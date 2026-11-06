@@ -909,7 +909,6 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--no-edit")
         .flag("--no-save")
         .flag("--caches-only")
-        .removed("--no-commit", "--no-save")
         .flag("-q|--quiet")
         .flag("--stat")
         .flag("--no-stat")
@@ -1403,7 +1402,6 @@ fn merge_rev_inner(
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let spec = Spec::new()
         .flag("-n|--no-save")
-        .removed("--no-commit", "--no-save")
         .flag("-x")
         .flag("--no-edit")
         .flag("--abort")
@@ -1768,8 +1766,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--continue")
         .flag("-i|--interactive")
         .flag("-q|--quiet")
-        .flag("--autopark")
-        .removed("--autostash", "--autopark");
+        .flag("--autopark");
     let a = parse(&spec, args)?;
     if a.has("-i") {
         return Err(exit(1, "interactive replay is not supported"));

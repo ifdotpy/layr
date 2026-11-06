@@ -4,10 +4,9 @@
 //! derived tables can be rebuilt from the records at any time.
 
 use crate::ids;
-use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec, Subject};
+use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange, RefState, StateKind, StateRec};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use layr_hashers::{ContentAddress, Digest};
 use std::path::{Path, PathBuf};
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
@@ -43,7 +42,6 @@ CREATE TABLE IF NOT EXISTS remote_refs (name TEXT PRIMARY KEY, state TEXT, gcomm
 CREATE TABLE IF NOT EXISTS git_map (state TEXT, gcommit TEXT, PRIMARY KEY(state, gcommit));
 CREATE INDEX IF NOT EXISTS git_map_commit ON git_map(gcommit);
 CREATE TABLE IF NOT EXISTS exports (id TEXT PRIMARY KEY, state TEXT, remote TEXT, branch TEXT, gcommit TEXT, status TEXT, time INTEGER, ord TEXT);
-CREATE TABLE IF NOT EXISTS checks (id TEXT PRIMARY KEY, state TEXT, command TEXT, exit INTEGER, time INTEGER, actor TEXT);
 CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT, public_key TEXT);
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT, ord TEXT);
 CREATE TABLE IF NOT EXISTS trusted (machine TEXT PRIMARY KEY, public_key TEXT, by TEXT);
@@ -55,7 +53,6 @@ CREATE TABLE IF NOT EXISTS attestations (id TEXT PRIMARY KEY, subject TEXT, kind
 CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, ord);
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
-CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
 CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust','trust.delegate');
 CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
 CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
@@ -63,12 +60,9 @@ CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 "#;
 
-/// The records that older binaries wrote as evidence (`import_legacy_evidence`).
-const LEGACY_OPS: &str = "op IN ('approve','approve.withdraw','check')";
-
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 const DERIVED: &[&str] = &[
     "states",
@@ -79,7 +73,6 @@ const DERIVED: &[&str] = &[
     "remote_refs",
     "git_map",
     "exports",
-    "checks",
     "machines",
     "config",
     "trusted",
@@ -93,45 +86,11 @@ const DERIVED: &[&str] = &[
     "bases",
 ];
 
-/// The backup of a database made before an upgrade from `version`: `<name>.schema-<version>.bak`
-/// in the folder of the database.
-pub fn backup_path(db_path: &Path, version: i64) -> PathBuf {
-    let name = db_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    db_path.with_file_name(format!("{name}.schema-{version}.bak"))
-}
-
-/// Every upgrade backup of a database (any version), in its folder.
-pub fn upgrade_backups(db_path: &Path) -> Result<Vec<PathBuf>> {
-    let Some(dir) = db_path.parent() else { return Ok(Vec::new()) };
-    let name = db_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let prefix = format!("{name}.schema-");
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(out) };
-    for e in rd.flatten() {
-        let file = e.file_name().to_string_lossy().into_owned();
-        if file.starts_with(&prefix) && file.ends_with(".bak") {
-            out.push(e.path());
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Upgrade backups older than `days`, with their size in bytes and their age in days.
-pub fn old_upgrade_backups(db_path: &Path, days: u64) -> Result<Vec<(PathBuf, u64, u64)>> {
-    let mut out = Vec::new();
-    for path in upgrade_backups(db_path)? {
-        let meta = std::fs::metadata(&path)?;
-        let age = meta.modified()?.elapsed().map(|d| d.as_secs() / 86_400).unwrap_or(0);
-        if age > days {
-            out.push((path, meta.len(), age));
-        }
-    }
-    Ok(out)
-}
-
 /// Derived tables of older versions, dropped on migration.
-const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines"];
+const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines", "checks"];
+
+/// Indexes of older versions on the records table, dropped on migration.
+const RETIRED_INDEXES: &[&str] = &["records_legacy_evidence"];
 
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
@@ -166,12 +125,7 @@ impl Db {
             }
             opened.map_err(|e| e.context(path.display().to_string()))?
         };
-        let db = Db { conn, stale };
-        // A stale database gets its legacy evidence from the rebuild (`derive`).
-        if !stale {
-            db.import_legacy_evidence()?;
-        }
-        Ok(db)
+        Ok(Db { conn, stale })
     }
 
     /// True when the version is current and every table and index of the schema exists.
@@ -196,37 +150,6 @@ impl Db {
         })();
         let _ = conn.execute_batch("COMMIT");
         checked
-    }
-
-    /// Older binaries can still add legacy records. Import their evidence: only when a record
-    /// is not yet in the attestations (or a withdraw lacks a revocation of an earlier approval)
-    /// the import takes the write lock; a read command finds nothing to do and takes none.
-    fn import_legacy_evidence(&self) -> Result<()> {
-        let pending: bool = self.conn.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM records r WHERE {LEGACY_OPS} AND (
-                   (NOT EXISTS (SELECT 1 FROM attestations a WHERE a.id=r.id)
-                     AND (json_type(r.raw, '$.r.data.state')='text' OR json_type(r.raw, '$.r.data.attestation') IS NOT NULL))
-                   OR (r.op='approve.withdraw' AND EXISTS (
-                        SELECT 1 FROM attestations w JOIN attestations ap
-                          ON ap.subject=w.subject AND ap.kind='approval' AND ap.machine=w.machine AND ap.uid=w.uid AND ap.ord<w.ord
-                        WHERE w.id=r.id AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.id=r.id AND v.target=ap.id)))))"
-            ),
-            [],
-            |r| r.get(0),
-        )?;
-        if !pending {
-            return Ok(());
-        }
-        let db = self;
-        db.with_tx(|| {
-            let mut st = db.conn.prepare(&format!("SELECT raw FROM records WHERE {LEGACY_OPS} ORDER BY time,machine,seq"))?;
-            let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-            for line in raw {
-                db.derive_attestation(&crate::oplog::parse_line(&line, None)?.record, false)?;
-            }
-            Ok(())
-        })
     }
 
     /// True when the schema version is older and the database holds records to rebuild from.
@@ -267,12 +190,6 @@ impl Db {
     /// COMMIT, and a failure or a crash rolls the whole rebuild back. With `only_older`, nothing
     /// is done when the database is current already (another process rebuilt it); returns false.
     pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
-        // An upgrade keeps a copy of the database before its first change. The copy is taken
-        // before the write transaction, with VACUUM INTO, which reads a consistent snapshot.
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 0 && version < SCHEMA_VERSION {
-            self.backup_before_upgrade(version)?;
-        }
         self.begin_rebuild()?;
         let done = (|| -> Result<bool> {
             let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
@@ -284,6 +201,9 @@ impl Db {
             }
             for t in DERIVED.iter().chain(RETIRED) {
                 self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
+            }
+            for i in RETIRED_INDEXES {
+                self.conn.execute_batch(&format!("DROP INDEX IF EXISTS {i}"))?;
             }
             self.conn.execute_batch(SCHEMA)?;
             // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
@@ -300,31 +220,27 @@ impl Db {
             self.conn.execute_batch("COMMIT")?;
             Ok(rebuilt)
         });
+        if result.as_ref().is_ok_and(|rebuilt| *rebuilt) {
+            self.remove_upgrade_copies();
+        }
         if result.is_err() {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
         result
     }
 
-    /// Copy the database before its schema upgrade: `VACUUM INTO` a temporary name next to the
-    /// database, then rename it to `<name>.schema-<version>.bak`. Only the newest backup of the
-    /// database is kept. Prints one line that names it.
-    fn backup_before_upgrade(&self, version: i64) -> Result<()> {
-        let Some(db_path) = self.conn.path().map(PathBuf::from) else { return Ok(()) };
-        let final_path = backup_path(&db_path, version);
-        // A process-specific temporary name: several processes may upgrade at once.
-        let temp = final_path.with_extension(format!("bak.{}.tmp", std::process::id()));
-        let _ = std::fs::remove_file(&temp);
-        self.conn.execute("VACUUM INTO ?1", rusqlite::params![temp.to_string_lossy()])?;
-        std::fs::rename(&temp, &final_path)?;
-        // Keep only this backup. Another process may remove or rename one at the same time.
-        for old in upgrade_backups(&db_path)? {
-            if old != final_path {
-                let _ = std::fs::remove_file(&old);
+    /// Older layr versions copied the database before a schema upgrade (`<name>.schema-<version>.bak`
+    /// next to it). The records of such a copy are all in the database, so the copies go.
+    fn remove_upgrade_copies(&self) {
+        let Some(db_path) = self.conn.path().map(PathBuf::from) else { return };
+        let (Some(dir), Some(name)) = (db_path.parent(), db_path.file_name()) else { return };
+        let prefix = format!("{}.schema-", name.to_string_lossy());
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let file = e.file_name().to_string_lossy().into_owned();
+            if file.starts_with(&prefix) && (file.ends_with(".bak") || file.ends_with(".tmp")) {
+                let _ = std::fs::remove_file(e.path());
             }
         }
-        eprintln!("database backup: {} (schema {version}, before the upgrade)", final_path.display());
-        Ok(())
     }
 
     /// Start the write transaction of a rebuild. Another process may hold the write lock for
@@ -689,19 +605,6 @@ impl Db {
                     }
                 }
             }
-            "check" => {
-                tx.prepare_cached(
-                    "INSERT OR IGNORE INTO checks(id, state, command, exit, time, actor) VALUES(?1,?2,?3,?4,?5,?6)",
-                )?
-                .execute(params![
-                    rec.id,
-                    s("state"),
-                    s("command"),
-                    d.get("exit").and_then(|v| v.as_i64()),
-                    rec.time,
-                    rec.actor.name
-                ])?;
-            }
             "gc" => {
                 if let Some(arr) = d.get("deleted").and_then(|v| v.as_array()) {
                     for id in arr.iter().filter_map(|v| v.as_str()) {
@@ -753,15 +656,6 @@ impl Db {
                         }
                     }
                 }
-            }
-            // Approvals name users of this machine: only local records count.
-            "approve" if !foreign && s("state").map(|x| crate::model::is_uuid(&x)).unwrap_or(false) => {
-                tx.prepare_cached("INSERT OR IGNORE INTO approvals(id, state, uid, time) VALUES(?1,?2,?3,?4)")?
-                    .execute(params![rec.id, s("state"), rec.actor.uid as i64, rec.time])?;
-            }
-            "approve.withdraw" if !foreign => {
-                tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE state=?1 AND uid=?2")?
-                    .execute(params![s("state"), rec.actor.uid as i64])?;
             }
             "stash.drop" => {
                 tx.prepare_cached("UPDATE states SET dropped=1 WHERE id=?1")?.execute(params![s("state")])?;
@@ -1138,8 +1032,8 @@ impl Db {
     }
 
     pub fn checks(&self, state: &str) -> Result<Vec<(String, i64, i64, String)>> {
-        let mut st = self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check.command'),json_extract(r.raw,'$.r.data.command')),
-            COALESCE(json_extract(r.raw,'$.r.data.check.exit'),json_extract(r.raw,'$.r.data.exit'),-1),r.time,json_extract(r.raw,'$.r.actor.name')
+        let mut st = self.conn.prepare_cached("SELECT json_extract(r.raw,'$.r.data.check.command'),
+            COALESCE(json_extract(r.raw,'$.r.data.check.exit'),-1),r.time,json_extract(r.raw,'$.r.actor.name')
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
             ORDER BY a.ord")?;
@@ -1153,31 +1047,23 @@ impl Db {
 
     /// Match command arguments, not their display text. With no requested exit, use the newest result.
     pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
-        let mut statement=self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data')),
+        let mut statement=self.conn.prepare_cached("SELECT json_extract(r.raw,'$.r.data.check'),
             json_extract(r.raw,'$.r.data')
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
             ORDER BY a.ord DESC")?;
         let rows = statement
-            .query_map(params![state], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(params![state], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         for (row, data) in rows {
+            // A check attestation without a check result (`layr attest check`) names no command.
+            let Some(row) = row else { continue };
             // A result whose digest differs from its signed payload digest counts as no result.
             if !layr_model::validation::check_digest_ok(&serde_json::from_str(&data)?) {
                 continue;
             }
             let result: serde_json::Value = serde_json::from_str(&row)?;
-            let matches = match result.get("argv") {
-                Some(value) => {
-                    serde_json::from_value::<Vec<String>>(value.clone()).map(|recorded| recorded == argv).unwrap_or(false)
-                }
-                None => {
-                    argv.len() == 1
-                        && !argv[0].is_empty()
-                        && !argv[0].chars().any(|c| c.is_whitespace())
-                        && result["command"].as_str() == Some(argv[0].as_str())
-                }
-            };
+            let matches = serde_json::from_value::<Vec<String>>(result["argv"].clone()).is_ok_and(|recorded| recorded == argv);
             if matches {
                 if let Some(code) = result["exit"].as_i64() {
                     if wanted_exit.map(|wanted| wanted == code).unwrap_or(true) {
@@ -1191,29 +1077,8 @@ impl Db {
 
     fn derive_attestation(&self, rec: &Record, local: bool) -> Result<()> {
         let ord = format!("{:016}:{}:{:012}", rec.time.max(0), rec.machine, rec.seq);
-        let a = if let Some(v) = rec.data.get("attestation") {
-            Some(serde_json::from_value::<Attestation>(v.clone())?)
-        } else if matches!(rec.op.as_str(), "approve" | "approve.withdraw" | "check") {
-            rec.data["state"].as_str().map(|state| Attestation {
-                format: 1,
-                attestation_id: rec.id.clone(),
-                subject: Subject { kind: "state".into(), id: state.into() },
-                change_id: self.state(state).ok().flatten().and_then(|s| s.change_id),
-                kind: match rec.op.as_str() {
-                    "approve" => "approval",
-                    "check" => "check",
-                    _ => "revoke",
-                }
-                .into(),
-                payload_digest: hex::encode(ContentAddress::digest(serde_json::to_vec(&rec.data).unwrap_or_default())),
-                payload_ref: None,
-                signer: rec.machine.clone(),
-                time: rec.time,
-            })
-        } else {
-            None
-        };
-        if let Some(a) = a {
+        if let Some(v) = rec.data.get("attestation") {
+            let a = serde_json::from_value::<Attestation>(v.clone())?;
             let signer = if a.signer.starts_with("person:") { &a.signer } else { &rec.machine };
             self.conn.prepare_cached("INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)")?.execute(
                 params![
@@ -1227,11 +1092,6 @@ impl Db {
                     local as i64
                 ],
             )?;
-            if rec.op == "approve.withdraw" {
-                self.conn.prepare_cached("INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
-                    SELECT ?1,id,?2,?3,?4 FROM attestations WHERE subject=?5 AND kind='approval' AND machine=?2 AND uid=?3 AND ord<?4")?.execute(
-                    params![a.attestation_id,rec.machine,rec.actor.uid as i64,ord,a.subject.id])?;
-            }
             if a.kind == "revoke" {
                 for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
                     self.conn
@@ -1513,7 +1373,9 @@ pub fn need<T>(v: Option<T>, what: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Subject;
     use crate::model::{Author, StateKind, StateRec};
+    use layr_hashers::{ContentAddress, Digest};
 
     #[test]
     fn opening_a_database_that_init_is_creating_keeps_its_tables() {
@@ -1825,27 +1687,43 @@ mod tests {
         assert_eq!(db.expired_refs(100).unwrap().len(), 1);
     }
 
+    /// A signed `attest` record of `kind` on `state`, with optional extra data (a check result).
+    fn attest_record(seq: u64, state: &str, kind: &str, check: Option<serde_json::Value>) -> Record {
+        let mut r = state_record(seq, state, vec![]);
+        r.states.clear();
+        r.op = "attest".into();
+        let digest = match &check {
+            Some(c) => hex::encode(ContentAddress::digest(serde_json::to_vec(c).unwrap())),
+            None => "0".repeat(64),
+        };
+        r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:kind.into(),payload_digest:digest,payload_ref:None,signer:r.machine.clone(),time:seq as i64}});
+        if let Some(c) = check {
+            r.data["check"] = c;
+        }
+        r
+    }
+
     #[test]
-    fn legacy_approvals_checks_and_withdrawals_become_attestations() {
+    fn records_of_the_removed_evidence_ops_are_no_evidence() {
+        // `approve`, `approve.withdraw` and `check` records of layr before the attestation table
+        // stay in the records, but they give no attestation, approval or check result.
         let db = memory();
         let state = "01a12290-0000-7000-8000-000000000003";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
-        for (seq, op) in [(1, "approve"), (2, "check"), (3, "approve.withdraw"), (4, "approve")] {
+        for (seq, op) in [(1, "approve"), (2, "check")] {
             let mut r = state_record(seq, state, vec![]);
             r.states.clear();
             r.op = op.into();
-            r.data = serde_json::json!({"state":state,"command":"true","exit":0});
+            r.data = serde_json::json!({"state":state,"command":"true","argv":["true"],"exit":0});
             let raw = crate::oplog::sign_line(&r, &key).unwrap();
             db.insert_record(&r, &raw).unwrap();
             db.derive(&r, &|_| true, machine).unwrap();
-            if seq == 3 {
-                assert!(db.approvals(state).unwrap().is_empty());
-            }
         }
-        assert_eq!(db.attestations(state, None).unwrap().len(), 4);
-        assert_eq!(db.approvals(state).unwrap(), vec![(0, 4)]);
-        assert_eq!(db.checks(state).unwrap()[0].0, "true");
+        assert!(db.attestations(state, None).unwrap().is_empty());
+        assert!(db.approvals(state).unwrap().is_empty());
+        assert!(db.checks(state).unwrap().is_empty());
+        assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), None);
         // The original signed bytes are unchanged.
         assert!(crate::oplog::parse_line(&db.record_line(machine, 2).unwrap().unwrap(), Some(&key.verifying_key())).is_ok());
     }
@@ -1855,10 +1733,7 @@ mod tests {
         let db = memory();
         let state = "01a12290-0000-7000-8000-000000000003";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
-        let mut first = state_record(1, state, vec![]);
-        first.states.clear();
-        first.op = "approve".into();
-        first.data = serde_json::json!({"state":state});
+        let first = attest_record(1, state, "approval", None);
         db.derive(&first, &|_| true, machine).unwrap();
         let mut other = first.clone();
         other.id = "01a12290-0000-7000-8000-000000000002".into();
@@ -1871,40 +1746,17 @@ mod tests {
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
     #[test]
-    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
+    fn opening_a_current_database_takes_no_write_lock() {
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layr.sqlite");
-        let state = "01a12290-0000-7000-8000-000000000003";
-        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         drop(Db::open(&path).unwrap());
-        // An older binary adds a record without its attestation: the next open imports it.
-        let late = |seq: u64, op: &str| {
-            let mut r = state_record(seq, state, vec![]);
-            r.states.clear();
-            r.op = op.into();
-            r.data = serde_json::json!({"state":state,"command":"true","exit":0});
-            let raw = crate::oplog::sign_line(&r, &key).unwrap();
-            Connection::open(&path)
-                .unwrap()
-                .execute(
-                    "INSERT INTO records(id, machine, seq, time, op, actor_uid, raw) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    params![r.id, r.machine, r.seq as i64, r.time, r.op, r.actor.uid as i64, raw],
-                )
-                .unwrap();
-        };
-        late(1, "approve");
-        assert_eq!(Db::open(&path).unwrap().attestations(state, None).unwrap().len(), 1);
-        late(2, "check");
-        assert_eq!(Db::open(&path).unwrap().attestations(state, None).unwrap().len(), 2);
-        // Another process holds the write lock: opening a current database with nothing new
-        // to import does not wait for it.
+        // Another process holds the write lock: opening a current database does not wait for it.
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let started = std::time::Instant::now();
         let db = Db::open(&path).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "open waited for the writer");
-        assert_eq!(db.attestations(state, None).unwrap().len(), 2);
         drop(db);
         writer.execute_batch("ROLLBACK").unwrap();
         let _ = std::fs::remove_dir_all(dir);
@@ -1973,10 +1825,7 @@ mod tests {
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         let insert = |seq, data: serde_json::Value| {
-            let mut rec = state_record(seq, state, vec![]);
-            rec.states.clear();
-            rec.op = "check".into();
-            rec.data = data;
+            let rec = attest_record(seq, state, "check", Some(data));
             let raw = crate::oplog::sign_line(&rec, &key).unwrap();
             db.insert_record(&rec, &raw).unwrap();
             db.derive(&rec, &|_| true, machine).unwrap();
@@ -1986,11 +1835,12 @@ mod tests {
         assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "exit".into(), "1".into()], None).unwrap(), None);
         insert(2, serde_json::json!({"state":state,"command":"sh -c true","exit":0}));
         assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "true".into()], None).unwrap(), None);
+        // A result without its arguments matches no command, not even its one-word command text.
         insert(3, serde_json::json!({"state":state,"command":"true","exit":0}));
-        assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), Some(0));
+        assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), None);
         insert(4, serde_json::json!({"state":state,"command":"true","argv":["true"],"exit":1}));
         assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), Some(1));
-        assert_eq!(db.check_exit(state, &["true".into()], Some(0)).unwrap(), Some(0));
+        assert_eq!(db.check_exit(state, &["true".into()], Some(0)).unwrap(), None);
     }
 }
 
