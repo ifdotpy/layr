@@ -31,7 +31,7 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   | `history` | `all`, `last`, `<N>` | `all` | How many states each overlay line keeps. `last` is `1`. Older states of the line are deleted at the next state of the line and by `gc`. |
   | `quiet` | on or off | off | The overlay files are not in `status`, `diff` and `add`. Their changes go into the overlay without the index (section 4). |
   | `merge` | `three-way`, `union-theirs` | `three-way` | How a merge of a line combines the follow overlay. `union-theirs`: the result has every file of both sides; on the same path the incoming line wins; no conflicts. |
-  | `gc` | `none`, `lru:<size>` | `none` | `gc` removes files from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). |
+  | `gc` | `none`, `lru:<size>` | `none` | `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
   | `folder` | a path | none | A **folder overlay**: the overlay is the whole folder at that path (section 3). |
   | `platform` | on or off | off | Each state records its platform key; a line takes a state only from its own platform (section 6). |
 
