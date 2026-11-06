@@ -26,16 +26,30 @@ pub(crate) struct Place {
 /// to one of them; both hold the same bytes.
 pub(crate) type Places = BTreeMap<String, Place>;
 
-/// The packs of a layer whose index is published. A pack without its index is an unfinished
-/// upload: no tree can name its chunks, and the deletion path removes it.
+/// The packs of a layer whose index and data are both published. A pack without its index is an unfinished
+/// upload: no tree can name its chunks, and the deletion path removes it. An index without its data (a delete that
+/// removed the data and not the index) names chunks that nobody can read: they count as absent, so a push uploads
+/// them again, and the sweep deletes the index.
 fn packs(backend: &Backend) -> Result<BTreeSet<String>> {
-    let mut indexes = BTreeSet::new();
+    Ok(listing(backend)?.0)
+}
+
+/// The packs with an index and data, and the packs with only an index.
+pub(super) fn listing(backend: &Backend) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let (mut indexes, mut data) = (BTreeSet::new(), BTreeSet::new());
     for object in backend.list("chunks/")? {
-        if let Some((pack, true)) = chunks::parse_name(&object.key) {
-            indexes.insert(pack);
+        match chunks::parse_name(&object.key) {
+            Some((pack, true)) => {
+                indexes.insert(pack);
+            }
+            Some((pack, false)) => {
+                data.insert(pack);
+            }
+            None => {}
         }
     }
-    Ok(indexes)
+    let without: BTreeSet<String> = indexes.difference(&data).cloned().collect();
+    Ok((indexes.intersection(&data).cloned().collect(), without))
 }
 
 fn cache_dir(dir: &Path) -> PathBuf {
@@ -701,10 +715,13 @@ pub(crate) fn release(store: &Store, identity: &str, recipient: &str, dead: &BTr
         }
         let live: Vec<_> =
             index.chunks.iter().filter(|(id, _, _)| !dead.contains(id) && holders[id.as_str()] == 1).cloned().collect();
-        if !live.is_empty() {
-            let Some(body) = store.backend.get(&chunks::pack_name(pack))? else {
-                bail!("chunk pack {pack} has an index but no data");
-            };
+        // A pack whose data is gone (a delete that removed the data and not the index) has nothing to copy: its index
+        // goes too. Its live chunks are lost; a cache is regenerable, and the next push of their trees reports them.
+        let body = if live.is_empty() { None } else { store.backend.get(&chunks::pack_name(pack))? };
+        if !live.is_empty() && body.is_none() {
+            eprintln!("layr: chunk pack {pack} has an index but no data; {} live chunk(s) of it are lost", live.len());
+        }
+        if let Some(body) = body {
             let data = chunks::open_pack(&keys::decrypt(identity, &body)?, index)?;
             let mut builder = Builder::default();
             for (id, offset, length) in &live {
