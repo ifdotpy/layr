@@ -2820,6 +2820,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let pol = repo.policy();
     match sub {
+        "grant" | "revoke" if rest.get(1).map(String::as_str) == Some("trust") => delegate(ctx, repo, sub == "revoke", rest),
         "person-key" if rest.len() == 2 => {
             repo.require(ctx, "access")?;
             let login = &rest[0];
@@ -2928,6 +2929,63 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => Err(exit(128, "usage: layr access [list|grant|revoke|deny|allow|check] ...")),
     }
+}
+
+/// `layr access grant machine:<broker> trust --max-hours <n> [--role reader|writer] [--overlays a,b] [--name-prefix p]`
+/// and `layr access revoke machine:<broker> trust` (docs/ci-trust.md): a `trust.delegate` record. The broker then
+/// trusts other machines with `remote trust --expires`, and those trusts count only inside the delegation.
+fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) -> Result<i32> {
+    let spec = Spec::new().value("--max-hours").value("--role").value("--overlays").value("--name-prefix").flag("--json");
+    let a = parse(&spec, rest)?;
+    repo.require(ctx, "access")?;
+    let usage = "usage: layr access grant machine:<id|name> trust --max-hours <n> [--role reader|writer] [--overlays a,b] [--name-prefix p]";
+    let who = a.pos.first().and_then(|p| p.strip_prefix("machine:")).ok_or_else(|| exit(128, usage))?;
+    let broker = if crate::model::is_uuid(who) {
+        who.to_string()
+    } else {
+        repo.p.db.machine_by_name(who)?.ok_or_else(|| exit(128, format!("unknown machine {who}")))?
+    };
+    if repo.p.db.trusted(&broker)?.is_none() {
+        return Err(exit(128, format!("machine {} is not trusted", ids::short(&broker))));
+    }
+    let mut data = serde_json::json!({"machine": broker});
+    if revoke {
+        data["revoked"] = serde_json::json!(true);
+    } else {
+        let hours: i64 = a.get("--max-hours").and_then(|h| h.parse().ok()).filter(|h| *h > 0).ok_or_else(|| exit(128, usage))?;
+        let role = a.get("--role").unwrap_or("reader");
+        if layr_store::trust::Role::parse(role).is_none() {
+            return Err(exit(128, format!("--role {role}: use reader or writer")));
+        }
+        data["max_hours"] = serde_json::json!(hours);
+        data["role"] = serde_json::json!(role);
+        if let Some(list) = a.get("--overlays") {
+            let names: Vec<&str> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+            for name in &names {
+                if repo.overlay_info(name)?.is_none() {
+                    return Err(exit(128, format!("unknown overlay {name}")));
+                }
+            }
+            data["overlays"] = serde_json::json!(names);
+        }
+        if let Some(prefix) = a.get("--name-prefix") {
+            data["name_prefix"] = serde_json::json!(prefix);
+        }
+    }
+    {
+        let _lock = repo.p.lock()?;
+        let mut record = Record::new("trust.delegate");
+        record.data = data.clone();
+        repo.p.append(record, &ctx.actor())?;
+    }
+    if a.has("--json") {
+        outln!(ctx, "{data}");
+    } else if revoke {
+        outln!(ctx, "machine {} trusts no other machine", ids::short(&broker));
+    } else {
+        outln!(ctx, "machine {} may trust other machines for at most {} h", ids::short(&broker), data["max_hours"]);
+    }
+    Ok(0)
 }
 
 /// `layr approve [<rev>] [--withdraw]`: approve an exact state (or withdraw the approval). A

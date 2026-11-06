@@ -16,7 +16,15 @@ All of them run without a prompt; `--json` prints one object.
   names the cache overlays the machine reads (and, as a writer, writes); without it, all of them.
 - `layr access grant machine:<broker> trust --max-hours <n> --role reader|writer
   --overlays <name>,<name> [--name-prefix <prefix>] [--json]` lets the broker trust other machines
-  within these limits. `layr access revoke machine:<broker> trust` ends it. Not built yet.
+  within these limits. `layr access revoke machine:<broker> trust` ends it. The broker must be a
+  trusted machine; it becomes a broker for good: a trust it makes counts only inside its newest
+  delegation made before that trust. Make the broker a key manager of the cache overlays
+  (`layr overlay managers <overlay> machine:<owner> machine:<broker>`), so its push gives a new job
+  the caches.
+- Per job, the broker runs `layr remote trust <remote> <job id> --public-key <hex> --name <job name>
+  --expires 1h --role writer --overlays <names> --json`, then `layr push <remote> --caches`. The job
+  gets its id, key and name from `LAYR_MACHINE_NAME=ci-… layr remote self --json`. A trust outside
+  the delegation is refused with exit 128.
 - `layr remote untrust <remote> <machine> [--json]` ends a trust at once (a suspected leak).
 - `layr save --caches --save-back <line> [--json]` saves the caches of the current line to the
   save-back line of `<line>` (`<line>.checks-<os>-<arch>`, as `checks run` does) and makes no source
@@ -46,10 +54,10 @@ All of them run without a prompt; `--json` prints one object.
    `config` (machine-local settings) and `line.create` of save-back lines (`<line>.checks-<os>-<arch>`); in the
    cache overlays its trust names, `line.create`, `commit` and `gc` of its own overlay lines. No source state, no
    other line, no move of a line another machine made, no delete, no trust.
-7. A delegation is a `trust.delegate` record of a full machine (not built yet). A `machine.trust` record signed
-   by a broker counts only when, at its time, a delegation of that broker is live and the trust is inside it:
-   `expires_at` at most `max-hours` after the record time, the same or a smaller role, overlays a subset, and the
-   machine name starts with the prefix.
+7. A delegation is a `trust.delegate` record of a full machine. A `machine.trust` record signed by a broker
+   counts only when, at its time, a delegation of that broker is live and the trust is inside it: `expires_at`
+   at most `max-hours` after the record time, the same or a smaller role, overlays a subset, and the machine name
+   (`name` in the trust record) starts with the prefix. A broker's trust without an end never counts.
 8. The gateway lets a job write only the record segments of its own machine: a clone takes every machine of the
    records it reads (`Trust::All`).
 

@@ -1443,6 +1443,7 @@ impl<'a> Project<'a> {
                     if s.record.op == "machine.trust"
                         && trusted.contains(&s.record.machine)
                         && !terms.contains_key(&s.record.machine)
+                        && terms.trust_counts(&s.record.machine, s.record.time, &s.record.data)
                     {
                         let (m, k) =
                             (s.record.data["machine"].as_str().unwrap_or(""), s.record.data["public_key"].as_str().unwrap_or(""));
@@ -1490,9 +1491,9 @@ impl<'a> Project<'a> {
         Ok(n)
     }
 
-    /// The limited machines (`layr_store::trust::terms`), from the trust records of this project, or for an
-    /// overlay, of its project. `more` are records of an import that are not stored yet.
-    pub fn trust_terms(&self, more: &[&Record]) -> Result<std::collections::BTreeMap<String, layr_store::trust::Terms>> {
+    /// The trust rules (`layr_store::trust::rules`: limited machines and brokers), from the trust records of this
+    /// project, or for an overlay, of its project. `more` are records of an import that are not stored yet.
+    pub fn trust_terms(&self, more: &[&Record]) -> Result<layr_store::trust::Rules> {
         let parent;
         let db = match self.name.split_once('%') {
             Some((project, _)) => {
@@ -1512,7 +1513,7 @@ impl<'a> Project<'a> {
                     "project" => {
                         creator.get_or_insert(record.machine.clone());
                     }
-                    "machine.trust" | "machine.untrust" => records.push((*record).clone()),
+                    "machine.trust" | "machine.untrust" | "trust.delegate" => records.push((*record).clone()),
                     _ => {}
                 }
             }
@@ -1521,7 +1522,7 @@ impl<'a> Project<'a> {
             return Ok(Default::default());
         }
         let Some(creator) = creator else { return Ok(Default::default()) };
-        Ok(layr_store::trust::terms(
+        Ok(layr_store::trust::rules(
             &creator,
             records.iter().map(|r| layr_store::trust::TrustRecord { signer: &r.machine, time: r.time, op: &r.op, data: &r.data }),
         ))
@@ -1529,13 +1530,12 @@ impl<'a> Project<'a> {
 
     /// Why a record has no effect here (`layr_store::trust::Terms::refusal`); None when it counts. A machine always
     /// takes its own records.
-    pub fn refusal(
-        &self,
-        terms: &std::collections::BTreeMap<String, layr_store::trust::Terms>,
-        record: &Record,
-    ) -> Result<Option<&'static str>> {
+    pub fn refusal(&self, terms: &layr_store::trust::Rules, record: &Record) -> Result<Option<&'static str>> {
         if record.machine == self.store.machine.id {
             return Ok(None);
+        }
+        if record.op == "machine.trust" && !terms.trust_counts(&record.machine, record.time, &record.data) {
+            return Ok(Some("a trust outside the delegation of its broker"));
         }
         let Some(limits) = terms.get(&record.machine) else { return Ok(None) };
         // Every line the record moves is a new line, or one that a record of the same machine made.
