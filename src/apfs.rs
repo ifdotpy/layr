@@ -486,87 +486,43 @@ fn open_child(dir: &File, root: &Path, name: &str, next: &str) -> Result<Option<
 /// `scan_bulk` of a whole tree with several threads. The threads share a queue of folders; a
 /// folder holds its parent open only until it is opened.
 fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) -> Result<()> {
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Mutex;
     struct Job {
         parent: Option<Arc<File>>,
         name: String,
         rel: String,
     }
-    struct Queue {
-        jobs: Vec<Job>,
-        busy: usize,
-        error: Option<anyhow::Error>,
-    }
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     let root_dir = Arc::new(dir);
-    let queue =
-        Mutex::new(Queue { jobs: vec![Job { parent: None, name: String::new(), rel: String::new() }], busy: 0, error: None });
-    let ready = Condvar::new();
-    let results: Vec<(Vec<(String, ScanEntry)>, Vec<String>)> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..threads)
-            .map(|_| {
-                scope.spawn(|| {
-                    let (mut found, mut gone) = (Vec::new(), Vec::new());
-                    let mut buf = Vec::new();
-                    loop {
-                        let job = {
-                            let mut q = queue.lock().unwrap();
-                            loop {
-                                if q.error.is_some() || (q.jobs.is_empty() && q.busy == 0) {
-                                    ready.notify_all();
-                                    return (found, gone);
-                                }
-                                if let Some(job) = q.jobs.pop() {
-                                    q.busy += 1;
-                                    break job;
-                                }
-                                q = ready.wait(q).unwrap();
-                            }
-                        };
-                        let step = (|| -> Result<Vec<Job>> {
-                            let dir = match &job.parent {
-                                None => root_dir.clone(),
-                                Some(parent) => match open_child(parent, root, &job.name, &job.rel)? {
-                                    Some(fd) => Arc::new(fd),
-                                    None => {
-                                        gone.push(job.rel.clone());
-                                        return Ok(Vec::new());
-                                    }
-                                },
-                            };
-                            drop(job.parent);
-                            let Some((entries, folders)) = read_folder(&dir, root, &job.rel, &mut buf)? else {
-                                return Ok(Vec::new());
-                            };
-                            found.extend(entries);
-                            Ok(folders.into_iter().map(|(name, rel)| Job { parent: Some(dir.clone()), name, rel }).collect())
-                        })();
-                        let mut q = queue.lock().unwrap();
-                        q.busy -= 1;
-                        match step {
-                            Ok(jobs) => q.jobs.extend(jobs),
-                            Err(e) => {
-                                q.error.get_or_insert(e);
-                            }
+    let found = Mutex::new(Vec::new());
+    let gone = Mutex::new(Vec::new());
+    let error = Mutex::new(None);
+    crate::pools::run(crate::pools::Priority::Foreground, || {
+        crate::fsutil::work_queue(vec![Job { parent: None, name: String::new(), rel: String::new() }], |job, add| {
+            if error.lock().unwrap().is_some() { return; }
+            let step = (|| -> Result<()> {
+                let dir = match &job.parent {
+                    None => root_dir.clone(),
+                    Some(parent) => match open_child(parent, root, &job.name, &job.rel)? {
+                        Some(fd) => Arc::new(fd),
+                        None => {
+                            gone.lock().unwrap().push(job.rel);
+                            return Ok(());
                         }
-                        ready.notify_all();
-                    }
-                })
-            })
-            .collect();
-        workers.into_iter().map(|w| w.join().unwrap()).collect()
-    });
-    if let Some(e) = queue.into_inner().unwrap().error {
-        return Err(e);
-    }
-    let mut gone_all = Vec::new();
-    for (found, gone) in results {
-        out.extend(found);
-        gone_all.extend(gone);
-    }
-    for g in gone_all {
-        out.remove(&g);
-    }
+                    },
+                };
+                let Some((entries, folders)) = read_folder(&dir, root, &job.rel, &mut Vec::new())? else { return Ok(()) };
+                found.lock().unwrap().extend(entries);
+                for (name, rel) in folders {
+                    add(Job { parent: Some(dir.clone()), name, rel });
+                }
+                Ok(())
+            })();
+            if let Err(e) = step { error.lock().unwrap().get_or_insert(e); }
+        })
+    })??;
+    if let Some(e) = error.into_inner().unwrap() { return Err(e); }
+    out.extend(found.into_inner().unwrap());
+    for g in gone.into_inner().unwrap() { out.remove(&g); }
     Ok(())
 }
 
@@ -846,9 +802,15 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
             dirs.extend(sub.iter().cloned());
             level = sub;
         }
-        each_parallel(&dirs, |d| open(d).map(|_| ()))?;
-        each_parallel(&files, |f| open(f).map(|_| ()))?;
-        return Ok(());
+        let apply = || -> Result<()> {
+            each_parallel(&dirs, |d| open(d).map(|_| ()))?;
+            each_parallel(&files, |f| open(f).map(|_| ()))
+        };
+        return if dirs.len().max(files.len()) >= PARALLEL_FROM {
+            crate::pools::run(crate::pools::Priority::Foreground, apply)?
+        } else {
+            apply()
+        };
     }
     let mut levels = vec![vec![path.to_path_buf()]];
     let mut files = Vec::new();
@@ -860,24 +822,31 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         }
         levels.push(sub);
     }
-    each_parallel(&files, |f| Ok(crate::sys::apfs_immutable(f, true)?))?;
-    for level in levels.iter().rev() {
-        each_parallel(level, |d| Ok(crate::sys::apfs_immutable(d, true)?))?;
+    let apply = || -> Result<()> {
+        each_parallel(&files, |f| Ok(crate::sys::apfs_immutable(f, true)?))?;
+        for level in levels.iter().rev() {
+            each_parallel(level, |d| Ok(crate::sys::apfs_immutable(d, true)?))?;
+        }
+        Ok(())
+    };
+    if files.len() >= PARALLEL_FROM || levels.iter().any(|level| level.len() >= PARALLEL_FROM) {
+        crate::pools::run(crate::pools::Priority::Foreground, apply)?
+    } else {
+        apply()
     }
-    Ok(())
 }
 
-/// Run `f` for each item with up to four threads; the first error wins.
+const PARALLEL_FROM: usize = 64;
+
+/// Run `f` for each item, retaining the small-work serial path.
 fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if items.len() < 64 || threads == 1 {
-        return items.iter().try_for_each(|p| f(p));
+    if items.len() < PARALLEL_FROM {
+        return items.iter().try_for_each(f);
     }
-    let chunk = items.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(|| part.iter().try_for_each(|p| f(p)))).collect();
-        workers.into_iter().try_for_each(|w| w.join().unwrap())
-    })
+    crate::pools::run(crate::pools::Priority::Foreground, || {
+        use rayon::prelude::*;
+        items.par_iter().map(f).collect::<Vec<_>>().into_iter().collect()
+    })?
 }
 /// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
 /// links (a recursive clone copies hard links as separate files).
@@ -1424,25 +1393,13 @@ fn candidates_scanned_with(
             .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
             .map(|(p, _)| p)
             .collect();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-        let stored_differ: Vec<&String> = std::thread::scope(|scope| {
-            let jobs: Vec<_> = same_data
-                .chunks(same_data.len().div_ceil(threads).max(1))
-                .map(|chunk| {
-                    scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .copied()
-                            .filter(|p| match (parent.at(p), child.at(p)) {
-                                (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
-                                _ => false,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
-        });
+        let stored_differ: Vec<&String> = crate::pools::run(crate::pools::Priority::Foreground, || {
+            use rayon::prelude::*;
+            same_data.par_iter().copied().filter(|p| match (parent.at(p), child.at(p)) {
+                (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
+                _ => false,
+            }).collect()
+        })?;
         names.extend(stored_differ);
     }
     let mut changes: BTreeMap<_, _> = names
@@ -1594,22 +1551,14 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
 /// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
 /// and the first error in that order is returned.
 fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if threads == 1 || paths.len() < 64 {
+    const PARALLEL_FROM: usize = 64;
+    if paths.len() < PARALLEL_FROM {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
-    let chunk = paths.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        let jobs: Vec<_> = paths
-            .chunks(chunk)
-            .map(|part| scope.spawn(move || part.iter().map(|p| changed_ranges(parent, child, p)).collect::<Result<Vec<_>>>()))
-            .collect();
-        let mut out = Vec::with_capacity(paths.len());
-        for job in jobs {
-            out.extend(job.join().map_err(|_| anyhow::anyhow!("changed ranges thread panicked"))??);
-        }
-        Ok(out)
-    })
+    crate::pools::run(crate::pools::Priority::Foreground, || {
+        use rayon::prelude::*;
+        paths.par_iter().map(|p| changed_ranges(parent, child, p)).collect::<Vec<_>>().into_iter().collect()
+    })?
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.

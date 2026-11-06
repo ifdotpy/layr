@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 /// On btrfs, schedule directories independently so a single large line can use the pool.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
+fn line_spaces(lines: &[(String, PathBuf)]) -> Result<Vec<Result<Space>>> {
     use std::collections::HashSet;
     let seen: Vec<_> = lines.iter().map(|_| Mutex::new(HashSet::new())).collect();
     let results: Vec<_> = lines.iter().map(|_| Mutex::new(Ok(Space::default()))).collect();
@@ -32,8 +32,8 @@ fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
             (_, Err(e)) => *result = Err(e),
             _ => {}
         }
-    });
-    results.into_iter().map(|r| r.into_inner().unwrap()).collect()
+    })?;
+    Ok(results.into_iter().map(|r| r.into_inner().unwrap()).collect())
 }
 
 pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -68,25 +68,12 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // No store lock: the walks only read the line folders.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    let results = line_spaces(&lines);
+    let results = line_spaces(&lines)?;
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    let results = {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let results: Vec<std::sync::Mutex<Option<Result<Space>>>> = lines.iter().map(|_| Default::default()).collect();
-        std::thread::scope(|s| {
-            for _ in 0..crate::fsutil::workers().min(lines.len()) {
-                s.spawn(|| {
-                    crate::sys::lower_thread_priority();
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some((_, path)) = lines.get(i) else { break };
-                        *results[i].lock().unwrap() = Some(crate::storage::space(path));
-                    }
-                });
-            }
-        });
-        results.into_iter().map(|r| r.into_inner().unwrap().expect("every line was read")).collect::<Vec<_>>()
-    };
+    let results = crate::pools::run(crate::pools::Priority::Background, || {
+        use rayon::prelude::*;
+        lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
+    })?;
     let mut rows = Vec::new();
     for ((name, path), r) in lines.into_iter().zip(results) {
         match r {
@@ -332,21 +319,15 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        let plan = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    crate::sys::lower_thread_priority();
-                    if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
-                        eprintln!("note: nested mount {}: walking files instead", mount.display());
-                        *mounts.lock().unwrap() = Mounts::Below;
-                        return Ok(None);
-                    }
-                    *mounts.lock().unwrap() = Mounts::None;
-                    crate::btrfs_scan::plan(root, &paths).map(Some)
-                })
-                .join()
-                .unwrap()
-        });
+        let plan = crate::pools::run(crate::pools::Priority::Background, || {
+            if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
+                eprintln!("note: nested mount {}: walking files instead", mount.display());
+                *mounts.lock().unwrap() = Mounts::Below;
+                return Ok(None);
+            }
+            *mounts.lock().unwrap() = Mounts::None;
+            crate::btrfs_scan::plan(root, &paths).map(Some)
+        })?;
         match plan {
             Ok(Some(plan)) => {
                 let failed = Mutex::new(None);
@@ -372,7 +353,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                         }
                         entry.1 = entry.1.max(bytes);
                     }
-                });
+                })?;
                 if let Some(err) = failed.into_inner().unwrap() {
                     eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");
                     None
@@ -478,7 +459,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 }
             }
         }
-    });
+    })?;
     let mut spaces: Vec<Option<PartSpace>> = Vec::new();
     for ((name, _), r) in parts.iter().zip(results) {
         match r.into_inner().unwrap() {
@@ -566,11 +547,26 @@ mod tests {
         std::fs::write(dir.join("a/file"), vec![1u8; 8192]).unwrap();
         std::fs::hard_link(dir.join("a/file"), dir.join("b/link")).unwrap();
         let expected = crate::fsutil::fiemap_space(&dir);
-        let actual = super::line_spaces(&[("line".into(), dir.clone())]).pop().unwrap();
+        let actual = super::line_spaces(&[("line".into(), dir.clone())]).unwrap().pop().unwrap();
         match expected {
             Ok(expected) => assert_eq!(actual.unwrap(), expected),
             Err(_) => assert!(actual.is_err()),
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn failing_line_does_not_skip_other_lines() {
+        let dir = std::env::temp_dir().join(format!("layr-du-failing-part-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("first")).unwrap();
+        std::fs::create_dir_all(dir.join("last")).unwrap();
+        let paths = ["first", "missing", "last"].map(|name| (name.to_string(), dir.join(name)));
+        let results = super::line_spaces(&paths).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

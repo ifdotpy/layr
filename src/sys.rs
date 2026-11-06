@@ -558,6 +558,7 @@ pub enum Fork {
 }
 
 /// `fork`. Only call it while the process has one thread (the service loop).
+// Scoped pools must have returned before any fork; the service parent stays single-threaded.
 pub fn fork() -> io::Result<Fork> {
     // SAFETY: the service calls this from its single-threaded main loop, so the child is a
     // complete copy of a process with one thread and may run normal Rust code.
@@ -1851,5 +1852,13 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
         }
         let last = map.extents[mapped - 1];
         start = last.logical + last.length;
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub fn test_thread_priority() -> (libc::c_int, libc::c_int) {
+    // SAFETY: these queries inspect only the calling thread and have no pointer arguments.
+    unsafe {
+        (libc::getpriority(libc::PRIO_PROCESS, 0), libc::syscall(libc::SYS_ioprio_get, 1, 0) as libc::c_int)
     }
 }

@@ -655,58 +655,45 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
     true
 }
 
-/// A folder with at least this many entries is emptied on `TRASH_THREADS` threads.
+/// A folder with at least this many entries is emptied in parallel.
 #[cfg(target_os = "macos")]
 const TRASH_PARALLEL_FROM: usize = 64;
-/// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
-/// half the time of one (40,363 files: 4.7 s to 2.4 s).
-#[cfg(target_os = "macos")]
-const TRASH_THREADS: usize = 4;
-/// True while threads empty a folder: a folder inside their work is emptied by the thread that finds it.
-#[cfg(target_os = "macos")]
-static TRASH_PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
+// half the time of one (40,363 files: 4.7 s to 2.4 s).
 
 /// `empty_tree` of each of `entries`. False when the budget ended first.
 #[cfg(target_os = "macos")]
 fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let parallel = entries.len() >= TRASH_PARALLEL_FROM
-        && TRASH_PARALLEL.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok();
-    if !parallel {
+    if entries.len() < TRASH_PARALLEL_FROM {
         for e in entries {
-            if late() {
-                return false;
-            }
+            if late() { return false; }
             empty_tree(e, late, deleted, failed);
         }
         return true;
     }
-    let next = AtomicUsize::new(0);
-    let results: std::sync::Mutex<(usize, Vec<String>, bool)> = std::sync::Mutex::new((0, Vec::new(), true));
-    std::thread::scope(|scope| {
-        for _ in 0..TRASH_THREADS {
-            scope.spawn(|| {
-                let (mut d, mut f, mut done) = (0, Vec::new(), true);
-                while let Some(e) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if late() {
-                        done = false;
-                        break;
-                    }
-                    empty_tree(e, late, &mut d, &mut f);
-                }
-                if let Ok(mut r) = results.lock() {
-                    r.0 += d;
-                    r.1.extend(f);
-                    r.2 &= done;
-                }
-            });
-        }
+    let results = crate::pools::run(crate::pools::Priority::Background, || {
+        use rayon::prelude::*;
+        entries.par_iter().map(|e| {
+            let (mut deleted, mut failed) = (0, Vec::new());
+            let done = !late() && empty_tree(e, late, &mut deleted, &mut failed);
+            (deleted, failed, done)
+        }).collect::<Vec<_>>()
     });
-    TRASH_PARALLEL.store(false, Ordering::SeqCst);
-    let (d, f, done) = results.into_inner().unwrap_or_else(|e| e.into_inner());
-    *deleted += d;
-    failed.extend(f);
-    done
+    match results {
+        Ok(results) => {
+            let mut done = true;
+            for (count, errors, complete) in results {
+                *deleted += count;
+                failed.extend(errors);
+                done &= complete;
+            }
+            done
+        }
+        Err(error) => {
+            failed.push(error.to_string());
+            false
+        }
+    }
 }
 
 impl<'a> Project<'a> {

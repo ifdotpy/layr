@@ -1275,57 +1275,18 @@ pub struct Space {
     pub unique: u64,
 }
 
-/// Use the parallelism available to this process, including system-imposed limits.
-pub fn workers() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-}
-
 /// Run a dynamic queue of background jobs, each of which can add more jobs.
-pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
-    use std::collections::VecDeque;
-    use std::sync::{Condvar, Mutex};
-    if seed.is_empty() {
-        return;
+pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) -> Result<(), crate::pools::PoolError> {
+    fn spawn<'scope, T: Send + 'scope>(scope: &rayon::Scope<'scope>, job: T, work: &'scope (impl Fn(T, &dyn Fn(T)) + Sync)) {
+        scope.spawn(move |scope| work(job, &|child| spawn(scope, child, work)));
     }
-    let pending = seed.len();
-    let queue = Mutex::new((VecDeque::from(seed), pending));
-    let ready = Condvar::new();
-    struct Pending<'a, T>(&'a Mutex<(VecDeque<T>, usize)>, &'a Condvar);
-    impl<T> Drop for Pending<'_, T> {
-        fn drop(&mut self) {
-            let mut q = self.0.lock().unwrap();
-            q.1 -= 1;
-            if q.1 == 0 {
-                self.1.notify_all();
+    crate::pools::run(crate::pools::Priority::Background, || {
+        rayon::scope(|scope| {
+            for job in seed {
+                spawn(scope, job, &work);
             }
-        }
-    }
-    std::thread::scope(|scope| {
-        for _ in 0..workers() {
-            scope.spawn(|| {
-                crate::sys::lower_thread_priority();
-                loop {
-                    let job = {
-                        let mut q = queue.lock().unwrap();
-                        while q.0.is_empty() && q.1 != 0 {
-                            q = ready.wait(q).unwrap();
-                        }
-                        match q.0.pop_front() {
-                            Some(job) => job,
-                            None => break,
-                        }
-                    };
-                    let _pending = Pending(&queue, &ready);
-                    work(job, &|child| {
-                        let mut q = queue.lock().unwrap();
-                        q.1 += 1;
-                        q.0.push_back(child);
-                        ready.notify_one();
-                    });
-                }
-            });
-        }
-    });
+        });
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1486,16 +1447,17 @@ mod range_tests {
 
     #[test]
     fn work_queue_finishes_dynamic_jobs_and_propagates_panics() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let count = AtomicUsize::new(0);
-        super::work_queue(vec![0], |depth, add| {
-            count.fetch_add(1, Ordering::Relaxed);
-            if depth < 3 {
-                add(depth + 1);
-                add(depth + 1);
+        let visited = std::sync::Mutex::new(Vec::new());
+        super::work_queue(vec![1, 2], |job, add| {
+            visited.lock().unwrap().push(job);
+            if job < 16 {
+                add(job * 2 + 1);
+                add(job * 2 + 2);
             }
-        });
-        assert_eq!(count.load(Ordering::Relaxed), 15);
+        }).unwrap();
+        let mut jobs = visited.into_inner().unwrap();
+        jobs.sort_unstable();
+        assert_eq!(jobs, (1..=32).collect::<Vec<_>>());
         assert!(std::panic::catch_unwind(|| super::work_queue(vec![()], |(), _| panic!("job failed"))).is_err());
     }
 
