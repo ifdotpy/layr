@@ -77,14 +77,7 @@ pub fn daemon_warning(root: &Path) -> Option<&'static str> {
         crate::service::Hello::Running { root: Some(served), version } => {
             if !same_store(&served, root) {
                 Some(NO_DAEMON)
-<<<<<<< head
-            } else if version.is_some_and(|v| v != crate::store_version::Version::binary()) {
-||||||| base
-        crate::service::Hello::Running { root: None } => Some(OLDER_DAEMON),
-        crate::service::Hello::Running { root: Some(served) } => (!same_store(&served, root)).then_some(NO_DAEMON),
-=======
             } else if version.is_some_and(|v| v != crate::store_version::binary()) {
->>>>>>> origin-https/main
                 Some(OTHER_BUILD)
             } else {
                 None

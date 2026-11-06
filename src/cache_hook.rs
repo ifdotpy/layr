@@ -689,9 +689,6 @@ mod tests {
         assert!(!done.folder_ok && done.log.contains("stays marked damaged"), "{}", done.log);
     }
 
-<<<<<<< head
-||||||| base
-=======
     #[cfg(target_os = "macos")]
     #[test]
     fn the_worker_clones_a_whole_tree_in_one_step_on_apfs() {
@@ -707,7 +704,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dst);
     }
 
->>>>>>> origin-https/main
     #[test]
     fn a_named_adapter_prunes_and_its_outcome_is_logged() {
         let dir = folder("ok");

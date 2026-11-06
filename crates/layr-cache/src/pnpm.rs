@@ -271,16 +271,12 @@ fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
     let program = if cfg!(target_os = "macos") { MACOS_CP } else { "cp" };
     let part = part_of(dst);
     let _ = std::fs::remove_dir_all(&part);
-<<<<<<< head
-||||||| base
-=======
     // One clone of the whole tree (APFS) takes a moment; a copy file by file takes minutes on a loaded machine.
     if host.clone_tree(src, &part)? {
         return std::fs::rename(&part, dst).context("cannot name the finished copy").inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&part);
         });
     }
->>>>>>> origin-https/main
     let made = exec(host, program, |c| {
         if cfg!(target_os = "macos") {
             c.args(["-cRp"]).arg(src).arg(&part)
