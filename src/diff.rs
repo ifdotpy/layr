@@ -3,10 +3,10 @@
 use crate::changes::Change;
 use crate::fsutil::{self, FType, Meta};
 use anyhow::Result;
-use similar::{capture_diff_slices, Algorithm, DiffOp};
+use similar::DiffOp;
 
-use layr_model::diff::split_lines;
 pub use layr_model::diff::{patch, FileDiff, Side};
+pub use layr_model::diff::{patch_analyzed, AnalyzedDiff};
 
 /// The bytes of the files of one side of a comparison: a folder tree, or content held in memory.
 pub trait Contents {
@@ -69,6 +69,10 @@ fn scale(it: usize, width: usize, max: usize) -> usize {
 
 /// `--stat` output (git's layout for an 80 column width).
 pub fn stat(files: &[FileDiff], width: usize) -> String {
+    stat_analyzed(&files.iter().map(AnalyzedDiff::new).collect::<Vec<_>>(), width)
+}
+
+pub fn stat_analyzed(files: &[AnalyzedDiff<'_>], width: usize) -> String {
     if files.is_empty() {
         return String::new();
     }
@@ -163,6 +167,10 @@ pub fn summary(files: usize, add: usize, del: usize) -> String {
 }
 
 pub fn shortstat(files: &[FileDiff]) -> String {
+    shortstat_analyzed(&files.iter().map(AnalyzedDiff::new).collect::<Vec<_>>())
+}
+
+pub fn shortstat_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     if files.is_empty() {
         return String::new();
     }
@@ -175,7 +183,7 @@ pub fn shortstat(files: &[FileDiff]) -> String {
     summary(files.len(), a, d)
 }
 
-pub fn numstat(files: &[FileDiff]) -> String {
+pub fn numstat_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     let mut s = String::new();
     for f in files {
         if f.is_binary() {
@@ -188,7 +196,7 @@ pub fn numstat(files: &[FileDiff]) -> String {
     s
 }
 
-pub fn name_status(files: &[FileDiff]) -> String {
+pub fn name_status_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     let mut s = String::new();
     for f in files {
         match f.status() {
@@ -204,27 +212,23 @@ pub fn name_status(files: &[FileDiff]) -> String {
     s
 }
 
-pub fn name_only(files: &[FileDiff]) -> String {
+pub fn name_only_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     files.iter().map(|f| format!("{}\n", f.path())).collect()
 }
 
 /// Whitespace errors and conflict markers in added lines (`--check`).
-pub fn check(files: &[FileDiff]) -> String {
+pub fn check_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     let mut s = String::new();
     for f in files {
         if f.is_binary() {
             continue;
         }
-        let empty: Vec<u8> = Vec::new();
-        let od = f.old.as_ref().map(|x| &x.data).unwrap_or(&empty);
-        let nd = match &f.new {
-            Some(n) => &n.data,
-            None => continue,
-        };
-        let ol = split_lines(od);
-        let nl = split_lines(nd);
-        let ops = capture_diff_slices(Algorithm::Myers, &ol, &nl);
-        for op in &ops {
+        if f.new.is_none() {
+            continue;
+        }
+        let edits = f.edits();
+        let nl = &edits.new;
+        for op in &edits.ops {
             let (start, len) = match *op {
                 DiffOp::Insert { new_index, new_len, .. } => (new_index, new_len),
                 DiffOp::Replace { new_index, new_len, .. } => (new_index, new_len),
@@ -251,4 +255,124 @@ pub fn check(files: &[FileDiff]) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+pub(crate) mod regression {
+    use super::*;
+    pub(crate) fn generated_files() -> Vec<FileDiff> {
+        let mut files = Vec::new();
+        for n in 0..12 {
+            let old = (0..n).map(|i| format!("line {i}\n")).collect::<String>().into_bytes();
+            let mut new = old.clone();
+            new.extend_from_slice(if n % 2 == 0 { b"added\n" } else { b"tail" });
+            let side = |path: String, data| Side { path, data, mode: 0o100644, big: None };
+            files.push(FileDiff {
+                old: (n % 3 != 0).then(|| side(format!("old-{n}"), old)),
+                new: (n % 3 != 1).then(|| side(format!("new-{n}"), new)),
+            });
+        }
+        for data in [b"binary\0data".as_slice(), b"", b"unchanged\n", b"a\nb\n"] {
+            let side = |path: &str| Side { path: path.into(), data: data.into(), mode: 0o100644, big: None };
+            files.push(FileDiff { old: Some(side("before")), new: Some(side("after")) });
+        }
+        for (old, new, mode, big) in [
+            (b"old\0binary".as_slice(), b"new\0binary".as_slice(), 0o100644, None),
+            (b"before\r\n", b"after \r\n \tindent\n<<<<<<< conflict\n", 0o100755, None),
+            (b"valid\n", b"invalid\xff", 0o120000, None),
+            (b"", b"", 0o100644, Some(layr_model::diff::MAX_TEXT + 1)),
+        ] {
+            files.push(FileDiff {
+                old: Some(Side { path: "old path".into(), data: old.into(), mode: 0o100644, big }),
+                new: Some(Side { path: "new path".into(), data: new.into(), mode, big }),
+            });
+        }
+        files
+    }
+
+    #[test]
+    fn generated_combined_renderers_match_previous_bytes() {
+        let files = generated_files();
+        // Captured from the previous formatters on the generated fixture below.
+        let expected: serde_json::Value = serde_json::from_str(include_str!("diff-regression.json")).unwrap();
+        let analyzed: Vec<_> = files.iter().map(AnalyzedDiff::new).collect();
+        let actual = serde_json::json!([
+            stat_analyzed(&analyzed, 80),
+            numstat_analyzed(&analyzed),
+            shortstat_analyzed(&analyzed),
+            name_only_analyzed(&analyzed),
+            name_status_analyzed(&analyzed),
+            check_analyzed(&analyzed),
+            analyzed.iter().flat_map(|f| (0..5).map(move |c| patch_analyzed(f, c))).collect::<Vec<_>>()
+        ]);
+        assert_eq!(actual, expected);
+        for f in &analyzed {
+            if !f.is_binary() {
+                let edits = f.edits() as *const _;
+                f.counts();
+                patch_analyzed(f, 3);
+                assert!(std::ptr::eq(edits, f.edits()));
+            }
+            if let Some(side) = &f.new {
+                let source = files.iter().filter_map(|f| f.new.as_ref()).find(|s| std::ptr::eq(*s, side)).unwrap();
+                assert!(std::ptr::eq(source.data.as_ptr(), side.data.as_ptr()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod measurements {
+    use super::*;
+
+    fn generated_file() -> FileDiff {
+        let old = (0..20_000).flat_map(|i| format!("generated line {i}\n").into_bytes()).collect::<Vec<_>>();
+        let mut new = old.clone();
+        new.extend_from_slice(b"one added line\n");
+        FileDiff {
+            old: Some(Side { path: "before".into(), mode: 0o100644, data: old, big: None }),
+            new: Some(Side { path: "after".into(), mode: 0o100644, data: new, big: None }),
+        }
+    }
+
+    #[test]
+    #[ignore = "generated allocation measurement"]
+    fn measure_renderer_content_allocations() {
+        let files = vec![generated_file()];
+        if std::env::var_os("LAYR_PERF_BASELINE").is_some() {
+            let owned = files.clone();
+            std::hint::black_box(owned.iter().map(|f| f.path().to_string()).collect::<Vec<_>>());
+        } else {
+            let analyzed: Vec<_> = files.iter().map(AnalyzedDiff::new).collect();
+            std::hint::black_box(name_only_analyzed(&analyzed));
+        }
+    }
+
+    #[test]
+    #[ignore = "generated allocation measurement"]
+    fn measure_shared_edit_allocations() {
+        let files = vec![generated_file()];
+        if std::env::var_os("LAYR_PERF_BASELINE").is_some() {
+            std::hint::black_box(stat(&files, 80));
+            std::hint::black_box(
+                files
+                    .iter()
+                    .map(|f| {
+                        let (a, d) = f.counts();
+                        format!("{a}\t{d}\t{}\n", f.display_path())
+                    })
+                    .collect::<String>(),
+            );
+            std::hint::black_box(shortstat(&files));
+            // Before sharing, rename similarity and patch hunks each captured operations.
+            std::hint::black_box(files.iter().map(FileDiff::similarity).collect::<Vec<_>>());
+            std::hint::black_box(files.iter().map(|f| patch(f, 3)).collect::<Vec<_>>());
+        } else {
+            let analyzed: Vec<_> = files.iter().map(AnalyzedDiff::new).collect();
+            std::hint::black_box(stat_analyzed(&analyzed, 80));
+            std::hint::black_box(numstat_analyzed(&analyzed));
+            std::hint::black_box(shortstat_analyzed(&analyzed));
+            std::hint::black_box(analyzed.iter().map(|f| patch_analyzed(f, 3)).collect::<Vec<_>>());
+        }
+    }
 }

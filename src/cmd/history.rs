@@ -107,39 +107,38 @@ impl DiffOpts {
 }
 
 pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
-    let fds: Vec<&FileDiff> = match &o.filter {
-        Some(f) => fds.iter().filter(|d| f.contains(d.status())).collect(),
-        None => fds.iter().collect(),
+    let analyzed: Vec<_> = match &o.filter {
+        Some(f) => fds.iter().filter(|d| f.contains(d.status())).map(diff::AnalyzedDiff::new).collect(),
+        None => fds.iter().map(diff::AnalyzedDiff::new).collect(),
     };
-    let owned: Vec<FileDiff> = fds.iter().map(|f| FileDiff { old: f.old.clone(), new: f.new.clone() }).collect();
     let mut problems = false;
     if o.check {
-        let s = diff::check(&owned);
+        let s = diff::check_analyzed(&analyzed);
         problems = !s.is_empty();
         ctx.print(&s);
         return problems;
     }
     if o.numstat {
-        ctx.print(&diff::numstat(&owned));
+        ctx.print(&diff::numstat_analyzed(&analyzed));
     }
     if o.stat {
-        ctx.print(&diff::stat(&owned, o.stat_width));
+        ctx.print(&diff::stat_analyzed(&analyzed, o.stat_width));
     }
     if o.shortstat {
-        ctx.print(&diff::shortstat(&owned));
+        ctx.print(&diff::shortstat_analyzed(&analyzed));
     }
     if o.name_only {
-        ctx.print(&diff::name_only(&owned));
+        ctx.print(&diff::name_only_analyzed(&analyzed));
     }
     if o.name_status {
-        ctx.print(&diff::name_status(&owned));
+        ctx.print(&diff::name_status_analyzed(&analyzed));
     }
     if o.patch {
         if o.stat || o.numstat || o.shortstat {
             outln!(ctx);
         }
-        for f in &owned {
-            ctx.print(&diff::patch(f, o.context));
+        for f in &analyzed {
+            ctx.print(&diff::patch_analyzed(f, o.context));
         }
     }
     problems
@@ -1621,10 +1620,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let mut count = 0;
         let mut out_lines = Vec::new();
-        for (i, l) in data.split(|b| *b == b'\n').enumerate() {
-            if i > 0 && i == data.split(|b| *b == b'\n').count() - 1 && l.is_empty() {
-                break;
-            }
+        for (i, l) in grep_lines(&data) {
             if re.is_match(l) != a.has("-v") {
                 count += 1;
                 if count <= maxc {
@@ -1775,6 +1771,12 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Preserve grep's empty-file segment while omitting a final empty newline segment.
+fn grep_lines(data: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+    let final_segment = data.split(|b| *b == b'\n').count() - 1;
+    data.split(|b| *b == b'\n').enumerate().take_while(move |(i, l)| !(*i > 0 && *i == final_segment && l.is_empty()))
+}
+
 #[allow(dead_code)]
 fn unused(_: &Here) {}
 
@@ -1789,5 +1791,114 @@ mod tests {
         assert_eq!(rev_argument(&args, 0, is_rev).map(String::as_str), Some("0123abcd"));
         assert_eq!(rev_argument(&args, 1, is_rev), None);
         assert_eq!(rev_argument(&args[..1], 0, is_rev), None);
+    }
+}
+
+#[cfg(test)]
+mod grep_regression {
+    use super::grep_lines;
+
+    fn previous(data: &[u8]) -> Vec<(usize, &[u8])> {
+        data.split(|b| *b == b'\n')
+            .enumerate()
+            .take_while(|(i, l)| !(*i > 0 && *i == data.split(|b| *b == b'\n').count() - 1 && l.is_empty()))
+            .collect()
+    }
+
+    #[test]
+    fn generated_grep_segments_match_previous_output() {
+        for lines in 0..64 {
+            for ending in [b"".as_slice(), b"\n", b"\n\n", b"tail", b"\xff"] {
+                let mut data = (0..lines).flat_map(|i| format!("row {i}\n").into_bytes()).collect::<Vec<_>>();
+                data.extend_from_slice(ending);
+                assert_eq!(grep_lines(&data).collect::<Vec<_>>(), previous(&data));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "generated scaling measurement"]
+    fn measure_grep_scaling() {
+        for lines in [1000, 2000, 4000] {
+            let data = b"generated line\n".repeat(lines);
+            let start = std::time::Instant::now();
+            std::hint::black_box(previous(std::hint::black_box(&data)));
+            let before = start.elapsed();
+            let start = std::time::Instant::now();
+            std::hint::black_box(grep_lines(std::hint::black_box(&data)).collect::<Vec<_>>());
+            eprintln!("grep lines={lines} previous={before:?} optimized={:?}", start.elapsed());
+        }
+    }
+}
+
+#[cfg(test)]
+mod renderer_regression {
+    use super::*;
+    use std::{
+        cell::RefCell,
+        io::{self, Write},
+        rc::Rc,
+    };
+
+    struct Capture(Rc<RefCell<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn generated_print_diffs_combines_flags_without_changing_bytes() {
+        let root = std::env::temp_dir().join(format!("layr-render-regression-{}", ids::new_id()));
+        let capture = Rc::new(RefCell::new(Vec::new()));
+        let ctx = Ctx {
+            store: crate::store::Store::open(&root).unwrap(),
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            out: RefCell::new(Box::new(Capture(capture.clone()))),
+        };
+        let files = diff::regression::generated_files();
+        let expected: serde_json::Value = serde_json::from_str(include_str!("../diff-regression.json")).unwrap();
+        let patches: String = expected[6].as_array().unwrap().iter().skip(3).step_by(5).map(|v| v.as_str().unwrap()).collect();
+        for combined in [false, true] {
+            let mut options = DiffOpts {
+                stat: true,
+                numstat: combined,
+                shortstat: combined,
+                name_only: combined,
+                name_status: combined,
+                check: false,
+                patch: true,
+                context: 3,
+                stat_width: 80,
+                filter: None,
+            };
+            let mut output = String::new();
+            if combined {
+                output.push_str(expected[1].as_str().unwrap());
+            }
+            output.push_str(expected[0].as_str().unwrap());
+            if combined {
+                for i in [2, 3, 4] {
+                    output.push_str(expected[i].as_str().unwrap());
+                }
+            }
+            output.push('\n');
+            output.push_str(&patches);
+            assert!(!print_diffs(&ctx, &files, &options));
+            assert_eq!(*capture.borrow(), output.as_bytes());
+            capture.borrow_mut().clear();
+            options.filter = Some("Z".into());
+            assert!(!print_diffs(&ctx, &files, &options));
+            assert_eq!(*capture.borrow(), b"\n");
+            capture.borrow_mut().clear();
+        }
+        drop(ctx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

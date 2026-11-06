@@ -61,6 +61,46 @@ impl FileDiff {
     }
     /// Similarity percent for a rename (100 when content is equal).
     pub fn similarity(&self) -> u32 {
+        AnalyzedDiff::new(self).similarity()
+    }
+    pub fn counts(&self) -> (usize, usize) {
+        AnalyzedDiff::new(self).counts()
+    }
+    pub fn display_path(&self) -> String {
+        match (&self.old, &self.new) {
+            (Some(o), Some(n)) if o.path != n.path => format!("{} => {}", o.path, n.path),
+            _ => self.path().to_string(),
+        }
+    }
+}
+
+/// Borrowed, invocation-local rendering analysis. Content remains owned by the caller.
+pub struct AnalyzedDiff<'a> {
+    file: &'a FileDiff,
+    edits: std::cell::OnceCell<LineEdits<'a>>,
+}
+
+/// Line slices and Myers operations, computed together once for each rendered file.
+pub struct LineEdits<'a> {
+    pub old: Vec<&'a [u8]>,
+    pub new: Vec<&'a [u8]>,
+    pub ops: Vec<DiffOp>,
+}
+
+impl<'a> AnalyzedDiff<'a> {
+    pub fn new(file: &'a FileDiff) -> Self {
+        Self { file, edits: std::cell::OnceCell::new() }
+    }
+
+    pub fn edits(&self) -> &LineEdits<'a> {
+        self.edits.get_or_init(|| {
+            let old = split_lines(self.file.old.as_ref().map(|s| s.data.as_slice()).unwrap_or_default());
+            let new = split_lines(self.file.new.as_ref().map(|s| s.data.as_slice()).unwrap_or_default());
+            let ops = capture_diff_slices(Algorithm::Myers, &old, &new);
+            LineEdits { old, new, ops }
+        })
+    }
+    pub fn similarity(&self) -> u32 {
         match (&self.old, &self.new) {
             (Some(o), Some(n)) => {
                 if same(o, n) {
@@ -69,9 +109,8 @@ impl FileDiff {
                 if o.big.is_some() || n.big.is_some() {
                     return 0;
                 }
-                let (a, b) = (split_lines(&o.data), split_lines(&n.data));
-                let ops = capture_diff_slices(Algorithm::Myers, &a, &b);
-                (get_diff_ratio(&ops, a.len(), b.len()) * 100.0) as u32
+                let edits = self.edits();
+                (get_diff_ratio(&edits.ops, edits.old.len(), edits.new.len()) * 100.0) as u32
             }
             _ => 0,
         }
@@ -80,14 +119,10 @@ impl FileDiff {
         if self.is_binary() {
             return (0, 0);
         }
-        let empty: Vec<u8> = Vec::new();
-        let o = self.old.as_ref().map(|s| &s.data).unwrap_or(&empty);
-        let n = self.new.as_ref().map(|s| &s.data).unwrap_or(&empty);
-        let (ol, nl) = (split_lines(o), split_lines(n));
-        let ops = capture_diff_slices(Algorithm::Myers, &ol, &nl);
+        let ops = &self.edits().ops;
         let mut a = 0;
         let mut r = 0;
-        for op in &ops {
+        for op in ops {
             match op {
                 DiffOp::Insert { new_len, .. } => a += new_len,
                 DiffOp::Delete { old_len, .. } => r += old_len,
@@ -100,11 +135,12 @@ impl FileDiff {
         }
         (a, r)
     }
-    pub fn display_path(&self) -> String {
-        match (&self.old, &self.new) {
-            (Some(o), Some(n)) if o.path != n.path => format!("{} => {}", o.path, n.path),
-            _ => self.path().to_string(),
-        }
+}
+
+impl std::ops::Deref for AnalyzedDiff<'_> {
+    type Target = FileDiff;
+    fn deref(&self) -> &FileDiff {
+        self.file
     }
 }
 
@@ -153,6 +189,10 @@ fn ab(prefix: &str, p: &str) -> String {
 
 /// A full git patch for one file.
 pub fn patch(fd: &FileDiff, context: usize) -> String {
+    patch_analyzed(&AnalyzedDiff::new(fd), context)
+}
+
+pub fn patch_analyzed(fd: &AnalyzedDiff<'_>, context: usize) -> String {
     let mut s = String::new();
     let opath = fd.old.as_ref().map(|x| x.path.clone()).unwrap_or_else(|| fd.path().to_string());
     let npath = fd.new.as_ref().map(|x| x.path.clone()).unwrap_or_else(|| fd.path().to_string());
@@ -199,7 +239,7 @@ pub fn patch(fd: &FileDiff, context: usize) -> String {
     }
     s.push_str(&format!("--- {}\n", if fd.old.is_some() { ab("a/", &opath) } else { "/dev/null".into() }));
     s.push_str(&format!("+++ {}\n", if fd.new.is_some() { ab("b/", &npath) } else { "/dev/null".into() }));
-    s.push_str(&hunks(od, nd, context));
+    s.push_str(&hunks_from_edits(fd.edits(), context));
     s
 }
 
@@ -249,8 +289,13 @@ pub fn hunks(old: &[u8], new: &[u8], context: usize) -> String {
     let ol = split_lines(old);
     let nl = split_lines(new);
     let ops = capture_diff_slices(Algorithm::Myers, &ol, &nl);
+    hunks_from_edits(&LineEdits { old: ol, new: nl, ops }, context)
+}
+
+fn hunks_from_edits(edits: &LineEdits<'_>, context: usize) -> String {
+    let (ol, nl) = (&edits.old, &edits.new);
     let mut s = String::new();
-    for group in group_diff_ops(ops, context) {
+    for group in group_diff_ops(edits.ops.clone(), context) {
         let (first, last) = (&group[0], &group[group.len() - 1]);
         let o_start = first.old_range().start;
         let o_end = last.old_range().end;
@@ -260,7 +305,7 @@ pub fn hunks(old: &[u8], new: &[u8], context: usize) -> String {
             "@@ -{} +{} @@{}\n",
             range(o_start, o_end - o_start),
             range(n_start, n_end - n_start),
-            funcname(&ol, o_start)
+            funcname(ol, o_start)
         ));
         for op in &group {
             let push = |s: &mut String, prefix: char, line: &[u8]| {

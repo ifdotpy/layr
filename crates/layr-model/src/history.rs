@@ -2,7 +2,26 @@
 use crate::StateRec;
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap};
+
+/// Heap identity is strictly the historical (time, id) ordering.
+struct QueuedState(StateRec);
+impl PartialEq for QueuedState {
+    fn eq(&self, other: &Self) -> bool {
+        (self.0.time, &self.0.id) == (other.0.time, &other.0.id)
+    }
+}
+impl Eq for QueuedState {}
+impl PartialOrd for QueuedState {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for QueuedState {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0.time, &self.0.id).cmp(&(other.0.time, &other.0.id))
+    }
+}
 
 /// Walk source states in CLI date/identity order, comparing each to its first parent.
 /// Callers supply verified metadata and the paths changed in each immutable state.
@@ -17,21 +36,26 @@ pub fn file_history(
     mut accept: impl FnMut(StateRec) -> Result<bool>,
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
+    let mut queued = BTreeSet::new();
     let mut heap = BinaryHeap::new();
     for id in starts.iter().filter(|id| !excluded.contains(*id)) {
-        if let Some(s) = state(id)?.filter(|s| !s.kind.auxiliary()) {
-            heap.push((s.time, s.id));
+        if !queued.contains(id) {
+            if let Some(s) = state(id)?.filter(|s| !s.kind.auxiliary()) {
+                queued.insert(s.id.clone());
+                heap.push(QueuedState(s));
+            }
         }
     }
-    while let Some((_, id)) = heap.pop() {
-        if !seen.insert(id.clone()) {
+    while let Some(QueuedState(s)) = heap.pop() {
+        queued.remove(&s.id);
+        if !seen.insert(s.id.clone()) {
             continue;
         }
-        let Some(s) = state(&id)? else { continue };
         for parent in s.parents.iter().take(if first_parent { 1 } else { usize::MAX }) {
-            if !excluded.contains(parent) && !seen.contains(parent) {
+            if !excluded.contains(parent) && !seen.contains(parent) && !queued.contains(parent) {
                 if let Some(p) = state(parent)?.filter(|s| !s.kind.auxiliary()) {
-                    heap.push((p.time, p.id));
+                    queued.insert(p.id.clone());
+                    heap.push(QueuedState(p));
                 }
             }
         }
@@ -72,19 +96,19 @@ pub fn blame(versions: &[FileVersion]) -> Result<Vec<BlameLine>> {
         let newer = String::from_utf8_lossy(&versions[vi - 1].bytes);
         let older = String::from_utf8_lossy(&versions[vi].bytes);
         let diff = similar::TextDiff::from_lines(&older, &newer);
-        let mut new_to_old = HashMap::new();
+        let mut new_to_old = vec![None; diff.new_slices().len()];
         for op in diff.ops() {
             if let similar::DiffOp::Equal { old_index, new_index, len } = op {
                 for k in 0..*len {
-                    new_to_old.insert(new_index + k, old_index + k);
+                    new_to_old[new_index + k] = Some(old_index + k);
                 }
             }
         }
         for (i, pos) in map.iter_mut().enumerate() {
             if let Some(m) = *pos {
-                match new_to_old.get(&m) {
+                match new_to_old[m] {
                     Some(o) => {
-                        *pos = Some(*o);
+                        *pos = Some(o);
                         owner[i] = vi;
                     }
                     None => *pos = None,
