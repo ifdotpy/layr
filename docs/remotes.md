@@ -75,19 +75,26 @@ The previous Git forms fail with the new command name.
 The previous command transport form fails with `layr sync <remote>` in the message.
 Tests can use `layr sync work --command -- <command> [<arguments>]` with an explicit peer remote.
 
-## A git mirror of a store remote
+## Push roles
 
-`layr config remote.<store>.mirror <git remote>` makes `layr push <store>` push to that git remote too, after the
-store push. It pushes the line of the command, every protected line, and each line whose mirror push failed before,
-each to the branch of its name (as `layr git push <git remote> <line>`). The store is the source of truth: a git
-failure never fails or undoes the store push. It prints `warning: mirror <git remote>: line <line> not pushed: <error>`,
-and the next push tries the line again. With `--json` the report has a `mirror` object: `remote`, `pushed` and `failed`
-(each with `line` and `error`). A queue pass with `queue.push <store>` pushes this way too, so a merge that a daemon
-makes reaches both remotes.
+Each remote has a push role: `layr config remote.<name>.push required|optional|off`.
+A store remote is `required` by default. A git remote is `optional` by default.
+
+- `layr push` without a name pushes to every remote that is not `off`, required remotes first.
+- `layr push cloud origin` pushes only to the named remotes.
+- A store remote gets records and states. A git remote gets the line of the command, every protected line,
+  and each line whose earlier push to that remote failed, each to the branch of its name.
+- A required failure fails the command (exit 1).
+- An optional failure prints `warning: push to <remote> (<lines>) failed`, and the command continues.
+  Layr records the lines in `meta/push-pending.json`. The next push to that remote tries them again.
+- With `--json` the report is `{"remotes":[...]}`. Each entry has `name`, `kind`, `role`, `pushed`, `failed` and `report`.
+
+`queue.push` takes a comma list of remotes (`layr config queue.push cloud,origin`).
+A queue pass pushes the merged lines to those remotes. Unset `queue.push` means no push.
 
 ```sh
-layr config remote.cloud.mirror origin
-layr push cloud
+layr config remote.origin.push optional
+layr push
 ```
 
 ## Btrfs execution and sync

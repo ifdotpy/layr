@@ -296,18 +296,21 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
     Ok(results)
 }
 
-/// The remote that a queue pass pushes its merged lines to (`queue.push`), if any.
+/// The remotes that a queue pass pushes its merged lines to (`queue.push`: a comma-separated list), if any.
 fn push_remote(repo: &Repo) -> Result<Option<String>> {
     match repo.p.config_value("queue.push")? {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(value)) if !value.is_empty() => Ok(Some(value)),
-        Some(_) => bail!("queue.push must be the name of a remote"),
+        Some(_) => bail!("queue.push must be a comma-separated list of remotes"),
     }
 }
 
-/// Push each line that an entry of `entries` merged into, once, to `remote`, from the folder of that line: the
-/// line moved on this machine, and other machines and the site see it only after the push.
-fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remote: &str) -> Result<()> {
+/// Push each line that an entry of `entries` merged into, once, to `remotes` (comma-separated), from the folder of
+/// that line, with their push roles (`layerpush::push_all`): the line moved on this machine, and other machines and
+/// the site see it only after the push. A failure on an optional remote waits for the next push.
+fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remotes: &str) -> Result<()> {
+    let mut names: Vec<String> = remotes.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    names.push("-q".to_string());
     let mut pushed = std::collections::BTreeSet::new();
     for entry in entries.iter().filter(|entry| entry.status == "done") {
         let line = target(repo, entry)?;
@@ -321,7 +324,11 @@ fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remote: &str) -> 
             env: ctx.env.clone(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let code = super::remote::push(&push_ctx, &[remote.to_string(), "-q".to_string()])?;
+        let code = if names.len() == 2 {
+            super::remote::push(&push_ctx, &names)?
+        } else {
+            super::layerpush::push_all(&push_ctx, &names)?
+        };
         anyhow::ensure!(code == 0, "push of line {} exited {code}", line.name);
     }
     Ok(())

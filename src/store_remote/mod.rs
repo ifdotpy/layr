@@ -43,9 +43,6 @@ pub struct Options {
 
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
-    /// The git mirror pass after a push (`remote.<store>.mirror`): remote, lines pushed, lines that failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mirror: Option<serde_json::Value>,
     pub records: usize,
     pub states: usize,
     /// Git packs (`git/`) that a push wrote or a fetch installed.

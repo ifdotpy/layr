@@ -2824,8 +2824,16 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if k == "queue.probes" && !val.is_null() && !val.is_boolean() {
         return Err(exit(128, "queue.probes must be true or false"));
     }
-    if matches!(k.as_str(), "queue.push" | "requests.remote") && !val.is_null() && !val.as_str().is_some_and(|v| !v.is_empty()) {
+    if k == "requests.remote" && !val.is_null() && !val.as_str().is_some_and(|v| !v.is_empty()) {
         return Err(exit(128, format!("{k} must be the name of a remote")));
+    }
+    if k == "queue.push" && !val.is_null() && !val.as_str().is_some_and(|v| v.split(',').any(|n| !n.trim().is_empty())) {
+        return Err(exit(128, "queue.push must be a comma-separated list of remotes"));
+    }
+    if k.starts_with("remote.") && k.ends_with(".push") && !val.is_null()
+        && !matches!(val.as_str(), Some("required" | "optional" | "off"))
+    {
+        return Err(exit(128, format!("{k} must be required, optional or off")));
     }
     if k == "queue.run" && !val.is_null() {
         let value = val.as_str().ok_or_else(|| exit(128, "queue.run must be a comma-separated list of line names"))?;

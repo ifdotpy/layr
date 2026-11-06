@@ -884,8 +884,15 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "sync")
 }
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    // Without a remote name: every layer to each of its remotes (docs/cache-overlays.md).
-    if args.iter().all(|s| s.starts_with('-')) {
+    // Without a remote name, with several, or with a git remote: the push roles (`layerpush::push_all`). One layr
+    // remote: its own push, with all its options.
+    let names: Vec<&String> = args.iter().filter(|s| !s.starts_with('-')).collect();
+    let git_named = names.len() == 1 && {
+        let h = here(ctx)?;
+        h.repo.p.config_value(&format!("cloud.remote.{}.url", names[0]))?.is_none()
+            && h.repo.p.config_value(&format!("remote.{}.url", names[0]))?.is_some()
+    };
+    if names.is_empty() || names.len() > 1 || git_named {
         return super::layerpush::push_all(ctx, args);
     }
     exchange(ctx, args, "push")
@@ -1090,10 +1097,6 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                     },
                 )?;
             }
-            let mut report = report;
-            if op == "push" {
-                report.mirror = mirror(ctx, &h.repo, h.line.as_ref(), name)?;
-            }
             if op != "pull" || !a.has("--json") {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
             }
@@ -1144,66 +1147,7 @@ fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
     a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// `remote.<store>.mirror <git remote>`: after a push to the store, the line of the command, the protected lines
-/// and the lines whose mirror push failed before go to that git remote too, each to the branch of its name. The store
-/// push stands either way: a failure is reported, and the line waits for the next push (`mirror-pending-<store>`).
-fn mirror(ctx: &Ctx, repo: &Repo, current: Option<&crate::model::Line>, store: &str) -> Result<Option<serde_json::Value>> {
-    let Some(git_remote) = repo.p.config_value(&format!("remote.{store}.mirror"))?.and_then(|v| v.as_str().map(str::to_owned))
-    else {
-        return Ok(None);
-    };
-    let pending_path = repo.p.meta_dir().join(format!("mirror-pending-{store}.json"));
-    let mut names: std::collections::BTreeSet<String> =
-        std::fs::read(&pending_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    names.extend(current.map(|l| l.name.clone()));
-    let policy = repo.policy();
-    names.extend(repo.lines()?.into_iter().filter(|l| policy.rule_for(&l.name).is_some()).map(|l| l.name));
-    let (mut pushed, mut failed) = (Vec::new(), Vec::new());
-    let mut waiting = std::collections::BTreeSet::new();
-    for name in names {
-        // A line that went since: nothing to mirror.
-        if repo.p.db.line_by_name(&name)?.is_none() {
-            continue;
-        }
-        let quiet = Ctx {
-            store: crate::store::Store::open(&ctx.store.root)?,
-            caller: ctx.caller.clone(),
-            cwd: ctx.cwd.clone(),
-            env: ctx.env.clone(),
-            out: std::cell::RefCell::new(Box::new(std::io::sink())),
-        };
-        match git::push(&quiet, &[git_remote.clone(), name.clone(), "-q".to_string()]) {
-            Ok(0) => pushed.push(name),
-            Ok(code) => {
-                failed.push(json!({"line": name, "error": format!("git push exited {code}")}));
-                waiting.insert(name);
-            }
-            Err(e) => {
-                failed.push(json!({"line": name, "error": format!("{e:#}")}));
-                waiting.insert(name);
-            }
-        }
-    }
-    if waiting.is_empty() {
-        let _ = std::fs::remove_file(&pending_path);
-    } else {
-        crate::fsutil::atomic_write(&pending_path, &serde_json::to_vec(&waiting)?, 0o600)?;
-    }
-    Ok(Some(json!({"remote": git_remote, "pushed": pushed, "failed": failed})))
-}
-
 fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_output: bool, quiet: bool) -> Result<()> {
-    // A mirror failure is a warning: the push to the store stands.
-    if let Some(mirror) = report.mirror.as_ref().filter(|_| !json_output) {
-        let remote = mirror["remote"].as_str().unwrap_or("");
-        for failure in mirror["failed"].as_array().into_iter().flatten() {
-            eprintln!(
-                "warning: mirror {remote}: line {} not pushed: {}; the next push tries again",
-                failure["line"].as_str().unwrap_or(""),
-                failure["error"].as_str().unwrap_or("")
-            );
-        }
-    }
     if json_output {
         outln!(ctx, "{}", serde_json::to_string(report)?);
     } else if !quiet {
