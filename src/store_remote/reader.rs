@@ -148,8 +148,14 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
         (r.time, r.machine, r.seq)
     });
     if let Some(path) = seen {
-        // Only after every segment was checked: a failed read leaves the old file.
-        if let Err(e) = crate::fsutil::atomic_write(path, format!("{}\n", checked.join("\n")).as_bytes(), 0o600) {
+        // Only after every segment was checked: a failed read leaves the old file. The first fetch of an overlay
+        // layer makes its folder.
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| crate::fsutil::atomic_write(path, format!("{}\n", checked.join("\n")).as_bytes(), 0o600));
+        if let Err(e) = written {
             eprintln!("warning: {}: {e:#}", path.display());
         }
     }
@@ -869,8 +875,10 @@ mod tests {
         let (backend, identity, key, root) = fixture();
         let lines = vec![line(1, &key), line(2, &key)];
         segment(&backend, &identity, 1, 2, &lines);
-        let seen = root.join("seen-records");
+        // The folder of the file is made by the first fetch (an overlay layer's first clone).
+        let seen = root.join("layer").join("seen-records");
         assert_eq!(records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap().lines.len(), 2);
+        assert!(seen.is_file());
         // The records are here and the object has the same time: the next fetch does not read it.
         let object = root.join(format::segment_name(MACHINE, 1, 2));
         let time = std::fs::metadata(&object).unwrap().modified().unwrap();
