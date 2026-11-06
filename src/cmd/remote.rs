@@ -585,6 +585,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &Spec::new()
             .flag("--json")
             .value("--public-key")
+            .value("--mode")
             .value("--paper-key-out")
             .flag("--paper-key-tty")
             .value("--recipient")
@@ -696,14 +697,28 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let recovery_key_file = if remote_kind == Kind::Store {
                 let mut store = store_remote::open(url, repo)?;
                 store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
+                let mode = a.get("--mode").map(|m| layr_store::format::Mode::parse(m)).transpose()?;
+                store.require_mode(mode);
                 let opts = store_remote::ConfigureOptions {
                     paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)),
                     paper_key_tty: a.has("--paper-key-tty"),
+                    // A new store is Private unless it asks for a paper key, which only a Secret store has.
+                    mode: mode.unwrap_or(if a.has("--paper-key-out") || a.has("--paper-key-tty") {
+                        layr_store::format::Mode::Secret
+                    } else {
+                        layr_store::format::Mode::Private
+                    }),
                 };
                 let configured = store.configure(ctx, &opts)?;
                 store.save_pin(ctx, repo, name)?;
+                set_config(ctx, repo, &format!("cloud.remote.{name}.mode"), json!(store.store_mode()?.name()))?;
                 configured.recovery_key_file
-            } else { None };
+            } else {
+                if a.has("--mode") {
+                    bail!("--mode requires a store remote");
+                }
+                None
+            };
             set_config(ctx, repo, &key, json!(url))?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"name": name, "url": url, "recovery_key_file": recovery_key_file}));
@@ -717,6 +732,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             remote_url(repo, &a.pos[1])?;
             set_config(ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
             set_config(ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
+            set_config(ctx, repo, &format!("cloud.remote.{}.mode", a.pos[1]), serde_json::Value::Null)?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
@@ -873,7 +889,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
@@ -1224,6 +1240,7 @@ fn args_for_merge(a: &crate::args::Parsed) -> Vec<String> {
 pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
         &Spec::new()
+            .value("--mode")
             .value("--paper-key")
             .value("--volume")
             .flag("--public")
@@ -1241,7 +1258,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
     }
     if a.pos.len() > 2 {
-        bail!("usage: layr clone <url> [<project>]");
+        bail!("usage: layr clone <url> [<project>] [--mode secret|private|public]");
     }
     let name = a.pos.get(1).cloned().unwrap_or_else(|| url.trim_end_matches('/').rsplit('/').next().unwrap_or("project").into());
     // Remove a new project if store open or clone fails.
@@ -1250,6 +1267,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let result = (|| -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.use_public_access(a.has("--public"));
+        // `--mode secret` refuses a server that serves this project as plain, and the reverse.
+        store.require_mode(a.get("--mode").map(layr_store::format::Mode::parse).transpose()?);
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
             public: a.has("--public"),
@@ -1265,6 +1284,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock()?;
         set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         store.save_pin(ctx, &repo, "origin")?;
+        set_config(ctx, &repo, "cloud.remote.origin.mode", json!(store.store_mode()?.name()))?;
         if store.is_public_reader() {
             set_config(ctx, &repo, "cloud.remote.origin.public", json!(true))?;
         }

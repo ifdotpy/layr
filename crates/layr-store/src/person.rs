@@ -409,6 +409,7 @@ mod tests {
             format: 2,
             project: "01a12290-0000-7000-8000-000000000001".into(),
             recipient: keys::recipient_of(&keys::generate_identity()).unwrap(),
+            mode: Default::default(),
         };
         let pin = Pin::of_store(&store);
         pin.validate().unwrap();

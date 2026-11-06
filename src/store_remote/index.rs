@@ -16,6 +16,11 @@ pub struct Report {
 
 pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
     let descriptor = store.descriptor()?;
+    ensure!(
+        descriptor.mode.is_secret(),
+        "the server builds the indexes of a {} project; layr index write is for Secret projects",
+        descriptor.mode.name()
+    );
     let identity = store.identity(&descriptor, None)?;
     repo.p.verify_records()?;
     ensure!(

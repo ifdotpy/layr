@@ -6,12 +6,60 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Public store metadata. The recipient identifies the vault encryption key.
+/// Public store metadata. In a Secret store the recipient identifies the vault encryption key; Private and
+/// Public stores keep plain objects and name [`crate::keys::PLAIN`] as the recipient.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Descriptor {
     pub format: u32,
     pub project: String,
     pub recipient: String,
+    #[serde(default, skip_serializing_if = "Mode::is_secret")]
+    pub mode: Mode,
+}
+
+/// The project mode (docs/cloud-rfc.md 7.0). Secret: end-to-end encrypted, the server holds ciphertext only.
+/// Private and Public: the server reads the code and controls access; objects and records are plain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Secret,
+    Private,
+    Public,
+}
+
+impl Mode {
+    pub fn is_secret(&self) -> bool {
+        *self == Mode::Secret
+    }
+
+    pub fn parse(text: &str) -> Result<Mode> {
+        match text {
+            "secret" => Ok(Mode::Secret),
+            "private" => Ok(Mode::Private),
+            "public" => Ok(Mode::Public),
+            _ => bail!("unknown project mode {text}; use secret, private or public"),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Mode::Secret => "secret",
+            Mode::Private => "private",
+            Mode::Public => "public",
+        }
+    }
+}
+
+impl Descriptor {
+    /// A descriptor whose recipient matches its mode: an age recipient for Secret, [`crate::keys::PLAIN`] otherwise.
+    pub fn check_mode(&self) -> Result<()> {
+        let plain = self.recipient == crate::keys::PLAIN;
+        if self.mode.is_secret() == plain {
+            bail!("store mode {} does not match its recipient", self.mode.name());
+        }
+        Ok(())
+    }
 }
 
 pub fn is_uuid(s: &str) -> bool {
@@ -339,8 +387,11 @@ mod tests {
                 Link(state, "0123abcd".into(), 2, 0, 65536, "full".into()),
             ],
         );
-        let tree =
-            Tree { files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
+        let tree = Tree {
+            files: BTreeMap::from([("plain".into(), entry.clone()), ("caf\u{e9}/\u{1f642}".into(), entry.clone())]),
+            times: BTreeMap::new(),
+            chunks: BTreeMap::new(),
+        };
         assert_eq!(tree.canonical().unwrap(), canonical(&serde_json::to_value(&tree).unwrap()).unwrap());
         Tree::parse(&tree.canonical().unwrap()).unwrap();
         let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };

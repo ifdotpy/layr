@@ -23,11 +23,16 @@ fn spool() -> Result<fs::File> {
     Ok(file)
 }
 
+/// The release file encrypted to the store recipient; a Private or Public store ([`keys::PLAIN`]) keeps it plain.
 fn encrypt(mut input: fs::File, recipient: &str) -> Result<(fs::File, u64, String)> {
     let mut output = spool()?;
-    let recipient = age::x25519::Recipient::from_str(recipient).map_err(|_| anyhow::anyhow!("invalid release recipient"))?;
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
-    let mut writer = encryptor.wrap_output(&mut output)?;
+    let mut writer = if recipient == layr_store::keys::PLAIN {
+        Out::Plain(&mut output)
+    } else {
+        let recipient = age::x25519::Recipient::from_str(recipient).map_err(|_| anyhow::anyhow!("invalid release recipient"))?;
+        let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
+        Out::Age(encryptor.wrap_output(&mut output)?)
+    };
     let mut hash = ContentAddress::new();
     let mut size = 0;
     let mut buffer = [0u8; 65536];
@@ -46,6 +51,37 @@ fn encrypt(mut input: fs::File, recipient: &str) -> Result<(fs::File, u64, Strin
     writer.finish()?;
     output.seek(SeekFrom::Start(0))?;
     Ok((output, size, hex::encode(hash.finalize())))
+}
+
+/// A release output: an age stream ends with its last chunk; a Private or Public store keeps plain bytes.
+enum Out<'a> {
+    Plain(&'a mut fs::File),
+    Age(age::stream::StreamWriter<&'a mut fs::File>),
+}
+
+impl Write for Out<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Out::Plain(file) => file.write(buffer),
+            Out::Age(writer) => writer.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Out::Plain(file) => file.flush(),
+            Out::Age(writer) => writer.flush(),
+        }
+    }
+}
+
+impl Out<'_> {
+    fn finish(self) -> Result<()> {
+        if let Out::Age(writer) = self {
+            writer.finish()?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn model(project: &str, records: &reader::Records, machine: &str) -> Result<layr_model::Project> {
@@ -241,9 +277,14 @@ impl Store {
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
         let (stream, identity) = self.backend.release_stream(&file.object, &identity)?;
-        let identity = age::x25519::Identity::from_str(&identity).map_err(|_| anyhow::anyhow!("invalid release identity"))?;
-        let decryptor = age::Decryptor::new(stream.take(release::MAX_OBJECT_BYTES + 1))?;
-        let mut plain = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
+        let stream = stream.take(release::MAX_OBJECT_BYTES + 1);
+        let mut plain: Box<dyn Read> = if identity == layr_store::keys::PLAIN {
+            Box::new(stream)
+        } else {
+            let identity = age::x25519::Identity::from_str(&identity).map_err(|_| anyhow::anyhow!("invalid release identity"))?;
+            let decryptor = age::Decryptor::new(stream)?;
+            Box::new(decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?)
+        };
         crate::privs::as_caller_fs(ctx, || {
             fs::create_dir_all(directory)?;
             let directory = fs::canonicalize(directory)?;
@@ -288,4 +329,34 @@ fn check_ref(remote: &layr_model::Project, name: &str, expected: &str) -> Result
         bail!("release ref '{name}' changed on the remote; fetch before attaching");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_with(bytes: &[u8]) -> fs::File {
+        let mut file = spool().unwrap();
+        file.write_all(bytes).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_plain_store_keeps_release_bytes_and_a_secret_store_encrypts_them() {
+        let bytes = b"release archive bytes".repeat(1000);
+        let mut plain = String::new();
+        let (mut output, size, sha256) = encrypt(file_with(&bytes), layr_store::keys::PLAIN).unwrap();
+        output.read_to_string(&mut plain).unwrap();
+        assert_eq!((plain.as_bytes(), size), (&bytes[..], bytes.len() as u64));
+        assert_eq!(sha256, hex::encode(ContentAddress::digest(&bytes)));
+        let identity = layr_store::keys::generate_identity();
+        let recipient = layr_store::keys::recipient_of(&identity).unwrap();
+        let (mut output, _, same) = encrypt(file_with(&bytes), &recipient).unwrap();
+        let mut sealed = Vec::new();
+        output.read_to_end(&mut sealed).unwrap();
+        assert!(sealed.starts_with(b"age-encryption.org/"));
+        assert_eq!(layr_store::keys::decrypt(&identity, &sealed).unwrap(), bytes);
+        assert_eq!(same, sha256);
+    }
 }

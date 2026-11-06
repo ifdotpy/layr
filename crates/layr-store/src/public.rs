@@ -195,7 +195,7 @@ mod tests {
 
     fn fixture() -> (Descriptor, String, Manifest, SigningKey) {
         let vault = keys::generate_identity();
-        let descriptor = Descriptor { format: 2, project: PROJECT.into(), recipient: keys::recipient_of(&vault).unwrap() };
+        let descriptor = Descriptor { format: 2, project: PROJECT.into(), recipient: keys::recipient_of(&vault).unwrap(), mode: Default::default() };
         let key = SigningKey::from_bytes(&[7; 32]);
         let manifest = Manifest::new(&descriptor, keys::generate_identity(), OWNER.into(), &key).unwrap();
         (descriptor, vault, manifest, key)

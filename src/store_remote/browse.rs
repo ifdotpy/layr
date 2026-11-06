@@ -82,7 +82,7 @@ impl Browse {
             person.check(&descriptor)?;
         }
         let pin =
-            StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None };
+            StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None, mode: descriptor.mode };
         drop(stage);
         let stage = crate::trace::span("disk slot");
         let own = (|| -> Result<String> {
@@ -134,7 +134,7 @@ impl Browse {
         })?;
         let root_descriptor = descriptor.clone();
         let (backend, descriptor, identity, public_reader) = if let Some((backend, current, public)) = resolved {
-            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient };
+            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient, mode: Default::default() };
             (backend, descriptor, current.identity, public)
         } else {
             let (identity, public_reader) = if access.public {

@@ -75,6 +75,38 @@ The previous Git forms fail with the new command name.
 The previous command transport form fails with `layr sync <remote>` in the message.
 Tests can use `layr sync work --command -- <command> [<arguments>]` with an explicit peer remote.
 
+## Project modes
+
+A store has one of three modes (see docs/cloud-rfc.md 7.0):
+
+| Mode | The server reads the code | Keys | Who writes |
+|---|---|---|---|
+| `secret` | no | vault key, slots, paper key, epochs | trusted machines |
+| `private` | yes | none | trusted machines; the Layr Cloud API adds its access list |
+| `public` | yes | none | trusted machines; the Layr Cloud API adds its access list |
+
+Choose the mode when you create the store.
+A new store is `private`, unless you ask for a paper key: `--paper-key-out` or `--paper-key-tty` makes a `secret` store.
+
+```sh
+layr remote add cloud s3://bucket/project
+layr remote add vault s3://bucket/secret --mode secret --paper-key-out /private/path/words
+layr clone https://cloud.example/p/app --mode private
+```
+
+A `private` or `public` store keeps plain objects and records, and its `store.json` names the mode.
+It has no slots and no paper key, so `--mode private --paper-key-out` is refused.
+These modes are meant for the Layr Cloud API, where the server reads the code and checks each writer.
+On a bare folder or bucket they only drop the encryption:
+anyone who can read the bucket reads the code, and a fetch still imports records of trusted machines only.
+`layr remote trust` records trust in history and writes no slot.
+`layr index write` is for `secret` stores only; the server builds the indexes of the other modes.
+
+`remote add --mode` and `clone --mode` record the mode in `cloud.remote.<name>.mode`, and the store pin keeps the mode.
+A store whose `store.json` later names another mode is refused, so a writer of the bucket cannot turn a `secret`
+project into a plain one.
+Use `--mode secret` when you clone a project that must stay encrypted.
+
 ## Push roles
 
 Each remote has a push role: `layr config remote.<name>.push required|optional|off`.

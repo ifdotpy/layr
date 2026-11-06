@@ -22,11 +22,10 @@ use crate::ctx::Ctx;
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use backend::Backend;
-use format::Descriptor;
+use format::{Descriptor, Mode};
 use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
 use std::path::PathBuf;
-
 #[derive(Clone, Default)]
 pub struct Options {
     pub public: bool,
@@ -65,6 +64,8 @@ pub struct Report {
 pub struct ConfigureOptions {
     pub paper_key_out: Option<PathBuf>,
     pub paper_key_tty: bool,
+    /// The mode of a new store. Private and Public stores need no paper key.
+    pub mode: Mode,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,12 +80,18 @@ pub(crate) struct StorePin {
     pub recipient: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper_recipient: Option<String>,
+    /// The project mode first seen; a pin without it is a Secret store.
+    #[serde(default, skip_serializing_if = "Mode::is_secret")]
+    pub mode: Mode,
 }
 
 impl StorePin {
     fn check(&self, descriptor: &Descriptor) -> Result<()> {
         if self.project != descriptor.project {
             bail!("store project changed: pinned {}, store.json {}", self.project, descriptor.project);
+        }
+        if self.mode != descriptor.mode {
+            bail!("store mode changed: pinned {}, store.json {}", self.mode.name(), descriptor.mode.name());
         }
         if self.recipient != descriptor.recipient {
             bail!(
@@ -115,6 +122,8 @@ pub struct Store {
     force_public: bool,
     public_clone: bool,
     public_reader: std::sync::atomic::AtomicBool,
+    /// The project mode chosen for this remote; None accepts the mode in store.json.
+    mode: Option<Mode>,
 }
 
 /// Opening a store performs no remote I/O. Configure it with the caller's environment next.
@@ -140,10 +149,27 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
             store.aws_profile =
                 repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
             store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
+            store.mode = configured_mode(repo, name)?;
             break;
         }
     }
     Ok(store)
+}
+
+/// The mode recorded by `remote add --mode` for a remote, if any.
+pub(crate) fn configured_mode(repo: &Repo, name: &str) -> Result<Option<Mode>> {
+    repo.p
+        .config_value(&format!("cloud.remote.{name}.mode"))?
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .map(|v| Mode::parse(&v))
+        .transpose()
+}
+
+impl Store {
+    /// Require this project mode in store.json (`remote add --mode`).
+    pub fn require_mode(&mut self, mode: Option<Mode>) {
+        self.mode = mode;
+    }
 }
 
 pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
@@ -155,6 +181,7 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
         .transpose()
         .context("invalid store pin")?;
     let mut store = open_with_pin(&url, repo, pin)?;
+    store.mode = configured_mode(repo, name)?;
     store.aws_profile = repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
     store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
     Ok(store)
@@ -318,6 +345,7 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         force_public: false,
         public_clone: false,
         public_reader: std::sync::atomic::AtomicBool::new(false),
+        mode: None,
     })
 }
 
@@ -460,6 +488,14 @@ impl Store {
         if self.project.is_empty() {
             bail!("the remote store is empty");
         }
+        if !opts.mode.is_secret() {
+            if opts.paper_key_tty || opts.paper_key_out.is_some() {
+                bail!("a {} store has no paper key; drop --paper-key-out and --paper-key-tty", opts.mode.name());
+            }
+            writer::initialize_plain(self, opts.mode)?;
+            self.pin_descriptor()?;
+            return Ok(Configured { created: true, recovery_key_file: None });
+        }
         let (file, paper_recipient) = if opts.paper_key_tty {
             (None, writer::initialize_tty(self, ctx)?)
         } else {
@@ -483,7 +519,7 @@ impl Store {
             pin.check_store(&descriptor)?;
         }
         let paper_recipient = self.pin.as_ref().and_then(|pin| pin.paper_recipient.clone());
-        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
+        self.pin = Some(StorePin { mode: descriptor.mode, project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
         Ok(())
     }
 
@@ -553,7 +589,7 @@ impl Store {
         if descriptor.recipient != recipient {
             bail!("store recipient differs: requested {}, store.json {}", recipient, descriptor.recipient);
         }
-        self.pin = Some(StorePin { project: descriptor.project, recipient: descriptor.recipient, paper_recipient: None });
+        self.pin = Some(StorePin { mode: descriptor.mode, project: descriptor.project, recipient: descriptor.recipient, paper_recipient: None });
         self.save_pin(ctx, repo, name)
     }
 
@@ -563,7 +599,11 @@ impl Store {
         if descriptor.format != 2 || !crate::model::is_uuid(&descriptor.project) {
             bail!("invalid root store descriptor");
         }
-        descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|_| anyhow::anyhow!("invalid root store recipient"))?;
+        descriptor.check_mode()?;
+        if descriptor.mode.is_secret() {
+            descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|_| anyhow::anyhow!("invalid root store recipient"))?;
+        }
+        self.check_mode(&descriptor)?;
         if !self.project.is_empty() && self.project != descriptor.project {
             bail!("store project differs: local {}, store.json {}", self.project, descriptor.project);
         }
@@ -572,10 +612,10 @@ impl Store {
 
     fn descriptor(&self) -> Result<Descriptor> {
         if let Some(epoch) = &self.epoch {
-            return Ok(Descriptor { format: 2, project: epoch.key.project.clone(), recipient: epoch.key.recipient.clone() });
+            return Ok(Descriptor { format: 2, project: epoch.key.project.clone(), recipient: epoch.key.recipient.clone(), mode: Default::default() });
         }
         if let Some(layer) = &self.layer {
-            return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone() });
+            return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone(), mode: Default::default() });
         }
         let data = self
             .backend
@@ -599,11 +639,36 @@ impl Store {
         if !self.project.is_empty() && descriptor.project != self.project {
             bail!("store project differs: local {}, store.json {}", self.project, descriptor.project);
         }
-        descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
+        descriptor.check_mode()?;
+        if descriptor.mode.is_secret() {
+            descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
+        }
+        self.check_mode(&descriptor)?;
         Ok(descriptor)
     }
 
+    /// The mode this machine chose for the remote (`remote add --mode`) must be the store's mode: a server
+    /// must not turn a Secret project into a plain one, nor the reverse.
+    fn check_mode(&self, descriptor: &Descriptor) -> Result<()> {
+        if let Some(mode) = self.mode {
+            if mode != descriptor.mode {
+                bail!("store mode differs: this remote is {}, store.json says {}", mode.name(), descriptor.mode.name());
+            }
+        }
+        Ok(())
+    }
+
+    /// The store mode from store.json; Secret until the descriptor is read.
+    pub fn store_mode(&self) -> Result<Mode> {
+        Ok(self.descriptor()?.mode)
+    }
+
     fn identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
+        // A Private or Public store has no keys: the server's access list decides who reads and writes.
+        if !descriptor.mode.is_secret() {
+            self.public_reader.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Ok(keys::PLAIN.to_string());
+        }
         if let Some(epoch) = &self.epoch {
             self.public_reader.store(self.epoch_public, std::sync::atomic::Ordering::SeqCst);
             return Ok(epoch.identity.clone());
@@ -911,6 +976,10 @@ impl Store {
         }
         let bytes: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| anyhow::anyhow!("invalid machine key"))?;
         let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)?;
+        // A Private or Public store has no vault key: the signed trust record is all a reader needs.
+        if !descriptor.mode.is_secret() {
+            return Ok(());
+        }
         let slot = keys::machine_slot(&identity, &key)?;
         let name = format!("slots/machine-{id}.age");
         // The signed trust path binds this machine id to one key. A retry keeps its slot.
@@ -1120,7 +1189,8 @@ mod pin_tests {
         let recipient = keys::recipient_of(&attacker).unwrap();
         std::fs::write(
             root.join("remote/store.json"),
-            serde_json::to_vec(&Descriptor { format: 2, project: project_id.clone(), recipient: recipient.clone() }).unwrap(),
+            serde_json::to_vec(&Descriptor { format: 2, project: project_id.clone(), recipient: recipient.clone(), mode: Default::default() })
+            .unwrap(),
         )
         .unwrap();
         // No slot: this machine can only write to the public recipient.
@@ -1142,12 +1212,67 @@ mod pin_tests {
         let other_project = crate::ids::new_id();
         std::fs::write(
             root.join("remote/store.json"),
-            serde_json::to_vec(&Descriptor { format: 2, project: other_project.clone(), recipient: pin.recipient.clone() })
-                .unwrap(),
+            serde_json::to_vec(&Descriptor { format: 2, project: other_project.clone(), recipient: pin.recipient.clone(), mode: Default::default() })
+            .unwrap(),
         )
         .unwrap();
         let error = store.descriptor().err().unwrap().to_string();
         assert!(error.contains(&project_id) && error.contains(&other_project), "{error}");
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mode_pin_tests {
+    use super::*;
+    use crate::ctx::{Caller, Ctx};
+    use crate::model::Record;
+
+    #[test]
+    fn a_pinned_secret_store_rewritten_as_plain_stops_fetch_and_push() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = Ctx {
+            store: crate::store::Store::open(&root.join("local")).unwrap(),
+            caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
+        };
+        let dir = ctx.store.project_dir("p").unwrap();
+        std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+        let project_id = crate::ids::new_id();
+        let mut repo = Repo {
+            p: crate::store::Project {
+                store: &ctx.store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: project_id.clone(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+            },
+            ctx: None,
+        };
+        let mut record = Record::new("project");
+        record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
+        repo.p.append(record, &ctx.actor()).unwrap();
+        let url = format!("file://{}", root.join("remote").display());
+        let mut store = open(&url, &repo).unwrap();
+        store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
+        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
+        store.save_pin(&ctx, &repo, "archive").unwrap();
+        let mut store = open(&url, &repo).unwrap();
+        assert_eq!(store.pin.as_ref().unwrap().mode, Mode::Secret);
+        // Someone with write access to the folder rewrites store.json as a plain Private store.
+        let plain = Descriptor { format: 2, project: project_id.clone(), recipient: keys::PLAIN.into(), mode: Mode::Private };
+        std::fs::write(root.join("remote/store.json"), serde_json::to_vec(&plain).unwrap()).unwrap();
+        let error = reader::fetch(&mut store, &ctx, &mut repo, &Options::default()).unwrap_err().to_string();
+        assert!(error.contains("store mode changed: pinned secret, store.json private"), "{error}");
+        let error = writer::push(&store, &ctx, &repo, &Options::default()).unwrap_err().to_string();
+        assert!(error.contains("store mode changed"), "{error}");
+        // A pin saved before modes existed has no mode field and still means Secret.
+        let old: StorePin = serde_json::from_value(serde_json::json!({"project":project_id,"recipient":"age1x"})).unwrap();
+        assert_eq!(old.mode, Mode::Secret);
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();
     }

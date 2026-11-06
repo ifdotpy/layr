@@ -839,6 +839,7 @@ mod tests {
             force_public: false,
             public_clone: false,
             public_reader: std::sync::atomic::AtomicBool::new(false),
+            mode: None,
         }
     }
 

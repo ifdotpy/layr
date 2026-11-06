@@ -299,7 +299,7 @@ fn publish_initial_slots(store: &Store, paper: &str, mut vault: String) -> Resul
         }
     }
     initialization_failpoint("machine")?;
-    let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&vault)? };
+    let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&vault)?, mode: Default::default() };
     if !store.backend.put_new("store.json", canonical(&serde_json::to_value(&descriptor)?)?)? {
         if store.descriptor()?.recipient != descriptor.recipient {
             bail!("store is being created by another writer");
@@ -307,6 +307,19 @@ fn publish_initial_slots(store: &Store, paper: &str, mut vault: String) -> Resul
     }
     initialization_failpoint("store")?;
     keys::recipient_of(paper)
+}
+
+/// A new Private or Public store: only store.json. It has no slots and no paper key; the server's access list
+/// decides who reads and writes.
+pub(super) fn initialize_plain(store: &Store, mode: format::Mode) -> Result<()> {
+    let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::PLAIN.into(), mode };
+    if !store.backend.put_new("store.json", canonical(&serde_json::to_value(&descriptor)?)?)? {
+        let existing = store.root_descriptor()?;
+        if existing.mode != mode || existing.project != descriptor.project {
+            bail!("store is being created by another writer");
+        }
+    }
+    Ok(())
 }
 
 // Unit tests inject interruption after each immutable publication.
@@ -1198,6 +1211,7 @@ mod tests {
             force_public: false,
             public_clone: false,
             public_reader: std::sync::atomic::AtomicBool::new(false),
+            mode: None,
         }
     }
     #[test]
@@ -1931,6 +1945,67 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn a_private_store_keeps_plain_objects_without_slots_and_reads_them_back() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = context(&root);
+        let mut store = remote(&root, &ctx);
+        // A Private store has no paper key.
+        let refused = store.configure(
+            &ctx,
+            &super::super::ConfigureOptions {
+                paper_key_out: Some(root.join("paper")),
+                mode: format::Mode::Private,
+                ..Default::default()
+            },
+        );
+        assert!(refused.unwrap_err().to_string().contains("no paper key"));
+        let configured =
+            store.configure(&ctx, &super::super::ConfigureOptions { mode: format::Mode::Private, ..Default::default() }).unwrap();
+        assert!(configured.created && configured.recovery_key_file.is_none());
+        let descriptor = store.descriptor().unwrap();
+        assert_eq!((descriptor.mode, descriptor.recipient.as_str()), (format::Mode::Private, keys::PLAIN));
+        assert!(store.backend.list("slots/").unwrap().is_empty(), "a Private store has no slots");
+        let source = root.join("state");
+        std::fs::create_dir(&source).unwrap();
+        let content = "plain project bytes that the server may read\n".repeat(200);
+        std::fs::write(source.join("a"), &content).unwrap();
+        let id = crate::ids::new_id();
+        let (pushed, _, _) = upload_state(&store, &descriptor, &id, &source, None, &mut BTreeMap::new(), None, None).unwrap();
+        // Every object is plain: no age header, and the tree object starts with its signed JSON header.
+        for object in store.backend.list("states/").unwrap() {
+            let body = store.backend.get(&object.key).unwrap().unwrap();
+            assert!(!body.starts_with(b"age-encryption.org/"), "{} is encrypted", object.key);
+        }
+        let tree = store.backend.get(&format::tree_name(&id, &pushed.attempt)).unwrap().unwrap();
+        assert!(tree.starts_with(b"{"), "the tree object is plain JSON");
+        let identity = store.identity(&descriptor, None).unwrap();
+        assert_eq!(identity, keys::PLAIN);
+        let machine_keys = BTreeMap::from([(store.machine.clone(), store.key.verifying_key())]);
+        let mut reader = reader::Reader::new(&store.backend, &identity, &machine_keys);
+        let (_, _, tree) = reader.tree(&id, &pushed.attempt).unwrap();
+        assert_eq!(reader.read(&tree.files["a"]).unwrap(), content.as_bytes());
+        // A remote added as Secret refuses this plain store, and a Private remote refuses a Secret store.
+        store.require_mode(Some(format::Mode::Secret));
+        assert!(store.descriptor().err().unwrap().to_string().contains("store mode differs"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_secret_store_refuses_a_plain_descriptor_and_a_plain_store_an_age_recipient() {
+        let identity = keys::generate_identity();
+        let mut descriptor =
+            Descriptor { format: 2, project: crate::ids::new_id(), recipient: keys::PLAIN.into(), mode: format::Mode::Secret };
+        assert!(descriptor.check_mode().is_err());
+        descriptor.mode = format::Mode::Public;
+        descriptor.check_mode().unwrap();
+        descriptor.recipient = keys::recipient_of(&identity).unwrap();
+        assert!(descriptor.check_mode().is_err());
+        descriptor.mode = format::Mode::Secret;
+        descriptor.check_mode().unwrap();
+        // Secret descriptors keep today's bytes: no mode field.
+        assert!(!String::from_utf8(serde_json::to_vec(&descriptor).unwrap()).unwrap().contains("mode"));
+    }
+    #[test]
     fn collection_keeps_complete_reused_and_young_parts() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
@@ -2010,8 +2085,7 @@ mod tests {
         store.backend = super::super::backend::Backend::file(destination.into());
         let identity = keys::generate_identity();
         let paper = keys::generate_identity();
-        let descriptor =
-            Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&identity).unwrap() };
+        let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&identity).unwrap(), mode: Default::default() };
         let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(paper_file).unwrap();
         writeln!(output, "{}", keys::words_of_identity(&paper).unwrap()).unwrap();
         store

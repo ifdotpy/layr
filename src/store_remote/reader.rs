@@ -702,7 +702,8 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 repo.commit_record(ctx, record)?;
             }
         }
-        if store.layer.is_none() && !store.is_public_reader() {
+        // A Private or Public store has no vault key, so there is nothing to seal in a slot.
+        if store.layer.is_none() && !store.is_public_reader() && descriptor.mode.is_secret() {
             let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
             // Optional enrollment keeps key metadata outside shared history: it supplies
             // a public key for resealing this existing reader slot, never writer trust.

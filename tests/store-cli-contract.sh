@@ -18,8 +18,8 @@ export AWS_REGION=${AWS_REGION:-us-east-1}
 
 # A failed creation must not leave a configured remote.
 rc=0
-l remote add archive "$url" > "$T/no-key.out" 2> "$T/no-key.err" || rc=$?
-eq "a new store requires a paper-key output path" 128 "$rc"
+l remote add archive "$url" --mode secret > "$T/no-key.out" 2> "$T/no-key.err" || rc=$?
+eq "a new Secret store requires a paper-key output path" 128 "$rc"
 has "the error names the output flag" --paper-key-out "$(cat "$T/no-key.err")"
 no "a failed creation does not record the URL" l config --get cloud.remote.archive.url
 
