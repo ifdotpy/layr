@@ -225,6 +225,8 @@ Layr talks to it as an ordinary remote.
 
 ## Contributing
 
+The toolchain is the latest stable Rust, pinned in `rust-toolchain.toml`; bump it and `rust-version` together on each release.
+
 ```sh
 cargo test --workspace      # unit tests
 sudo tests/run.sh           # integration tests: each file gets a fresh btrfs on a loop file

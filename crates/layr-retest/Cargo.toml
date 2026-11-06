@@ -2,6 +2,7 @@
 name = "layr-retest"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Run only the tests that a change can affect, on top of the layr CLI"
 license = "MIT"
 publish = false
