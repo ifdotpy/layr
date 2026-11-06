@@ -203,6 +203,12 @@ The same holds for removed layr commands (`cache`, `layer`, `approvals`, `machin
 and removed options (`--no-commit`, `--autostash`, `--layers`).
 Git commands under `layr git` keep Git words.
 
+`usage [--days <n>] [--json]` shows how often each command ran on this machine in the last `n`
+days (default 28): runs, runs by agents (with `LAYR_SESSION`), failed runs and users, per command
+and subcommand. Every command adds to this count in `<store>/machine/usage.sqlite`. Only command
+and subcommand words are kept, never arguments, paths or messages. The count stays on this machine.
+It helps to decide which commands are used before one is removed.
+
 `du [<line>...] [--json]` shows the disk space of each line on this machine: `total` is the
 allocated size of its files, `unique` the part that no other line, state or clone shares, which
 deleting the line frees. A file with several links counts once. It reads only metadata and takes

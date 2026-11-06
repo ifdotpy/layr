@@ -393,6 +393,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
             return 128;
         }
     };
+    let started = std::time::Instant::now();
     let out: Box<dyn Write> = Box::new(std::io::BufWriter::new(std::io::stdout()));
     let ctx = Ctx { store, caller, cwd, env, out: std::cell::RefCell::new(out) };
     let r = crate::cmd::run(&ctx, &argv);
@@ -416,6 +417,8 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
     crate::free::finish(&ctx);
+    let agent = ctx.session().is_some();
+    crate::usage::count(&ctx.store.root, &argv, ctx.caller.uid, agent, code, started.elapsed().as_millis() as u64);
     code
 }
 
