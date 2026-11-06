@@ -415,7 +415,8 @@ fn folder_in_line(
     op: Option<&Project>,
 ) -> InLine {
     let cp = repo.working(l).join(folder);
-    let state = match (kind, btrfs::is_subvolume(&cp)) {
+    let is_layer = btrfs::is_subvolume(&cp);
+    let state = match (kind, is_layer) {
         (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
         (FolderIn::Versioned, false) => crate::cmd::admin::VERSIONED.to_string(),
         (FolderIn::Other, _) => NOT_CACHE_PATH.to_string(),
@@ -423,10 +424,15 @@ fn folder_in_line(
         (FolderIn::Cache, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
         (FolderIn::Cache, false) => "absent".to_string(),
     };
-    let size = (with_size && state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
+    let size = listing_size(with_size, kind, is_layer, || crate::cache_overlay::tree_size(&cp));
     let saved =
         op.and_then(|p| p.db.line_by_name(&crate::overlay::cache_line_name(&l.id)).ok().flatten()).map(|ol| ids::short(&ol.head));
     InLine { state, size, saved }
+}
+
+/// Invoke the cache walk only for an explicitly requested, active cache layer.
+fn listing_size(with_size: bool, kind: FolderIn, is_layer: bool, measure: impl FnOnce() -> u64) -> Option<u64> {
+    (with_size && kind == FolderIn::Cache && is_layer).then(measure)
 }
 
 /// Read settings through the listing's existing overlay handle.
@@ -1250,6 +1256,24 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn listing_only_walks_active_caches_when_size_is_requested() {
+        for kind in [FolderIn::Cache, FolderIn::Versioned, FolderIn::Other] {
+            for is_layer in [false, true] {
+                for with_size in [false, true] {
+                    let walks = std::cell::Cell::new(0);
+                    let size = listing_size(with_size, kind, is_layer, || {
+                        walks.set(walks.get() + 1);
+                        11
+                    });
+                    let should_walk = with_size && kind == FolderIn::Cache && is_layer;
+                    assert_eq!(walks.get(), u32::from(should_walk), "{kind:?}, layer={is_layer}, --size={with_size}");
+                    assert_eq!(size, should_walk.then_some(11));
+                }
+            }
+        }
+    }
 
     #[test]
     fn listing_json_distinguishes_uncomputed_and_empty_sizes() -> Result<()> {

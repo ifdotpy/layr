@@ -50,13 +50,17 @@ assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
 assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto'}, cache
 assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
+# Fix the measured tree at exactly 11 bytes, excluding the saved source-time metadata.
+rm -f target/.layr-times
+mkdir -p target/nested
+printf payload > target/nested/extra
 l overlay list --json --size > "$T/sized.json" || exit 1
 ok "explicit size measures the cache" python3 - "$T/sized.json" <<'PY_SIZE'
 import json, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
 cache = next(r for r in rows if r['name'] == 'cache.target')
-assert isinstance(cache['size'], int) and cache['size'] >= len('cache'), cache
+assert type(cache['size']) is int and cache['size'] == len(b'cache') + len(b'payload'), cache
 assert all('size' not in r for r in rows if r['folder'] is None), rows
 PY_SIZE
 out=$(l overlay list)
@@ -65,7 +69,8 @@ has "text listing shows the cache folder" 'folder=target' "$out"
 has "default text leaves size uncomputed" $'cache\t-\tsaved ' "$out"
 sized=$(l overlay list --size)
 no "explicit text size is computed" test "$sized" = "$out"
-rm -f target/result target/.layr-times
+rm -f target/result target/nested/extra
+rmdir target/nested
 l overlay list --size --json > "$T/empty.json" || exit 1
 ok "measured empty cache is zero" python3 - "$T/empty.json" <<'PY_EMPTY'
 import json, sys
