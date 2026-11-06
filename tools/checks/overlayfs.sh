@@ -31,6 +31,7 @@ PY
 while IFS= read -r unit; do TMPDIR="$root" "$unit" --include-ignored; done < "$TMPDIR/unit-paths"
 bash tests/overlayfs-local.sh
 bash tests/overlayfs-caches.sh
+bash tests/save-unsettled.sh
 if [ "$filesystem" = ext4 ]; then
     truncate -s 64M "$TMPDIR/fold.img"
     mkfs.ext4 -q -F -O casefold "$TMPDIR/fold.img"
@@ -47,4 +48,4 @@ if [ "$filesystem" = ext4 ]; then
     grep 'ignores case' "$TMPDIR/fold.err"
     umount "$fold"
 fi
-bash tests/run.sh t01-basic t02-merge t03-git t05-transfer t06-sync t07-service t08-gitcompat t11-security t13-access t16-overlays
+bash tests/run.sh --tag overlayfs
