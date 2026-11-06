@@ -884,10 +884,21 @@ pub fn sync(ctx: &Ctx, args: &[String]) -> Result<i32> {
     exchange(ctx, args, "sync")
 }
 pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    // Without a remote name: every layer to each of its remotes (docs/cache-overlays.md).
-    if args.iter().all(|s| s.starts_with('-')) {
+    // Remote names and `-n`, `-q`, `--json` only: without a name, with several, or with one git remote, the push
+    // roles (`layerpush::push_all`). Any other form (one layr remote, its options, a revision, `--`) is the push
+    // of that remote, with all its options.
+    let h = here(ctx)?;
+    let layr = |n: &str| h.repo.p.config_value(&format!("cloud.remote.{n}.url")).ok().flatten().is_some();
+    let git = |n: &str| !layr(n) && h.repo.p.config_value(&format!("remote.{n}.url")).ok().flatten().is_some();
+    let names: Vec<&String> = args.iter().filter(|s| !s.starts_with('-')).collect();
+    let plain = args.iter().all(|a| {
+        matches!(a.as_str(), "-n" | "--dry-run" | "-q" | "--quiet" | "--json") || (!a.starts_with('-') && (layr(a) || git(a)))
+    });
+    if plain && (names.len() != 1 || git(names[0])) {
+        drop(h);
         return super::layerpush::push_all(ctx, args);
     }
+    drop(h);
     exchange(ctx, args, "push")
 }
 pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
