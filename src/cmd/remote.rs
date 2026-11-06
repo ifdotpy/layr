@@ -1217,6 +1217,13 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // This new copy belongs to the cloning OS user. Its local policy never
         // selects automatic check commands, which use the verified creator.
         let mut access = repo.policy().access_json();
+        // The default of a project without a role list (`*` = writer: every local user and every pinned person) is
+        // not written into the clone's list.
+        if repo.p.config_value("access")?.is_none() {
+            if let Some(map) = access.as_object_mut() {
+                map.remove("*");
+            }
+        }
         access[format!("user:{}", ctx.caller.uid)] = json!("admin");
         set_config(ctx, &repo, "access", access)?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
