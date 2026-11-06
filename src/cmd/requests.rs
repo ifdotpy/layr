@@ -1,5 +1,5 @@
 //! Create-only person requests, applied once on a trusted machine.
-use super::here;
+use super::{exit, here};
 use crate::{
     args::{parse, Spec},
     ctx::Ctx,
@@ -136,13 +136,55 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("usage: layr requests apply [--remote <name>] [--json]");
     }
     let h = here(ctx)?;
-    h.repo.require(ctx, "sync")?;
-    let mut store = crate::store_remote::open_named(a.get("--remote").unwrap_or("origin"), &h.repo)?;
+    let results = apply(ctx, &h.repo, a.get("--remote").unwrap_or("origin"), false)?;
+    if a.has("--json") {
+        outln!(ctx, "{}", serde_json::to_string(&results)?);
+    } else {
+        for result in results {
+            outln!(
+                ctx,
+                "{} {}{}",
+                result["id"].as_str().unwrap_or(""),
+                result["status"].as_str().unwrap_or(""),
+                result["reason"].as_str().map(|s| format!(": {s}")).unwrap_or_default()
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// The remote whose person requests the daemon applies on each tick (`requests.remote`), if any.
+pub fn daemon_remote(repo: &Repo) -> Result<Option<String>> {
+    match repo.p.config_value("requests.remote")? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(_) => bail!("requests.remote must be the name of a remote"),
+    }
+}
+
+/// Apply the person requests on `remote`: each new request becomes its record (or a signed refusal), then the
+/// queues that a request added to run. `skip_busy`: a running queue pass leaves the requests to the next tick (the
+/// daemon). Returns one JSON object per request.
+pub fn apply(ctx: &Ctx, repo: &Repo, remote: &str, skip_busy: bool) -> Result<Vec<serde_json::Value>> {
+    repo.require(ctx, "sync")?;
+    let mut store = crate::store_remote::open_named(remote, repo)?;
     let identity = store.request_identity(ctx)?;
     let backend = store.request_backend(ctx)?;
-    let _queue_lock = super::queue::require_lock(&h.repo)?;
+    let _queue_lock = match super::queue::try_lock(repo)? {
+        Some(lock) => lock,
+        None if skip_busy => return Ok(Vec::new()),
+        None => return Err(exit(1, "a queue runner is already active for this project")),
+    };
     let mut results = Vec::new();
     let mut queue_targets = std::collections::BTreeSet::new();
+    // The digests of the requests that records already applied or refused: one read of the records, not one per
+    // request on the remote.
+    let mut done: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+    for r in repo.p.db.records(usize::MAX >> 1)? {
+        if let Some(id) = r.data["request_id"].as_str() {
+            done.entry(id.to_string()).or_insert_with(|| r.data["request_digest"].clone());
+        }
+    }
     for object in backend.list("requests/")? {
         let Some(id) = object
             .key
@@ -152,25 +194,30 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
         else {
             continue;
         };
-        let _lock = h.repo.p.lock()?;
-        let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
-        let hash = digest(&bytes);
-        if let Some(old) = h.repo.p.db.records(usize::MAX >> 1)?.into_iter().find(|r| r.data["request_id"] == id) {
-            if old.data["request_digest"] != hash {
+        if let Some(old) = done.get(id) {
+            // An applied request is not read again; a reused id with other content is found by `requests apply`.
+            if skip_busy {
+                continue;
+            }
+            let (bytes, _, _) = backend.request_object(&object.key, &identity)?;
+            if *old != digest(&bytes) {
                 bail!("request id was reused with different content");
             }
             results.push(json!({"id":id,"status":"ignored"}));
             continue;
         }
-        let claim = claim(ctx, &h.repo, backend, id)?;
+        let _lock = repo.p.lock()?;
+        let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
+        let hash = digest(&bytes);
+        let claim = claim(ctx, repo, backend, id)?;
         if matches!(claim, ClaimState::Other) {
             results.push(json!({"id":id,"status":"claimed"}));
             continue;
         }
-        let verified = verify_request(&h.repo, id, &bytes, &epoch, &identity);
+        let verified = verify_request(repo, id, &bytes, &epoch, &identity);
         let mut record = match (&claim, &verified) {
             (ClaimState::Refused(reason), _) => refusal(reason),
-            (_, Ok((request, _, _))) => match effect(ctx, &h.repo, request) {
+            (_, Ok((request, _, _))) => match effect(ctx, repo, request) {
                 Ok(record) => record,
                 Err(error) => refusal(&error.to_string()),
             },
@@ -191,7 +238,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Err(_) => ctx.actor(),
         };
         let status = if record.op == "request.refused" { "refused" } else { "applied" };
-        let record = h.repo.p.append(record, &actor)?;
+        let record = repo.p.append(record, &actor)?;
         if record.op == "queue.add" {
             if let Some(target) = record.data["queue_change"]["after"]["target_line"].as_str() {
                 queue_targets.insert(target.to_owned());
@@ -201,25 +248,13 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     drop(_queue_lock);
     for target in queue_targets {
-        if let Err(error) = super::queue::run_configured(ctx, &h.repo, Some(&target)) {
+        if let Err(error) = super::queue::run_configured(ctx, repo, Some(&target)) {
             eprintln!("layr queue: {error:#}");
         }
     }
-    if a.has("--json") {
-        outln!(ctx, "{}", serde_json::to_string(&results)?);
-    } else {
-        for result in results {
-            outln!(
-                ctx,
-                "{} {}{}",
-                result["id"].as_str().unwrap_or(""),
-                result["status"].as_str().unwrap_or(""),
-                result["reason"].as_str().map(|s| format!(": {s}")).unwrap_or_default()
-            );
-        }
-    }
-    Ok(0)
+    Ok(results)
 }
+
 fn refusal(reason: &str) -> Record {
     let mut record = Record::new("request.refused");
     record.data = json!({"reason":reason});

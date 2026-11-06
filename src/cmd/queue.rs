@@ -9,7 +9,7 @@ use crate::repo::Repo;
 use anyhow::{bail, Result};
 use std::fs::File;
 
-fn try_lock(repo: &Repo) -> Result<Option<File>> {
+pub(crate) fn try_lock(repo: &Repo) -> Result<Option<File>> {
     let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(repo.p.meta_dir().join("queue.lock"))?;
     match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(Some(file)),
