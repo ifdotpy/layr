@@ -272,9 +272,6 @@ impl StateCompare {
 
 /// Run state compares in order, using the current operation's pool when available.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
-    if jobs.len() < 2 {
-        return jobs.iter().map(StateCompare::run).collect();
-    }
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(jobs.len()), || {
         use rayon::prelude::*;
         jobs.par_iter().map(StateCompare::run).collect::<Vec<_>>().into_iter().collect()

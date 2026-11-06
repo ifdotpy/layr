@@ -66,9 +66,6 @@ fn walk(root: &Path, dir: &Path, rules: &Rules, out: &mut Vec<(String, std::fs::
 /// The content hash (git blob id) of each file, on a few threads. None for a file that cannot be read.
 fn hash_all(w: &Path, rels: &[&str]) -> Result<Vec<Option<String>>> {
     let hash = |rel: &&str| hash_file(&w.join(rel));
-    if rels.len() < 2 {
-        return Ok(rels.iter().map(hash).collect());
-    }
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(rels.len()), || {
         use rayon::prelude::*;
         rels.par_iter().map(hash).collect()

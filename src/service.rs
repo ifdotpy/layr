@@ -522,6 +522,7 @@ fn user_socket_path() -> PathBuf {
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(80);
 
 pub fn daemon(args: &[String]) -> Result<i32> {
+    crate::pools::mark_forking_parent();
     let own = rustix::process::geteuid().as_raw();
     let user_mode = own != 0 && cfg!(target_os = "macos");
     if own != 0 && !user_mode {
@@ -567,7 +568,6 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             }
         }
     }
-    crate::pools::mark_forking_parent();
     let _store_guard = Store::open(&root)?;
     if let Some(d) = sock.parent() {
         std::fs::create_dir_all(d)?;
