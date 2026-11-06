@@ -1691,7 +1691,15 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = Store::open(&base.join("store"))?;
             let actor = Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
-            let p = Project::create(&store, "p", &actor, serde_json::json!({}))?;
+            // The project folder by hand: no subvolume, so the test runs on any file system.
+            let dir = store.project_dir("p")?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            fs::create_dir(dir.join("states"))?;
+            let id = ids::new_id();
+            let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: id.clone(), db: Db::open(&db_file(&dir))? };
+            let mut project = Record::new("project");
+            project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+            p.append(project, &actor)?;
             let job_key = SigningKey::from_bytes(&[9u8; 32]);
             let (job, public_key) = (ids::new_id(), hex::encode(job_key.verifying_key().to_bytes()));
             let mut trust = Record::new("machine.trust");
@@ -1731,7 +1739,7 @@ mod tests {
             }
             Ok(())
         })();
-        let _ = crate::storage::delete_tree(&base);
+        let _ = fs::remove_dir_all(&base);
         result
     }
 }
