@@ -3,7 +3,7 @@ members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crat
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.99"
+rust-version = "1.99.1"
 
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that
