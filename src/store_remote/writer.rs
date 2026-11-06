@@ -329,7 +329,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Res
     push_locked(store, ctx, repo, opts)
 }
 
-fn push_folder_lock(dir: &Path) -> Result<std::fs::File> {
+/// The lock of one remote folder: one push or sweep of that remote at a time (a sweep must not delete a tree that
+/// a push uses as its base).
+pub(super) fn push_folder_lock(dir: &Path) -> Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
     let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join("push.lock"))?;
     rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
