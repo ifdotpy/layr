@@ -27,7 +27,7 @@ a file. Existing output files are preserved. A failed download removes its
 unfinished output. `--public` selects anonymous access for a public project.
 The site offers downloads up to 256 MiB; larger files show the CLI command.
 
-`--public-files` also writes each file as plaintext at `public/release/<version>/<name>` of the
+`--public-files` (files of at most 32 MiB) also writes each file as plaintext at `public/release/<version>/<name>` of the
 store, then `public/release/<version>/files.json` (`version`, `state`, and `name`, `size`, `sha256`
 per file), all create-only, the list last. The gateway serves them without sign-in:
 `/p/<project>/release/<version>/<name>`, and `/p/<project>/release/latest` from the highest version

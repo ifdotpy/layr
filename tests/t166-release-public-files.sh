@@ -16,8 +16,9 @@ head -c 300000 /dev/urandom > "$T/layr-v1.0.0-linux-x86_64.tar.gz"
 echo built > "$T/notes.txt"
 l ref set release/v1.0.0 main >/dev/null
 ok "attach with public files" l release attach release/v1.0.0 "$T/layr-v1.0.0-linux-x86_64.tar.gz" "$T/notes.txt" --public-files
-pub=$(find "$T/archive" -path '*public/release/v1.0.0' -type d | head -1)
-ok "the public folder is in the store" test -n "$pub"
+# The gateway serves the root of the store: /p/<project>/release/<version>/<name>.
+pub=$T/archive/public/release/v1.0.0
+ok "the public folder is at the root of the store" test -d "$pub"
 ok "a public file is the plaintext" cmp "$T/layr-v1.0.0-linux-x86_64.tar.gz" "$pub/layr-v1.0.0-linux-x86_64.tar.gz"
 sha=$(shasum -a 256 "$T/layr-v1.0.0-linux-x86_64.tar.gz" | cut -d' ' -f1)
 eq "files.json names its SHA-256" "$sha" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print([f["sha256"] for f in d["files"] if f["name"].endswith(".tar.gz")][0])' "$pub/files.json")"
@@ -27,4 +28,9 @@ ok "a second attach of the same bytes succeeds" l release attach release/v1.0.0 
 echo other > "$T/notes.txt"
 no "other bytes under a published name are refused" l release attach release/v1.0.0 "$T/notes.txt" --public-files
 eq "the public file keeps its bytes" built "$(cat "$pub/notes.txt")"
+head -c $((33 << 20)) /dev/zero > "$T/big.bin"
+out=$(l release attach release/v1.0.0 "$T/big.bin" --public-files 2>&1); rc=$?
+eq "a public file over 32 MiB is refused" 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)"
+has "the refusal names the limit" "32 MiB" "$out"
+no "and nothing of it is public" test -e "$pub/big.bin"
 finish

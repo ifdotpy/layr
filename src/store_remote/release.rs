@@ -12,6 +12,9 @@ use std::{
     str::FromStr,
 };
 
+/// The size limit of a public release file (`--public-files`): the gateway refuses larger ones.
+const PUBLIC_MAX_BYTES: u64 = 32 << 20;
+
 /// An unlinked private ciphertext spool bounds memory and leaves no disk artifact after exit.
 fn spool() -> Result<fs::File> {
     let path = std::env::temp_dir().join(format!("layr-release-{}", ids::new_id()));
@@ -150,6 +153,10 @@ impl Store {
                 }
                 Ok(f)
             })?;
+            // The gateway serves public files up to 32 MiB: refuse before anything is written.
+            if public && file.metadata()?.len() > PUBLIC_MAX_BYTES {
+                bail!("{filename}: a public release file is at most 32 MiB");
+            }
             prepared.push((filename, file));
         }
         let descriptor = self.descriptor()?;
