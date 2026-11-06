@@ -1400,6 +1400,13 @@ fn merge_rev_inner(
 
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let spec = Spec::new()
+<<<<<<< head
+||||||| base
+        .flag("-n|--no-save")
+        .removed("--no-commit", "--no-save")
+=======
+        .flag("-n|--no-save")
+>>>>>>> origin-https/main
         .flag("-x")
         .flag("--no-edit")
         .flag("--abort")
@@ -1762,7 +1769,26 @@ pub fn revert(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
+<<<<<<< head
     let spec = Spec::new().value("--onto").flag("--abort").flag("--continue").flag("-i|--interactive").flag("-q|--quiet");
+||||||| base
+    let spec = Spec::new()
+        .value("--onto")
+        .flag("--abort")
+        .flag("--continue")
+        .flag("-i|--interactive")
+        .flag("-q|--quiet")
+        .flag("--autopark")
+        .removed("--autostash", "--autopark");
+=======
+    let spec = Spec::new()
+        .value("--onto")
+        .flag("--abort")
+        .flag("--continue")
+        .flag("-i|--interactive")
+        .flag("-q|--quiet")
+        .flag("--autopark");
+>>>>>>> origin-https/main
     let a = parse(&spec, args)?;
     if a.has("-i") {
         return Err(exit(1, "interactive replay is not supported"));

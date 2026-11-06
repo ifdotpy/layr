@@ -183,7 +183,21 @@ Use `--all-lines` to save auto states for all lines. `--all` applies only to nam
 `park` keeps unfinished work. It has `list`, `show`, `pop`, `apply`, `drop`, and `clear` subcommands.
 `pick` applies a state. `replay` applies states on a new base. `invert` reverses a state.
 Use `restore --ours` or `restore --theirs` for conflicts.
+<<<<<<< head
 `merge`, `pick`, `invert` and `replay` never stop on a conflict: the state keeps the conflicts, and `--continue` says to fix the files and run `save -m`. `--abort` undoes the operation.
+||||||| base
+Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
+
+Removed command names fail and show their replacements. They are not aliases.
+`branch`, `commit`, `stash`, `cherry-pick`, `rebase`, and `revert` use the new names above.
+`checkout` and `switch` are removed because a line is a folder.
+The old `--no-commit`, `--autostash`, and `--layers` options fail and name `--no-save`, `--autopark`, and `--caches`.
+The `cache` command group is removed. Its forms fail and name their replacements: `cache list` is
+`overlay list`, `cache repair` is `overlay repair <overlay>`, `cache add` and `cache remove` are the
+`regenerable` attribute in `.layrattributes`, and `cache pull` is `line new <name> <line>` or `merge <line>`.
+=======
+Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
+>>>>>>> origin-https/main
 
 Git command names (`branch`, `commit`, `stash`, `checkout`, `switch`, `cherry-pick`, `rebase`,
 `revert`, `worktree`) are no layr commands. They fail like any unknown command, with no hint.
@@ -234,6 +248,31 @@ A layr upgrade that changes the schema rebuilds the derived tables from the reco
 transaction. The records stay as they are, so the rebuild loses nothing. Layr keeps no copy of
 the database. An older layr cannot open a database after the upgrade. The rebuild also removes
 the copies `layr.sqlite.schema-<old>.bak` that older layr versions made.
+<<<<<<< head
+||||||| base
+### Schema upgrades and their backups
+
+A layr upgrade that changes the schema rebuilds the derived tables from the records. Before the
+rebuild changes anything, it keeps a copy of the project database: `VACUUM INTO` a temporary name
+in the database folder (`meta/db/`), renamed to `layr.sqlite.schema-<old>.bak`. The `<old>` is the
+schema version before the upgrade. Only the newest backup is kept. The rebuild prints one line:
+`database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
+database (a 400 MB database needs 400 MB more until the backup goes).
+
+A backup older than 14 days goes at the end of the next command on the project.
+
+To roll back to the old layr:
+
+1. Stop the service and the daemon (`launchctl unload` or `systemctl stop` for the layr unit).
+2. Install the old layr binary (the one that wrote the backup's schema version).
+3. In the database folder, remove `layr.sqlite-wal` and `layr.sqlite-shm` if they exist. Then move the
+   new database aside and rename the backup into place:
+   `mv layr.sqlite layr.sqlite.upgraded` and `mv layr.sqlite.schema-<old>.bak layr.sqlite`.
+4. Start the service. Check `layr status` and `layr line list`.
+
+The backup has the records up to the upgrade. Changes made after the upgrade are lost on rollback.
+=======
+>>>>>>> origin-https/main
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 
