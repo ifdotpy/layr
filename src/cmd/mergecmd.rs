@@ -907,7 +907,6 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--abort")
         .flag("--continue")
         .flag("--no-edit")
-        .flag("--no-save")
         .flag("--caches-only")
         .flag("-q|--quiet")
         .flag("--stat")
@@ -1401,7 +1400,6 @@ fn merge_rev_inner(
 
 fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let spec = Spec::new()
-        .flag("-n|--no-save")
         .flag("-x")
         .flag("--no-edit")
         .flag("--abort")
@@ -1415,6 +1413,10 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let repo = &h.repo;
     if a.has("--abort") {
         return super::admin::undo_last_of(ctx, repo, &line, &[if revert { "revert" } else { "cherry-pick" }]);
+    }
+    if a.has("--continue") {
+        let name = if revert { "inverts" } else { "picks" };
+        return Err(exit(1, format!("layr {name} never stop on a conflict: fix the files and run 'layr save -m <message>'.")));
     }
     if a.pos.is_empty() {
         return Err(exit(128, if revert { "usage: layr invert <rev>..." } else { "usage: layr pick <rev>..." }));
@@ -1760,13 +1762,7 @@ pub fn revert(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new()
-        .value("--onto")
-        .flag("--abort")
-        .flag("--continue")
-        .flag("-i|--interactive")
-        .flag("-q|--quiet")
-        .flag("--autopark");
+    let spec = Spec::new().value("--onto").flag("--abort").flag("--continue").flag("-i|--interactive").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     if a.has("-i") {
         return Err(exit(1, "interactive replay is not supported"));
