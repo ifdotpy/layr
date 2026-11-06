@@ -8,7 +8,8 @@ use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, Record, StateKind};
+use crate::model::{Conflict, Line, Record, StateKind};
+use crate::radar::Overlap;
 use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
 use anyhow::Result;
@@ -68,6 +69,101 @@ fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Stat
     Ok(st)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusOverlaps {
+    Include,
+    Skip,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusIgnored {
+    Include,
+    Omit,
+}
+
+struct StatusOptions {
+    overlaps: StatusOverlaps,
+    ignored: StatusIgnored,
+}
+
+#[derive(serde::Serialize)]
+struct StatusChange<'a> {
+    old_path: &'a Option<String>,
+    path: &'a str,
+    status: char,
+}
+
+impl<'a> From<&'a Change> for StatusChange<'a> {
+    fn from(c: &'a Change) -> Self {
+        Self { path: &c.path, old_path: &c.old_path, status: xy(c) }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct StatusConflict<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base: Option<&'a str>,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ours: Option<&'a str>,
+    path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    theirs: Option<&'a str>,
+}
+
+impl<'a> From<&'a Conflict> for StatusConflict<'a> {
+    fn from(c: &'a Conflict) -> Self {
+        Self { base: c.base.as_deref(), kind: &c.kind, ours: c.ours.as_deref(), path: &c.path, theirs: c.theirs.as_deref() }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct StatusOverlap<'a> {
+    changed_at: i64,
+    line: &'a str,
+    owner: u32,
+    path: &'a str,
+}
+
+impl<'a> From<&'a Overlap> for StatusOverlap<'a> {
+    fn from(o: &'a Overlap) -> Self {
+        Self { changed_at: o.changed_at, line: &o.line, owner: o.owner, path: &o.path }
+    }
+}
+
+// Keep all DTO fields in alphabetical order to preserve the former json! map's byte order.
+#[derive(serde::Serialize)]
+struct StatusJson<'a> {
+    conflicts: Vec<StatusConflict<'a>>,
+    head: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignored: Option<Vec<&'a String>>,
+    line: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overlaps: Option<Vec<StatusOverlap<'a>>>,
+    staged: Vec<StatusChange<'a>>,
+    unstaged: Vec<StatusChange<'a>>,
+    untracked: Vec<&'a String>,
+}
+
+impl<'a> StatusJson<'a> {
+    fn new(line: &'a Line, st: &'a Status, specs: &[String], overlaps: &'a [Overlap], options: &StatusOptions) -> Self {
+        Self {
+            line: &line.name,
+            head: &line.head,
+            staged: st.staged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
+            unstaged: st.unstaged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
+            untracked: st.untracked.iter().filter(|p| matches(specs, p)).collect(),
+            // Ignore classification is shared with the other status entries. Keep it intact;
+            // the opt-out avoids constructing and serializing its output list.
+            ignored: (options.ignored == StatusIgnored::Include)
+                .then(|| st.ignored.iter().filter(|p| matches(specs, p)).collect()),
+            conflicts: st.conflicts.iter().filter(|c| matches(specs, &c.path)).map(StatusConflict::from).collect(),
+            overlaps: (options.overlaps == StatusOverlaps::Include).then(|| overlaps.iter().map(StatusOverlap::from).collect()),
+        }
+    }
+}
+
 pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-s|--short")
@@ -79,8 +175,14 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--long")
         .flag("-v|--verbose")
         .flag("--no-renames")
+        .flag("--no-overlaps")
+        .flag("--no-ignored")
         .flag("--json");
     let a = parse(&spec, args)?;
+    let options = StatusOptions {
+        overlaps: if a.has("--no-overlaps") { StatusOverlaps::Skip } else { StatusOverlaps::Include },
+        ignored: if a.has("--no-ignored") { StatusIgnored::Omit } else { StatusIgnored::Include },
+    };
     let h = here(ctx)?;
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
@@ -88,33 +190,24 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let filtered = h.repo.filtered_view(ctx, &line)?;
     let specs = h.specs(&a.rest())?;
     let st = shown_status(ctx, &h, &line, filtered.is_some())?;
-    let overlaps = if filtered.is_none() && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain"))) {
+    let overlaps = if options.overlaps == StatusOverlaps::Include
+        && filtered.is_none()
+        && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain")))
+    {
         let _t = crate::trace::span("status overlaps");
         h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
     } else {
         Vec::new()
     };
     if a.has("--json") {
-        let row = |c: &Change| serde_json::json!({"path": c.path, "old_path": c.old_path, "status": xy(c).to_string()});
-        outln!(
-            ctx,
-            "{}",
-            serde_json::json!({
-                "line": line.name, "head": line.head,
-                "staged": st.staged.iter().filter(|c| matches(&specs, &c.path)).map(row).collect::<Vec<_>>(),
-                "unstaged": st.unstaged.iter().filter(|c| matches(&specs, &c.path)).map(row).collect::<Vec<_>>(),
-                "untracked": st.untracked.iter().filter(|p| matches(&specs, p)).collect::<Vec<_>>(),
-                "ignored": st.ignored.iter().filter(|p| matches(&specs, p)).collect::<Vec<_>>(),
-                "conflicts": st.conflicts.iter().filter(|c| matches(&specs, &c.path)).collect::<Vec<_>>(),
-                "overlaps": overlaps,
-            })
-        );
+        let output = StatusJson::new(&line, &st, &specs, &overlaps, &options);
+        outln!(ctx, "{}", serde_json::to_string(&output)?);
         return Ok(0);
     }
     let porcelain = a.has("--porcelain");
     let short = a.has("-s") || porcelain;
     let untracked_mode = a.get("-u").map(|s| if s.is_empty() { "all" } else { s }).unwrap_or("normal").to_string();
-    let show_ignored = a.has("--ignored");
+    let show_ignored = options.ignored == StatusIgnored::Include && a.has("--ignored");
     let nul = a.has("-z");
     let end = if nul { "\0" } else { "\n" };
     let path_of = |p: &str| -> String {
@@ -2207,4 +2300,94 @@ fn clean_targets(st: &Status, scan: &Path, index: &Snap, dirs: bool, with_ignore
     let all: Vec<String> = out.iter().cloned().collect();
     out.retain(|p| !all.iter().any(|d| d.ends_with('/') && d != p && p.starts_with(d.as_str())));
     out
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn line() -> Line {
+        Line { id: "id".into(), name: "topic".into(), head: "state".into(), owner: 0, machine: "machine".into() }
+    }
+
+    #[test]
+    fn default_json_keeps_empty_sections() {
+        let line = line();
+        let st = Status::default();
+        let options = StatusOptions { overlaps: StatusOverlaps::Include, ignored: StatusIgnored::Include };
+        let output = StatusJson::new(&line, &st, &[], &[], &options);
+        assert_eq!(
+            serde_json::to_string(&output).unwrap(),
+            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","overlaps":[],"staged":[],"unstaged":[],"untracked":[]}"#
+        );
+    }
+
+    #[test]
+    fn default_json_keeps_nonempty_nested_key_order() {
+        let line = line();
+        let st = Status {
+            conflicts: vec![
+                Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None },
+                Conflict {
+                    path: "other.txt".into(),
+                    kind: "content".into(),
+                    base: Some("base".into()),
+                    ours: Some("ours".into()),
+                    theirs: Some("theirs".into()),
+                },
+            ],
+            ..Status::default()
+        };
+        let overlaps = [Overlap { path: "shared.txt".into(), line: "other".into(), owner: 0, changed_at: 0 }];
+        let options = StatusOptions { overlaps: StatusOverlaps::Include, ignored: StatusIgnored::Include };
+        let output = StatusJson::new(&line, &st, &[], &overlaps, &options);
+        assert_eq!(
+            serde_json::to_string(&output).unwrap(),
+            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"base","kind":"content","ours":"ours","path":"other.txt","theirs":"theirs"}],"head":"state","ignored":[],"line":"topic","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
+        );
+    }
+
+    #[test]
+    fn status_help_lists_opt_outs() {
+        assert!(crate::cmd::HELP.contains("status [--json] [--no-overlaps] [--no-ignored]"));
+    }
+
+    #[test]
+    fn json_opt_outs_omit_only_requested_sections() {
+        let line = line();
+        let st = Status {
+            ignored: vec!["debug.log".into()],
+            untracked: vec!["new.txt".into()],
+            conflicts: vec![Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None }],
+            ..Status::default()
+        };
+        let overlaps = [Overlap { path: "shared.txt".into(), line: "other".into(), owner: 0, changed_at: 0 }];
+        for radar in [StatusOverlaps::Include, StatusOverlaps::Skip] {
+            for ignored in [StatusIgnored::Include, StatusIgnored::Omit] {
+                let options = StatusOptions { overlaps: radar, ignored };
+                let output = StatusJson::new(&line, &st, &[], &overlaps, &options);
+                let json = serde_json::to_string(&output).unwrap();
+                assert_eq!(json.contains(r#""overlaps":"#), radar == StatusOverlaps::Include);
+                assert_eq!(json.contains(r#""ignored":"#), ignored == StatusIgnored::Include);
+                assert!(json.contains(r#""conflicts":[{"kind":"content","path":"shared.txt"}]"#));
+                assert!(json.contains(r#""untracked":["new.txt"]"#));
+                assert!(!json.contains(r#""ignored":null"#));
+                assert!(!json.contains(r#""overlaps":null"#));
+            }
+        }
+        assert_eq!(st.ignored, ["debug.log"]);
+        assert_eq!(st.untracked, ["new.txt"]);
+    }
+
+    #[test]
+    fn json_path_filters_apply_with_opt_outs() {
+        let line = line();
+        let st = Status { ignored: vec!["debug.log".into()], untracked: vec!["new.txt".into()], ..Status::default() };
+        let options = StatusOptions { overlaps: StatusOverlaps::Skip, ignored: StatusIgnored::Include };
+        let output = StatusJson::new(&line, &st, &["new.txt".into()], &[], &options);
+        assert_eq!(
+            serde_json::to_string(&output).unwrap(),
+            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","staged":[],"unstaged":[],"untracked":["new.txt"]}"#
+        );
+    }
 }

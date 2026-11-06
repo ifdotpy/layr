@@ -204,7 +204,8 @@ pub fn matches(specs: &[String], path: &str) -> bool {
 pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json]
 
 Work in a line:
-   status, diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
+   status [--json] [--no-overlaps] [--no-ignored]
+   diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
 Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:

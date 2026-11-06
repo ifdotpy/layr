@@ -2,10 +2,30 @@
 //! steps of a store-lock hold are still kept, so that `meta/lock-slow.log` names the slow ones.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Steps shorter than this are not kept for the lock log (milliseconds).
 const KEEP_MS: f64 = 100.0;
+
+// The daemon parent inherits its own environment. Its forked request child overrides
+// tracing for all command threads without changing the process environment.
+const INHERIT_ENV: u8 = 0;
+const DISABLED: u8 = 1;
+const ENABLED: u8 = 2;
+static REQUEST_TRACE: AtomicU8 = AtomicU8::new(INHERIT_ENV);
+
+pub fn set_request_enabled(enabled: bool) {
+    REQUEST_TRACE.store(if enabled { ENABLED } else { DISABLED }, Ordering::Relaxed);
+}
+
+fn enabled() -> bool {
+    match REQUEST_TRACE.load(Ordering::Relaxed) {
+        INHERIT_ENV => std::env::var_os("LAYR_TRACE").is_some(),
+        ENABLED => true,
+        _ => false,
+    }
+}
 
 thread_local! {
     /// Steps of this thread since the store lock was taken: name and milliseconds.
@@ -23,13 +43,13 @@ pub fn span(name: impl Into<String>) -> Option<Span> {
 
 /// A span whose name is built only when `LAYR_TRACE` is set (a name that needs a `format!` on a hot path).
 pub fn named(name: impl FnOnce() -> String) -> Option<Span> {
-    std::env::var_os("LAYR_TRACE").map(|_| Span { name: name(), start: Instant::now() })
+    enabled().then(|| Span { name: name(), start: Instant::now() })
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
         let ms = self.start.elapsed().as_secs_f64() * 1000.0;
-        if std::env::var_os("LAYR_TRACE").is_some() {
+        if enabled() {
             eprintln!("trace {ms:>8.1} ms  {}", self.name);
         }
         if ms >= KEEP_MS {
@@ -42,7 +62,7 @@ impl Drop for Span {
 /// start line, which `span` alone cannot show.
 pub fn begin(name: impl Into<String>) -> Option<Span> {
     let name = name.into();
-    if std::env::var_os("LAYR_TRACE").is_some() {
+    if enabled() {
         eprintln!("trace begin {name}");
     }
     span(name)

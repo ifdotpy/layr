@@ -20,14 +20,14 @@ done
 echo more >> notes.txt
 out=$(LAYR_TRACE=1 "$LAYR" save 2>&1)
 trace=$(printf '%s\n' "$out" | grep '^trace' | sed 's/  */ /g')
-first=$(printf '%s\n' "$out" | tail -1 | awk '{print $NF}')
+first=$(printf '%s\n' "$out" | grep -v '^trace' | tail -1 | awk '{print $NF}')
 has "the new folder is cloned as one folder" "thin clone 1 new folders" "$trace"
 eq "the layer lists the folder and its content" 1 "$(printf '%s\n' "$trace" | grep -c 'thin write 36[0-9] entries')"
 echo again >> notes.txt
 out=$(LAYR_TRACE=1 "$LAYR" save 2>&1)
 trace=$(printf '%s\n' "$out" | grep '^trace' | sed 's/  */ /g')
 has "the next save copies only the changed file" "thin write 1 entries" "$trace"
-second=$(printf '%s\n' "$out" | tail -1)
+second=$(printf '%s\n' "$out" | grep -v '^trace' | tail -1)
 eq "an unchanged folder makes no state" "$second" "$("$LAYR" save)"
 eq "the state keeps the files of a cloned folder" 10 "$(l show "$first:deps/p7/lib" | grep -c '\.js$')"
 finish
