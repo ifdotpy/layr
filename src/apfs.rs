@@ -840,7 +840,7 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
 const PARALLEL_FROM: usize = 64;
 
 /// Run `f` for each item, retaining the small-work serial path.
-fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
+fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Send + Sync) -> Result<()> {
     if items.len() < PARALLEL_FROM {
         return items.iter().try_for_each(f);
     }
