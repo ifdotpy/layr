@@ -1275,6 +1275,11 @@ pub struct Space {
     pub unique: u64,
 }
 
+/// Use the parallelism available to this process, including system-imposed limits.
+pub fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
 /// Run a dynamic queue of background jobs, each of which can add more jobs.
 #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
 pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) -> Result<(), crate::pools::PoolError> {
