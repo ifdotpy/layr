@@ -48,11 +48,18 @@ All of them run without a prompt; `--json` prints one object.
    it from the next push.
 5. Full machines grow from the project creator: a trust without limits by a full machine. A limited machine
    trusts, limits and untrusts nobody, also with a backdated record. When full machines disagree about one
-   machine, the narrowest limits win.
+   machine, the narrowest limits win. A trust, a delegation or an untrust counts only when its signer was not
+   untrusted at or before its time. The untrusts count in their time order: each one needs a signer that is
+   full with the untrusts before it.
 6. Roles. A `reader` makes no record that others take. A `writer` (a cache writer) makes only: in the project,
    `config` (machine-local settings) and `line.create` of save-back lines (`<line>.checks-<os>-<arch>`); in the
    cache overlays its trust names, `line.create`, `commit` and `gc` of its own overlay lines. No source state, no
-   other line, no move of a line another machine made, no delete, no trust.
+   other line, no move of a line another machine made, no delete, no trust. The role covers the whole record,
+   because a record of any op can carry states and line moves: a writer's `config` makes no state and moves no
+   line, its `line.create` makes only the one new save-back line that it names, and its overlay `commit` makes
+   states only on the lines it moves. No record of a limited machine (its `machine` record too) carries a queue
+   change, a ref change or an attestation, and its `machine` record makes no state and moves no line. The
+   `config` of a writer cannot change project settings: other machines keep it as `<key>@<machine>`.
 7. A delegation is a `trust.delegate` record of a full machine. A `machine.trust` record signed by a broker
    counts only when, at its time, a delegation of that broker is live and the trust is inside it: `expires_at`
    at most `max-hours` after the record time, the same or a smaller role, overlays a subset, and the machine name
