@@ -75,6 +75,7 @@ impl Store {
         model.release_files(name, ids::now_ms())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn attach_release(
         &mut self,
         ctx: &Ctx,
