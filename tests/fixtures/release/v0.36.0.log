@@ -1,0 +1,92 @@
+4192900fa24c78d2bf6c28ea9f951f3e50e84456chore(main): release 0.36.0 (#346)
+
+Co-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+5061fad07ad411f54cbd34e79b33480168c5f4farefactor(btrfs): use typed layouts and a minimal unsafe boundary (#349)
+9e9261fe415f6219d74eea46f844f8ce3bb21f5efeat(probes): a structure snapshot diff matches lines without their indent (#350)
+
+A new wrapper element moves its children one level deeper. The line diff saw every
+child line as removed and added, so a wrapper counted as all its children changed.
+Lines are matched without their indent now: a wrapper is one added element, and the
+shown diff keeps each line with its indent.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+dfdd0a8cc6b6b9fb32e10ebb5348a7ae47a0a247fix(gateway): a delete error names its key and the gateway's answer; DELETE is retried like other idempotent requests (#345)
+
+* fix(gateway): a delete of an object that is gone is done, and a delete error names its key
+
+A sweep over the gateway failed with only 'gateway delete: HTTP 404' when an earlier pass
+or another machine had deleted the object. A 404 is done now (a 404 that says no such
+project stays an error), a DELETE goes again on 502, 504 and a dropped connection like
+other idempotent requests, and every delete error names its key.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* style: format the delete test
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* fix(gateway): every delete answer but 204 is an error with the key and the answer
+
+The gateway answers 204 for an object that is gone already; a 404 says that the route
+or the project is unknown, so it is no success.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+eed71bbc5bd32bff3e1ab2a77a15ac9785b14de3perf(model): merge_base is linear; trusted_writers_checked skips a second signature check (#344)
+
+merge_base compared every pair of common ancestors and walked the history for each:
+quadratic, and the Changes page of the site calls it once per change (83.5 s for the
+layr project in WASM). One walk from the parents of the common ancestors finds the
+ones that are not best; the result is the same.
+
+trusted_writers checks every record signature. Callers whose records a fetch or an
+import checked already use trusted_writers_checked, which does not check them again.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+8af9c41bc15c37f8d2ecf9114bab176716e2565crefactor(pools): run parallel work on scoped rayon pools (#323)
+
+* refactor(pools): use scoped rayon pools
+
+* Avoid starting a pool for an empty queue
+
+* Avoid an unused import on overlayfs
+
+* fix(pools): guard the forking parent and bound pool width
+
+* Keep one execution path and mark daemon on entry
+
+* fix(pools): retry deferred trash and size fixed batches
+
+* Avoid overlayfs-only unused variant warning
+
+* Gate dynamic pool support where used
+
+* fix(service): retry trash through locked background emptiers
+
+* Merge origin/main and preserve shared APFS threshold
+
+* Restore worker count helper used by chunked transfers
+
+* fix(apfs): require Send for parallel callback
+5c2670db0da16920f94a0e59792721b9bc67e310feat(review): change diff --since-review --person <login> starts at that person's approval (#342)
+
+A person approves through a signed request, with the person as signer, so the machine
+and uid rule of --since-review never found it. With --person the diff starts at the
+newest version that person approved (an approval not withdrawn, with a pinned key).
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>

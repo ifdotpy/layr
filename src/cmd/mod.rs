@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod attest;
 pub mod bisect;
+pub mod release_prepare;
 pub mod branch;
 pub mod change;
 pub mod checks;

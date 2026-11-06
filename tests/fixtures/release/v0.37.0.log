@@ -1,0 +1,225 @@
+3f84f845246fce7e5ee1bb3a786e31210f021fa1chore(main): release 0.37.0 (#358)
+
+Co-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+ba25720459527ebcdaa78db9db91e65a58c18a0atest(apfs): t80 reads the save output without trace lines (#384)
+
+#370 adds a trace line after the command output, so the last line of a
+traced save was a trace line.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+1c411d9b1486fcb4ddf30a3bdf9287cc2d86e1d8feat(status): Add overlap and ignored output opt-outs (#366)
+
+* feat(status): Add overlap and ignored output opt-outs
+
+* fix(status): Preserve JSON key order and correct radar coverage
+2cb16561416191846fc8fe3c4c3efe4764f94fdafix(deps): update zstd-safe for RUSTSEC-2026-0398 and RUSTSEC-2026-0403 (#367)
+bd26fb1f59fff4c324a2581b148ae054bc01ed56perf(apfs): line copies clone hard-linked files one by one instead of copying the whole tree (#355)
+
+* perf(apfs): a tree with hard links is cloned by folders; only the linked files are copied one by one
+
+clone_complete copied the whole tree file by file when one file of it had a second link,
+so its links stayed links. One hard link in a large ignored folder (Attar: chromium/ 70 GB
+and .attar-cache/ 30 GB) made an automatic save take more than ten minutes. Now the
+folders above the linked files are walked, each linked file is copied by itself with one
+map of inodes, and every other subtree is one clone. On APFS one folder clone of 20k files
+takes 0.75 s, a file-by-file copy 5.6 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* fix(apfs): seal the linked files of a read-only copy after the walk
+
+A link to a file that is immutable already cannot be made: the second link of a group
+failed with 'Operation not permitted' (thin tests). The flags of the linked files are now
+set after every link exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* fix(apfs): a folder that a writer removed during a copy is skipped when the copy gets its folder times
+
+The copy of a tree with hard links now goes through the folder clone, which then gives the
+folders the times of the scan. A folder that a writer removed after the scan is not in the
+copy: the times step failed with 'No such file or directory'. It skips such a folder, as
+the copy does; the scan after the copy sees the change. The re-copy loop names its last
+error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+638d5acc55c24ea6fcfc3cc4e7f3d23f915b185cfix(service): Honor client tracing and decode requests once (#370)
+
+fix(service): honor client tracing and decode requests once
+e3c4064812fce07c7891f4d07618d4a150e6d04fperf(overlay): Measure cache sizes only when requested (#365)
+
+* perf(overlay): measure cache sizes only when requested
+
+* test(overlay): distinguish unmeasured cache sizes from zero
+
+* test(overlay): prove cache size walks are opt-in
+
+* test(overlay): clarify exact cache fixture byte count
+eaa67f655a8f171f6b3a936694d578b183684dc8fix(remote): a chunk pack whose data is gone counts as absent, and the sweep deletes its index (#360)
+
+A pack index without its data (a delete that removed the data and not the index) made the
+next push stop ('has an index but no data') when a chunk of it was dead, and otherwise a
+new cache reused its chunks, so no machine could read that cache. A pack now counts only
+with both objects: a push uploads such chunks again, and every sweep pass deletes the
+index without data. release goes on past a pack whose data went during the pass.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+f9667151a34d8871949008c22787c83a032411b5fix(remote): index write takes no project lock, writes the heads first and goes on past an unreadable tree (#359)
+
+layr index write held the project lock while it read every tree of the store: more than ten
+minutes on project layr, and every command of the project waited. It only reads the records
+and writes create-only remote objects, so it takes no lock now. The heads snapshot goes up
+first: a run that failed in the paths phase left a store without heads, and the site then
+read every record segment (14 to 25 s). A tree that cannot be read marks its state as
+unavailable, names it, and the index goes on.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+a33df93b5c8610f262d75be3fe5c8a9cc07f6a8drefactor(remote)!: remove the Desk v1 import (#357)
+
+The owner has no Desk v1 vault left to import. clone no longer reads a vault.json store,
+push and fetch no longer check for one, and --desk-prefix is gone with
+src/store_remote/legacy.rs and tests/t21-desk-import.sh. The person keys, their index
+format and the store disk stay: they came from Desk but are features of layr.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+5a1bd31ce601e54ce92f9e3f29b5522614066afdfix(release): release attach uploads its public copies without the project lock (#361)
+
+release attach --public-files held the project lock until the end, also while it uploaded
+the plain public copies: every command of the project waited minutes behind it. The lock
+now ends after the release.files record and its push; the public copies are create-only
+remote objects and need no lock.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+652ed0a4224e2af6403a86f7fffe31a8ee45e67dfix(caches): a node cache prune or warm step leaves package-lock.json and package.json of the line as they were (#356)
+
+npm prune writes package-lock.json again, in its own format and with a new time, in the
+folder of the line. The cache step changed source files of the line: Attar's main showed
+two package-lock.json files as changed. The prune and the warm step now keep the bytes
+and times of the lockfile and package.json and put them back after the tool ran.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+e72c6aaa87898ceeac01b87d1ae68916c1c580cdfix(privs): a command of the caller runs with the caller's PATH, and init --from-git names the git error (#354)
+
+command_as gave every child the fixed PATH /usr/local/bin:/usr/bin:/bin. An old Intel
+/usr/local/bin/git does not run on Apple silicon without Rosetta, so init --from-git said
+'is not a Git checkout' for every checkout. A command of the caller's own process now uses
+the caller's PATH; a service (root for a user) uses a fixed PATH with /opt/homebrew/bin
+first on macOS. init --from-git adds the git error to its message.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+4b04e33eb68ce45c0bf75a17503e73676ffbc320feat(review): path owners and approvals that a change of some paths keeps (#353)
+
+* feat(review): path owners and approvals that a change of some paths keeps
+
+protect --owner <path>=<principal>,...: a merge whose change touches the path needs an
+approval of the merged state by one of them; each owner group needs its own approval.
+protect --keep-approvals <path>,...: an approval of an earlier version of the same change
+counts for a newer version that changed only these paths after it. Both count approvals
+as --approvals does, without the authors of the incoming states. A person owner approves
+through a signed request.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* test(review): t176 runs as a user; root takes a protected line without approvals
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+39b58f634668b9a0fbc563c5b9c10f0e56de8a74fix(gateway): a release file upload goes again while the gateway restarts (#351)
+
+* fix(gateway): a release file upload goes again while the gateway restarts
+
+put_file_new sent the file once: a 502 or a dropped connection during a gateway
+restart failed the release attach. It is a create-only PUT, so it goes again like the
+other idempotent requests, each try from the start of the file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* Merge origin-https/main into put-file-retry
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+4e464b8f53b44bcd96fd61fbc1577c33a8dcea73fix(caches): relocate also reads the binary dep-info of a unit (#347)
+
+A source out of the package (include_str!("../../other/x.json")) is relative in the text
+dep-info and absolute, with its .. parts, in the binary one that cargo checks. relocate
+read only the text file, so such a unit kept naming the old line and cargo built it again
+(studio-runtime-store). The old paths of the binary files count now as well.
+
+
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+b182e74cfc99d9bd949926fb31fab94b9a763b52fix(trust): check the whole record of a limited machine and drop trusts of untrusted signers (#352)
+
+* fix(trust): check the whole record of a limited machine and drop trusts of untrusted signers
+
+A cache writer's record was judged by its op only, but Db::derive applies the
+states, line moves and some data keys of a record of any op. A writer's config
+record could make a source state or move a line. Now Terms::refusal gets the
+record's states and line moves as plain values (Payload) and checks them:
+- in the project, a writer makes no state; its config moves no line; its
+  line.create makes only the one new save-back line it names;
+- in its overlays, a writer's states are on the lines the record moves;
+- no record of a limited machine carries queue_change, ref_change or
+  attestation, and its machine record makes no state and moves no line.
+
+rules() collected trusts and delegations of a signer after its untrust. Now
+the untrusts are decided first, in time order, each with the untrusts before
+it, and a trust or delegation counts only when its signer was not untrusted at
+or before its time.
+
+Fixes #348
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+* test(trust): build the writer test project by hand, without a subvolume
+
+Project::create needs btrfs on Linux, so the end-to-end writer test failed in
+the Linux CI. The test now makes the project folder (meta/db, states) itself, as
+repo::tests do, and runs on any file system. The checks stay the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jp3rumuJHd1FeTnGGzzrED
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
