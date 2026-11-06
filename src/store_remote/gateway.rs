@@ -783,15 +783,23 @@ impl Gateway {
             bail!("release object is too large");
         }
         let token = self.token.as_deref().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?;
-        let response = self
-            .http
-            .put(self.base.join(&format!("objects/{key}"))?)
-            .bearer_auth(token)
-            .timeout(Duration::from_secs(7200))
-            .header("content-type", "application/octet-stream")
-            .body(reqwest::blocking::Body::sized(file, length))
-            .send()
-            .map_err(reqwest::Error::without_url)?;
+        let url = self.base.join(&format!("objects/{key}"))?;
+        // A create-only PUT may go again (a gateway restart): each try sends the file from its start. A try after one
+        // that landed gets 412.
+        let response = send_again(true, || {
+            use std::io::Seek;
+            let mut body = file.try_clone()?;
+            body.seek(std::io::SeekFrom::Start(0))?;
+            self.http
+                .put(url.clone())
+                .bearer_auth(token)
+                .timeout(Duration::from_secs(7200))
+                .header("content-type", "application/octet-stream")
+                .body(reqwest::blocking::Body::sized(body, length))
+                .send()
+                .map_err(reqwest::Error::without_url)
+                .map_err(Into::into)
+        })?;
         match response.status().as_u16() {
             201 => Ok(true),
             412 => Ok(false),
@@ -965,6 +973,47 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         assert!(result.unwrap().is_empty(), "a 502 and a closed connection are asked again for a read");
+    }
+
+    #[test]
+    fn a_release_file_goes_again_from_its_start_while_the_gateway_restarts() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let expected = content.clone();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for status in ["502 Bad Gateway", "201 Created"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                let length: usize =
+                    head.lines().find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                bodies.push(body);
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            bodies
+        });
+        let path = std::env::temp_dir().join(format!("layr-release-{}", crate::ids::new_id()));
+        std::fs::write(&path, &content).unwrap();
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        let created = gateway.put_file_new("public/release/v1.0.0/layr.tar.gz", std::fs::File::open(&path).unwrap()).unwrap();
+        let bodies = server.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(created);
+        assert!(bodies.len() == 2 && bodies.iter().all(|b| *b == expected), "both tries send the whole file");
     }
 
     #[test]
