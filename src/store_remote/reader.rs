@@ -46,25 +46,40 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
         }
     }
     let mut checked = Vec::new();
+    let mut wanted = Vec::new();
     for object in backend.list("records/")? {
         let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
         let stamp = format!("{} {}", object.key, object.modified);
         let here = || have.get(&machine).is_some_and(|seqs| (first..=last).all(|seq| seqs.contains(&seq)));
-        if known.contains(&stamp) && here() {
-            checked.push(stamp);
-            continue;
-        }
+        let read = !(known.contains(&stamp) && here());
         checked.push(stamp);
-        let body = backend.get(&object.key)?.context("record segment disappeared")?;
+        if read {
+            wanted.push((object.key, machine, first, last));
+        }
+    }
+    // A segment is one small object: a clone reads hundreds of them, many at a time, so the latency of the remote
+    // counts once per batch, not once per segment.
+    let mut bodies: Vec<Result<Vec<u8>>> = Vec::with_capacity(wanted.len());
+    for batch in wanted.chunks(32) {
+        bodies.extend(std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|(key, ..)| scope.spawn(move || backend.get(key)?.context("record segment disappeared")))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked")))).collect::<Vec<_>>()
+        }));
+    }
+    for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
+        let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
         for line in body.lines() {
             let signed = oplog::parse_line(line, None)?;
             if signed.record.machine != machine || signed.record.seq != expected || expected > last {
-                bail!("segment {} has an invalid sequence", object.key);
+                bail!("segment {} has an invalid sequence", key);
             }
             if signed.record.project != project {
-                bail!("segment {} belongs to another project", object.key);
+                bail!("segment {} belongs to another project", key);
             }
             crate::model::validate(&signed.record)?;
             let by_seq = machines.entry(machine.clone()).or_default();
@@ -79,7 +94,7 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
             expected = expected.checked_add(1).context("record sequence overflow")?;
         }
         if expected.checked_sub(1) != Some(last) {
-            bail!("segment {} is incomplete", object.key);
+            bail!("segment {} is incomplete", key);
         }
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
