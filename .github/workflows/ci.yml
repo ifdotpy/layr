@@ -10,8 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # The integration tests build cargo projects (t120) and fill the runner disk: remove toolchains
-      # that no test uses.
+      # The integration tests build cargo projects (t120) and fill the runner disk.
       - name: Free disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL

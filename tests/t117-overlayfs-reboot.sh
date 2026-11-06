@@ -61,7 +61,9 @@ ok "the command runs after the source line is gone" l status -s
 eq "target still has its files" "$sum" "$(cksum < "$W/target/blob")"
 eq "the layer is still taken" "True" "$(entry /lines/w/target taken)"
 
-# A layer that cannot be mounted again: the command fails and names the mount.
+# A layer that cannot be mounted again: the command fails and names the mount. The garbage check cannot open the
+# store after that.
+LAYR_TEST_GARBAGE_OK=1
 lower=$(entry /lines/w/target base)
 reboot
 rm -rf "$LAYR_ROOT/.layr-overlayfs/objects/$lower"

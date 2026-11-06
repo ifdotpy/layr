@@ -41,6 +41,8 @@ M  notes.txt
 eq "diff --cached" "A	docs/deep/a.md
 M	notes.txt" "$(l diff --cached --name-status)"
 eq "pathspec without match" "128" "$(l add nothing.txt 2>/dev/null; echo $?)"
+# Many paths in one argument (an unsplit `$var` of zsh) are refused with the cause.
+has "one argument with many lines names the cause" "pass each path as its own argument" "$(l add "$(printf 'notes.txt\ndocs')" 2>&1)"
 eq "ignored path needs -f" "1" "$(l add other.log 2>/dev/null; echo $?)"
 has "commit output" "[main " "$(l save -m 'First change')"
 eq "after commit" " D src/main.rs

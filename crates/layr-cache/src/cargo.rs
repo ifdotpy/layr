@@ -61,12 +61,48 @@ pub struct Settings {
     pub listed: bool,
     pub commands: Vec<Vec<String>>,
     pub retest: Vec<Vec<String>>,
+    /// `sweep` entries that build into a folder of their own below `target` (`{"target_dir", "args", "env"}`): a test
+    /// that sets CARGO_TARGET_DIR to `target/<dir>` with another env gets that folder warm and pruned too.
+    pub other_dirs: Vec<OtherDir>,
 }
 
-/// The cargo commands under `key` (`sweep` or `retest`): an array of arrays of strings.
+/// A `sweep` entry with its own target folder: `{"target_dir": "<folder below target>", "args": [...], "env": {...}}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OtherDir {
+    pub dir: String,
+    pub args: Vec<String>,
+    /// Over the project env (`env` of the table).
+    pub env: Vec<(String, String)>,
+}
+
+/// The `sweep` entries that are objects (`OtherDir`).
+fn other_dirs(cfg: &Value) -> Result<Vec<OtherDir>> {
+    let mut out = Vec::new();
+    for c in cfg["sweep"].as_array().into_iter().flatten().filter(|c| c.is_object()) {
+        let dir = c["target_dir"].as_str().context("sweep: an object entry needs target_dir")?.to_string();
+        if dir.is_empty() || dir.starts_with('/') || dir.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+            bail!("sweep: target_dir must be a folder below target");
+        }
+        let args = c["args"]
+            .as_array()
+            .context("sweep: an object entry needs args")?
+            .iter()
+            .map(|a| a.as_str().map(String::from).context("sweep: each argument is a string"))
+            .collect::<Result<Vec<_>>>()?;
+        let mut env = Vec::new();
+        for (k, v) in c["env"].as_object().into_iter().flatten() {
+            env.push((k.clone(), v.as_str().context("sweep: each env value is a string")?.to_string()));
+        }
+        out.push(OtherDir { dir, args, env });
+    }
+    Ok(out)
+}
+
+/// The cargo commands under `key` (`sweep` or `retest`): an array of arrays of strings. An object entry of `sweep`
+/// is an `OtherDir`, read by `other_dirs`.
 fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
     let mut commands = Vec::new();
-    for c in cfg[key].as_array().into_iter().flatten() {
+    for c in cfg[key].as_array().into_iter().flatten().filter(|c| !(key == "sweep" && c.is_object())) {
         let args = c.as_array().with_context(|| format!("{key}: each command is an array of strings"))?;
         let strings =
             args.iter().map(|a| a.as_str().map(String::from).with_context(|| format!("{key}: each argument is a string")));
@@ -144,6 +180,7 @@ pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
         listed: cfg["sweep"].as_array().is_some(),
         commands: command_list(cfg, "sweep")?,
         retest: command_list(cfg, "retest")?,
+        other_dirs: other_dirs(cfg)?,
     })
 }
 
@@ -444,7 +481,13 @@ fn newest_write(dir: &Path) -> std::time::SystemTime {
 /// The top-level folders of `target` that no listed command makes and that no build wrote into for
 /// `UNLISTED_AGE` before `now`. Files and symbolic links at the top level stay.
 pub fn stale_unlisted(target: &Path, commands: &[Vec<String>], now: std::time::SystemTime) -> Vec<PathBuf> {
-    let listed = listed_dirs(commands);
+    stale_unlisted_but(target, commands, &[], now)
+}
+
+/// `stale_unlisted`, keeping the top-level folders of `other` (the `target_dir` of `OtherDir` entries) too.
+pub fn stale_unlisted_but(target: &Path, commands: &[Vec<String>], other: &[OtherDir], now: std::time::SystemTime) -> Vec<PathBuf> {
+    let mut listed = listed_dirs(commands);
+    listed.extend(other.iter().filter_map(|o| o.dir.split('/').next().map(String::from)));
     let mut out = Vec::new();
     for e in std::fs::read_dir(target).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -548,6 +591,16 @@ pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
         c.env("CARGO_TERM_COLOR", "never");
         run(&mut c, Some(host.deadline())).with_context(|| format!("cargo {}", args.join(" ")))?;
     }
+    for other in &cfg.other_dirs {
+        let mut c = host_cargo(host)?;
+        c.args(&other.args)
+            .current_dir(root)
+            .env("CARGO_TARGET_DIR", target.join(&other.dir))
+            .envs(cfg.env.iter().chain(other.env.iter()).map(|(k, v)| (k, v)));
+        c.env("CARGO_TERM_COLOR", "never");
+        run(&mut c, Some(host.deadline()))
+            .with_context(|| format!("cargo {} (target/{})", other.args.join(" "), other.dir))?;
+    }
     Ok(())
 }
 
@@ -586,8 +639,29 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
             Listed::Busy(holder) => kept.push(format!("{profile}: build lock busy (holder: {holder})")),
         }
     }
+    // A folder of an `OtherDir` entry has the live set of its own command and env. A folder that a test never
+    // built has nothing to prune.
+    for other in &cfg.other_dirs {
+        let dir = target.join(&other.dir);
+        if !built(&dir) {
+            continue;
+        }
+        let mut own = env.clone();
+        own.extend(other.env.iter().cloned());
+        for (profile, _, listed) in live_by_profile(host, root, &dir, &own, std::slice::from_ref(&other.args))? {
+            match listed {
+                Listed::Fresh(live) => {
+                    let (n, b) = sweep_plans(&live, false)?;
+                    freed += n;
+                    busy += b;
+                }
+                Listed::NotFresh(why) => kept.push(format!("{}/{profile}: a unit is not fresh ({why})", other.dir)),
+                Listed::Busy(holder) => kept.push(format!("{}/{profile}: build lock busy (holder: {holder})", other.dir)),
+            }
+        }
+    }
     // The folders that no listed command makes have no live set: an old one goes (issue #195).
-    for dir in stale_unlisted(target, &cfg.commands, std::time::SystemTime::now()) {
+    for dir in stale_unlisted_but(target, &cfg.commands, &cfg.other_dirs, std::time::SystemTime::now()) {
         let n = size_of(&dir);
         if std::fs::remove_dir_all(&dir).is_ok() {
             freed += n;
@@ -622,5 +696,35 @@ mod pinned_env_tests {
         assert_eq!(last("SDKROOT"), cfg!(target_os = "macos").then_some("sdk"));
         assert!(!env.iter().any(|(n, _)| n == "macos" || n == "linux"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod other_dir_tests {
+    use super::*;
+
+    #[test]
+    fn an_object_entry_of_sweep_is_a_target_folder_of_its_own() {
+        let cfg = serde_json::json!({"sweep": [
+            ["build", "--workspace"],
+            {"target_dir": "provider-contract-compile", "args": ["check", "--offline", "-p", "studio-runtime-schema"], "env": {"RUSTFLAGS": ""}}
+        ]});
+        assert_eq!(command_list(&cfg, "sweep").unwrap(), vec![vec!["build".to_string(), "--workspace".to_string()]]);
+        let other = other_dirs(&cfg).unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].dir, "provider-contract-compile");
+        assert_eq!(other[0].env, vec![("RUSTFLAGS".to_string(), String::new())]);
+        for bad in ["", "/abs", "a/../b", "."] {
+            let cfg = serde_json::json!({"sweep": [{"target_dir": bad, "args": []}]});
+            assert!(other_dirs(&cfg).is_err(), "{bad:?} is refused");
+        }
+        // The prune keeps the folder of an entry, however old it is.
+        let target = std::env::temp_dir().join(format!("layr-other-dir-{}", std::process::id()));
+        std::fs::create_dir_all(target.join("provider-contract-compile/debug")).unwrap();
+        std::fs::create_dir_all(target.join("old-unlisted")).unwrap();
+        let later = std::time::SystemTime::now() + UNLISTED_AGE * 2;
+        let stale = stale_unlisted_but(&target, &[], &other, later);
+        assert_eq!(stale, vec![target.join("old-unlisted")]);
+        std::fs::remove_dir_all(&target).unwrap();
     }
 }

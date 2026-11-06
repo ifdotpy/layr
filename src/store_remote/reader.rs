@@ -46,27 +46,43 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
         }
     }
     let mut checked = Vec::new();
+    let mut wanted = Vec::new();
     for object in backend.list("records/")? {
         let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
         let stamp = format!("{} {}", object.key, object.modified);
         let here = || have.get(&machine).is_some_and(|seqs| (first..=last).all(|seq| seqs.contains(&seq)));
-        if known.contains(&stamp) && here() {
-            checked.push(stamp);
-            continue;
-        }
+        let read = !(known.contains(&stamp) && here());
         checked.push(stamp);
-        let body = backend.get(&object.key)?.context("record segment disappeared")?;
+        if read {
+            wanted.push((object.key, machine, first, last));
+        }
+    }
+    // A segment is one small object: a clone reads hundreds of them, many at a time, so the latency of the remote
+    // counts once per batch, not once per segment.
+    let mut bodies: Vec<Result<Vec<u8>>> = Vec::with_capacity(wanted.len());
+    for batch in wanted.chunks(32) {
+        bodies.extend(std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|(key, ..)| scope.spawn(move || backend.get(key)?.context("record segment disappeared")))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked")))).collect::<Vec<_>>()
+        }));
+    }
+    for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
+        let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
         for line in body.lines() {
             let signed = oplog::parse_line(line, None)?;
             if signed.record.machine != machine || signed.record.seq != expected || expected > last {
-                bail!("segment {} has an invalid sequence", object.key);
+                bail!("segment {} has an invalid sequence", key);
             }
             if signed.record.project != project {
-                bail!("segment {} belongs to another project", object.key);
+                bail!("segment {} belongs to another project", key);
             }
-            crate::model::validate(&signed.record)?;
+            crate::model::validate(&signed.record)
+                .with_context(|| format!("record {} of machine {machine} ({})", signed.record.seq, signed.record.id))?;
             let by_seq = machines.entry(machine.clone()).or_default();
             if let Some(previous) = by_seq.get(&expected) {
                 if previous != line {
@@ -79,7 +95,7 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
             expected = expected.checked_add(1).context("record sequence overflow")?;
         }
         if expected.checked_sub(1) != Some(last) {
-            bail!("segment {} is incomplete", object.key);
+            bail!("segment {} is incomplete", key);
         }
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
@@ -303,9 +319,14 @@ impl<'a> Reader<'a> {
         if !tree.chunks.is_empty() {
             // The chunks of the files that the loop below writes, in its order, so their packs
             // load ahead in the background.
-            let ids = tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten();
+            let ids: Vec<&String> =
+                tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten().collect();
             let (backend, identity) = (self.backend, self.identity);
-            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(ids)?;
+            let chunks = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity));
+            // A chunk that no pack holds fails the restore before any file is read: the indexes are small, the files
+            // are not.
+            chunks.require(&ids)?;
+            chunks.plan(ids)?;
         }
         for (path, entry) in &tree.files {
             if unchanged(path, entry) {
@@ -617,14 +638,43 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
         report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read (--heads)", left.len()));
     }
+    // Cache states that failed to restore, with the packs of the remote then (`<state> <packs>` lines): one is tried
+    // again only when a push or a release changed the packs, so an idle fetch does not download it each time.
+    let failed_path = store.dir.join("cache-restore-failed");
+    let mut failed: BTreeMap<String, String> = std::fs::read_to_string(&failed_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string())))
+        .collect();
+    let failed_before = failed.clone();
+    let mut packs_now: Option<String> = None;
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
+        let cache = repo.p.is_overlay() && state.cache_of.is_some();
+        if cache && failed.contains_key(&id) {
+            let now = match &packs_now {
+                Some(now) => now.clone(),
+                None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
+            };
+            if failed.get(&id) == Some(&now) {
+                report.omitted.push(format!("cache state {}: not restored (it failed before, and the remote did not change)", crate::ids::short(&id)));
+                continue;
+            }
+        }
         let files = match restore_one(repo, &mut reader, &states, &state) {
-            Ok(files) => files,
+            Ok(files) => {
+                failed.remove(&id);
+                files
+            }
             // A cache state that a push removed while this fetch ran (its sweep deletes parts, then the tree, of a
             // cache that a newer state replaced): the cache is regenerable, so it omits, and the fetch goes on.
-            Err(e) if repo.p.is_overlay() && state.cache_of.is_some() => {
+            Err(e) if cache => {
                 report.omitted.push(format!("cache state {}: not restored ({e:#})", crate::ids::short(&id)));
+                let now = match &packs_now {
+                    Some(now) => now.clone(),
+                    None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
+                };
+                failed.insert(id, now);
                 continue;
             }
             Err(e) => return Err(e),
@@ -632,6 +682,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         report.files += files;
         report.states += 1;
         report.state_ids.push(id.clone());
+    }
+    if failed != failed_before {
+        let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
+        crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
     }
     // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
     if bootstrap {

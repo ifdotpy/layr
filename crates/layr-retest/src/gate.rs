@@ -12,8 +12,38 @@ const USAGE: &str = "usage: layr retest gate [--name <n>] [--max-load <n>] -- <c
 /// every process of the user. `LAYR_RETEST_GATE_LOCK` names another path (the tests use one).
 const LOCK_VAR: &str = "LAYR_RETEST_GATE_LOCK";
 const DEFAULT_LOCK: &str = "/tmp/layr-retest-gate.lock";
-/// Default limit of the 1-minute load average. A gate starts when the load is below it.
-const DEFAULT_MAX_LOAD: f64 = 60.0;
+/// A gate waits only when the machine is heavily oversubscribed.
+const DEFAULT_LOAD_PER_CPU: f64 = 4.0;
+
+#[cfg(target_os = "linux")]
+fn parse_online_cpus(text: &str) -> Option<usize> {
+    let mut total = 0usize;
+    let mut last = None;
+    for part in text.trim().split(',') {
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?),
+            None => { let cpu = part.parse::<usize>().ok()?; (cpu, cpu) }
+        };
+        if end < start || last.is_some_and(|previous| start <= previous) { return None; }
+        total = total.checked_add(end.checked_sub(start)?.checked_add(1)?)?;
+        last = Some(end);
+    }
+    (total > 0).then_some(total)
+}
+
+fn online_cpus() -> usize {
+    #[cfg(target_os = "linux")]
+    if let Some(count) = std::fs::read_to_string("/sys/devices/system/cpu/online").ok().and_then(|s| parse_online_cpus(&s)) {
+        return count;
+    }
+    // SAFETY: sysconf has no pointer arguments and does not modify Rust memory.
+    let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    usize::try_from(count).ok().filter(|&n| n > 0).unwrap_or(1)
+}
+
+fn default_max_load() -> f64 {
+    DEFAULT_LOAD_PER_CPU * online_cpus() as f64
+}
 /// The longest wait for a low load. After it the gate starts anyway and says so.
 const MAX_LOAD_WAIT: Duration = Duration::from_secs(600);
 /// How often a waiting gate checks the lock and the load.
@@ -33,7 +63,7 @@ fn parse(args: &[String]) -> Result<Option<Options>> {
         return Ok(None);
     }
     let mut name = "gate".to_string();
-    let mut max_load = DEFAULT_MAX_LOAD;
+    let mut max_load = default_max_load();
     let mut it = args[..at].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -155,7 +185,11 @@ fn with_env<'a>(cmd: &'a mut Command, env: &[(String, String)]) -> &'a mut Comma
 
 /// The env of the gate: the project's `env` (none without `Cargo.toml`), and `RUSTC_WRAPPER` cleared.
 fn gate_env(root: &Path) -> Result<Vec<(String, String)>> {
-    let mut env = if root.join("Cargo.toml").is_file() { layr_cache::cargo::settings(&layr_cache::LocalHost::new(std::time::Duration::from_secs(3600)), root)?.env } else { Vec::new() };
+    let mut env = if root.join("Cargo.toml").is_file() {
+        layr_cache::cargo::settings(&layr_cache::LocalHost::new(std::time::Duration::from_secs(3600)), root)?.env
+    } else {
+        Vec::new()
+    };
     env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     Ok(env)
 }
@@ -222,6 +256,16 @@ pub fn run(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_online_cpu_ranges() {
+        assert_eq!(super::parse_online_cpus("0-15,17,20-23\n"), Some(21));
+        assert_eq!(super::parse_online_cpus("0"), Some(1));
+        for invalid in ["", "2-1", "0-2,2", "a", "1-", "1,,2"] {
+            assert_eq!(super::parse_online_cpus(invalid), None);
+        }
+    }
+
     use super::*;
 
     fn args(v: &[&str]) -> Vec<String> {
@@ -231,7 +275,7 @@ mod tests {
     #[test]
     fn the_command_follows_the_separator() {
         let o = parse(&args(&["--name", "test-fast", "--", "just", "test-fast"])).unwrap().unwrap();
-        assert_eq!((o.name.as_str(), o.max_load, o.command), ("test-fast", DEFAULT_MAX_LOAD, args(&["just", "test-fast"])));
+        assert_eq!((o.name.as_str(), o.max_load, o.command), ("test-fast", default_max_load(), args(&["just", "test-fast"])));
         // A later separator belongs to the command.
         assert_eq!(
             parse(&args(&["--", "cargo", "test", "--", "x"])).unwrap().unwrap().command,

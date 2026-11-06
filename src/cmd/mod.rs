@@ -62,6 +62,14 @@ impl<'a> Here<'a> {
 
     /// Convert command line paths (relative to the working folder) to paths from the line root.
     pub fn specs(&self, args: &[String]) -> Result<Vec<String>> {
+        // Many paths in one argument (zsh does not split an unquoted `$var`): name the cause, not ENAMETOOLONG.
+        if let Some(arg) = args.iter().find(|a| a.trim_end_matches('\n').contains('\n')) {
+            let lines = arg.lines().filter(|l| !l.is_empty()).count();
+            return Err(exit(
+                128,
+                format!("one argument holds {lines} lines; pass each path as its own argument (in zsh: ${{=var}} or ${{(f)var}})"),
+            ));
+        }
         args.iter().map(|a| normalize(&self.loc.sub, a)).collect()
     }
 

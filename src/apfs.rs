@@ -867,10 +867,13 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     Ok(())
 }
 
+/// Below this workload, thread startup costs more than it saves.
+const PARALLEL_FROM: usize = 64;
+
 /// Run `f` for each item with up to four threads; the first error wins.
 fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if items.len() < 64 || threads == 1 {
+    if items.len() < PARALLEL_FROM || threads == 1 {
         return items.iter().try_for_each(|p| f(p));
     }
     let chunk = items.len().div_ceil(threads);
@@ -1595,7 +1598,7 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
 /// and the first error in that order is returned.
 fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if threads == 1 || paths.len() < 64 {
+    if threads == 1 || paths.len() < PARALLEL_FROM {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
     let chunk = paths.len().div_ceil(threads);
@@ -2168,7 +2171,7 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 /// plus each clone key (shared data) once. Clones inside the copy stay clones.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let mut own = 0u64;
-    let mut keys: HashMap<u64, u64> = HashMap::new();
+    let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = HashMap::new();
     visit_space(path, &mut |h| {
         own += h.own;
         for &(key, size) in h.shared {

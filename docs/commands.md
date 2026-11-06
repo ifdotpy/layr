@@ -19,11 +19,11 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
-| queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>]` |
+| queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
-| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN] [--to vM]` |
+| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN\|--since-review] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
@@ -204,10 +204,11 @@ file; on btrfs, XFS and ext4 the extents that a snapshot or reflink shares carry
 `du --store` covers the whole store: each line folder, each other folder of a project (`states`,
 `deltas`, `git`, `meta`) and `trash`. For each part it shows `frees`: the bytes that only this part
 holds, also data that its own files share among themselves, which deleting the part frees. Shared
-data counts once under a key that names it (the APFS clone id, or the physical address of an
-extent), and belongs to a part when no other part references it. The last lines show the data that
-several parts share and the store total. It reads every file's metadata (on Linux it opens each
-file), so a large store takes minutes; 4 workers share the folders of `states` and `deltas`.
+data counts once under a key that names it, and belongs to a part when no other part references it.
+The last lines show the data that several parts share and the store total. On btrfs, the bulk scan
+counts whole allocated extents, including compressed and partially referenced extents. It reports
+committed on-disk allocation, so writes from the current transaction may not appear yet. On
+OverlayFS, data awaiting writeback can count more than once when seen through a view and its layer.
 
 Storage is freed when a state loses its last owner (docs/ownership.md). A command that drops
 the last owner of a state moves its storage to the trash after its commit and after the store
@@ -239,7 +240,7 @@ schema version before the upgrade. Only the newest backup is kept. The rebuild p
 `database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
 database (a 400 MB database needs 400 MB more until the backup goes).
 
-`gc` lists each backup older than 14 days with its size; `gc --repair` removes them.
+A backup older than 14 days goes at the end of the next command on the project.
 
 To roll back to the old layr:
 
@@ -394,6 +395,8 @@ A `.git` folder that the line owner made instead is left alone.
 A name pattern filters the array. JSON output does not support `--all` or `--remotes`.
 
 `layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
+`--since-review` starts at the newest version that you approved (an approval of this machine and your user), so
+a reviewer sees only what changed after their review.
 The `files` array gives each changed file patch, its status, and added and removed line counts.
 Each version is compared with its own first parent. Changes to the base stay out of the interdiff.
 

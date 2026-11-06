@@ -152,6 +152,8 @@ impl Backend {
     pub fn put_file_new(&self, key: &str, mut source: fs::File) -> Result<bool> {
         check_key(key)?;
         match self {
+            // A public release file goes to the root of the store, as `put_new` does with objects outside the epochs.
+            Self::Epoch(epoch) if !epoch_object(key) => epoch.root.put_file_new(key, source),
             Self::Epoch(epoch) => epoch.current.put_file_new(key, source),
             Self::Prefix(base, prefix) => base.put_file_new(&format!("{prefix}{key}"), source),
             Self::S3(s) => s.put_file_new(key, source),
@@ -670,6 +672,26 @@ mod tests {
 #[cfg(test)]
 mod epoch_tests {
     use super::*;
+
+    #[test]
+    fn a_public_release_file_goes_to_the_root_and_a_release_file_to_the_epoch() {
+        let path = std::env::temp_dir().join(crate::ids::new_id());
+        let root = Backend::file(path.clone());
+        let current = root.scoped("project/epochs/new").unwrap();
+        let backend = Backend::Epoch(Box::new(EpochBackend { root: root.clone(), current: current.clone(), history: Vec::new() }));
+        let file = |body: &[u8]| {
+            let p = path.join(format!("in-{}", crate::ids::new_id()));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(&p, body).unwrap();
+            std::fs::File::open(p).unwrap()
+        };
+        assert!(backend.put_file_new("public/release/v1.0.0/a.tar.gz", file(b"public")).unwrap());
+        assert_eq!(root.get("public/release/v1.0.0/a.tar.gz").unwrap().unwrap(), b"public");
+        assert!(current.get("public/release/v1.0.0/a.tar.gz").unwrap().is_none());
+        assert!(backend.put_file_new("files/01a1ae00-0000-7000-8000-000000000001.age", file(b"sealed")).unwrap());
+        assert!(current.get("files/01a1ae00-0000-7000-8000-000000000001.age").unwrap().is_some());
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn historical_states_use_sealed_history_keys_but_slots_never_fall_back() {
         let path = std::env::temp_dir().join(crate::ids::new_id());

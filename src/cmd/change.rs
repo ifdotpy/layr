@@ -35,10 +35,10 @@ pub fn version(value: &str) -> Result<usize> {
 }
 
 pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--json").value("--from").value("--to"), args)?;
+    let a = parse(&Spec::new().flag("--json").flag("--since-review").value("--from").value("--to"), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let usage = "usage: layr change (list|show <id>|log <id>|diff <id> [--from vN] [--to vN]) [--json]";
+    let usage = "usage: layr change (list|show <id>|log <id>|diff <id> [--from vN|--since-review] [--to vN]) [--json]";
     let command = a.pos.first().map(String::as_str).unwrap_or("");
     if command == "list" && a.pos.len() == 1 {
         let mut rows = Vec::new();
@@ -146,7 +146,14 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if versions.len() < 2 && (a.get("--from").is_none() || a.get("--to").is_none()) {
                 bail!("change {id} has only one version");
             }
-            let from = a.get("--from").map(version).transpose()?.unwrap_or_else(|| versions.len().saturating_sub(2));
+            let from = if a.has("--since-review") {
+                if a.has("--from") {
+                    bail!("--since-review and --from name the same version; give one");
+                }
+                reviewed(repo, ctx, &versions)?.ok_or_else(|| anyhow::anyhow!("you approved no version of change {id}"))?
+            } else {
+                a.get("--from").map(version).transpose()?.unwrap_or_else(|| versions.len().saturating_sub(2))
+            };
             let to = a.get("--to").map(version).transpose()?.unwrap_or(versions.len() - 1);
             let old = versions.get(from).ok_or_else(|| anyhow::anyhow!("change {id} has no version v{}", from + 1))?;
             let new = versions.get(to).ok_or_else(|| anyhow::anyhow!("change {id} has no version v{}", to + 1))?;
@@ -161,6 +168,21 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => bail!("{usage}"),
     }
     Ok(0)
+}
+
+/// The newest version of a change that the caller approved (an `approval` attestation of this machine and this
+/// user on the state of that version), as an index into `versions`.
+fn reviewed(repo: &Repo, ctx: &Ctx, versions: &[StateRec]) -> Result<Option<usize>> {
+    for (i, v) in versions.iter().enumerate().rev() {
+        for a in repo.p.db.attestations(&v.id, Some("approval"))? {
+            let mine = a.signer == repo.p.store.machine.id
+                && repo.p.db.record(&a.attestation_id)?.is_some_and(|r| r.actor.uid == ctx.caller.uid);
+            if mine {
+                return Ok(Some(i));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {

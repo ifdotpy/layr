@@ -127,21 +127,26 @@ try:
     (work / 'd4/f400').write_bytes(b'file 400\n')
     print('PASS automatic states are thin, and an unchanged folder makes none', flush=True)
 
-    # gc removes unused views and gives a long chain a complete tree.
+    # gc removes unused views. A long chain gets a complete tree: a save starts a background keyframe, and
+    # gc makes one for a head that still has a long chain. After gc, one of the last thin.chain states of the
+    # head is a complete tree.
     run(work, 'config', 'thin.view_seconds', '0')
     run(work, 'config', 'thin.chain', '3')
     run(work, 'show', 'head')
     run(work, 'diff', 'head~1', 'head', '--', 'd0/f1')
+    steps = []
     for n in range(4):
         (work / 'd5' / f'f{500 + n}').write_bytes(f'commit {n}\n'.encode())
         run(work, 'save', '-qam', f'step {n}')
+        steps.append(head(work))
     before = tree(work)
     run(work, 'gc', '--repair')
-    h = head(work)
-    assert (project / 'states' / h).is_dir() and not (project / 'deltas' / h).exists()
+    assert any((project / 'states' / s).is_dir() for s in steps[-3:]), steps
     assert not (project / 'states' / h1).exists(), 'gc keeps an unused view'
     assert tree(work) == before and not run(work, 'status', '--porcelain').stdout
     assert run(work, 'show', 'head~3:d5/f500').stdout == 'commit 0\n'
+    # A background keyframe keeps the layer for the readers that opened it as long as a view in use stays.
+    run(work, 'config', 'thin.view_seconds', '60')
     print('PASS gc removes unused views and shortens long chains', flush=True)
 
     # A changed file with two names makes a complete automatic state, which keeps both names.

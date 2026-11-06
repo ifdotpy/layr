@@ -9,7 +9,7 @@ use crate::repo::Repo;
 use anyhow::{bail, Result};
 use std::fs::File;
 
-fn try_lock(repo: &Repo) -> Result<Option<File>> {
+pub(crate) fn try_lock(repo: &Repo) -> Result<Option<File>> {
     let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(repo.p.meta_dir().join("queue.lock"))?;
     match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(Some(file)),
@@ -86,11 +86,11 @@ fn print_entry(ctx: &Ctx, entry: &QueueEntry) {
 }
 
 pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--into").flag("--json"), args)?;
+    let a = parse(&Spec::new().value("--into").value("--push").flag("--json"), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let command = a.pos.first().map(String::as_str).unwrap_or("");
-    let usage = "usage: layr queue (add <rev>|list|remove <entry>|run) [--into <line>] [--json]";
+    let usage = "usage: layr queue (add <rev>|list|remove <entry>|run [--push <remote>]) [--into <line>] [--json]";
     match command {
         "add" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
@@ -178,7 +178,14 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "run" if a.pos.len() == 1 => {
             let line = a.get("--into").map(|name| repo.line(name)).transpose()?;
             let entries = run_entries(ctx, repo, line.as_ref().map(|line| line.id.as_str()), false)?;
-            let failed = entries.iter().any(|entry| entry.status == "failed");
+            let mut failed = entries.iter().any(|entry| entry.status == "failed");
+            let push = a.get("--push").map(str::to_owned).or(push_remote(repo)?);
+            if let Some(remote) = push {
+                if let Err(e) = push_merged(ctx, repo, &entries, &remote) {
+                    eprintln!("layr queue: the merged line was not pushed to {remote}: {e:#}");
+                    failed = true;
+                }
+            }
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&entries)?);
             } else {
@@ -256,6 +263,13 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
             break (result, probes);
         };
         let (outcome, probes) = outcome;
+        // A check that waits for a runner of another platform keeps the entry pending; the entries after it wait too.
+        if outcome.as_ref().err().is_some_and(|e| e.downcast_ref::<super::mergecmd::ChecksWaiting>().is_some()) {
+            if let Err(e) = &outcome {
+                eprintln!("layr queue: entry '{}' waits: {e:#}", entry.id);
+            }
+            break;
+        }
         match outcome {
             Ok(0) => {}
             result => {
@@ -282,6 +296,37 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
     Ok(results)
 }
 
+/// The remote that a queue pass pushes its merged lines to (`queue.push`), if any.
+fn push_remote(repo: &Repo) -> Result<Option<String>> {
+    match repo.p.config_value("queue.push")? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(_) => bail!("queue.push must be the name of a remote"),
+    }
+}
+
+/// Push each line that an entry of `entries` merged into, once, to `remote`, from the folder of that line: the
+/// line moved on this machine, and other machines and the site see it only after the push.
+fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remote: &str) -> Result<()> {
+    let mut pushed = std::collections::BTreeSet::new();
+    for entry in entries.iter().filter(|entry| entry.status == "done") {
+        let line = target(repo, entry)?;
+        if !pushed.insert(line.id.clone()) {
+            continue;
+        }
+        let push_ctx = Ctx {
+            store: crate::store::Store::open(&ctx.store.root)?,
+            caller: ctx.caller.clone(),
+            cwd: repo.working(&line),
+            env: ctx.env.clone(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let code = super::remote::push(&push_ctx, &[remote.to_string(), "-q".to_string()])?;
+        anyhow::ensure!(code == 0, "push of line {} exited {code}", line.name);
+    }
+    Ok(())
+}
+
 /// The daemon and queue add use the target line owner, with the normal merge policy.
 pub fn run_configured(ctx: &Ctx, repo: &Repo, only: Option<&str>) -> Result<()> {
     let configured = match repo.p.config_value("queue.run")? {
@@ -302,7 +347,10 @@ pub fn run_configured(ctx: &Ctx, repo: &Repo, only: Option<&str>) -> Result<()> 
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let run_repo = Repo::open(&run_ctx, &repo.p.name)?;
-        run_entries(&run_ctx, &run_repo, Some(&line.id), true)?;
+        let entries = run_entries(&run_ctx, &run_repo, Some(&line.id), true)?;
+        if let Some(remote) = push_remote(&run_repo)? {
+            push_merged(&run_ctx, &run_repo, &entries, &remote)?;
+        }
     }
     Ok(())
 }

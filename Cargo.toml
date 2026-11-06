@@ -2,6 +2,9 @@
 members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.99.1"
+
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that
 # main makes for installs. A profile folder is swept only when a command lists it: without the release command,
@@ -13,8 +16,9 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-version = "0.30.1"
+version = "0.33.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
 publish = false
@@ -47,7 +51,7 @@ regex = "1"
 rustix = { version = "1", features = ["fs", "net", "process", "thread", "event", "stdio", "pipe", "termios"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_yaml = "0.9"
 layr-hashers = { path = "crates/layr-hashers" }

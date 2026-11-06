@@ -43,8 +43,9 @@ const INCREMENTAL_VAR: &str = "LAYR_RETEST_INCREMENTAL";
 const LINE_TABLES_VAR: &str = "LAYR_RETEST_LINE_TABLES";
 /// Set to `0` to skip the sweep of stale build output after the build.
 const SWEEP_VAR: &str = "LAYR_RETEST_SWEEP";
-/// Number of parallel coverage exports.
-const EXPORT_WORKERS: usize = 4;
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
 /// Files that no record keeps: the standard library and build output. Cargo's own folders stay:
 /// they name the packages that a test used.
 const IGNORE_FILES: &str = r"(/\.rustup/|/rustc/|/target/)";
@@ -755,10 +756,11 @@ fn run(args: &[String]) -> Result<i32> {
             cmd.args(["-E", &filter_expr(&stale)]);
         }
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("cannot start cargo nextest")?;
-        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, PathBuf, PathBuf)>(EXPORT_WORKERS);
+        let export_workers = workers().min(stale.len());
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, PathBuf, PathBuf)>(export_workers);
         let rx = Mutex::new(rx);
         std::thread::scope(|sc| {
-            for _ in 0..EXPORT_WORKERS {
+            for _ in 0..export_workers {
                 sc.spawn(|| loop {
                     let Ok((key, bin, dir)) = rx.lock().unwrap().recv() else { break };
                     // A test that died before it wrote a profile has no coverage.

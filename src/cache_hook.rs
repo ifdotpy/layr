@@ -259,6 +259,7 @@ fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&s
     ];
     vars.extend(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     let mut cmd = Command::new(&launch.exe);
+    crate::sys::inherit_background(&mut cmd);
     cmd.args(&launch.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Err(e) = privs::command_as(&mut cmd, uid, &vars) {
         return Run::Start(format!("{e:#}"));

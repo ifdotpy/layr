@@ -48,7 +48,9 @@ export LAYR_ROOT_SUBVOLUME_PATH=$M
 export LAYR_ROOT=$M/own
 ok "a snapper config of the top level does not cover a subvolume" sh -c "cd $M/own/projects/q/lines/main && $LAYR status >/dev/null"
 
-# A line folder that a rollback emptied stops every command of its project.
+# A line folder that a rollback emptied stops every command of its project. The garbage check cannot read the
+# projects that this test rolls back on purpose.
+LAYR_TEST_GARBAGE_OK=1
 P=$M/own/projects/q/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true

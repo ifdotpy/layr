@@ -22,9 +22,20 @@ export LAYR_ROOT=$T/store
 # Tests empty the trash in the command itself (bounded), so their cleanup does not race the
 # background emptier; t82 checks the background path.
 export LAYR_TRASH_BUDGET_MS=${LAYR_TRASH_BUDGET_MS:-2000}
+# A sweep releases a dead chunk at its first pass: one machine pushes at a time here (t148 tests the wait).
+export LAYR_TEST_CHUNK_GRACE=${LAYR_TEST_CHUNK_GRACE:-0}
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
+
+# Resolve rustup's toolchain in the sudo user's home, where the test owner can read it.
+owner_toolchain_env() {
+    if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        export RUSTUP_HOME=${SUDO_RUSTUP_HOME:-$sudo_home/.rustup} CARGO_HOME=${SUDO_CARGO_HOME:-$sudo_home/.cargo}
+    fi
+}
 
 l() {
     "$LAYR" "$@"
@@ -111,7 +122,30 @@ has() { # has <description> <needle> <haystack>
     case "$3" in *"$2"*) PASS=$((PASS + 1)); echo "PASS $1" ;; *) FAIL=$((FAIL + 1)); printf 'FAIL %s\n  missing: %s\n  in: %s\n' "$1" "$2" "$3" ;; esac
 }
 
+# No garbage is left (docs/ownership.md): data goes in the operation that makes it dead, with no gc. At the end of
+# each test the owners of every project of the test store equal the replay of its records with no leaked state
+# (`layr gc`, a check), and no cache data is unreachable (`fsck --caches`). A test that makes garbage on purpose (a
+# crash, a leak) sets LAYR_TEST_GARBAGE_OK=1.
+garbage_check() {
+    [ -n "${LAYR_TEST_GARBAGE_OK:-}" ] && return 0
+    # A test that unsets LAYR_ROOT (set -u) has no store to check.
+    [ -n "${LAYR_ROOT:-}" ] && [ -d "$LAYR_ROOT/projects" ] || return 0
+    local d name out
+    for d in "$LAYR_ROOT"/projects/*/; do
+        name=$(basename "$d")
+        case "$name" in *%*) continue ;; esac
+        [ -f "$d/meta/db/layr.sqlite" ] || continue
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" gc 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no garbage is left in project $name (layr gc)"; echo "$out" | sed 's/^/  /' | head -8
+        fi
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --caches 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --caches)"; echo "$out" | sed 's/^/  /' | head -8
+        fi
+    done
+}
+
 finish() {
+    garbage_check
     echo "$(basename "$0"): $PASS passed, $FAIL failed"
     [ "$FAIL" -eq 0 ]
 }

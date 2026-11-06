@@ -51,6 +51,19 @@ pub fn validate_config(key: &str, value: &Value) -> Result<()> {
                 }
             }
         }
+        "checks.after" => {
+            for (name, needs) in value.as_object().context("checks.after must be an object of check names to check arrays")? {
+                crate::oci::valid_component(name)?;
+                for need in needs.as_array().context("checks.after maps a check name to an array of checks")? {
+                    let need = need.as_str().context("checks.after needs string check names")?;
+                    let (check, platform) = split_need(need);
+                    crate::oci::valid_component(check)?;
+                    if platform.is_some_and(|p| !PLATFORMS.contains(&p)) {
+                        bail!("check platform must be one of {}", PLATFORMS.join(", "));
+                    }
+                }
+            }
+        }
         "checks.timeout" => {
             number(key, value, 1, 86400)?;
         }
@@ -78,12 +91,12 @@ pub fn platform() -> String {
 }
 
 /// Whether the platform `have` (`<os>-<arch>`) meets the entry `want` of `checks.platforms`.
-fn meets(want: &str, have: &str) -> bool {
+pub(crate) fn meets(want: &str, have: &str) -> bool {
     have == want || have.strip_prefix(want).is_some_and(|arch| arch.starts_with('-'))
 }
 
 /// The platform entries of the check `name`; None: one run on any platform.
-fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
+pub(crate) fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
     match platforms.get(name) {
         Some(Value::String(one)) => vec![Some(one.clone())],
         Some(Value::Array(list)) => list.iter().filter_map(|e| e.as_str().map(|e| Some(e.to_owned()))).collect(),
@@ -383,6 +396,54 @@ fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: O
     }))
 }
 
+/// An entry of `checks.after`: `<check>` or `<check>@<platform>`.
+fn split_need(need: &str) -> (&str, Option<&str>) {
+    match need.split_once('@') {
+        Some((check, platform)) => (check, Some(platform)),
+        None => (need, None),
+    }
+}
+
+/// What the checks that a job needs (`checks.after`) say about its state.
+#[derive(Debug, PartialEq)]
+enum Needs {
+    /// Each one passed (on its platform, when the entry names one).
+    Ready,
+    /// One has no result yet: the job waits, with no attestation.
+    Wait(String),
+    /// One failed: the job does not run, with no attestation.
+    Skip(String),
+}
+
+/// The state of the checks that the check `name` needs on `state`. A passing result on any platform counts unless
+/// the entry names one.
+fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMap<String, String>) -> Result<Needs> {
+    let Some(list) = after.get(name).and_then(Value::as_array) else {
+        return Ok(Needs::Ready);
+    };
+    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let results: Vec<Value> = crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
+    for need in list.iter().filter_map(Value::as_str) {
+        let (check, platform) = split_need(need);
+        let Some(command) = commands.get(check) else {
+            return Ok(Needs::Skip(format!("it needs check '{check}', which is not configured")));
+        };
+        let argv = json!(layr_model::protection::check_argv(command));
+        let on = |r: &&Value| {
+            r["argv"] == argv && platform.is_none_or(|want| r["platform"].as_str().is_some_and(|have| meets(want, have)))
+        };
+        let exits: Vec<i64> = results.iter().filter(on).filter_map(|r| r["exit"].as_i64()).collect();
+        if exits.contains(&0) {
+            continue;
+        }
+        if !exits.is_empty() {
+            return Ok(Needs::Skip(format!("check '{need}' failed")));
+        }
+        return Ok(Needs::Wait(format!("check '{need}' has no result yet")));
+    }
+    Ok(Needs::Ready)
+}
+
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
     let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
@@ -399,6 +460,10 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
     if privileged_only && !(local.runner && local.privileged) {
         bail!("privileged watcher requires local checks.runner and checks.privileged-runner true");
     }
+    let after = setting(&policy, "checks.after", json!({}))?;
+    // The jobs that need other checks (`checks.after`) go last, so in one pass the checks they need run first.
+    let (mut jobs, later): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|(_, name, _)| after.get(name.as_str()).is_none());
+    jobs.extend(later);
     let mut results = Vec::new();
     let mut pending = 0;
     let mut pending_privileged = 0;
@@ -414,6 +479,13 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
         }
         if attested(repo, &state, &argv, is_privileged, want.as_deref())? {
             continue;
+        }
+        match needs(repo, &state, &name, &after, &commands)? {
+            Needs::Ready => {}
+            Needs::Wait(why) | Needs::Skip(why) => {
+                eprintln!("layr checks: {name} of {} does not run now: {why}", crate::ids::short(&state));
+                continue;
+            }
         }
         // Collected sources have metadata but cannot be executed. Never attest them as passing.
         if !repo.tree_available(&state) {

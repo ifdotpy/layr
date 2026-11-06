@@ -2309,7 +2309,7 @@ impl<'a> Repo<'a> {
                 let kept = if std::fs::symlink_metadata(w.join(cache_journal(&cache))).is_ok() {
                     Some("cache swap not finished".to_string())
                 } else {
-                    crate::busy::user_of(&path)?.map(|u| format!("in use by pid {} ({})", u.pid, u.name))
+                    crate::busy::writer_of(&path)?.map(|u| format!("in use by {u}"))
                 };
                 out.push(Leftover { line: line.name.clone(), rel, bytes: tree_bytes(&path), path, kept });
             }
@@ -3658,15 +3658,15 @@ fn writes_since(baseline: &Manifest, now: &Manifest, carried: &std::collections:
 /// copied. The automatic save skips it; `save --caches` and `overlay repair` report it.
 #[derive(Debug)]
 pub enum CacheRefused {
-    Busy { path: String, pid: u32, name: String },
+    Busy { path: String, user: crate::busy::User },
     Changed { path: String },
 }
 
 impl std::fmt::Display for CacheRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Busy { path, pid, name } => {
-                write!(f, "{path}: not made a cache: in use by pid {pid} ({name}); run again when the build ends")
+            Self::Busy { path, user } => {
+                write!(f, "{path}: not made a cache: in use by {user}; run again when the build ends")
             }
             Self::Changed { path } => {
                 write!(f, "{path}: not made a cache: written while it was copied; run again when the build ends")
@@ -3677,10 +3677,11 @@ impl std::fmt::Display for CacheRefused {
 
 impl std::error::Error for CacheRefused {}
 
-/// Refuse a folder that a process uses: a copy and a swap would lose the writes that come later.
+/// Refuse a folder that a process can write: a copy and a swap would lose the writes that come
+/// later. A reader keeps its old files and loses nothing.
 fn refuse_busy(w: &Path, path: &str) -> Result<()> {
-    if let Some(user) = crate::busy::user_of(&fsutil::safe_join(w, path)?)? {
-        return Err(CacheRefused::Busy { path: path.to_string(), pid: user.pid, name: user.name }.into());
+    if let Some(user) = crate::busy::writer_of(&fsutil::safe_join(w, path)?)? {
+        return Err(CacheRefused::Busy { path: path.to_string(), user }.into());
     }
     Ok(())
 }

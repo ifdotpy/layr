@@ -8,6 +8,7 @@
 #
 # The lines belong to the user that runs cargo: on a root run (the Linux CI job) the user who started the job.
 . "$(dirname "$0")/lib.sh"
+owner_toolchain_env
 
 if [ "$(id -u)" = 0 ]; then
     # The owner is the user who started the job (sudo sets SUDO_USER): its home holds the toolchain that cargo

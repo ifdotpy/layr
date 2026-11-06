@@ -9,6 +9,11 @@
 //! owner releases them. Rings (automatic states, undo records, deleted lines) are sets of the
 //! newest entries, so the table does not depend on the order in which records arrive.
 
+
+/// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state needs"). `parent`,
+/// `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record. `conflict` needs the trees of its sides.
+pub const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+
 use crate::db::{kind_str, Db, SCHEMA};
 use crate::model::{Record, StateKind};
 use anyhow::Result;
@@ -170,6 +175,18 @@ impl Db {
         Ok(())
     }
 
+    /// Whether a command pins `state` now (a reader outside the store lock).
+    pub fn is_pinned(&self, state: &str) -> Result<bool> {
+        Ok(self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind='pin')", params![state], |r| r.get(0))?)
+    }
+
+    /// Whether a tree owner (`TREE_OWNERS`) keeps the tree of `state`.
+    pub fn has_tree_owner(&self, state: &str) -> Result<bool> {
+        const SQL: &str = "SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind IN \
+            ('head','auto','undo','deleted','park','overlay','pin','conflict'))";
+        Ok(self.one(SQL, params![state], |r| r.get(0))?)
+    }
+
     /// Add rows. A state that gains its first owner also gets the rows it holds.
     fn add_rows(&self, rows: Vec<Row>) -> Result<()> {
         let mut work = rows;
@@ -196,11 +213,16 @@ impl Db {
         Ok(())
     }
 
-    /// Remove rows. A state that loses its last owner is dead and releases the rows it holds.
+    /// Remove rows. A state that loses its last owner is dead and releases the rows it holds. A state that loses
+    /// its last tree owner but keeps others goes to the free queue too: the free step drops its tree when git can
+    /// build it again (an imported state), and keeps the record.
     fn remove_rows(&self, rows: Vec<Row>) -> Result<()> {
         let mut work = rows;
         while let Some((s, k, h)) = work.pop() {
             let n = self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
+            if n > 0 && TREE_OWNERS.contains(&k.as_str()) && !FILL_ONLY.with(|c| c.get()) && !self.has_tree_owner(&s)? {
+                self.exec("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", params![s])?;
+            }
             if n > 0 && !self.owners_live(&s)? {
                 self.mark_dead(&s)?;
                 let mut st = self.cached(

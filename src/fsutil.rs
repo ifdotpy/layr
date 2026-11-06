@@ -1275,6 +1275,78 @@ pub struct Space {
     pub unique: u64,
 }
 
+/// Use the parallelism available to this process, including system-imposed limits.
+pub fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Run a dynamic queue of background jobs, each of which can add more jobs.
+pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
+    if seed.is_empty() {
+        return;
+    }
+    let pending = seed.len();
+    let queue = Mutex::new((VecDeque::from(seed), pending));
+    let ready = Condvar::new();
+    struct Pending<'a, T>(&'a Mutex<(VecDeque<T>, usize)>, &'a Condvar);
+    impl<T> Drop for Pending<'_, T> {
+        fn drop(&mut self) {
+            let mut q = self.0.lock().unwrap();
+            q.1 -= 1;
+            if q.1 == 0 {
+                self.1.notify_all();
+            }
+        }
+    }
+    std::thread::scope(|scope| {
+        for _ in 0..workers() {
+            scope.spawn(|| {
+                crate::sys::lower_thread_priority();
+                loop {
+                    let job = {
+                        let mut q = queue.lock().unwrap();
+                        while q.0.is_empty() && q.1 != 0 {
+                            q = ready.wait(q).unwrap();
+                        }
+                        match q.0.pop_front() {
+                            Some(job) => job,
+                            None => break,
+                        }
+                    };
+                    let _pending = Pending(&queue, &ready);
+                    work(job, &|child| {
+                        let mut q = queue.lock().unwrap();
+                        q.1 += 1;
+                        q.0.push_back(child);
+                        ready.notify_one();
+                    });
+                }
+            });
+        }
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExtentKey {
+    /// Data at a device address (btrfs disk_bytenr, or the FIEMAP physical address).
+    #[cfg(target_os = "linux")]
+    Disk(u64),
+    /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    Inline { ino: u64, offset: u64, generation: u64, payload: u64 },
+    /// Data without a physical address, identified by its inode and logical offset.
+    #[cfg(target_os = "linux")]
+    Unaddressed { dev: u64, ino: u64, offset: u64 },
+    /// An APFS clone id: files cloned from one another share it.
+    #[cfg(target_os = "macos")]
+    ApfsClone(u64),
+    /// Shared APFS bytes without a clone id, keyed by their file id.
+    #[cfg(target_os = "macos")]
+    ApfsFile(u64),
+}
+
 /// What one file holds for `layr du`: its allocated bytes, the bytes that no other file shares,
 /// and data that clones of it share, by a key that names that data with its size (the APFS
 /// clone id, or the physical address of a Linux extent).
@@ -1284,7 +1356,7 @@ pub struct Held<'a> {
     pub own: u64,
     /// The part of `own` that has no key (`layr du --store` counts it for its part alone).
     pub exclusive: u64,
-    pub shared: &'a [(u64, u64)],
+    pub shared: &'a [(ExtentKey, u64)],
 }
 
 impl Space {
@@ -1309,9 +1381,8 @@ pub fn apfs_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                     Err(err) => return Err(err.into()),
                 }
             } else if e.links <= 1 || seen.insert(e.ino) {
-                // Shared bytes without a clone id get a key of their own file (top bit set).
                 let rest = e.alloc.saturating_sub(e.private);
-                let key = if e.clone != 0 { e.clone } else { e.ino | 1 << 63 };
+                let key = if e.clone != 0 { ExtentKey::ApfsClone(e.clone) } else { ExtentKey::ApfsFile(e.ino) };
                 let shared = [(key, rest)];
                 let own = e.private.min(e.alloc);
                 f(&Held { alloc: e.alloc, own, exclusive: own, shared: &shared[..usize::from(rest > 0)] });
@@ -1331,6 +1402,19 @@ pub fn apfs_space(root: &Path) -> Result<Space> {
     Ok(space)
 }
 
+/// Account for unaddressable extents separately from addressable extents.
+#[cfg(target_os = "linux")]
+fn fiemap_held(extents: &[crate::sys::MappedExtent], dev: u64, ino: u64, f: &mut dyn FnMut(&Held)) {
+    let alloc = extents.iter().map(|x| x.len).sum();
+    let own = extents.iter().filter(|x| !x.shared).map(|x| x.len).sum();
+    // An inode key preserves hard-link sharing when FIEMAP has no physical address.
+    let shared: Vec<_> = extents
+        .iter()
+        .map(|x| (x.addr.map_or(ExtentKey::Unaddressed { dev, ino, offset: x.logical }, ExtentKey::Disk), x.len))
+        .collect();
+    f(&Held { alloc, own, exclusive: 0, shared: &shared });
+}
+
 /// Visit the files of a folder on Linux: the extents of each, shared ones by physical address.
 #[cfg(target_os = "linux")]
 pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
@@ -1347,14 +1431,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
                 walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
                 match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
-                    Ok(extents) => {
-                        let alloc = extents.iter().map(|x| x.1).sum();
-                        // Every extent has a key: ext4 never flags a shared extent, and a file seen
-                        // through an OverlayFS mount is the same extent as its layer file.
-                        let own = extents.iter().filter(|x| !x.2).map(|x| x.1).sum();
-                        let shared: Vec<(u64, u64)> = extents.iter().map(|x| (x.0, x.1)).collect();
-                        f(&Held { alloc, own, exclusive: 0, shared: &shared });
-                    }
+                    Ok(extents) => fiemap_held(&extents, m.dev(), m.ino(), f),
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
                 }
@@ -1363,6 +1440,35 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
         Ok(())
     }
     walk(root, f, &mut Default::default())
+}
+
+/// Visit just the files directly in a directory, sharing hard-link tracking with other units.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub fn fiemap_visit_shallow(
+    root: &Path,
+    seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
+    dirs: &mut dyn FnMut(std::path::PathBuf),
+    f: &mut dyn FnMut(&Held, &File, u64),
+) -> Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(e) => return Err(e).with_context(|| root.display().to_string()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let m = entry.metadata()?;
+        if m.is_dir() {
+            dirs(entry.path());
+        } else if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
+            match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file).map(|extents| (file, extents))) {
+                Ok((file, extents)) => fiemap_held(&extents, m.dev(), m.ino(), &mut |held| f(held, &file, m.dev())),
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
+                Err(err) => return Err(err).with_context(|| entry.path().display().to_string()),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Space` of a folder on Linux.
@@ -1377,6 +1483,37 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
+
+    #[test]
+    fn work_queue_finishes_dynamic_jobs_and_propagates_panics() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = AtomicUsize::new(0);
+        super::work_queue(vec![0], |depth, add| {
+            count.fetch_add(1, Ordering::Relaxed);
+            if depth < 3 {
+                add(depth + 1);
+                add(depth + 1);
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 15);
+        assert!(std::panic::catch_unwind(|| super::work_queue(vec![()], |(), _| panic!("job failed"))).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unaddressable_extents_are_not_deduplicated_by_address_zero() {
+        let mut keys = Vec::new();
+        use crate::sys::MappedExtent;
+        for ino in [1, 1, 2] {
+            let extents = [MappedExtent { logical: 0, addr: None, len: 4096, shared: false }];
+            super::fiemap_held(&extents, 7, ino, &mut |held| {
+                assert_eq!(held.own, 4096);
+                keys.extend_from_slice(held.shared);
+            });
+        }
+        assert_eq!(keys[0], keys[1]);
+        assert_ne!(keys[0], keys[2]);
+    }
 
     #[test]
     fn ranges_merge_and_clip() {

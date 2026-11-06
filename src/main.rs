@@ -32,6 +32,8 @@ mod ids;
 use layr_store::http;
 mod ignore_rules;
 mod lineops;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs_scan;
 mod linepaths;
 mod merge;
 mod model;
@@ -89,8 +91,18 @@ fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
         // The trash of a store, emptied in the background after a command (`store::Lock`).
+        crate::sys::lower_process_priority();
         if let Err(e) = crate::store::empty_trash_process(std::path::Path::new(&argv[1])) {
             eprintln!("layr empty trash: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if argv.first().map(String::as_str) == Some("__keyframe") && argv.len() == 4 {
+        // A complete tree for a thin line head with a long chain, after the command that moved it (`free`).
+        if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3]) {
+            eprintln!("layr keyframe: {e:#}");
             std::process::exit(1);
         }
         return;

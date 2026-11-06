@@ -171,8 +171,9 @@ command reads it.
   command holds it.
 - Offline: when no remote gives the tree, the command fails with the state, the remote name and the
   reason. Run the command again when the remote is reachable.
-- Periodic gc: Linux runs `gc` hourly in `layr daemon`. macOS runs no periodic gc (owner decision,
-  2026-11-03): states are freed by operations, and `layr gc` runs by hand.
+- No periodic gc: the operations that make data dead free it (docs/ownership.md). `layr daemon` writes a
+  daily garbage report to its log, one line for each project where `layr gc` or `layr fsck --caches` finds
+  something; it changes nothing. `layr gc --repair` runs by hand, after a crash or a bug.
 - Not done: fetch back from a git remote (a commit as a state). Git-only states stay on disk.
 
 ## 5. Warm caches

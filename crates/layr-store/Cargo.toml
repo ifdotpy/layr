@@ -2,6 +2,7 @@
 name = "layr-store"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Encrypted Layr store format, keys, and transport"
 license = "MIT"
 
@@ -27,7 +28,7 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 layr-hashers = { path = "../layr-hashers" }
 uuid = "1"
