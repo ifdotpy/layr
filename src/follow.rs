@@ -462,6 +462,7 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
         caller: caller.clone(),
         cwd,
         env: HashMap::new(),
+        author: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     };
     let repo = Repo::open(&ctx, name)?;

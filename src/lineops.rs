@@ -204,7 +204,7 @@ impl Repo<'_> {
     }
 
     /// The caller holds the project lock. Checks that the names are still free and the start
-    /// state is still there, then moves each prepared folder into place and records the line.
+    /// state is still there, then publishes every prepared folder and records the whole batch in one transaction.
     pub(crate) fn commit_prepared_lines(&self, ctx: &Ctx, prepared: PreparedLines) -> Result<Vec<Line>> {
         let _t = crate::trace::span("record lines");
         #[cfg(feature = "overlayfs")]
@@ -214,12 +214,12 @@ impl Repo<'_> {
             let names: Vec<String> = lines.iter().map(|l| l.name.clone()).collect();
             self.check_names_free(&names)?;
             self.source_state(&start)?;
-            for ((line, tmp), rec) in lines.iter().zip(&tmps).zip(recs) {
+            for (line, tmp) in lines.iter().zip(&tmps) {
                 crate::fsutil::rename_tree(tmp, self.working(line))?;
                 #[cfg(feature = "overlayfs")]
                 self.take_caches(ctx, line, &start, source.as_ref(), &self.working(line))?;
-                self.commit_record(ctx, rec)?;
             }
+            self.p.append_batch(recs, &ctx.actor())?;
             Ok(())
         })();
         if let Err(e) = result {
@@ -241,7 +241,7 @@ impl Repo<'_> {
                 .collect::<Vec<_>>();
             if !created.is_empty() {
                 let _ = crate::gitbridge::sync_store_access(self);
-                bail!("{e:#}; created lines: {}", created.join(", "));
+                bail!("{e:#}; batch committed despite the reported error; recorded lines: {}", created.join(", "));
             }
             return Err(e);
         }
@@ -328,5 +328,148 @@ mod tests {
         assert_eq!(batch_names("trial", 3).unwrap(), ["trial-1", "trial-2", "trial-3"]);
         assert!(batch_names("trial", 0).is_err());
         assert!(batch_names("../trial", 1).is_err());
+    }
+}
+
+#[cfg(all(test, not(feature = "overlayfs")))]
+mod batch_commit_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::store::{Project, Store};
+
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn context() -> Result<(Scratch, Ctx)> {
+        let root = Scratch(std::env::temp_dir().join(format!("layr-batch-{}", ids::new_id())));
+        std::fs::create_dir_all(&root.0)?;
+        let ctx = Ctx {
+            store: Store::open(&root.0.join("store"))?,
+            caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.0.clone(),
+            env: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            author: Default::default(),
+        };
+        Ok((root, ctx))
+    }
+
+    // Plain folders exercise the actual publication/record/rollback path on any filesystem.
+    fn prepared(ctx: &Ctx) -> Result<(Repo<'_>, PreparedLines)> {
+        let dir = ctx.store.project_dir("batch")?;
+        for name in ["meta/db", "lines", "work", "states"] {
+            std::fs::create_dir_all(dir.join(name))?;
+        }
+        let p = Project {
+            store: &ctx.store,
+            name: "batch".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        let mut project = Record::new("project");
+        project.data = serde_json::json!({"id": p.id, "name": p.name, "config": {}});
+        p.append(project, &ctx.actor())?;
+        let start = ids::new_id();
+        std::fs::create_dir(p.state_path(&start))?;
+        let mut state = Record::new("state");
+        state.states.push(serde_json::from_value(serde_json::json!({
+            "id": start, "kind": "commit", "subvol": "", "author": ctx.author(), "time": ids::now_ms()
+        }))?);
+        p.append(state, &ctx.actor())?;
+        let repo = Repo { p, ctx: None };
+        let mut lines = Vec::new();
+        let mut tmps = Vec::new();
+        let mut recs = Vec::new();
+        for name in batch_names("trial", 3)? {
+            let line = Line {
+                id: ids::new_id(),
+                name,
+                head: start.clone(),
+                owner: ctx.caller.uid,
+                machine: ctx.store.machine.id.clone(),
+            };
+            let tmp = dir.join("work").join(&line.id);
+            std::fs::create_dir(&tmp)?;
+            std::fs::write(tmp.join("content"), &line.name)?;
+            let mut rec = Record::new("line.create");
+            rec.data = serde_json::json!({"name": line.name, "start": start});
+            rec.lines.insert(
+                line.id.clone(),
+                LineChange {
+                    before: None,
+                    after: Some(repo.line_state(&line, &start)),
+                    working_before: None,
+                    working_after: None,
+                },
+            );
+            lines.push(line);
+            tmps.push(tmp);
+            recs.push(rec);
+        }
+        Ok((repo, PreparedLines { start, lines, tmps, recs }))
+    }
+
+    #[test]
+    fn a_batch_publishes_all_lines_with_contiguous_records_and_full_sync() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let _lock = repo.p.lock()?;
+        let before = repo.p.db.last_seq(&ctx.store.machine.id)?;
+        let lines = repo.commit_prepared_lines(&ctx, prepared)?;
+        assert_eq!(lines.len(), 3);
+        assert_eq!(repo.p.db.last_seq(&ctx.store.machine.id)?, before + lines.len() as u64);
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(repo.p.db.line_by_id(&line.id)?.unwrap().name, line.name);
+            assert_eq!(std::fs::read_to_string(repo.working(line).join("content"))?, line.name);
+            let raw = repo.p.db.record_line(&ctx.store.machine.id, before + index as u64 + 1)?.unwrap();
+            let rec = crate::oplog::parse_line(&raw, None)?.record;
+            assert!(rec.lines.contains_key(&line.id));
+        }
+        let sync: i64 = repo.p.db.conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+        assert_eq!(sync, 2, "FULL synchronous is required");
+        Ok(())
+    }
+
+    #[test]
+    fn a_mid_batch_database_failure_rolls_back_every_record_and_published_folder() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let paths: Vec<_> = prepared.lines.iter().map(|line| repo.working(line)).collect();
+        let tmps = prepared.tmps.clone();
+        repo.p.db.conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_second_line BEFORE INSERT ON lines
+            WHEN NEW.name = 'trial-2' BEGIN SELECT RAISE(ABORT, 'injected mid-batch failure'); END;",
+        )?;
+        let _lock = repo.p.lock()?;
+        let before = repo.p.db.last_seq(&ctx.store.machine.id)?;
+        let err = repo.commit_prepared_lines(&ctx, prepared).unwrap_err();
+        assert!(err.to_string().contains("injected mid-batch failure"));
+        assert!(repo.p.db.lines()?.is_empty());
+        assert_eq!(repo.p.db.last_seq(&ctx.store.machine.id)?, before);
+        assert!(paths.iter().chain(&tmps).all(|path| !path.exists()));
+        Ok(())
+    }
+
+    #[test]
+    fn an_error_after_commit_keeps_the_entire_recorded_batch_and_its_folders() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let paths: Vec<_> = prepared.lines.iter().map(|line| repo.working(line)).collect();
+        let _lock = repo.p.lock()?;
+        crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
+        let err = repo.commit_prepared_lines(&ctx, prepared).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("batch committed despite the reported error"), "{message}");
+        assert_eq!(repo.p.db.lines()?.len(), 3);
+        for (index, path) in paths.iter().enumerate() {
+            assert!(path.join("content").is_file());
+            assert!(message.contains(&format!("trial-{}", index + 1)));
+        }
+        Ok(())
     }
 }

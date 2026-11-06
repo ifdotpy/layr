@@ -175,6 +175,7 @@ fn context(root: &Path, uid: u32) -> Result<Ctx> {
         caller: Caller::from_uid(uid),
         cwd: "/".into(),
         env: HashMap::new(),
+        author: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     })
 }

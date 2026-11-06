@@ -1189,6 +1189,7 @@ mod tests {
             caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.to_path_buf(),
             env: HashMap::new(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         }
     }

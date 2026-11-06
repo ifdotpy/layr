@@ -265,6 +265,7 @@ fn run_entries(ctx: &Ctx, repo: &Repo, into: Option<&str>, skip_busy: bool) -> R
         caller: ctx.caller.clone(),
         cwd: ctx.cwd.clone(),
         env: ctx.env.clone(),
+        author: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     };
     let merge_repo = Repo::open(&merge_ctx, &repo.p.name)?;
@@ -345,6 +346,7 @@ fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remotes: &str) ->
             caller: ctx.caller.clone(),
             cwd: repo.working(&line),
             env: ctx.env.clone(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let code = if names.len() == 2 {
@@ -374,6 +376,7 @@ pub fn run_configured(ctx: &Ctx, repo: &Repo, only: Option<&str>) -> Result<()> 
             caller: Caller::from_uid(line.owner),
             cwd: repo.working(&line),
             env: std::collections::HashMap::new(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let run_repo = Repo::open(&run_ctx, &repo.p.name)?;

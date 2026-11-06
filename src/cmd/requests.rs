@@ -412,6 +412,7 @@ mod tests {
             caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.clone(),
             env: Default::default(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let dir = ctx.store.project_dir("p").unwrap();

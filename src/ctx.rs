@@ -38,6 +38,8 @@ pub struct Ctx {
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
     pub out: std::cell::RefCell<Box<dyn Write>>,
+    /// Resolved on first use and kept for every state this command creates.
+    pub author: std::cell::OnceCell<Author>,
 }
 
 /// Where the command runs: a project, a line and the folder below the line root.
@@ -47,6 +49,11 @@ pub struct Loc {
     pub line: Option<String>,
     /// Working folder relative to the line root ("" at the root).
     pub sub: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    static GIT_CONFIG_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl Ctx {
@@ -63,6 +70,8 @@ impl Ctx {
         let mut command = std::process::Command::new("git");
         command.args(["config", "--file"]).arg(&f).arg(key);
         crate::privs::command_as(&mut command, self.caller.uid, &[]).ok()?;
+        #[cfg(test)]
+        GIT_CONFIG_READS.with(|reads| reads.set(reads.get() + 1));
         let out = command.output().ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() {
@@ -73,19 +82,23 @@ impl Ctx {
     }
 
     pub fn author(&self) -> Author {
-        let name = self
-            .env("LAYR_AUTHOR_NAME")
-            .or(self.env("GIT_AUTHOR_NAME"))
-            .map(|s| s.to_string())
-            .or_else(|| self.git_config("user.name"))
-            .unwrap_or_else(|| self.caller.user.clone());
-        let email = self
-            .env("LAYR_AUTHOR_EMAIL")
-            .or(self.env("GIT_AUTHOR_EMAIL"))
-            .map(|s| s.to_string())
-            .or_else(|| self.git_config("user.email"))
-            .unwrap_or_else(|| format!("{}@{}", self.caller.user, self.store.machine.name));
-        Author { name, email, uid: self.caller.uid, session: self.session() }
+        self.author
+            .get_or_init(|| {
+                let name = self
+                    .env("LAYR_AUTHOR_NAME")
+                    .or(self.env("GIT_AUTHOR_NAME"))
+                    .map(|s| s.to_string())
+                    .or_else(|| self.git_config("user.name"))
+                    .unwrap_or_else(|| self.caller.user.clone());
+                let email = self
+                    .env("LAYR_AUTHOR_EMAIL")
+                    .or(self.env("GIT_AUTHOR_EMAIL"))
+                    .map(|s| s.to_string())
+                    .or_else(|| self.git_config("user.email"))
+                    .unwrap_or_else(|| format!("{}@{}", self.caller.user, self.store.machine.name));
+                Author { name, email, uid: self.caller.uid, session: self.session() }
+            })
+            .clone()
     }
 
     /// The session label (`LAYR_SESSION`), see `Author::session`.
@@ -185,5 +198,85 @@ mod tests {
         outln!(output, "{name}: {:08x} {:>width$}", 42, "text", width = 6);
         outln!(output, "{}", "first\nsecond\n");
         assert_eq!(&*output.0.borrow(), &["\n", "\n", "λ: 0000002a   text\n", "first\nsecond\n\n"]);
+    }
+}
+
+#[cfg(test)]
+mod author_tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn context(config: &str, env: &[(&str, &str)]) -> Result<(Scratch, Ctx)> {
+        let root = Scratch(std::env::temp_dir().join(format!("layr-author-{}", crate::ids::new_id())));
+        std::fs::create_dir_all(&root.0)?;
+        std::fs::write(root.0.join(".gitconfig"), config)?;
+        let mut caller = Caller::from_uid(rustix::process::geteuid().as_raw());
+        caller.home = root.0.clone();
+        let ctx = Ctx {
+            store: Store::open(&root.0.join("store"))?,
+            caller,
+            cwd: root.0.clone(),
+            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            author: Default::default(),
+        };
+        Ok((root, ctx))
+    }
+
+    #[test]
+    fn author_is_lazy_and_keeps_the_first_identity_for_the_command() -> Result<()> {
+        let (root, ctx) = context("", &[])?;
+        GIT_CONFIG_READS.with(|reads| reads.set(0));
+        assert!(ctx.author.get().is_none());
+        assert_eq!(GIT_CONFIG_READS.with(|reads| reads.get()), 0);
+        std::fs::write(root.0.join(".gitconfig"), "[user]\nname = First\nemail = first@example.org\n")?;
+        let author = ctx.author();
+        assert_eq!(author.name, "First");
+        assert_eq!(author.email, "first@example.org");
+        std::fs::remove_file(root.0.join(".gitconfig"))?;
+        assert_eq!(ctx.author(), author);
+        assert_eq!(ctx.author(), author);
+        assert_eq!(GIT_CONFIG_READS.with(|reads| reads.get()), 2, "only the first state resolves name and email");
+        Ok(())
+    }
+
+    #[test]
+    fn author_keeps_environment_precedence_empty_values_and_session() -> Result<()> {
+        let (_root, ctx) = context(
+            "[user]\nname = Config\nemail = config@example.org\n",
+            &[
+                ("LAYR_AUTHOR_NAME", "Override"),
+                ("GIT_AUTHOR_NAME", "Git"),
+                ("LAYR_AUTHOR_EMAIL", ""),
+                ("GIT_AUTHOR_EMAIL", "git@example.org"),
+                ("LAYR_SESSION", "test"),
+            ],
+        )?;
+        let author = ctx.author();
+        assert_eq!(author.name, "Override");
+        assert_eq!(author.email, "git@example.org");
+        assert_eq!(author.uid, ctx.caller.uid);
+        assert_eq!(author.session.as_deref(), Some("test"));
+        Ok(())
+    }
+
+    #[test]
+    fn author_keeps_git_duplicate_key_and_missing_value_behavior() -> Result<()> {
+        let (_root, ctx) =
+            context("[user]\nname = First\nname = Last\nemail = first@example.org\nemail = last@example.org\n", &[])?;
+        let author = ctx.author();
+        assert_eq!(author.name, "Last");
+        assert_eq!(author.email, "last@example.org");
+        let (_empty, ctx) = context("", &[])?;
+        let author = ctx.author();
+        assert_eq!(author.name, ctx.caller.user);
+        assert_eq!(author.email, format!("{}@{}", ctx.caller.user, ctx.store.machine.name));
+        Ok(())
     }
 }

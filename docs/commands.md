@@ -113,6 +113,11 @@ Overlay and people prefixes are excluded. Public requests never use the authenti
 The gateway must expose the routes only when a signed public manifest is present.
 
 `line new <name> [<rev>] [--count N]` creates lines. A line starts at the state that `<rev>` names when the command reads it; a save or a fetch that moves that line during the command does not change the start. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
+With `--count N`, names run from `<name>-1` through `<name>-N`. The main project's line records
+commit together in one durable transaction: failure records none of the batch and removes its
+published folders. If a commit reports an error after it succeeded, all recorded lines and their
+folders are kept and the error names them. Overlay preparation records belong to separate overlay
+projects and may remain after a failed batch; they are not part of this transaction.
 A line is a folder. Use `cd` to enter it.
 `line move <line> <path>` keeps the working folder of a line at `<path>`, outside the store, for
 example `~/Projects/app` as the real folder of the line `main`. `line move <line>` without a path

@@ -973,6 +973,7 @@ mod tests {
             caller: Caller::from_uid(0),
             cwd: base.clone(),
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
         };
         let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap(), ctx: None };

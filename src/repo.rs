@@ -3741,6 +3741,7 @@ mod cache_copy_tests {
                 ("LAYR_PROJECT".into(), "concurrent".into()),
                 ("LAYR_LINE".into(), "main".into()),
             ]),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         })
     }
@@ -4173,6 +4174,7 @@ mod cache_platform_tests {
             caller: Caller::from_uid(0),
             cwd: dir.clone(),
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let project_dir = ctx.store.project_dir("p").unwrap();
@@ -4355,6 +4357,7 @@ mod commit_record_tests {
             caller: Caller::from_uid(0),
             cwd: dir.clone(),
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let project_dir = ctx.store.project_dir("p").unwrap();

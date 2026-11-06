@@ -1098,6 +1098,7 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             caller: caller.clone(),
             cwd: std::path::PathBuf::from("/"),
             env: std::collections::HashMap::new(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let Ok(repo) = Repo::open(&ctx, &project) else { continue };
@@ -1160,6 +1161,7 @@ mod pin_tests {
             caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.clone(),
             env: Default::default(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();
@@ -1238,6 +1240,7 @@ mod mode_pin_tests {
             caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.clone(),
             env: Default::default(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();

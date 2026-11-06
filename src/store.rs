@@ -1261,11 +1261,18 @@ impl<'a> Project<'a> {
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
     /// The caller holds the project lock and has created all snapshots the record names.
-    pub fn append(&self, mut rec: Record, actor: &Actor) -> Result<Record> {
-        let _t = crate::trace::span(format!("record {}", rec.op));
+    pub fn append(&self, rec: Record, actor: &Actor) -> Result<Record> {
+        Ok(self.append_batch(vec![rec], actor)?.remove(0))
+    }
+
+    /// Sign and derive every record in one FULL transaction, with contiguous sequence numbers.
+    /// Snapshots must already exist and the caller must hold the project lock.
+    pub(crate) fn append_batch(&self, mut records: Vec<Record>, actor: &Actor) -> Result<Vec<Record>> {
+        let _t = crate::trace::span("record batch");
+        let Some(first) = records.first() else { return Ok(records) };
         let m = &self.store.machine;
         let present = self.state_present();
-        let project = if rec.op == "project" { rec.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
+        let project = if first.op == "project" { first.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
         if project.is_empty() {
             bail!("project id unknown: the project has no records yet");
         }
@@ -1283,36 +1290,42 @@ impl<'a> Project<'a> {
                 mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
                 let line = oplog::sign_line(&mr, &m.key)?;
                 self.db.insert_record(&mr, &line)?;
-                self.db.derive(&mr, &present, &m.id)?;
+                self.db.derive_rows(&mr, &present, &m.id)?;
                 seq = 1;
             }
-            rec.id = ids::new_id();
-            rec.machine = m.id.clone();
-            rec.seq = seq + 1;
-            rec.time = ids::now_ms();
-            rec.project = project.clone();
-            rec.actor = actor.clone();
-            if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
-                a.insert("attestation_id".into(), serde_json::json!(rec.id));
-                if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
-                    a.insert("signer".into(), serde_json::json!(m.id));
+            for rec in &mut records {
+                rec.id = ids::new_id();
+                rec.machine = m.id.clone();
+                rec.seq = seq + 1;
+                rec.time = ids::now_ms();
+                rec.project = project.clone();
+                rec.actor = actor.clone();
+                if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
+                    a.insert("attestation_id".into(), serde_json::json!(rec.id));
+                    if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
+                        a.insert("signer".into(), serde_json::json!(m.id));
+                    }
+                    a.insert("time".into(), serde_json::json!(rec.time));
                 }
-                a.insert("time".into(), serde_json::json!(rec.time));
-            }
-            crate::model::validate(&rec)?;
-            let line = oplog::sign_line(&rec, &m.key)?;
-            self.db.insert_record(&rec, &line)?;
-            self.db.derive(&rec, &present, &m.id)?;
-            // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
-            #[cfg(target_os = "macos")]
-            for state in &rec.states {
-                if let Some(base) = crate::thin::layer_base(self, &state.id)? {
-                    self.db.record_base(&state.id, &base)?;
+                crate::model::validate(rec)?;
+                let line = oplog::sign_line(rec, &m.key)?;
+                self.db.insert_record(rec, &line)?;
+                self.db.derive_rows(rec, &present, &m.id)?;
+                // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
+                #[cfg(target_os = "macos")]
+                for state in &rec.states {
+                    if let Some(base) = crate::thin::layer_base(self, &state.id)? {
+                        self.db.record_base(&state.id, &base)?;
+                    }
                 }
+                seq = rec.seq;
             }
             Ok(())
         })?;
-        Ok(rec)
+        for rec in &records {
+            Db::publish_effects(rec);
+        }
+        Ok(records)
     }
 
     /// Records of other machines (replication, restore): check each machine's chain (its key

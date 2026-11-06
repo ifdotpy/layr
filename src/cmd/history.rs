@@ -1860,6 +1860,7 @@ mod renderer_regression {
             caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
             cwd: root.clone(),
             env: Default::default(),
+            author: Default::default(),
             out: RefCell::new(Box::new(Capture(capture.clone()))),
         };
         let files = diff::regression::generated_files();

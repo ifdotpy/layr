@@ -3318,6 +3318,7 @@ mod op_log_tests {
             caller: Caller::from_uid(uid),
             cwd: project_dir.join("lines/main"),
             env: std::collections::HashMap::new(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
         };
         for all in [false, true] {

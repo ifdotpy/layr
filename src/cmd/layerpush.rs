@@ -361,6 +361,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 caller: ctx.caller.clone(),
                 cwd: ctx.cwd.clone(),
                 env: ctx.env.clone(),
+                author: Default::default(),
                 out: std::cell::RefCell::new(if json { Box::new(capture.clone()) } else if quiet { Box::new(std::io::sink()) } else { Box::new(std::io::stdout()) }),
             };
             let mut v = vec![name.clone(), if json { "--json".to_string() } else { "-q".to_string() }];
@@ -385,6 +386,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     caller: ctx.caller.clone(),
                     cwd: ctx.cwd.clone(),
                     env: ctx.env.clone(),
+                    author: Default::default(),
                     out: std::cell::RefCell::new(Box::new(std::io::sink())),
                 };
                 match super::remote::git::push(&sub, &[name.clone(), l.clone(), "-q".to_string()]) {

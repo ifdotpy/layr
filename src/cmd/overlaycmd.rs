@@ -1243,6 +1243,7 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
         caller: ctx.caller.clone(),
         cwd: ctx.cwd.clone(),
         env,
+        author: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::BufWriter::new(std::io::stdout()))),
     };
     let mut argv = vec![cmd.to_string()];

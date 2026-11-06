@@ -1903,6 +1903,7 @@ mod approval_tests {
             caller: Caller::from_uid(1001),
             cwd: dir.clone(),
             env: std::collections::HashMap::new(),
+            author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let project_dir = ctx.store.project_dir("p").unwrap();

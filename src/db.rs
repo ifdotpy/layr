@@ -391,6 +391,30 @@ impl Db {
     /// working folder here change only by this machine's records; the values written by other
     /// machines are kept under `<key>@<machine>`.
     pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
+        self.derive_rows(rec, state_present, local)?;
+        Self::publish_effects(rec);
+        Ok(())
+    }
+
+    /// Release command cleanup notifications only after the writer has committed these rows.
+    pub(crate) fn publish_effects(rec: &Record) {
+        for (id, ch) in &rec.lines {
+            if let Some(a) = &ch.after {
+                crate::free::head_moved(&a.head);
+            }
+            match (&ch.before, &ch.after) {
+                (Some(b), Some(a)) if b.head != a.head => crate::free::head_left(&b.head),
+                (Some(b), None) => {
+                    crate::free::head_left(&b.head);
+                    crate::free::line_deleted(id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Derive database rows without releasing effects from a transaction that may roll back.
+    pub(crate) fn derive_rows(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         let tx = &self.conn;
         let ord = crate::owners::record_ord(rec);
         let foreign = rec.machine != local;
@@ -440,16 +464,6 @@ impl Db {
                      ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
                 )?
                 .execute(params![id, rec.machine, a.head, rec.time, ord])?;
-                crate::free::head_moved(&a.head);
-            }
-            // The head the line left, and a deleted line: their derived data goes at the end of the command.
-            match (&ch.before, &ch.after) {
-                (Some(b), Some(a)) if b.head != a.head => crate::free::head_left(&b.head),
-                (Some(b), None) => {
-                    crate::free::head_left(&b.head);
-                    crate::free::line_deleted(id);
-                }
-                _ => {}
             }
             let row_machine: Option<String> =
                 tx.prepare_cached("SELECT machine FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
@@ -1177,7 +1191,8 @@ impl Db {
     /// The attestations of `subject` that `machine` made for `uid` (any user when None), but revokes.
     pub fn own_attestations(&self, subject: &str, machine: &str, uid: Option<u32>, kind: Option<&str>) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND (?3 IS NULL OR uid=?3) AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
-        let v = st.query_map(params![subject, machine, uid.map(i64::from), kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+        let v =
+            st.query_map(params![subject, machine, uid.map(i64::from), kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
@@ -2090,8 +2105,10 @@ mod tests {
         // The filter of the evidence reads (`checks`, `check_exit`).
         let mut st = db
             .conn
-            .prepare("SELECT id FROM attestations a WHERE kind='check' AND NOT EXISTS (SELECT 1 FROM attestation_revocations v
-                WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord) ORDER BY id")
+            .prepare(
+                "SELECT id FROM attestations a WHERE kind='check' AND NOT EXISTS (SELECT 1 FROM attestation_revocations v
+                WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord) ORDER BY id",
+            )
             .unwrap();
         let left: Vec<String> = st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(left, vec![foreign.id.clone()], "root revokes its machine's users only");
