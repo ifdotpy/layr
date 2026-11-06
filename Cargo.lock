@@ -1490,6 +1490,7 @@ dependencies = [
  "hmac",
  "ignore",
  "layr-adapter",
+ "layr-api",
  "layr-cache",
  "layr-hashers",
  "layr-model",
@@ -1517,6 +1518,14 @@ dependencies = [
 [[package]]
 name = "layr-adapter"
 version = "0.1.0"
+
+[[package]]
+name = "layr-api"
+version = "0.37.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "layr-cache"
