@@ -75,7 +75,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let env: HashMap<String, String> = std::env::vars().collect();
     let req = serde_json::to_vec(
-        &serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": crate::store_version::Version::binary()}),
+        &serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": crate::store_version::binary()}),
     )?;
     let dir = std::fs::File::open(&cwd)?;
     let mut data = (req.len() as u32).to_be_bytes().to_vec();
@@ -127,7 +127,7 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     if kind[0] != b'V' {
         bail!(
             "incompatible daemon: unknown store format (unguarded layr); this binary uses {}. Upgrade the daemon",
-            crate::store_version::Version::binary().description()
+            crate::store_version::description(&crate::store_version::binary())
         );
     }
     let mut length = [0; 4];
@@ -139,7 +139,7 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     let mut bytes = vec![0; size];
     (&*sock).read_exact(&mut bytes)?;
     let daemon = serde_json::from_slice(&bytes).context("invalid daemon version")?;
-    crate::store_version::Version::binary().require_compatible(&daemon, "daemon")?;
+    crate::store_version::require_compatible(&crate::store_version::binary(), &daemon, "daemon")?;
     // Commands can take longer than negotiation.
     sock.set_read_timeout(None)?;
     Ok(())
@@ -266,7 +266,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
                 bail!("the version request must not contain descriptors");
             }
             // The store root lets a client see which store this daemon serves (layr follow).
-            let mut hello = serde_json::to_value(crate::store_version::Version::binary())?;
+            let mut hello = serde_json::to_value(crate::store_version::binary())?;
             hello["root"] = root.to_string_lossy().into_owned().into();
             let bytes = serde_json::to_vec(&hello)?;
             let mut packet = vec![b'V'];
@@ -302,10 +302,10 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         let client: crate::store_version::Version = serde_json::from_value(v["version"].clone()).with_context(|| {
             format!(
                 "incompatible client: unknown store format (unguarded layr); daemon uses {}. Upgrade the client",
-                crate::store_version::Version::binary().description()
+                crate::store_version::description(&crate::store_version::binary())
             )
         })?;
-        crate::store_version::Version::binary().require_compatible(&client, "client")?;
+        crate::store_version::require_compatible(&crate::store_version::binary(), &client, "client")?;
         rustix::process::fchdir(&fds[3]).context("cannot enter the working folder")?;
         drop(fds);
         let cwd = std::env::current_dir()?;
@@ -847,7 +847,7 @@ mod version_tests {
                 let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(hello, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
-                let mut version = crate::store_version::Version::binary();
+                let mut version = crate::store_version::binary();
                 version.format = format;
                 version.version = "other-package".into();
                 version.build = "other-build".into();

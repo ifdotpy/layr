@@ -4,7 +4,8 @@
 //! carry their own `format`, checked when they are read (`volumes.rs`). A store without them stays
 //! at this format: no migration.
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+pub use layr_api::Version;
+use layr_api::{StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR, RELEASE};
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -13,32 +14,19 @@ pub const FORMAT: u32 = 1;
 pub const MARKER: &str = "store-version.json";
 const LOCK: &str = ".layr-version.lock";
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Version {
-    pub format: u32,
-    pub version: String,
-    pub build: String,
+pub fn binary() -> Version {
+    Version { format: FORMAT, version: RELEASE.into(), build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into() }
 }
 
-impl Version {
-    pub fn binary() -> Self {
-        Self {
-            format: FORMAT,
-            version: env!("CARGO_PKG_VERSION").into(),
-            build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into(),
-        }
-    }
+pub(crate) fn description(version: &Version) -> String {
+    format!("format {} (layr {}, build {})", version.format, version.version, version.build)
+}
 
-    pub(crate) fn description(&self) -> String {
-        format!("format {} (layr {}, build {})", self.format, self.version, self.build)
+pub fn require_compatible(binary: &Version, other: &Version, source: &str) -> Result<()> {
+    if binary.format != other.format {
+        bail!("incompatible {source}: {}; this binary uses {}", description(other), description(binary));
     }
-
-    pub fn require_compatible(&self, other: &Self, source: &str) -> Result<()> {
-        if self.format != other.format {
-            bail!("incompatible {source}: {}; this binary uses {}", other.description(), self.description());
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// The shared lease prevents a store from changing format while a command or daemon holds it.
@@ -51,15 +39,15 @@ fn marker(root: &Path) -> Result<Option<Version>> {
     let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("read {} for {}", path.display(), Version::binary().description())),
+        Err(e) => return Err(e).with_context(|| format!("read {} for {}", path.display(), description(&binary()))),
     };
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > 4096 {
-        bail!("invalid store version file {} for {}", path.display(), Version::binary().description());
+        bail!("invalid store version file {} for {}", path.display(), description(&binary()));
     }
     Ok(Some(
         serde_json::from_reader(file)
-            .with_context(|| format!("invalid store version file {} for {}", path.display(), Version::binary().description()))?,
+            .with_context(|| format!("invalid store version file {} for {}", path.display(), description(&binary())))?,
     ))
 }
 
@@ -117,14 +105,14 @@ fn foreign(root: &Path) -> Result<bool> {
 fn unmarked_error() -> anyhow::Error {
     anyhow::anyhow!(
         "incompatible store: format 0 (no version marker, no machine/id); this binary uses {}",
-        Version::binary().description()
+        description(&binary())
     )
 }
 
 fn unwritable_error() -> anyhow::Error {
     anyhow::anyhow!(
         "incompatible store: format 0 (no version marker) is not writable, so its marker cannot be written; give write access to the store root and run the command again; this binary uses {}",
-        Version::binary().description()
+        description(&binary())
     )
 }
 
@@ -144,14 +132,14 @@ fn writable(error: anyhow::Error) -> anyhow::Error {
 
 impl Guard {
     pub fn open(root: &Path) -> Result<Self> {
-        let binary = Version::binary();
+        let binary = binary();
         if let Some(stored) = marker(root)? {
             // Refuse before opening a lock file or changing machine/project data.
-            binary.require_compatible(&stored, "store")?;
+            require_compatible(&binary, &stored, "store")?;
             let file = lock_file(root, true)?;
             rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
             let stored = marker(root)?.context("the store version disappeared; refuse access")?;
-            binary.require_compatible(&stored, "store")?;
+            require_compatible(&binary, &stored, "store")?;
             return Ok(Self { _file: file });
         }
         // No marker. A folder that is not a layr store is refused before the lock file is created.
@@ -168,7 +156,7 @@ impl Guard {
         let file = lock_file(root, true).map_err(writable)?;
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
         match marker(root)? {
-            Some(stored) => binary.require_compatible(&stored, "store")?,
+            Some(stored) => require_compatible(&binary, &stored, "store")?,
             None => {
                 if !empty(root)? && !has_layout(root)? {
                     return Err(unmarked_error());
@@ -179,53 +167,36 @@ impl Guard {
         // The marker exists now, so every later open takes the shared lease of a marked store.
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
         let stored = marker(root)?.context("the store version disappeared; refuse access")?;
-        binary.require_compatible(&stored, "store")?;
+        require_compatible(&binary, &stored, "store")?;
         Ok(Self { _file: file })
     }
 
     pub fn ready(&self, root: &Path) -> Result<()> {
         rustix::fs::flock(&self._file, rustix::fs::FlockOperation::LockShared)?;
         let stored = marker(root)?.context("the store version disappeared; refuse access")?;
-        Version::binary().require_compatible(&stored, "store")
+        require_compatible(&binary(), &stored, "store")
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Upgrade {
-    pub metadata_only: bool,
-    pub from_format: u32,
-    pub to_format: u32,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Report {
-    pub binary: Version,
-    pub store: Option<Version>,
-    pub compatible: bool,
-    pub state: &'static str,
-    pub upgrade: Option<Upgrade>,
 }
 
 /// Inspect without Store::open, locks, directory creation, or database migrations.
 pub fn inspect(root: &Path) -> Result<Report> {
-    let binary = Version::binary();
+    let binary = binary();
     let store = marker(root)?;
     let (state, compatible, upgrade) = match &store {
-        Some(stored) if stored.format == binary.format => ("compatible", true, None),
-        Some(_) => ("incompatible", false, None),
+        Some(stored) if stored.format == binary.format => (StoreState::Compatible, true, None),
+        Some(_) => (StoreState::Incompatible, false, None),
         None => match fs::metadata(root) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("absent", true, None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StoreState::Absent, true, None),
             Err(e) => return Err(e.into()),
-            Ok(_) if empty(root)? => ("empty", true, None),
+            Ok(_) if empty(root)? => (StoreState::Empty, true, None),
             // The next open writes the marker (when the store is writable).
             Ok(_) if has_layout(root)? => {
-                ("unmarked", true, Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT }))
+                (StoreState::Unmarked, true, Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT }))
             }
-            Ok(_) => ("incompatible", false, None),
+            Ok(_) => (StoreState::Incompatible, false, None),
         },
     };
-    Ok(Report { binary, store, compatible, state, upgrade })
+    Ok(Report { binary, store, compatible, state, upgrade, api: API_MAJOR })
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<i32> {
@@ -237,10 +208,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
     if options.has("--json") {
         println!("{}", serde_json::to_string(&report)?);
     } else {
-        println!("binary: {}", report.binary.description());
+        let state = serde_json::to_value(report.state)?;
+        let state = state.as_str().context("store state must serialize as a string")?;
+        println!("binary: {}", description(&report.binary));
         match report.store {
-            Some(stored) => println!("store: {} ({})", stored.description(), report.state),
-            None => println!("store: {}", report.state),
+            Some(stored) => println!("store: {} ({})", description(&stored), state),
+            None => println!("store: {}", state),
         }
     }
     Ok(0)
@@ -250,6 +223,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
 mod race_tests {
     use super::*;
 
+    #[test]
+    fn report_advertises_api_major() {
+        let root = std::env::temp_dir().join(format!("layr-api-absent-{}", std::process::id()));
+        assert!(!root.exists());
+        let report = serde_json::to_value(inspect(&root).unwrap()).unwrap();
+        assert_eq!(report.get("api").and_then(serde_json::Value::as_u64), Some(u64::from(API_MAJOR)));
+    }
+
     /// A store that a concurrent first open is making (marker written, machine folder without its
     /// id yet) is not a foreign folder; a folder with other files and no marker is.
     #[test]
@@ -257,7 +238,7 @@ mod race_tests {
         let root = std::env::temp_dir().join(format!("layr-marker-race-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("machine")).unwrap();
-        fs::write(root.join(MARKER), serde_json::to_vec(&Version::binary()).unwrap()).unwrap();
+        fs::write(root.join(MARKER), serde_json::to_vec(&binary()).unwrap()).unwrap();
         assert!(!foreign(&root).unwrap(), "a marker and a machine folder without its id is a store being made");
         fs::remove_file(root.join(MARKER)).unwrap();
         fs::write(root.join("notes.txt"), b"x").unwrap();
