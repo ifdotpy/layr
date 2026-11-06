@@ -37,7 +37,7 @@ operation that drops its last owner. No walk decides what lives; `gc` only check
 | `tag` | tag name | the target | `tag` | tag delete |
 | `remote-ref` | remote ref name | the imported state | fetch | fetch moves it, remote ref delete |
 | `export` | remote + branch | the newest exported state of that branch | push | the next push of that branch |
-| `park` | line id + index | a park entry | `park` | `park pop`, `park drop`, `park clear` |
+| `park` | line id | a park entry of an older layr (a parked line is kept by its `head`) | `park` of an older layr | the first `park` command makes it a parked line |
 | `auto` | line id | its newest `retention.auto` automatic states (default 10) | a new automatic state | the ring overflows, line delete |
 | `undo` | line id | the states that its newest `undo.ops` records name (default 20): before and after heads, working states, states made by the record | a record of the line | the ring overflows |
 | `deleted` | project | the final state and staged state of the newest `undo.deleted` deleted lines (default 5) | line delete | the ring overflows (with the `undo` owner of the delete record), `undo` of the delete |

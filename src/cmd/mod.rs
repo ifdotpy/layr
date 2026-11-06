@@ -13,6 +13,7 @@ pub mod layerpush;
 pub mod mergecmd;
 pub mod oci;
 pub mod overlaycmd;
+pub mod park;
 pub mod probe;
 pub mod queue;
 pub mod refs;
@@ -307,7 +308,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "apply" => work::apply(ctx, &rest),
         "restore" => work::restore(ctx, &rest),
         "reset" => work::reset(ctx, &rest),
-        "park" => work::stash(ctx, &rest),
+        "park" => park::park(ctx, &rest),
         "clean" => work::clean(ctx, &rest),
         "line" => branch::line(ctx, &rest),
         "tag" => branch::tag(ctx, &rest),

@@ -297,39 +297,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     crate::thin::make_keyframe(&repo.p, id)?;
                 }
             }
-            // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
-            let staged = staged_state(ctx, repo, &l)?;
-            // Record first, then delete the folder: the content is in the saved state.
-            let mut rec = Record::new("line.delete");
-            rec.lines.insert(
-                l.id.clone(),
-                LineChange {
-                    before: Some(repo.line_state(&l, &l.head)),
-                    after: None,
-                    working_before: last.clone(),
-                    working_after: None,
-                },
-            );
-            rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
-            repo.commit_record(ctx, rec)?;
-            if made {
-                crate::fsutil::git_writable(&repo.working(&l), true);
-                // Into the trash, emptied after the store lock: a folder with build output takes
-                // minutes to delete, and other commands must not wait for it.
-                repo.p.trash(&repo.working(&l))?;
-            }
-            repo.p.set_moved_path(&l.id, None)?;
-            repo.drop_stage(&l)?;
-            repo.set_pending_moves(&l, &Default::default())?;
-            repo.prune_bases(&l, None, 0)?;
-            // The owner of a deleted line no longer reads the git objects.
-            crate::gitbridge::sync_store_access(repo)?;
-            // The line's head no longer keeps its caches.
-            super::admin::trash_excess_caches(&repo.p)?;
-            // Its cache overlay lines go too, with their states.
-            if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
-                eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
-            }
+            delete_recorded(ctx, repo, &l, last, made)?;
             outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
         }
         return Ok(0);
@@ -572,6 +540,47 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// Record the deletion of line `l` and remove what it holds on this machine: its folder (when it
+/// has one, `made`), stage, bases and caches. The caller holds the project lock. `last` is the state
+/// of the working folder that the record keeps.
+pub(crate) fn delete_recorded(
+    ctx: &Ctx,
+    repo: &crate::repo::Repo,
+    l: &crate::model::Line,
+    last: Option<String>,
+    made: bool,
+) -> Result<()> {
+    // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
+    let staged = staged_state(ctx, repo, l)?;
+    // Record first, then delete the folder: the content is in the saved state.
+    let mut rec = Record::new("line.delete");
+    rec.lines.insert(
+        l.id.clone(),
+        LineChange { before: Some(repo.line_state(l, &l.head)), after: None, working_before: last.clone(), working_after: None },
+    );
+    rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
+    repo.commit_record(ctx, rec)?;
+    if made {
+        crate::fsutil::git_writable(&repo.working(l), true);
+        // Into the trash, emptied after the store lock: a folder with build output takes
+        // minutes to delete, and other commands must not wait for it.
+        repo.p.trash(&repo.working(l))?;
+    }
+    repo.p.set_moved_path(&l.id, None)?;
+    repo.drop_stage(l)?;
+    repo.set_pending_moves(l, &Default::default())?;
+    repo.prune_bases(l, None, 0)?;
+    // The owner of a deleted line no longer reads the git objects.
+    crate::gitbridge::sync_store_access(repo)?;
+    // The line's head no longer keeps its caches.
+    super::admin::trash_excess_caches(&repo.p)?;
+    // Its cache overlay lines go too, with their states.
+    if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
+        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+    }
+    Ok(())
 }
 
 /// Removed folder-switch commands never change files or create a line.
