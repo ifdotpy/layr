@@ -80,8 +80,10 @@ built=$(trees)
 # Commits that bisect and diff did not build: each try builds one. C7 first: C3 is no base of it.
 l try -q $(commit_of 7) -- true
 l try -q $(commit_of 3) -- true
-# The states that the ring let go and no owner keeps went in the build that pushed them out.
-ok "a newer build frees the built states that no owner keeps" test "$(trees)" -le $((built - 1))
+# The states that the ring let go and no owner keeps went in the build that pushed them out: two builds add one
+# tree at most (t155 checks the state that goes).
+echo "diag: trees $built before the builds, $(trees) after, ring $(ls $P/meta/built 2>/dev/null | wc -l | tr -d ' ')"
+ok "the ring bounds the built trees" test "$(trees)" -le $((built + 1))
 eq "gc --repair finds no built state to free" "freed 0 built Git state(s) (rebuilt on read)" "$(l gc --repair 2>&1 | grep 'built Git state')"
 ok "the tip and the old line keep their trees" test "$(l log --json | wc -l | tr -d ' ')" -eq 200
 l diff $C30 $C31 > $T/d3031b.out
