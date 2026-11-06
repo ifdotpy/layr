@@ -226,8 +226,20 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
         bail!("usage: layr store-version [--json]");
     }
     let report = inspect(root)?;
+    // The daemon of this user, when one answers: its binary can differ from this one (an install
+    // without a daemon restart) while the format matches.
+    let daemon = match crate::service::hello(&crate::service::user_daemon_socket()) {
+        crate::service::Hello::Absent => None,
+        crate::service::Hello::Busy => Some(serde_json::json!({"busy": true})),
+        crate::service::Hello::Running { version: None, .. } => Some(serde_json::json!({"version": null})),
+        crate::service::Hello::Running { version: Some(v), .. } => Some(serde_json::to_value(v)?),
+    };
     if options.has("--json") {
-        println!("{}", serde_json::to_string(&report)?);
+        let mut out = serde_json::to_value(&report)?;
+        if let Some(d) = &daemon {
+            out["daemon"] = d.clone();
+        }
+        println!("{out}");
     } else {
         let state = serde_json::to_value(report.state())?;
         let state = state.as_str().context("store state must serialize as a string")?;
@@ -235,6 +247,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
         match report.store() {
             Some(stored) => println!("store: {} ({})", description(stored), state),
             None => println!("store: {}", state),
+        }
+        match daemon.as_ref().map(|d| serde_json::from_value::<Version>(d.clone())) {
+            None => {}
+            Some(Ok(v)) => println!("daemon: {}", v.description()),
+            Some(Err(_)) if daemon.as_ref().is_some_and(|d| d["busy"] == true) => println!("daemon: busy"),
+            Some(Err(_)) => println!("daemon: an older build that does not report its version"),
         }
     }
     Ok(0)

@@ -36,6 +36,13 @@ Example output:
 }
 ```
 
+When a daemon of this user answers (the LaunchAgent socket on macOS, `LAYR_SOCKET` or the service
+socket elsewhere), the report also has `daemon`: its `format`, `version` and `build`. The daemon can
+run an older binary of the same format after an install without a restart; compare its `build` with
+`binary.build`. A busy daemon gives `{"busy": true}`. A daemon too old to report its version gives
+`{"version": null}`. Without a daemon the field is absent. `layr follow` warns when the daemon runs
+another build than the client.
+
 The command does not call `Store::open`.
 It does not create a root, a marker, a lock, or a database.
 It returns status 0 for valid reports, including incompatible stores.
