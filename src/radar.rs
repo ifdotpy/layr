@@ -139,6 +139,7 @@ fn merge_changes(
     mut recheck: impl FnMut(&str) -> Result<Option<Found>>,
 ) -> Result<Option<Vec<Found>>> {
     if saved.iter().chain(head_live).any(|f| f.old_path.is_some()) {
+        let _t = crate::trace::span("overlap combine rename fallback");
         return Ok(None);
     }
     let live_paths: BTreeSet<&str> = head_live.iter().map(|f| f.path.as_str()).collect();
@@ -179,6 +180,7 @@ fn combine(
         })
         .collect();
     if changes::with_renames(base, live, lone).iter().any(|c| c.old_path.is_some()) {
+        let _t = crate::trace::span("overlap combine paired rename fallback");
         return Ok(None);
     }
     Ok(Some(merged))
@@ -193,11 +195,12 @@ fn changes_vs_base(
     parts: Option<(&[Found], &[Found])>,
 ) -> Result<Vec<Found>> {
     if let Some((saved, head_live)) = parts {
+        let _t = crate::trace::span("overlap combine changes");
         if let Some(found) = combine(base, live, rules, saved, head_live)? {
             return Ok(found);
         }
     }
-    let _t = crate::trace::span("overlap live compare");
+    let _t = crate::trace::span("overlap direct base compare");
     compare(base, live, rules)
 }
 
@@ -669,5 +672,27 @@ mod tests {
         let mut moved = f("new");
         moved.old_path = Some("old".into());
         assert!(merge_changes(&[moved], &[], |_| Ok(None)).unwrap().is_none());
+    }
+
+    #[test]
+    fn visible_changes_keep_both_rename_paths_and_filter_hidden_names() {
+        let mut moved = f("new");
+        moved.old_path = Some("old".into());
+        let root = Path::new("/nonexistent");
+        let rules = Rules::new(root);
+        let found = [moved];
+        let paths = visible(&found, &BTreeSet::new(), &rules);
+        assert_eq!(paths.keys().map(String::as_str).collect::<Vec<_>>(), ["new", "old"]);
+        assert!(visible(&found, &BTreeSet::from(["old".into()]), &rules).is_empty());
+    }
+
+    #[test]
+    fn combined_changes_do_not_need_a_direct_compare() {
+        let root = Path::new("/nonexistent");
+        let saved = [f("saved")];
+        let live = [f("live")];
+        // A direct compare cannot read this path, so success proves the parts sufficed.
+        let found = changes_vs_base(root, root, &Rules::new(root), Some((&saved, &live))).unwrap();
+        assert_eq!(found.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["saved", "live"]);
     }
 }
