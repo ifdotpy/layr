@@ -12,7 +12,7 @@ pub fn is_forking_parent() -> bool { FORKING_PARENT.load(Ordering::Relaxed) }
 #[derive(Clone, Copy)]
 pub enum Width {
     Items(NonZeroUsize),
-    #[cfg_attr(all(target_os = "linux", feature = "overlayfs"), allow(dead_code))]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
     Unbounded,
 }
 
@@ -54,7 +54,11 @@ fn run_for_role<R: Send>(priority: Priority, width: Width, forking_parent: bool,
         return Ok(work());
     }
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let threads = match width { Width::Items(items) => threads.min(items.get()), Width::Unbounded => threads };
+    let threads = match width {
+        Width::Items(items) => threads.min(items.get()),
+        #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
+        Width::Unbounded => threads,
+    };
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .start_handler(move |_| {
@@ -75,9 +79,9 @@ mod tests {
 
     #[test]
     fn nested_work_stays_in_background_pool() {
-        run(Priority::Background, Width::Unbounded, || {
+        run(Priority::Background, Width::Items(NonZeroUsize::new(2).unwrap()), || {
             let outer = rayon::current_num_threads();
-            run(Priority::Foreground, Width::Unbounded, || {
+            run(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), || {
                 (0..outer * 4).into_par_iter().for_each(|_| {
                     assert!(super::IN_POOL.with(std::cell::Cell::get));
                     assert!(rayon::current_thread_index().is_some());
@@ -115,10 +119,10 @@ mod tests {
     #[test]
     fn pool_threads_keep_their_priorities() {
         let caller = crate::sys::test_thread_priority();
-        run(Priority::Foreground, Width::Unbounded, || {
+        run(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), || {
             assert_eq!(crate::sys::test_thread_priority(), caller);
         }).unwrap();
-        run(Priority::Background, Width::Unbounded, || {
+        run(Priority::Background, Width::Items(NonZeroUsize::new(2).unwrap()), || {
             assert_eq!(crate::sys::test_thread_priority(), (19, (2 << 13) | 7));
         }).unwrap();
     }

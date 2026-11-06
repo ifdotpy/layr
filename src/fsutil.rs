@@ -1276,6 +1276,7 @@ pub struct Space {
 }
 
 /// Run a dynamic queue of background jobs, each of which can add more jobs.
+#[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
 pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) -> Result<(), crate::pools::PoolError> {
     if seed.is_empty() {
         return Ok(());
@@ -1448,6 +1449,7 @@ mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
     #[test]
     fn work_queue_finishes_dynamic_jobs_and_propagates_panics() {
         let visited = std::sync::Mutex::new(Vec::new());
