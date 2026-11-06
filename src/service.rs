@@ -967,7 +967,7 @@ mod request_tests {
         negotiate(&socket)?;
         let request = serde_json::to_vec(&serde_json::json!({
             "argv": ["volume", "list", "--json"], "cwd": root, "env": env,
-            "version": crate::store_version::Version::binary()
+            "version": crate::store_version::binary()
         }))?;
         let input = std::fs::File::open("/dev/null")?;
         let output = std::fs::File::create(root.join("stdout"))?;
