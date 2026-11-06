@@ -72,10 +72,12 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let results = line_spaces(&lines)?;
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::items(lines.len()), || {
+    let results = if let Some(width) = std::num::NonZeroUsize::new(lines.len()) {
+        crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
         use rayon::prelude::*;
         lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
-    })?;
+        })?
+    } else { Vec::new() };
     let mut rows = Vec::new();
     for ((name, path), r) in lines.into_iter().zip(results) {
         match r {
@@ -321,7 +323,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        let plan = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::items(1), || {
+        let plan = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::MIN), || {
             if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
                 eprintln!("note: nested mount {}: walking files instead", mount.display());
                 *mounts.lock().unwrap() = Mounts::Below;
@@ -334,7 +336,10 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             Ok(Some(plan)) => {
                 let failed = Mutex::new(None);
                 let bulk = Mutex::new(HashMap::new());
-                crate::fsutil::work_queue(plan.units, |unit, _| {
+                if let Some(width) = std::num::NonZeroUsize::new(plan.units.len()) {
+                    crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
+                        use rayon::prelude::*;
+                        plan.units.into_par_iter().for_each(|unit| {
                     let mut local = HashMap::<(usize, ExtentKey), u64>::new();
                     let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
                         for &(key, bytes) in held.shared {
@@ -355,7 +360,9 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                         }
                         entry.1 = entry.1.max(bytes);
                     }
-                })?;
+                        });
+                    })?;
+                }
                 if let Some(err) = failed.into_inner().unwrap() {
                     eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");
                     None
@@ -406,7 +413,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     }
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let seen: Vec<_> = parts.iter().map(|_| Mutex::new(std::collections::HashSet::new())).collect();
-    crate::fsutil::work_queue(units, |(i, path), _add| {
+    let walk = |(i, path): (usize, PathBuf), _add: &dyn Fn((usize, PathBuf))| {
         let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         let unit_fs = if mounts.resolve_directories() { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
@@ -461,7 +468,16 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 }
             }
         }
-    })?;
+    };
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    crate::fsutil::work_queue(units, walk)?;
+    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
+    if let Some(width) = std::num::NonZeroUsize::new(units.len()) {
+        crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
+            use rayon::prelude::*;
+            units.into_par_iter().for_each(|unit| walk(unit, &|_| {}));
+        })?;
+    }
     let mut spaces: Vec<Option<PartSpace>> = Vec::new();
     for ((name, _), r) in parts.iter().zip(results) {
         match r.into_inner().unwrap() {

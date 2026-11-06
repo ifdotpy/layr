@@ -516,12 +516,14 @@ pub fn diff(
     // Extended attributes and ACLs are not in the scan: read them for the entries that look equal.
     // An unreadable entry differs. Threads share the work, as the scan does.
     let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
-    let differ: Vec<&str> = crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(equal.len()), || {
+    let differ: Vec<&str> = if let Some(width) = std::num::NonZeroUsize::new(equal.len()) {
+        crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
         use rayon::prelude::*;
         equal.par_iter().copied()
             .filter(|k| !old_path(k).and_then(|a| stored_metadata_same(&a, &new_root.join(k))).unwrap_or(false))
             .collect()
-    })?;
+        })?
+    } else { Vec::new() };
     d.write.extend(differ.into_iter().map(String::from));
     for k in old.keys() {
         if !k.is_empty() && !new.contains_key(k) && !ancestors(k).any(|a| d.removed.contains(a)) {

@@ -272,7 +272,8 @@ impl StateCompare {
 
 /// Run state compares in order, using the current operation's pool when available.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
-    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(jobs.len()), || {
+    let Some(width) = std::num::NonZeroUsize::new(jobs.len()) else { return Ok(Vec::new()); };
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
         use rayon::prelude::*;
         jobs.par_iter().map(StateCompare::run).collect::<Vec<_>>().into_iter().collect()
     })?

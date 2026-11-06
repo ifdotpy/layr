@@ -14,11 +14,6 @@ pub enum Width {
     Items(NonZeroUsize),
     Unbounded,
 }
-impl Width {
-    pub fn items(count: usize) -> Self {
-        Self::Items(NonZeroUsize::new(count).unwrap_or(NonZeroUsize::MIN))
-    }
-}
 
 thread_local! {
     static IN_POOL: Cell<bool> = const { Cell::new(false) };
@@ -74,6 +69,7 @@ fn run_for_role<R: Send>(priority: Priority, width: Width, forking_parent: bool,
 #[cfg(test)]
 mod tests {
     use super::{run, Priority, Width};
+    use std::num::NonZeroUsize;
     use rayon::prelude::*;
 
     #[test]
@@ -93,13 +89,13 @@ mod tests {
 
     #[test]
     fn width_limits_the_pool_to_available_work() {
-        let threads = run(Priority::Foreground, Width::items(2), rayon::current_num_threads).unwrap();
+        let threads = run(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), rayon::current_num_threads).unwrap();
         assert_eq!(threads, std::thread::available_parallelism().unwrap().get().min(2));
     }
 
     #[test]
     fn forking_parent_cannot_start_a_pool() {
-        let result = super::run_for_role(Priority::Foreground, Width::items(2), true, || panic!("must not run"));
+        let result = super::run_for_role(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), true, || panic!("must not run"));
         assert!(matches!(result, Err(super::PoolError::ForkingParent)));
     }
 

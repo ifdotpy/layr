@@ -679,7 +679,7 @@ fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted:
         }
         return Ok(true);
     }
-    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::items(entries.len()), || {
+    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()), || {
         use rayon::prelude::*;
         entries.par_iter().map(|e| {
             let (mut deleted, mut failed) = (0, Vec::new());

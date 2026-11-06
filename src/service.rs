@@ -482,6 +482,21 @@ fn periodic(root: &Path, hourly: bool) {
     }
 }
 
+/// Retry trash left by a failed background start, on every available volume.
+fn sweep_trash(root: &Path) {
+    let layout = match crate::volumes::Layout::for_root(root) {
+        Ok(layout) => layout,
+        Err(error) => { eprintln!("layr trash sweep: {error:#}"); return; }
+    };
+    for name in layout.names() {
+        if let Ok(path) = layout.trash_of(&name) {
+            if let Err(error) = crate::store::empty_all(&path) {
+                eprintln!("layr trash sweep ({name}): {error}");
+            }
+        }
+    }
+}
+
 /// The daily garbage report: for each project of the store at `root`, one line in the service log when
 /// `layr gc` or `layr fsck --caches` would find something. It changes nothing: the operations that make data dead
 /// free it, and a report names a gap in them.
@@ -698,6 +713,8 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
+                    crate::sys::lower_process_priority();
+                    sweep_trash(&root);
                     let caller = Caller::from_uid(if user_mode { own } else { 0 });
                     if !user_mode {
                         periodic(&root, hourly);
@@ -741,6 +758,30 @@ mod tests {
         let (uid, gid, _) = super::peer_uid(&a).unwrap();
         assert_eq!(uid, rustix::process::geteuid().as_raw());
         assert_eq!(gid, rustix::process::getegid().as_raw());
+    }
+}
+
+#[cfg(test)]
+mod trash_sweep_tests {
+    #[test]
+    fn periodic_sweep_removes_deferred_trees_on_all_volumes() {
+        let base = std::env::temp_dir().join(format!("layr-trash-sweep-{}", crate::ids::new_id()));
+        let root = base.join("store");
+        let volume = base.join("volume");
+        std::fs::create_dir_all(root.join("machine")).unwrap();
+        std::fs::write(root.join("machine/id"), "m1").unwrap();
+        for path in [&root, &volume] {
+            std::fs::create_dir_all(path.join("trash/deferred")).unwrap();
+            std::fs::write(path.join("trash/deferred/file"), b"x").unwrap();
+        }
+        std::fs::write(volume.join("layr-volume.json"), br#"{"format":1,"store":"m1","volume":"other"}"#).unwrap();
+        std::fs::write(root.join("volumes.json"), serde_json::to_vec(&serde_json::json!({
+            "format": 1, "volumes": {"other": {"path": volume}}
+        })).unwrap()).unwrap();
+        super::sweep_trash(&root);
+        assert!(!root.join("trash/deferred").exists());
+        assert!(!volume.join("trash/deferred").exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
 
