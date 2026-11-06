@@ -90,10 +90,6 @@ Decisions:
    slot and delete rights) removes only orphan parts of incomplete attempts older than 24 hours.
    It never deletes states that records reference. Writer credentials should have no delete
    right (IAM policy as in Desk's template).
-9. **Desk v1 import:** a store whose `vault.json` has `"format": 1` is read only. `layr clone
-   <url>` imports its linear history into line `main` as `import` states, oldest first, with the
-   Desk paper key, and writes an `import` attestation with the Desk seq and Layr state id when
-   core lands. A v1 store is never written.
 
 ## Peer remotes
 
@@ -121,8 +117,8 @@ merge it (the existing merge engine; conflicts stay in the state).
 
 - Workstream `remote-store`: store format v2 library (`src/store_remote/`), `file://` and
   `s3://` backends (S3 SigV4 client ported from Desk, conditional and multipart puts), keys and
-  slots, push/fetch/clone of stores, `fsck --remote`, `log --remote`, `gc --remote`, Desk v1
-  import. Public API used by the CLI:
+  slots, push/fetch/clone of stores, `fsck --remote`, `log --remote`, `gc --remote`. Public API
+  used by the CLI:
   `store_remote::open(url, repo) -> Store`, `Store::push(ctx, repo, opts)`,
   `Store::fetch(ctx, repo, opts)`, `Store::clone_into(ctx, …)`, `Store::verify(…)`,
   `Store::log(…)`, `Store::gc(…)`, `Store::trust(machine)`.

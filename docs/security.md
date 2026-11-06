@@ -107,7 +107,6 @@ For v2 stores, `fp` is the first 16 hexadecimal characters of SHA-256 of the per
 The opener computes this value and reads its exact slot.
 The store creates every slot conditionally and never replaces an object.
 Old person keys retain access to data that they could already read.
-Desk v1 import reads `slots/person-<login>.age`.
 
 An old person slot stays in the store. It opens the store for the old key until the store key changes (a new store recipient).
 
