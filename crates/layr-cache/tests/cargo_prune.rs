@@ -193,6 +193,19 @@ fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
     assert!(!t.exists(), "nothing was built");
 }
 
+#[test]
+fn warm_runs_every_sweep_command_when_one_fails() {
+    let dir = tmp("warm-fails");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--features\", \"extra\"], [\"build\", \"--release\"]]"));
+    // The feature build does not compile; the release build does.
+    std::fs::write(dir.join("src/lib.rs"), "pub fn a() -> i32 {\n    1\n}\n#[cfg(feature = \"extra\")]\ncompile_error!(\"broken\");\n").unwrap();
+    let e = format!("{:#}", cargo::warm(&host(), &target).unwrap_err());
+    assert!(e.contains("cargo build --features extra"), "{e}");
+    assert!(!e.contains("--release"), "{e}");
+    let stderr = cargo_in(&dir, &target, &["build", "--release"]);
+    assert!(!stderr.contains("Compiling"), "the command after the failed one still warmed its profile: {stderr}");
+}
+
 /// A helper process that takes an exclusive flock on `path` and prints `locked`. It is killed on drop.
 struct Holder {
     child: std::process::Child,
