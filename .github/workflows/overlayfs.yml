@@ -48,6 +48,7 @@ jobs:
           export LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci"
           export LAYR="$RUNNER_TEMP/layr-overlayfs"
           # Unit tests make stores below the temporary folder; /tmp is on a shared mount.
+          test -s "$RUNNER_TEMP/unit-executables"
           while IFS= read -r executable; do
             sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" TMPDIR="$LAYR_OVERLAYFS_TEST_ROOT" "$executable" --include-ignored
           done < "$RUNNER_TEMP/unit-executables"
