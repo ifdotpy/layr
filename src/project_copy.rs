@@ -361,7 +361,7 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
 
 /// Compare file contents using reusable buffers for each parallel job.
 fn compare_contents(files: &[(PathBuf, PathBuf, String)]) -> Result<()> {
-    crate::pools::run(crate::pools::Priority::Foreground, || {
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(files.len()), || {
         use rayon::prelude::*;
         files.par_iter().map_init(
             || (vec![0u8; 1 << 20], vec![0u8; 1 << 20]),

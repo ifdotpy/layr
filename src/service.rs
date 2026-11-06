@@ -567,6 +567,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             }
         }
     }
+    crate::pools::mark_forking_parent();
     let _store_guard = Store::open(&root)?;
     if let Some(d) = sock.parent() {
         std::fs::create_dir_all(d)?;

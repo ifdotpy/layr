@@ -445,7 +445,7 @@ pub fn remove(root: &Path, machine: &str, name: &str) -> Result<()> {
         bail!("volume '{name}' is the default volume; run layr volume default <other> first");
     }
     if let Ok(path) = layout.ready(name) {
-        crate::store::empty_all(&path.join("trash"));
+        crate::store::empty_all(&path.join("trash"))?;
     }
     let mut file = volumes_file(&layout);
     file.volumes.remove(name);

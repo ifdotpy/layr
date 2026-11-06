@@ -496,7 +496,7 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
     let found = Mutex::new(Vec::new());
     let gone = Mutex::new(Vec::new());
     let error = Mutex::new(None);
-    crate::pools::run(crate::pools::Priority::Foreground, || {
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Unbounded, || {
         crate::fsutil::work_queue(vec![Job { parent: None, name: String::new(), rel: String::new() }], |job, add| {
             if error.lock().unwrap().is_some() { return; }
             let step = (|| -> Result<()> {
@@ -807,7 +807,7 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
             each_parallel(&files, |f| open(f).map(|_| ()))
         };
         return if dirs.len().max(files.len()) >= PARALLEL_FROM {
-            crate::pools::run(crate::pools::Priority::Foreground, apply)?
+            crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(dirs.len().max(files.len())), apply)?
         } else {
             apply()
         };
@@ -830,7 +830,7 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         Ok(())
     };
     if files.len() >= PARALLEL_FROM || levels.iter().any(|level| level.len() >= PARALLEL_FROM) {
-        crate::pools::run(crate::pools::Priority::Foreground, apply)?
+        crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(files.len().max(levels.iter().map(Vec::len).max().unwrap_or(0))), apply)?
     } else {
         apply()
     }
@@ -843,7 +843,7 @@ fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> R
     if items.len() < PARALLEL_FROM {
         return items.iter().try_for_each(f);
     }
-    crate::pools::run(crate::pools::Priority::Foreground, || {
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(items.len()), || {
         use rayon::prelude::*;
         items.par_iter().map(f).collect::<Vec<_>>().into_iter().collect()
     })?
@@ -1393,7 +1393,7 @@ fn candidates_scanned_with(
             .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
             .map(|(p, _)| p)
             .collect();
-        let stored_differ: Vec<&String> = crate::pools::run(crate::pools::Priority::Foreground, || {
+        let stored_differ: Vec<&String> = crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(same_data.len()), || {
             use rayon::prelude::*;
             same_data.par_iter().copied().filter(|p| match (parent.at(p), child.at(p)) {
                 (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
@@ -1555,7 +1555,7 @@ fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
     if paths.len() < PARALLEL_FROM {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
-    crate::pools::run(crate::pools::Priority::Foreground, || {
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(paths.len()), || {
         use rayon::prelude::*;
         paths.par_iter().map(|p| changed_ranges(parent, child, p)).collect::<Vec<_>>().into_iter().collect()
     })?

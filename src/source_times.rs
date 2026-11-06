@@ -69,7 +69,7 @@ fn hash_all(w: &Path, rels: &[&str]) -> Result<Vec<Option<String>>> {
     if rels.len() < 2 {
         return Ok(rels.iter().map(hash).collect());
     }
-    crate::pools::run(crate::pools::Priority::Foreground, || {
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::items(rels.len()), || {
         use rayon::prelude::*;
         rels.par_iter().map(hash).collect()
     }).map_err(Into::into)

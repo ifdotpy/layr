@@ -72,7 +72,7 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let results = line_spaces(&lines)?;
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    let results = crate::pools::run(crate::pools::Priority::Background, || {
+    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::items(lines.len()), || {
         use rayon::prelude::*;
         lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
     })?;
@@ -321,7 +321,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        let plan = crate::pools::run(crate::pools::Priority::Background, || {
+        let plan = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::items(1), || {
             if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
                 eprintln!("note: nested mount {}: walking files instead", mount.display());
                 *mounts.lock().unwrap() = Mounts::Below;

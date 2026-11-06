@@ -565,6 +565,7 @@ pub fn fork() -> io::Result<Fork> {
     match unsafe { libc::fork() } {
         -1 => Err(io::Error::last_os_error()),
         0 => {
+            crate::pools::mark_worker();
             // A request process stops on SIGTERM; only the service waits for its requests.
             set_terminate_action(libc::SIG_DFL)?;
             Ok(Fork::Child)

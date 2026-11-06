@@ -1283,7 +1283,7 @@ pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) ->
     fn spawn<'scope, T: Send + 'scope>(scope: &rayon::Scope<'scope>, job: T, work: &'scope (impl Fn(T, &dyn Fn(T)) + Sync)) {
         scope.spawn(move |scope| work(job, &|child| spawn(scope, child, work)));
     }
-    crate::pools::run(crate::pools::Priority::Background, || {
+    crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Unbounded, || {
         rayon::scope(|scope| {
             for job in seed {
                 spawn(scope, job, &work);

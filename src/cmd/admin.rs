@@ -1550,7 +1550,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
     };
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
-    crate::store::empty_trash(&repo.p.trash_dir()?, None);
+    crate::store::empty_trash(&repo.p.trash_dir()?, None)?;
     // Temporary objects whose creator is gone, and old ones without a creator pid. A live
     // creator keeps its object: a copy has the times of its source, so its age says nothing.
     for d in [repo.p.scan_dir(), repo.p.work_dir()] {
