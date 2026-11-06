@@ -237,7 +237,7 @@ Each structure file uses the same name as its PNG, with one of these extensions:
 
 | Extension | Normalization |
 | --- | --- |
-| `.html` | One tag or text node per line, sorted attributes, no blank text nodes. Remove `nonce` and attributes that match `^data-.*id$`. |
+| `.html` | One tag or text node per line, sorted attributes, no blank text nodes. Remove `nonce`, attributes that match `^data-.*id$`, the probe's `ignore` attributes, and generated ids (`id`, `for`, `aria-labelledby`, `aria-describedby`, `aria-controls` with a `:`, 4 or more digits, or a hex run of 8). Dates and times in text (`2026-11-06`, `2026-11-06T03:16:19Z`, `03:16`, `03:16:19`) become `<time>`. |
 | `.xml` | One tag or text node per line, sorted attributes, no blank text nodes. Remove coordinate attributes by default. |
 | `.json` | Sorted object keys, one field per line, stable indentation. Remove coordinate fields by default. |
 | `.txt` | Compare text lines without normalization. |
