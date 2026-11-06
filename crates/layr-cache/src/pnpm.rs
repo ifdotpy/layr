@@ -20,6 +20,8 @@ pub struct Tool {
     pub lockfile: &'static str,
     pub prune: &'static [&'static [&'static str]],
     pub warm: &'static [&'static str],
+    /// The install that makes a damaged folder whole again from the local store (`repair_with`).
+    pub repair: &'static [&'static str],
 }
 
 pub const PNPM: Tool = Tool {
@@ -30,6 +32,7 @@ pub const PNPM: Tool = Tool {
         &["prune", "--ignore-scripts", "--reporter=silent"],
     ],
     warm: &["install", "--frozen-lockfile", "--reporter=silent"],
+    repair: &["install", "--frozen-lockfile", "--offline", "--force", "--ignore-scripts", "--reporter=silent"],
 };
 
 pub const NPM: Tool = Tool {
@@ -37,6 +40,7 @@ pub const NPM: Tool = Tool {
     lockfile: "package-lock.json",
     prune: &[&["prune", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]],
     warm: &["install", "--no-audit", "--no-fund", "--loglevel=error"],
+    repair: &["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
 };
 
 /// The pnpm adapter (`layr-adapter`): `node_modules` next to `pnpm-lock.yaml`.
@@ -51,10 +55,25 @@ fn detects_with(tool: &Tool, folder: &Path) -> bool {
 fn recover_with(folder: &Path) -> Result<bool, String> {
     let Some(root) = folder.parent() else { return Err("no project folder".into()) };
     let copy_path = root.join("node_modules.layr-prune");
+    // A copy that a stop cut short is no copy: only a finished copy has the final name.
+    let _ = std::fs::remove_dir_all(part_of(&copy_path));
     if !copy_path.exists() {
         return Ok(false);
     }
     restore(folder, &copy_path).map(|_| true).map_err(|e| format!("{e:#}"))
+}
+
+/// Installs every package of the lockfile again from the local store, over the files that are there (a folder
+/// that an interrupted step left with missing files). Offline: the store has each package of the lockfile.
+pub fn repair_with(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
+    let named = folder.file_name().is_some_and(|n| n == "node_modules");
+    let Some(root) = folder.parent().filter(|r| named && r.join(tool.lockfile).is_file()) else {
+        anyhow::bail!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile);
+    };
+    let files = ProjectFiles::read(tool, root);
+    let done = exec(host, tool.program, |c| c.args(tool.repair).current_dir(root)).map(drop);
+    files.put_back()?;
+    done.with_context(|| format!("{} {}", tool.program, tool.repair.join(" ")))
 }
 
 impl CacheAdapter for Pnpm {
@@ -76,6 +95,10 @@ impl CacheAdapter for Pnpm {
 
     fn recover(&self, folder: &Path) -> Result<bool, String> {
         recover_with(folder)
+    }
+
+    fn repair(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        repair_with(&PNPM, host, folder).map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -99,6 +122,10 @@ impl CacheAdapter for Npm {
 
     fn recover(&self, folder: &Path) -> Result<bool, String> {
         recover_with(folder)
+    }
+
+    fn repair(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        repair_with(&NPM, host, folder).map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -227,24 +254,43 @@ fn prune_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
     Outcome::Pruned { freed }
 }
 
+/// The name of a copy while it is made: only a finished copy gets its final name, so a stop in the middle of the
+/// copy never leaves a partial copy that a recovery would put in place of the whole folder.
+fn part_of(dst: &Path) -> std::path::PathBuf {
+    let mut name = dst.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    dst.with_file_name(name)
+}
+
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
 fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
-    let made = exec(host, "cp", |c| {
+    let program = if cfg!(target_os = "macos") { MACOS_CP } else { "cp" };
+    let part = part_of(dst);
+    let _ = std::fs::remove_dir_all(&part);
+    let made = exec(host, program, |c| {
         if cfg!(target_os = "macos") {
-            c.args(["-cRp"]).arg(src).arg(dst)
+            c.args(["-cRp"]).arg(src).arg(&part)
         } else {
-            c.args(["-a", "--reflink=auto"]).arg(src).arg(dst)
+            c.args(["-a", "--reflink=auto"]).arg(src).arg(&part)
         }
     })
-    .map(drop);
+    .map(drop)
+    .and_then(|()| std::fs::rename(&part, dst).context("cannot name the finished copy"));
     if made.is_err() {
-        let _ = std::fs::remove_dir_all(dst);
+        let _ = std::fs::remove_dir_all(&part);
     }
     made
 }
 
-/// Puts the copy of `folder` back in place of the changed `folder`.
+/// Puts the copy of `folder` back in place of the changed `folder`. Two renames, then the slow delete: a stop at
+/// any point leaves either the copy or the restored folder whole (the changed folder waits in `.layr-broken`).
 fn restore(folder: &Path, copy_path: &Path) -> Result<()> {
-    std::fs::remove_dir_all(folder).context("cannot remove the changed folder")?;
-    std::fs::rename(copy_path, folder).context("cannot move the copy back")
+    let broken = folder.with_file_name("node_modules.layr-broken");
+    let _ = std::fs::remove_dir_all(&broken);
+    if folder.exists() {
+        std::fs::rename(folder, &broken).context("cannot move the changed folder aside")?;
+    }
+    std::fs::rename(copy_path, folder).context("cannot move the copy back")?;
+    let _ = std::fs::remove_dir_all(&broken);
+    Ok(())
 }
