@@ -13,6 +13,9 @@ use anyhow::{Context, Result};
 use layr_adapter::{CacheAdapter, Host, Outcome};
 use std::path::Path;
 
+/// Apple's cp supports clone copies (-c); a GNU cp earlier in PATH does not.
+const MACOS_CP: &str = "/bin/cp";
+
 /// A node package tool: its program, its lockfile, the commands of a prune (offline, no scripts) and of a warm
 /// step (online, with scripts).
 pub struct Tool {
@@ -265,8 +268,13 @@ fn part_of(dst: &Path) -> std::path::PathBuf {
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
 fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
     let program = if cfg!(target_os = "macos") { MACOS_CP } else { "cp" };
+<<<<<<< head
     let part = part_of(dst);
     let _ = std::fs::remove_dir_all(&part);
+||||||| base
+    let made = exec(host, "cp", |c| {
+=======
+>>>>>>> origin-https/main
     let made = exec(host, program, |c| {
         if cfg!(target_os = "macos") {
             c.args(["-cRp"]).arg(src).arg(&part)
@@ -293,4 +301,27 @@ fn restore(folder: &Path, copy_path: &Path) -> Result<()> {
     std::fs::rename(copy_path, folder).context("cannot move the copy back")?;
     let _ = std::fs::remove_dir_all(&broken);
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_copy_uses_the_system_cp_instead_of_path() {
+        struct CheckProgram;
+        impl Host for CheckProgram {
+            fn command(&self, program: &str) -> std::io::Result<std::process::Command> {
+                assert_eq!(program, "/bin/cp");
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+
+            fn deadline(&self) -> std::time::Instant {
+                unreachable!("the test host never starts a process")
+            }
+        }
+
+        // Stop at command selection; no filesystem copy or PATH lookup occurs.
+        assert!(copy(&CheckProgram, Path::new(""), Path::new("")).is_err());
+    }
 }
