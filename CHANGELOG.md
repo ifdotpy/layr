@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.36.0](https://github.com/ifdotpy/layr/compare/v0.35.0...v0.36.0) (2026-11-06)
+
+
+### Features
+
+* **probes:** a structure snapshot diff matches lines without their indent ([#350](https://github.com/ifdotpy/layr/issues/350)) ([9e9261f](https://github.com/ifdotpy/layr/commit/9e9261fe415f6219d74eea46f844f8ce3bb21f5e))
+* **review:** change diff --since-review --person &lt;login&gt; starts at that person's approval ([#342](https://github.com/ifdotpy/layr/issues/342)) ([5c2670d](https://github.com/ifdotpy/layr/commit/5c2670db0da16920f94a0e59792721b9bc67e310))
+
+
+### Bug Fixes
+
+* **gateway:** a delete error names its key and the gateway's answer; DELETE is retried like other idempotent requests ([#345](https://github.com/ifdotpy/layr/issues/345)) ([dfdd0a8](https://github.com/ifdotpy/layr/commit/dfdd0a8cc6b6b9fb32e10ebb5348a7ae47a0a247))
+
+
+### Performance
+
+* **model:** merge_base is linear; trusted_writers_checked skips a second signature check ([#344](https://github.com/ifdotpy/layr/issues/344)) ([eed71bb](https://github.com/ifdotpy/layr/commit/eed71bbc5bd32bff3e1ab2a77a15ac9785b14de3))
+
 ## [0.35.0](https://github.com/ifdotpy/layr/compare/v0.34.0...v0.35.0) (2026-11-06)
 
 
