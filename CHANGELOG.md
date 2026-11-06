@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/ifdotpy/layr/compare/v0.38.0...v0.38.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **remote:** renew the gateway read proof before expiry and on 401 ([#403](https://github.com/ifdotpy/layr/issues/403)) ([01f4e56](https://github.com/ifdotpy/layr/commit/01f4e5658fb2d3663466fd4c279a567a05c22330))
+
 ## [0.38.0](https://github.com/ifdotpy/layr/compare/v0.37.0...v0.38.0) (2026-11-06)
 
 
