@@ -98,6 +98,14 @@ The snapshot path keeps the existing `.git` subvolume. An ordinary `.git` direct
 `layr status --json` returns an `overlaps` array with `path`, `line`, `owner`, and `changed_at`.
 `changed_at` uses Unix milliseconds from the other file, or its state for a deletion.
 
+Use `layr status --no-overlaps` to skip radar entirely when only this line's status is needed.
+The long output omits the overlap section; JSON omits the `overlaps` field without comparing other lines.
+`layr status --no-ignored` omits the `ignored` JSON field and suppresses ignored paths in text
+output, including when `--ignored` is also given. Ignore rules still classify paths during the
+shared status scan, so ignored files do not become untracked. This switch skips output collection
+and serialization, not that scan. Both switches can be combined, including with `--json`,
+short or porcelain output, and path filters. Without them, the existing output is unchanged.
+
 Radar compares paths against each pair's common base with the existing change lists.
 Each readable overlay uses its own common base.
 This line uses its current content. Other lines use their newest saved state, or their head when newer.
