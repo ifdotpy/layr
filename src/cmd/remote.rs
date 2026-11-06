@@ -594,8 +594,14 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--reason")
             .value("--expires")
             .value("--role")
+<<<<<<< head
             .value("--overlays")
             .value("--name"),
+||||||| base
+            .value("--reason"),
+=======
+            .value("--overlays"),
+>>>>>>> origin-https/main
         args,
     )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
@@ -805,7 +811,12 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let raw: [u8; 32] = bytes.try_into().map_err(|_| exit(128, "invalid machine key"))?;
             ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|_| exit(128, "invalid machine key"))?;
             let key = hex::encode(raw);
+<<<<<<< head
             let limits = trust_limits(repo, &a, &full)?;
+||||||| base
+=======
+            let limits = trust_limits(repo, &a)?;
+>>>>>>> origin-https/main
             match remote_kind {
                 Kind::Store => {
                     let mut store = store_remote::open_named(&a.pos[1], repo)?;
@@ -873,7 +884,13 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
+<<<<<<< head
                 "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+||||||| base
+                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+=======
+                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+>>>>>>> origin-https/main
             ))
         }
     }
@@ -1328,6 +1345,7 @@ mod tests {
 
 /// The limits of `remote trust` (docs/ci-trust.md): `--expires <RFC 3339 time or duration>`, `--role reader|writer`
 /// (reader by default) and `--overlays <name>,<name>`. None without any of them: a full trust without an end.
+<<<<<<< head
 fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str) -> Result<Option<serde_json::Value>> {
     if !["--expires", "--role", "--overlays", "--name"].iter().any(|f| a.get(f).is_some()) {
         if repo.p.trust_terms(&[])?.brokers.contains_key(&repo.p.store.machine.id) {
@@ -1376,6 +1394,38 @@ fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str
     data["machine"] = json!(machine);
     if !rules.trust_counts(&repo.p.store.machine.id, crate::ids::now_ms(), &data) {
         return Err(exit(128, "this broker's delegation does not cover the trust (end, role, overlays or name prefix)"));
+||||||| base
+=======
+fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed) -> Result<Option<serde_json::Value>> {
+    if !["--expires", "--role", "--overlays"].iter().any(|f| a.get(f).is_some()) {
+        return Ok(None);
+    }
+    let mut limits = json!({});
+    if let Some(text) = a.get("--expires") {
+        let now = crate::ids::now_ms();
+        let at = match chrono::DateTime::parse_from_rfc3339(text) {
+            Ok(time) => time.timestamp_millis(),
+            Err(_) => now + super::admin::duration_ms(text)?,
+        };
+        if at <= now {
+            return Err(exit(128, format!("--expires {text} is not in the future")));
+        }
+        limits["expires_at"] = json!(at);
+    }
+    let role = a.get("--role").unwrap_or("reader");
+    if layr_store::trust::Role::parse(role).is_none() {
+        return Err(exit(128, format!("--role {role}: use reader or writer")));
+    }
+    limits["role"] = json!(role);
+    if let Some(list) = a.get("--overlays") {
+        let names: Vec<&str> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        for name in &names {
+            if repo.overlay_info(name)?.is_none() {
+                return Err(exit(128, format!("unknown overlay {name}")));
+            }
+        }
+        limits["overlays"] = json!(names);
+>>>>>>> origin-https/main
     }
     Ok(Some(limits))
 }

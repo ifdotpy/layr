@@ -92,6 +92,12 @@ check gives nothing back either: its copy is a plain folder of root. A runner th
 checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <head>` (or
 `checks watch --once`), `layr push <remote> --caches`.
 
+A build outside `checks run`, such as a CI job, gives its caches back the same way with
+`layr save --caches --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
+folders of the current line go to `<line>.checks-<os>-<arch>` with the line's head as their source
+state, and no source state is made (a cache writer machine may run it, docs/ci-trust.md). Then
+`layr push <remote> --caches` publishes them.
+
 The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read
 logs with `layr show <log_ref>:check.log`; inspect evidence with

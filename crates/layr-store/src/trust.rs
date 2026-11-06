@@ -105,6 +105,7 @@ pub fn is_save_back(name: &str) -> bool {
     name.rsplit_once(".checks-").is_some_and(|(line, platform)| !line.is_empty() && platform.split('-').count() >= 2)
 }
 
+<<<<<<< head
 /// One record of a trust history (`machine.trust`, `machine.untrust` or `trust.delegate`).
 pub struct TrustRecord<'a> {
     pub signer: &'a str,
@@ -369,6 +370,156 @@ mod tests {
         assert_eq!(rules.limited.keys().collect::<Vec<_>>(), ["ci-ok"], "{rules:?}");
         assert!(!rules.trust_counts("broker", 34, &json!({"machine": "ci-full"})), "a broker makes no full machine");
         assert!(rules.trust_counts("root", 34, &json!({"machine": "x"})));
+||||||| base
+=======
+/// One record of a trust history (`machine.trust` or `machine.untrust`).
+pub struct TrustRecord<'a> {
+    pub signer: &'a str,
+    pub time: i64,
+    pub op: &'a str,
+    pub data: &'a Value,
+}
+
+/// The terms of every limited or untrusted machine. Full machines grow from the project creator: a trust without
+/// limits by a full machine makes a full machine, a trust with limits by a full machine limits its machine (and
+/// it is not full, even when another full machine trusts it without limits). Several limits on one machine take
+/// the narrowest: the first end, the smaller role, the common overlays. An untrust counts when its signer is full
+/// and was not untrusted before. Records of other signers change nothing.
+pub fn terms<'a>(creator: &str, records: impl IntoIterator<Item = TrustRecord<'a>>) -> BTreeMap<String, Terms> {
+    let mut records: Vec<TrustRecord<'a>> = records.into_iter().collect();
+    records.sort_by(|a, b| (a.time, a.signer).cmp(&(b.time, b.signer)));
+    let trusts: Vec<&TrustRecord<'a>> = records.iter().filter(|r| r.op == "machine.trust").collect();
+    let target = |r: &TrustRecord<'a>| r.data["machine"].as_str().filter(|m| *m != creator);
+    // A machine that a full machine limits is never full. Each round finds more of them, so the rounds end.
+    let mut never_full: BTreeSet<&str> = BTreeSet::new();
+    let full = loop {
+        let mut full: BTreeSet<&str> = BTreeSet::from([creator]);
+        loop {
+            let more: Vec<&str> = trusts
+                .iter()
+                .filter(|r| full.contains(r.signer) && Terms::of_trust(r.data).is_none())
+                .filter_map(|r| target(r))
+                .filter(|m| !never_full.contains(m) && !full.contains(m))
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            full.extend(more);
+        }
+        let hits: Vec<&str> = trusts
+            .iter()
+            .filter(|r| full.contains(r.signer) && Terms::of_trust(r.data).is_some())
+            .filter_map(|r| target(r))
+            .filter(|m| full.contains(m))
+            .collect();
+        if hits.is_empty() {
+            break full;
+        }
+        never_full.extend(hits);
+    };
+    let mut limited: BTreeMap<String, Terms> = BTreeMap::new();
+    for record in trusts.iter().filter(|r| full.contains(r.signer)) {
+        let (Some(machine), Some(terms)) = (target(record), Terms::of_trust(record.data)) else { continue };
+        limited.entry(machine.to_string()).and_modify(|have| *have = have.narrowest(&terms)).or_insert(terms);
+    }
+    let mut untrusted: BTreeMap<String, i64> = BTreeMap::new();
+    for record in records.iter().filter(|r| r.op == "machine.untrust" && full.contains(r.signer)) {
+        let Some(machine) = target(record) else { continue };
+        if untrusted.get(record.signer).is_some_and(|at| *at <= record.time) {
+            continue;
+        }
+        untrusted.entry(machine.to_string()).or_insert(record.time);
+    }
+    for (machine, at) in untrusted {
+        limited
+            .entry(machine)
+            .or_insert(Terms { expires_at: None, role: Role::Full, overlays: None, untrusted_at: None })
+            .untrusted_at = Some(at);
+    }
+    limited
+}
+
+impl Terms {
+    fn narrowest(&self, other: &Terms) -> Terms {
+        Terms {
+            expires_at: match (self.expires_at, other.expires_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+            role: self.role.min(other.role),
+            overlays: match (&self.overlays, &other.overlays) {
+                (Some(a), Some(b)) => Some(a.intersection(b).cloned().collect()),
+                (a, b) => a.clone().or(b.clone()),
+            },
+            untrusted_at: self.untrusted_at.or(other.untrusted_at),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trust(signer: &'static str, time: i64, data: Value) -> (&'static str, i64, &'static str, Value) {
+        (signer, time, "machine.trust", data)
+    }
+
+    fn solve(records: &[(&'static str, i64, &'static str, Value)]) -> BTreeMap<String, Terms> {
+        terms("root", records.iter().map(|(signer, time, op, data)| TrustRecord { signer, time: *time, op, data }))
+    }
+
+    #[test]
+    fn a_limited_machine_limits_nobody() {
+        let records = [
+            trust("root", 10, json!({"machine": "job", "expires_at": 100, "role": "writer", "overlays": ["cache-target"]})),
+            // A full trust of the same machine does not lift the limits.
+            trust("root", 20, json!({"machine": "job"})),
+            // The job trusts a machine, limits and untrusts the full ones; none of it counts, also backdated.
+            trust("job", 30, json!({"machine": "evil"})),
+            trust("job", 1, json!({"machine": "root", "expires_at": 2})),
+            trust("job", 1, json!({"machine": "peer", "expires_at": 2})),
+            ("job", 31, "machine.untrust", json!({"machine": "root"})),
+            ("job", 1, "machine.untrust", json!({"machine": "peer"})),
+            trust("root", 5, json!({"machine": "peer"})),
+        ];
+        let terms = solve(&records);
+        let job = &terms["job"];
+        assert_eq!((job.expires_at, job.role), (Some(100), Role::Writer));
+        assert!(job.reads("cache-target") && !job.reads("cache-node"));
+        assert_eq!(terms.keys().collect::<Vec<_>>(), ["job"]);
+    }
+
+    #[test]
+    fn a_machine_that_a_limited_machine_trusted_is_limited_too_when_full_machines_say_so() {
+        // peer is full and trusts b without limits; root limits b: b is limited, and b's trust of c counts for nothing.
+        let records = [
+            trust("root", 10, json!({"machine": "peer"})),
+            trust("peer", 11, json!({"machine": "b"})),
+            trust("root", 12, json!({"machine": "b", "expires_at": 50})),
+            trust("b", 13, json!({"machine": "c"})),
+        ];
+        let terms = solve(&records);
+        assert_eq!(terms["b"].expires_at, Some(50));
+        assert!(!terms.contains_key("c") && !terms.contains_key("peer"));
+    }
+
+    #[test]
+    fn an_untrust_ends_a_machine_and_its_later_untrusts() {
+        let records = [
+            trust("root", 10, json!({"machine": "a"})),
+            trust("root", 10, json!({"machine": "b"})),
+            ("root", 50, "machine.untrust", json!({"machine": "a"})),
+            ("a", 40, "machine.untrust", json!({"machine": "b"})),
+            ("a", 60, "machine.untrust", json!({"machine": "root"})),
+        ];
+        let terms = solve(&records);
+        assert_eq!(terms["a"].untrusted_at, Some(50));
+        assert_eq!(terms["a"].role, Role::Full);
+        assert_eq!(terms["b"].untrusted_at, Some(40), "an untrust made before its signer's untrust stays");
+        assert!(!terms.contains_key("root"), "the creator is never untrusted");
+        assert!(terms["a"].live(49) && !terms["a"].live(50));
+>>>>>>> origin-https/main
     }
 
     #[test]

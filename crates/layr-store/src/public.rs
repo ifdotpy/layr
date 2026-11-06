@@ -133,6 +133,7 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
     }
     let creator = creator.context("push the project before making its store public")?;
     // A limited machine (`crate::trust`) is no writer and vouches for nobody.
+<<<<<<< head
     let limited = crate::trust::rules(
         &creator,
         parsed
@@ -144,17 +145,37 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
                 op: v["op"].as_str().unwrap_or(""),
                 data: &v["data"],
             }),
+||||||| base
+    let mut trusted = BTreeSet::from([creator.context("push the project before making its store public")?]);
+=======
+    let limited = crate::trust::terms(
+        &creator,
+        parsed.iter().filter(|(_, v)| matches!(v["op"].as_str(), Some("machine.trust" | "machine.untrust"))).map(|(_, v)| {
+            crate::trust::TrustRecord {
+                signer: v["machine"].as_str().unwrap_or(""),
+                time: v["time"].as_i64().unwrap_or(0),
+                op: v["op"].as_str().unwrap_or(""),
+                data: &v["data"],
+            }
+        }),
+>>>>>>> origin-https/main
     );
     let mut trusted = BTreeSet::from([creator]);
     loop {
         let before = trusted.len();
         for (_, value) in &parsed {
             let signer = value["machine"].as_str().unwrap_or("");
+<<<<<<< head
             if value["op"] != "machine.trust"
                 || !trusted.contains(signer)
                 || limited.contains_key(signer)
                 || !limited.trust_counts(signer, value["time"].as_i64().unwrap_or(0), &value["data"])
             {
+||||||| base
+            if value["op"] != "machine.trust" || !trusted.contains(value["machine"].as_str().unwrap_or("")) {
+=======
+            if value["op"] != "machine.trust" || !trusted.contains(signer) || limited.contains_key(signer) {
+>>>>>>> origin-https/main
                 continue;
             }
             let target = value["data"]["machine"].as_str().unwrap_or("");
