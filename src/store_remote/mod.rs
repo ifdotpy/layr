@@ -325,7 +325,8 @@ impl Store {
     pub fn write_index(&mut self, ctx: &Ctx, repo: &Repo) -> Result<index::Report> {
         self.connect(ctx)?;
         repo.require(ctx, "sync")?;
-        let _lock = repo.p.lock()?;
+        // No project lock: the index only reads the records and writes create-only objects of the remote (heads take
+        // the next free number), and it can take minutes on a large store.
         index::write(self, repo)
     }
     fn connect(&mut self, ctx: &Ctx) -> Result<()> {
