@@ -19,13 +19,21 @@ use zerocopy::FromZeros;
 
 const CHECK_OPEN_FILES_COUNT: u64 = 1024;
 const PASSWD_INITIAL_BYTES: usize = 16 * 1024;
+const PASSWD_MAX_BYTES: usize = 1024 * 1024;
 const GROUPS_INITIAL_COUNT: usize = 1024;
+const GROUPS_MAX_COUNT: usize = 65_536;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 const XATTR_INITIAL_VALUE_BYTES: usize = 256;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 const XATTR_INITIAL_NAMES_BYTES: usize = 512;
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 const XATTR_GROWTH_SLACK_BYTES: usize = 64;
+// Linux limits both individual attributes and attribute name lists to 64 KiB.
+#[cfg(feature = "overlayfs")]
+const XATTR_MAX_BYTES: usize = 64 * 1024;
+// Bound memory for Darwin attributes, including potentially large thin-layer markers.
+#[cfg(target_os = "macos")]
+const XATTR_MAX_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const ATTR_BULK_BUFFER_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "macos")]
@@ -176,9 +184,54 @@ const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 #[cfg(target_os = "linux")]
 const BTRFS_FS_INFO: libc::c_ulong = 0x8400_941f;
 #[cfg(target_os = "linux")]
+#[repr(C)]
+struct FsInfo {
+    max_id: u64,
+    devices: u64,
+    uuid: [u8; 16],
+    rest: [u8; 992],
+}
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<FsInfo>() == 1024);
+    assert!(std::mem::offset_of!(FsInfo, uuid) == 16);
+};
+#[cfg(target_os = "linux")]
 const BTRFS_SET_RECEIVED_SUBVOL: libc::c_ulong = 0xc0c8_9425;
 #[cfg(target_os = "linux")]
+#[repr(C)]
+struct ReceivedSubvolArgs {
+    uuid: [u8; 16],
+    stransid: u64,
+    rtransid: u64,
+    stime: Timespec,
+    rtime: Timespec,
+    flags: u64,
+    reserved: [u64; 16],
+}
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<ReceivedSubvolArgs>() == 200);
+    assert!(std::mem::offset_of!(ReceivedSubvolArgs, flags) == 64);
+};
+#[cfg(target_os = "linux")]
 const BTRFS_SEND: libc::c_ulong = 0x4048_9426;
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct SendArgs {
+    send_fd: i64,
+    clone_sources_count: u64,
+    clone_sources: u64,
+    parent_root: u64,
+    flags: u64,
+    version: u32,
+    reserved: [u8; 28],
+}
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<SendArgs>() == 72);
+    assert!(std::mem::offset_of!(SendArgs, version) == 40);
+};
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
 
@@ -379,13 +432,6 @@ pub fn subvol_flags(fd: BorrowedFd) -> io::Result<u64> {
 
 #[cfg(target_os = "linux")]
 pub fn filesystem_uuid(fd: BorrowedFd) -> io::Result<[u8; 16]> {
-    #[repr(C)]
-    struct FsInfo {
-        max_id: u64,
-        devices: u64,
-        uuid: [u8; 16],
-        rest: [u8; 992],
-    }
     let mut info = FsInfo { max_id: 0, devices: 0, uuid: [0; 16], rest: [0; 992] };
     ioctl_ptr(fd, BTRFS_FS_INFO, &mut info)?;
     Ok(info.uuid)
@@ -401,16 +447,6 @@ pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
 /// Set the identity of a verified file restore, as btrfs receive does before sealing it.
 #[cfg(target_os = "linux")]
 pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::Result<()> {
-    #[repr(C)]
-    struct ReceivedSubvolArgs {
-        uuid: [u8; 16],
-        stransid: u64,
-        rtransid: u64,
-        stime: Timespec,
-        rtime: Timespec,
-        flags: u64,
-        reserved: [u64; 16],
-    }
     let zero_time = Timespec { sec: 0, nsec: 0 };
     let mut args = ReceivedSubvolArgs {
         uuid,
@@ -472,16 +508,6 @@ pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
 /// Produce a version 1 metadata stream through an open pipe.
 #[cfg(target_os = "linux")]
 pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::Result<()> {
-    #[repr(C)]
-    struct SendArgs {
-        send_fd: i64,
-        clone_sources_count: u64,
-        clone_sources: u64,
-        parent_root: u64,
-        flags: u64,
-        version: u32,
-        reserved: [u8; 28],
-    }
     const BTRFS_SEND_NO_FILE_DATA: u64 = 1;
     // Version zero selects the original protocol.
     let mut args = SendArgs {
@@ -726,13 +752,27 @@ pub struct UserInfo {
     pub home: String,
 }
 
-fn passwd(by_uid: Option<u32>, by_name: Option<&str>) -> Option<UserInfo> {
+fn resize_lookup_buffer<T: Copy + Default>(buffer: &mut Vec<T>, length: usize, maximum: usize, what: &str) -> io::Result<()> {
+    if length > maximum {
+        return Err(io::Error::other(format!("{what} exceeds the limit of {maximum}")));
+    }
+    if length > buffer.len() {
+        buffer
+            .try_reserve(length - buffer.len())
+            .map_err(|error| io::Error::other(format!("cannot allocate {what}: {error}")))?;
+    }
+    buffer.resize(length, T::default());
+    Ok(())
+}
+
+fn passwd(by_uid: Option<u32>, by_name: Option<&str>) -> io::Result<Option<UserInfo>> {
     passwd_with_buffer(by_uid, by_name, PASSWD_INITIAL_BYTES)
 }
 
-fn passwd_with_buffer(by_uid: Option<u32>, by_name: Option<&str>, initial_bytes: usize) -> Option<UserInfo> {
-    let name = by_name.map(CString::new).transpose().ok()?;
-    let mut buf = vec![0u8; initial_bytes];
+fn passwd_with_buffer(by_uid: Option<u32>, by_name: Option<&str>, initial_bytes: usize) -> io::Result<Option<UserInfo>> {
+    let name = by_name.map(CString::new).transpose()?;
+    let mut buf: Vec<u8> = Vec::new();
+    resize_lookup_buffer(&mut buf, initial_bytes, PASSWD_MAX_BYTES, "passwd buffer bytes")?;
     loop {
         // SAFETY: NSS writes pw/result and bounded buf; strings are copied before buf is resized or dropped.
         unsafe {
@@ -743,61 +783,76 @@ fn passwd_with_buffer(by_uid: Option<u32>, by_name: Option<&str>, initial_bytes:
                 (None, Some(name)) => {
                     libc::getpwnam_r(name.as_ptr(), pw.as_mut_ptr(), buf.as_mut_ptr().cast(), buf.len(), &mut result)
                 }
-                _ => return None,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing passwd lookup key")),
             };
             if rc == libc::ERANGE {
-                buf.resize(buf.len().max(1).checked_mul(2)?, 0);
+                if buf.len() == PASSWD_MAX_BYTES {
+                    return Err(io::Error::other(format!("passwd buffer bytes exceed the limit of {PASSWD_MAX_BYTES}")));
+                }
+                let next = buf.len().max(1).saturating_mul(2).min(PASSWD_MAX_BYTES);
+                resize_lookup_buffer(&mut buf, next, PASSWD_MAX_BYTES, "passwd buffer bytes")?;
                 continue;
             }
-            if rc != 0 || result.is_null() {
-                return None;
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc));
+            }
+            if result.is_null() {
+                return Ok(None);
             }
             let pw = pw.assume_init();
-            return Some(UserInfo {
+            return Ok(Some(UserInfo {
                 uid: pw.pw_uid,
                 gid: pw.pw_gid,
                 name: CStr::from_ptr(pw.pw_name).to_string_lossy().into_owned(),
                 home: CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned(),
-            });
+            }));
         }
     }
 }
 
+/// Best-effort display/policy lookup; use try_user_by_uid for credential changes.
 pub fn user_by_uid(uid: u32) -> Option<UserInfo> {
+    try_user_by_uid(uid).ok().flatten()
+}
+
+/// Look up credentials without treating an NSS failure as a missing user.
+pub fn try_user_by_uid(uid: u32) -> io::Result<Option<UserInfo>> {
     passwd(Some(uid), None)
 }
 
+/// Best-effort name lookup for display and policy resolution.
 pub fn user_by_name(name: &str) -> Option<UserInfo> {
-    passwd(None, Some(name))
+    passwd(None, Some(name)).ok().flatten()
 }
 
 /// The groups of a user (its primary group included).
-pub fn user_groups(name: &str, gid: u32) -> Vec<u32> {
-    let c = match CString::new(name) {
-        Ok(c) => c,
-        Err(_) => return vec![gid],
-    };
-    lookup_groups(gid, |groups, count| {
-        // SAFETY: count is the slice capacity on entry; NSS writes at most that many gids.
-        unsafe { libc::getgrouplist(c.as_ptr(), gid, groups.as_mut_ptr(), count) }
+pub fn user_groups(name: &str, gid: u32) -> io::Result<Vec<u32>> {
+    let c = CString::new(name)?;
+    lookup_groups(|groups, count| {
+        // SAFETY: the capacity bounds writes; Darwin uses signed int pointers for the same 32-bit GID ABI.
+        unsafe { libc::getgrouplist(c.as_ptr(), gid as _, groups.as_mut_ptr().cast(), count) }
     })
 }
 
-fn lookup_groups(gid: u32, mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int) -> Vec<u32> {
-    let mut groups = vec![0; GROUPS_INITIAL_COUNT];
+fn lookup_groups(mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int) -> io::Result<Vec<u32>> {
+    let mut groups = Vec::new();
+    resize_lookup_buffer(&mut groups, GROUPS_INITIAL_COUNT, GROUPS_MAX_COUNT, "supplementary group count")?;
     loop {
-        let Ok(mut count) = libc::c_int::try_from(groups.len()) else { return vec![gid] };
+        let mut count = groups.len() as libc::c_int;
         let rc = lookup(&mut groups, &mut count);
+        let required = usize::try_from(count).map_err(|_| io::Error::other("NSS returned a negative group count"))?;
         if rc >= 0 {
-            groups.truncate(count as usize);
-            return groups;
+            if required > groups.len() {
+                return Err(io::Error::other("NSS returned an invalid group count on success"));
+            }
+            groups.truncate(required);
+            return Ok(groups);
         }
         // getgrouplist reports the required count, rather than returning ERANGE.
-        let Ok(required) = usize::try_from(count) else { return vec![gid] };
         if required <= groups.len() {
-            return vec![gid];
+            return Err(io::Error::other("NSS group lookup failed without a larger required count"));
         }
-        groups.resize(required, 0);
+        resize_lookup_buffer(&mut groups, required, GROUPS_MAX_COUNT, "supplementary group count")?;
     }
 }
 
@@ -809,7 +864,7 @@ mod nss_tests {
     fn passwd_grows_after_erange() {
         let uid = rustix::process::getuid().as_raw();
         let expected = user_by_uid(uid).expect("current user in NSS");
-        let actual = passwd_with_buffer(Some(uid), None, 1).expect("retry small NSS buffer");
+        let actual = passwd_with_buffer(Some(uid), None, 1).expect("retry small NSS buffer").expect("current user in NSS");
         assert_eq!(
             (actual.uid, actual.gid, actual.name, actual.home),
             (expected.uid, expected.gid, expected.name, expected.home)
@@ -817,10 +872,34 @@ mod nss_tests {
     }
 
     #[test]
+    fn passwd_buffer_limit_is_an_explicit_error() {
+        let error = passwd_with_buffer(Some(0), None, PASSWD_MAX_BYTES + 1).err().expect("reject oversized buffer");
+        assert!(error.to_string().contains("passwd buffer bytes exceeds the limit"));
+    }
+
+    #[test]
+    fn group_lookup_rejects_excessive_counts_and_provider_errors() {
+        for count in [libc::c_int::MAX, -1, GROUPS_INITIAL_COUNT as libc::c_int] {
+            let error = lookup_groups(|_, needed| {
+                *needed = count;
+                -1
+            })
+            .unwrap_err();
+            assert!(!error.to_string().is_empty());
+        }
+        assert!(user_groups("invalid\0name", 7).is_err());
+        assert!(lookup_groups(|groups, count| {
+            *count = groups.len() as libc::c_int + 1;
+            0
+        })
+        .is_err());
+    }
+
+    #[test]
     fn group_lookup_retries_required_count() {
         let required = GROUPS_INITIAL_COUNT + 1;
         let mut calls = 0;
-        let groups = lookup_groups(7, |groups, count| {
+        let groups = lookup_groups(|groups, count| {
             calls += 1;
             *count = required as libc::c_int;
             if groups.len() < required {
@@ -829,7 +908,8 @@ mod nss_tests {
             groups.fill(9);
             groups[0] = 7;
             required as libc::c_int
-        });
+        })
+        .unwrap();
         assert_eq!(calls, 2);
         assert_eq!(groups.len(), required);
         assert_eq!(groups[0], 7);
@@ -1269,7 +1349,8 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
 // Retry when an attribute grows between the size query and read.
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
 fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0; initial_bytes];
+    let mut buffer = Vec::new();
+    resize_lookup_buffer(&mut buffer, initial_bytes, XATTR_MAX_BYTES, "xattr bytes")?;
     loop {
         match read(&mut buffer) {
             Ok(size) => {
@@ -1278,7 +1359,11 @@ fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> ru
             }
             Err(rustix::io::Errno::RANGE) => {
                 let size = read(&mut [])?;
-                buffer.resize(size.saturating_add(XATTR_GROWTH_SLACK_BYTES).max(buffer.len().saturating_mul(2)), 0);
+                if buffer.len() == XATTR_MAX_BYTES || size > XATTR_MAX_BYTES {
+                    return Err(io::Error::other(format!("xattr bytes exceed the limit of {XATTR_MAX_BYTES}")));
+                }
+                let next = size.saturating_add(XATTR_GROWTH_SLACK_BYTES).max(buffer.len().saturating_mul(2)).min(XATTR_MAX_BYTES);
+                resize_lookup_buffer(&mut buffer, next, XATTR_MAX_BYTES, "xattr bytes")?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -1885,6 +1970,34 @@ mod metadata_tests {
         .unwrap();
         assert_eq!(value, vec![7; 128]);
         assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn attribute_growth_stops_at_the_size_limit() {
+        let mut calls = 0;
+        let error = read_xattr_buffer(1, |buffer| {
+            calls += 1;
+            if buffer.is_empty() {
+                Ok(0)
+            } else {
+                Err(rustix::io::Errno::RANGE)
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("xattr bytes exceed the limit"));
+        assert!(calls < 64);
+        let error = read_xattr_buffer(
+            1,
+            |buffer| {
+                if buffer.is_empty() {
+                    Ok(XATTR_MAX_BYTES + 1)
+                } else {
+                    Err(rustix::io::Errno::RANGE)
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("xattr bytes exceed the limit"));
     }
 
     #[test]

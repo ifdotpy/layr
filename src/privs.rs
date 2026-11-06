@@ -68,9 +68,9 @@ pub struct User {
 
 /// A user and the groups it belongs to.
 pub fn user(uid: u32) -> Result<User> {
-    match sys::user_by_uid(uid) {
+    match sys::try_user_by_uid(uid)? {
         Some(u) => {
-            let groups = sys::user_groups(&u.name, u.gid);
+            let groups = sys::user_groups(&u.name, u.gid)?;
             Ok(User { uid, gid: u.gid, name: u.name, home: u.home, groups })
         }
         None => Ok(User { uid, gid: uid, name: format!("uid{uid}"), home: "/".into(), groups: vec![uid] }),
