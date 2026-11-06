@@ -302,8 +302,7 @@ of the states that the repair frees. `layr gc -n --repair` lists the states the 
 | `undo.ops` | 20 | records per line | operations of a line that `layr undo` can reverse |
 | `undo.deleted` | 5 | lines per project | deleted lines that `layr undo` can bring back |
 
-`undo.days` and `retention.hours` are removed. Setting either fails with the name of its
-replacement. Ring sizes are counts. The first open of an old database does not free anything:
+`undo.days` and `retention.hours` are removed. Ring sizes are counts. The first open of an old database does not free anything:
 the replay fills the owners, and `layr gc` reports the states that no owner names.
 
 ## Upgrade

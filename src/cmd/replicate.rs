@@ -615,7 +615,7 @@ pub fn exchange(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?}))?;
         let hello = w.recv_json()?;
         if direction != "sync" && hello["direction_v1"] != true {
             bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
@@ -626,9 +626,7 @@ pub fn exchange(
             bail!("the peer holds another project ({peer_project})");
         }
         let peer = (hello["machine"].as_str().unwrap_or("").to_string(), hello["public_key"].as_str().unwrap_or("").to_string());
-        let peer_caches: BTreeSet<String> =
-            serde_json::from_value(hello.get("caches").or_else(|| hello.get("layers")).cloned().unwrap_or(Value::Null))
-                .unwrap_or_default();
+        let peer_caches: BTreeSet<String> = serde_json::from_value(hello["caches"].clone()).unwrap_or_default();
         let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
         let peer_present: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
         // Records both ways.
@@ -673,7 +671,7 @@ pub fn exchange(
                 .cloned()
                 .collect()
         };
-        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?, "have_layers": present_caches(&repo.p)?, "layers": caches}))?;
+        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?}))?;
         let got = recv_states(&mut w, &repo.p, direction != "push")?;
         let overlay_omitted = if hello["overlay_sync_v1"] == true {
             exchange_overlays(ctx, &mut w, repo, direction, auto, caches, &peer.0, &peer.1, true)?
@@ -783,7 +781,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p, ctx: Some(ctx) };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?, "layers": present_caches(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     if direction == "fetch" && !lines.is_empty() {
         bail!("the client sent records during fetch");
@@ -848,21 +846,10 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         have2.insert(id.clone());
         list.push((id, parent));
     }
-    let peer_caches: BTreeSet<String> =
-        serde_json::from_value(want.get("have_caches").or_else(|| want.get("have_layers")).cloned().unwrap_or(Value::Null))
-            .unwrap_or_default();
+    let peer_caches: BTreeSet<String> = serde_json::from_value(want["have_caches"].clone()).unwrap_or_default();
     let mut features = SendFeatures::from_hello(&hello);
     features.identities = serde_json::from_value(want["clone_identities_v1"].clone()).unwrap_or_default();
-    send_states(
-        ctx,
-        &mut w,
-        &repo,
-        &list,
-        want.get("caches").or_else(|| want.get("layers")).and_then(Value::as_bool).unwrap_or(false),
-        &peer_caches,
-        &have,
-        features,
-    )?;
+    send_states(ctx, &mut w, &repo, &list, want["caches"].as_bool().unwrap_or(false), &peer_caches, &have, features)?;
     if hello["overlay_sync_v1"] == true {
         exchange_overlays(
             ctx,

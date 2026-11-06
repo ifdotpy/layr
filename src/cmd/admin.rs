@@ -88,7 +88,6 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--force")
         .flag("--caches")
         .value("--cache")
-        .removed("--layers", "--caches")
         .flag("--all-lines")
         .value("--save-back")
         .flag("--json")
@@ -2728,16 +2727,7 @@ fn default_branch(repo: &Repo) -> Option<String> {
     names.first().map(|s| s.to_string())
 }
 
-/// Settings that the owners model replaced (docs/ownership.md): the replacement is named.
-pub const REMOVED_KEYS: &[(&str, &str)] = &[
-    ("undo.days", "undo.ops (records per line, default 20)"),
-    ("retention.hours", "retention.auto (automatic states per line, default 10)"),
-];
-
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
-    if let Some((_, new)) = REMOVED_KEYS.iter().find(|(old, _)| *old == key) {
-        return Err(exit(1, format!("error: {key} was removed; use {new}")));
-    }
     if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
         return Err(exit(1, format!("{key} is on or off")));
     }
@@ -3272,22 +3262,6 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
 pub(crate) const VERSIONED: &str = "not a cache: has versioned files; remove them from history first";
 /// A folder with versioned files that an older layr made a cache, after it became plain again.
 pub(crate) const VERSIONED_AGAIN: &str = "not a cache: has versioned files; a plain folder again";
-
-/// The `layr cache` forms that the cache overlays replaced (docs/cache-overlays.md, section 4).
-/// Each fails and names its replacement; no repository is opened.
-pub fn removed_cache(args: &[String]) -> Result<i32> {
-    let (old, new) = match args.first().map(|s| s.as_str()) {
-        Some("add") => ("layr cache add", "'regenerable' in .layrattributes, then 'layr save --caches'"),
-        Some("remove") => {
-            ("layr cache remove", "'-regenerable' in .layrattributes, or 'layr config regenerable' without the path")
-        }
-        Some("pull") => ("layr cache pull", "'layr line new <name> <line>' or 'layr merge <line>'"),
-        Some("repair") => ("layr cache repair", "'layr overlay repair <overlay>'"),
-        Some("list") => ("layr cache list", "'layr overlay list'"),
-        _ => ("layr cache", "'layr overlay list'"),
-    };
-    Err(exit(2, format!("{old} was removed. Use {new}.")))
-}
 
 /// Hidden helpers for tests: `layr debug changes <a> <b>` prints the raw change list.
 pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {

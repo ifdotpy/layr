@@ -1451,7 +1451,7 @@ impl<'a> Project<'a> {
                     .map(|m| format!("{} (key {})", &crate::ids::display(m)[..8], keys.get(m).map(|k| k.as_str()).unwrap_or("")))
                     .collect();
                 bail!(
-                    "records of untrusted machine(s): {}. If you trust them, run: layr machines trust <id> --key <key>",
+                    "records of untrusted machine(s): {}. If you trust them, run: layr remote trust <remote> <id>",
                     list.join(", ")
                 );
             }

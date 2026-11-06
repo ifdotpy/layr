@@ -5,8 +5,6 @@ sample "$T/src"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
 S1=$(l rev-parse head)
-no 'the layer alias is removed' l layer list
-has 'layer names overlay' 'layr overlay list' "$(l layer list 2>&1)"
 removed_cli() {
     local replacement=$1 output rc
     shift
@@ -14,19 +12,17 @@ removed_cli() {
     eq "$* exits 2" 2 "$rc"
     has "$* names $replacement" "$replacement" "$output"
 }
-removed_cli 'layr line' branch
-removed_cli 'layr save -m' commit
-removed_cli 'layr line new' checkout main
-removed_cli 'layr line new' switch main
-removed_cli 'layr park' stash
-removed_cli 'layr pick' cherry-pick
-removed_cli 'layr replay' rebase
-removed_cli 'layr invert' revert
-removed_cli '--no-save' merge --no-commit head
-removed_cli '--no-save' pick --no-commit head
-removed_cli '--no-save' invert --no-commit head
-removed_cli '--autopark' replay --autostash head
-removed_cli '--caches' save --layers
+# Git names and removed commands are no layr commands: they fail before any change, with no hint.
+for gitname in branch commit checkout switch stash cherry-pick rebase revert worktree cache layer approvals machines git-sync; do
+    output=$(l $gitname main 2>&1); rc=$?
+    eq "$gitname exits 1" 1 "$rc"
+    has "$gitname is not a layr command" "'$gitname' is not a layr command" "$output"
+done
+for removed in "merge --no-commit head" "pick --no-commit head" "invert --no-commit head" "replay --autostash head" "save --layers"; do
+    no "$removed is an unknown option" l $removed
+    has "$removed names no replacement" "unknown option" "$(l $removed 2>&1)"
+done
+eq 'the removed options changed nothing' "$S1" "$(l rev-parse head)"
 removed_cli '--all-lines' save --all
 for revision in HEAD 'HEAD~1' 'HEAD^2' 'HEAD@{0}' 'HEAD:notes.txt' 'HEAD^{tree}'; do
     removed_cli head rev-parse "$revision"
@@ -91,10 +87,8 @@ ok 'try writes a passing check attestation' l try -q head -- sh -c 'test -f note
 no 'try returns the failed command exit code' l try -q head -- sh -c 'exit 7'
 eq 'both checks are recorded' 2 "$(l attestations head --kind check --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 eq 'change JSON exposes passing and failed command outcomes' '0,7' "$(l change show "$C" --json | python3 -c 'import json,sys; print(",".join(str(c["exit"]) for c in json.load(sys.stdin)["versions"][0]["checks"]))')"
-for old in approvals checks; do
-    has "$old names its replacement" 'layr attestations' "$(l "$old" head 2>&1)"
-    no "$old fails" l "$old" head
-done
+has "checks with a revision names attestations" 'layr attestations' "$(l checks head 2>&1)"
+no "checks with a revision fails" l checks head
 echo second >> notes.txt
 l save -qam amended --amend
 S3=$(l rev-parse head)
