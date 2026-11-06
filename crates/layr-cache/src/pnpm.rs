@@ -59,6 +59,7 @@ fn detects_with(tool: &Tool, folder: &Path) -> bool {
 fn recover_with(folder: &Path) -> Result<bool, String> {
     let Some(root) = folder.parent() else { return Err("no project folder".into()) };
     let copy_path = root.join("node_modules.layr-prune");
+    leftovers(root);
     // A copy that a stop cut short is no copy: only a finished copy has the final name.
     let _ = std::fs::remove_dir_all(part_of(&copy_path));
     if !copy_path.exists() {
@@ -161,6 +162,7 @@ fn warm_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
         anyhow::bail!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile);
     };
     let copy_path = root.join("node_modules.layr-prune");
+    leftovers(root);
     if copy_path.exists() {
         restore(folder, &copy_path).context("cannot restore node_modules from its copy")?;
     }
@@ -229,6 +231,7 @@ fn prune_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
         return skip(format!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile));
     };
     let copy_path = root.join("node_modules.layr-prune");
+    leftovers(root);
     // A copy that an interrupted prune left: put it back first, so the folder is the state before that prune.
     if copy_path.exists() {
         if let Err(e) = restore(folder, &copy_path) {
@@ -264,6 +267,13 @@ fn part_of(dst: &Path) -> std::path::PathBuf {
     let mut name = dst.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     dst.with_file_name(name)
+}
+
+/// Removes what an interrupted step left next to `node_modules`: a changed folder that a restore moved aside
+/// (`node_modules.layr-broken`, deleted last and slowly) and a copy cut short (`.part`). Neither is ever put back.
+fn leftovers(root: &Path) {
+    let _ = std::fs::remove_dir_all(root.join("node_modules.layr-broken"));
+    let _ = std::fs::remove_dir_all(part_of(&root.join("node_modules.layr-prune")));
 }
 
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
@@ -343,6 +353,16 @@ mod tests {
         assert_eq!(recover_with(&root.join("node_modules")), Ok(false));
         assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "whole");
         assert!(!root.join("node_modules.layr-prune.part").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_folder_that_an_interrupted_restore_moved_aside_goes_at_the_next_recovery() {
+        let root = project("leftover");
+        std::fs::create_dir_all(root.join("node_modules.layr-broken/pkg")).unwrap();
+        assert_eq!(recover_with(&root.join("node_modules")), Ok(false));
+        assert!(!root.join("node_modules.layr-broken").exists());
+        assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "whole");
         let _ = std::fs::remove_dir_all(root);
     }
 
