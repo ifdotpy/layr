@@ -116,6 +116,15 @@ pub fn warm(host: &dyn Host, folder: &Path) -> Result<()> {
 /// with the lifecycle scripts, as the project's own install runs. The folder is copied first and restored on a
 /// failure, as in a prune; `recover` puts the copy back after a stop at the hard limit.
 pub fn warm_with(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
+    let files = folder.parent().map(|root| ProjectFiles::read(tool, root));
+    let warmed = warm_files_kept(tool, host, folder);
+    if let Some(files) = files {
+        files.put_back()?;
+    }
+    warmed
+}
+
+fn warm_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
     let named = folder.file_name().is_some_and(|n| n == "node_modules");
     let Some(root) = folder.parent().filter(|r| named && r.join(tool.lockfile).is_file()) else {
         anyhow::bail!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile);
@@ -138,8 +147,52 @@ pub fn warm_with(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The project files next to `node_modules` that a tool may write (`npm prune` writes `package-lock.json` again,
+/// with its own format and a new time): their bytes and times before a step, put back after it. A cache step
+/// changes `node_modules` only; the files of the line stay as the line saved them.
+struct ProjectFiles(Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)>);
+
+impl ProjectFiles {
+    fn read(tool: &Tool, root: &Path) -> ProjectFiles {
+        let names = [tool.lockfile, "package.json"];
+        ProjectFiles(
+            names
+                .iter()
+                .map(|name| root.join(name))
+                .filter_map(|path| {
+                    let bytes = std::fs::read(&path).ok()?;
+                    let time = std::fs::metadata(&path).ok()?.modified().ok()?;
+                    Some((path, bytes, time))
+                })
+                .collect(),
+        )
+    }
+
+    fn put_back(&self) -> Result<()> {
+        for (path, bytes, time) in &self.0 {
+            if std::fs::read(path).ok().as_ref() != Some(bytes) {
+                std::fs::write(path, bytes).with_context(|| format!("cannot write {} back", path.display()))?;
+            }
+            if std::fs::metadata(path).and_then(|m| m.modified()).ok() != Some(*time) {
+                std::fs::File::options().write(true).open(path)?.set_modified(*time)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Prunes `folder`, a `node_modules` folder, with `tool`. Any failure restores the folder and skips it.
 pub fn prune_with(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
+    let Some(root) = folder.parent() else { return skip("no project folder".to_string()) };
+    let files = ProjectFiles::read(tool, root);
+    let outcome = prune_files_kept(tool, host, folder);
+    match files.put_back() {
+        Ok(()) => outcome,
+        Err(e) => skip(format!("{e:#}")),
+    }
+}
+
+fn prune_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
     let named = folder.file_name().is_some_and(|n| n == "node_modules");
     let Some(root) = folder.parent().filter(|r| named && r.join(tool.lockfile).is_file()) else {
         return skip(format!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile));

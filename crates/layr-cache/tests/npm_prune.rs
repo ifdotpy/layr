@@ -51,10 +51,20 @@ fn npm_prunes_a_removed_package_and_warm_installs_an_added_one() {
     // The lockfile drops pkg-b: the prune removes it, offline.
     manifest(&dir, &["pkg-a"]);
     npm_ok(&dir, &["install", "--package-lock-only"]);
+    // The lockfile is a file of the line: the prune leaves its bytes and its time, also when npm would write it in
+    // its own format.
+    let lock = dir.join("package-lock.json");
+    let compact =
+        serde_json::to_vec(&serde_json::from_slice::<serde_json::Value>(&std::fs::read(&lock).unwrap()).unwrap()).unwrap();
+    std::fs::write(&lock, &compact).unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
     match pnpm::Npm.prune(&host(), &nm) {
         Outcome::Pruned { .. } => {}
         other => panic!("expected a prune, got {other:?}"),
     }
+    assert_eq!(std::fs::read(&lock).unwrap(), compact, "the prune keeps the bytes of the lockfile");
+    assert_eq!(std::fs::metadata(&lock).unwrap().modified().unwrap(), old, "and its time");
     assert!(nm.join("pkg-b").symlink_metadata().is_err(), "pkg-b stays");
     assert!(nm.join("pkg-a/index.js").is_file());
 
