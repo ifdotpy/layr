@@ -574,7 +574,9 @@ impl CacheAdapter for Cargo {
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
-/// change can add a dependency). A failed build leaves `target` consistent: cargo writes each output whole.
+/// change can add a dependency). A failed build leaves `target` consistent: cargo writes each output whole. Every
+/// command runs, also after one fails: a crate that does not compile leaves only the units of that command cold,
+/// not the other profiles and target folders. The error names each failed command.
 pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
     let named = target.file_name().is_some_and(|n| n == "target");
     let Some(root) = target.parent().filter(|r| named && r.join("Cargo.toml").is_file()) else {
@@ -584,24 +586,44 @@ pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
     if !cfg.listed {
         bail!("no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml");
     }
+    let mut failed = Vec::new();
     for args in &cfg.commands {
         let mut c = host_cargo(host)?;
-        c.args(args).current_dir(root).env("CARGO_TARGET_DIR", target).envs(cfg.env.iter().map(|(k, v)| (k, v)));
+        c.args(keep_going(args)).current_dir(root).env("CARGO_TARGET_DIR", target).envs(cfg.env.iter().map(|(k, v)| (k, v)));
         // The color again after the project's env: the parsers of later steps read plain text.
         c.env("CARGO_TERM_COLOR", "never");
-        run(&mut c, Some(host.deadline())).with_context(|| format!("cargo {}", args.join(" ")))?;
+        if let Err(e) = run(&mut c, Some(host.deadline())) {
+            failed.push(format!("cargo {}: {e:#}", args.join(" ")));
+        }
     }
     for other in &cfg.other_dirs {
         let mut c = host_cargo(host)?;
-        c.args(&other.args)
+        c.args(keep_going(&other.args))
             .current_dir(root)
             .env("CARGO_TARGET_DIR", target.join(&other.dir))
             .envs(cfg.env.iter().chain(other.env.iter()).map(|(k, v)| (k, v)));
         c.env("CARGO_TERM_COLOR", "never");
-        run(&mut c, Some(host.deadline()))
-            .with_context(|| format!("cargo {} (target/{})", other.args.join(" "), other.dir))?;
+        if let Err(e) = run(&mut c, Some(host.deadline())) {
+            failed.push(format!("cargo {} (target/{}): {e:#}", other.args.join(" "), other.dir));
+        }
+    }
+    if !failed.is_empty() {
+        bail!("{}", failed.join("\n"));
     }
     Ok(())
+}
+
+/// The arguments of a warm command: `build`, `check`, `clippy` and `doc` get `--keep-going`, so a crate that
+/// does not compile leaves only itself and its dependents cold. The flag changes no unit hash. Other commands
+/// (such as `nextest list`) take their arguments as they are.
+fn keep_going(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    if matches!(args.first().map(String::as_str), Some("build" | "check" | "clippy" | "doc")) && !args.iter().any(|a| a == "--keep-going") {
+        // Before a `--` that passes the rest to a tool (clippy lints).
+        let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
+        out.insert(at, "--keep-going".to_string());
+    }
+    out
 }
 
 fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
