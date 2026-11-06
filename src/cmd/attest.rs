@@ -18,6 +18,12 @@ pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload
     record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
 }
 
+/// Whether a check attestation of exactly `state` ran `command` (split as `check_argv` does) and
+/// exited 0. The protection of lines and refs reads required checks through this alone.
+pub(crate) fn check_passed(repo: &Repo, state: &str, command: &str) -> Result<bool> {
+    Ok(repo.p.db.check_exit(state, &layr_model::protection::check_argv(command), Some(0))?.is_some())
+}
+
 fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {
     if !ATTESTATION_KINDS.contains(&kind) {
         bail!("unknown attestation kind '{kind}'");

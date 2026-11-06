@@ -174,7 +174,7 @@ l protect env/prod --update maintainer --check smoke
 l ref set env/prod "$V3" --expect "$BASE" >/dev/null
 l ref log env/prod --json > "$T/ref-history.json"
 eq 'the protected ref has two transitions' 2 "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$T/ref-history.json")"
-for KIND in origin import quarantine; do l attest "$KIND" "$V3" >/dev/null; done
+for KIND in origin import quarantine bisect; do l attest "$KIND" "$V3" >/dev/null; done
 l attest revoke "$V3" >/dev/null
 l try -q "$V3" --check smoke
 l approve -q "$V3"
@@ -357,7 +357,7 @@ l ref list --json > "$T/cli/refs.json"
 l ref log env/prod --json > "$T/cli/ref-log.json"
 l queue list --json > "$T/cli/queue.json"
 l attestations "$V3" --json > "$T/cli/attestations.json"
-ok 'the fixture retains all six attestation kinds' python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); assert {r["kind"] for r in rows}=={"check","approval","origin","import","quarantine","revoke"}' "$T/cli/attestations.json"
+ok 'the fixture retains all seven attestation kinds' python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); assert {r["kind"] for r in rows}=={"check","approval","origin","import","quarantine","revoke","bisect"}' "$T/cli/attestations.json"
 l op log --json > "$T/cli/operations.jsonl"
 python3 - "$T/cli/operations.jsonl" "$T/cli/operations.json" <<'PY'
 import json, sys

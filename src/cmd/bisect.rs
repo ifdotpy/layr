@@ -165,7 +165,11 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     {
         let _lock = repo.p.lock()?;
         let mut rec = crate::model::Record::new("bisect.run");
+        // The finding is evidence about the first bad state: a `bisect` attestation of it, whose
+        // payload is the result. `layr attestations <state> --kind bisect` lists it.
+        let finding = super::attest::record(repo, &first.id, "bisect", &serde_json::to_vec(&result)?)?;
         rec.data = result.clone();
+        rec.data["attestation"] = finding.data["attestation"].clone();
         if let Some(line) = &h.line {
             rec.data["line"] = serde_json::json!(line.id);
         }
