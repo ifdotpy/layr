@@ -104,9 +104,7 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         }
         let object = store.backend.get(&index.name())?.context("heads index disappeared")?;
         let old = index::open(&identity, &object, &index.name(), &descriptor.project, &trusted)?;
-        if old.data == index.data {
-            break;
-        }
+        unchanged = old.data == index.data;
     }
     let mut pending: BTreeMap<_, _> = project.states.iter().map(|(id, s)| (id.clone(), s.state.clone())).collect();
     let mut graphs = BTreeMap::new();
