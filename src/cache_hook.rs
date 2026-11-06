@@ -103,6 +103,15 @@ impl Host for WorkerHost {
     fn deadline(&self) -> Instant {
         self.until
     }
+
+    fn clone_tree(&self, src: &Path, dst: &Path) -> std::io::Result<bool> {
+        #[cfg(target_os = "macos")]
+        if crate::sys::apfs_clone(src, dst).is_ok() {
+            return Ok(true);
+        }
+        let _ = (src, dst);
+        Ok(false)
+    }
 }
 
 /// The search path of the owner's tools: its own bin folders, then the system folders. A process that is not
@@ -678,6 +687,21 @@ mod tests {
         assert!(dir.join("repaired.txt").exists());
         let done = repair_with(&launch(), &TEST_ENV, Some("hard-stuck"), &dir, me(), ms(5000), ms(20000));
         assert!(!done.folder_ok && done.log.contains("stays marked damaged"), "{}", done.log);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_worker_clones_a_whole_tree_in_one_step_on_apfs() {
+        let src = folder("tree");
+        std::fs::create_dir_all(src.join("pkg/lib")).unwrap();
+        std::fs::write(src.join("pkg/lib/index.js"), "whole").unwrap();
+        let dst = src.with_file_name(format!("{}-copy", src.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dst);
+        let host = WorkerHost { until: Instant::now() + Duration::from_secs(5) };
+        assert!(host.clone_tree(&src, &dst).unwrap());
+        assert_eq!(std::fs::read_to_string(dst.join("pkg/lib/index.js")).unwrap(), "whole");
+        assert_eq!(names(&dst), names(&src));
+        let _ = std::fs::remove_dir_all(&dst);
     }
 
     #[test]
