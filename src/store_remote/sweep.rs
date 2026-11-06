@@ -198,6 +198,16 @@ fn sweep_chunks(
     dry_run: bool,
     swept: &mut Swept,
 ) -> Result<()> {
+    // An index whose pack data is gone names chunks that nobody can read: it goes now. An upload writes the data
+    // before the index, so no push in flight has such an index.
+    for pack in super::chunked::listing(&store.backend)?.1 {
+        let name = layr_store::chunks::index_name(&pack);
+        eprintln!("layr: chunk pack {pack} has an index but no data; the index goes");
+        if !dry_run {
+            store.backend.delete(&name)?;
+        }
+        swept.packs.push(name);
+    }
     let objects = store.backend.list("chunks/")?;
     if objects.is_empty() {
         swept.missing = kept.iter().filter(|named| !named.is_empty()).count();

@@ -21,7 +21,27 @@ pub fn socket_path() -> PathBuf {
     })
 }
 
-const MAX_REQ: usize = 4 << 20;
+const MAX_REQ_BYTES: usize = 4 << 20;
+const REQUEST_BUFFER_BYTES: usize = 64 << 10;
+const MAX_DESCRIPTORLESS_REQUEST_BYTES: usize = 32 << 10;
+const REQUEST_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_MAX_REQUESTS: usize = 256;
+const DEFAULT_MAX_REQUESTS_PER_USER: usize = 32;
+
+/// Commands and the descriptorless hello/registry messages share a frame. Command fields
+/// remain optional here for those control messages and are required before command dispatch.
+#[derive(serde::Deserialize)]
+struct Request {
+    argv: Option<Vec<String>>,
+    // The directory descriptor is authoritative; older clients omitted this hint.
+    #[serde(rename = "cwd")]
+    _cwd: Option<PathBuf>,
+    env: Option<HashMap<String, String>>,
+    version: Option<crate::store_version::Version>,
+    #[serde(default)]
+    hello: bool,
+    registry: Option<serde_json::Value>,
+}
 
 fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
@@ -109,7 +129,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
 fn negotiate(sock: &UnixStream) -> Result<()> {
     // A busy daemon writes "B" and closes at once. macOS then refuses the timeout on the closed
     // socket, and the write fails too. The answer is still read; a closed socket never waits.
-    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS)));
     let request = br#"{"hello":true}"#;
     let mut packet = (request.len() as u32).to_be_bytes().to_vec();
     packet.extend_from_slice(request);
@@ -224,32 +244,49 @@ fn limit(var: &str, default: usize) -> usize {
 
 /// Read one request. `None`: the client closed the connection without sending a byte, which is a
 /// normal end of the connection, not a bad request.
-fn read_request(sock: &UnixStream) -> Result<Option<(serde_json::Value, Vec<OwnedFd>)>> {
-    let mut first = vec![0u8; 65536];
-    let (n, fds) = recv_with_fds(sock, &mut first)?;
-    if n == 0 {
+fn read_request(sock: &UnixStream) -> Result<Option<(Vec<u8>, Vec<OwnedFd>)>> {
+    let mut buffer = vec![0u8; REQUEST_BUFFER_BYTES];
+    let (mut filled, mut fds) = recv_with_fds(sock, &mut buffer)?;
+    if filled == 0 {
         return Ok(None);
     }
-    if n < 4 {
-        bail!("bad request");
+    while filled < 4 {
+        let (n, more_fds) = recv_with_fds(sock, &mut buffer[filled..4])?;
+        fds.extend(more_fds);
+        if n == 0 {
+            bail!("bad request");
+        }
+        filled += n;
     }
-    let len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
-    if len > MAX_REQ || (fds.is_empty() && len > 32768) {
+    let len = u32::from_be_bytes(buffer[..4].try_into()?) as usize;
+    if len > MAX_REQ_BYTES || (fds.is_empty() && len > MAX_DESCRIPTORLESS_REQUEST_BYTES) {
         bail!("request too large");
     }
-    let mut req = first[4..n].to_vec();
-    if req.len() > len {
+    let frame_bytes = len + 4;
+    if filled > frame_bytes {
         bail!("request exceeds its declared size");
     }
-    while req.len() < len {
-        let mut more = vec![0u8; len - req.len()];
-        let k = (&*sock).read(&mut more)?;
-        if k == 0 {
+    buffer.resize(frame_bytes, 0);
+    while filled < frame_bytes {
+        let n = (&*sock).read(&mut buffer[filled..])?;
+        if n == 0 {
             bail!("short request");
         }
-        req.extend_from_slice(&more[..k]);
+        filled += n;
     }
-    Ok(Some((serde_json::from_slice(&req)?, fds)))
+    Ok(Some((buffer, fds)))
+}
+
+fn decode_request(frame: (Vec<u8>, Vec<OwnedFd>)) -> Result<(Request, Vec<OwnedFd>)> {
+    let (bytes, fds) = frame;
+    // Decode errors belong on the caller's stderr, too. This runs only in the request child.
+    if fds.len() == 4 {
+        rustix::stdio::dup2_stdin(&fds[0])?;
+        rustix::stdio::dup2_stdout(&fds[1])?;
+        rustix::stdio::dup2_stderr(&fds[2])?;
+    }
+    let request = serde_json::from_slice(&bytes[4..]).context("invalid request")?;
+    Ok((request, fds))
 }
 
 /// Child process: serve one request, then exit.
@@ -257,11 +294,12 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
     let res = (|| -> Result<i32> {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
         // A client that does not send its request in time does not hold a process.
-        sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-        let Some((v, fds)) = read_request(&sock)? else {
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS)))?;
+        let Some(frame) = read_request(&sock)? else {
             return Ok(0);
         };
-        let (v, fds) = if v.get("hello") == Some(&serde_json::Value::Bool(true)) {
+        let (v, fds) = decode_request(frame)?;
+        let (v, fds) = if v.hello {
             if !fds.is_empty() {
                 bail!("the version request must not contain descriptors");
             }
@@ -277,15 +315,15 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
             let Some(next) = read_request(&sock)? else {
                 return Ok(0);
             };
-            next
+            decode_request(next)?
         } else {
             (v, fds)
         };
-        if let Some(query) = v.get("registry") {
+        if let Some(query) = v.registry {
             if !fds.is_empty() {
                 bail!("registry request must not contain descriptors");
             }
-            crate::oci::registry::serve_backend(sock.try_clone()?, root, uid, query.clone())?;
+            crate::oci::registry::serve_backend(sock.try_clone()?, root, uid, query)?;
             return Ok(0);
         }
         if registry_uids.contains(&uid) {
@@ -294,12 +332,9 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         if fds.len() != 4 {
             bail!("bad request: expected 4 descriptors");
         }
-        let argv: Vec<String> = serde_json::from_value(v["argv"].clone())?;
-        let env: HashMap<String, String> = serde_json::from_value(v["env"].clone()).unwrap_or_default();
-        rustix::stdio::dup2_stdin(&fds[0])?;
-        rustix::stdio::dup2_stdout(&fds[1])?;
-        rustix::stdio::dup2_stderr(&fds[2])?;
-        let client: crate::store_version::Version = serde_json::from_value(v["version"].clone()).with_context(|| {
+        let argv = v.argv.context("bad request: missing argv")?;
+        let env = v.env.context("bad request: missing env")?;
+        let client = v.version.with_context(|| {
             format!(
                 "incompatible client: unknown store format (unguarded layr); daemon uses {}. Upgrade the client",
                 crate::store_version::Version::binary().description()
@@ -332,6 +367,8 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
 
 /// Run a command for a caller and return its exit code (errors are printed to stderr).
 pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<String, String>, root: &Path) -> i32 {
+    crate::trace::set_request_enabled(env.contains_key("LAYR_TRACE"));
+    let _trace = crate::trace::span("command");
     crate::repo::begin_command();
     crate::store::set_holder_command(&argv);
     crate::store::panic_point(argv.first().map_or("", String::as_str));
@@ -490,7 +527,10 @@ fn sweep_trash(root: &Path) {
 fn sweep_trash_with(root: &Path, start: impl Fn(&Path) -> bool) {
     let layout = match crate::volumes::Layout::for_root(root) {
         Ok(layout) => layout,
-        Err(error) => { eprintln!("layr trash sweep: {error:#}"); return; }
+        Err(error) => {
+            eprintln!("layr trash sweep: {error:#}");
+            return;
+        }
     };
     for name in layout.names() {
         if let Ok(path) = layout.trash_of(&name) {
@@ -616,7 +656,8 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     let mut children: HashMap<i32, u32> = HashMap::new();
     // One periodic pass at a time: a pass longer than the tick must not start another.
     let mut periodic_child: Option<i32> = None;
-    let (max_total, max_per_user) = (limit("LAYR_MAX_REQUESTS", 256), limit("LAYR_MAX_REQUESTS_PER_USER", 32));
+    let (max_total, max_per_user) =
+        (limit("LAYR_MAX_REQUESTS", DEFAULT_MAX_REQUESTS), limit("LAYR_MAX_REQUESTS_PER_USER", DEFAULT_MAX_REQUESTS_PER_USER));
     loop {
         if crate::sys::terminate_requested() {
             // Stop: take no new request and let the running ones finish (layr#252). A service
@@ -634,7 +675,11 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                 }
             }
             if !children.is_empty() {
-                eprintln!("layr service: {} requests still run after {} s; they stop with the service", children.len(), STOP_WAIT.as_secs());
+                eprintln!(
+                    "layr service: {} requests still run after {} s; they stop with the service",
+                    children.len(),
+                    STOP_WAIT.as_secs()
+                );
             }
             return Ok(0);
         }
@@ -779,9 +824,14 @@ mod trash_sweep_tests {
             std::fs::write(path.join("trash/deferred/file"), b"x").unwrap();
         }
         std::fs::write(volume.join("layr-volume.json"), br#"{"format":1,"store":"m1","volume":"other"}"#).unwrap();
-        std::fs::write(root.join("volumes.json"), serde_json::to_vec(&serde_json::json!({
-            "format": 1, "volumes": {"other": {"path": volume}}
-        })).unwrap()).unwrap();
+        std::fs::write(
+            root.join("volumes.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "format": 1, "volumes": {"other": {"path": volume}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("trash.lock")).unwrap();
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
@@ -820,6 +870,168 @@ mod request_tests {
     use super::*;
 
     #[test]
+    fn fragmented_headers_and_payloads_are_accepted() -> Result<()> {
+        let (mut client, server) = UnixStream::pair()?;
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let payload = br#"{"hello":true}"#;
+        let length = (payload.len() as u32).to_be_bytes();
+        client.write_all(&length[..1])?;
+        let writer = std::thread::spawn(move || -> Result<()> {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            client.write_all(&length[1..])?;
+            for byte in payload {
+                client.write_all(&[*byte])?;
+            }
+            Ok(())
+        });
+        let result = read_request(&server);
+        writer.join().unwrap()?;
+        let (request, fds) = result?.context("missing request")?;
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&request[4..])?, serde_json::json!({"hello": true}));
+        assert!(fds.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn size_limits_and_truncated_payloads_are_preserved() -> Result<()> {
+        for size in [MAX_DESCRIPTORLESS_REQUEST_BYTES + 1, MAX_REQ_BYTES + 1] {
+            let (mut client, server) = UnixStream::pair()?;
+            client.write_all(&(size as u32).to_be_bytes())?;
+            assert_eq!(read_request(&server).unwrap_err().to_string(), "request too large");
+        }
+        let (mut client, server) = UnixStream::pair()?;
+        client.write_all(&[0, 0, 0, 10, b'{'])?;
+        drop(client);
+        assert_eq!(read_request(&server).unwrap_err().to_string(), "short request");
+        let (mut client, server) = UnixStream::pair()?;
+        client.write_all(&[0, 0, 0, 1, b'{', b'}'])?;
+        assert_eq!(read_request(&server).unwrap_err().to_string(), "request exceeds its declared size");
+        Ok(())
+    }
+
+    #[test]
+    fn a_large_fragmented_request_retains_its_descriptors() -> Result<()> {
+        let (client, server) = UnixStream::pair()?;
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let writer = std::thread::spawn(move || -> Result<()> {
+            let file = std::fs::File::open("/dev/null")?;
+            let size = REQUEST_BUFFER_BYTES * 2;
+            send_with_fds(&client, &(size as u32).to_be_bytes(), &[file.as_fd()])?;
+            for _ in 0..size / 1024 {
+                (&client).write_all(&[b' '; 1024])?;
+            }
+            Ok(())
+        });
+        let (bytes, fds) = read_request(&server)?.context("missing request")?;
+        writer.join().unwrap()?;
+        assert_eq!(bytes.len(), REQUEST_BUFFER_BYTES * 2 + 4);
+        assert_eq!(fds.len(), 1);
+        assert!(!std::fs::File::from(fds.into_iter().next().unwrap()).metadata()?.is_file());
+        Ok(())
+    }
+
+    // A fresh process owns stdio and cwd, just like a daemon request child. Never redirect
+    // the test runner's shared descriptors or change its process environment.
+    #[test]
+    fn request_child() -> Result<()> {
+        let Some(path) = std::env::var_os("LAYR_TEST_REQUEST_SOCKET") else { return Ok(()) };
+        let socket = UnixStream::connect(path)?;
+        let code = handle(socket, &crate::store::default_root(), &[]);
+        std::thread::spawn(|| {
+            drop(crate::trace::named(|| "request worker".into()));
+            drop(crate::trace::begin("request worker begin"));
+        })
+        .join()
+        .unwrap();
+        std::process::exit(code);
+    }
+
+    fn child_request(root: &Path, env: serde_json::Value, daemon_trace: bool) -> Result<(i32, Vec<u8>, String)> {
+        use std::process::{Command, Stdio};
+        let path = root.join("request.sock");
+        let listener = UnixListener::bind(&path)?;
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .args(["--exact", "service::request_tests::request_child", "--nocapture"])
+            .env("LAYR_TEST_REQUEST_SOCKET", &path)
+            .env("LAYR_ROOT", root.join("store"))
+            .env_remove("LAYR_TRACE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if daemon_trace {
+            command.env("LAYR_TRACE", "1");
+        }
+        let child = command.spawn()?;
+        let (socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS)))?;
+        negotiate(&socket)?;
+        let request = serde_json::to_vec(&serde_json::json!({
+            "argv": ["volume", "list", "--json"], "cwd": root, "env": env,
+            "version": crate::store_version::Version::binary()
+        }))?;
+        let input = std::fs::File::open("/dev/null")?;
+        let output = std::fs::File::create(root.join("stdout"))?;
+        let error = std::fs::File::create(root.join("stderr"))?;
+        let directory = std::fs::File::open(root)?;
+        let mut packet = (request.len() as u32).to_be_bytes().to_vec();
+        packet.extend_from_slice(&request);
+        send_with_fds(&socket, &packet, &[input.as_fd(), output.as_fd(), error.as_fd(), directory.as_fd()])?;
+        let mut reply = [0; 5];
+        (&socket).read_exact(&mut reply)?;
+        assert_eq!(reply[0], b'R');
+        let code = i32::from_be_bytes(reply[1..].try_into()?);
+        let child = child.wait_with_output()?;
+        let mut stderr = std::fs::read_to_string(root.join("stderr"))?;
+        stderr.push_str(&String::from_utf8_lossy(&child.stderr));
+        std::fs::remove_file(path)?;
+        Ok((code, std::fs::read(root.join("stdout"))?, stderr))
+    }
+
+    #[test]
+    fn client_trace_is_isolated_and_stdout_stays_json() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("lt-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let (code, traced, stderr) = child_request(&root, serde_json::json!({"LAYR_TRACE":"1"}), false)?;
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.lines().any(|line| line.starts_with("trace ")), "{stderr}");
+        assert!(stderr.lines().any(|line| line.ends_with("  request worker")), "named worker span missing: {stderr}");
+        assert!(stderr.contains("trace begin request worker begin"), "worker begin missing: {stderr}");
+        // Free disk space changes as concurrent builds run; all other JSON fields stay equal.
+        let stable_json = |bytes: &[u8]| -> Result<serde_json::Value> {
+            let mut rows: Vec<serde_json::Value> = serde_json::from_slice(bytes)?;
+            for row in &mut rows {
+                let row = row.as_object_mut().context("volume is not an object")?;
+                row.remove("used");
+                row.remove("free");
+            }
+            Ok(rows.into())
+        };
+        let traced = stable_json(&traced)?;
+        for daemon_trace in [false, true] {
+            let (code, plain, stderr) = child_request(&root, serde_json::json!({}), daemon_trace)?;
+            assert_eq!(code, 0, "{stderr}");
+            assert_eq!(stable_json(&plain)?, traced);
+            assert!(!stderr.lines().any(|line| line.starts_with("trace ")), "{stderr}");
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_environment_is_an_error() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("le-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        for env in [serde_json::json!({"LAYR_TRACE":1}), serde_json::json!([]), serde_json::Value::Null] {
+            let (code, stdout, stderr) = child_request(&root, env, false)?;
+            assert_eq!(code, 128, "{stderr}");
+            assert!(stdout.is_empty());
+            assert!(!stderr.is_empty());
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn a_closed_connection_is_no_request_and_a_short_one_is_bad() -> Result<()> {
         let (client, server) = UnixStream::pair()?;
         drop(client);
@@ -845,7 +1057,7 @@ mod version_tests {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
                 let (hello, fds) = read_request(&server)?.context("no request")?;
-                assert_eq!(hello, serde_json::json!({"hello": true}));
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&hello[4..])?, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 let mut version = crate::store_version::Version::binary();
                 version.format = format;
@@ -880,7 +1092,7 @@ mod version_tests {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
                 let (hello, fds) = read_request(&server)?.context("no request")?;
-                assert_eq!(hello, serde_json::json!({"hello": true}));
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&hello[4..])?, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 (&server).write_all(&[answer])?;
                 let mut next = [0];
