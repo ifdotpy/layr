@@ -3,9 +3,11 @@
 //! holes do not count. These keys describe the btrfs allocation, not FIEMAP's merged ranges.
 //! Each tree is read once with TREE_SEARCH_V2, which requires CAP_SYS_ADMIN.
 //! The bulk path reports committed on-disk allocation; very recent writes may not appear yet.
+//! Identical inline bytes independently written at the same inode and offset in sibling snapshots within one transaction count once.
 
 use crate::fsutil::{ExtentKey, Held};
 use crate::sys::{self, SearchKey, TreeSearch};
+use layr_hashers::{FastCryptographic, PurposeHasher};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, ErrorKind};
@@ -260,7 +262,16 @@ fn extent(lineage: [u8; 16], ino: u64, offset: u64, item: &[u8]) -> io::Result<O
     match ty {
         FILE_EXTENT_INLINE => Ok(Some((
             // Snapshot copies retain the origin lineage, inode, offset and item generation.
-            ExtentKey::Inline { lineage, ino, offset, generation: le64(item, EXTENT_GENERATION)? },
+            ExtentKey::Inline {
+                lineage,
+                ino,
+                offset,
+                generation: le64(item, EXTENT_GENERATION)?,
+                payload: u64::from_le_bytes(bytes(
+                    &FastCryptographic::hash(item.get(EXTENT_INLINE_HEADER..).ok_or_else(invalid)?),
+                    0,
+                )?),
+            },
             item.len().checked_sub(EXTENT_INLINE_HEADER).ok_or_else(invalid)? as u64,
         ))),
         FILE_EXTENT_REG | FILE_EXTENT_PREALLOC => {
@@ -604,10 +615,10 @@ mod tests {
     fn extent_fixtures() {
         let mut data = vec![0; EXTENT_INLINE_HEADER + 7];
         data[..8].copy_from_slice(&42u64.to_le_bytes());
-        assert_eq!(
-            extent([1; 16], 8, 9, &data).unwrap(),
-            Some((ExtentKey::Inline { lineage: [1; 16], ino: 8, offset: 9, generation: 42 }, 7))
-        );
+        let first = extent([1; 16], 8, 9, &data).unwrap();
+        assert!(matches!(first, Some((ExtentKey::Inline { ino: 8, offset: 9, generation: 42, .. }, 7))));
+        data[EXTENT_INLINE_HEADER] = 1;
+        assert_ne!(first, extent([1; 16], 8, 9, &data).unwrap());
         data.resize(EXTENT_REGULAR_SIZE, 0);
         data[EXTENT_TYPE] = FILE_EXTENT_REG;
         data[EXTENT_BYTENR..EXTENT_BYTENR + 8].copy_from_slice(&4096u64.to_le_bytes());

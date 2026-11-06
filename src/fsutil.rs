@@ -1335,7 +1335,7 @@ pub enum ExtentKey {
     Disk(u64),
     /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    Inline { lineage: [u8; 16], ino: u64, offset: u64, generation: u64 },
+    Inline { lineage: [u8; 16], ino: u64, offset: u64, generation: u64, payload: u64 },
     /// Data without a physical address, identified by its inode and logical offset.
     #[cfg(target_os = "linux")]
     Unaddressed { dev: u64, ino: u64, offset: u64 },
