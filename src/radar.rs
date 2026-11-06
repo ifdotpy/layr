@@ -15,8 +15,9 @@ use crate::ignore_rules::Rules;
 use crate::model::Line;
 use crate::repo::{skip_path, Repo, Snap};
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 use layr_hashers::{Digest, GitCompatible};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -95,7 +96,11 @@ fn scan_digest(live: &Path) -> Result<String> {
 /// before the content compare, so ignored build output costs no content reads.
 pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rules: &Rules) -> Result<Vec<Found>> {
     let mut out = Vec::new();
-    for change in changes::candidates(base, child)? {
+    #[cfg(not(test))]
+    let candidates = changes::candidates(base, child)?;
+    #[cfg(test)]
+    let candidates = test_probe::candidates(base, child)?;
+    for change in candidates {
         let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
         if skip_path(&change.path) || rules.ignored(&change.path, is_dir) {
             continue;
@@ -195,11 +200,15 @@ fn changes_vs_base(
     parts: Option<(&[Found], &[Found])>,
 ) -> Result<Vec<Found>> {
     if let Some((saved, head_live)) = parts {
+        #[cfg(test)]
+        test_probe::record(|p| p.combines += 1);
         let _t = crate::trace::span("overlap combine changes");
         if let Some(found) = combine(base, live, rules, saved, head_live)? {
             return Ok(found);
         }
     }
+    #[cfg(test)]
+    test_probe::record(|p| p.fallbacks += 1);
     let _t = crate::trace::span("overlap direct base compare");
     compare(base, live, rules)
 }
@@ -242,6 +251,9 @@ impl StateCompare {
     }
 
     fn run(&self) -> Result<Vec<Found>> {
+        if self.base_id == self.theirs_id {
+            return Ok(Vec::new());
+        }
         if let Some(found) = self.read() {
             return Ok(found);
         }
@@ -255,12 +267,16 @@ impl StateCompare {
 
     /// `None` for a missing, unreadable or foreign entry: the compare runs again and rewrites it.
     fn read(&self) -> Option<Vec<Found>> {
+        #[cfg(test)]
+        test_probe::record(|p| p.cache_reads += 1);
         let saved: SavedCompare = serde_json::from_slice(&std::fs::read(&self.file).ok()?).ok()?;
         let same = saved.format == COMPARE_FORMAT && saved.base == self.base_id && saved.theirs == self.theirs_id;
         same.then_some(saved.found)
     }
 
     fn write(&self, found: &[Found]) -> Result<()> {
+        #[cfg(test)]
+        test_probe::record(|p| p.cache_writes += 1);
         let dir = self.file.parent().ok_or_else(|| anyhow!("compare folder"))?;
         std::fs::create_dir_all(dir)?;
         let saved = SavedCompare {
@@ -299,14 +315,49 @@ struct Work {
     layer_live: BTreeMap<String, Option<Vec<Found>>>,
 }
 
+/// Our merge base relative to the head used for the live compare. Identity is a state-ID
+/// property, never inferred from an empty saved diff (which can omit metadata changes).
+#[derive(Clone, Copy, Debug)]
+enum OurBase {
+    AtHead,
+    /// The queued saved compare, or `None` when the head is unreadable.
+    Diverged(Option<usize>),
+}
+
+impl OurBase {
+    fn plan(base: &str, head: &str, queue: impl FnOnce() -> Result<Option<usize>>) -> Result<Self> {
+        if base == head {
+            Ok(Self::AtHead)
+        } else {
+            queue().map(Self::Diverged)
+        }
+    }
+
+    fn changes<'a>(
+        self,
+        base: &(impl Src + ?Sized),
+        live: &(impl Src + ?Sized),
+        rules: &Rules,
+        found: &[Vec<Found>],
+        head_live: Option<&'a [Found]>,
+    ) -> Result<Cow<'a, [Found]>> {
+        let parts = match (self, head_live) {
+            (Self::AtHead, Some(live)) => return Ok(Cow::Borrowed(live)),
+            (Self::Diverged(Some(job)), Some(live)) => Some((found[job].as_slice(), live)),
+            _ => None,
+        };
+        changes_vs_base(base, live, rules, parts).map(Cow::Owned)
+    }
+}
+
 /// What one other line contributes, with its state compare in `Work::jobs`.
 struct OtherPlan {
     name: String,
     owner: u32,
-    /// The merge base with this line, as a tree. `our_job` is our compare against it.
+    /// The merge base with this line, as a tree. `our_base` plans our compare against it.
     base: String,
     base_src: Snap,
-    our_job: Option<usize>,
+    our_base: OurBase,
     their_private: BTreeSet<String>,
     hidden: BTreeSet<String>,
     state_time: i64,
@@ -318,7 +369,7 @@ struct OtherPlan {
 struct LayerPlan {
     overlay: String,
     base: String,
-    our_job: Option<usize>,
+    our_base: OurBase,
     state_time: i64,
     job: usize,
 }
@@ -434,20 +485,22 @@ impl Repo<'_> {
         Ok(found)
     }
 
-    /// The saved compare of a merge base -> our head, once per base. `None` when our head is
-    /// unreadable: the changes then come from the direct compare.
-    fn our_base_job(&self, line: &Line, base: &str, work: &mut Work) -> Result<Option<usize>> {
-        if let Some(job) = work.ours_jobs.get(base) {
-            return Ok(Some(*job));
-        }
-        let (true, Some(head)) = (matches!(work.head_live, Some(Some(_))), work.head_src.clone()) else {
-            return Ok(None);
-        };
-        let job = work.jobs.len();
-        let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, head);
-        work.jobs.push(state);
-        work.ours_jobs.insert(base.to_string(), job);
-        Ok(Some(job))
+    /// Plan our merge base -> head compare once per base. An identical head needs no job;
+    /// an unreadable head leaves the diverged plan to the direct compare.
+    fn our_base_job(&self, line: &Line, base: &str, work: &mut Work) -> Result<OurBase> {
+        OurBase::plan(base, &line.head, || {
+            if let Some(job) = work.ours_jobs.get(base) {
+                return Ok(Some(*job));
+            }
+            let (true, Some(head)) = (matches!(work.head_live, Some(Some(_))), work.head_src.clone()) else {
+                return Ok(None);
+            };
+            let job = work.jobs.len();
+            let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, head);
+            work.jobs.push(state);
+            work.ours_jobs.insert(base.to_string(), job);
+            Ok(Some(job))
+        })
     }
 
     pub fn overlaps(&self, ctx: &Ctx, line: &Line) -> Result<Vec<Overlap>> {
@@ -490,7 +543,7 @@ impl Repo<'_> {
             }
             let ours_root = &ours.as_ref().expect("scanned above").1;
             self.our_head_live(line, ours_root, &ignored, &mut work)?;
-            let our_job = self.our_base_job(line, &base, &mut work)?;
+            let our_base = self.our_base_job(line, &base, &mut work)?;
             // show <state>:<path> and try use project read access for both head and auto states.
             let head = self.state(&other.head)?;
             let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
@@ -505,7 +558,7 @@ impl Repo<'_> {
                 owner: other.owner,
                 base,
                 base_src: root,
-                our_job,
+                our_base,
                 their_private,
                 hidden,
                 state_time: state.time,
@@ -528,14 +581,15 @@ impl Repo<'_> {
             let mut layer_keys: BTreeMap<(String, String), BTreeMap<String, i64>> = BTreeMap::new();
             for p in &plans {
                 if !ours_keys.contains_key(&p.base) {
-                    let base_src = p.base_src.clone();
-                    let parts = match (p.our_job, work.head_live.as_ref().and_then(|h| h.as_ref())) {
-                        (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
-                        _ => None,
-                    };
                     let changed = {
                         let _t = crate::trace::span("overlap ours changes");
-                        changes_vs_base(&base_src, ours_root, &ignored, parts)?
+                        p.our_base.changes(
+                            &p.base_src,
+                            ours_root,
+                            &ignored,
+                            &found,
+                            work.head_live.as_ref().and_then(|h| h.as_deref()),
+                        )?
                     };
                     ours_keys.insert(p.base.clone(), visible(&changed, &our_private, &ignored));
                 }
@@ -555,11 +609,13 @@ impl Repo<'_> {
                     if !layer_keys.contains_key(&key) {
                         let repo = self.overlay_repo(&layer.overlay)?;
                         let base_src = repo.state_src(&layer.base)?;
-                        let parts = match (layer.our_job, work.layer_live.get(&layer.overlay).and_then(|l| l.as_ref())) {
-                            (Some(j), Some(live)) => Some((found[j].as_slice(), live.as_slice())),
-                            _ => None,
-                        };
-                        let changed = changes_vs_base(&base_src, ours_root, &overlay_rules, parts)?;
+                        let changed = layer.our_base.changes(
+                            &base_src,
+                            ours_root,
+                            &overlay_rules,
+                            &found,
+                            work.layer_live.get(&layer.overlay).and_then(|l| l.as_deref()),
+                        )?;
                         layer_keys.insert(key.clone(), visible(&changed, &our_hidden, &overlay_rules));
                     }
                     let ours_layer = &layer_keys[&key];
@@ -622,29 +678,70 @@ impl Repo<'_> {
                 work.layer_live.insert(layer.overlay.clone(), live);
             }
             let key = (layer.overlay.clone(), base.clone());
-            let our_job = match work.layer_jobs.get(&key) {
-                Some(job) => Some(*job),
-                None if matches!(work.layer_live.get(&layer.overlay), Some(Some(_))) => {
-                    let job = work.jobs.len();
-                    let state = StateCompare::new(
-                        &repo.compare_dir(),
-                        &base,
-                        &layer.state,
-                        repo.state_src(&base)?,
-                        repo.state_src(&layer.state)?,
-                    );
-                    work.jobs.push(state);
-                    work.layer_jobs.insert(key, job);
-                    Some(job)
-                }
-                None => None,
-            };
+            let our_base = OurBase::plan(&base, &layer.state, || {
+                Ok(match work.layer_jobs.get(&key) {
+                    Some(job) => Some(*job),
+                    None if matches!(work.layer_live.get(&layer.overlay), Some(Some(_))) => {
+                        let job = work.jobs.len();
+                        let state = StateCompare::new(
+                            &repo.compare_dir(),
+                            &base,
+                            &layer.state,
+                            repo.state_src(&base)?,
+                            repo.state_src(&layer.state)?,
+                        );
+                        work.jobs.push(state);
+                        work.layer_jobs.insert(key, job);
+                        Some(job)
+                    }
+                    None => None,
+                })
+            })?;
             let state = repo.state(&theirs.state)?;
             let job = work.jobs.len();
             work.jobs.push(StateCompare::new(&repo.compare_dir(), &base, &theirs.state, base_root, their_root));
-            plans.push(LayerPlan { overlay: layer.overlay.clone(), base, our_job, state_time: state.time, job });
+            plans.push(LayerPlan { overlay: layer.overlay.clone(), base, our_base, state_time: state.time, job });
         }
         Ok(plans)
+    }
+}
+
+/// Observe the candidate/send boundary without requiring a privileged btrfs send in unit tests.
+/// Fixtures replace only candidate discovery; content checks and caller filters still run.
+#[cfg(test)]
+mod test_probe {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    pub(super) struct Probe {
+        pub candidates: usize,
+        pub combines: usize,
+        pub fallbacks: usize,
+        pub cache_reads: usize,
+        pub cache_writes: usize,
+        pub streams: VecDeque<Vec<changes::Change>>,
+    }
+
+    thread_local! {
+        static PROBE: RefCell<Probe> = RefCell::new(Probe::default());
+    }
+
+    pub(super) fn record(f: impl FnOnce(&mut Probe)) {
+        PROBE.with(|p| f(&mut p.borrow_mut()));
+    }
+
+    pub(super) fn candidates(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<changes::Change>> {
+        let mut stream = None;
+        record(|p| {
+            p.candidates += 1;
+            stream = p.streams.pop_front();
+        });
+        match stream {
+            Some(stream) => Ok(stream),
+            None => changes::candidates(base, child),
+        }
     }
 }
 
@@ -694,5 +791,132 @@ mod tests {
         // A direct compare cannot read this path, so success proves the parts sufficed.
         let found = changes_vs_base(root, root, &Rules::new(root), Some((&saved, &live))).unwrap();
         assert_eq!(found.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["saved", "live"]);
+    }
+
+    struct Trees(PathBuf);
+
+    impl Trees {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("layr-radar-{}", crate::ids::new_id()));
+            std::fs::create_dir_all(root.join("head")).unwrap();
+            std::fs::create_dir_all(root.join("live")).unwrap();
+            Self(root)
+        }
+
+        fn head(&self) -> PathBuf {
+            self.0.join("head")
+        }
+        fn live(&self) -> PathBuf {
+            self.0.join("live")
+        }
+    }
+
+    impl Drop for Trees {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn reset_probe(streams: Vec<Vec<changes::Change>>) {
+        test_probe::record(|p| *p = test_probe::Probe { streams: streams.into(), ..Default::default() });
+    }
+
+    fn bytes(found: &[Found]) -> Vec<u8> {
+        serde_json::to_vec(found).unwrap()
+    }
+
+    #[test]
+    fn at_head_reuses_renames_without_a_job_combine_or_send() {
+        let trees = Trees::new();
+        let (head, live) = (trees.head(), trees.live());
+        std::fs::write(head.join("old"), "rename content").unwrap();
+        std::fs::write(live.join("new"), "rename content").unwrap();
+        std::fs::write(live.join("private"), "hidden content").unwrap();
+        let stream = vec![
+            changes::Change {
+                path: "new".into(),
+                old_path: Some("old".into()),
+                old: fsutil::lmeta(&head, "old"),
+                new: fsutil::lmeta(&live, "new"),
+                ranges: None,
+            },
+            changes::Change {
+                path: "private".into(),
+                old_path: None,
+                old: None,
+                new: fsutil::lmeta(&live, "private"),
+                ranges: None,
+            },
+        ];
+        let rules = Rules::new(&live);
+        reset_probe(vec![stream.clone()]);
+        let head_live = compare(&head, &live, &rules).unwrap();
+        // Both main and overlay callers pass the head of their own immutable tree. An overlay
+        // state deliberately differs from the main head, so using the main ID would queue.
+        for own_head in ["main-head", "overlay-state"] {
+            reset_probe(Vec::new());
+            let plan = OurBase::plan(own_head, own_head, || panic!("AtHead queued a saved send")).unwrap();
+            let fast = plan.changes(&head, &live, &rules, &[], Some(&head_live)).unwrap();
+            assert!(matches!(fast, Cow::Borrowed(_)));
+            assert_eq!(bytes(&fast), bytes(&head_live));
+            test_probe::record(|p| {
+                assert_eq!((p.candidates, p.combines, p.fallbacks), (0, 0, 0));
+                assert_eq!((p.cache_reads, p.cache_writes), (0, 0));
+            });
+            reset_probe(vec![stream.clone()]);
+            let slow = changes_vs_base(&head, &live, &rules, Some((&[], &head_live))).unwrap();
+            assert_eq!(bytes(&fast), bytes(&slow));
+            // This is the old rename fallback, with the same candidate stream and real metadata.
+            test_probe::record(|p| assert_eq!((p.candidates, p.combines, p.fallbacks), (1, 1, 1)));
+            for hidden in [BTreeSet::new(), BTreeSet::from(["private".into()]), BTreeSet::from(["old".into()])] {
+                assert_eq!(visible(&fast, &hidden, &rules), visible(&slow, &hidden, &rules));
+            }
+        }
+    }
+
+    #[test]
+    fn diverged_empty_saved_diff_is_not_identity_and_missing_live_still_compares() {
+        let root = Path::new("/nonexistent");
+        let rules = Rules::new(root);
+        let live = [f("mtime-can-differ")];
+        reset_probe(Vec::new());
+        let mut queued = 0;
+        let plan = OurBase::plan("base", "head", || {
+            queued += 1;
+            Ok(Some(0))
+        })
+        .unwrap();
+        assert_eq!(queued, 1);
+        let changed = plan.changes(root, root, &rules, &[Vec::new()], Some(&live)).unwrap();
+        assert!(matches!(changed, Cow::Owned(_)));
+        test_probe::record(|p| assert_eq!(p.combines, 1));
+        // An unreadable head cannot supply a live diff, even when the IDs match.
+        reset_probe(vec![Vec::new()]);
+        let changed = OurBase::AtHead.changes(root, root, &rules, &[], None).unwrap();
+        assert!(changed.is_empty());
+        test_probe::record(|p| assert_eq!((p.candidates, p.fallbacks), (1, 1)));
+    }
+
+    #[test]
+    fn identical_states_skip_send_and_cache_even_when_a_cache_entry_exists() {
+        let trees = Trees::new();
+        let snap = crate::repo::snap(&trees.head());
+        let job = StateCompare::new(&trees.0.join("cache"), "same-state", "same-state", snap.clone(), snap);
+        // Poison the otherwise-valid cache to prove identity is answered before reading it.
+        job.write(&[f("must-not-be-read")]).unwrap();
+        let before = std::fs::read(&job.file).unwrap();
+        reset_probe(Vec::new());
+        assert!(job.run().unwrap().is_empty());
+        assert_eq!(std::fs::read(&job.file).unwrap(), before);
+        test_probe::record(|p| assert_eq!((p.candidates, p.cache_reads, p.cache_writes), (0, 0, 0)));
+        std::fs::remove_dir_all(job.file.parent().unwrap()).unwrap();
+        assert!(job.run().unwrap().is_empty());
+        assert!(!job.file.parent().unwrap().exists());
+        test_probe::record(|p| assert_eq!((p.candidates, p.cache_reads, p.cache_writes), (0, 0, 0)));
+        // The previous cold path on the same immutable input also returns no changes, but sends.
+        reset_probe(vec![Vec::new()]);
+        let slow = compare(&job.base, &job.theirs, &Rules::of(&job.theirs)).unwrap();
+        assert_eq!(bytes(&job.run().unwrap()), bytes(&slow));
+        test_probe::record(|p| assert_eq!(p.candidates, 1));
     }
 }
