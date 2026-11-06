@@ -180,7 +180,19 @@ Use `--running`, `--force`, `--caches`, or `-q` with an auto save.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 
-`park` keeps unfinished work. It has `list`, `show`, `pop`, `apply`, `drop`, and `clear` subcommands.
+`park` keeps unfinished work. It saves the changes of the working folder as the head of a new line
+`parked.<line>.<n>` and resets the folder. The parked line has no working folder; it is an ordinary
+line otherwise (`line list`, `show parked.main.1:<path>`, sync and push take it). Its head has the
+line head as parent.
+- `park list` lists the parked lines of the current line on this machine, newest first: `park@{0}: <line>: <message>`.
+- `park show [<entry>]` shows the change. `park pop [<entry>]` merges it into the working folder and
+  deletes the parked line; `park apply [<entry>]` keeps it. A conflict keeps the entry.
+- `park drop [<entry>]` deletes one parked line, `park clear` all of them. `layr undo` brings one back, without a folder.
+- An entry is `park@{n}`, a parked line name, or its head state. `apply` also takes any state with a parent.
+- New files come back untracked.
+
+Park entries of older layr versions were states on the line. The first `park` command after the upgrade
+makes each one a parked line, in the same order. Until then they keep their trees.
 `pick` applies a state. `replay` applies states on a new base. `invert` reverses a state.
 Use `restore --ours` or `restore --theirs` for conflicts.
 Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
@@ -268,8 +280,8 @@ bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --h
 they need (`docs/ownership.md`, "States imported from Git").
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
-state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}`, `head@{n}`
-(auto states, newest first). Every command that takes a revision takes a git commit id.
+state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}` (the head of
+the n-th newest parked line of the current line), `head@{n}` (auto states, newest first). Every command that takes a revision takes a git commit id.
 
 Two kinds of id: a state id has 32 hex digits, a git commit id has 40. `rev-parse` and `log` print
 state ids. `layr rev-parse --git <rev>` prints the git commit of the state (in a line with a `.git`

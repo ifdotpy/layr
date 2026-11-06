@@ -24,9 +24,8 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
                 .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
         } else if name == "park" {
             let l = need_line(line, rev)?;
-            let v = repo.p.db.line_states(&l.id, StateKind::Stash)?;
-            match v.get(n) {
-                Some(s) => s.id.clone(),
+            match crate::cmd::park::parked_lines(repo, l)?.get(n) {
+                Some(parked) => parked.head.clone(),
                 None => bail!("park@{{{n}}} does not exist"),
             }
         } else {
@@ -136,8 +135,8 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
     }
     if name == "park" {
         let l = need_line(line, name)?;
-        return match repo.p.db.line_states(&l.id, StateKind::Stash)?.first() {
-            Some(s) => Ok(s.id.clone()),
+        return match crate::cmd::park::parked_lines(repo, l)?.first() {
+            Some(parked) => Ok(parked.head.clone()),
             None => bail!("no park entries"),
         };
     }
