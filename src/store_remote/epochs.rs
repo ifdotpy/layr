@@ -501,7 +501,7 @@ impl Store {
             };
             let current = root.scoped(&key.prefix())?;
             write_slots(&current, &next_identity, &readers)?;
-            let next = Descriptor { format: 2, project: descriptor.project.clone(), recipient: key.recipient.clone() };
+            let next = Descriptor { format: 2, project: descriptor.project.clone(), recipient: key.recipient.clone(), mode: Default::default() };
             current.put_new("store.json", serde_json::to_vec(&next)?)?;
             current.put_new(&format!("history/{parent}.age"), keys::seal_slot(&identity, &key.recipient)?)?;
             let mut history = vec![(

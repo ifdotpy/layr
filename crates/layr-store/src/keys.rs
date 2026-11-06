@@ -57,8 +57,15 @@ pub fn ciphertext_len(size: usize) -> usize {
     AGE_X25519_HEADER + AGE_GREASE_STANZA_MAX + size + size.div_ceil(AGE_CHUNK).max(1) * AGE_TAG
 }
 
-/// Bytes encrypted to one recipient.
+/// The recipient and identity of a Private or Public store: objects stay plain bytes. No age recipient or
+/// identity has this text, so it cannot be mistaken for a key.
+pub const PLAIN: &str = "plain";
+
+/// Bytes encrypted to one recipient; plain bytes for [`PLAIN`].
 pub fn encrypt(recipient: &str, data: &[u8]) -> Result<Vec<u8>> {
+    if recipient == PLAIN {
+        return Ok(data.to_vec());
+    }
     let recipient = age::x25519::Recipient::from_str(recipient.trim()).map_err(|e| anyhow!("not an age recipient: {e}"))?;
     use std::io::Write;
     let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
@@ -69,8 +76,11 @@ pub fn encrypt(recipient: &str, data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Bytes encrypted to an identity, decrypted.
+/// Bytes encrypted to an identity, decrypted; plain bytes as they are for [`PLAIN`].
 pub fn decrypt(identity: &str, data: &[u8]) -> Result<Vec<u8>> {
+    if identity == PLAIN {
+        return Ok(data.to_vec());
+    }
     decrypt_with(&parse(identity)?, data)
 }
 

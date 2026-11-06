@@ -322,7 +322,7 @@ pub(crate) fn open_identity(
         }
     }
     if !key.hidden && key.access_mode == layr_store::epochs::Mode::Public {
-        let descriptor = super::Descriptor { format: 2, project: key.overlay.clone(), recipient: key.recipient.clone() };
+        let descriptor = super::Descriptor { format: 2, project: key.overlay.clone(), recipient: key.recipient.clone(), mode: Default::default() };
         let manifest = layr_store::public::Manifest::parse(
             &backend.get("public.json")?.context("public overlay has no manifest")?,
             &descriptor,
@@ -349,6 +349,7 @@ fn layer(store: &Store, published: &Published, identity: Option<String>, cache: 
         force_public: false,
         public_clone: false,
         public_reader: std::sync::atomic::AtomicBool::new(false),
+        mode: None,
         epoch: None,
         epoch_public: false,
         publishing_epoch: false,

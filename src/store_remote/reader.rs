@@ -33,11 +33,19 @@ pub(super) fn seen_file(dir: &Path) -> PathBuf {
 /// all here, was read and checked before: it is not read again, so an idle fetch reads no segment. A segment with
 /// another time (a replaced object) or with records that are not here is read and checked, and the file is written
 /// again after a fetch that checked every segment.
-pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String], seen: Option<&Path>) -> Result<Records> {
+pub(super) fn records_with_local(
+    backend: &Backend,
+    identity: &str,
+    project: &str,
+    local: &[String],
+    seen: Option<&Path>,
+) -> Result<Records> {
     let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
     let mut overlaps = 0;
-    let known: std::collections::BTreeSet<String> =
-        seen.and_then(|path| std::fs::read_to_string(path).ok()).map(|text| text.lines().map(str::to_owned).collect()).unwrap_or_default();
+    let known: std::collections::BTreeSet<String> = seen
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
     let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
@@ -66,7 +74,10 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
                 .iter()
                 .map(|(key, ..)| scope.spawn(move || backend.get(key)?.context("record segment disappeared")))
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked")))).collect::<Vec<_>>()
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked"))))
+                .collect::<Vec<_>>()
         }));
     }
     for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
@@ -325,8 +336,13 @@ impl<'a> Reader<'a> {
         if !tree.chunks.is_empty() {
             // The chunks of the files that the loop below writes, in its order, so their packs
             // load ahead in the background.
-            let ids: Vec<&String> =
-                tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten().collect();
+            let ids: Vec<&String> = tree
+                .files
+                .iter()
+                .filter(|(path, entry)| !unchanged(path, entry))
+                .filter_map(|(path, _)| tree.chunks.get(path))
+                .flatten()
+                .collect();
             let (backend, identity) = (self.backend, self.identity);
             let chunks = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity));
             // A chunk that no pack holds fails the restore before any file is read: the indexes are small, the files
@@ -553,8 +569,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let count;
     {
         let _lock = repo.p.lock()?;
-        count =
-            repo.p.import_lines(&records.lines, if bootstrap { crate::store::Trust::All } else { crate::store::Trust::Known })?;
+        // In a Private or Public project the server access list decides who may write: every signed record in
+        // the store counts. A Secret project trusts known machines only.
+        let trust = if bootstrap || !descriptor.mode.is_secret() { crate::store::Trust::All } else { crate::store::Trust::Known };
+        count = repo.p.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -573,11 +591,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
     let required = required_states(repo, &records.lines, opts)?;
     // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
-    let heads: Option<BTreeSet<String>> = opts.heads.then(|| -> Result<BTreeSet<String>> {
-        let mut keep: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
-        keep.extend(deletion_dependencies(&records.lines)?);
-        Ok(keep)
-    }).transpose()?;
+    let heads: Option<BTreeSet<String>> = opts
+        .heads
+        .then(|| -> Result<BTreeSet<String>> {
+            let mut keep: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+            keep.extend(deletion_dependencies(&records.lines)?);
+            Ok(keep)
+        })
+        .transpose()?;
     let mut left = Vec::new();
     let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
@@ -614,10 +635,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         // `--caches-of`: only the caches that a new line from those lines takes.
         // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
         // a cache that no line takes here: nothing else needs its files.
-        if repo.p.is_overlay()
-            && state.cache_of.is_some()
-            && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id))
-        {
+        if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
             report.omitted.push(format!("cache state {}: not for --caches-of", crate::ids::short(id)));
             continue;
         }
@@ -663,7 +681,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
             };
             if failed.get(&id) == Some(&now) {
-                report.omitted.push(format!("cache state {}: not restored (it failed before, and the remote did not change)", crate::ids::short(&id)));
+                report.omitted.push(format!(
+                    "cache state {}: not restored (it failed before, and the remote did not change)",
+                    crate::ids::short(&id)
+                ));
                 continue;
             }
         }
@@ -702,7 +723,8 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 repo.commit_record(ctx, record)?;
             }
         }
-        if store.layer.is_none() && !store.is_public_reader() {
+        // A Private or Public store has no slots: the server access list decides who reads.
+        if store.layer.is_none() && !store.is_public_reader() && descriptor.mode.is_secret() {
             let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
             // Optional enrollment keeps key metadata outside shared history: it supplies
             // a public key for resealing this existing reader slot, never writer trust.
@@ -968,7 +990,8 @@ mod tests {
             hex::encode(ContentAddress::digest(content)),
             vec![format::Link(STATE.into(), "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
         );
-        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
+        let tree =
+            Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         let canonical = tree.canonical().unwrap();
         let mut header = Header {
             v: 2,

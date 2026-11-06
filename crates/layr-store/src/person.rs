@@ -27,8 +27,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
 use layr_hashers::ContentAddress;
+use serde::{Deserialize, Serialize};
 
 /// A person's signing identity, encrypted with the existing age key helpers.
 /// The secret seed is only returned in memory; persist `sealed`, never the seed.
@@ -409,6 +409,7 @@ mod tests {
             format: 2,
             project: "01a12290-0000-7000-8000-000000000001".into(),
             recipient: keys::recipient_of(&keys::generate_identity()).unwrap(),
+            mode: Default::default(),
         };
         let pin = Pin::of_store(&store);
         pin.validate().unwrap();

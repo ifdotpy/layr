@@ -134,7 +134,7 @@ impl Browse {
         })?;
         let root_descriptor = descriptor.clone();
         let (backend, descriptor, identity, public_reader) = if let Some((backend, current, public)) = resolved {
-            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient };
+            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient, mode: Default::default() };
             (backend, descriptor, current.identity, public)
         } else {
             let (identity, public_reader) = if access.public {
