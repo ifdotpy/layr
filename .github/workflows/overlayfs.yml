@@ -36,19 +36,22 @@ jobs:
           cargo build --locked --features overlayfs
           cp target/debug/layr "$RUNNER_TEMP/layr-overlayfs"
           cargo test --locked --features overlayfs --no-run --message-format=json > "$RUNNER_TEMP/unit.json"
-          python3 - <<'PY' >> "$GITHUB_ENV"
+          python3 - <<'PY' > "$RUNNER_TEMP/unit-executables"
           import json, os, pathlib
           for line in pathlib.Path(os.environ['RUNNER_TEMP'], 'unit.json').read_text().splitlines():
               item = json.loads(line)
               if item.get('executable') and item.get('profile', {}).get('test'):
-                  print('UNIT_TESTS=' + item['executable'])
+                  print(item['executable'])
           PY
       - name: Test snapshots, service, permissions and transfer
         run: |
           export LAYR_OVERLAYFS_TEST_ROOT="/var/tmp/layr-overlayfs-ci"
           export LAYR="$RUNNER_TEMP/layr-overlayfs"
           # Unit tests make stores below the temporary folder; /tmp is on a shared mount.
-          sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" TMPDIR="$LAYR_OVERLAYFS_TEST_ROOT" "$UNIT_TESTS" --include-ignored
+          test -s "$RUNNER_TEMP/unit-executables"
+          while IFS= read -r executable; do
+            sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" TMPDIR="$LAYR_OVERLAYFS_TEST_ROOT" "$executable" --include-ignored
+          done < "$RUNNER_TEMP/unit-executables"
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-local.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/overlayfs-caches.sh
           sudo env LAYR_OVERLAYFS_TEST_ROOT="$LAYR_OVERLAYFS_TEST_ROOT" LAYR="$LAYR" bash tests/save-unsettled.sh

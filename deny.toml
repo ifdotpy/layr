@@ -1,0 +1,43 @@
+# Check every workspace member, feature and target dependency.
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities are errors by default; also reject unmaintained transitive crates.
+unmaintained = "all"
+unsound = "all"
+ignore = [
+    # age's `ssh` feature pulls in RSA decryption with a Marvin timing side channel.
+    # No fixed release exists; revisit when rsa 0.10 / age update ships.
+    { id = "RUSTSEC-2023-0071", reason = "RSA is required by age/ssh; no patched release is available" },
+    # age's i18n build-time translation configuration uses basic-toml via i18n-config.
+    { id = "RUSTSEC-2026-0374", reason = "Transitive through age -> i18n-embed-fl/i18n-embed-impl -> i18n-config; no replacement release" },
+    # age's i18n-embed-fl procedural macro depends on proc-macro-error2 at build time.
+    { id = "RUSTSEC-2026-0173", reason = "Transitive through age -> i18n-embed-fl; await upstream migration" },
+    # serde_yaml uses unsafe-libyaml at runtime; replacing the YAML parser is separate work.
+    { id = "RUSTSEC-2024-0449", reason = "Transitive through direct dependency serde_yaml; no maintained patch release" },
+]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "CDLA-Permissive-2.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Unpublished workspace crates use local paths without registry versions.
+allow-wildcard-paths = true
+# Layr uses rustix for Unix system calls.
+deny = [{ name = "nix" }]
+# These old versions are required by upstream dependencies; keep new duplicates visible.
+skip = [
+    { name = "bech32", version = "=0.9.1" }, # age 0.11; layr-store uses 0.11.
+    { name = "rustc-hash", version = "=1.1.0" }, # fluent-bundle; layr-hashers uses 2.
+    { name = "toml", version = "=0.5.11" }, # find-crate (age i18n); Layr uses 0.8.
+    { name = "windows-sys", version = "=0.52.0" }, # ring; rustix/tokio use 0.61.
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

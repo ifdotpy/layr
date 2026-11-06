@@ -19,7 +19,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
-| queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
+| queue         | `queue add <rev> [--into <line>] [-m <conventional title>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
@@ -248,10 +248,23 @@ each difference. `gc --repair` makes the table match the disk.
 
 ### Schema upgrades
 
-A layr upgrade that changes the schema rebuilds the derived tables from the records, in one
-transaction. The records stay as they are, so the rebuild loses nothing. Layr keeps no copy of
-the database. An older layr cannot open a database after the upgrade. The rebuild also removes
-the copies `layr.sqlite.schema-<old>.bak` that older layr versions made.
+For a schema upgrade, stop the service/daemon first, upgrade every CLI and the daemon binary,
+then restart the service. The first project open rebuilds its database before running the command.
+The CLI and daemon must support the same database schema even when their local store format is
+unchanged. Their negotiation checks this before a command is sent; upgrade both if it refuses.
+
+A layr upgrade that changes the schema rebuilds the derived tables from the records in one
+`BEGIN IMMEDIATE` transaction. The backfill, table/index changes and schema version commit
+together. If the process crashes before that commit, SQLite recovery discards the unfinished
+transaction: the old schema and records remain, and the next open retries the upgrade.
+Concurrent readers continue to see their consistent pre-upgrade snapshot; new reads see the
+rebuilt tables after commit.
+
+Layr keeps no pre-upgrade database copy. An older layr cannot open a database after the upgrade;
+there is no automatic downgrade. To retain a downgrade option, make your own consistent store
+backup while all store users and the daemon are stopped, before upgrading, and restore that
+backup before using the old binary again. The rebuild also removes the copies
+`layr.sqlite.schema-<old>.bak` that older layr versions made.
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 

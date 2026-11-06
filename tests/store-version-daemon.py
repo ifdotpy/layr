@@ -27,6 +27,19 @@ def exact(sock, size):
     return result
 
 
+# The marker/report keeps Version; negotiation adds the required schema in Peer.
+with socket.socket(socket.AF_UNIX) as probe:
+    probe.settimeout(15)
+    probe.connect(str(root / "version.sock"))
+    packet = b'{"hello":true}'
+    probe.sendall(struct.pack("!I", len(packet)) + packet)
+    assert exact(probe, 1) == b"V"
+    reply = json.loads(exact(probe, struct.unpack("!I", exact(probe, 4))[0]))
+    assert {key: reply[key] for key in current} == current, reply
+    assert type(reply["schema"]) is int and reply["schema"] > 0, reply
+    current = dict(current, schema=reply["schema"])
+
+
 def request(version, hello=False):
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(15)
@@ -70,6 +83,15 @@ for hello in (False, True):
     code, error = request(None, hello)
     assert code == 128 and "unguarded layr" in error, error
     assert not (store / "projects/must-not-exist").exists()
+    for schema in (None, 0, current["schema"] + 1):
+        peer = dict(current)
+        if schema is None:
+            peer.pop("schema")
+        else:
+            peer["schema"] = schema
+        code, error = request(peer, hello)
+        assert code == 128 and "upgrade both the CLI and the daemon" in error, error
+        assert not (store / "projects/must-not-exist").exists()
     code, error = request(dict(current, version="another-version", build="another-build"), hello)
     assert code == 0, error
 print("PASS the daemon refuses different formats and unguarded clients before work", flush=True)

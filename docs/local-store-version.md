@@ -90,11 +90,22 @@ Complete identity files publish once through an atomic hard link.
 An existing ID, name, or key is never replaced.
 A missing key with existing project data refuses access and requires identity restoration.
 
-The client and daemon exchange their format descriptors before a command uses the daemon.
-The exchange uses the same connection as the command.
-Either format mismatch refuses the command.
-The daemon also refuses clients that supply no format descriptor.
-A new client refuses an older daemon that has no version exchange.
+The CLI and daemon exchange `layr_api::Peer` descriptors before a command, on the same
+connection as that command. A descriptor flattens the existing `Version` fields and adds a
+required positive `schema` (`layr_api::SchemaVersion`, backed by `NonZeroU32`). The daemon's
+hello reply retains `format`, `version`, `build`, and `root`, with `schema` added, so existing
+Studio probes can still read those fields.
+
+Both peers must support the same store format and database schema. A missing, zero, invalid,
+or different schema refuses the command before dispatch; the error tells the operator to
+"upgrade both the CLI and the daemon". A schema mismatch names both schema numbers. Clients
+without a version exchange are refused too. Stop the daemon, upgrade all CLI and daemon
+binaries, restart the daemon, then let the first project open migrate its database.
+
+`Version`, `store-version.json`, and `StoreVersionReport` keep their existing shape and
+format-only store-layout compatibility rules. The marker records the creating binary's
+identity, not the currently migrated database schema. The separate `Peer` and `SchemaVersion`
+types are additive public API; `API_MAJOR` remains 1.
 
 ## Older binaries
 
@@ -106,7 +117,8 @@ The marker write cannot detect an active older binary that takes no version leas
 Studio must inspect its bundled and developer binaries before it shares a root.
 It must refuse a developer binary that has no `store-version` command.
 Studio can require equal package versions as its own policy.
-Layr itself enforces only the local format number.
+Store access checks the local format number; CLI/daemon negotiation also requires an equal
+database schema.
 
 The build identity and date come from `LAYR_BUILD_ID` and `LAYR_BUILD_DATE` at build time.
 A release build sets both, for example `LAYR_BUILD_ID=$(git rev-parse --short HEAD)

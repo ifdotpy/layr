@@ -13,6 +13,12 @@ pub trait Host {
     fn command(&self, program: &str) -> std::io::Result<Command>;
     /// The moment at which the adapter stops its processes and skips the folder.
     fn deadline(&self) -> Instant;
+    /// Clones the folder `src` to `dst` (which does not exist) in one step, where the file system can (APFS:
+    /// one clonefile of the whole tree). Ok(false): not possible here, and nothing was made; the adapter copies.
+    fn clone_tree(&self, src: &Path, dst: &Path) -> std::io::Result<bool> {
+        let _ = (src, dst);
+        Ok(false)
+    }
 }
 
 /// The command that names a toolchain (`CacheAdapter::toolchain_command`).

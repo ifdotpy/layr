@@ -75,6 +75,7 @@ The previous Git forms fail with the new command name.
 The previous command transport form fails with `layr sync <remote>` in the message.
 Tests can use `layr sync work --command -- <command> [<arguments>]` with an explicit peer remote.
 
+<<<<<<< head
 ## Project modes
 
 A store has one of three modes (see docs/cloud-rfc.md 7.0):
@@ -107,6 +108,9 @@ A store whose `store.json` later names another mode is refused, so a writer of t
 project into a plain one.
 Use `--mode secret` when you clone a project that must stay encrypted.
 
+||||||| base
+=======
+>>>>>>> origin-https/main
 ## Push roles
 
 Each remote has a push role: `layr config remote.<name>.push required|optional|off`.

@@ -6,6 +6,17 @@ on:
   pull_request:
 
 jobs:
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check advisories, licenses, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 (cargo-deny 0.20.2)
+        with:
+          arguments: --locked --workspace --all-features
   test:
     runs-on: ubuntu-24.04
     steps:
@@ -40,8 +51,19 @@ jobs:
           CGO_ENABLED=0 GOBIN="$HOME/minio" go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
       - name: Build
         run: cargo build --locked
+      - name: Set up Node.js for npm adapter tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Set up pnpm for adapter tests
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+        with:
+          version: '12.16.1'
       - name: Unit tests
-        run: cargo test --locked
+        # Follow-up: enable layr-retest e2e after provisioning nextest, LLVM tools and layr in PATH.
+        run: |
+          cargo test --locked --workspace --exclude layr-retest
+          cargo test --locked -p layr-retest --lib --bins
       - name: Integration tests (root, btrfs on loop files)
         run: |
           sudo modprobe btrfs || true
@@ -55,6 +77,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: brew install coreutils gnu-sed zstd
+      - name: Set up Node.js for npm adapter tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Set up pnpm for adapter tests
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+        with:
+          version: '12.16.1'
       - name: Create the APFS test volume
         run: |
           hdiutil create -size 4g -fs 'Case-sensitive APFS' -volname LayrCI -type SPARSE -o "$RUNNER_TEMP/layr.sparseimage"
@@ -69,6 +99,9 @@ jobs:
           export PATH="$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
           cargo build --locked
           cargo test --locked -- --include-ignored
+          # Follow-up: enable layr-retest e2e after provisioning nextest, LLVM tools and layr in PATH.
+          cargo test --locked --workspace --exclude layr --exclude layr-retest
+          cargo test --locked -p layr-retest --lib --bins
           export LAYR="$PWD/target/debug/layr"
           python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
           python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"

@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.38.1](https://github.com/ifdotpy/layr/compare/v0.38.0...v0.38.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **remote:** renew the gateway read proof before expiry and on 401 ([#403](https://github.com/ifdotpy/layr/issues/403)) ([01f4e56](https://github.com/ifdotpy/layr/commit/01f4e5658fb2d3663466fd4c279a567a05c22330))
+
+## [0.38.0](https://github.com/ifdotpy/layr/compare/v0.37.0...v0.38.0) (2026-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* cut compatibility shims ([#372](https://github.com/ifdotpy/layr/issues/372))
+* **caches:** caches live in cache overlays only; old cache snapshots of states go ([#389](https://github.com/ifdotpy/layr/issues/389))
+* **merge:** remove the options that did nothing; pick --continue says what to do ([#380](https://github.com/ifdotpy/layr/issues/380))
+* **park:** park keeps the changes as a line without a folder ([#375](https://github.com/ifdotpy/layr/issues/375))
+* **remote:** push roles: remote.&lt;name&gt;.push required|optional|off ([#374](https://github.com/ifdotpy/layr/issues/374))
+
+### Features
+
+* **api:** Add typed store-version command contract ([#364](https://github.com/ifdotpy/layr/issues/364)) ([fe65fbc](https://github.com/ifdotpy/layr/commit/fe65fbc6e7ef450fd2d55088563fe7a3e2e65fa0))
+* **caches:** caches live in cache overlays only; old cache snapshots of states go ([#389](https://github.com/ifdotpy/layr/issues/389)) ([45d9039](https://github.com/ifdotpy/layr/commit/45d9039326926a038b1554e6402790b3e39cd52a))
+* **daemon:** store-version reports the daemon build; follow warns on another build ([#377](https://github.com/ifdotpy/layr/issues/377)) ([41834d9](https://github.com/ifdotpy/layr/commit/41834d9e0e901c40bbb6af9de6d4903585072834))
+* **park:** park keeps the changes as a line without a folder ([#375](https://github.com/ifdotpy/layr/issues/375)) ([ea5514d](https://github.com/ifdotpy/layr/commit/ea5514de360d3cf138b9fe2a7ce295e374b8ff83))
+* **queue:** a queue entry with a conventional title lands as one state with that title ([#397](https://github.com/ifdotpy/layr/issues/397)) ([1187fb5](https://github.com/ifdotpy/layr/commit/1187fb5d46a0b91879439b1040fbcff2152d095a))
+* **release:** layr release prepare writes the next version and its changelog as release-please did ([#394](https://github.com/ifdotpy/layr/issues/394)) ([6b03a0c](https://github.com/ifdotpy/layr/commit/6b03a0cff717dcfaf57d650b9c2f1578ebc5e325))
+* **remote:** push roles: remote.&lt;name&gt;.push required|optional|off ([#374](https://github.com/ifdotpy/layr/issues/374)) ([3240b75](https://github.com/ifdotpy/layr/commit/3240b759fa188d63b32ba664424824f70bd9f960))
+* **usage:** count the commands that run on this machine ([#376](https://github.com/ifdotpy/layr/issues/376)) ([fb1b888](https://github.com/ifdotpy/layr/commit/fb1b888c0dec38981da8c225452224bda2e679ca))
+
+
+### Bug Fixes
+
+* **attest:** root revokes the attestations of every user of its machine ([#386](https://github.com/ifdotpy/layr/issues/386)) ([e0fa6fd](https://github.com/ifdotpy/layr/commit/e0fa6fdbdf8c39d6fd69b833194fe6cfdaccf9b8))
+* **caches:** a stopped node prune never puts a partial copy back; a damaged folder is repaired before its mark goes ([#391](https://github.com/ifdotpy/layr/issues/391)) ([1234fde](https://github.com/ifdotpy/layr/commit/1234fdeeb64bf354cdee687cfd8169a092169002))
+* **caches:** a cargo warm build runs every sweep command when one fails ([#388](https://github.com/ifdotpy/layr/issues/388)) ([5cffd30](https://github.com/ifdotpy/layr/commit/5cffd307f176ca5dfb3723601bb10259b91ef701))
+* **caches:** copy node_modules with the system cp on macOS ([#383](https://github.com/ifdotpy/layr/issues/383)) ([d270f98](https://github.com/ifdotpy/layr/commit/d270f98c9eb581f0afd028c2087056d122a7508e))
+* **checks:** a check job that waits on this machine says why ([#385](https://github.com/ifdotpy/layr/issues/385)) ([7636e93](https://github.com/ifdotpy/layr/commit/7636e9314b3356494e4f5b36324a7b656533949d))
+* **checks:** checks.changes plans the newest version of each open change, newest states first ([#371](https://github.com/ifdotpy/layr/issues/371)) ([eb79dcf](https://github.com/ifdotpy/layr/commit/eb79dcfa78cdcb686da68d2427d69b99f6ddc3ee))
+* **checks:** a save-back records the source times of the check copy ([#379](https://github.com/ifdotpy/layr/issues/379)) ([f45359e](https://github.com/ifdotpy/layr/commit/f45359eef502ac6cccdf9a433908a276fd52e623))
+* **db:** a temporary SQLite lock (SQLITE_PROTOCOL, SQLITE_BUSY) is retried instead of failing the command ([#401](https://github.com/ifdotpy/layr/issues/401)) ([8b14acc](https://github.com/ifdotpy/layr/commit/8b14accf742b9bb8c0305b499c506af324f97bbc))
+* **gc:** reserve a tree before eviction removes it, so a reader cannot pin it meanwhile ([#378](https://github.com/ifdotpy/layr/issues/378)) ([f418d0c](https://github.com/ifdotpy/layr/commit/f418d0c6191122792057c4d16aad3560c337ee9b))
+* **merge:** remove the options that did nothing; pick --continue says what to do ([#380](https://github.com/ifdotpy/layr/issues/380)) ([59ecc34](https://github.com/ifdotpy/layr/commit/59ecc34ac9e52a32798444ceca950f406b8d32ac))
+* **remote:** a store push leaves out a state that a free step queued ([#400](https://github.com/ifdotpy/layr/issues/400)) ([a027735](https://github.com/ifdotpy/layr/commit/a027735531a3bcbb190ef553b88b98e5106f8e1d))
+* **remote:** a cache sweep leaves a remote tree that cannot be decoded; main builds again ([#399](https://github.com/ifdotpy/layr/issues/399)) ([7ce9845](https://github.com/ifdotpy/layr/commit/7ce9845cf5be34a750f0391f386abb48850c91df))
+* **remote:** a push takes a remote base tree that cannot be read as absent ([#398](https://github.com/ifdotpy/layr/issues/398)) ([be9917a](https://github.com/ifdotpy/layr/commit/be9917a5007db41b12f2d6c242cf7c5907540cdb))
+* **remote:** a cache overlay push holds the overlay's project lock only for its key records ([#392](https://github.com/ifdotpy/layr/issues/392)) ([3c39de3](https://github.com/ifdotpy/layr/commit/3c39de388417827df1c3aace244610c91fbaebb9))
+* **service:** the macOS user daemon applies person requests and runs the queue on its tick ([#373](https://github.com/ifdotpy/layr/issues/373)) ([d3a7650](https://github.com/ifdotpy/layr/commit/d3a7650c78c56b1983d265e019cd7a3952ae5f28))
+* **store:** the root snapshot check covers the volumes of the store ([#381](https://github.com/ifdotpy/layr/issues/381)) ([c10f796](https://github.com/ifdotpy/layr/commit/c10f796d4ac7bddcf4adbf2ad114ead2bdc8c71a))
+
+
+### Performance
+
+* **oplog:** Limit indexed records before decoding ([#241](https://github.com/ifdotpy/layr/issues/241)) ([adb4a7c](https://github.com/ifdotpy/layr/commit/adb4a7c2c6110be40102ce3a415ed61c67482f77))
+* **remote:** a store push checks its tips 32 at a time ([#387](https://github.com/ifdotpy/layr/issues/387)) ([bc565a5](https://github.com/ifdotpy/layr/commit/bc565a59e1f78dfd074b9a01c13e2501c2a99fe5))
+
+
+### Code Refactoring
+
+* cut compatibility shims ([#372](https://github.com/ifdotpy/layr/issues/372)) ([2f88053](https://github.com/ifdotpy/layr/commit/2f8805376695d19c965db7aa7e43d72abe528f0f))
+
 ## [0.37.0](https://github.com/ifdotpy/layr/compare/v0.36.0...v0.37.0) (2026-11-06)
 
 

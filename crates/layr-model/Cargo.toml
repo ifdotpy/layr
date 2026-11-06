@@ -5,6 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 description = "Pure project read model for signed Layr records"
 license = "MIT"
+publish = false
 
 [dependencies]
 html5gum = { version = "0.8", default-features = false }

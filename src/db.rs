@@ -28,9 +28,17 @@ pub struct Db {
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEGER, time INTEGER, op TEXT, actor_uid INTEGER, raw TEXT);
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
+CREATE INDEX IF NOT EXISTS records_time_seq ON records(time, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
 CREATE INDEX IF NOT EXISTS records_git_import ON records(json_extract(raw, '$.r.data.state')) WHERE op='import';
 CREATE INDEX IF NOT EXISTS records_git_export ON records(json_extract(raw, '$.r.data.state')) WHERE op='export';
+-- kind 0: global push/sync; kind 1: exact line association. IDs link records; record_order preserves insertion ties.
+CREATE TABLE IF NOT EXISTS record_lines (kind INTEGER NOT NULL, line_id TEXT NOT NULL, time INTEGER NOT NULL, seq INTEGER NOT NULL, record_order INTEGER NOT NULL, record_id TEXT NOT NULL, PRIMARY KEY(kind, line_id, time, seq, record_order)) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS records_index_lines AFTER INSERT ON records BEGIN
+  INSERT OR IGNORE INTO record_lines SELECT 0, '', NEW.time, NEW.seq, NEW.rowid, NEW.id WHERE NEW.op IN ('push','sync');
+  INSERT OR IGNORE INTO record_lines SELECT 1, key, NEW.time, NEW.seq, NEW.rowid, NEW.id FROM json_each(NEW.raw, '$.r.lines') WHERE NEW.op NOT IN ('push','sync');
+  INSERT OR IGNORE INTO record_lines SELECT 1, value, NEW.time, NEW.seq, NEW.rowid, NEW.id FROM (SELECT value, type FROM json_each(NEW.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1) WHERE NEW.op NOT IN ('push','sync') AND type='text';
+END;
 CREATE TABLE IF NOT EXISTS states (id TEXT PRIMARY KEY, display TEXT UNIQUE, kind TEXT, line TEXT, time INTEGER, rec TEXT, present INTEGER DEFAULT 1, deleted INTEGER DEFAULT 0, dropped INTEGER DEFAULT 0, machine TEXT);
 CREATE INDEX IF NOT EXISTS states_line ON states(line, kind, time);
 CREATE TABLE IF NOT EXISTS parents (state TEXT, parent TEXT, ord INTEGER, PRIMARY KEY(state, ord));
@@ -62,9 +70,10 @@ CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 const DERIVED: &[&str] = &[
+    "record_lines",
     "states",
     "parents",
     "lines",
@@ -92,16 +101,38 @@ const RETIRED: &[&str] = &["slots", "mirrors", "groups", "group_lines", "checks"
 /// Indexes of older versions on the records table, dropped on migration.
 const RETIRED_INDEXES: &[&str] = &["records_legacy_evidence"];
 
+/// Runs `step` again while SQLite reports a lock it gives up on at once: SQLITE_PROTOCOL (the WAL index lock,
+/// under heavy load) and SQLITE_BUSY where no busy handler applies. Both are temporary; at most about 30 s.
+fn retry_locked<T>(mut step: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let mut wait = std::time::Duration::from_millis(5);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match step() {
+            Err(e)
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::FileLockingProtocolFailed | rusqlite::ErrorCode::DatabaseBusy)
+                ) && std::time::Instant::now() < until =>
+            {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_millis(500));
+            }
+            other => return other,
+        }
+    }
+}
+
 impl Db {
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Before the pragmas: switching to WAL takes a lock too.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        retry_locked(|| conn.pragma_update(None, "journal_mode", "WAL"))?;
         // FULL: a committed record survives a power loss. The database has its own subvolume,
         // so this fsync costs a few milliseconds even right after a snapshot.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        retry_locked(|| conn.pragma_update(None, "synchronous", "FULL"))?;
         // A current schema needs no write lock: one read transaction decides, so read commands
         // do not wait for a writer.
         // An old schema with records is not touched here: its derived tables stay as they are,
@@ -199,6 +230,7 @@ impl Db {
                 }
                 return Ok(false);
             }
+            self.conn.execute_batch("DROP TRIGGER IF EXISTS records_index_lines")?;
             for t in DERIVED.iter().chain(RETIRED) {
                 self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
             }
@@ -206,6 +238,11 @@ impl Db {
                 self.conn.execute_batch(&format!("DROP INDEX IF EXISTS {i}"))?;
             }
             self.conn.execute_batch(SCHEMA)?;
+            self.conn.execute_batch(r#"
+                INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, rowid, id FROM records WHERE op IN ('push','sync');
+                INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.rowid, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
+                INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, rowid, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
+            "#)?;
             // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
             crate::owners::fill_only(|| replay(self))?;
             // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
@@ -265,7 +302,7 @@ impl Db {
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
     pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        retry_locked(|| self.conn.execute_batch("BEGIN IMMEDIATE"))?;
         match f() {
             Ok(v) => {
                 // A failed COMMIT (a full disk) can leave the transaction open: roll it back so the
@@ -1293,6 +1330,31 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
+    /// The newest operations visible on a line, or all operations when no line is supplied.
+    /// SQLite merges two ordered index ranges and stops at `limit`; only selected rows are
+    /// fetched and decoded. Global (`kind=0`) records are never in the line range (`kind=1`).
+    pub fn log_records(&self, line: Option<&str>, limit: usize) -> Result<Vec<Record>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = if let Some(line) = line {
+            let mut st = self.conn.prepare_cached(
+                "SELECT records.raw FROM (
+                 SELECT time, seq, record_order, record_id FROM record_lines WHERE kind=1 AND line_id=?1
+                 UNION ALL
+                 SELECT time, seq, record_order, record_id FROM record_lines WHERE kind=0 AND line_id=''
+                 ORDER BY time DESC, seq DESC, record_order DESC LIMIT ?2
+                 ) AS selected JOIN records ON records.id=selected.record_id
+                 ORDER BY selected.time DESC, selected.seq DESC, selected.record_order DESC",
+            )?;
+            let rows = st.query_map(params![line, limit], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC, rowid DESC LIMIT ?1")?;
+            let rows = st.query_map(params![limit], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        rows.into_iter().map(|raw| Ok(crate::oplog::parse_line(&raw, None)?.record)).collect()
+    }
+
     /// The newest records whose text names `needle` (a line id), newest first, at most `limit`.
     pub fn records_naming(&self, needle: &str, limit: usize) -> Result<Vec<Record>> {
         let mut st =
@@ -1390,6 +1452,225 @@ mod tests {
     use crate::model::Subject;
     use crate::model::{Author, StateKind, StateRec};
     use layr_hashers::{ContentAddress, Digest};
+
+    #[test]
+    fn log_records_keep_the_observed_insertion_order_for_fully_tied_records() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        for (id, op) in [("z-first", "save"), ("a-second", "sync"), ("m-third", "save")] {
+            let mut rec = Record::new(op);
+            rec.id = id.into();
+            rec.machine = id.into();
+            rec.time = 1;
+            rec.seq = 1;
+            rec.data = serde_json::json!({"line": "wanted"});
+            db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
+        }
+        // Installed 0.36's actual records(100000) caller returns newest insertion first.
+        let expected = ["m-third", "a-second", "z-first"];
+        for line in [None, Some("wanted"), Some("missing")] {
+            for limit in [1, 2, 10] {
+                let ids: Vec<_> = db.log_records(line, limit)?.into_iter().map(|r| r.id).collect();
+                let visible: Vec<_> = expected
+                    .iter()
+                    .filter(|id| line != Some("missing") || **id == "a-second")
+                    .take(limit)
+                    .map(|id| id.to_string())
+                    .collect();
+                assert_eq!(ids, visible, "line={line:?}, limit={limit}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn log_records_match_full_history_output() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        for i in 0..1000 {
+            let mut rec = Record::new(if i % 17 == 0 { "push" } else { "save" });
+            rec.id = format!("record-{i}");
+            rec.machine = "machine".into();
+            rec.seq = i as u64;
+            rec.time = i / 3;
+            if i % 5 == 0 {
+                rec.data = serde_json::json!({"line": "wanted"});
+            } else if i % 7 == 0 {
+                rec.lines.insert(
+                    "wanted".into(),
+                    crate::model::LineChange { before: None, after: None, working_before: None, working_after: None },
+                );
+            } else {
+                rec.data = serde_json::json!({"line": "other", "note": "wanted"});
+            }
+            let raw = serde_json::json!({"r": rec, "s": ""}).to_string();
+            db.conn.execute(
+                "INSERT INTO records(id,machine,seq,time,op,raw) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![rec.id, rec.machine, rec.seq, rec.time, rec.op, raw],
+            )?;
+            db.derive(&rec, &|_| true, "machine")?;
+        }
+        for line in [None, Some("wanted"), Some("missing")] {
+            for limit in [1, 30, 200, 2000] {
+                let expected: Vec<_> = db
+                    .records(100000)?
+                    .into_iter()
+                    .filter(|r| {
+                        line.is_none_or(|l| {
+                            matches!(r.op.as_str(), "push" | "sync")
+                                || r.lines.contains_key(l)
+                                || r.data.get("line").and_then(|v| v.as_str()) == Some(l)
+                        })
+                    })
+                    .take(limit)
+                    .collect();
+                let actual = db.log_records(line, limit)?;
+                assert_eq!(serde_json::to_vec(&expected)?, serde_json::to_vec(&actual)?);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn opening_main_schema_nine_requires_and_backfills_the_line_index() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-log-main-nine-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(SCHEMA)?;
+        // Main's schema 9 has no operation-log index. It must not be treated as current.
+        conn.execute_batch("DROP TRIGGER records_index_lines; DROP TABLE record_lines; DROP INDEX records_time_seq")?;
+        conn.pragma_update(None, "user_version", 9)?;
+        let old = Db { conn, stale: true };
+        let mut rec = Record::new("save");
+        rec.id = "main-nine-record".into();
+        rec.machine = "machine".into();
+        rec.time = 1;
+        rec.seq = 1;
+        rec.data = serde_json::json!({"line": "wanted"});
+        old.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
+        drop(old);
+        let db = Db::open(&path)?;
+        assert!(db.stale, "main schema 9 must trigger a rebuild instead of creating an empty index");
+        assert!(db.rebuild(true, |_| Ok(()))?);
+        assert_eq!(db.log_records(Some("wanted"), 1)?[0].id, rec.id);
+        assert_eq!(db.conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?, 10);
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rebuilding_line_index_keeps_interleaved_log_order() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-log-migration-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let conn = Connection::open(dir.join("layr.sqlite"))?;
+        conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", 9)?;
+        let db = Db { conn, stale: true };
+        for i in 0..400 {
+            let mut rec = Record::new(if i % 13 == 0 { "sync" } else { "save" });
+            rec.id = format!("record-{i}");
+            rec.machine = "machine".into();
+            rec.seq = i as u64;
+            rec.time = i / 4;
+            rec.data = serde_json::json!({"line": if i % 2 == 0 { "a" } else { "b" }});
+            let raw = serde_json::json!({"r": rec, "s": ""}).to_string();
+            db.insert_record(&rec, &raw)?;
+        }
+        assert!(db.rebuild(true, |db| {
+            for raw in db.all_lines()? {
+                let rec = crate::oplog::parse_line(&raw, None)?.record;
+                db.derive(&rec, &|_| true, "machine")?;
+            }
+            Ok(())
+        })?);
+        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        for line in ["a", "b"] {
+            let expected: Vec<_> = db
+                .records(1000)?
+                .into_iter()
+                .filter(|r| matches!(r.op.as_str(), "push" | "sync") || r.data["line"].as_str() == Some(line))
+                .take(75)
+                .collect();
+            assert_eq!(serde_json::to_vec(&expected)?, serde_json::to_vec(&db.log_records(Some(line), 75)?)?);
+        }
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_data_line_uses_last_value_on_insert_and_rebuild() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-log-migration-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let conn = Connection::open(dir.join("layr.sqlite"))?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        let ordered: Vec<String> = {
+            let mut st = db.conn.prepare(
+                "SELECT value FROM json_each('{\"line\":\"first\",\"line\":\"last\"}') WHERE key='line' ORDER BY id DESC",
+            )?;
+            let rows = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        assert_eq!(ordered, ["last", "first"]);
+        for (i, data) in [(1, r#"{"line":"first","line":"last"}"#), (2, r#"{"line":"first","line":null}"#)] {
+            let mut rec = Record::new("save");
+            rec.id = format!("record-{i}");
+            rec.machine = "machine".into();
+            rec.seq = i;
+            rec.time = i as i64;
+            rec.data = serde_json::json!({"line": "placeholder"});
+            let body = serde_json::to_string(&rec)?.replace(r#"{"line":"placeholder"}"#, data);
+            let raw = format!(r#"{{"r":{body},"s":""}}"#);
+            let parsed = crate::oplog::parse_line(&raw, None)?.record;
+            db.insert_record(&parsed, &raw)?;
+        }
+        for rebuild in [false, true] {
+            if rebuild {
+                db.conn.pragma_update(None, "user_version", 8)?;
+                db.rebuild(true, |_| Ok(()))?;
+            }
+            assert_eq!(db.log_records(Some("last"), 10)?.len(), 1);
+            assert!(db.log_records(Some("first"), 10)?.is_empty());
+            let raw: String = db.conn.query_row("SELECT raw FROM records WHERE id='record-1'", [], |r| r.get(0))?;
+            assert!(raw.contains(r#"{"line":"first","line":"last"}"#));
+        }
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn log_records_decode_only_the_requested_records() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        for i in 0..41 {
+            let mut rec = Record::new("save");
+            rec.id = format!("record-{i}");
+            rec.machine = "machine".into();
+            rec.seq = i;
+            rec.time = i as i64;
+            rec.data = serde_json::json!({"line": "wanted"});
+            let mut raw = serde_json::json!({"r": rec, "s": ""});
+            if i == 0 {
+                // Valid JSON, but not a decodable record. Outside every requested window.
+                raw["r"]["actor"] = serde_json::Value::Null;
+            }
+            db.insert_record(&rec, &raw.to_string())?;
+        }
+        for line in [None, Some("wanted")] {
+            assert_eq!(db.log_records(line, 1)?[0].id, "record-40");
+            assert_eq!(db.log_records(line, 30)?.len(), 30);
+            assert!(db.log_records(line, 41).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn opening_a_database_that_init_is_creating_keeps_its_tables() {
@@ -1847,6 +2128,7 @@ mod tests {
             result: None,
             reason: None,
             probes: None,
+            title: None,
         };
         let event = |seq, status: Option<&str>| {
             let mut rec = state_record(seq, id, vec![]);

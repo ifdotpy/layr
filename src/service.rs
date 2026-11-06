@@ -37,10 +37,22 @@ struct Request {
     #[serde(rename = "cwd")]
     _cwd: Option<PathBuf>,
     env: Option<HashMap<String, String>>,
-    version: Option<crate::store_version::Version>,
+    #[serde(default, deserialize_with = "deserialize_client_peer")]
+    version: Option<layr_api::Peer>,
     #[serde(default)]
     hello: bool,
     registry: Option<serde_json::Value>,
+}
+
+/// Keep a missing/invalid schema diagnostic on the caller's stderr through typed decoding.
+fn deserialize_client_peer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<layr_api::Peer>, D::Error> {
+    <Option<layr_api::Peer> as serde::Deserialize>::deserialize(deserializer).map_err(|error| {
+        serde::de::Error::custom(format!(
+            "incompatible client negotiation (a valid database schema is required); upgrade both the CLI and the daemon: {error}"
+        ))
+    })
 }
 
 fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
@@ -95,7 +107,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let env: HashMap<String, String> = std::env::vars().collect();
     let req = serde_json::to_vec(
-        &serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": crate::store_version::Version::binary()}),
+        &serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": crate::store_version::peer()?}),
     )?;
     let dir = std::fs::File::open(&cwd)?;
     let mut data = (req.len() as u32).to_be_bytes().to_vec();
@@ -146,8 +158,8 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     sent?;
     if kind[0] != b'V' {
         bail!(
-            "incompatible daemon: unknown store format (unguarded layr); this binary uses {}. Upgrade the daemon",
-            crate::store_version::Version::binary().description()
+            "incompatible daemon: unknown store format (unguarded layr); this binary uses {}. upgrade both the CLI and the daemon",
+            crate::store_version::description(&crate::store_version::binary())
         );
     }
     let mut length = [0; 4];
@@ -158,8 +170,10 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     }
     let mut bytes = vec![0; size];
     (&*sock).read_exact(&mut bytes)?;
-    let daemon = serde_json::from_slice(&bytes).context("invalid daemon version")?;
-    crate::store_version::Version::binary().require_compatible(&daemon, "daemon")?;
+    let daemon = serde_json::from_slice::<layr_api::Peer>(&bytes).context(
+        "incompatible daemon negotiation (a valid database schema is required); upgrade both the CLI and the daemon",
+    )?;
+    crate::store_version::require_peer_compatible(&crate::store_version::peer()?, &daemon, "daemon")?;
     // Commands can take longer than negotiation.
     sock.set_read_timeout(None)?;
     Ok(())
@@ -316,7 +330,7 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
                 bail!("the version request must not contain descriptors");
             }
             // The store root lets a client see which store this daemon serves (layr follow).
-            let mut hello = serde_json::to_value(crate::store_version::Version::binary())?;
+            let mut hello = serde_json::to_value(crate::store_version::peer()?)?;
             hello["root"] = root.to_string_lossy().into_owned().into();
             let bytes = serde_json::to_vec(&hello)?;
             let mut packet = vec![b'V'];
@@ -348,11 +362,11 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         let env = v.env.context("bad request: missing env")?;
         let client = v.version.with_context(|| {
             format!(
-                "incompatible client: unknown store format (unguarded layr); daemon uses {}. Upgrade the client",
-                crate::store_version::Version::binary().description()
+                "incompatible client: unknown store format (unguarded layr); daemon uses {}. upgrade both the CLI and the daemon",
+                crate::store_version::description(&crate::store_version::binary())
             )
         })?;
-        crate::store_version::Version::binary().require_compatible(&client, "client")?;
+        crate::store_version::require_peer_compatible(&crate::store_version::peer()?, &client, "client")?;
         rustix::process::fchdir(&fds[3]).context("cannot enter the working folder")?;
         drop(fds);
         let cwd = std::env::current_dir()?;
@@ -971,6 +985,15 @@ mod request_tests {
     }
 
     fn child_request(root: &Path, env: serde_json::Value, daemon_trace: bool) -> Result<(i32, Vec<u8>, String)> {
+        child_request_with_peer(root, env, daemon_trace, serde_json::to_value(crate::store_version::peer()?)?)
+    }
+
+    fn child_request_with_peer(
+        root: &Path,
+        env: serde_json::Value,
+        daemon_trace: bool,
+        peer: serde_json::Value,
+    ) -> Result<(i32, Vec<u8>, String)> {
         use std::process::{Command, Stdio};
         let path = root.join("request.sock");
         let listener = UnixListener::bind(&path)?;
@@ -991,7 +1014,7 @@ mod request_tests {
         negotiate(&socket)?;
         let request = serde_json::to_vec(&serde_json::json!({
             "argv": ["volume", "list", "--json"], "cwd": root, "env": env,
-            "version": crate::store_version::Version::binary()
+            "version": peer
         }))?;
         let input = std::fs::File::open("/dev/null")?;
         let output = std::fs::File::create(root.join("stdout"))?;
@@ -1009,6 +1032,42 @@ mod request_tests {
         stderr.push_str(&String::from_utf8_lossy(&child.stderr));
         std::fs::remove_file(path)?;
         Ok((code, std::fs::read(root.join("stdout"))?, stderr))
+    }
+
+    #[test]
+    fn incompatible_client_schemas_are_refused_before_opening_the_store() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("ls-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        for (different_format, schema) in [
+            (false, None),
+            (false, Some(0)),
+            (false, Some(crate::db::SCHEMA_VERSION - 1)),
+            (false, Some(crate::db::SCHEMA_VERSION + 1)),
+            (true, Some(crate::db::SCHEMA_VERSION + 1)),
+        ] {
+            let mut peer = serde_json::to_value(crate::store_version::binary())?;
+            if let Some(schema) = schema {
+                peer["schema"] = schema.into();
+            }
+            if different_format {
+                peer["format"] = (crate::store_version::FORMAT + 1).into();
+            }
+            let (code, stdout, stderr) = child_request_with_peer(&root, serde_json::json!({}), false, peer)?;
+            assert_eq!(code, 128, "{stderr}");
+            assert!(stdout.is_empty());
+            if different_format {
+                assert!(stderr.contains("format 1") && stderr.contains("format 2"), "{stderr}");
+            }
+            assert!(stderr.contains("schema"), "{stderr}");
+            assert!(stderr.contains("upgrade both the CLI and the daemon"), "{stderr}");
+            assert!(!root.join("store").exists(), "refused client must not initialize or migrate a store");
+            if let Some(schema) = schema.filter(|schema| *schema > 0) {
+                assert!(stderr.contains(&schema.to_string()), "{stderr}");
+                assert!(stderr.contains(&crate::db::SCHEMA_VERSION.to_string()), "{stderr}");
+            }
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -1076,6 +1135,51 @@ mod version_tests {
     use super::*;
 
     #[test]
+    fn negotiation_refuses_missing_zero_and_different_schemas_before_a_command() -> Result<()> {
+        for (different_format, schema) in [
+            (false, None),
+            (false, Some(0)),
+            (false, Some(crate::db::SCHEMA_VERSION - 1)),
+            (false, Some(crate::db::SCHEMA_VERSION + 1)),
+            (true, Some(crate::db::SCHEMA_VERSION + 1)),
+        ] {
+            let (client, server) = UnixStream::pair()?;
+            let thread = std::thread::spawn(move || -> Result<()> {
+                let (_, fds) = read_request(&server)?.context("no hello")?;
+                assert!(fds.is_empty());
+                let mut version = serde_json::to_value(crate::store_version::binary())?;
+                if let Some(schema) = schema {
+                    version["schema"] = schema.into();
+                }
+                if different_format {
+                    version["format"] = (crate::store_version::FORMAT + 1).into();
+                }
+                let bytes = serde_json::to_vec(&version)?;
+                (&server).write_all(&[b'V'])?;
+                (&server).write_all(&(bytes.len() as u32).to_be_bytes())?;
+                (&server).write_all(&bytes)?;
+                let mut next = [0];
+                assert_eq!((&server).read(&mut next)?, 0, "no command or descriptors after schema refusal");
+                Ok(())
+            });
+            let result = negotiate(&client);
+            drop(client);
+            thread.join().unwrap()?;
+            let error = format!("{:#}", result.expect_err("unknown or different schema must refuse negotiation"));
+            if different_format {
+                assert!(error.contains("format 1") && error.contains("format 2"), "{error}");
+            }
+            assert!(error.contains("schema"), "{error}");
+            assert!(error.contains("upgrade both the CLI and the daemon"), "{error}");
+            if let Some(schema) = schema.filter(|schema| *schema > 0) {
+                assert!(error.contains(&schema.to_string()), "{error}");
+                assert!(error.contains(&crate::db::SCHEMA_VERSION.to_string()), "{error}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn negotiation_checks_the_daemon_before_a_command() -> Result<()> {
         for format in [crate::store_version::FORMAT, crate::store_version::FORMAT + 1] {
             let (client, server) = UnixStream::pair()?;
@@ -1083,10 +1187,10 @@ mod version_tests {
                 let (hello, fds) = read_request(&server)?.context("no request")?;
                 assert_eq!(serde_json::from_slice::<serde_json::Value>(&hello[4..])?, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
-                let mut version = crate::store_version::Version::binary();
-                version.format = format;
-                version.version = "other-package".into();
-                version.build = "other-build".into();
+                let mut version = crate::store_version::peer()?;
+                version.version.format = format;
+                version.version.version = "other-package".into();
+                version.version.build = "other-build".into();
                 let bytes = serde_json::to_vec(&version)?;
                 (&server).write_all(&[b'V'])?;
                 (&server).write_all(&(bytes.len() as u32).to_be_bytes())?;

@@ -5,6 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 description = "Encrypted Layr store format, keys, and transport"
 license = "MIT"
+publish = false
 
 [features]
 default = ["native"]
