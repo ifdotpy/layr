@@ -7,6 +7,9 @@ use crate::{
 use anyhow::{bail, Context, Result};
 
 pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str) == Some("prepare") {
+        return super::release_prepare::prepare(ctx, &args[1..]);
+    }
     let a = parse(
         &Spec::new().flag("--json").flag("--public").flag("--public-files").value("--remote").value("--name").value("--expect").value("-o|--output"),
         args,
