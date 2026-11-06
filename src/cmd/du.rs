@@ -2,7 +2,9 @@
 use super::here;
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::fsutil::{ExtentKey, Space};
+use crate::fsutil::ExtentKey;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+use crate::fsutil::Space;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
