@@ -39,6 +39,13 @@ pub trait CacheAdapter: Send + Sync {
         let _ = (host, folder);
         Err("the adapter has no build".to_string())
     }
+    /// Makes `folder` whole again after an interrupted step left it damaged (a prune or build stopped at the hard
+    /// limit whose copy could not be put back). Ok: the folder is whole. Err: the reason; the folder stays marked
+    /// damaged. The default has nothing to repair: a build makes what is missing again.
+    fn repair(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
+        let _ = (host, folder);
+        Ok(())
+    }
     /// Puts `folder` back in the state before an interrupted `prune` (its processes were stopped at the hard
     /// limit). Ok(true): it restored a copy. Ok(false): there is nothing to restore. Err: the folder may be
     /// changed and is not restored. Runs no process, so it needs no host.

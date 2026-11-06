@@ -1008,6 +1008,18 @@ impl<'a> Repo<'a> {
             Ok(f) => f,
             Err(e) => return eprintln!("layr: prune {folder}: not pruned: {e:#}"),
         };
+        // A folder that an interrupted step left damaged is repaired first; it stays marked (and saves skip it) until
+        // the repair succeeds. A prune alone cannot tell a whole folder from one with missing files.
+        if self.damaged_folders(line).is_ok_and(|d| d.contains(folder)) {
+            let fixed =
+                crate::cache_hook::run_mode(crate::cache_hook::Mode::Repair, setting.as_deref(), &path, uid, Self::prune_limit());
+            if !fixed.log.is_empty() {
+                eprintln!("layr: repair {}", fixed.log);
+            }
+            if !fixed.folder_ok {
+                return;
+            }
+        }
         let done = crate::cache_hook::run(setting.as_deref(), &path, uid, Self::prune_limit());
         if let Err(e) = self.set_damaged(line, folder, !done.folder_ok) {
             eprintln!("layr: prune {folder}: cannot record the damaged state: {e:#}");
@@ -1023,8 +1035,8 @@ impl<'a> Repo<'a> {
         self.p.line_lock(&line.id, &line.name)
     }
 
-    /// The cache folders of `line` that an interrupted hook left damaged. A save skips them: a prune of a folder
-    /// that succeeds clears its mark.
+    /// The cache folders of `line` that an interrupted hook left damaged. A save skips them: a repair and a prune of
+    /// the folder that succeed clear its mark.
     pub fn damaged_folders(&self, line: &Line) -> Result<BTreeSet<String>> {
         match std::fs::read(self.damaged_file(line)) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),

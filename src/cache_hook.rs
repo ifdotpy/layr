@@ -131,6 +131,8 @@ pub fn run(setting: Option<&str>, folder: &Path, uid: u32, limit: Duration) -> D
 pub enum Mode {
     Prune,
     Warm,
+    /// Makes a damaged folder whole (`CacheAdapter::repair`); a folder stays marked damaged until it succeeds.
+    Repair,
 }
 
 /// `run` for `mode`.
@@ -156,6 +158,7 @@ pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limi
     match mode {
         Mode::Prune => run_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
         Mode::Warm => warm_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
+        Mode::Repair => repair_with(&launch, &[], setting, folder, uid, limit, limit + GRACE),
     }
 }
 
@@ -233,6 +236,18 @@ pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, f
         }
     };
     Done { log, folder_ok: true, built }
+}
+
+/// The repair of a damaged folder in a worker. `folder_ok` is true only when the adapter repaired it.
+pub fn repair_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
+    let shown = folder.display();
+    let (log, ok) = match execute(launch, env, "repair", setting, folder, uid, limit, wait) {
+        Run::Report(r) if r.pruned => (format!("{shown}: repaired with {}", r.adapter), true),
+        Run::Report(r) => (format!("{shown}: not repaired with {}: {}; it stays marked damaged", r.adapter, r.reason), false),
+        Run::Start(e) | Run::Failed(e) => (format!("{shown}: not repaired: {e}; it stays marked damaged"), false),
+        Run::Killed => (format!("{shown}: not repaired: timed out after {} s; it stays marked damaged", limit.as_secs()), false),
+    };
+    Done { log, folder_ok: ok, built: ok }
 }
 
 /// What one worker run ended with.
@@ -328,7 +343,10 @@ pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, fo
 }
 
 fn damaged(folder: &Path, reason: &str) -> String {
-    format!("{}: stopped at the time limit and not restored ({reason}); marked damaged, saves skip it until a prune succeeds", folder.display())
+    format!(
+        "{}: stopped at the time limit and not restored ({reason}); marked damaged, saves skip it until a repair succeeds",
+        folder.display()
+    )
 }
 
 /// The log line of a report of a prune.
@@ -364,6 +382,7 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
         "recover" => recover_here(adapters, setting.as_deref(), &folder),
         "relocate" => relocate_here(adapters, setting.as_deref(), &folder, Path::new(&var(ENV_AT))),
         "warm" => warm_here(adapters, setting.as_deref(), &folder, limit),
+        "repair" => repair_here(adapters, setting.as_deref(), &folder, limit),
         _ => prune_here(adapters, setting.as_deref(), &folder, limit),
     };
     println!("{REPORT_MARK}{}", serde_json::to_string(&report).unwrap_or_default());
@@ -465,6 +484,21 @@ fn warm_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, 
     Report { adapter: found.name().into(), pruned, freed: 0, restored: false, folder_ok: true, reason }
 }
 
+/// Runs the adapter's `repair` on `folder` within `limit`. `pruned` in the report means the folder is whole.
+fn repair_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
+    let found = match find(adapters, setting, folder) {
+        Ok(a) => a,
+        // Without an adapter nothing changed the folder: it is as whole as it can be.
+        Err(_) => return Report { adapter: "-".into(), pruned: true, freed: 0, restored: false, folder_ok: true, reason: String::new() },
+    };
+    let host = WorkerHost { until: Instant::now() + limit };
+    let (pruned, reason) = match found.repair(&host, folder) {
+        Ok(()) => (true, String::new()),
+        Err(reason) => (false, reason),
+    };
+    Report { adapter: found.name().into(), pruned, freed: 0, restored: false, folder_ok: pruned, reason }
+}
+
 /// Runs the adapter's `recover` on `folder` (after its processes were stopped at the hard limit).
 fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path) -> Report {
     let found = match find(adapters, setting, folder) {
@@ -564,6 +598,12 @@ mod tests {
                 _ => Ok(false),
             }
         }
+        fn repair(&self, _host: &dyn Host, folder: &Path) -> Result<(), String> {
+            match self.0 {
+                "hard-stuck" => Err("the store has no copy".into()),
+                _ => std::fs::write(folder.join("repaired.txt"), "whole").map_err(|e| e.to_string()),
+            }
+        }
     }
 
     fn fakes() -> &'static [Box<dyn CacheAdapter>] {
@@ -627,6 +667,17 @@ mod tests {
         assert!(done.log.contains("not built with fail: no build") && !done.built, "{}", done.log);
         let done = warm_with(&launch(), &TEST_ENV, Some("slow"), &dir, me(), ms(200), ms(500));
         assert!(done.log.contains("timed out") && done.folder_ok && !done.built, "{}", done.log);
+    }
+
+    #[test]
+    fn a_repair_clears_the_damage_only_when_the_adapter_repaired_the_folder() {
+        let dir = folder("repair");
+        let ms = Duration::from_millis;
+        let done = repair_with(&launch(), &TEST_ENV, Some("ok"), &dir, me(), ms(5000), ms(20000));
+        assert!(done.folder_ok && done.log.contains("repaired with ok"), "{}", done.log);
+        assert!(dir.join("repaired.txt").exists());
+        let done = repair_with(&launch(), &TEST_ENV, Some("hard-stuck"), &dir, me(), ms(5000), ms(20000));
+        assert!(!done.folder_ok && done.log.contains("stays marked damaged"), "{}", done.log);
     }
 
     #[test]
