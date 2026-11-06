@@ -117,6 +117,14 @@ Its caches under `meta/overlap-compares` and `meta/overlap-live` hold saved comp
 compare of a line is reused while the working folder scan is the same. `layr gc` removes stale entries.
 
 
+### A titled queue entry
+
+`layr queue add <line> -m "<type>(<scope>): <subject>"` gives the entry a Conventional Commit title
+(the types of the PR title rule: feat, fix, perf, revert, docs, test, refactor, build, ci, chore,
+style). Another title is refused at `queue add`. The queue merges a titled entry as one state on the
+target (a squash), with the title as its message and `Layr-Change: <change id>` as a trailer, so
+`layr release prepare` sees one titled state per entry. An entry without `-m` merges as before.
+
 ### Queue probe limits
 
 ```sh

@@ -153,6 +153,9 @@ pub struct QueueEntry {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<serde_json::Value>,
+    /// The conventional title of the entry: the queue merges it as one state with this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

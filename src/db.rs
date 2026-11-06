@@ -2070,6 +2070,7 @@ mod tests {
             result: None,
             reason: None,
             probes: None,
+            title: None,
         };
         let event = |seq, status: Option<&str>| {
             let mut rec = state_record(seq, id, vec![]);
