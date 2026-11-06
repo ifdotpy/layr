@@ -77,7 +77,7 @@ struct SavedLive {
 
 fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
     std::fs::create_dir_all(file.parent().ok_or_else(|| anyhow!("live compare folder"))?)?;
-    crate::fsutil::atomic_write(file, &serde_json::to_vec(saved)?, 0o600)
+    crate::fsutil::cache_write(file, &serde_json::to_vec(saved)?, 0o600)
 }
 
 /// A digest of every entry of a scan: the path, the metadata, the data identity and the birth.
@@ -285,7 +285,7 @@ impl StateCompare {
             theirs: self.theirs_id.clone(),
             found: found.to_vec(),
         };
-        crate::fsutil::atomic_write(&self.file, &serde_json::to_vec(&saved)?, 0o600)
+        crate::fsutil::cache_write(&self.file, &serde_json::to_vec(&saved)?, 0o600)
     }
 }
 
