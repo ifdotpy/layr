@@ -143,6 +143,10 @@ machines. Source states keep frames.
   deleted. A pack without live chunks is deleted directly. No dead chunk stays in a pack. The new
   pack is put before the deletes, so a crash leaves a duplicate, and a rerun deletes the same objects.
 - A reader that does not find a chunk lists the packs once more: a rewrite may have moved it.
+- A restore checks that every chunk of the files it writes is in a published index before it reads
+  any file. A cache state that fails is omitted, and the layer store remembers it with a fingerprint
+  of the pack names (`cache-restore-failed`). A later fetch tries it again only when a push or a
+  deletion changed the packs.
 - The remote cache sweep (`store_remote::sweep`) deletes the chunks that its dead trees name and no
   kept tree names, through `chunked::release`, after the trees. A pack that no tree names (a push
   that stopped before its tree) goes when its index is older than a day and holds no live chunk.
