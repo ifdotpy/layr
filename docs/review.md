@@ -52,8 +52,8 @@ The optional payload reference field is reserved for an object in an allowed lay
 `attest revoke` revokes the caller's earlier attestations of the subject on this machine.
 The original evidence remains in the log. A revoke cannot withdraw another caller's evidence.
 `try` records a check attestation and its command result. Protected-line rules continue to use approvals and checks.
-The old `approvals` and `checks` commands fail and name `layr attestations` as their replacement.
-Existing signed approval and check records populate the new attestation table without changes to their signatures.
+Layr before the attestation table wrote `approve`, `approve.withdraw` and `check` records. They stay in
+the log with their signatures, but they are no evidence: they give no attestation.
 Attestations do not keep a subject alive. Their records remain available while the subject lives.
 
 State kinds `cache` and `derived` have optional `derived_from` and `context` fields.
