@@ -20,7 +20,7 @@ source = (Path(__file__).resolve().parent.parent / "src/db.rs").read_text()
 schema = source.split('pub(crate) const SCHEMA: &str = r#"', 1)[1].split('"#;', 1)[0]
 version = int(re.search(r"pub const SCHEMA_VERSION: i64 = (\d+);", source)[1])
 method = source.split("pub fn log_records(", 1)[1].split("    /// The newest records whose", 1)[0]
-query = re.search(r'"SELECT records.raw.*?selected.seq DESC"', method, re.S)[0][1:-1]
+query = re.search(r'"SELECT records.raw.*?selected.record_order DESC"', method, re.S)[0][1:-1]
 project_id, line_id = str(uuid.uuid4()), str(uuid.uuid4())
 records = []
 for i in range(args.records + 1):
@@ -109,16 +109,16 @@ if args.baseline:
         conn.create_function("candidate", 1, candidate)
         conn.create_function("selected", 1, selected)
         instrumented = query.replace("SELECT records.raw", "SELECT selected(records.raw)").replace(
-            "SELECT time, seq, record_id FROM record_lines", "SELECT time, seq, candidate(record_id) AS record_id FROM record_lines")
+            "SELECT time, seq, record_order, record_id FROM record_lines", "SELECT time, seq, record_order, candidate(record_id) AS record_id FROM record_lines")
         conn.execute(instrumented, (line_id, n)).fetchall()
         assert counts["decoded"] == n and counts["candidates"] <= n + 2, counts
-        old_count = before.execute("SELECT COUNT(*) FROM (SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT 100000)").fetchone()[0]
+        old_count = before.execute("SELECT COUNT(*) FROM (SELECT raw FROM records ORDER BY time DESC, seq DESC, rowid DESC LIMIT 100000)").fetchone()[0]
         print(f"-n {n}: before returned/decoded={old_count}; after index candidates={counts['candidates']} returned/decoded={counts['decoded']}")
     print("EXPLAIN QUERY PLAN line:")
     for row in conn.execute("EXPLAIN QUERY PLAN " + query, (line_id, 1)):
         print(row[3])
     print("EXPLAIN QUERY PLAN all:")
-    for row in conn.execute("EXPLAIN QUERY PLAN SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT 1"):
+    for row in conn.execute("EXPLAIN QUERY PLAN SELECT raw FROM records ORDER BY time DESC, seq DESC, rowid DESC LIMIT 1"):
         print(row[3])
     before.close()
 else:
@@ -132,5 +132,16 @@ else:
                             cwd=work, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode != 0, "the fixture must fail if the older record is decoded"
     print("PASS -n 1 and -n 30 do not decode the complete history", flush=True)
+    # Use an ID order that differs from insertion order, with a global record in the tie.
+    for name, operation in (("z-first", "save"), ("a-second", "sync")):
+        record = dict(records[-1], id=name, machine=name, time=args.records + 100, seq=1,
+                      op=operation, data={"line": line_id})
+        conn.execute("INSERT INTO records(id,machine,seq,time,op,raw) VALUES(?,?,?,?,?,?)",
+                     (name, name, 1, record["time"], operation, json.dumps(dict(r=record, s=""))))
+    conn.commit()
+    for all_records in (False, True):
+        output, _ = run(args.binary, env, work, 2, all_records)
+        assert [r["id"] for r in output] == ["a-second", "z-first"]
+    print("PASS fully tied records retain 0.36's newest-insertion-first order", flush=True)
 conn.close()
 print("t165-op-log-limit.sh: 2 passed, 0 failed")

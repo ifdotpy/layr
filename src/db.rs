@@ -32,12 +32,12 @@ CREATE INDEX IF NOT EXISTS records_time_seq ON records(time, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
 CREATE INDEX IF NOT EXISTS records_git_import ON records(json_extract(raw, '$.r.data.state')) WHERE op='import';
 CREATE INDEX IF NOT EXISTS records_git_export ON records(json_extract(raw, '$.r.data.state')) WHERE op='export';
--- kind 0: global push/sync; kind 1: exact line association. Records use stable IDs across VACUUM.
-CREATE TABLE IF NOT EXISTS record_lines (kind INTEGER NOT NULL, line_id TEXT NOT NULL, time INTEGER NOT NULL, seq INTEGER NOT NULL, record_id TEXT NOT NULL, PRIMARY KEY(kind, line_id, time, seq, record_id)) WITHOUT ROWID;
+-- kind 0: global push/sync; kind 1: exact line association. IDs link records; record_order preserves insertion ties.
+CREATE TABLE IF NOT EXISTS record_lines (kind INTEGER NOT NULL, line_id TEXT NOT NULL, time INTEGER NOT NULL, seq INTEGER NOT NULL, record_order INTEGER NOT NULL, record_id TEXT NOT NULL, PRIMARY KEY(kind, line_id, time, seq, record_order)) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS records_index_lines AFTER INSERT ON records BEGIN
-  INSERT OR IGNORE INTO record_lines SELECT 0, '', NEW.time, NEW.seq, NEW.id WHERE NEW.op IN ('push','sync');
-  INSERT OR IGNORE INTO record_lines SELECT 1, key, NEW.time, NEW.seq, NEW.id FROM json_each(NEW.raw, '$.r.lines') WHERE NEW.op NOT IN ('push','sync');
-  INSERT OR IGNORE INTO record_lines SELECT 1, value, NEW.time, NEW.seq, NEW.id FROM (SELECT value, type FROM json_each(NEW.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1) WHERE NEW.op NOT IN ('push','sync') AND type='text';
+  INSERT OR IGNORE INTO record_lines SELECT 0, '', NEW.time, NEW.seq, NEW.rowid, NEW.id WHERE NEW.op IN ('push','sync');
+  INSERT OR IGNORE INTO record_lines SELECT 1, key, NEW.time, NEW.seq, NEW.rowid, NEW.id FROM json_each(NEW.raw, '$.r.lines') WHERE NEW.op NOT IN ('push','sync');
+  INSERT OR IGNORE INTO record_lines SELECT 1, value, NEW.time, NEW.seq, NEW.rowid, NEW.id FROM (SELECT value, type FROM json_each(NEW.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1) WHERE NEW.op NOT IN ('push','sync') AND type='text';
 END;
 CREATE TABLE IF NOT EXISTS states (id TEXT PRIMARY KEY, display TEXT UNIQUE, kind TEXT, line TEXT, time INTEGER, rec TEXT, present INTEGER DEFAULT 1, deleted INTEGER DEFAULT 0, dropped INTEGER DEFAULT 0, machine TEXT);
 CREATE INDEX IF NOT EXISTS states_line ON states(line, kind, time);
@@ -217,9 +217,9 @@ impl Db {
             }
             self.conn.execute_batch(SCHEMA)?;
             self.conn.execute_batch(r#"
-                INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, id FROM records WHERE op IN ('push','sync');
-                INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
-                INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
+                INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, rowid, id FROM records WHERE op IN ('push','sync');
+                INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.rowid, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
+                INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, rowid, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
             "#)?;
             // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
             crate::owners::fill_only(|| replay(self))?;
@@ -1302,17 +1302,17 @@ impl Db {
         let rows = if let Some(line) = line {
             let mut st = self.conn.prepare_cached(
                 "SELECT records.raw FROM (
-                 SELECT time, seq, record_id FROM record_lines WHERE kind=1 AND line_id=?1
+                 SELECT time, seq, record_order, record_id FROM record_lines WHERE kind=1 AND line_id=?1
                  UNION ALL
-                 SELECT time, seq, record_id FROM record_lines WHERE kind=0 AND line_id=''
-                 ORDER BY time DESC, seq DESC LIMIT ?2
+                 SELECT time, seq, record_order, record_id FROM record_lines WHERE kind=0 AND line_id=''
+                 ORDER BY time DESC, seq DESC, record_order DESC LIMIT ?2
                  ) AS selected JOIN records ON records.id=selected.record_id
-                 ORDER BY selected.time DESC, selected.seq DESC",
+                 ORDER BY selected.time DESC, selected.seq DESC, selected.record_order DESC",
             )?;
             let rows = st.query_map(params![line, limit], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             rows
         } else {
-            let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT ?1")?;
+            let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC, rowid DESC LIMIT ?1")?;
             let rows = st.query_map(params![limit], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             rows
         };
@@ -1416,6 +1416,37 @@ mod tests {
     use crate::model::Subject;
     use crate::model::{Author, StateKind, StateRec};
     use layr_hashers::{ContentAddress, Digest};
+
+    #[test]
+    fn log_records_keep_the_observed_insertion_order_for_fully_tied_records() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        for (id, op) in [("z-first", "save"), ("a-second", "sync"), ("m-third", "save")] {
+            let mut rec = Record::new(op);
+            rec.id = id.into();
+            rec.machine = id.into();
+            rec.time = 1;
+            rec.seq = 1;
+            rec.data = serde_json::json!({"line": "wanted"});
+            db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
+        }
+        // Installed 0.36's actual records(100000) caller returns newest insertion first.
+        let expected = ["m-third", "a-second", "z-first"];
+        for line in [None, Some("wanted"), Some("missing")] {
+            for limit in [1, 2, 10] {
+                let ids: Vec<_> = db.log_records(line, limit)?.into_iter().map(|r| r.id).collect();
+                let visible: Vec<_> = expected
+                    .iter()
+                    .filter(|id| line != Some("missing") || **id == "a-second")
+                    .take(limit)
+                    .map(|id| id.to_string())
+                    .collect();
+                assert_eq!(ids, visible, "line={line:?}, limit={limit}");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn log_records_match_full_history_output() -> Result<()> {

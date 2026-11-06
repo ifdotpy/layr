@@ -230,10 +230,38 @@ each difference. `gc --repair` makes the table match the disk.
 
 ### Schema upgrades
 
+<<<<<<< head
 A layr upgrade that changes the schema rebuilds the derived tables from the records, in one
 transaction. The records stay as they are, so the rebuild loses nothing. Layr keeps no copy of
 the database. An older layr cannot open a database after the upgrade. The rebuild also removes
 the copies `layr.sqlite.schema-<old>.bak` that older layr versions made.
+=======
+For a schema upgrade, stop the service/daemon first, upgrade every CLI and the daemon binary,
+then restart the service. The first project open rebuilds its database before running the command.
+Do not run an older binary against the migrated project; restore the backup before downgrading.
+The CLI and daemon must support the same database schema even when their local store format is
+unchanged. Their handshake checks this before sending a command.
+
+A layr upgrade that changes the schema rebuilds the derived tables from the records. Before the
+rebuild changes anything, it keeps a copy of the project database: `VACUUM INTO` a temporary name
+in the database folder (`meta/db/`), renamed to `layr.sqlite.schema-<old>.bak`. The `<old>` is the
+schema version before the upgrade. Only the newest backup is kept. The rebuild prints one line:
+`database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
+database (a 400 MB database needs 400 MB more until the backup goes).
+
+A backup older than 14 days goes at the end of the next command on the project.
+
+To roll back to the old layr:
+
+1. Stop the service and the daemon (`launchctl unload` or `systemctl stop` for the layr unit).
+2. Install the old layr binary (the one that wrote the backup's schema version).
+3. In the database folder, remove `layr.sqlite-wal` and `layr.sqlite-shm` if they exist. Then move the
+   new database aside and rename the backup into place:
+   `mv layr.sqlite layr.sqlite.upgraded` and `mv layr.sqlite.schema-<old>.bak layr.sqlite`.
+4. Start the service. Check `layr status` and `layr line list`.
+
+The backup has the records up to the upgrade. Changes made after the upgrade are lost on rollback.
+>>>>>>> 7f13b6a
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 
