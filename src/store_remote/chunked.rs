@@ -131,7 +131,7 @@ fn indexes_once(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result
     let mut out = BTreeMap::new();
     for batch in packs.chunks(INDEX_FETCHES) {
         let loaded: Vec<Result<Index>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch.iter().map(|pack| scope.spawn(move || { let _worker = crate::fsutil::PoolWorker::enter(); index(backend, dir, identity, pack) })).collect();
+            let handles: Vec<_> = batch.iter().map(|pack| scope.spawn(move || index(backend, dir, identity, pack))).collect();
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("index read panicked")))).collect()
         });
         for (pack, index) in batch.iter().zip(loaded) {
@@ -190,7 +190,6 @@ impl Uploader {
                 let (queue, done, backend, recipient, dir) =
                     (queue.clone(), done.clone(), backend.clone(), recipient.to_string(), dir.to_path_buf());
                 std::thread::spawn(move || {
-                    let _worker = crate::fsutil::PoolWorker::enter();
                     loop {
                         let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
                             return;
@@ -490,7 +489,6 @@ impl Prefetch {
                 let (shared, backend, identity, indexes) =
                     (shared.clone(), backend.clone(), identity.to_string(), indexes.clone());
                 std::thread::spawn(move || {
-                    let _worker = crate::fsutil::PoolWorker::enter();
                     loop {
                         let at = shared.next.fetch_add(1, Ordering::SeqCst);
                         if at >= shared.order.len() {
