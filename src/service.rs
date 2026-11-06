@@ -171,8 +171,18 @@ pub enum Hello {
     Absent,
     /// A daemon accepted but gave no version reply (busy or closing).
     Busy,
-    /// A daemon. `root` is its store root; None from a build that does not report it.
-    Running { root: Option<PathBuf> },
+    /// A daemon. `root` is its store root; None from a build that does not report it. `version`
+    /// is its binary version; None when the reply does not parse.
+    Running { root: Option<PathBuf>, version: Option<crate::store_version::Version> },
+}
+
+/// The socket of the daemon of this user: the user socket on macOS (LaunchAgent), the service
+/// socket elsewhere. The same rules as `daemon`.
+pub fn user_daemon_socket() -> PathBuf {
+    if cfg!(target_os = "macos") && std::env::var_os("LAYR_SOCKET").is_none() {
+        return PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock");
+    }
+    socket_path()
 }
 
 /// Ask the daemon on `path` for its store root (the reply of `handle`, read as `negotiate` does).
@@ -197,8 +207,10 @@ pub fn hello(path: &Path) -> Hello {
     if size > 4096 || (&sock).read_exact(&mut bytes).is_err() {
         return Hello::Busy;
     }
-    let root = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v["root"].as_str().map(PathBuf::from));
-    Hello::Running { root }
+    let reply = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+    let root = reply["root"].as_str().map(PathBuf::from);
+    let version = serde_json::from_value(reply).ok();
+    Hello::Running { root, version }
 }
 
 /// Why a client could not connect, and what to do. The service opens its socket to every local
