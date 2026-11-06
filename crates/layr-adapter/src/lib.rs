@@ -52,6 +52,12 @@ pub trait CacheAdapter: Send + Sync {
         let _ = (host, folder);
         Ok(())
     }
+    /// The build unit that the file at `path` (a path inside a cache tree) belongs to, or None. A union of two
+    /// caches takes each unit whole from one side: files of one unit from two builds do not fit together.
+    fn unit_of(&self, path: &str) -> Option<String> {
+        let _ = path;
+        None
+    }
     /// Puts `folder` back in the state before an interrupted `prune` (its processes were stopped at the hard
     /// limit). Ok(true): it restored a copy. Ok(false): there is nothing to restore. Err: the folder may be
     /// changed and is not restored. Runs no process, so it needs no host.

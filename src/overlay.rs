@@ -1468,7 +1468,7 @@ pub fn next_state(
 pub fn union_state(orepo: &Repo, ctx: &Ctx, ol: &Line, ours: &str, theirs: &str, message: &str) -> Result<StateRec> {
     let theirs_root = orepo.state_root(theirs)?;
     let ours_files: BTreeSet<String> = files_of(&orepo.state_root(ours)?)?.into_iter().collect();
-    let ops = union_ops(&ours_files, files_of(&theirs_root)?);
+    let ops = union_ops_by_unit(&ours_files, files_of(&theirs_root)?, &crate::cache_hook::unit_of);
     next_state(
         orepo,
         ctx,
@@ -1480,6 +1480,23 @@ pub fn union_state(orepo: &Repo, ctx: &Ctx, ol: &Line, ours: &str, theirs: &str,
         message,
         Some(&ol.id),
     )
+}
+
+/// `union_ops`, and each build unit whole from one side: a file of `ours` goes when `theirs` brings files of its
+/// unit (`unit`). Files of one unit from two builds (an rmeta of one, a fingerprint of the other) make a stale unit
+/// look fresh, or name a file that is not there.
+pub(crate) fn union_ops_by_unit(ours: &BTreeSet<String>, theirs: Vec<String>, unit: &dyn Fn(&str) -> Option<String>) -> Ops {
+    let incoming: BTreeSet<String> = theirs.iter().cloned().collect();
+    let units: BTreeSet<String> = theirs.iter().filter_map(|p| unit(p)).collect();
+    let mut ops = union_ops(ours, theirs);
+    if !units.is_empty() {
+        for q in ours.iter().filter(|q| !incoming.contains(*q)) {
+            if unit(q).is_some_and(|u| units.contains(&u)) {
+                ops.dels.insert(q.clone());
+            }
+        }
+    }
+    ops
 }
 
 /// The changes that put every file of `theirs` over a tree with the files `ours`.
@@ -1727,6 +1744,19 @@ mod tests {
         assert_eq!(Mode::parse("follow"), Some(Mode::Follow));
         assert_eq!(Mode::parse("shared").map(|m| m.name()), Some("shared"));
         assert_eq!(Mode::parse("ephemeral"), None);
+    }
+
+    #[test]
+    fn union_takes_each_unit_whole_from_theirs() {
+        let ours: BTreeSet<String> =
+            ["t/d/deps/libx-1.rlib", "t/d/deps/libx-1.rmeta", "t/d/deps/liby-2.rlib", "t/a.txt"].iter().map(|s| s.to_string()).collect();
+        let theirs = vec!["t/d/deps/libx-1.rmeta".to_string(), "t/b.txt".to_string()];
+        let unit = |p: &str| p.split("deps/lib").nth(1).and_then(|r| r.split('.').next()).map(str::to_string);
+        let ops = union_ops_by_unit(&ours, theirs, &unit);
+        assert!(ops.dels.contains("t/d/deps/libx-1.rlib"), "the old rlib of a unit that theirs rebuilt goes");
+        assert!(!ops.dels.contains("t/d/deps/liby-2.rlib"), "a unit theirs did not touch stays");
+        assert!(!ops.dels.contains("t/a.txt"));
+        assert!(ops.puts.contains("t/d/deps/libx-1.rmeta") && ops.puts.contains("t/b.txt"));
     }
 
     #[test]

@@ -51,6 +51,11 @@ const REPORT_MARK: &str = "LAYR-CACHE-HOOK ";
 
 static ADAPTERS: OnceLock<Vec<Box<dyn CacheAdapter>>> = OnceLock::new();
 
+/// The build unit of a file in a cache tree, by the first registered adapter that knows it (`CacheAdapter::unit_of`).
+pub fn unit_of(path: &str) -> Option<String> {
+    registered().iter().find_map(|a| a.unit_of(path))
+}
+
 /// Registers the adapters of the binary. `main` calls it once, before any command runs.
 pub fn register(adapters: Vec<Box<dyn CacheAdapter>>) {
     let _ = ADAPTERS.set(adapters);
