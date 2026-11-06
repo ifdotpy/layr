@@ -428,7 +428,10 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
         }
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
-    crate::free::finish(&ctx);
+    {
+        let _t = crate::trace::span("free finish");
+        crate::free::finish(&ctx);
+    }
     let agent = ctx.session().is_some();
     crate::usage::count(&ctx.store.root, &argv, ctx.caller.uid, agent, code, started.elapsed().as_millis() as u64);
     code

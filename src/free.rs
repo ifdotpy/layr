@@ -98,6 +98,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
             eprintln!("test: exit after the commit, before the free step of {name}");
             std::process::exit(86);
         }
+        let _t = crate::trace::span("finish project");
         if let Err(e) = finish_project(&p) {
             eprintln!("layr: states of {name} stay queued until the next command: {e:#}");
         }
@@ -368,8 +369,10 @@ fn hold_before_free() {
 
 /// Release the pins of processes that are gone (a crash inside a pinned read).
 fn release_dead_pins(p: &Project) -> Result<()> {
-    for holder in p.db.pin_holders()? {
-        if !holder_alive(&holder) {
+    let holders = p.db.pin_holders()?;
+    let processes = HolderProcesses::new(&holders);
+    for holder in holders {
+        if !processes.alive(&holder) {
             p.db.release_holder(&holder)?;
         }
     }
@@ -388,30 +391,59 @@ pub fn self_holder() -> String {
 }
 
 /// True when the process of a holder runs. An unknown start time counts as the same process,
-/// so a failed `ps` never releases a live pin.
+/// so a failed process lookup never releases a live pin.
 pub fn holder_alive(holder: &str) -> bool {
-    let Some((pid, start)) = holder.split_once(':') else { return false };
-    let Ok(raw) = pid.parse::<u32>() else { return false };
-    let Some(pid) = rustix::process::Pid::from_raw(raw as i32) else { return false };
-    // Only "no such process" counts as gone: another user's process exists too.
-    if matches!(rustix::process::test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH) {
-        return false;
+    HolderProcesses::new(&[holder.to_string()]).alive(holder)
+}
+
+struct HolderProcesses(sysinfo::System);
+
+impl HolderProcesses {
+    fn new(holders: &[String]) -> Self {
+        let pids: Vec<_> = holders.iter().filter_map(|h| h.split_once(':')?.0.parse::<u32>().ok()).map(sysinfo::Pid::from_u32).collect();
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing().without_tasks());
+        Self(system)
     }
-    match process_start(raw) {
-        Some(now) if !start.is_empty() => now == start,
+
+    fn start(&self, pid: u32) -> Option<u64> {
+        self.0.process(sysinfo::Pid::from_u32(pid)).map(|p| p.start_time())
+    }
+
+    fn alive(&self, holder: &str) -> bool {
+        let Some((pid, start)) = holder.split_once(':') else { return false };
+        let Ok(raw) = pid.parse::<u32>() else { return false };
+        let Some(pid) = rustix::process::Pid::from_raw(raw as i32) else { return false };
+        // Only "no such process" counts as gone: another user's process exists too.
+        if matches!(rustix::process::test_kill_process(pid), Err(e) if e == rustix::io::Errno::SRCH) {
+            return false;
+        }
+        same_start(start, self.start(raw), || process_start(raw))
+    }
+}
+
+// A sysinfo match is sufficient to retain a pin. A mismatch may reflect platform or timezone
+// differences, so only the original ps lookup can decide that the process was replaced.
+fn same_start(stored: &str, observed: Option<u64>, fallback: impl FnOnce() -> Option<String>) -> bool {
+    if observed.filter(|&time| time != 0).and_then(format_start).is_some_and(|start| start == stored) {
+        return true;
+    }
+    match fallback() {
+        Some(now) if !stored.is_empty() => now == stored,
         _ => true,
     }
 }
 
-/// The start time of a process as `ps` prints it (the same text for the same process).
 fn process_start(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .env("LC_ALL", "C")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
+    let out = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+// Keep the existing `ps -o lstart` representation: older processes may still hold pins.
+fn format_start(start: u64) -> Option<String> {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_opt(start as i64, 0).single().map(|t| t.format("%a %b %e %T %Y").to_string())
 }
 
 /// Pins of states that a command reads outside the store lock, or under it while another process
@@ -478,5 +510,34 @@ impl Drop for Pin {
         if let Err(e) = released {
             eprintln!("layr: cannot release the pins of this command: {e:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    #[test]
+    fn system_lookup_only_retains_and_mismatch_uses_fallback() {
+        let timestamp = 1_700_000_000;
+        let matching = super::format_start(timestamp).unwrap();
+        assert!(super::same_start(&matching, Some(timestamp), || panic!("matching lookup must not run ps")));
+        for observed in [None, Some(0), Some(timestamp)] {
+            let mut called = false;
+            assert!(super::same_start("legacy", observed, || { called = true; Some("legacy".into()) }));
+            assert!(called);
+            assert!(!super::same_start("legacy", observed, || Some("reused".into())));
+            assert!(super::same_start("legacy", observed, || None));
+        }
+    }
+
+    #[test]
+    fn detects_live_reused_and_dead_holders() {
+        let holder = super::self_holder();
+        assert!(super::holder_alive(&holder));
+        let pid = std::process::id();
+        assert!(!super::holder_alive(&format!("{pid}:1")));
+        assert!(!super::holder_alive("2147483647:1"));
+        let output = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+        let legacy = String::from_utf8(output.stdout).unwrap();
+        assert!(super::holder_alive(&format!("{pid}:{}", legacy.trim())));
     }
 }
