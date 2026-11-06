@@ -12,6 +12,7 @@ pub fn is_forking_parent() -> bool { FORKING_PARENT.load(Ordering::Relaxed) }
 #[derive(Clone, Copy)]
 pub enum Width {
     Items(NonZeroUsize),
+    #[cfg_attr(all(target_os = "linux", feature = "overlayfs"), allow(dead_code))]
     Unbounded,
 }
 
