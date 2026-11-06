@@ -11,12 +11,13 @@
 #
 # The layr commands run as the test's user (root on the Linux CI job, as in t117). The cargo commands run as the
 # owner of the lines, so the sweep and the cache hook see the owner's units. On a root run the owner's cargo is the
-# toolchain of the runner, found through the runner's rustup home (root has no toolchain of its own).
+# toolchain of the runner, found through the runner's rustup home.
 . "$(dirname "$0")/lib.sh"
 fail() { FAIL=$((FAIL + 1)); echo "FAIL $*"; }
 # layr follow probes the user socket (macOS: under HOME) or LAYR_SOCKET: keep both in the test folder. Cargo and
 # rustup keep their homes from the runner.
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup} CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
+owner_toolchain_env
 mkdir -p $T/home
 if [ "$(uname -s)" = Darwin ]; then export HOME=$T/home; else export LAYR_SOCKET=$T/service.sock; fi
 
@@ -26,10 +27,6 @@ if [ "$(id -u)" = 0 ]; then
     id $OWN >/dev/null 2>&1 || useradd -m $OWN
     chmod 755 $T $LAYR_ROOT
     cp "$LAYR" "$T/layr" && chmod 755 "$T/layr" && LAYR=$T/layr
-    if [ -n "${SUDO_USER:-}" ]; then
-        SUDO_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-        export RUSTUP_HOME=${SUDO_RUSTUP_HOME:-$SUDO_HOME/.rustup} CARGO_HOME=${SUDO_CARGO_HOME:-$SUDO_HOME/.cargo}
-    fi
     REAL_CARGO=$(rustup which cargo 2>/dev/null || command -v cargo || true)
     [ -n "$REAL_CARGO" ] || { echo "FATAL: no cargo for the test (run with the PATH of the runner)" >&2; exit 1; }
     TOOLS=$(dirname "$REAL_CARGO")
