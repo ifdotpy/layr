@@ -117,7 +117,8 @@ has() { # has <description> <needle> <haystack>
 # crash, a leak) sets LAYR_TEST_GARBAGE_OK=1.
 garbage_check() {
     [ -n "${LAYR_TEST_GARBAGE_OK:-}" ] && return 0
-    [ -d "$LAYR_ROOT/projects" ] || return 0
+    # A test that unsets LAYR_ROOT (set -u) has no store to check.
+    [ -n "${LAYR_ROOT:-}" ] && [ -d "$LAYR_ROOT/projects" ] || return 0
     local d name out
     for d in "$LAYR_ROOT"/projects/*/; do
         name=$(basename "$d")
