@@ -37,7 +37,7 @@ with open(sys.argv[1]) as f:
 assert [r['name'] for r in rows] == ['cache.target', 'offline', 'private', 'public'], rows
 by_name = {r['name']: r for r in rows}
 for row in rows:
-    assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'properties', 'folder', 'state', 'size', 'saved'}, row
+    assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'properties', 'folder', 'state', 'saved'}, row
     assert isinstance(row['owner'], int) and isinstance(row['readers'], list), row
     assert row['mode'] == 'follow', row
 assert by_name['offline']['readers'] == [] and by_name['offline']['saved'] is None, by_name['offline']
@@ -48,7 +48,7 @@ assert by_name['public']['properties'] == {'history': 1, 'quiet': True, 'merge':
 cache = by_name['cache.target']
 assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
 assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto'}, cache
-assert cache['size'] is None and isinstance(cache['saved'], str), cache
+assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
 l overlay list --json --size > "$T/sized.json" || exit 1
 ok "explicit size measures the cache" python3 - "$T/sized.json" <<'PY_SIZE'
@@ -57,7 +57,7 @@ with open(sys.argv[1]) as f:
     rows = json.load(f)
 cache = next(r for r in rows if r['name'] == 'cache.target')
 assert isinstance(cache['size'], int) and cache['size'] >= len('cache'), cache
-assert all(r['size'] is None for r in rows if r['folder'] is None), rows
+assert all('size' not in r for r in rows if r['folder'] is None), rows
 PY_SIZE
 out=$(l overlay list)
 has "text listing shows public properties" 'history=last quiet' "$out"

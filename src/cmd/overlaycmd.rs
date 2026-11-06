@@ -385,6 +385,23 @@ struct InLine {
     saved: Option<String>,
 }
 
+/// Machine-readable listing; an unmeasured cache size is absent.
+#[derive(serde::Serialize)]
+struct ListingRow {
+    name: String,
+    mode: String,
+    hidden: bool,
+    owner: u32,
+    readers: Vec<String>,
+    shown: bool,
+    properties: serde_json::Value,
+    folder: Option<String>,
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    saved: Option<String>,
+}
+
 /// The state of a line's folder in `overlay list` and `overlay repair` (one rule for both).
 pub(crate) const NOT_CACHE_PATH: &str = "not a cache path in this line";
 
@@ -458,12 +475,19 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             _ => None,
         };
         if a.has("--json") {
-            rows.push(serde_json::json!({
-                "name":name,"mode":info.mode.name(),"hidden":info.hidden,"owner":info.owner,"readers":readers,
-                "shown":shown.contains(&name),"properties":props.to_json(),"folder":folder,
-                "state":line_state.as_ref().map(|s| &s.state),"size":line_state.as_ref().and_then(|s| s.size),
-                "saved":line_state.as_ref().and_then(|s| s.saved.clone()),
-            }));
+            rows.push(ListingRow {
+                name: name.clone(),
+                mode: info.mode.name().to_string(),
+                hidden: info.hidden,
+                owner: info.owner,
+                readers,
+                shown: shown.contains(&name),
+                properties: props.to_json(),
+                folder,
+                state: line_state.as_ref().map(|s| s.state.clone()),
+                size: line_state.as_ref().and_then(|s| s.size),
+                saved: line_state.and_then(|s| s.saved),
+            });
         } else {
             let owner = crate::ctx::Caller::from_uid(info.owner).user;
             let mut described = props.describe();
@@ -1226,6 +1250,29 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn listing_json_distinguishes_uncomputed_and_empty_sizes() -> Result<()> {
+        let mut row = ListingRow {
+            name: "cache.target".into(),
+            mode: "follow".into(),
+            hidden: false,
+            owner: 1000,
+            readers: Vec::new(),
+            shown: false,
+            properties: json!({}),
+            folder: Some("target".into()),
+            state: Some("cache".into()),
+            size: None,
+            saved: None,
+        };
+        assert!(serde_json::to_value(&row)?.get("size").is_none());
+        row.size = Some(0);
+        assert_eq!(serde_json::to_value(&row)?["size"], 0);
+        row.size = Some(123);
+        assert_eq!(serde_json::to_value(&row)?["size"], 123);
+        Ok(())
+    }
 
     #[test]
     fn listing_settings_reads_public_and_hidden_sources() -> Result<()> {

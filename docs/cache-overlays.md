@@ -425,7 +425,7 @@ A bare `layr cache`, or any other form, fails with `layr cache was removed. Use 
 The lines that carry caches are unchanged:
 `line new` takes them, and `merge` brings them back.
 
-- `overlay list` does not walk cache contents by default. Add `--size` to measure the apparent size of active cache folders (without following links or entering other layers). Text shows `-` when size is not computed; JSON `size` is `null` unless measured, and a measured empty cache is `0`. `--json --size` combines both options.
+- `overlay list` does not walk cache contents by default. Add `--size` to measure the apparent size of active cache folders (without following links or entering other layers). Text shows `-` when size is not computed; JSON omits `size` unless measured, and a measured empty cache is `0`. `--json --size` combines both options.
 - `overlay list` shows folder overlays only. A regenerable folder with no overlay has no row. It
   has no overlay until its first `save --caches`, and a folder with versioned files never gets one.
   `save --caches` prints why a folder is no cache.
