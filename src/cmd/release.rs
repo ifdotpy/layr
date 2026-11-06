@@ -8,10 +8,10 @@ use anyhow::{bail, Context, Result};
 
 pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
-        &Spec::new().flag("--json").flag("--public").value("--remote").value("--name").value("--expect").value("-o|--output"),
+        &Spec::new().flag("--json").flag("--public").flag("--public-files").value("--remote").value("--name").value("--expect").value("-o|--output"),
         args,
     )?;
-    let usage = "usage: layr release (attach release/<version> <path>... [--name <name>]|files release/<version>|get release/<version> [<name>] [-o <dir>]) [--remote <name>]";
+    let usage = "usage: layr release (attach release/<version> <path>... [--name <name>] [--public-files]|files release/<version>|get release/<version> [<name>] [-o <dir>]) [--remote <name>]";
     let command = a.pos.first().map(String::as_str).context(usage)?;
     let name = a.pos.get(1).context(usage)?;
     if !name.starts_with("release/") || !crate::model::is_ref(name) {
@@ -26,7 +26,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("attach needs private access and does not take -o");
             }
             let expected = a.get("--expect").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
-            store.attach_release(ctx, &mut h.repo, name, &a.pos[2..], a.get("--name"), expected.as_deref())?.files
+            store.attach_release(ctx, &mut h.repo, name, &a.pos[2..], a.get("--name"), expected.as_deref(), a.has("--public-files"))?.files
         }
         "files" | "get" if a.pos.len() <= if command == "files" { 2 } else { 3 } => {
             if a.has("--name") || a.has("--expect") {

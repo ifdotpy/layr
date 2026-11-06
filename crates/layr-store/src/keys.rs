@@ -43,10 +43,30 @@ pub fn recipient_of(identity: &str) -> Result<String> {
     Ok(parse(identity)?.to_public().to_string())
 }
 
+// https://c2sp.org/age: one X25519 stanza, header MAC, and 16-byte file nonce.
+const AGE_X25519_HEADER: usize = 184;
+// age-core 0.11 grease_the_joint: first line <= 66 bytes; body <= 99 bytes,
+// base64 encoded to <= 132 bytes plus three line endings.
+// https://docs.rs/age-core/0.11.0/src/age_core/format.rs.html
+const AGE_GREASE_STANZA_MAX: usize = 66 + 132 + 3;
+const AGE_CHUNK: usize = 64 * 1024;
+const AGE_TAG: usize = 16;
+
+/// Maximum ciphertext size for one X25519 recipient, including grease and the final tag.
+pub fn ciphertext_len(size: usize) -> usize {
+    AGE_X25519_HEADER + AGE_GREASE_STANZA_MAX + size + size.div_ceil(AGE_CHUNK).max(1) * AGE_TAG
+}
+
 /// Bytes encrypted to one recipient.
 pub fn encrypt(recipient: &str, data: &[u8]) -> Result<Vec<u8>> {
     let recipient = age::x25519::Recipient::from_str(recipient.trim()).map_err(|e| anyhow!("not an age recipient: {e}"))?;
-    Ok(age::encrypt(&recipient, data)?)
+    use std::io::Write;
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
+    let mut output = Vec::with_capacity(ciphertext_len(data.len()));
+    let mut writer = encryptor.wrap_output(&mut output)?;
+    writer.write_all(data)?;
+    writer.finish()?;
+    Ok(output)
 }
 
 /// Bytes encrypted to an identity, decrypted.

@@ -27,6 +27,14 @@ a file. Existing output files are preserved. A failed download removes its
 unfinished output. `--public` selects anonymous access for a public project.
 The site offers downloads up to 256 MiB; larger files show the CLI command.
 
+`--public-files` (files of at most 32 MiB) also writes each file as plaintext at `public/release/<version>/<name>` of the
+store, then `public/release/<version>/files.json` (`version`, `state`, and `name`, `size`, `sha256`
+per file), all create-only, the list last. The gateway serves them without sign-in:
+`/p/<project>/release/<version>/<name>`, and `/p/<project>/release/latest` from the highest version
+that has a `files.json`. A download checks the SHA-256 from `files.json`; the signed `release.files`
+record binds the same digests. A second attach of the same bytes succeeds; other bytes under a
+published name are refused.
+
 A moved ref has no files until files are attached to its new state. GC retains
 all published lists while their release ref exists. After deleting the ref and
 pushing, remote GC frees its files:

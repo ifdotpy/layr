@@ -81,7 +81,8 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
             if signed.record.project != project {
                 bail!("segment {} belongs to another project", key);
             }
-            crate::model::validate(&signed.record)?;
+            crate::model::validate(&signed.record)
+                .with_context(|| format!("record {} of machine {machine} ({})", signed.record.seq, signed.record.id))?;
             let by_seq = machines.entry(machine.clone()).or_default();
             if let Some(previous) = by_seq.get(&expected) {
                 if previous != line {
