@@ -32,6 +32,44 @@ pub(super) fn operation_name(op: &str) -> String {
     }
 }
 
+/// `save --caches --save-back <line>` (docs/ci-trust.md): the caches of the current line go to the save-back line of
+/// `<line>` (`<line>.checks-<os>-<arch>`), as a passing `checks run` gives them back, with the head of the current
+/// line as their source state. No source state is made, so a cache writer machine (a CI job) may run it.
+fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
+    if !a.has("--caches") {
+        return Err(exit(2, "--save-back saves caches: use it with --caches"));
+    }
+    if ["-m", "-F", "--amend", "--all-lines", "--cache", "--running", "--force"].iter().any(|f| a.has(f) || a.get(f).is_some()) {
+        return Err(exit(2, "--save-back takes only --caches, --json and -q"));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(exit(1, "--save-back needs Linux or macOS"));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let h = here(ctx)?;
+        let repo = &h.repo;
+        let line = h.line()?.clone();
+        repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
+        if repo.p.db.line_by_name(target)?.is_none() {
+            return Err(exit(1, format!("error: no line {target}")));
+        }
+        let (name, saved) = super::checks::save_back_caches(ctx, repo, target, &line.head, &repo.working(&line))?;
+        if a.has("--json") {
+            let caches: Vec<_> =
+                saved.iter().map(|(path, overlay, state)| serde_json::json!({"path":path,"overlay":overlay,"state":state})).collect();
+            outln!(ctx, "{}", serde_json::json!({"line": name, "source": line.head, "caches": caches}));
+        } else if !a.has("-q") {
+            if saved.is_empty() {
+                outln!(ctx, "no cache folder to save");
+            }
+            for (path, overlay, state) in &saved {
+                outln!(ctx, "{path}: overlay {overlay} {} on {name}", ids::short(state));
+            }
+        }
+        Ok(0)
+    }
+}
+
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
@@ -52,8 +90,13 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--cache")
         .removed("--layers", "--caches")
         .flag("--all-lines")
+        .value("--save-back")
+        .flag("--json")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if let Some(target) = a.get("--save-back") {
+        return save_back(ctx, &a, target);
+    }
     if a.has("-m") || a.has("-F") || a.has("--amend") {
         return super::work::commit(ctx, args);
     }
