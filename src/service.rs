@@ -458,6 +458,17 @@ fn periodic(root: &Path, hourly: bool) {
                 let _ = crate::fsutil::atomic_write(&checks_path, &data, 0o600);
             }
         }
+        // Person requests (approve, comment, queue add) of `requests.remote`: before the queue pass, so a queued
+        // entry merges on the same tick.
+        match crate::cmd::requests::daemon_remote(&repo) {
+            Ok(Some(remote)) => {
+                if let Err(error) = crate::cmd::requests::apply(&ctx, &repo, &remote, true) {
+                    eprintln!("layr requests ({name}): {error:#}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("layr requests ({name}): {error:#}"),
+        }
         if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
             eprintln!("layr queue ({name}): {error:#}");
         }
