@@ -5,7 +5,7 @@ set -e
 l remote self --json > "$T/self.json"
 ok "a host can show its identity outside a project" python3 - "$T/self.json" "$LAYR_ROOT/machine/id" <<'CHECK'
 import json,pathlib,sys,uuid
-d=json.load(open(sys.argv[1])); assert set(d)=={'id','public_key'}
+d=json.load(open(sys.argv[1])); assert set(d)=={'id','public_key','name'} and d['name']
 assert d['id']==pathlib.Path(sys.argv[2]).read_text().strip(); uuid.UUID(d['id'])
 assert len(bytes.fromhex(d['public_key']))==32
 CHECK

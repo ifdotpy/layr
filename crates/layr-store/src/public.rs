@@ -133,23 +133,28 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
     }
     let creator = creator.context("push the project before making its store public")?;
     // A limited machine (`crate::trust`) is no writer and vouches for nobody.
-    let limited = crate::trust::terms(
+    let limited = crate::trust::rules(
         &creator,
-        parsed.iter().filter(|(_, v)| matches!(v["op"].as_str(), Some("machine.trust" | "machine.untrust"))).map(|(_, v)| {
-            crate::trust::TrustRecord {
+        parsed
+            .iter()
+            .filter(|(_, v)| matches!(v["op"].as_str(), Some("machine.trust" | "machine.untrust" | "trust.delegate")))
+            .map(|(_, v)| crate::trust::TrustRecord {
                 signer: v["machine"].as_str().unwrap_or(""),
                 time: v["time"].as_i64().unwrap_or(0),
                 op: v["op"].as_str().unwrap_or(""),
                 data: &v["data"],
-            }
-        }),
+            }),
     );
     let mut trusted = BTreeSet::from([creator]);
     loop {
         let before = trusted.len();
         for (_, value) in &parsed {
             let signer = value["machine"].as_str().unwrap_or("");
-            if value["op"] != "machine.trust" || !trusted.contains(signer) || limited.contains_key(signer) {
+            if value["op"] != "machine.trust"
+                || !trusted.contains(signer)
+                || limited.contains_key(signer)
+                || !limited.trust_counts(signer, value["time"].as_i64().unwrap_or(0), &value["data"])
+            {
                 continue;
             }
             let target = value["data"]["machine"].as_str().unwrap_or("");

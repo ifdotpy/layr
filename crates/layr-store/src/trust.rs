@@ -105,7 +105,7 @@ pub fn is_save_back(name: &str) -> bool {
     name.rsplit_once(".checks-").is_some_and(|(line, platform)| !line.is_empty() && platform.split('-').count() >= 2)
 }
 
-/// One record of a trust history (`machine.trust` or `machine.untrust`).
+/// One record of a trust history (`machine.trust`, `machine.untrust` or `trust.delegate`).
 pub struct TrustRecord<'a> {
     pub signer: &'a str,
     pub time: i64,
@@ -113,24 +113,112 @@ pub struct TrustRecord<'a> {
     pub data: &'a Value,
 }
 
-/// The terms of every limited or untrusted machine. Full machines grow from the project creator: a trust without
-/// limits by a full machine makes a full machine, a trust with limits by a full machine limits its machine (and
-/// it is not full, even when another full machine trusts it without limits). Several limits on one machine take
-/// the narrowest: the first end, the smaller role, the common overlays. An untrust counts when its signer is full
-/// and was not untrusted before. Records of other signers change nothing.
-pub fn terms<'a>(creator: &str, records: impl IntoIterator<Item = TrustRecord<'a>>) -> BTreeMap<String, Terms> {
+/// A broker's permission to trust other machines within limits (a `trust.delegate` record of a full machine).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delegation {
+    pub time: i64,
+    pub max_hours: i64,
+    pub role: Role,
+    /// None: every overlay.
+    pub overlays: Option<BTreeSet<String>>,
+    pub name_prefix: Option<String>,
+    /// A revoke: no delegation from its time on.
+    pub revoked: bool,
+}
+
+impl Delegation {
+    fn of(time: i64, data: &Value) -> Delegation {
+        Delegation {
+            time,
+            max_hours: data["max_hours"].as_i64().unwrap_or(0),
+            role: data["role"].as_str().and_then(Role::parse).unwrap_or(Role::Reader),
+            overlays: data["overlays"]
+                .as_array()
+                .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+            name_prefix: data["name_prefix"].as_str().map(str::to_owned),
+            revoked: data["revoked"].as_bool() == Some(true),
+        }
+    }
+
+    /// A trust record's data made at `time` is inside this delegation: it ends at most `max_hours` later, with
+    /// the same or a smaller role, overlays among the delegation's, and a machine name with the prefix.
+    fn covers(&self, time: i64, data: &Value) -> bool {
+        let Some(terms) = Terms::of_trust(data) else { return false };
+        let ends = terms.expires_at.is_some_and(|end| end > time && end - time <= self.max_hours.saturating_mul(3_600_000));
+        let overlays = match (&self.overlays, &terms.overlays) {
+            (None, _) => true,
+            (Some(allowed), Some(asked)) => asked.is_subset(allowed),
+            (Some(_), None) => false,
+        };
+        let name =
+            self.name_prefix.as_ref().is_none_or(|prefix| data["name"].as_str().is_some_and(|n| n.starts_with(prefix.as_str())));
+        !self.revoked && ends && terms.role <= self.role && overlays && name
+    }
+}
+
+/// The trust rules of a project: the limited machines and the brokers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rules {
+    pub limited: BTreeMap<String, Terms>,
+    /// The delegations of each broker, oldest first.
+    pub brokers: BTreeMap<String, Vec<Delegation>>,
+}
+
+impl Rules {
+    pub fn get(&self, machine: &str) -> Option<&Terms> {
+        self.limited.get(machine)
+    }
+
+    pub fn contains_key(&self, machine: &str) -> bool {
+        self.limited.contains_key(machine)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.limited.is_empty() && self.brokers.is_empty()
+    }
+
+    /// A `machine.trust` record of `signer` at `time` counts: the signer is no broker, or the trust is inside the
+    /// broker's delegation of that time (the newest one made before it).
+    pub fn trust_counts(&self, signer: &str, time: i64, data: &Value) -> bool {
+        match self.brokers.get(signer) {
+            None => true,
+            Some(delegations) => delegations.iter().rev().find(|d| d.time <= time).is_some_and(|d| d.covers(time, data)),
+        }
+    }
+}
+
+/// The trust rules. Full machines grow from the project creator: a trust without limits by a full machine makes
+/// a full machine, a trust with limits by a full machine limits its machine (and it is not full, even when another
+/// full machine trusts it without limits). A machine that a full machine delegates to is a broker: its trusts count
+/// only inside its delegation, so it never makes a full machine. Several limits on one machine take the narrowest:
+/// the first end, the smaller role, the common overlays. An untrust counts when its signer is full and was not
+/// untrusted before. Records of other signers change nothing.
+pub fn rules<'a>(creator: &str, records: impl IntoIterator<Item = TrustRecord<'a>>) -> Rules {
     let mut records: Vec<TrustRecord<'a>> = records.into_iter().collect();
     records.sort_by(|a, b| (a.time, a.signer).cmp(&(b.time, b.signer)));
     let trusts: Vec<&TrustRecord<'a>> = records.iter().filter(|r| r.op == "machine.trust").collect();
+    let delegations: Vec<&TrustRecord<'a>> = records.iter().filter(|r| r.op == "trust.delegate").collect();
     let target = |r: &TrustRecord<'a>| r.data["machine"].as_str().filter(|m| *m != creator);
+    let brokers_of = |full: &BTreeSet<&str>| {
+        let mut brokers: BTreeMap<String, Vec<Delegation>> = BTreeMap::new();
+        for record in delegations.iter().filter(|r| full.contains(r.signer)) {
+            if let Some(broker) = target(record) {
+                brokers.entry(broker.to_string()).or_default().push(Delegation::of(record.time, record.data));
+            }
+        }
+        Rules { limited: BTreeMap::new(), brokers }
+    };
     // A machine that a full machine limits is never full. Each round finds more of them, so the rounds end.
     let mut never_full: BTreeSet<&str> = BTreeSet::new();
-    let full = loop {
+    let (full, mut rules) = loop {
         let mut full: BTreeSet<&str> = BTreeSet::from([creator]);
         loop {
+            let brokers = brokers_of(&full);
             let more: Vec<&str> = trusts
                 .iter()
-                .filter(|r| full.contains(r.signer) && Terms::of_trust(r.data).is_none())
+                .filter(|r| {
+                    full.contains(r.signer) && !brokers.brokers.contains_key(r.signer) && Terms::of_trust(r.data).is_none()
+                })
                 .filter_map(|r| target(r))
                 .filter(|m| !never_full.contains(m) && !full.contains(m))
                 .collect();
@@ -139,22 +227,26 @@ pub fn terms<'a>(creator: &str, records: impl IntoIterator<Item = TrustRecord<'a
             }
             full.extend(more);
         }
+        let rules = brokers_of(&full);
         let hits: Vec<&str> = trusts
             .iter()
-            .filter(|r| full.contains(r.signer) && Terms::of_trust(r.data).is_some())
+            .filter(|r| {
+                full.contains(r.signer) && rules.trust_counts(r.signer, r.time, r.data) && Terms::of_trust(r.data).is_some()
+            })
             .filter_map(|r| target(r))
             .filter(|m| full.contains(m))
             .collect();
         if hits.is_empty() {
-            break full;
+            break (full, rules);
         }
         never_full.extend(hits);
     };
     let mut limited: BTreeMap<String, Terms> = BTreeMap::new();
-    for record in trusts.iter().filter(|r| full.contains(r.signer)) {
+    for record in trusts.iter().filter(|r| full.contains(r.signer) && rules.trust_counts(r.signer, r.time, r.data)) {
         let (Some(machine), Some(terms)) = (target(record), Terms::of_trust(record.data)) else { continue };
         limited.entry(machine.to_string()).and_modify(|have| *have = have.narrowest(&terms)).or_insert(terms);
     }
+    rules.limited = limited;
     let mut untrusted: BTreeMap<String, i64> = BTreeMap::new();
     for record in records.iter().filter(|r| r.op == "machine.untrust" && full.contains(r.signer)) {
         let Some(machine) = target(record) else { continue };
@@ -164,12 +256,13 @@ pub fn terms<'a>(creator: &str, records: impl IntoIterator<Item = TrustRecord<'a
         untrusted.entry(machine.to_string()).or_insert(record.time);
     }
     for (machine, at) in untrusted {
-        limited
+        rules
+            .limited
             .entry(machine)
             .or_insert(Terms { expires_at: None, role: Role::Full, overlays: None, untrusted_at: None })
             .untrusted_at = Some(at);
     }
-    limited
+    rules
 }
 
 impl Terms {
@@ -199,7 +292,7 @@ mod tests {
     }
 
     fn solve(records: &[(&'static str, i64, &'static str, Value)]) -> BTreeMap<String, Terms> {
-        terms("root", records.iter().map(|(signer, time, op, data)| TrustRecord { signer, time: *time, op, data }))
+        rules("root", records.iter().map(|(signer, time, op, data)| TrustRecord { signer, time: *time, op, data })).limited
     }
 
     #[test]
@@ -252,6 +345,30 @@ mod tests {
         assert_eq!(terms["b"].untrusted_at, Some(40), "an untrust made before its signer's untrust stays");
         assert!(!terms.contains_key("root"), "the creator is never untrusted");
         assert!(terms["a"].live(49) && !terms["a"].live(50));
+    }
+
+    #[test]
+    fn a_broker_trusts_only_inside_its_delegation() {
+        const H: i64 = 3_600_000;
+        let delegate =
+            json!({"machine": "broker", "max_hours": 2, "role": "writer", "overlays": ["cache.target"], "name_prefix": "ci-"});
+        let job = |name: &str, end: i64, role: &str, overlays: Value| json!({"machine": name, "expires_at": end, "role": role, "overlays": overlays, "name": name});
+        let records = [
+            trust("root", 10, json!({"machine": "broker"})),
+            ("root", 20, "trust.delegate", delegate),
+            trust("broker", 15, job("ci-early", 15 + H, "writer", json!(["cache.target"]))),
+            trust("broker", 30, job("ci-ok", 30 + H, "writer", json!(["cache.target"]))),
+            trust("broker", 31, job("ci-long", 31 + 3 * H, "writer", json!(["cache.target"]))),
+            trust("broker", 32, job("ci-wide", 32 + H, "writer", json!(["cache.target", "cache.node"]))),
+            trust("broker", 33, job("other", 33 + H, "writer", json!(["cache.target"]))),
+            trust("broker", 34, json!({"machine": "ci-full", "name": "ci-full"})),
+            ("root", 40, "trust.delegate", json!({"machine": "broker", "revoked": true})),
+            trust("broker", 50, job("ci-late", 50 + H, "reader", json!(["cache.target"]))),
+        ];
+        let rules = rules("root", records.iter().map(|(signer, time, op, data)| TrustRecord { signer, time: *time, op, data }));
+        assert_eq!(rules.limited.keys().collect::<Vec<_>>(), ["ci-ok"], "{rules:?}");
+        assert!(!rules.trust_counts("broker", 34, &json!({"machine": "ci-full"})), "a broker makes no full machine");
+        assert!(rules.trust_counts("root", 34, &json!({"machine": "x"})));
     }
 
     #[test]

@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, o
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
-CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust');
+CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust','trust.delegate');
 CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
 CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
 CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
@@ -1364,6 +1364,11 @@ impl Db {
             .optional()?)
     }
 
+    /// The name in a machine's first record.
+    pub fn machine_name(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.machines()?.into_iter().find(|(m, _)| m == id).map(|(_, name)| name))
+    }
+
     /// A machine by its short id (the display form, random part first), full id or a unique name.
     pub fn machine_by_name(&self, name: &str) -> Result<Option<String>> {
         let all = self.machines()?;
@@ -1429,10 +1434,11 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
-    /// The project creator and the trust records (`machine.trust`, `machine.untrust`), for `layr_store::trust`.
+    /// The project creator and the trust records (`machine.trust`, `machine.untrust`, `trust.delegate`), for
+    /// `layr_store::trust`.
     pub fn trust_history(&self) -> Result<(Option<String>, Vec<Record>)> {
         let mut st = self.conn.prepare_cached(
-            "SELECT raw FROM records WHERE op IN ('project','machine.trust','machine.untrust') ORDER BY time, machine, seq",
+            "SELECT raw FROM records WHERE op IN ('project','machine.trust','machine.untrust','trust.delegate') ORDER BY time, machine, seq",
         )?;
         let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         let mut creator = None;
