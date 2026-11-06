@@ -46,4 +46,7 @@ l config remote.origin.push off >/dev/null
 ok "an off remote is left out" l push -q
 mv "$T/mirror.away" "$T/mirror.git"
 ok "a list in queue.push is accepted" l config queue.push cloud,origin
+# Options of one remote's own push (and words after --) are no remote names.
+ok "one remote with its own options takes its own push" l push cloud --caches -q
+has "a command after -- is no remote: the remote's own push reads it" "--command is available only for peer remotes" "$(l push cloud --command -- true 2>&1)"
 finish
