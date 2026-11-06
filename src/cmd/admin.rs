@@ -1316,10 +1316,11 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     Ok(OwnersCheck { missing, extra, stale, freed })
 }
 
-/// The owner rows that a repair keeps: the replay plus the pins of live processes.
+/// The owner rows that a repair keeps: the replay plus the pins and tree reservations of live
+/// processes.
 fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
     let mut rows = want.to_vec();
-    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin") {
+    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin" || r.1 == "drop") {
         if crate::free::holder_alive(&holder) {
             rows.push((state, kind, holder));
         }
@@ -1429,13 +1430,39 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
             evict.push(id);
         }
     }
-    let gone = repo.p.delete_states(&evict);
-    for id in &evict {
-        if gone.contains(id) && !repo.p.has_state(id) {
-            db.set_present(id, false)?;
+    drop_trees(repo, &evict)
+}
+
+/// Remove the trees of states whose records stay (eviction, imports that git builds again) and
+/// mark them absent. The states are reserved first, in one transaction with the check for pins
+/// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
+/// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
+/// the states whose trees went.
+fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
+    let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
+        if !crate::free::holder_alive(&holder) {
+            left.entry(holder).or_default().push(state);
         }
     }
+    for (holder, states) in left {
+        let gone = absent_after_delete(repo, &states);
+        repo.p.db.release_trees(&states, &gone, &holder)?;
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holder = crate::free::self_holder();
+    let reserved = repo.p.db.reserve_trees(ids, &holder)?;
+    let gone = absent_after_delete(repo, &reserved);
+    repo.p.db.release_trees(&reserved, &gone, &holder)?;
     Ok(gone)
+}
+
+/// Delete the trees of `ids`; the states whose trees are gone after it (a state kept as the base
+/// of a thin layer stays).
+fn absent_after_delete(repo: &Repo, ids: &[String]) -> Vec<String> {
+    repo.p.delete_states(ids).into_iter().filter(|id| !repo.p.has_state(id)).collect()
 }
 
 /// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --caches` would find, in
@@ -1877,14 +1904,7 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
             freed.extend(round);
             break;
         }
-        repo.p.delete_states(&round);
-        let mut gone = Vec::new();
-        for id in round {
-            if !repo.p.has_state(&id) {
-                repo.p.db.set_present(&id, false)?;
-                gone.push(id);
-            }
-        }
+        let gone = drop_trees(repo, &round)?;
         if gone.is_empty() {
             break;
         }
