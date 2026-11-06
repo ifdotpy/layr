@@ -298,6 +298,14 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     if let Err(e) = crate::source_times::record(&w, &ready) {
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
+    // The copy of each cache folder that the overlay save takes under the lock is made here, before it.
+    #[cfg(target_os = "macos")]
+    for p in &ready {
+        let cp = fsutil::safe_join(&w, p)?;
+        if btrfs::is_subvolume(&cp) {
+            btrfs::prepare_snapshot(&cp, &repo.p.work_dir(), true)?;
+        }
+    }
     Ok(refused)
 }
 
