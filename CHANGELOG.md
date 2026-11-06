@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.37.0](https://github.com/ifdotpy/layr/compare/v0.36.0...v0.37.0) (2026-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **remote:** remove the Desk v1 import ([#357](https://github.com/ifdotpy/layr/issues/357))
+
+### Features
+
+* **review:** path owners and approvals that a change of some paths keeps ([#353](https://github.com/ifdotpy/layr/issues/353)) ([4b04e33](https://github.com/ifdotpy/layr/commit/4b04e33eb68ce45c0bf75a17503e73676ffbc320))
+* **status:** Add overlap and ignored output opt-outs ([#366](https://github.com/ifdotpy/layr/issues/366)) ([1c411d9](https://github.com/ifdotpy/layr/commit/1c411d9b1486fcb4ddf30a3bdf9287cc2d86e1d8))
+
+
+### Bug Fixes
+
+* **caches:** a node cache prune or warm step leaves package-lock.json and package.json of the line as they were ([#356](https://github.com/ifdotpy/layr/issues/356)) ([652ed0a](https://github.com/ifdotpy/layr/commit/652ed0a4224e2af6403a86f7fffe31a8ee45e67d))
+* **caches:** relocate also reads the binary dep-info of a unit ([#347](https://github.com/ifdotpy/layr/issues/347)) ([4e464b8](https://github.com/ifdotpy/layr/commit/4e464b8f53b44bcd96fd61fbc1577c33a8dcea73))
+* **deps:** update zstd-safe for RUSTSEC-2026-0398 and RUSTSEC-2026-0403 ([#367](https://github.com/ifdotpy/layr/issues/367)) ([2cb1656](https://github.com/ifdotpy/layr/commit/2cb16561416191846fc8fe3c4c3efe4764f94fda))
+* **gateway:** a release file upload goes again while the gateway restarts ([#351](https://github.com/ifdotpy/layr/issues/351)) ([39b58f6](https://github.com/ifdotpy/layr/commit/39b58f634668b9a0fbc563c5b9c10f0e56de8a74))
+* **privs:** a command of the caller runs with the caller's PATH, and init --from-git names the git error ([#354](https://github.com/ifdotpy/layr/issues/354)) ([e72c6aa](https://github.com/ifdotpy/layr/commit/e72c6aaa87898ceeac01b87d1ae68916c1c580cd))
+* **release:** release attach uploads its public copies without the project lock ([#361](https://github.com/ifdotpy/layr/issues/361)) ([5a1bd31](https://github.com/ifdotpy/layr/commit/5a1bd31ce601e54ce92f9e3f29b5522614066afd))
+* **remote:** a chunk pack whose data is gone counts as absent, and the sweep deletes its index ([#360](https://github.com/ifdotpy/layr/issues/360)) ([eaa67f6](https://github.com/ifdotpy/layr/commit/eaa67f655a8f171f6b3a936694d578b183684dc8))
+* **remote:** index write takes no project lock, writes the heads first and goes on past an unreadable tree ([#359](https://github.com/ifdotpy/layr/issues/359)) ([f966715](https://github.com/ifdotpy/layr/commit/f9667151a34d8871949008c22787c83a032411b5))
+* **service:** honor client tracing and decode requests once ([638d5ac](https://github.com/ifdotpy/layr/commit/638d5acc55c24ea6fcfc3cc4e7f3d23f915b185c))
+* **service:** Honor client tracing and decode requests once ([#370](https://github.com/ifdotpy/layr/issues/370)) ([638d5ac](https://github.com/ifdotpy/layr/commit/638d5acc55c24ea6fcfc3cc4e7f3d23f915b185c))
+* **trust:** check the whole record of a limited machine and drop trusts of untrusted signers ([#352](https://github.com/ifdotpy/layr/issues/352)) ([b182e74](https://github.com/ifdotpy/layr/commit/b182e74cfc99d9bd949926fb31fab94b9a763b52))
+
+
+### Performance
+
+* **apfs:** line copies clone hard-linked files one by one instead of copying the whole tree ([#355](https://github.com/ifdotpy/layr/issues/355)) ([bd26fb1](https://github.com/ifdotpy/layr/commit/bd26fb1f59fff4c324a2581b148ae054bc01ed56))
+* **overlay:** Measure cache sizes only when requested ([#365](https://github.com/ifdotpy/layr/issues/365)) ([e3c4064](https://github.com/ifdotpy/layr/commit/e3c4064812fce07c7891f4d07618d4a150e6d04f))
+
+
+### Code Refactoring
+
+* **remote:** remove the Desk v1 import ([#357](https://github.com/ifdotpy/layr/issues/357)) ([a33df93](https://github.com/ifdotpy/layr/commit/a33df93b5c8610f262d75be3fe5c8a9cc07f6a8d))
+
 ## [0.36.0](https://github.com/ifdotpy/layr/compare/v0.35.0...v0.36.0) (2026-11-06)
 
 
