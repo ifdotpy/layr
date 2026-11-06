@@ -741,7 +741,9 @@ impl Gateway {
 
     pub fn put_file_new(&self, key: &str, file: std::fs::File) -> Result<bool> {
         let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
-        if self.is_public() || !super::format::release_file(logical) {
+        // A public release file lives at the root of the store, outside the epochs.
+        let public = epoch_path(key).is_none() && super::format::public_release_file(key);
+        if self.is_public() || !(super::format::release_file(logical) || public) {
             bail!("invalid release write");
         }
         let length = file.metadata()?.len();

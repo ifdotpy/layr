@@ -19,6 +19,24 @@ pub fn is_uuid(s: &str) -> bool {
 }
 
 /// One immutable encrypted release file, without any user-controlled path components.
+/// A public release file at the root of a store (`release attach --public-files`): `public/release/<vX>/<name>`, the
+/// gateway serves it without sign-in. The version is `v<major>.<minor>.<patch>[-<pre>]`; the name has letters, digits,
+/// `.`, `_` and `-`, no leading dot, at most 128 bytes.
+pub fn public_release_file(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("public/release/") else { return false };
+    let Some((version, name)) = rest.split_once('/') else { return false };
+    let numbers = version.strip_prefix('v').map(|v| v.split_once('-').map_or(v, |(core, _)| core));
+    let version_ok = numbers.is_some_and(|core| {
+        let parts: Vec<&str> = core.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }) && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'));
+    let name_ok = !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('.')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    version_ok && name_ok
+}
+
 pub fn release_file(key: &str) -> bool {
     key.strip_prefix("files/").and_then(|s| s.strip_suffix(".age")).is_some_and(is_uuid)
 }
@@ -398,5 +416,21 @@ mod tests {
         for bad in ["../a", "/a", "a//b", "a/./b", "a\0"] {
             assert!(!safe_path(bad));
         }
+    }
+}
+
+#[cfg(test)]
+mod public_release_tests {
+    use super::public_release_file;
+
+    #[test]
+    fn public_release_keys_follow_the_gateway_rules() {
+        assert!(public_release_file("public/release/v0.33.0/layr-v0.33.0-linux-x86_64.tar.gz"));
+        assert!(public_release_file("public/release/v1.2.3-rc.1/files.json"));
+        assert!(!public_release_file("public/release/0.33.0/a"));
+        assert!(!public_release_file("public/release/v1.2/a"));
+        assert!(!public_release_file("public/release/v1.2.3/.hidden"));
+        assert!(!public_release_file("public/release/v1.2.3/a/b"));
+        assert!(!public_release_file("public/other/v1.2.3/a"));
     }
 }
