@@ -49,7 +49,9 @@ It records the exact subject state, optional ChangeId, payload digest, signer, a
 The optional payload reference field is reserved for an object in an allowed layer.
 
 `approve` writes an approval attestation. `approve --withdraw` appends a revoke attestation for the caller's approvals.
-`attest revoke` revokes the caller's earlier attestations of the subject on this machine.
+`attest revoke` revokes the caller's earlier attestations of the subject on this machine. Root revokes
+those of every user of this machine (for example the service user of a check runner), never those of
+another machine. A revoke that finds nothing to revoke prints a warning.
 The original evidence remains in the log. A revoke cannot withdraw another caller's evidence.
 `try` records a check attestation and its command result. Protected-line rules continue to use approvals and checks.
 The old `approvals` and `checks` commands fail and name `layr attestations` as their replacement.

@@ -66,7 +66,17 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = h.repo.p.lock()?;
     let mut rec = record_subject(&h.repo, subject.clone(), kind, &payload)?;
     if kind == "revoke" {
-        let ids = h.repo.p.db.own_attestations(&subject.id, &h.repo.p.store.machine.id, ctx.caller.uid, None)?;
+        // A revoke takes the attestations of its own user; root speaks for every user of this machine
+        // (a check runner's service user, for example).
+        let uid = (!ctx.caller.is_root()).then_some(ctx.caller.uid);
+        let ids = h.repo.p.db.own_attestations(&subject.id, &h.repo.p.store.machine.id, uid, None)?;
+        if ids.is_empty() {
+            eprintln!(
+                "warning: no attestation of {} on this machine for {} to revoke",
+                if uid.is_some() { "this user" } else { "any user" },
+                crate::ids::short(&subject.id)
+            );
+        }
         rec.data["revokes"] = serde_json::json!(ids);
     }
     let rec = h.repo.commit_record(ctx, rec)?;
