@@ -182,21 +182,21 @@ impl Guard {
 pub fn inspect(root: &Path) -> Result<Report> {
     let binary = binary();
     let store = marker(root)?;
-    let (state, compatible, upgrade) = match &store {
-        Some(stored) if stored.format == binary.format => (StoreState::Compatible, true, None),
-        Some(_) => (StoreState::Incompatible, false, None),
+    let (state, upgrade) = match &store {
+        Some(stored) if stored.format == binary.format => (StoreState::Compatible, None),
+        Some(_) => (StoreState::Incompatible, None),
         None => match fs::metadata(root) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StoreState::Absent, true, None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StoreState::Absent, None),
             Err(e) => return Err(e.into()),
-            Ok(_) if empty(root)? => (StoreState::Empty, true, None),
+            Ok(_) if empty(root)? => (StoreState::Empty, None),
             // The next open writes the marker (when the store is writable).
             Ok(_) if has_layout(root)? => {
-                (StoreState::Unmarked, true, Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT }))
+                (StoreState::Unmarked, Some(Upgrade { metadata_only: true, from_format: 0, to_format: FORMAT }))
             }
-            Ok(_) => (StoreState::Incompatible, false, None),
+            Ok(_) => (StoreState::Incompatible, None),
         },
     };
-    Ok(Report { binary, store, compatible, state, upgrade, api: API_MAJOR })
+    Ok(Report::new(binary, store, state, upgrade, API_MAJOR)?)
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<i32> {
@@ -208,11 +208,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
     if options.has("--json") {
         println!("{}", serde_json::to_string(&report)?);
     } else {
-        let state = serde_json::to_value(report.state)?;
+        let state = serde_json::to_value(report.state())?;
         let state = state.as_str().context("store state must serialize as a string")?;
-        println!("binary: {}", description(&report.binary));
-        match report.store {
-            Some(stored) => println!("store: {} ({})", description(&stored), state),
+        println!("binary: {}", description(report.binary()));
+        match report.store() {
+            Some(stored) => println!("store: {} ({})", description(stored), state),
             None => println!("store: {}", state),
         }
     }

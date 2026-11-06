@@ -79,6 +79,16 @@ pub enum StoreState {
     Incompatible,
 }
 
+impl StoreState {
+    /// Whether a command can safely open this store with the current binary.
+    pub const fn compatible(self) -> bool {
+        match self {
+            Self::Absent | Self::Empty | Self::Unmarked | Self::Compatible => true,
+            Self::Incompatible => false,
+        }
+    }
+}
+
 /// A metadata upgrade available on the next writable open.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -88,20 +98,172 @@ pub struct Upgrade {
     pub to_format: u32,
 }
 
-/// The JSON response to [`StoreVersion`].
+/// The JSON response to [`StoreVersion`], validated on construction and decoding.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "WireReport", into = "WireReport")]
 pub struct StoreVersionReport {
-    pub binary: Version,
-    pub store: Option<Version>,
-    pub compatible: bool,
-    pub state: StoreState,
-    pub upgrade: Option<Upgrade>,
-    pub api: u32,
+    binary: Version,
+    store: Option<Version>,
+    state: StoreState,
+    upgrade: Option<Upgrade>,
+    api: u32,
+}
+
+/// A report whose state, stored format, or upgrade contradicts its other fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidReport;
+
+impl std::fmt::Display for InvalidReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("contradictory store-version report")
+    }
+}
+
+impl std::error::Error for InvalidReport {}
+
+impl StoreVersionReport {
+    /// Construct a report with consistent store identity and upgrade metadata.
+    pub fn new(
+        binary: Version,
+        store: Option<Version>,
+        state: StoreState,
+        upgrade: Option<Upgrade>,
+        api: u32,
+    ) -> Result<Self, InvalidReport> {
+        let valid_store = match state {
+            StoreState::Absent | StoreState::Empty | StoreState::Unmarked => store.is_none(),
+            StoreState::Compatible => store.as_ref().is_some_and(|stored| stored.format == binary.format),
+            StoreState::Incompatible => store.as_ref().is_none_or(|stored| stored.format != binary.format),
+        };
+        let valid_upgrade = match (state, &upgrade) {
+            (StoreState::Unmarked, Some(upgrade)) => {
+                upgrade.metadata_only && upgrade.from_format == 0 && upgrade.to_format == binary.format
+            }
+            (StoreState::Unmarked, None) | (_, Some(_)) => false,
+            (_, None) => true,
+        };
+        if !valid_store || !valid_upgrade {
+            return Err(InvalidReport);
+        }
+        Ok(Self { binary, store, state, upgrade, api })
+    }
+
+    pub fn binary(&self) -> &Version {
+        &self.binary
+    }
+
+    pub fn store(&self) -> Option<&Version> {
+        self.store.as_ref()
+    }
+
+    pub const fn state(&self) -> StoreState {
+        self.state
+    }
+
+    pub const fn compatible(&self) -> bool {
+        self.state.compatible()
+    }
+
+    pub fn upgrade(&self) -> Option<&Upgrade> {
+        self.upgrade.as_ref()
+    }
+
+    pub const fn api(&self) -> u32 {
+        self.api
+    }
+}
+
+// The wire alone carries the redundant compatibility flag; the public model
+// derives it from the state and exposes no mutable invariant fields.
+#[derive(Deserialize, Serialize)]
+struct WireReport {
+    binary: Version,
+    store: Option<Version>,
+    compatible: bool,
+    state: StoreState,
+    upgrade: Option<Upgrade>,
+    api: u32,
+}
+
+impl TryFrom<WireReport> for StoreVersionReport {
+    type Error = InvalidReport;
+
+    fn try_from(wire: WireReport) -> Result<Self, Self::Error> {
+        if wire.compatible != wire.state.compatible() {
+            return Err(InvalidReport);
+        }
+        Self::new(wire.binary, wire.store, wire.state, wire.upgrade, wire.api)
+    }
+}
+
+impl From<StoreVersionReport> for WireReport {
+    fn from(report: StoreVersionReport) -> Self {
+        Self {
+            compatible: report.compatible(),
+            binary: report.binary,
+            store: report.store,
+            state: report.state,
+            upgrade: report.upgrade,
+            api: report.api,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contradictory_reports_are_rejected() {
+        let valid = serde_json::json!({
+            "binary": {"format": 1, "version": RELEASE, "build": "test"},
+            "store": null,
+            "compatible": true,
+            "state": "absent",
+            "upgrade": null,
+            "api": API_MAJOR
+        });
+        let mut cases = Vec::new();
+        let mut contradictory = valid.clone();
+        contradictory["state"] = "incompatible".into();
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["upgrade"] = serde_json::json!({"metadataOnly": true, "fromFormat": 0, "toFormat": 1});
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["state"] = "compatible".into();
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["state"] = "unmarked".into();
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["store"] = valid["binary"].clone();
+        cases.push(contradictory);
+        let upgrade = serde_json::json!({"metadataOnly": true, "fromFormat": 0, "toFormat": 1});
+        for (field, value) in [("metadataOnly", false.into()), ("fromFormat", 1.into()), ("toFormat", 2.into())] {
+            let mut contradictory = valid.clone();
+            contradictory["state"] = "unmarked".into();
+            contradictory["upgrade"] = upgrade.clone();
+            contradictory["upgrade"][field] = value;
+            cases.push(contradictory);
+        }
+        let mut contradictory = valid.clone();
+        contradictory["state"] = "incompatible".into();
+        contradictory["compatible"] = false.into();
+        contradictory["upgrade"] = upgrade;
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["state"] = "incompatible".into();
+        contradictory["compatible"] = false.into();
+        contradictory["store"] = valid["binary"].clone();
+        cases.push(contradictory);
+        let mut contradictory = valid.clone();
+        contradictory["compatible"] = false.into();
+        cases.push(contradictory);
+        for json in cases {
+            assert!(serde_json::from_value::<StoreVersionReport>(json.clone()).is_err(), "accepted {json}");
+        }
+    }
 
     #[test]
     fn store_states_are_closed_and_keep_their_wire_names() {
