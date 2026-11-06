@@ -225,7 +225,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // The working state is prepared before the lock; under it the record and the renames only
             // (issue #194). A folder that changed since adds a layer of its changes under the lock; a
             // moved head prepares again, up to three times.
-            let (_lock, l, last) = {
+            // A line that this machine never made a folder for (another machine's line that a fetch brought, as a
+            // CI line) has no working state to keep: the record alone deletes it.
+            let made = repo.working(&l).exists();
+            let (_lock, l, last) = if !made {
+                let lock = repo.p.lock()?;
+                let fresh = repo.line(&l.id)?;
+                (lock, fresh, None)
+            } else {
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
@@ -305,10 +312,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             );
             rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
             repo.commit_record(ctx, rec)?;
-            crate::fsutil::git_writable(&repo.working(&l), true);
-            // Into the trash, emptied after the store lock: a folder with build output takes
-            // minutes to delete, and other commands must not wait for it.
-            repo.p.trash(&repo.working(&l))?;
+            if made {
+                crate::fsutil::git_writable(&repo.working(&l), true);
+                // Into the trash, emptied after the store lock: a folder with build output takes
+                // minutes to delete, and other commands must not wait for it.
+                repo.p.trash(&repo.working(&l))?;
+            }
             repo.p.set_moved_path(&l.id, None)?;
             repo.drop_stage(&l)?;
             repo.set_pending_moves(&l, &Default::default())?;
