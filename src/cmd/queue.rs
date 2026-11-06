@@ -85,18 +85,40 @@ fn print_entry(ctx: &Ctx, entry: &QueueEntry) {
     );
 }
 
+/// The conventional title of a queue entry (the pr-title rule): `type(scope)!: subject`.
+pub(crate) fn conventional_title(title: &str) -> Result<String> {
+    const TYPES: &[&str] = &["feat", "fix", "perf", "revert", "docs", "test", "refactor", "build", "ci", "chore", "style"];
+    let title = title.lines().next().unwrap_or("").trim();
+    let ok = title.split_once(": ").is_some_and(|(head, subject)| {
+        let head = head.strip_suffix('!').unwrap_or(head);
+        let (kind, scope) = match head.split_once('(') {
+            Some((k, rest)) => (k, rest.strip_suffix(')')),
+            None => (head, Some("")),
+        };
+        TYPES.contains(&kind)
+            && scope.is_some_and(|s| s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+            && !subject.trim().is_empty()
+    });
+    if !ok {
+        bail!("the queue entry needs a Conventional Commit title, for example 'fix(merge): keep the base'; pass it with -m (it was: '{title}')");
+    }
+    Ok(title.to_string())
+}
+
 pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--into").value("--push").flag("--json"), args)?;
+    let a = parse(&Spec::new().value("--into").value("--push").value("-m|--message").flag("--json"), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let command = a.pos.first().map(String::as_str).unwrap_or("");
-    let usage = "usage: layr queue (add <rev>|list|remove <entry>|run [--push <remote>]) [--into <line>] [--json]";
+    let usage = "usage: layr queue (add <rev> [-m <conventional title>]|list|remove <entry>|run [--push <remote>]) [--into <line>] [--json]";
     match command {
         "add" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
             let state = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[1])?;
             let source = repo.source_state(&state)?;
             repo.state_root(&state)?;
+            // With a title (-m), the entry lands on the target as one state with that message.
+            let title = a.get("-m").map(conventional_title).transpose()?;
             let upstream = match h
                 .line
                 .as_ref()
@@ -126,6 +148,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 result: None,
                 reason: None,
                 probes: None,
+                title,
             };
             {
                 let _lock = repo.p.lock()?;

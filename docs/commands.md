@@ -19,7 +19,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
-| queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
+| queue         | `queue add <rev> [--into <line>] [-m <conventional title>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |

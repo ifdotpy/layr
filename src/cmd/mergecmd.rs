@@ -1101,6 +1101,15 @@ pub fn merge_queued(
         let mut args = crate::args::Parsed::default();
         args.values.insert("--expect".into(), vec![entry.state.clone()]);
         args.flags.insert("-q".into(), 1);
+        // A titled entry lands as one state with its title; the change it came from is a trailer.
+        if let Some(title) = &entry.title {
+            let mut message = title.clone();
+            if let Some(change) = &entry.change_id {
+                message.push_str(&format!("\n\nLayr-Change: {change}"));
+            }
+            args.flags.insert("--squash".into(), 1);
+            args.values.insert("-m".into(), vec![message]);
+        }
         merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&queue))
     })();
     (result, queue.probes.into_inner())

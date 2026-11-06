@@ -331,6 +331,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 result: None,
                 reason: None,
                 probes: None,
+                title: None,
             };
             let hold = format!("holds/queue/{}", entry.id);
             let mut record = Record::new("queue.add");
