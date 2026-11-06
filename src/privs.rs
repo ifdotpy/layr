@@ -77,13 +77,28 @@ pub fn user(uid: u32) -> Result<User> {
     }
 }
 
+/// The PATH of a command that runs as a user for a service: the system folders, Homebrew's first on macOS (an old
+/// `/usr/local/bin/git` of an Intel Mac does not run on Apple silicon without Rosetta).
+const SERVICE_PATH: &str =
+    if cfg!(target_os = "macos") { "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" } else { "/usr/local/bin:/usr/bin:/bin" };
+
+/// The PATH of a command that runs as `uid` from a process of `euid`: the caller's own PATH when the process is the
+/// caller (it chose its tools, as in its shell), else `SERVICE_PATH`.
+fn child_path(euid: u32, uid: u32) -> std::ffi::OsString {
+    match std::env::var_os("PATH") {
+        Some(path) if euid == uid && !path.is_empty() => path,
+        _ => SERVICE_PATH.into(),
+    }
+}
+
 /// Make `cmd` run as `uid` with a clean environment: HOME, USER, LOGNAME, PATH, and `env`.
 /// When the service is root and `uid` is not, the child sets the user's groups, gid and uid
 /// before `exec`; nothing of the service's environment or groups reaches it.
 pub fn command_as(cmd: &mut Command, uid: u32, env: &[(String, String)]) -> Result<()> {
     let u = user(uid)?;
     cmd.env_clear();
-    cmd.env("HOME", &u.home).env("USER", &u.name).env("LOGNAME", &u.name).env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    let path = child_path(rustix::process::geteuid().as_raw(), uid);
+    cmd.env("HOME", &u.home).env("USER", &u.name).env("LOGNAME", &u.name).env("PATH", path);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -99,4 +114,19 @@ pub fn command_as(cmd: &mut Command, uid: u32, env: &[(String, String)]) -> Resu
 /// Selected variables of the caller's environment.
 pub fn pick_env(ctx: &Ctx, keys: &[&str]) -> Vec<(String, String)> {
     keys.iter().filter_map(|k| ctx.env(k).map(|v| (k.to_string(), v.to_string()))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_of_the_caller_finds_its_tools_on_its_own_path() {
+        let own = std::env::var_os("PATH").unwrap();
+        assert_eq!(child_path(501, 501), own, "the caller's own PATH");
+        assert_eq!(child_path(0, 501), std::ffi::OsString::from(SERVICE_PATH), "a service runs it with the fixed PATH");
+        if cfg!(target_os = "macos") {
+            assert!(SERVICE_PATH.starts_with("/opt/homebrew/bin:"));
+        }
+    }
 }
