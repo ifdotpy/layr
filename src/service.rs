@@ -482,6 +482,25 @@ fn periodic(root: &Path, hourly: bool) {
     }
 }
 
+/// Retry trash left by a failed background start, on every available volume.
+fn sweep_trash(root: &Path) {
+    sweep_trash_with(root, crate::store::spawn_trash_emptier);
+}
+
+fn sweep_trash_with(root: &Path, start: impl Fn(&Path) -> bool) {
+    let layout = match crate::volumes::Layout::for_root(root) {
+        Ok(layout) => layout,
+        Err(error) => { eprintln!("layr trash sweep: {error:#}"); return; }
+    };
+    for name in layout.names() {
+        if let Ok(path) = layout.trash_of(&name) {
+            if !start(&path) {
+                eprintln!("layr trash sweep ({name}): cannot start trash emptier");
+            }
+        }
+    }
+}
+
 /// The daily garbage report: for each project of the store at `root`, one line in the service log when
 /// `layr gc` or `layr fsck --caches` would find something. It changes nothing: the operations that make data dead
 /// free it, and a report names a gap in them.
@@ -522,6 +541,7 @@ fn user_socket_path() -> PathBuf {
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(80);
 
 pub fn daemon(args: &[String]) -> Result<i32> {
+    crate::pools::mark_forking_parent();
     let own = rustix::process::geteuid().as_raw();
     let user_mode = own != 0 && cfg!(target_os = "macos");
     if own != 0 && !user_mode {
@@ -697,6 +717,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
+                    sweep_trash(&root);
                     let caller = Caller::from_uid(if user_mode { own } else { 0 });
                     if !user_mode {
                         periodic(&root, hourly);
@@ -740,6 +761,36 @@ mod tests {
         let (uid, gid, _) = super::peer_uid(&a).unwrap();
         assert_eq!(uid, rustix::process::geteuid().as_raw());
         assert_eq!(gid, rustix::process::getegid().as_raw());
+    }
+}
+
+// OverlayFS requires a root-owned registry; t82 and t91 cover its trash emptier in CI.
+#[cfg(all(test, not(feature = "overlayfs")))]
+mod trash_sweep_tests {
+    #[test]
+    fn periodic_sweep_removes_deferred_trees_on_all_volumes() {
+        let base = std::env::temp_dir().join(format!("layr-trash-sweep-{}", crate::ids::new_id()));
+        let root = base.join("store");
+        let volume = base.join("volume");
+        std::fs::create_dir_all(root.join("machine")).unwrap();
+        std::fs::write(root.join("machine/id"), "m1").unwrap();
+        for path in [&root, &volume] {
+            std::fs::create_dir_all(path.join("trash/deferred")).unwrap();
+            std::fs::write(path.join("trash/deferred/file"), b"x").unwrap();
+        }
+        std::fs::write(volume.join("layr-volume.json"), br#"{"format":1,"store":"m1","volume":"other"}"#).unwrap();
+        std::fs::write(root.join("volumes.json"), serde_json::to_vec(&serde_json::json!({
+            "format": 1, "volumes": {"other": {"path": volume}}
+        })).unwrap()).unwrap();
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("trash.lock")).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
+        assert!(root.join("trash/deferred").exists(), "a locked trash is left for the next sweep");
+        assert!(!volume.join("trash/deferred").exists());
+        drop(lock);
+        super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
+        assert!(!root.join("trash/deferred").exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
 

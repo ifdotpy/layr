@@ -2,7 +2,9 @@
 use super::here;
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::fsutil::{ExtentKey, Space};
+use crate::fsutil::ExtentKey;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+use crate::fsutil::Space;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,7 +12,7 @@ use std::sync::Mutex;
 
 /// On btrfs, schedule directories independently so a single large line can use the pool.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
+fn line_spaces(lines: &[(String, PathBuf)]) -> Result<Vec<Result<Space>>> {
     use std::collections::HashSet;
     let seen: Vec<_> = lines.iter().map(|_| Mutex::new(HashSet::new())).collect();
     let results: Vec<_> = lines.iter().map(|_| Mutex::new(Ok(Space::default()))).collect();
@@ -32,8 +34,8 @@ fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
             (_, Err(e)) => *result = Err(e),
             _ => {}
         }
-    });
-    results.into_iter().map(|r| r.into_inner().unwrap()).collect()
+    })?;
+    Ok(results.into_iter().map(|r| r.into_inner().unwrap()).collect())
 }
 
 pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -68,25 +70,14 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // No store lock: the walks only read the line folders.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    let results = line_spaces(&lines);
+    let results = line_spaces(&lines)?;
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    let results = {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let results: Vec<std::sync::Mutex<Option<Result<Space>>>> = lines.iter().map(|_| Default::default()).collect();
-        std::thread::scope(|s| {
-            for _ in 0..crate::fsutil::workers().min(lines.len()) {
-                s.spawn(|| {
-                    crate::sys::lower_thread_priority();
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some((_, path)) = lines.get(i) else { break };
-                        *results[i].lock().unwrap() = Some(crate::storage::space(path));
-                    }
-                });
-            }
-        });
-        results.into_iter().map(|r| r.into_inner().unwrap().expect("every line was read")).collect::<Vec<_>>()
-    };
+    let results = if let Some(width) = std::num::NonZeroUsize::new(lines.len()) {
+        crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
+        use rayon::prelude::*;
+        lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
+        })?
+    } else { Vec::new() };
     let mut rows = Vec::new();
     for ((name, path), r) in lines.into_iter().zip(results) {
         match r {
@@ -332,26 +323,23 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        let plan = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    crate::sys::lower_thread_priority();
-                    if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
-                        eprintln!("note: nested mount {}: walking files instead", mount.display());
-                        *mounts.lock().unwrap() = Mounts::Below;
-                        return Ok(None);
-                    }
-                    *mounts.lock().unwrap() = Mounts::None;
-                    crate::btrfs_scan::plan(root, &paths).map(Some)
-                })
-                .join()
-                .unwrap()
-        });
+        let plan = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::MIN), || {
+            if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
+                eprintln!("note: nested mount {}: walking files instead", mount.display());
+                *mounts.lock().unwrap() = Mounts::Below;
+                return Ok(None);
+            }
+            *mounts.lock().unwrap() = Mounts::None;
+            crate::btrfs_scan::plan(root, &paths).map(Some)
+        })?;
         match plan {
             Ok(Some(plan)) => {
                 let failed = Mutex::new(None);
                 let bulk = Mutex::new(HashMap::new());
-                crate::fsutil::work_queue(plan.units, |unit, _| {
+                if let Some(width) = std::num::NonZeroUsize::new(plan.units.len()) {
+                    crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
+                        use rayon::prelude::*;
+                        plan.units.into_par_iter().for_each(|unit| {
                     let mut local = HashMap::<(usize, ExtentKey), u64>::new();
                     let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
                         for &(key, bytes) in held.shared {
@@ -372,7 +360,9 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                         }
                         entry.1 = entry.1.max(bytes);
                     }
-                });
+                        });
+                    })?;
+                }
                 if let Some(err) = failed.into_inner().unwrap() {
                     eprintln!("warning: bulk btrfs scan failed: {err}; walking files instead");
                     None
@@ -423,7 +413,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     }
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let seen: Vec<_> = parts.iter().map(|_| Mutex::new(std::collections::HashSet::new())).collect();
-    crate::fsutil::work_queue(units, |(i, path), _add| {
+    let walk = |(i, path): (usize, PathBuf), _add: &dyn Fn((usize, PathBuf))| {
         let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         let unit_fs = if mounts.resolve_directories() { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
@@ -478,7 +468,16 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                 }
             }
         }
-    });
+    };
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    crate::fsutil::work_queue(units, walk)?;
+    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
+    if let Some(width) = std::num::NonZeroUsize::new(units.len()) {
+        crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
+            use rayon::prelude::*;
+            units.into_par_iter().for_each(|unit| walk(unit, &|_| {}));
+        })?;
+    }
     let mut spaces: Vec<Option<PartSpace>> = Vec::new();
     for ((name, _), r) in parts.iter().zip(results) {
         match r.into_inner().unwrap() {
@@ -566,11 +565,26 @@ mod tests {
         std::fs::write(dir.join("a/file"), vec![1u8; 8192]).unwrap();
         std::fs::hard_link(dir.join("a/file"), dir.join("b/link")).unwrap();
         let expected = crate::fsutil::fiemap_space(&dir);
-        let actual = super::line_spaces(&[("line".into(), dir.clone())]).pop().unwrap();
+        let actual = super::line_spaces(&[("line".into(), dir.clone())]).unwrap().pop().unwrap();
         match expected {
             Ok(expected) => assert_eq!(actual.unwrap(), expected),
             Err(_) => assert!(actual.is_err()),
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn failing_line_does_not_skip_other_lines() {
+        let dir = std::env::temp_dir().join(format!("layr-du-failing-part-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("first")).unwrap();
+        std::fs::create_dir_all(dir.join("last")).unwrap();
+        let paths = ["first", "missing", "last"].map(|name| (name.to_string(), dir.join(name)));
+        let results = super::line_spaces(&paths).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

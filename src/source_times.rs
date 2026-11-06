@@ -35,7 +35,7 @@ fn collect(w: &Path) -> Result<BTreeMap<String, Entry>> {
     let rules = Rules::new(w);
     let mut files = Vec::new();
     walk(w, w, &rules, &mut files)?;
-    let hashes = hash_all(w, &files.iter().map(|(rel, _)| rel.as_str()).collect::<Vec<_>>());
+    let hashes = hash_all(w, &files.iter().map(|(rel, _)| rel.as_str()).collect::<Vec<_>>())?;
     let mut out = BTreeMap::new();
     for ((rel, m), hash) in files.into_iter().zip(hashes) {
         // A file that went away during the walk is left out.
@@ -64,16 +64,13 @@ fn walk(root: &Path, dir: &Path, rules: &Rules, out: &mut Vec<(String, std::fs::
 }
 
 /// The content hash (git blob id) of each file, on a few threads. None for a file that cannot be read.
-fn hash_all(w: &Path, rels: &[&str]) -> Vec<Option<String>> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
-    let chunk = rels.len().div_ceil(threads).max(1);
-    std::thread::scope(|s| {
-        let parts: Vec<_> = rels
-            .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().map(|rel| hash_file(&w.join(rel))).collect::<Vec<_>>()))
-            .collect();
-        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
+fn hash_all(w: &Path, rels: &[&str]) -> Result<Vec<Option<String>>> {
+    let hash = |rel: &&str| hash_file(&w.join(rel));
+    let Some(width) = std::num::NonZeroUsize::new(rels.len()) else { return Ok(Vec::new()); };
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
+        use rayon::prelude::*;
+        rels.par_iter().map(hash).collect()
+    }).map_err(Into::into)
 }
 
 /// The git blob id of one file. Source files are small, so the file is read whole.
@@ -180,7 +177,7 @@ pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
             older.push(rel.as_str());
         }
     }
-    let hashes = hash_all(w, &cand.iter().map(|(rel, _)| *rel).collect::<Vec<_>>());
+    let hashes = hash_all(w, &cand.iter().map(|(rel, _)| *rel).collect::<Vec<_>>())?;
     let mut n = 0;
     for ((rel, saw), hash) in cand.into_iter().zip(hashes) {
         let Ok(m) = std::fs::symlink_metadata(w.join(rel)) else { continue };

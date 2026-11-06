@@ -19,8 +19,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
 
 /// Marks a target folder that a copy has not finished.
@@ -361,34 +359,19 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
     }
 }
 
-/// Compares the bytes of each pair of files, on up to four threads: the work is reading, and the files are many.
-/// The first difference or error wins, and the other threads stop.
+/// Compare file contents using reusable buffers for each parallel job.
 fn compare_contents(files: &[(PathBuf, PathBuf, String)]) -> Result<()> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4).min(files.len().max(1));
-    let next = AtomicUsize::new(0);
-    let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-    std::thread::scope(|scope| {
-        for _ in 0..threads {
-            scope.spawn(|| {
-                let (mut a, mut b) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
-                while failed.lock().map(|f| f.is_none()).unwrap_or(false) {
-                    let Some((s, d, rel)) = files.get(next.fetch_add(1, Ordering::Relaxed)) else { return };
-                    let r = same_content(s, d, &mut a, &mut b)
-                        .and_then(|same| if same { Ok(()) } else { Err(anyhow::anyhow!("{rel}: content differs")) });
-                    if let Err(e) = r {
-                        if let Ok(mut f) = failed.lock() {
-                            f.get_or_insert(e);
-                        }
-                    }
-                }
-            });
-        }
-    });
-    match failed.into_inner() {
-        Ok(None) => Ok(()),
-        Ok(Some(e)) => Err(e),
-        Err(_) => bail!("a comparison thread failed"),
-    }
+    let Some(width) = std::num::NonZeroUsize::new(files.len()) else { return Ok(()); };
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
+        use rayon::prelude::*;
+        files.par_iter().map_init(
+            || (vec![0u8; 1 << 20], vec![0u8; 1 << 20]),
+            |(a, b), (s, d, rel)| {
+                let same = same_content(s, d, a, b)?;
+                if same { Ok(()) } else { Err(anyhow::anyhow!("{rel}: content differs")) }
+            },
+        ).collect::<Result<()>>()
+    })?
 }
 
 /// Whether the files `s` and `d` hold the same bytes. `a` and `b` are the read buffers (of one size).

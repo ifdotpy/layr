@@ -3,6 +3,7 @@
 // Unsafe code is allowed only in `sys` (system calls without safe wrappers).
 #![deny(unsafe_code)]
 
+mod pools;
 mod busy;
 #[macro_use]
 mod ctx;

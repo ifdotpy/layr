@@ -414,13 +414,17 @@ impl Drop for Lock {
             // failed start spend a bounded time here instead. Each volume of the locks has its trash.
             let dirs = LOCK_TRASH.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default();
             for dir in dirs {
+                if crate::pools::is_forking_parent() {
+                    spawn_trash_emptier(&dir);
+                    continue;
+                }
                 if EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst) {
                     let _t = crate::trace::span("empty trash (all)");
-                    empty_all(&dir);
+                    if let Err(error) = empty_all(&dir) { eprintln!("layr: cannot empty trash: {error}"); }
                 } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&dir) {
                     let budget = trash_budget();
                     let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
-                    empty_trash(&dir, Some(budget));
+                    if let Err(error) = empty_trash(&dir, Some(budget)) { eprintln!("layr: cannot empty trash: {error}"); }
                 }
             }
         }
@@ -563,10 +567,14 @@ pub static EMPTY_TRASH_FULLY: std::sync::atomic::AtomicBool = std::sync::atomic:
 /// Empty the trash after a free step (`free.rs`) that runs without the store lock: in the
 /// background, or within the test budget when one is set or the start fails.
 pub fn kick_trash(dir: &Path) {
+    if crate::pools::is_forking_parent() {
+        spawn_trash_emptier(dir);
+        return;
+    }
     if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(dir) {
         let budget = trash_budget();
         let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
-        empty_trash(dir, Some(budget));
+        if let Err(error) = empty_trash(dir, Some(budget)) { eprintln!("layr: cannot empty trash: {error}"); }
     }
 }
 
@@ -575,7 +583,7 @@ pub fn kick_trash(dir: &Path) {
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
 /// Start `layr __empty-trash <dir>` in the background when the trash holds something: true when
 /// it started (or nothing waits). The child deletes everything; one child per trash at a time.
-fn spawn_trash_emptier(dir: &Path) -> bool {
+pub(crate) fn spawn_trash_emptier(dir: &Path) -> bool {
     if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
         return true;
     }
@@ -598,44 +606,45 @@ pub fn empty_trash_process(dir: &Path) -> anyhow::Result<()> {
         Err(rustix::io::Errno::WOULDBLOCK) => return Ok(()),
         Err(e) => return Err(e.into()),
     }
-    empty_all(dir);
+    empty_all(dir)?;
     Ok(())
 }
 
 /// Delete the trash until a pass deletes nothing: trees that commands move here while it runs go
 /// too, and a path that cannot be deleted stays. Its line goes to `<store>/trash.errors`, which
 /// the next run replaces. Returns those lines.
-pub fn empty_all(dir: &Path) -> Vec<String> {
+pub fn empty_all(dir: &Path) -> Result<Vec<String>, crate::pools::PoolError> {
     loop {
-        let (deleted, failed) = empty_trash(dir, None);
+        let (deleted, failed) = empty_trash(dir, None)?;
         if deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
             if let Some(store) = dir.parent() {
                 let _ = fs::write(store.join("trash.errors"), failed.iter().map(|line| format!("{line}\n")).collect::<String>());
             }
-            return failed;
+            return Ok(failed);
         }
     }
 }
 
 /// One pass over the trash, for at most `budget`. Returns the number of trees deleted and a
 /// `path: error` line for each path that stayed.
-pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> (usize, Vec<String>) {
+pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(usize, Vec<String>), crate::pools::PoolError> {
+    if crate::pools::is_forking_parent() { return Err(crate::pools::PoolError::ForkingParent); }
     let deadline = budget.map(|b| std::time::Instant::now() + b);
     let late = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
     let (mut deleted, mut failed) = (0, Vec::new());
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
-            if late() || !empty_tree(&e.path(), &late, &mut deleted, &mut failed) {
+            if late() || !empty_tree(&e.path(), &late, &mut deleted, &mut failed)? {
                 break;
             }
         }
     }
-    (deleted, failed)
+    Ok((deleted, failed))
 }
 
 /// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
 /// false when the budget ended before `path` was gone.
-fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
+fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
     #[cfg(not(target_os = "macos"))]
     let _ = late;
     #[cfg(target_os = "macos")]
@@ -647,14 +656,14 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
             let _ = fs::set_permissions(path, fs::Permissions::from_mode((m.permissions().mode() & 0o7777) | 0o700));
             if let Ok(rd) = fs::read_dir(path) {
                 let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-                if !empty_entries(&entries, late, deleted, failed) {
-                    return false;
+                if !empty_entries(&entries, late, deleted, failed)? {
+                    return Ok(false);
                 }
             }
         }
     }
     if fs::symlink_metadata(path).is_err() {
-        return true;
+        return Ok(true);
     }
     match crate::storage::delete_tree(path) {
         Ok(()) => *deleted += 1,
@@ -664,61 +673,40 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
         Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
-    true
+    Ok(true)
 }
 
-/// A folder with at least this many entries is emptied on `TRASH_THREADS` threads.
+/// A folder with at least this many entries is emptied in parallel.
 #[cfg(target_os = "macos")]
 const TRASH_PARALLEL_FROM: usize = 64;
-/// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
-/// half the time of one (40,363 files: 4.7 s to 2.4 s).
-#[cfg(target_os = "macos")]
-const TRASH_THREADS: usize = 4;
-/// True while threads empty a folder: a folder inside their work is emptied by the thread that finds it.
-#[cfg(target_os = "macos")]
-static TRASH_PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
+// half the time of one (40,363 files: 4.7 s to 2.4 s).
 
 /// `empty_tree` of each of `entries`. False when the budget ended first.
 #[cfg(target_os = "macos")]
-fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let parallel = entries.len() >= TRASH_PARALLEL_FROM
-        && TRASH_PARALLEL.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok();
-    if !parallel {
+fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
+    if entries.len() < TRASH_PARALLEL_FROM {
         for e in entries {
-            if late() {
-                return false;
-            }
-            empty_tree(e, late, deleted, failed);
+            if late() || !empty_tree(e, late, deleted, failed)? { return Ok(false); }
         }
-        return true;
+        return Ok(true);
     }
-    let next = AtomicUsize::new(0);
-    let results: std::sync::Mutex<(usize, Vec<String>, bool)> = std::sync::Mutex::new((0, Vec::new(), true));
-    std::thread::scope(|scope| {
-        for _ in 0..TRASH_THREADS {
-            scope.spawn(|| {
-                let (mut d, mut f, mut done) = (0, Vec::new(), true);
-                while let Some(e) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if late() {
-                        done = false;
-                        break;
-                    }
-                    empty_tree(e, late, &mut d, &mut f);
-                }
-                if let Ok(mut r) = results.lock() {
-                    r.0 += d;
-                    r.1.extend(f);
-                    r.2 &= done;
-                }
-            });
-        }
-    });
-    TRASH_PARALLEL.store(false, Ordering::SeqCst);
-    let (d, f, done) = results.into_inner().unwrap_or_else(|e| e.into_inner());
-    *deleted += d;
-    failed.extend(f);
-    done
+    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()), || {
+        use rayon::prelude::*;
+        entries.par_iter().map(|e| {
+            let (mut deleted, mut failed) = (0, Vec::new());
+            let done = if late() { false } else { empty_tree(e, late, &mut deleted, &mut failed)? };
+            Ok((deleted, failed, done))
+        }).collect::<Vec<Result<_, crate::pools::PoolError>>>()
+    })?;
+    let mut done = true;
+    for result in results {
+        let (count, errors, complete) = result?;
+        *deleted += count;
+        failed.extend(errors);
+        done &= complete;
+    }
+    Ok(done)
 }
 
 impl<'a> Project<'a> {
@@ -1747,14 +1735,14 @@ mod trash_tests {
                 }
             }
             let failed: Vec<String> = std::thread::scope(|scope| {
-                let a = scope.spawn(|| empty_trash(&dir, None).1);
-                let b = scope.spawn(|| empty_trash(&dir, None).1);
+                let a = scope.spawn(|| empty_trash(&dir, None).unwrap().1);
+                let b = scope.spawn(|| empty_trash(&dir, None).unwrap().1);
                 let mut f = a.join().unwrap();
                 f.extend(b.join().unwrap());
                 f
             });
             // A pass may leave a path that the other emptier was deleting; a second pass ends it.
-            let (_, again) = empty_trash(&dir, None);
+            let (_, again) = empty_trash(&dir, None).unwrap();
             assert!(failed.is_empty() && again.is_empty(), "round {round}: {failed:?} {again:?}");
             assert!(fs::read_dir(&dir).unwrap().next().is_none(), "round {round}: the trash is empty");
             fs::remove_dir(&dir).unwrap();
@@ -1774,10 +1762,10 @@ mod trash_tests {
         for i in 0..200 {
             fs::write(tree.join("many").join(format!("g{i}")), b"y").unwrap();
         }
-        let (deleted, failed) = empty_trash(&dir, Some(std::time::Duration::ZERO));
+        let (deleted, failed) = empty_trash(&dir, Some(std::time::Duration::ZERO)).unwrap();
         assert_eq!((deleted, failed.len()), (0, 0));
         assert!(tree.join("many/g0").exists(), "a spent budget deletes nothing");
-        let (deleted, failed) = empty_trash(&dir, None);
+        let (deleted, failed) = empty_trash(&dir, None).unwrap();
         assert!(failed.is_empty(), "{failed:?}");
         assert!(deleted > 0);
         assert!(!tree.exists());

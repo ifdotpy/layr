@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use layr_hashers::{Digest, GitCompatible};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Format of the saved state compares. Bump it when `changes::candidates`,
 /// `changes::really_changed`, `skip_path` or the ignore rules inside the compare change their
@@ -34,7 +33,6 @@ const LIVE_DIR: &str = "overlap-live";
 /// Format of the saved live compares. Bump it when `compare` changes its results.
 const LIVE_FORMAT: u32 = 1;
 /// Threads that compare saved states at once.
-const COMPARE_THREADS: usize = 4;
 
 #[derive(Debug, Serialize)]
 pub struct Overlap {
@@ -272,29 +270,13 @@ impl StateCompare {
     }
 }
 
-/// Run the state compares on up to `COMPARE_THREADS` threads. The results keep the order of `jobs`.
+/// Run state compares in order, using the current operation's pool when available.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
-    let next = AtomicUsize::new(0);
-    let worker = || -> Result<Vec<(usize, Vec<Found>)>> {
-        let mut done = Vec::new();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            let Some(job) = jobs.get(i) else { return Ok(done) };
-            done.push((i, job.run()?));
-        }
-    };
-    let mut out: Vec<Option<Vec<Found>>> = jobs.iter().map(|_| None).collect();
-    std::thread::scope(|s| -> Result<()> {
-        let handles: Vec<_> = (0..COMPARE_THREADS.min(jobs.len())).map(|_| s.spawn(worker)).collect();
-        for h in handles {
-            let done = h.join().map_err(|_| anyhow!("status overlap compare panicked"))??;
-            for (i, found) in done {
-                out[i] = Some(found);
-            }
-        }
-        Ok(())
-    })?;
-    out.into_iter().map(|f| f.ok_or_else(|| anyhow!("status overlap compare missing"))).collect()
+    let Some(width) = std::num::NonZeroUsize::new(jobs.len()) else { return Ok(Vec::new()); };
+    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
+        use rayon::prelude::*;
+        jobs.par_iter().map(StateCompare::run).collect::<Vec<_>>().into_iter().collect()
+    })?
 }
 
 /// The state compares and live compares of one `overlaps` call. Each one runs once.
