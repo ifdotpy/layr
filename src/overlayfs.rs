@@ -1686,6 +1686,13 @@ pub fn contains_managed_tree(path: &Path) -> bool {
     lock(&path).is_ok_and(|s| s.registry.trees.keys().any(|p| p.starts_with(&path)))
 }
 
+/// The backing registry of a managed overlay mount, for physical extent keys.
+pub fn du_backing(path: &Path) -> Option<PathBuf> {
+    let path = absolute(path).ok()?;
+    let state = lock(&path).ok()?;
+    state.registry.trees.get(&path).filter(|entry| !entry.plain).map(|_| state.home.clone())
+}
+
 /// Disk space of a folder (`layr du`). A mounted tree reads its files from shared lower layers
 /// and its own upper layer: only the upper layer is its own. A plain folder is its own files.
 pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
@@ -1711,10 +1718,12 @@ pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Resu
 /// an upper layer hides is only in its layer.
 pub(crate) fn copy_need(path: &Path) -> Result<u64> {
     let src = absolute(path)?;
-    let mut keys: HashMap<u64, u64> = Default::default();
+    let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
         for &(key, size) in h.shared {
-            keys.entry(key).or_insert(size);
+            if !matches!(key, crate::fsutil::ExtentKey::Unaddressed { .. }) {
+                keys.entry(key).or_insert(size);
+            }
         }
     })?;
     let state = lock(&src)?;
@@ -1724,7 +1733,9 @@ pub(crate) fn copy_need(path: &Path) -> Result<u64> {
             if folder.is_dir() {
                 crate::fsutil::fiemap_visit(&folder, &mut |h| {
                     for &(key, size) in h.shared {
-                        keys.entry(key).or_insert(size);
+                        if !matches!(key, crate::fsutil::ExtentKey::Unaddressed { .. }) {
+                            keys.entry(key).or_insert(size);
+                        }
                     }
                 })?;
             }

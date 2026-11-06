@@ -16,6 +16,25 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
 
+/// Lower the calling thread's CPU and I/O priority, best effort. Call only from threads
+/// dedicated to background work: on Linux these priorities apply per thread.
+#[cfg(target_os = "linux")]
+pub fn lower_thread_priority() {
+    const NICE_LOWEST: libc::c_int = 19;
+    const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+    const IOPRIO_CLASS_BE: libc::c_int = 2;
+    const IOPRIO_BE_LOWEST: libc::c_int = 7;
+    const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
+    // SAFETY: both calls operate on the calling thread, and have no pointer arguments.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, NICE_LOWEST);
+        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_BE_LOWEST);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lower_thread_priority() {}
+
 /// Bound automatic check processes before executing any project code.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, seconds: u64) -> Result<()> {
@@ -65,6 +84,70 @@ const SUBVOL_SETFLAGS: libc::c_ulong = 0x4008_941a;
 const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
+
+/// The UAPI `btrfs_ioctl_search_key`, in native byte order.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SearchKey {
+    pub tree_id: u64,
+    pub min_objectid: u64,
+    pub max_objectid: u64,
+    pub min_offset: u64,
+    pub max_offset: u64,
+    pub min_transid: u64,
+    pub max_transid: u64,
+    pub min_type: u32,
+    pub max_type: u32,
+    pub nr_items: u32,
+    pub unused: u32,
+    pub unused1: [u64; 4],
+}
+
+/// Reusable, aligned storage for TREE_SEARCH_V2's flexible array argument.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub struct TreeSearch {
+    args: Vec<u64>,
+    size: usize,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+impl TreeSearch {
+    pub fn new(size: usize) -> Self {
+        const WORD: usize = std::mem::size_of::<u64>();
+        let prefix = std::mem::size_of::<SearchKey>() + WORD;
+        Self { args: vec![0; (prefix + size).div_ceil(WORD)], size }
+    }
+
+    pub fn run(&mut self, fd: BorrowedFd<'_>, key: &mut SearchKey) -> io::Result<(usize, &[u8])> {
+        const TREE_SEARCH_V2: libc::c_ulong = 0xc070_9411;
+        const WORD: usize = std::mem::size_of::<u64>();
+        let prefix = std::mem::size_of::<SearchKey>() + WORD;
+        loop {
+            // SAFETY: the allocation is aligned for SearchKey and contains the key, size and
+            // output buffer; the returned slice cannot outlive or overlap a subsequent call.
+            unsafe {
+                let ptr = self.args.as_mut_ptr().cast::<u8>();
+                ptr.cast::<SearchKey>().write(*key);
+                let size_ptr = ptr.add(std::mem::size_of::<SearchKey>()).cast::<u64>();
+                size_ptr.write(self.size as u64);
+                if libc::ioctl(fd.as_raw_fd(), TREE_SEARCH_V2 as _, ptr) < 0 {
+                    let error = io::Error::last_os_error();
+                    let required = usize::try_from(size_ptr.read()).unwrap_or(0);
+                    if error.raw_os_error() != Some(libc::EOVERFLOW) || required <= self.size {
+                        return Err(error);
+                    }
+                    let len = prefix.checked_add(required).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                    self.args.resize(len.div_ceil(WORD), 0);
+                    self.size = required;
+                    continue;
+                }
+                *key = ptr.cast::<SearchKey>().read();
+                return Ok((key.nr_items as usize, std::slice::from_raw_parts(ptr.add(prefix), self.size)));
+            }
+        }
+    }
+}
 
 #[repr(C)]
 struct VolArgsV2 {
@@ -1629,10 +1712,19 @@ pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>
     }
 }
 
+/// An extent returned by FIEMAP; unstable addresses are absent.
+#[cfg(target_os = "linux")]
+pub struct MappedExtent {
+    pub logical: u64,
+    pub addr: Option<u64>,
+    pub len: u64,
+    pub shared: bool,
+}
+
 /// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
 /// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
 #[cfg(target_os = "linux")]
-pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>> {
+pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
     const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     const EXTENT_LAST: u32 = 0x1;
     const EXTENT_SHARED: u32 = 0x2000;
@@ -1670,7 +1762,13 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<(u64, u64, bool)>>
             return Ok(out);
         }
         for e in &map.extents[..mapped] {
-            out.push((e.physical, e.length, e.flags & EXTENT_SHARED != 0));
+            let addressable = e.flags & FIEMAP_UNSTABLE == 0;
+            out.push(MappedExtent {
+                logical: e.logical,
+                addr: (addressable && e.physical != 0).then_some(e.physical),
+                len: e.length,
+                shared: e.flags & EXTENT_SHARED != 0,
+            });
             if e.flags & EXTENT_LAST != 0 {
                 return Ok(out);
             }

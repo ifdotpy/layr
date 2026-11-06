@@ -32,6 +32,8 @@ mod ids;
 use layr_store::http;
 mod ignore_rules;
 mod lineops;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs_scan;
 mod linepaths;
 mod merge;
 mod model;
