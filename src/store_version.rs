@@ -250,7 +250,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
         }
         match daemon.as_ref().map(|d| serde_json::from_value::<Version>(d.clone())) {
             None => {}
-            Some(Ok(v)) => println!("daemon: {}", v.description()),
+            Some(Ok(v)) => println!("daemon: {}", description(&v)),
             Some(Err(_)) if daemon.as_ref().is_some_and(|d| d["busy"] == true) => println!("daemon: busy"),
             Some(Err(_)) => println!("daemon: an older build that does not report its version"),
         }

@@ -119,10 +119,20 @@ pub(super) fn sweep(
     }
     // A kept delta tree needs its base trees to decode (a tree is a zstd delta on its base tree), but not their
     // data: the parts and chunks that stay are the ones that the trees kept for their own state link.
+    // A tree that cannot be decoded (a delta whose base tree is gone) stays as it is: the sweep cannot tell what it
+    // links, so it deletes nothing for it, and it never fails a push for it.
+    let mut broken: BTreeSet<(String, String)> = BTreeSet::new();
     let own = keep.clone();
     let mut pending: Vec<(String, String)> = keep.iter().cloned().collect();
     while let Some((state, attempt)) = pending.pop() {
-        let (header, _, _) = reader.tree(&state, &attempt)?;
+        let header = match reader.tree(&state, &attempt) {
+            Ok((header, _, _)) => header,
+            Err(e) => {
+                eprintln!("layr: remote tree {} cannot be read ({e:#}); the sweep leaves it", tree_name(&state, &attempt));
+                broken.insert((state, attempt));
+                continue;
+            }
+        };
         if let Some(base) = header.base {
             if keep.insert(base.clone()) {
                 why(&base.0, format!("base tree of {}", crate::ids::short(&state)));
@@ -133,8 +143,8 @@ pub(super) fn sweep(
     let mut linked = BTreeSet::new();
     let mut live_chunks: BTreeSet<String> = BTreeSet::new();
     let mut kept_chunks: Vec<BTreeSet<String>> = Vec::new();
-    for (state, attempt) in &own {
-        let (_, _, tree) = reader.tree(state, attempt)?;
+    for (state, attempt) in own.iter().filter(|t| !broken.contains(*t)) {
+        let Ok((_, _, tree)) = reader.tree(state, attempt) else { continue };
         linked.extend(tree.files.values().flat_map(|e| e.3.iter().map(|l| l.object())));
         let named: BTreeSet<String> = tree.chunks.values().flatten().cloned().collect();
         live_chunks.extend(named.iter().cloned());
@@ -147,7 +157,14 @@ pub(super) fn sweep(
     let mut frames = BTreeSet::new();
     let mut dead_chunks: BTreeSet<String> = BTreeSet::new();
     for (state, attempt) in dead.iter().copied().chain(bases.iter().copied()) {
-        let (_, _, tree) = reader.tree(state, attempt)?;
+        let tree = match reader.tree(state, attempt) {
+            Ok((_, _, tree)) => tree,
+            Err(e) => {
+                eprintln!("layr: remote tree {} cannot be read ({e:#}); the sweep leaves it and its data", tree_name(state, attempt));
+                broken.insert(((*state).clone(), (*attempt).clone()));
+                continue;
+            }
+        };
         dead_chunks.extend(tree.chunks.values().flatten().filter(|id| !live_chunks.contains(*id)).cloned());
         for link in tree.files.values().flat_map(|e| e.3.iter()) {
             let object = link.object();
@@ -175,7 +192,7 @@ pub(super) fn sweep(
         }
         swept.parts.push(part);
     }
-    for (state, attempt) in dead {
+    for (state, attempt) in dead.into_iter().filter(|t| !broken.contains(*t)) {
         let name = tree_name(state, attempt);
         if !dry_run {
             store.backend.delete(&name)?;
