@@ -48,6 +48,16 @@ export LAYR_ROOT_SUBVOLUME_PATH=$M
 export LAYR_ROOT=$M/own
 ok "a snapper config of the top level does not cover a subvolume" sh -c "cd $M/own/projects/q/lines/main && $LAYR status >/dev/null"
 
+# A volume folder in the root subvolume is refused as the store folder is (Store::open checks the volumes of this
+# store; it once read them with no machine id, so none was ready and none was checked).
+mkdir -p $M/vol
+ok "a volume in the root subvolume is added with the override" env LAYR_ALLOW_ROOT_SNAPSHOTS=1 "$LAYR" volume add v $M/vol
+out=$(cd $M/own/projects/q/lines/main && $LAYR status 2>&1); rc=$?
+ok "a volume folder in the root subvolume refuses status" test "$rc" -ne 0
+has "the refusal names the volume folder" "volume folder" "$out"
+ok "the override lets status pass" sh -c "cd $M/own/projects/q/lines/main && LAYR_ALLOW_ROOT_SNAPSHOTS=1 $LAYR status >/dev/null"
+LAYR_ALLOW_ROOT_SNAPSHOTS=1 "$LAYR" volume remove v >/dev/null
+
 # A line folder that a rollback emptied stops every command of its project. The garbage check cannot read the
 # projects that this test rolls back on purpose.
 LAYR_TEST_GARBAGE_OK=1

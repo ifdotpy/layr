@@ -130,7 +130,8 @@ impl Store {
         let root = root.as_path();
         // The volume files are read before anything is written. A volume that cannot be used
         // (unmounted, or another store's) is not checked here: only its projects are refused.
-        let layout = Layout::load(root, "")?;
+        // The machine id makes the volumes of this store ready (an empty id matches none).
+        let layout = Layout::for_root(root)?;
         crate::rootcheck::check_store(root, &layout.ready_volume_paths())?;
         if !root.exists() {
             mkdir_mode(root, 0o755)?;
