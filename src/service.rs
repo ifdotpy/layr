@@ -448,15 +448,17 @@ fn disk_full_hint(root: &Path) -> String {
 /// folder. It is local to this machine and is never sent to other machines.
 const PERIODIC_CHECKS: &str = "periodic-checks.json";
 
-/// Periodic work: automatic states of busy lines, access to the git store. No repair: the operations that make
-/// data dead free it, and the daily garbage report (`garbage_report`) names a gap.
-fn periodic(root: &Path, hourly: bool) {
+/// Periodic work: automatic states of busy lines, access to the git store, person requests and the queue. No repair:
+/// the operations that make data dead free it, and the daily garbage report (`garbage_report`) names a gap. A user
+/// daemon (`user_mode`, the macOS LaunchAgent) runs the requests and the queue of its own store as its user; the
+/// automatic states and the git store access stay with the root service.
+fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let caller = Caller::from_uid(0);
+    let caller = Caller::from_uid(user_mode.unwrap_or(0));
     let names = store.project_names().unwrap_or_default();
     drop(store);
     for name in names {
@@ -475,6 +477,35 @@ fn periodic(root: &Path, hourly: bool) {
             Ok(r) => r,
             Err(_) => continue,
         };
+        if user_mode.is_none() {
+            automatic_states(&ctx, &repo, &name, now);
+        }
+        // Person requests (approve, comment, queue add) of `requests.remote`: before the queue pass, so a queued
+        // entry merges on the same tick.
+        match crate::cmd::requests::daemon_remote(&repo) {
+            Ok(Some(remote)) => {
+                if let Err(error) = crate::cmd::requests::apply(&ctx, &repo, &remote, true) {
+                    eprintln!("layr requests ({name}): {error:#}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("layr requests ({name}): {error:#}"),
+        }
+        if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
+            eprintln!("layr queue ({name}): {error:#}");
+        }
+        if hourly && user_mode.is_none() {
+            // Also repairs the git store of a project from an earlier layr, soon after a start.
+            if let Ok(_lock) = repo.p.lock() {
+                let _ = crate::gitbridge::sync_store_access(&repo);
+            }
+        }
+    }
+}
+
+/// The automatic states of the busy lines of project `name` (`snapshot.interval`).
+fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
+    {
         let interval = repo.p.config_u64("snapshot.interval", 600) as i64 * 1000;
         // A check that found no change saves no state, so the time of the last automatic state
         // stays old. The time of the check keeps an idle line from a snapshot and a comparison
@@ -508,26 +539,6 @@ fn periodic(root: &Path, hourly: bool) {
         if checks != before {
             if let Ok(data) = serde_json::to_vec(&checks) {
                 let _ = crate::fsutil::atomic_write(&checks_path, &data, 0o600);
-            }
-        }
-        // Person requests (approve, comment, queue add) of `requests.remote`: before the queue pass, so a queued
-        // entry merges on the same tick.
-        match crate::cmd::requests::daemon_remote(&repo) {
-            Ok(Some(remote)) => {
-                if let Err(error) = crate::cmd::requests::apply(&ctx, &repo, &remote, true) {
-                    eprintln!("layr requests ({name}): {error:#}");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("layr requests ({name}): {error:#}"),
-        }
-        if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
-            eprintln!("layr queue ({name}): {error:#}");
-        }
-        if hourly {
-            // Also repairs the git store of a project from an earlier layr, soon after a start.
-            if let Ok(_lock) = repo.p.lock() {
-                let _ = crate::gitbridge::sync_store_access(&repo);
             }
         }
     }
@@ -778,9 +789,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                     drop(listener);
                     sweep_trash(&root);
                     let caller = Caller::from_uid(if user_mode { own } else { 0 });
-                    if !user_mode {
-                        periodic(&root, hourly);
-                    }
+                    periodic(&root, hourly, user_mode.then_some(own));
                     crate::follow::tick(&root, caller.clone());
                     // Dead cache states in remotes that nobody pushes to (docs/cache-overlays.md).
                     if hourly {
