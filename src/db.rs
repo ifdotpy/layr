@@ -56,12 +56,7 @@ CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, o
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
-<<<<<<< head
 CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust','trust.delegate');
-||||||| base
-=======
-CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust');
->>>>>>> origin-https/main
 CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
 CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
 CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
@@ -1439,19 +1434,11 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
-<<<<<<< head
     /// The project creator and the trust records (`machine.trust`, `machine.untrust`, `trust.delegate`), for
     /// `layr_store::trust`.
     pub fn trust_history(&self) -> Result<(Option<String>, Vec<Record>)> {
         let mut st = self.conn.prepare_cached(
             "SELECT raw FROM records WHERE op IN ('project','machine.trust','machine.untrust','trust.delegate') ORDER BY time, machine, seq",
-||||||| base
-=======
-    /// The project creator and the trust records (`machine.trust`, `machine.untrust`), for `layr_store::trust`.
-    pub fn trust_history(&self) -> Result<(Option<String>, Vec<Record>)> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT raw FROM records WHERE op IN ('project','machine.trust','machine.untrust') ORDER BY time, machine, seq",
->>>>>>> origin-https/main
         )?;
         let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         let mut creator = None;
