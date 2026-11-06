@@ -182,6 +182,51 @@ fn history_walks_merge_and_auto_states_but_excludes_auxiliary_roots() {
     assert_eq!(p.merge_base("a", "b"), Some("root".into()));
 }
 #[test]
+fn merge_base_agrees_with_the_pairwise_rule_and_is_fast_on_a_long_history() {
+    // A history with merges: each state has one or two earlier parents (a fixed pseudo-random choice).
+    let mut seed: u64 = 7;
+    let mut next = |n: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    let names: Vec<String> = (0..60).map(|i| format!("s{i}")).collect();
+    let mut a = record(1, "commit");
+    a.states.push(state("s0", StateKind::Commit, &[]));
+    for i in 1..names.len() {
+        let mut parents = vec![names[next(i)].as_str()];
+        if next(3) == 0 {
+            let other = names[next(i)].as_str();
+            if !parents.contains(&other) {
+                parents.push(other);
+            }
+        }
+        a.states.push(state(&names[i], StateKind::Commit, &parents));
+    }
+    let p = fold(vec![a]);
+    let pairwise = |x: &str, y: &str| {
+        let right: BTreeSet<_> = p.ancestors(y).into_iter().collect();
+        let common: Vec<_> = p.ancestors(x).into_iter().filter(|id| right.contains(id)).collect();
+        common.iter().find(|c| !common.iter().any(|d| d != *c && p.ancestors(d).contains(c))).cloned()
+    };
+    for x in &names {
+        for y in &names {
+            assert_eq!(p.merge_base(x, y), pairwise(x, y), "{x} {y}");
+        }
+    }
+    // A long line and a branch from its start: the pairwise rule walks the history once per common ancestor.
+    let mut b = record(1, "commit");
+    b.states.push(state("c0", StateKind::Commit, &[]));
+    let chain: Vec<String> = (0..5000).map(|i| format!("c{i}")).collect();
+    for i in 1..chain.len() {
+        b.states.push(state(&chain[i], StateKind::Commit, &[chain[i - 1].as_str()]));
+    }
+    b.states.push(state("side", StateKind::Commit, &["c4000"]));
+    let p = fold(vec![b]);
+    let started = std::time::Instant::now();
+    assert_eq!(p.merge_base("c4999", "side"), Some("c4000".into()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+}
+#[test]
 fn queue_outcomes_keep_probes_and_removal() {
     let entry = json!({"id":"q","into":"main","target_line":"line","state":"s1","added_by":10,"time":1,"status":"done","attempts":2,"result":"merged","probes":{"status":"passed","behavior":{"base":"before","head":"merged","base_source":"available","head_source":"available","probes":[]}}});
     let mut a = record(1, "queue.done");

@@ -52,7 +52,7 @@ pub(super) fn model(project: &str, records: &reader::Records, machine: &str) -> 
     if !records.gaps.is_empty() {
         bail!("remote record gaps prevent reading release files");
     }
-    let trusted = layr_store::public::trusted_writers(project, &records.lines)?;
+    let trusted = layr_store::public::trusted_writers_checked(project, &records.lines)?;
     let lines = records
         .lines
         .iter()
@@ -124,7 +124,7 @@ impl Store {
             } else {
                 &local
             };
-        let trusted = layr_store::public::trusted_writers(&descriptor.project, trust_source)?;
+        let trusted = layr_store::public::trusted_writers_checked(&descriptor.project, trust_source)?;
         if trusted.get(&self.machine) != Some(&self.key.verifying_key()) {
             bail!("release attach requires a trusted writer machine");
         }

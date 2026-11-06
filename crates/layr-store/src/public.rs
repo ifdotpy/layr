@@ -102,8 +102,18 @@ impl Manifest {
 
 /// Resolve writer trust from authenticated project history. The creator is the root;
 /// subsequent machine.trust records must come from an already trusted machine.
-/// Callers supply the complete verified record prefixes, just as for normal readers.
+/// Callers supply the complete record prefixes; each signature is checked here.
 pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<String, VerifyingKey>> {
+    writers(project, lines, true)
+}
+
+/// `trusted_writers` for records whose signatures the caller checked already (a fetch checks each record once, an
+/// import checks it before it stores it): the signatures are not checked a second time.
+pub fn trusted_writers_checked(project: &str, lines: &[String]) -> Result<BTreeMap<String, VerifyingKey>> {
+    writers(project, lines, false)
+}
+
+fn writers(project: &str, lines: &[String], verify: bool) -> Result<BTreeMap<String, VerifyingKey>> {
     let mut parsed = Vec::new();
     let mut keys = BTreeMap::new();
     let mut creator = None;
@@ -124,7 +134,10 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
     }
     for (line, value) in &parsed {
         let machine = value["machine"].as_str().context("record has no machine")?;
-        record::verify_line(line.as_bytes(), keys.get(machine).context("writer has no machine record")?)?;
+        let key = keys.get(machine).context("writer has no machine record")?;
+        if verify {
+            record::verify_line(line.as_bytes(), key)?;
+        }
         if value["op"] == "project" {
             if value["data"]["id"].as_str() != Some(project) || creator.replace(machine.to_string()).is_some() {
                 bail!("ambiguous project creator");
@@ -263,6 +276,7 @@ mod tests {
         let trusted = trusted_writers(PROJECT, &lines).unwrap();
         public.verify_signer(&trusted).unwrap();
         assert!(!trusted.contains_key(ROGUE));
+        assert_eq!(trusted_writers_checked(PROJECT, &lines).unwrap(), trusted, "checked records give the same writers");
         lines[0] = registration(OWNER, &rogue);
         assert!(trusted_writers(PROJECT, &lines).is_err());
     }

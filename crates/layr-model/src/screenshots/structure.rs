@@ -334,10 +334,14 @@ fn region(line: &Line, kind: &str, out: &mut Vec<Value>) {
         }
     }
 }
+/// The change of structure from `a` to `b`. Lines are matched without their indent, so a new wrapper element (its
+/// children one level deeper) is one added element, not a removed and added subtree.
 pub(super) fn compare(a: &Document, b: &Document, old_path: &str, new_path: &str) -> Value {
     let old = a.text();
     let new = b.text();
-    let diff = TextDiff::from_lines(&old, &new);
+    let (old_keys, new_keys): (Vec<&str>, Vec<&str>) =
+        (a.lines.iter().map(|l| l.text.trim_start()).collect(), b.lines.iter().map(|l| l.text.trim_start()).collect());
+    let diff = TextDiff::from_slices(&old_keys, &new_keys);
     let mut deleted = Vec::<&Line>::new();
     let mut inserted = Vec::<&Line>::new();
     let (mut added, mut removed, mut texts) = (0, 0, 0);
@@ -404,7 +408,36 @@ pub(super) fn compare(a: &Document, b: &Document, old_path: &str, new_path: &str
     }
     flush(&mut deleted, &mut inserted);
     json!({"elements_added":added,"elements_removed":removed,"text_changes":texts,"structure_regions":regions,
-        "structure_diff":if old==new {String::new()}else{diff.unified_diff().header(old_path,new_path).to_string()}})
+        "structure_diff":if old==new {String::new()}else{unified(&diff, a, b, old_path, new_path)}})
+}
+
+/// A unified diff of the matched lines that shows each line as it is, with its indent: a line whose indent changed
+/// is a context line.
+fn unified(diff: &TextDiff<'_, '_, '_, str>, a: &Document, b: &Document, old_path: &str, new_path: &str) -> String {
+    let mut out = format!("--- {old_path}\n+++ {new_path}\n");
+    for group in diff.grouped_ops(3) {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else { continue };
+        let (old_range, new_range) =
+            (first.old_range().start..last.old_range().end, first.new_range().start..last.new_range().end);
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_range.start + 1,
+            old_range.len(),
+            new_range.start + 1,
+            new_range.len()
+        ));
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let (sign, line) = match change.tag() {
+                    ChangeTag::Delete => ('-', &a.lines[change.old_index().unwrap()]),
+                    ChangeTag::Insert => ('+', &b.lines[change.new_index().unwrap()]),
+                    ChangeTag::Equal => (' ', &b.lines[change.new_index().unwrap()]),
+                };
+                out.push_str(&format!("{sign}{}\n", line.text));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -422,6 +455,16 @@ mod tests {
         assert_eq!(result["elements_removed"], 0);
         assert_eq!(result["text_changes"], 2);
         assert_eq!(result["structure_regions"], json!([]));
+    }
+    #[test]
+    fn a_new_wrapper_is_one_added_element() {
+        let a = normalize("<main><p>Text</p><button>Go</button></main>", "html", &[]).unwrap();
+        let b = normalize("<main><section><p>Text</p><button>Go</button></section></main>", "html", &[]).unwrap();
+        let result = compare(&a, &b, "a", "b");
+        assert_eq!((result["elements_added"].as_u64(), result["elements_removed"].as_u64()), (Some(1), Some(0)), "{result}");
+        assert_eq!(result["text_changes"], 0);
+        let shown = result["structure_diff"].as_str().unwrap();
+        assert!(shown.contains("+") && shown.contains("section") && !shown.contains("-  <p>"), "{shown}");
     }
     #[test]
     fn html_drops_generated_ids_times_and_ignored_attributes() {
