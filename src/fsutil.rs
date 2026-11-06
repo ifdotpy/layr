@@ -1277,6 +1277,9 @@ pub struct Space {
 
 /// Run a dynamic queue of background jobs, each of which can add more jobs.
 pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) -> Result<(), crate::pools::PoolError> {
+    if seed.is_empty() {
+        return Ok(());
+    }
     fn spawn<'scope, T: Send + 'scope>(scope: &rayon::Scope<'scope>, job: T, work: &'scope (impl Fn(T, &dyn Fn(T)) + Sync)) {
         scope.spawn(move |scope| work(job, &|child| spawn(scope, child, work)));
     }
