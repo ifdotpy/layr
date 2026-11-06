@@ -28,6 +28,15 @@ export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
 
+# Resolve rustup's toolchain in the sudo user's home, where the test owner can read it.
+owner_toolchain_env() {
+    if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        export RUSTUP_HOME=${SUDO_RUSTUP_HOME:-$sudo_home/.rustup} CARGO_HOME=${SUDO_CARGO_HOME:-$sudo_home/.cargo}
+    fi
+}
+
 l() {
     "$LAYR" "$@"
     local rc=$?
