@@ -1335,7 +1335,7 @@ pub enum ExtentKey {
     Disk(u64),
     /// Inline btrfs data, which lives in metadata: snapshots that share the file share the item.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    Inline { lineage: [u8; 16], ino: u64, offset: u64, generation: u64, payload: u64 },
+    Inline { ino: u64, offset: u64, generation: u64, payload: u64 },
     /// Data without a physical address, identified by its inode and logical offset.
     #[cfg(target_os = "linux")]
     Unaddressed { dev: u64, ino: u64, offset: u64 },
@@ -1448,7 +1448,7 @@ pub fn fiemap_visit_shallow(
     root: &Path,
     seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
     dirs: &mut dyn FnMut(std::path::PathBuf),
-    f: &mut dyn FnMut(&Held),
+    f: &mut dyn FnMut(&Held, &File, u64),
 ) -> Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(v) => v,
@@ -1461,8 +1461,8 @@ pub fn fiemap_visit_shallow(
         if m.is_dir() {
             dirs(entry.path());
         } else if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
-            match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
-                Ok(extents) => fiemap_held(&extents, m.dev(), m.ino(), f),
+            match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file).map(|extents| (file, extents))) {
+                Ok((file, extents)) => fiemap_held(&extents, m.dev(), m.ino(), &mut |held| f(held, &file, m.dev())),
                 Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                 Err(err) => return Err(err).with_context(|| entry.path().display().to_string()),
             }

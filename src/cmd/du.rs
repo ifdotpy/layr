@@ -18,7 +18,9 @@ fn line_spaces(lines: &[(String, PathBuf)]) -> Vec<Result<Space>> {
     crate::fsutil::work_queue(seed, |(i, path), add| {
         let walked = (|| -> Result<Space> {
             let mut space = Space::default();
-            crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| add((i, child)), &mut |held| space.add(held))?;
+            crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| add((i, child)), &mut |held, _, _| {
+                space.add(held)
+            })?;
             Ok(space)
         })();
         let mut result = results[i].lock().unwrap();
@@ -258,15 +260,27 @@ enum FsId {
     Device(u64),
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+fn file_filesystem(dir_dev: u64, file_dev: u64, dir_fs: FsId, resolve: impl FnOnce() -> FsId) -> FsId {
+    if dir_dev == file_dev {
+        dir_fs
+    } else {
+        resolve()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_fd(file: &std::fs::File, dev: u64) -> FsId {
+    use std::os::fd::AsFd;
+    crate::sys::filesystem_uuid(file.as_fd()).map(FsId::BtrfsUuid).unwrap_or(FsId::Device(dev))
+}
+
 fn filesystem(path: &Path) -> std::io::Result<FsId> {
     use std::os::unix::fs::MetadataExt;
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::AsFd;
         if let Ok(file) = std::fs::File::open(path) {
-            if let Ok(uuid) = crate::sys::filesystem_uuid(file.as_fd()) {
-                return Ok(FsId::BtrfsUuid(uuid));
-            }
+            return Ok(filesystem_fd(&file, file.metadata()?.dev()));
         }
     }
     Ok(FsId::Device(path.metadata()?.dev()))
@@ -388,33 +402,46 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
         let unit_fs =
             if nested.load(std::sync::atomic::Ordering::Relaxed) { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
         let mut own = 0u64;
-        let mut local: HashMap<ExtentKey, u64> = HashMap::new();
-        let mut collect = |h: &crate::fsutil::Held| {
+        let mut local: HashMap<(FsId, ExtentKey), u64> = HashMap::new();
+        let mut collect = |h: &crate::fsutil::Held, fsid: FsId| {
             own += h.exclusive;
             for &(k, b) in h.shared {
-                let e = local.entry(k).or_insert(0);
+                let e = local.entry((fsid, k)).or_insert(0);
                 *e = (*e).max(b);
             }
         };
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         let walked = match unit_fs {
             Ok(Some(fsid)) => {
-                crate::fsutil::fiemap_visit_shallow(&path, &seen[i], &mut |child| _add((i, child)), &mut collect).map(|()| fsid)
+                use std::os::unix::fs::MetadataExt;
+                match std::fs::metadata(&path) {
+                    Ok(meta) => crate::fsutil::fiemap_visit_shallow(
+                        &path,
+                        &seen[i],
+                        &mut |child| _add((i, child)),
+                        &mut |held, file, dev| {
+                            let file_fs = file_filesystem(meta.dev(), dev, fsid, || filesystem_fd(file, dev));
+                            collect(held, file_fs);
+                        },
+                    )
+                    .map(|()| ()),
+                    Err(err) => Err(err.into()),
+                }
             }
             Ok(None) => return,
             Err(err) => Err(err.into()),
         };
         #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
         let walked =
-            crate::storage::visit_space(&path, &mut collect).map(|()| filesystems[i].expect("only present parts are walked"));
+            crate::storage::visit_space(&path, &mut |held| collect(held, filesystems[i].expect("only present parts are walked")));
         let mut result = results[i].lock().unwrap();
         match walked {
             Err(e) if in_trash && vanished(&e) => {}
             Err(e) => *result = Err(e),
-            Ok(fsid) => {
+            Ok(()) => {
                 let mut all = keys.lock().unwrap();
                 for (k, b) in local {
-                    let e = all.entry((fsid, k)).or_insert((i, b));
+                    let e = all.entry(k).or_insert((i, b));
                     if e.0 != i {
                         e.0 = SHARED;
                     }
@@ -471,6 +498,14 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
 mod tests {
     use super::vanished;
     use std::path::PathBuf;
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn file_mount_uses_its_own_filesystem() {
+        use super::{file_filesystem, FsId};
+        assert_eq!(file_filesystem(1, 1, FsId::Device(1), || panic!("same device needs no lookup")), FsId::Device(1));
+        assert_eq!(file_filesystem(1, 2, FsId::Device(1), || FsId::Device(2)), FsId::Device(2));
+    }
 
     #[test]
     fn vanished_part_has_no_filesystem() {
