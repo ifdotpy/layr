@@ -376,7 +376,7 @@ impl<'a> Repo<'a> {
             ctx,
             self,
             &name,
-            &self.cache_readers()?,
+            &self.cache_readers(&name)?,
             Mode::Follow,
             false,
             &cache_props(),
@@ -387,11 +387,18 @@ impl<'a> Repo<'a> {
         Ok(name)
     }
 
-    /// The readers of a cache overlay besides its owner: the machines this project trusts (this
-    /// machine included), so that store copies and peer sync give caches only to them. Local users
-    /// take a cache by the rules of `usable_cache`.
-    fn cache_readers(&self) -> Result<Vec<String>> {
-        Ok(crate::store_remote::overlays::trusted_keys(self)?.into_keys().map(|m| format!("machine:{m}")).collect())
+    /// The readers of cache overlay `name` besides its owner: the machines this project trusts (this
+    /// machine included), so that store copies and peer sync give caches only to them. A limited
+    /// machine reads it while its trust lasts and when the trust names it (docs/ci-trust.md). Local
+    /// users take a cache by the rules of `usable_cache`.
+    fn cache_readers(&self, name: &str) -> Result<Vec<String>> {
+        let terms = self.p.trust_terms(&[])?;
+        let now = crate::ids::now_ms();
+        Ok(crate::store_remote::overlays::trusted_keys(self)?
+            .into_keys()
+            .filter(|m| terms.get(m).is_none_or(|t| t.live(now) && t.reads(name)))
+            .map(|m| format!("machine:{m}"))
+            .collect())
     }
 
     /// Add machines that the project trusts since the cache overlay was made to its readers. Only a
@@ -407,13 +414,18 @@ impl<'a> Repo<'a> {
                 .filter(|(_, r)| **r >= crate::access::Role::Reader)
                 .map(|(p, _)| p.clone())
                 .collect();
-            let want = self.cache_readers()?;
+            let want = self.cache_readers(name)?;
             if want.iter().all(|m| have.contains(m)) || !orepo.is_admin(ctx) {
                 return Ok(());
             }
             crate::overlay_managers::of(self, name)?.require(&ctx.store.machine.id)?;
             let info = self.need_overlay(name)?;
-            let mut readers: Vec<String> = have.into_iter().filter(|p| *p != format!("user:{}", info.owner)).collect();
+            // Machines whose trust ended leave the list (their key slots stay until a new epoch, docs/ci-trust.md).
+            let terms = self.p.trust_terms(&[])?;
+            let now = crate::ids::now_ms();
+            let ended = |p: &str| p.strip_prefix("machine:").and_then(|m| terms.get(m)).is_some_and(|t| !t.live(now));
+            let mut readers: Vec<String> =
+                have.into_iter().filter(|p| *p != format!("user:{}", info.owner) && !ended(p)).collect();
             for m in want {
                 if !readers.contains(&m) {
                     readers.push(m);

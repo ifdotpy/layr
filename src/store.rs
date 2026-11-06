@@ -1217,9 +1217,13 @@ impl<'a> Project<'a> {
         let present = self.state_present();
         // The layer bases are not in the records: they come from disk, read before the rebuild.
         let bases = self.layer_bases_on_disk()?;
+        let terms = self.trust_terms(&[])?;
         self.db.rebuild(only_older, |db| {
             for line in db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
+                if self.refusal(&terms, &s.record)?.is_some() {
+                    continue;
+                }
                 db.derive(&s.record, &present, &self.store.machine.id)?;
             }
             for (id, deleted) in db.present_states()? {
@@ -1414,6 +1418,9 @@ impl<'a> Project<'a> {
                 fresh.push(oplog::Signed { record: s.record.clone(), line: s.line.clone() });
             }
         }
+        // Limited machines (docs/ci-trust.md): their records outside their terms are stored but have no effect, and
+        // they vouch for nobody.
+        let terms = self.trust_terms(&fresh.iter().map(|s| &s.record).collect::<Vec<_>>())?;
         // Trust: known machines, then machines vouched for by trusted ones in this batch.
         if !matches!(trust, Trust::All) {
             let mut trusted: BTreeSet<String> = BTreeSet::new();
@@ -1433,7 +1440,10 @@ impl<'a> Project<'a> {
             loop {
                 let before = trusted.len();
                 for s in &fresh {
-                    if s.record.op == "machine.trust" && trusted.contains(&s.record.machine) {
+                    if s.record.op == "machine.trust"
+                        && trusted.contains(&s.record.machine)
+                        && !terms.contains_key(&s.record.machine)
+                    {
                         let (m, k) =
                             (s.record.data["machine"].as_str().unwrap_or(""), s.record.data["public_key"].as_str().unwrap_or(""));
                         if keys.get(m).map(|x| x == k).unwrap_or(false) {
@@ -1465,12 +1475,102 @@ impl<'a> Project<'a> {
         self.db.with_tx(|| {
             for s in &fresh {
                 if self.db.insert_record(&s.record, &s.line)? {
+                    if let Some(why) = self.refusal(&terms, &s.record)? {
+                        if std::env::var_os("LAYR_TRACE").is_some() {
+                            let (seq, machine, op) = (s.record.seq, crate::ids::short(&s.record.machine), &s.record.op);
+                            eprintln!("trace record {seq} of machine {machine} ({op}) has no effect: {why}");
+                        }
+                        continue;
+                    }
                     self.db.derive(&s.record, &present, &local)?;
                 }
             }
             Ok(())
         })?;
         Ok(n)
+    }
+
+    /// The limited machines (`layr_store::trust::terms`), from the trust records of this project, or for an
+    /// overlay, of its project. `more` are records of an import that are not stored yet.
+    pub fn trust_terms(&self, more: &[&Record]) -> Result<std::collections::BTreeMap<String, layr_store::trust::Terms>> {
+        let parent;
+        let db = match self.name.split_once('%') {
+            Some((project, _)) => {
+                let path = db_file(&self.store.project_dir(project)?);
+                if !path.is_file() {
+                    return Ok(Default::default());
+                }
+                parent = Db::open(&path)?;
+                &parent
+            }
+            None => &self.db,
+        };
+        let (mut creator, mut records) = db.trust_history()?;
+        if !self.is_overlay() {
+            for record in more {
+                match record.op.as_str() {
+                    "project" => {
+                        creator.get_or_insert(record.machine.clone());
+                    }
+                    "machine.trust" | "machine.untrust" => records.push((*record).clone()),
+                    _ => {}
+                }
+            }
+        }
+        if records.is_empty() {
+            return Ok(Default::default());
+        }
+        let Some(creator) = creator else { return Ok(Default::default()) };
+        Ok(layr_store::trust::terms(
+            &creator,
+            records.iter().map(|r| layr_store::trust::TrustRecord { signer: &r.machine, time: r.time, op: &r.op, data: &r.data }),
+        ))
+    }
+
+    /// Why a record has no effect here (`layr_store::trust::Terms::refusal`); None when it counts. A machine always
+    /// takes its own records.
+    pub fn refusal(
+        &self,
+        terms: &std::collections::BTreeMap<String, layr_store::trust::Terms>,
+        record: &Record,
+    ) -> Result<Option<&'static str>> {
+        if record.machine == self.store.machine.id {
+            return Ok(None);
+        }
+        let Some(limits) = terms.get(&record.machine) else { return Ok(None) };
+        // Every line the record moves is a new line, or one that a record of the same machine made.
+        let mut own = true;
+        for (id, change) in &record.lines {
+            own &= match self.db.line_machine(id)? {
+                None => change.before.is_none(),
+                Some(machine) => machine == record.machine,
+            };
+        }
+        let overlay = self.name.split_once('%').map(|(_, name)| name);
+        Ok(limits.refusal(record.time, &record.op, &record.data, overlay, own))
+    }
+
+    /// The owners that the records with an effect give (`Db::recomputed_owners`).
+    pub fn recomputed_owners(&self) -> Result<Vec<crate::owners::Row>> {
+        let terms = self.trust_terms(&[])?;
+        self.db.recomputed_owners(&self.store.machine.id, &|record| Ok(self.refusal(&terms, record)?.is_none()))
+    }
+
+    /// The records that have an effect here (`refusal`), as `export_jsonl`: the source of keys, readers and modes.
+    pub fn effective_jsonl(&self) -> Result<String> {
+        let terms = self.trust_terms(&[])?;
+        let all = self.export_jsonl()?;
+        if terms.is_empty() {
+            return Ok(all);
+        }
+        let mut out = String::new();
+        for line in all.lines() {
+            if self.refusal(&terms, &oplog::parse_line(line, None)?.record)?.is_none() {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        Ok(out)
     }
 
     /// Machines whose records this project has but does not trust yet, with their keys.

@@ -56,6 +56,7 @@ CREATE INDEX IF NOT EXISTS attestations_subject ON attestations(subject, kind, o
 CREATE TABLE IF NOT EXISTS queue_entries (id TEXT PRIMARY KEY, rec TEXT, deleted INTEGER DEFAULT 0, ord TEXT);
 CREATE TABLE IF NOT EXISTS attestation_revocations (id TEXT, target TEXT, machine TEXT, uid INTEGER, ord TEXT, PRIMARY KEY(id,target));
 CREATE INDEX IF NOT EXISTS records_legacy_evidence ON records(op) WHERE op IN ('approve','approve.withdraw','check');
+CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','machine.trust','machine.untrust');
 CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
 CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
 CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
@@ -1426,6 +1427,30 @@ impl Db {
         let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
         let v = st.query_map(params![op], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+    }
+
+    /// The project creator and the trust records (`machine.trust`, `machine.untrust`), for `layr_store::trust`.
+    pub fn trust_history(&self) -> Result<(Option<String>, Vec<Record>)> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT raw FROM records WHERE op IN ('project','machine.trust','machine.untrust') ORDER BY time, machine, seq",
+        )?;
+        let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let mut creator = None;
+        let mut records = Vec::new();
+        for line in raw {
+            let record = crate::oplog::parse_line(&line, None)?.record;
+            if record.op == "project" {
+                creator.get_or_insert(record.machine);
+            } else {
+                records.push(record);
+            }
+        }
+        Ok((creator, records))
+    }
+
+    /// The machine whose record made line `id`.
+    pub fn line_machine(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.conn.prepare_cached("SELECT machine FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?)
     }
 
     /// The trusted machines and their public keys (hex).

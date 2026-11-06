@@ -1266,7 +1266,7 @@ impl OwnersCheck {
 }
 
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
-    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+    let want = repo.p.recomputed_owners()?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
     let stale = repo.p.db.stale_undo_rows()?;
     let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
@@ -1425,7 +1425,7 @@ pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
 pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
-        None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
+        None => repo.p.db.owners_diff(&repo.p.recomputed_owners()?)?,
     };
     repo.p.db.apply_owners_diff(&missing, &extra)?;
     for holder in repo.p.db.pin_holders()? {
@@ -1470,7 +1470,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
             snapshot(repo, || {
-                let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+                let want = repo.p.recomputed_owners()?;
                 Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
             })?
         };
