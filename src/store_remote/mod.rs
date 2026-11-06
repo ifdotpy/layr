@@ -1014,12 +1014,13 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
                     let verb = if a.has("-n") { "would delete" } else { "deleted" };
                     outln!(
                         ctx,
-                        "overlay {overlay}: {verb} {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes",
+                        "overlay {overlay}: {verb} {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes; {} dead chunk(s) wait for a later pass",
                         swept.trees.len(),
                         swept.bytes,
                         swept.chunks,
                         swept.packs.len(),
-                        swept.chunk_bytes
+                        swept.chunk_bytes,
+                        swept.chunks_waiting
                     );
                 }
             }

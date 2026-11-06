@@ -94,4 +94,25 @@ out=$(l fsck --caches --remote archive 2>&1); rc=$?
 eq "after the line delete and a push nothing is unreachable" 0 "$rc"
 has "no chunk of the line is left" "0 unreachable chunk(s)" "$out"
 eq "its pack is gone" "$before" "$(packs | wc -l | tr -d ' ')"
+
+# With a wait: a sweep releases a dead chunk only when an earlier pass found it dead long enough before, so a push
+# of another machine that reused it meanwhile names it in its tree first.
+l line new y main >/dev/null 2>&1
+(cd "$P/y" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/yonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+with_y=$(packs | wc -l | tr -d ' ')
+l line delete -D y >/dev/null
+LAYR_TEST_CHUNK_GRACE=3600 l push archive -q --caches >/dev/null 2>&1
+eq "a chunk found dead for the first time stays" "$with_y" "$(packs | wc -l | tr -d ' ')"
+marks=$(find "$LAYR_ROOT" -name dead-chunks | head -1)
+ok "the pass marks it" test -s "$marks"
+python3 - "$marks" <<'PY'
+import sys, time
+path = sys.argv[1]
+lines = [l.split() for l in open(path) if l.strip()]
+open(path, "w").write("".join(f"{i} {int(time.time()) - 7200}\n" for i, _ in lines))
+PY
+# A push that sends nothing runs no pass: the sweep of the remote runs by itself.
+out=$(LAYR_TEST_CHUNK_GRACE=3600 l gc --remote archive 2>&1)
+echo "$out"
+eq "a later pass after the wait releases it" "$before" "$(packs | wc -l | tr -d ' ')"
 finish

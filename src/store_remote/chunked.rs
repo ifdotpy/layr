@@ -102,6 +102,18 @@ fn places_of(indexes: &BTreeMap<String, Index>) -> Places {
 
 /// The published pack indexes of the layer, by pack.
 pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
+    // A release of another machine may delete a listed pack before its index is read; its live chunks are in a new
+    // pack then, so the listing runs again.
+    for _ in 0..3 {
+        if let Some(out) = indexes_once(backend, dir, identity)? {
+            return Ok(out);
+        }
+    }
+    indexes_once(backend, dir, identity)?.context("the chunk packs changed during each of 4 listings; retry")
+}
+
+/// The published indexes, or None when a listed pack went away before its index was read.
+fn indexes_once(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<Option<BTreeMap<String, Index>>> {
     let packs = packs(backend)?;
     // Forget cached indexes of packs that are gone, so the cache does not grow.
     if let Some(Ok(entries)) = dir.map(|dir| std::fs::read_dir(cache_dir(dir))) {
@@ -120,10 +132,16 @@ pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> 
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("index read panicked")))).collect()
         });
         for (pack, index) in batch.iter().zip(loaded) {
-            out.insert(pack.clone(), index?);
+            match index {
+                Ok(index) => {
+                    out.insert(pack.clone(), index);
+                }
+                Err(_) if !self::packs(backend)?.contains(pack) => return Ok(None),
+                Err(e) => return Err(e),
+            }
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Uploads the chunks of the files of one state.
