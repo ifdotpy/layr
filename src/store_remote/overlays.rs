@@ -419,7 +419,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 continue;
             }
         };
-        let _lock = orepo.p.lock()?;
+        // The overlay's project lock covers its key records only. The upload (minutes for the first push of a cache)
+        // and the sweep run under the lock of the remote folder, so `line new` and `save --caches` do not wait.
+        let lock = orepo.p.lock()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
             authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
@@ -503,6 +505,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             published
         };
+        drop(lock);
         let identity = layer_identity(store, &orepo.p.id, &published)?;
         let scoped = layer(store, &published, identity.clone(), repo.need_overlay(&name)?.cache)?;
         if let Some(identity) = &identity {
@@ -525,6 +528,11 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
+        let push_lock = writer::push_folder_lock(&scoped.dir)?;
+        // Test only (tests/t190-overlay-push-lock.sh): a slow upload of the overlay.
+        if let Some(ms) = std::env::var("LAYR_TEST_OVERLAY_PUSH_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
         if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -541,6 +549,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 );
             }
         }
+        drop(push_lock);
         if let Some(identity) = &identity {
             if access_mode == layr_store::epochs::Mode::Service {
                 let recipient =
@@ -717,7 +726,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
             continue;
         };
         let scoped = layer(store, published, Some(identity), repo.need_overlay(&name)?.cache)?;
-        let _lock = orepo.p.lock()?;
+        let _push = writer::push_folder_lock(&scoped.dir)?;
         let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
         swept.trees.extend(old.trees);
         swept.parts.extend(old.parts);
