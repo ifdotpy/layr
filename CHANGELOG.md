@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.35.0](https://github.com/ifdotpy/layr/compare/v0.34.0...v0.35.0) (2026-11-06)
+
+
+### Features
+
+* **caches:** a cargo unit whose old sources the new line has moves with it ([#340](https://github.com/ifdotpy/layr/issues/340)) ([6c4d042](https://github.com/ifdotpy/layr/commit/6c4d04260c35701462f42f5fe07909102346a50e))
+* **caches:** save --caches --save-back &lt;line&gt; gives a CI job's caches back ([#336](https://github.com/ifdotpy/layr/issues/336)) ([c534759](https://github.com/ifdotpy/layr/commit/c534759cfa15214fddcfa4d982fb5deac837812f))
+* **remote:** a broker machine trusts CI jobs inside a delegation ([#338](https://github.com/ifdotpy/layr/issues/338)) ([94e3d9c](https://github.com/ifdotpy/layr/commit/94e3d9c7d53089399aa6c593a858f74c85864847))
+* **remote:** limited machine trust for CI jobs: an end, a role, the overlays, and untrust ([#335](https://github.com/ifdotpy/layr/issues/335)) ([e2c4fd8](https://github.com/ifdotpy/layr/commit/e2c4fd8f4a8bfa1e577dbcb45eb4285f2ea187cb))
+
+
+### Bug Fixes
+
+* **caches:** the cargo prune keeps the build unit of a crate with a cdylib ([#337](https://github.com/ifdotpy/layr/issues/337)) ([786f6ff](https://github.com/ifdotpy/layr/commit/786f6ff8ecf10be009ddae354dc7cfbbef04e8c4))
+* **remote:** a push whose base tree is gone uploads a complete tree; a line without a folder can be deleted ([#343](https://github.com/ifdotpy/layr/issues/343)) ([fed3bc7](https://github.com/ifdotpy/layr/commit/fed3bc71f7dc8cd6ffb9414fd74afe1458cdeae6))
+* **remote:** the first fetch of an overlay layer writes its seen-records file ([#339](https://github.com/ifdotpy/layr/issues/339)) ([5662c9b](https://github.com/ifdotpy/layr/commit/5662c9be7106b87a2b8c5dbd6dd24fc96be440bf))
+
 ## [0.34.0](https://github.com/ifdotpy/layr/compare/v0.33.0...v0.34.0) (2026-11-06)
 
 
