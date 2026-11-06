@@ -591,8 +591,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let base = match base_id {
             Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
             Some(id) => {
-                let mut pushed = index.get(&id).and_then(|entry| cached_tree(&tree_cache, entry));
-                if pushed.is_none() && store.backend.can_read() {
+                // A tree that the local index names can be gone from the remote: a sweep of another machine (or an
+                // earlier one of this machine, before it knew a state built on it) deleted it. A delta needs its base
+                // on the remote, so the state then goes up as a complete tree, and the index forgets the base.
+                let name = format::tree_name(&id, &present[&id]);
+                let listed = store.backend.list(&format!("states/{id}/"))?.iter().any(|object| object.key == name);
+                let mut pushed = if listed { index.get(&id).and_then(|entry| cached_tree(&tree_cache, entry)) } else { None };
+                if !listed {
+                    index.remove(&id);
+                    present.remove(&id);
+                } else if pushed.is_none() && store.backend.can_read() {
                     if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
                         if remote_records.is_none() {
                             remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
