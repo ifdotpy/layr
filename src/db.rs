@@ -1749,49 +1749,7 @@ mod tests {
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
     #[test]
-<<<<<<< head
-    fn root_revokes_the_evidence_of_every_user_of_its_machine_only() {
-        let db = memory();
-        let state = "01a12290-0000-7000-8000-000000000003";
-        let machine = "01a12290-0000-7000-8000-00000000aaaa";
-        let attest = |seq: u64, uid: u32, signer: &str, kind: &str, revokes: Vec<String>| {
-            let mut r = state_record(seq, state, vec![]);
-            r.states.clear();
-            r.id = format!("01a12290-0000-7000-8000-{seq:012}");
-            r.op = "attest".into();
-            r.time = seq as i64;
-            r.actor.uid = uid;
-            r.machine = signer.into();
-            r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:kind.into(),payload_digest:"0".repeat(64),payload_ref:None,signer:signer.into(),time:seq as i64},"revokes":revokes});
-            r
-        };
-        let other_machine = "01a12290-0000-7000-8000-00000000bbbb";
-        let runner = attest(1, 1001, machine, "check", vec![]);
-        let foreign = attest(2, 1001, other_machine, "check", vec![]);
-        for r in [&runner, &foreign] {
-            db.derive(r, &|_| true, machine).unwrap();
-        }
-        assert_eq!(db.own_attestations(state, machine, Some(0), None).unwrap(), Vec::<String>::new());
-        assert_eq!(db.own_attestations(state, machine, None, None).unwrap(), vec![runner.id.clone()]);
-        // A root revoke of this machine names the runner's check (and, forged, another machine's).
-        let revoke = attest(3, 0, machine, "revoke", vec![runner.id.clone(), foreign.id.clone()]);
-        db.derive(&revoke, &|_| true, machine).unwrap();
-        // The filter of the evidence reads (`checks`, `check_exit`).
-        let mut st = db
-            .conn
-            .prepare("SELECT id FROM attestations a WHERE kind='check' AND NOT EXISTS (SELECT 1 FROM attestation_revocations v
-                WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord) ORDER BY id")
-            .unwrap();
-        let left: Vec<String> = st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(left, vec![foreign.id.clone()], "root revokes its machine's users only");
-    }
-    #[test]
-    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
-||||||| base
-    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
-=======
     fn opening_a_current_database_takes_no_write_lock() {
->>>>>>> origin-https/main
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layr.sqlite");
