@@ -188,6 +188,8 @@ pub(super) fn import(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Optio
     let mut cache: BTreeMap<(u64, String), Vec<u8>> = BTreeMap::new();
     let mut last = None::<String>;
     let line_id = crate::ids::new_id();
+    // The import moves its line once per state: no other command moves it meanwhile (#194).
+    let _line_lock = repo.p.line_lock(&line_id, "main")?;
     let mut report = Report::default();
     for (seq, attempt) in attempts {
         let canonical = tree(store, &identity, &policy, seq, &attempt, &mut cache)?;
