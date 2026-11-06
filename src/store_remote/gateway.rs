@@ -16,6 +16,9 @@ use std::time::Duration;
 const OBJECT_LIMIT: usize = 32 << 20;
 const SLOTS_LIMIT: usize = 8 << 20;
 const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+/// A cached read proof is renewed when it expires within this time: a long push or a CI clock that runs behind the
+/// gateway by some seconds must not send a proof that the gateway sees as expired.
+const PROOF_RENEW_MS: i64 = 60_000;
 
 fn valid_token_expiry(expires: i64, now: i64, lifetime: i64) -> bool {
     expires > now && expires <= now + lifetime + CLOCK_SKEW_MS
@@ -454,7 +457,7 @@ impl Gateway {
 
     fn proof(&self) -> Result<String> {
         let mut cached = self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))?;
-        if let Some((token, _)) = cached.as_ref().filter(|(_, expires)| *expires > crate::ids::now_ms() + 10_000) {
+        if let Some((token, _)) = cached.as_ref().filter(|(_, expires)| *expires > crate::ids::now_ms() + PROOF_RENEW_MS) {
             return Ok(token.clone());
         }
         let identity = self
@@ -501,15 +504,30 @@ impl Gateway {
     }
 
     fn read_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
-        let token = self.proof().with_context(|| format!("gateway read {action}"))?;
-        let response = self.send_query(Method::GET, action, Some(&token), query, None)?;
+        self.proof_request(Method::GET, action, query, None)
+    }
+
+    /// Sends each request that carries a read proof (reads, listings, slot writes). A 401 means that the gateway
+    /// refused the proof: a restart discarded its in-memory HMAC key, or the proof expired (clock skew). The client
+    /// then exchanges one new proof and sends the request once again. A second 401 is an error. Other answers, a 404
+    /// too, go to the caller at once.
+    fn proof_request(&self, method: Method, action: &str, query: &[(&str, &str)], data: Option<Vec<u8>>) -> Result<Response> {
+        let token = self.proof().with_context(|| format!("gateway {method} {action}"))?;
+        let response = self.send_query(method.clone(), action, Some(&token), query, data.clone())?;
         if response.status().as_u16() != 401 {
             return Ok(response);
         }
-        // A gateway restart discards its in-memory HMAC key. Exchange one new proof.
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
-        let token = self.proof()?;
-        self.send_query(Method::GET, action, Some(&token), query, None)
+        let token = self.proof().with_context(|| format!("gateway {method} {action}: renew the read proof after HTTP 401"))?;
+        let response = self.send_query(method.clone(), action, Some(&token), query, data)?;
+        if response.status().as_u16() == 401 {
+            let body = bytes(response, 4096).unwrap_or_default();
+            bail!(
+                "gateway {method} {action}: HTTP 401 again with a new read proof ({}); check the clock of this machine and the project grant",
+                String::from_utf8_lossy(&body).trim()
+            );
+        }
+        Ok(response)
     }
 
     pub fn prove_reader(&self) -> Result<()> {
@@ -836,12 +854,13 @@ impl Gateway {
         }
         // Pending epoch slots are staged before discovery exists, so they cannot
         // obtain a read proof yet. A project writer uses its grant for those PUTs.
-        let token = if logical.starts_with("slots/") && (epoch_path(key).is_none() || self.token.is_none()) {
-            self.proof()?
+        let action = format!("objects/{key}");
+        let response = if logical.starts_with("slots/") && (epoch_path(key).is_none() || self.token.is_none()) {
+            self.proof_request(Method::PUT, &action, &[], Some(data))?
         } else {
-            self.token.clone().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?
+            let token = self.token.as_deref().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?;
+            self.send(Method::PUT, &action, Some(token), None, Some(data))?
         };
-        let response = self.send(Method::PUT, &format!("objects/{key}"), Some(&token), None, Some(data))?;
         match response.status().as_u16() {
             201 => Ok(true),
             412 => Ok(false),
@@ -1303,7 +1322,7 @@ mod tests {
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
         gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
         gateway.token = Some("project.grant".into());
-        *gateway.read.lock().unwrap() = Some(("old.read.proof".into(), crate::ids::now_ms() + 60_000));
+        *gateway.read.lock().unwrap() = Some(("old.read.proof".into(), crate::ids::now_ms() + 300_000));
         for key in [
             format!("project/epochs/{epoch}/slots/machine-test.age"),
             "slots/machine-test.age".into(),
@@ -1367,6 +1386,181 @@ mod tests {
         assert!(token_file(&dir.join("link"), uid).is_err());
         assert!(token_file(&dir, uid).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A fake gateway that issues read proofs. `answer` gets "METHOD path" and the bearer of each object request and
+    /// returns its status and body. It stops at a "GET /quit" request and returns the log of all requests before it.
+    fn proof_gateway(
+        recipient: String,
+        answer: impl Fn(&str, &str) -> (&'static str, String) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let mut log = Vec::new();
+            let mut issued = 0;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                let lower = head.to_ascii_lowercase();
+                let length: usize =
+                    lower.lines().find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let line: Vec<&str> = head.lines().next().unwrap().split(' ').collect();
+                let request = format!("{} {}", line[0], line[1].split('?').next().unwrap());
+                if request == "GET /quit" {
+                    return log;
+                }
+                let bearer = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("authorization: Bearer ").or_else(|| l.strip_prefix("Authorization: Bearer ")))
+                    .unwrap_or("-")
+                    .trim()
+                    .to_string();
+                log.push(format!("{request} {bearer}"));
+                let (status, reply) = match request.as_str() {
+                    "GET /v1/p/project/challenge" => {
+                        let sealed = keys::encrypt(&recipient, b"challenge.proof").unwrap();
+                        (
+                            "200 OK",
+                            serde_json::json!({"challenge": base64::engine::general_purpose::STANDARD.encode(sealed)})
+                                .to_string(),
+                        )
+                    }
+                    "POST /v1/p/project/token" => {
+                        issued += 1;
+                        let expires = crate::ids::now_ms() + 600_000;
+                        ("200 OK", serde_json::json!({"token": format!("new.proof{issued}"), "expires": expires}).to_string())
+                    }
+                    _ => answer(&request, &bearer),
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
+                    .unwrap();
+            }
+        });
+        (address, server)
+    }
+
+    /// A client with a read identity and a cached proof that expires in `expires_in` ms.
+    fn proof_client(address: &str, identity: &str, expires_in: i64) -> Gateway {
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.set_identity(identity).unwrap();
+        *gateway.read.lock().unwrap() = Some(("old.proof".into(), crate::ids::now_ms() + expires_in));
+        gateway
+    }
+
+    fn quit(address: &str, server: std::thread::JoinHandle<Vec<String>>) -> Vec<String> {
+        use std::io::Write;
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(stream, "GET /quit HTTP/1.1\r\n\r\n").unwrap();
+        server.join().unwrap()
+    }
+
+    const LISTING: &str = r#"{"objects":[],"continuation":null}"#;
+
+    #[test]
+    fn a_read_proof_that_expires_during_a_push_is_renewed_before_the_request() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |_, bearer| {
+            if bearer == "new.proof1" {
+                ("200 OK", LISTING.into())
+            } else {
+                ("401 Unauthorized", "read proof expired".into())
+            }
+        });
+        // 30 s is left: within the renew margin, as for a proof that a long push took 9 minutes ago.
+        let gateway = proof_client(&address, &identity, 30_000);
+        assert!(gateway.list("states/").unwrap().is_empty());
+        let log = quit(&address, server);
+        assert_eq!(
+            log,
+            ["GET /v1/p/project/challenge -", "POST /v1/p/project/token -", "GET /v1/p/project/objects new.proof1"],
+            "the proof is renewed before it goes out, so the gateway never sees an expired proof"
+        );
+    }
+
+    #[test]
+    fn a_401_on_a_listing_renews_the_proof_once_and_sends_again() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |_, bearer| {
+            if bearer == "new.proof1" {
+                ("200 OK", LISTING.into())
+            } else {
+                ("401 Unauthorized", "read proof expired".into())
+            }
+        });
+        // The client clock runs behind the gateway: the client sees 5 minutes left, the gateway sees an expired proof.
+        let gateway = proof_client(&address, &identity, 300_000);
+        assert!(gateway.list("states/").unwrap().is_empty());
+        let log = quit(&address, server);
+        assert_eq!(
+            log,
+            [
+                "GET /v1/p/project/objects old.proof",
+                "GET /v1/p/project/challenge -",
+                "POST /v1/p/project/token -",
+                "GET /v1/p/project/objects new.proof1"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_401_on_a_proof_write_renews_the_proof_once_and_sends_again() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, bearer| {
+            assert_eq!(request, "PUT /v1/p/project/objects/slots/machine-test.age");
+            if bearer == "new.proof1" {
+                ("201 Created", String::new())
+            } else {
+                ("401 Unauthorized", "read proof expired".into())
+            }
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        assert!(gateway.put_new("slots/machine-test.age", b"sealed slot".to_vec()).unwrap());
+        let log = quit(&address, server);
+        assert_eq!(
+            log,
+            [
+                "PUT /v1/p/project/objects/slots/machine-test.age old.proof",
+                "GET /v1/p/project/challenge -",
+                "POST /v1/p/project/token -",
+                "PUT /v1/p/project/objects/slots/machine-test.age new.proof1"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_401_after_a_renewal_fails_clearly() {
+        let identity = keys::generate_identity();
+        let (address, server) =
+            proof_gateway(keys::recipient_of(&identity).unwrap(), |_, _| ("401 Unauthorized", "read proof expired".into()));
+        let gateway = proof_client(&address, &identity, 300_000);
+        let error = format!("{:#}", gateway.list("states/").unwrap_err());
+        let log = quit(&address, server);
+        assert!(error.contains("HTTP 401 again with a new read proof") && error.contains("read proof expired"), "{error}");
+        assert_eq!(log.len(), 4, "one renewal and one more try, no loop: {log:?}");
+    }
+
+    #[test]
+    fn a_404_with_a_read_proof_is_not_sent_again() {
+        let identity = keys::generate_identity();
+        let (address, server) =
+            proof_gateway(keys::recipient_of(&identity).unwrap(), |_, _| ("404 Not Found", "no such project".into()));
+        let gateway = proof_client(&address, &identity, 300_000);
+        let error = format!("{:#}", gateway.get("states/ab").unwrap_err());
+        let log = quit(&address, server);
+        assert!(error.contains("no such project"), "{error}");
+        assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof"], "a 404 does not renew the proof or send again");
     }
 }
 
