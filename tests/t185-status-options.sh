@@ -24,15 +24,26 @@ printf 'untracked\n' > new.txt
 printf 'ignored\n' > debug.log
 
 ok "no-overlaps JSON succeeds" l status --json --no-overlaps
-ok "no-ignored JSON succeeds" l status --json --no-ignored
-# Stop here on an older binary: subsequent checks require valid JSON from both switches.
+# Stop here on an older binary: subsequent checks require the radar opt-out.
 if [ "$FAIL" -ne 0 ]; then finish; exit 1; fi
 
 LAYR_TRACE=1 l status --json --no-overlaps > "$T/no-overlaps.json" 2> "$T/no-overlaps.trace"
 no "disabled radar is never entered" grep -E 'status overlaps|overlap live|overlap compare' "$T/no-overlaps.trace"
+status_without_overlaps() {
+    LAYR_TRACE=1 l status "$1" --no-overlaps > "$T/no-overlaps-$1.out" 2> "$T/no-overlaps-$1.trace"
+}
+for format in --long -s --porcelain; do
+    ok "$format no-overlaps succeeds" status_without_overlaps "$format"
+    no "$format disabled radar is never entered" grep -E 'status overlaps|overlap live|overlap compare' "$T/no-overlaps-$format.trace"
+done
+no "no-overlaps text output has no radar section" grep 'Overlaps with' "$T/no-overlaps---long.out"
 no "disabled radar creates no compare cache" test -d "$LAYR_ROOT/projects/status-options/meta/overlap-compares"
 no "disabled radar creates no live cache" test -d "$LAYR_ROOT/projects/status-options/meta/overlap-live"
-l status --json > "$T/default.json"
+LAYR_TRACE=1 l status --json > "$T/default.json" 2> "$T/default.trace"
+ok "default status enters radar" grep 'status overlaps' "$T/default.trace"
+ok "default status computes a cold compare" grep 'overlap compare miss' "$T/default.trace"
+ok "default status creates the compare cache" test -d "$LAYR_ROOT/projects/status-options/meta/overlap-compares"
+ok "no-ignored JSON succeeds" l status --json --no-ignored
 l status --json --no-ignored > "$T/no-ignored.json"
 l status --json --no-overlaps --no-ignored > "$T/neither.json"
 ok "JSON switches change only their requested sections" python3 - "$T" <<'PY'
@@ -54,6 +65,8 @@ assert load('neither') == {k: v for k, v in without_ignored.items() if k != 'ove
 PY
 has "default long output includes radar" 'Overlaps with other live lines:' "$(l status)"
 no "no-overlaps long output omits radar" sh -c '"$LAYR" status --no-overlaps | grep -q "Overlaps with"'
+eq "short output with only no-overlaps is unchanged" "$(l status -s)" "$(cat "$T/no-overlaps--s.out")"
+eq "porcelain output with only no-overlaps is unchanged" "$(l status --porcelain)" "$(cat "$T/no-overlaps---porcelain.out")"
 eq "short output is unchanged" "$(l status -s)" "$(l status -s --no-overlaps --no-ignored)"
 eq "porcelain output is unchanged" "$(l status --porcelain)" "$(l status --porcelain --no-overlaps --no-ignored)"
 has "ignored short output is available" '!! debug.log' "$(l status -s --ignored)"
