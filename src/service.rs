@@ -484,14 +484,18 @@ fn periodic(root: &Path, hourly: bool) {
 
 /// Retry trash left by a failed background start, on every available volume.
 fn sweep_trash(root: &Path) {
+    sweep_trash_with(root, crate::store::spawn_trash_emptier);
+}
+
+fn sweep_trash_with(root: &Path, start: impl Fn(&Path) -> bool) {
     let layout = match crate::volumes::Layout::for_root(root) {
         Ok(layout) => layout,
         Err(error) => { eprintln!("layr trash sweep: {error:#}"); return; }
     };
     for name in layout.names() {
         if let Ok(path) = layout.trash_of(&name) {
-            if let Err(error) = crate::store::empty_all(&path) {
-                eprintln!("layr trash sweep ({name}): {error}");
+            if !start(&path) {
+                eprintln!("layr trash sweep ({name}): cannot start trash emptier");
             }
         }
     }
@@ -713,7 +717,6 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
-                    crate::sys::lower_process_priority();
                     sweep_trash(&root);
                     let caller = Caller::from_uid(if user_mode { own } else { 0 });
                     if !user_mode {
@@ -761,7 +764,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// OverlayFS requires a root-owned registry; t82 and t91 cover its trash emptier in CI.
+#[cfg(all(test, not(feature = "overlayfs")))]
 mod trash_sweep_tests {
     #[test]
     fn periodic_sweep_removes_deferred_trees_on_all_volumes() {
@@ -778,9 +782,14 @@ mod trash_sweep_tests {
         std::fs::write(root.join("volumes.json"), serde_json::to_vec(&serde_json::json!({
             "format": 1, "volumes": {"other": {"path": volume}}
         })).unwrap()).unwrap();
-        super::sweep_trash(&root);
-        assert!(!root.join("trash/deferred").exists());
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("trash.lock")).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
+        assert!(root.join("trash/deferred").exists(), "a locked trash is left for the next sweep");
         assert!(!volume.join("trash/deferred").exists());
+        drop(lock);
+        super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
+        assert!(!root.join("trash/deferred").exists());
         std::fs::remove_dir_all(base).unwrap();
     }
 }

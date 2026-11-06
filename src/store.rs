@@ -571,7 +571,7 @@ pub fn kick_trash(dir: &Path) {
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
 /// Start `layr __empty-trash <dir>` in the background when the trash holds something: true when
 /// it started (or nothing waits). The child deletes everything; one child per trash at a time.
-fn spawn_trash_emptier(dir: &Path) -> bool {
+pub(crate) fn spawn_trash_emptier(dir: &Path) -> bool {
     if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
         return true;
     }
