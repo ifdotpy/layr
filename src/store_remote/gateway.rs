@@ -971,7 +971,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            for (status, body) in [("404 Not Found", "no such object"), ("404 Not Found", "no such project"), ("403 Forbidden", "")] {
+            for (status, body) in
+                [("404 Not Found", "no such object"), ("404 Not Found", "no such project"), ("403 Forbidden", "")]
+            {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut request = Vec::new();
