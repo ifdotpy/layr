@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.31.0](https://github.com/ifdotpy/layr/compare/v0.30.1...v0.31.0) (2026-11-05)
+
+
+### Features
+
+* **remote:** clone and fetch --heads restore only the heads of the lines ([#299](https://github.com/ifdotpy/layr/issues/299)) ([319d793](https://github.com/ifdotpy/layr/commit/319d793ce75dd53315d1bde9ee5dc9957e306205))
+
+
+### Bug Fixes
+
+* **caches:** a cache saved after a change gives its source times when older caches saw other bytes ([#305](https://github.com/ifdotpy/layr/issues/305)) ([d645233](https://github.com/ifdotpy/layr/commit/d6452335f3bae07d57338ef2864b220e88f2940e))
+* **checks:** a check that starts cold gives its cache back too ([#302](https://github.com/ifdotpy/layr/issues/302)) ([9bf1ca8](https://github.com/ifdotpy/layr/commit/9bf1ca8c7e52a724b22bfe029ba16e09b474571d))
+* **gateway:** ask a busy gateway again ([#303](https://github.com/ifdotpy/layr/issues/303)) ([fd5f01c](https://github.com/ifdotpy/layr/commit/fd5f01c73a7425b995135a91517e85eda9a0114a))
+* **remote:** the cache sweep deletes parts that no live tree needs ([#301](https://github.com/ifdotpy/layr/issues/301)) ([a6aaf03](https://github.com/ifdotpy/layr/commit/a6aaf03588437333ba63705fc448d99765353cf5))
+* **trash:** an entry that another emptier deleted is no failure ([#297](https://github.com/ifdotpy/layr/issues/297)) ([c8446c5](https://github.com/ifdotpy/layr/commit/c8446c513ae1f19124b4a8c32637d7b2320022c5))
+
+
+### Performance
+
+* **remote:** an idle fetch or push reads no record segment again ([#296](https://github.com/ifdotpy/layr/issues/296)) ([34142f3](https://github.com/ifdotpy/layr/commit/34142f3125dde37d8b81e81dfb4a59a7a3bd823a))
+
 ## [0.30.1](https://github.com/ifdotpy/layr/compare/v0.30.0...v0.30.1) (2026-11-05)
 
 

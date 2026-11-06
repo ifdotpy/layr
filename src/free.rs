@@ -83,7 +83,11 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
                 eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
             }
         }
+<<<<<<< head
         drop_old_backups(store, &name);
+||||||| base
+=======
+>>>>>>> origin-https/main
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
         if expired_refs(store, &name) {
             if let Err(e) = expire_refs(ctx, &name) {
@@ -214,6 +218,7 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
     Ok(())
 }
 
+<<<<<<< head
 /// How long the database backup of a schema upgrade stays (`layr.sqlite.schema-<old>.bak`, docs/commands.md).
 const BACKUP_DAYS: u64 = 14;
 
@@ -227,6 +232,9 @@ fn drop_old_backups(store: &Store, name: &str) {
     }
 }
 
+||||||| base
+=======
+>>>>>>> origin-https/main
 /// True when a ref of project `name` has expired (a read-only query; no project open).
 fn expired_refs(store: &Store, name: &str) -> bool {
     let Ok(dir) = store.project_dir(name) else { return false };

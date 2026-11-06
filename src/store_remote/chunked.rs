@@ -75,6 +75,16 @@ fn remember(dir: &Path, pack: &str, bytes: &[u8]) {
     }
 }
 
+/// A short fingerprint of the published packs of the layer: it changes when a push adds a pack or a release removes
+/// one. A fetch that failed on a missing chunk tries the same state again only when it changed.
+pub(crate) fn packs_fingerprint(backend: &Backend) -> Result<String> {
+    use std::hash::{Hash, Hasher};
+    // Not a security check: another layr version may give another value, and the state is tried once more.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    packs(backend)?.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
 /// Every published chunk of the layer.
 pub(crate) fn places(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<Places> {
     Ok(places_of(&indexes(backend, dir, identity)?))
@@ -92,6 +102,18 @@ fn places_of(indexes: &BTreeMap<String, Index>) -> Places {
 
 /// The published pack indexes of the layer, by pack.
 pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
+    // A release of another machine may delete a listed pack before its index is read; its live chunks are in a new
+    // pack then, so the listing runs again.
+    for _ in 0..3 {
+        if let Some(out) = indexes_once(backend, dir, identity)? {
+            return Ok(out);
+        }
+    }
+    indexes_once(backend, dir, identity)?.context("the chunk packs changed during each of 4 listings; retry")
+}
+
+/// The published indexes, or None when a listed pack went away before its index was read.
+fn indexes_once(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<Option<BTreeMap<String, Index>>> {
     let packs = packs(backend)?;
     // Forget cached indexes of packs that are gone, so the cache does not grow.
     if let Some(Ok(entries)) = dir.map(|dir| std::fs::read_dir(cache_dir(dir))) {
@@ -110,10 +132,16 @@ pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> 
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("index read panicked")))).collect()
         });
         for (pack, index) in batch.iter().zip(loaded) {
-            out.insert(pack.clone(), index?);
+            match index {
+                Ok(index) => {
+                    out.insert(pack.clone(), index);
+                }
+                Err(_) if !self::packs(backend)?.contains(pack) => return Ok(None),
+                Err(e) => return Err(e),
+            }
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Uploads the chunks of the files of one state.
@@ -504,6 +532,19 @@ impl<'a> Reader<'a> {
             self.places = Some(places_of(&self.indexes));
         }
         Ok(self.places.as_ref().unwrap())
+    }
+
+    /// Fails when a chunk of `ids` is in no published pack, before any pack is read: the layer was listed once more
+    /// first, as `append` does, since a release may have moved the chunk.
+    pub(crate) fn require(&mut self, ids: &[&String]) -> Result<()> {
+        if ids.iter().all(|id| self.places(false).is_ok_and(|p| p.contains_key(*id))) {
+            return Ok(());
+        }
+        let places = self.places(true)?;
+        if let Some(id) = ids.iter().find(|id| !places.contains_key(**id)) {
+            bail!("chunk {id} is not in the store");
+        }
+        Ok(())
     }
 
     /// The chunks that the caller reads next, in order: their packs load in the background.

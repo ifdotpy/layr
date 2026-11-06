@@ -636,13 +636,30 @@ fn execute(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
     let r = (|| -> Result<usize> {
-        let folders: Vec<String> = repo
-            .folder_overlays()?
-            .into_iter()
-            .map(|(_, folder)| folder)
-            .filter(|folder| crate::fsutil::safe_join(dir, folder).is_ok_and(|p| crate::storage::is_subvolume(&p)))
-            .collect();
+        // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
+        // could warm it): it becomes a cache first, as in `save --caches`, so the first build of a platform is saved.
+        let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+        for p in repo.cache_paths(dir)? {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
+        let mut folders = Vec::new();
+        for folder in paths {
+            let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
+            if !path.is_dir() {
+                continue;
+            }
+            if !crate::storage::is_subvolume(&path) {
+                crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
+            }
+            if crate::storage::is_subvolume(&path) {
+                folders.push(folder);
+            }
+        }
         if folders.is_empty() {
+            eprintln!("layr checks: caches of {state} not saved: the check left no cache folder");
             return Ok(0);
         }
         let name = format!("{line}.checks-{}", platform());

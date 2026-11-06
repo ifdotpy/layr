@@ -189,6 +189,23 @@ echo 'pub fn changed() -> i32 {' >> $P/neg/crates/a/src/lib.rs && echo '    3' >
 out=$(cb $P/negl build --locked)
 has "a line from a change after the cache save compiles crate a (the time of the write is kept)" "Compiling a " "$out"
 
+# 2c. Two caches saved at other times: a line saves both caches, then changes crate a and saves only target. A line
+#     from it takes target (it saw the change) and the side cache (it saw the old bytes); the file gets the time that
+#     target recorded, so it compiles 0 crates (docs/cache-overlays.md, section 20).
+(cd $P/main && ly line new two main $OWNER_ARG >/dev/null 2>&1)
+cd $P/two || exit 1
+printf 'side/\n' >> .gitignore && printf 'side regenerable\n' >> .layrattributes
+mkdir -p side && echo built > side/out
+std $P/two >/dev/null
+(ly add .gitignore .layrattributes >/dev/null 2>&1 && ly save -m "a side cache" >/dev/null 2>&1) || fail "the save of the side cache rule failed"
+ly save --caches >/dev/null 2>&1 || fail "save --caches of two failed"
+echo 'pub fn later() -> i32 {' >> crates/a/src/lib.rs && echo '    4' >> crates/a/src/lib.rs && echo '}' >> crates/a/src/lib.rs
+std $P/two >/dev/null
+(ly save -a -m "a: changed after the side save" >/dev/null 2>&1) || fail "the save of the change in two failed"
+ly save --caches --cache target >/dev/null 2>&1 || fail "save --caches --cache target of two failed"
+(cd $P/main && ly line new twol two $OWNER_ARG >/dev/null 2>&1)
+eq "a line from a line whose caches were saved at other times compiles 0 crates" 0 "$(compiled $P/twol build --locked)"
+
 # 3. Twenty saves with builds in a line: the store grows by the tracked changes and one live cache, not 20 copies.
 (cd $P/main && ly line new t4 main $OWNER_ARG >/dev/null 2>&1)
 cd $P/t4 || exit 1

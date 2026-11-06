@@ -303,9 +303,14 @@ impl<'a> Reader<'a> {
         if !tree.chunks.is_empty() {
             // The chunks of the files that the loop below writes, in its order, so their packs
             // load ahead in the background.
-            let ids = tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten();
+            let ids: Vec<&String> =
+                tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten().collect();
             let (backend, identity) = (self.backend, self.identity);
-            self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).plan(ids)?;
+            let chunks = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity));
+            // A chunk that no pack holds fails the restore before any file is read: the indexes are small, the files
+            // are not.
+            chunks.require(&ids)?;
+            chunks.plan(ids)?;
         }
         for (path, entry) in &tree.files {
             if unchanged(path, entry) {
@@ -545,20 +550,34 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     };
     report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
     let required = required_states(repo, &records.lines, opts)?;
+    // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
+    let heads: Option<BTreeSet<String>> = opts.heads.then(|| -> Result<BTreeSet<String>> {
+        let mut keep: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
+        keep.extend(deletion_dependencies(&records.lines)?);
+        Ok(keep)
+    }).transpose()?;
+    let mut left = Vec::new();
     let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
-        // An overlay leaves out the records of a signer that is not trusted here yet, and so their states.
+        // A tree whose record this fetch did not read: a push published both after this fetch read the records
+        // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
+        // here yet. The next fetch takes it; nothing is imported without its record.
         let state = match repo.p.db.state(id)? {
             Some(state) => state,
-            None if repo.p.is_overlay() => {
+            None => {
                 report.omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
                 continue;
             }
-            None => bail!("remote tree {id} has no state record"),
         };
         if !wanted(&state, opts) && !required.contains(id) {
+            continue;
+        }
+        if heads.as_ref().is_some_and(|keep| !repo.p.is_overlay() && !keep.contains(id)) {
+            if !repo.p.has_state(id) {
+                left.push(id.clone());
+            }
             continue;
         }
         // A cache overlay state of another platform stays on the remote (docs/cache-overlays.md).
@@ -595,14 +614,51 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
             missing.push(state);
         }
     }
+    if !left.is_empty() {
+        // A read of such a state restores it from this remote (`restore_state`).
+        let path = super::states_left_file(&store.dir);
+        let mut all: BTreeSet<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
+        all.extend(left.iter().cloned());
+        crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
+        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read (--heads)", left.len()));
+    }
+    // Cache states that failed to restore, with the packs of the remote then (`<state> <packs>` lines): one is tried
+    // again only when a push or a release changed the packs, so an idle fetch does not download it each time.
+    let failed_path = store.dir.join("cache-restore-failed");
+    let mut failed: BTreeMap<String, String> = std::fs::read_to_string(&failed_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string())))
+        .collect();
+    let failed_before = failed.clone();
+    let mut packs_now: Option<String> = None;
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
+        let cache = repo.p.is_overlay() && state.cache_of.is_some();
+        if cache && failed.contains_key(&id) {
+            let now = match &packs_now {
+                Some(now) => now.clone(),
+                None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
+            };
+            if failed.get(&id) == Some(&now) {
+                report.omitted.push(format!("cache state {}: not restored (it failed before, and the remote did not change)", crate::ids::short(&id)));
+                continue;
+            }
+        }
         let files = match restore_one(repo, &mut reader, &states, &state) {
-            Ok(files) => files,
+            Ok(files) => {
+                failed.remove(&id);
+                files
+            }
             // A cache state that a push removed while this fetch ran (its sweep deletes parts, then the tree, of a
             // cache that a newer state replaced): the cache is regenerable, so it omits, and the fetch goes on.
-            Err(e) if repo.p.is_overlay() && state.cache_of.is_some() => {
+            Err(e) if cache => {
                 report.omitted.push(format!("cache state {}: not restored ({e:#})", crate::ids::short(&id)));
+                let now = match &packs_now {
+                    Some(now) => now.clone(),
+                    None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
+                };
+                failed.insert(id, now);
                 continue;
             }
             Err(e) => return Err(e),
@@ -610,6 +666,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         report.files += files;
         report.states += 1;
         report.state_ids.push(id.clone());
+    }
+    if failed != failed_before {
+        let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
+        crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
     }
     // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
     if bootstrap {

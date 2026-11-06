@@ -22,6 +22,8 @@ export LAYR_ROOT=$T/store
 # Tests empty the trash in the command itself (bounded), so their cleanup does not race the
 # background emptier; t82 checks the background path.
 export LAYR_TRASH_BUDGET_MS=${LAYR_TRASH_BUDGET_MS:-2000}
+# A sweep releases a dead chunk at its first pass: one machine pushes at a time here (t148 tests the wait).
+export LAYR_TEST_CHUNK_GRACE=${LAYR_TEST_CHUNK_GRACE:-0}
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET

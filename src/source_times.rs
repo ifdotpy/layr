@@ -132,73 +132,78 @@ pub fn record(w: &Path, folders: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// What one cache recorded of a file, and the time of that cache's save.
+type Saw = (Entry, (i64, i64));
+
 /// Gives the tracked files of `w` the times that the caches in `folders` saw (their `.layr-times`). A file gets a
 /// time only when its size and content hash equal the recorded ones in every cache that records it; with two
-/// caches, it gets the older time. Returns the number of files that got a time.
+/// caches, it gets the older time. When the caches saw other bytes, the file gets the time of the caches that saw
+/// its bytes if that time is after the save of each cache that saw other bytes: those still build it again. A line
+/// that saved one cache after a change and keeps older saves of the others (a line from a line) then stays warm.
+/// Returns the number of files that got a time.
 pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
-    let mut want: BTreeMap<String, Option<Entry>> = BTreeMap::new();
+    // What each cache saw of a file, with the time of that cache's save.
+    let mut seen: BTreeMap<String, Vec<Saw>> = BTreeMap::new();
     // The newest save of the caches: build output is not newer than it.
     let mut saved = (i64::MIN, 0);
     for f in folders {
         let path = fsutil::safe_join(w, f)?.join(FILE);
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        if let Ok(m) = std::fs::metadata(&path) {
-            saved = saved.max((m.mtime(), m.mtime_nsec()));
-        }
+        // A save of unknown time is after every file.
+        let at = std::fs::metadata(&path).map_or((i64::MAX, 0), |m| (m.mtime(), m.mtime_nsec()));
+        saved = saved.max(at);
         for (rel, e) in decode(&text) {
-            match want.get_mut(&rel) {
-                None => {
-                    want.insert(rel, Some(e));
-                }
-                // Two caches saw other bytes: the file keeps its time.
-                Some(Some(have)) if have.hash != e.hash || have.size != e.size => {
-                    want.insert(rel, None);
-                }
-                Some(Some(have)) => {
-                    if (e.sec, e.nsec) < (have.sec, have.nsec) {
-                        *have = e;
-                    }
-                }
-                Some(None) => {}
-            }
+            seen.entry(rel).or_default().push((e, at));
         }
     }
-    if want.is_empty() {
+    if seen.is_empty() {
         return Ok(0);
     }
     let _t = crate::trace::span("source times: apply");
-    // Only a file of the recorded size and another time is read.
-    let mut cand: Vec<(&str, &Entry)> = Vec::new();
+    // Only a file of the recorded size and another time is read; a file that the caches saw with other bytes is
+    // read too.
+    let mut cand: Vec<(&str, &[Saw])> = Vec::new();
     // Files with other bytes whose time is not after the save.
     let mut older: Vec<&str> = Vec::new();
-    for (rel, e) in &want {
+    for (rel, saw) in &seen {
         let Ok(m) = std::fs::symlink_metadata(w.join(rel)) else { continue };
         if !m.is_file() {
             continue;
         }
         let time = (m.mtime(), m.mtime_nsec());
-        match e {
-            Some(e) if m.len() == e.size && time != (e.sec, e.nsec) => cand.push((rel.as_str(), e)),
-            Some(e) if m.len() == e.size => {}
-            _ if time <= saved => older.push(rel.as_str()),
-            _ => {}
+        let agree = saw.iter().all(|(e, _)| e.hash == saw[0].0.hash && e.size == saw[0].0.size);
+        let size = saw.iter().any(|(e, _)| e.size == m.len());
+        let first = saw.iter().map(|(e, _)| (e.sec, e.nsec)).min();
+        if size && (!agree || first != Some(time)) {
+            cand.push((rel.as_str(), saw.as_slice()));
+        } else if !size && time <= saved {
+            older.push(rel.as_str());
         }
     }
     let hashes = hash_all(w, &cand.iter().map(|(rel, _)| *rel).collect::<Vec<_>>());
     let mut n = 0;
-    for ((rel, e), hash) in cand.into_iter().zip(hashes) {
-        if hash.as_deref() != Some(e.hash.as_str()) {
-            if std::fs::symlink_metadata(w.join(rel)).is_ok_and(|m| (m.mtime(), m.mtime_nsec()) <= saved) {
-                older.push(rel);
+    for ((rel, saw), hash) in cand.into_iter().zip(hashes) {
+        let Ok(m) = std::fs::symlink_metadata(w.join(rel)) else { continue };
+        let same = |e: &Entry| e.size == m.len() && hash.as_deref() == Some(e.hash.as_str());
+        // The oldest time of the caches that saw these bytes, and the newest save of those that saw others.
+        let first = saw.iter().filter(|(e, _)| same(e)).map(|(e, _)| (e.sec, e.nsec)).min();
+        let others = saw.iter().filter(|(e, _)| !same(e)).map(|(_, at)| *at).max();
+        let time = (m.mtime(), m.mtime_nsec());
+        match first {
+            Some(t) if others.is_none_or(|o| t > o) => {
+                if t == time {
+                    continue;
+                }
+                let f = std::fs::OpenOptions::new().write(true).open(w.join(rel));
+                // A file the caller cannot write keeps its time.
+                if let Ok(f) = f {
+                    if fsutil::set_mtime(&f, t.0, t.1).is_ok() {
+                        n += 1;
+                    }
+                }
             }
-            continue;
-        }
-        let f = std::fs::OpenOptions::new().write(true).open(w.join(rel));
-        // A file the caller cannot write keeps its time.
-        if let Ok(f) = f {
-            if fsutil::set_mtime(&f, e.sec, e.nsec).is_ok() {
-                n += 1;
-            }
+            _ if time <= saved => older.push(rel),
+            _ => {}
         }
     }
     if !older.is_empty() {
@@ -279,6 +284,36 @@ mod tests {
         set(&w.join("src/a.rs"), 1_000_000_000);
         apply(&w, &["target".to_string(), "node_modules".to_string()]).unwrap();
         assert!(mtime(&w.join("src/a.rs")) > after, "an older time goes past the saves");
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn a_cache_saved_after_a_change_gives_its_time_when_older_caches_saw_other_bytes() {
+        // node_modules was saved before the change, target after it (a line saves one cache, then a line from it
+        // takes both).
+        let w = tmp("later");
+        std::fs::create_dir_all(w.join("node_modules")).unwrap();
+        std::fs::write(w.join(".gitignore"), "/target\n/node_modules\n").unwrap();
+        std::fs::write(w.join("target/out"), "built").unwrap();
+        std::fs::write(w.join("node_modules/out"), "built").unwrap();
+        std::fs::write(w.join("src/a.rs"), "one\n").unwrap();
+        record(&w, &["node_modules".to_string()]).unwrap();
+        let before = mtime(&w.join("node_modules").join(FILE));
+        std::fs::write(w.join("src/a.rs"), "two\n").unwrap();
+        set(&w.join("src/a.rs"), before.0 + 10);
+        record(&w, &["target".to_string()]).unwrap();
+        // A checkout writes the file with a new time.
+        set(&w.join("src/a.rs"), before.0 + 7200);
+        let both = ["target".to_string(), "node_modules".to_string()];
+        assert_eq!(apply(&w, &both).unwrap(), 1);
+        assert_eq!(mtime(&w.join("src/a.rs")), (before.0 + 10, 0), "target sees its own time");
+        assert!(mtime(&w.join("src/a.rs")) > before, "node_modules sees a change after its save");
+        assert_eq!(apply(&w, &both).unwrap(), 0, "a second apply changes nothing");
+        // Bytes that no cache saw get a time after the saves.
+        std::fs::write(w.join("src/a.rs"), "six\n").unwrap();
+        set(&w.join("src/a.rs"), 1_000_000_000);
+        assert_eq!(apply(&w, &both).unwrap(), 0);
+        assert!(mtime(&w.join("src/a.rs")) > mtime(&w.join("target").join(FILE)));
         let _ = std::fs::remove_dir_all(&w);
     }
 

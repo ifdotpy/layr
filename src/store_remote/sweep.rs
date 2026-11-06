@@ -15,7 +15,7 @@
 //! so that no dead chunk stays in a pack. A pack whose chunks no tree names at all (a push that
 //! stopped before its tree) goes when its index is older than a day and none of its chunks is live.
 
-use super::format::{parse_tree_name, tree_name};
+use super::format::{parse_data_name, parse_tree_name, tree_name};
 use super::reader::Reader;
 use super::Store;
 use anyhow::Result;
@@ -36,10 +36,31 @@ pub struct Swept {
     pub chunk_bytes: u64,
     /// Kept trees that name a chunk that no pack holds (a deletion raced their push).
     pub missing: usize,
+    /// Dead chunks that wait for a later pass (`CHUNK_GRACE`).
+    pub chunks_waiting: usize,
 }
 
 /// A pack index younger than this may belong to a push in flight.
 const PACK_GRACE: i64 = 24 * 3600;
+
+/// A dead chunk is released only when a pass of this machine found it dead at least this long before and finds it
+/// dead again. A writer that reused the chunk in a push in flight (its tree is not listed yet) names it in a tree
+/// before then, and the chunk is live at the next pass. The test hook `LAYR_TEST_CHUNK_GRACE` (seconds) sets it.
+const CHUNK_GRACE: i64 = 2 * 3600;
+
+fn chunk_grace() -> i64 {
+    std::env::var("LAYR_TEST_CHUNK_GRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(CHUNK_GRACE)
+}
+
+/// The dead chunks that passes of this machine found, with the time each was first found dead (`dead-chunks` in
+/// the layer store, `<chunk> <unix time>` lines).
+fn dead_marks(dir: &std::path::Path) -> BTreeMap<String, i64> {
+    std::fs::read_to_string(dir.join("dead-chunks"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').and_then(|(id, t)| Some((id.to_string(), t.parse().ok()?))))
+        .collect()
+}
 
 /// Delete the dead cache trees of the layer `store` of a cache overlay: the trees of states that the
 /// overlay's records know (`known`) and do not keep (`kept`), and their parts that no kept tree links.
@@ -61,15 +82,24 @@ pub(super) fn sweep(
         local,
         Some(&super::reader::seen_file(&store.dir)),
     )?;
-    let trees: Vec<(String, String)> = store.backend.list("states/")?.iter().filter_map(|o| parse_tree_name(&o.key)).collect();
+    let objects = store.backend.list("states/")?;
+    let trees: Vec<(String, String)> = objects.iter().filter_map(|o| parse_tree_name(&o.key)).collect();
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut swept = Swept::default();
     let mut keep: BTreeSet<(String, String)> = BTreeSet::new();
+    // `LAYR_TRACE=1`: why each tree stays.
+    let why = |state: &str, reason: String| {
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace sweep keeps {}: {reason}", crate::ids::short(state));
+        }
+    };
     for (state, attempt) in &trees {
         if !known(state) {
             swept.unknown += 1;
+            why(state, "not known here".into());
             keep.insert((state.clone(), attempt.clone()));
         } else if kept.contains(state) {
+            why(state, "live".into());
             keep.insert((state.clone(), attempt.clone()));
         }
     }
@@ -80,18 +110,22 @@ pub(super) fn sweep(
         for _ in 0..1000 {
             let Some(id) = at else { break };
             if pushed.contains(id.as_str()) {
+                why(&id, format!("nearest pushed ancestor of live state {} whose tree is not on the remote", crate::ids::short(state)));
                 keep.extend(trees.iter().filter(|(s, _)| *s == id).cloned());
                 break;
             }
             at = parent(&id);
         }
     }
-    // A kept delta tree needs its base trees.
+    // A kept delta tree needs its base trees to decode (a tree is a zstd delta on its base tree), but not their
+    // data: the parts and chunks that stay are the ones that the trees kept for their own state link.
+    let own = keep.clone();
     let mut pending: Vec<(String, String)> = keep.iter().cloned().collect();
     while let Some((state, attempt)) = pending.pop() {
         let (header, _, _) = reader.tree(&state, &attempt)?;
         if let Some(base) = header.base {
             if keep.insert(base.clone()) {
+                why(&base.0, format!("base tree of {}", crate::ids::short(&state)));
                 pending.push(base);
             }
         }
@@ -99,18 +133,20 @@ pub(super) fn sweep(
     let mut linked = BTreeSet::new();
     let mut live_chunks: BTreeSet<String> = BTreeSet::new();
     let mut kept_chunks: Vec<BTreeSet<String>> = Vec::new();
-    for (state, attempt) in &keep {
+    for (state, attempt) in &own {
         let (_, _, tree) = reader.tree(state, attempt)?;
         linked.extend(tree.files.values().flat_map(|e| e.3.iter().map(|l| l.object())));
         let named: BTreeSet<String> = tree.chunks.values().flatten().cloned().collect();
         live_chunks.extend(named.iter().cloned());
         kept_chunks.push(named);
     }
+    // The data of a tree that stays only as a base: its parts go unless a tree of `own` links them.
+    let bases: Vec<&(String, String)> = keep.iter().filter(|t| !own.contains(*t)).collect();
     let dead: Vec<&(String, String)> = trees.iter().filter(|t| !keep.contains(*t)).collect();
     let mut parts = BTreeSet::new();
     let mut frames = BTreeSet::new();
     let mut dead_chunks: BTreeSet<String> = BTreeSet::new();
-    for (state, attempt) in &dead {
+    for (state, attempt) in dead.iter().copied().chain(bases.iter().copied()) {
         let (_, _, tree) = reader.tree(state, attempt)?;
         dead_chunks.extend(tree.chunks.values().flatten().filter(|id| !live_chunks.contains(*id)).cloned());
         for link in tree.files.values().flat_map(|e| e.3.iter()) {
@@ -121,6 +157,16 @@ pub(super) fn sweep(
                 }
                 parts.insert(object);
             }
+        }
+    }
+    // Parts of an attempt that published no tree (a push that stopped) and that no kept tree links. After 24 hours no
+    // writer can still publish a tree that links them: writers stop at +23 h, as in `gc --remote`.
+    let cutoff = chrono::Utc::now().timestamp() - 86400;
+    let with_tree: BTreeSet<&(String, String)> = trees.iter().collect();
+    for object in &objects {
+        let Some((state, attempt, _)) = parse_data_name(&object.key) else { continue };
+        if object.modified < cutoff && !linked.contains(&object.key) && !with_tree.contains(&(state, attempt)) {
+            parts.insert(object.key.clone());
         }
     }
     for part in parts {
@@ -178,6 +224,33 @@ fn sweep_chunks(
             if dead.contains(id) {
                 swept.chunks += 1;
                 swept.chunk_bytes += length;
+            }
+        }
+    }
+    // Only the chunks that an earlier pass found dead `chunk_grace` ago go now; the others are marked for a later
+    // pass. A chunk that is live again loses its mark.
+    if !dry_run {
+        let marks = dead_marks(&store.dir);
+        // A marked chunk whose tree an earlier pass deleted is still dead while no live tree names it and a pack
+        // holds it.
+        dead.extend(marks.keys().filter(|id| !live.contains(*id) && held.contains(id.as_str())).cloned());
+        let now_marks: BTreeMap<String, i64> = dead.iter().map(|id| (id.clone(), marks.get(id).copied().unwrap_or(now))).collect();
+        if now_marks != marks {
+            let text: String = now_marks.iter().map(|(id, t)| format!("{id} {t}\n")).collect();
+            crate::fsutil::atomic_write(&store.dir.join("dead-chunks"), text.as_bytes(), 0o600)?;
+        }
+        let grace = chunk_grace();
+        let young = now_marks.iter().filter(|(_, t)| now - **t < grace).count();
+        swept.chunks_waiting = young;
+        dead.retain(|id| now_marks.get(id).is_some_and(|t| now - t >= grace));
+        swept.chunks = 0;
+        swept.chunk_bytes = 0;
+        for index in indexes.values() {
+            for (id, _, length) in &index.chunks {
+                if dead.contains(id) {
+                    swept.chunks += 1;
+                    swept.chunk_bytes += length;
+                }
             }
         }
     }

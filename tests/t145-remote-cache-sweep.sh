@@ -32,6 +32,18 @@ l push archive -q --caches >/dev/null 2>&1
 eq "after the line delete and a push its cache state is gone from the remote" 2 "$(trees)"
 eq "and its data part too" "$first_parts" "$(parts)"
 
+# A push that stopped before its tree leaves parts that no tree names. After 24 hours (writers stop at +23 h) the
+# sweep of a push deletes them; a younger one stays, as it may belong to a push in flight.
+dir=$(dirname "$(find "$T/archive/overlays" -name '*.tree.age' | head -1)")/..
+mkdir -p "$dir/01a1aaaa-0000-7000-8000-000000000001" "$dir/01a1aaaa-0000-7000-8000-000000000002"
+echo old > "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
+touch -t 202101010000.00 "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
+echo young > "$dir/01a1aaaa-0000-7000-8000-000000000002/deadbeef.0000.data.age"
+head -c 20000 /dev/urandom > target/big3; l save --caches -q; l push archive -q --caches >/dev/null 2>&1
+no "the sweep deletes an old part that no tree names" test -e "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
+ok "and keeps a young one" test -e "$dir/01a1aaaa-0000-7000-8000-000000000002/deadbeef.0000.data.age"
+rm -rf "$dir/01a1aaaa-0000-7000-8000-000000000001" "$dir/01a1aaaa-0000-7000-8000-000000000002"
+
 # fsck --caches --remote reports dead cache states that a push has not deleted yet; the daemon's
 # pass deletes them in a remote that nobody pushes to.
 for i in 4 5; do head -c 20000 /dev/urandom > target/big$i; l save --caches -q; done
