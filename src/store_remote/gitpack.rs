@@ -84,6 +84,12 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
         .zip(gitbridge::has_commits(repo, &listed_here)?)
         .filter_map(|(c, present)| present.then_some(c))
         .collect();
+    // The list names only the commits that the pack holds: a commit that a covered commit reaches is in that
+    // commit's pack already (an older history that a later import added).
+    let new = gitbridge::commits_outside(repo, &new, &covered)?;
+    if new.is_empty() {
+        return Ok(());
+    }
     let pack = gitbridge::pack_commits(repo, &new, &covered)?;
     let name = hex::encode(ContentAddress::digest(&pack));
     store.backend.put_new(&format!("git/{name}{PACK}"), keys::encrypt(&descriptor.recipient, &pack)?)?;
@@ -96,6 +102,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
 /// Install the Git packs whose commits the local Git store lacks. Returns the number installed.
 pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize> {
     let mut installed = 0;
+    let mut named: Vec<(String, Vec<String>)> = Vec::new();
     for object in store.backend.list("git/")? {
         let Some(stem) = object.key.strip_suffix(COMMITS) else { continue };
         let body = store.backend.get(&object.key)?.with_context(|| format!("{} disappeared", object.key))?;
@@ -112,10 +119,17 @@ pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize>
             bail!("Git pack {pack_key} does not match its name");
         }
         gitbridge::install_pack(repo, &pack)?;
-        if !gitbridge::has_commits(repo, &list.commits)?.iter().all(|present| *present) {
-            bail!("Git pack {pack_key} does not hold all its commits");
-        }
+        named.push((pack_key, list.commits));
         installed += 1;
+    }
+    // A pack may name a commit that another pack holds (a pack of an older layr listed the commits that its
+    // history exclusion left out): the commits are checked after all packs are in. A commit that no pack holds
+    // stays missing: an imported state of it cannot be read here, and the rest of the fetch goes on.
+    for (pack_key, commits) in named {
+        let missing = commits.iter().zip(gitbridge::has_commits(repo, &commits)?).filter(|(_, present)| !present).count();
+        if missing > 0 {
+            eprintln!("layr: Git pack {pack_key} names {missing} commit(s) that no Git pack of the remote holds");
+        }
     }
     Ok(installed)
 }
