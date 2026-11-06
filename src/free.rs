@@ -197,17 +197,10 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
     }
     if !left.is_empty() {
         let heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
-        let mut caches_left = false;
         for state in left.iter().filter(|s| !heads.contains(*s) && crate::model::is_uuid(s)) {
             if p.db.git_commit_of(state)?.is_none() {
                 let _ = std::fs::remove_file(p.git_dir().join("layr-index").join(state));
             }
-            caches_left |= p.db.state(state)?.is_some_and(|s| s.caches.values().any(|n| p.cache_path(state, n).exists()));
-        }
-        // A head left a state with cache snapshots: it no longer keeps them, so those beyond `retention.caches` go.
-        if caches_left {
-            let _lock = p.lock()?;
-            crate::cmd::admin::trash_excess_caches(&p)?;
         }
     }
     Ok(())

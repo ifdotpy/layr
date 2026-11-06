@@ -216,7 +216,7 @@ crash between commit and move leaves the state queued; the next command finishes
 the rows that differ and the present states that no owner names (leaks). It exits 1 when it
 finds any. It prints one line with the number of leaked states and their bytes, which
 `gc --repair` frees. `gc --repair` rebuilds the table from the records, frees the leaks, releases
-expired refs and dead pins, trims cache snapshots beyond `retention.caches`, and empties the
+expired refs and dead pins, removes the old cache snapshots of states, and empties the
 trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, and
 `fsck --repair` rebuilds the table. `gc --dedup` shares identical cache files and is unchanged.
 
@@ -242,7 +242,6 @@ Keys that keep states (count rings, `layr config <key> <n>`):
 | `retention.auto` | 10 | the newest automatic states of each line |
 | `undo.ops` | 20 | the states named by the newest operations of each line (`layr undo` reverses them) |
 | `undo.deleted` | 5 | the final and staged states of the newest deleted lines (`layr undo` brings a line back) |
-| `retention.caches` | 5 | the cache snapshots of the newest states with caches (`gc --repair` trims the rest) |
 
 An
 operation past `undo.ops` cannot be undone: `layr undo` says that the states of the operation

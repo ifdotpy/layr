@@ -396,7 +396,6 @@ mod apfs {
 pub fn run(repo: &Repo, dry: bool) -> Result<Report> {
     let started = std::time::Instant::now();
     let mut total = Report::default();
-    let states = repo.p.db.present_states()?;
     for (name, folder) in repo.folder_overlays()? {
         let mut entries = Vec::new();
         for line in repo.lines()? {
@@ -407,14 +406,6 @@ pub fn run(repo: &Repo, dry: bool) -> Result<Report> {
         if let Ok(orepo) = repo.overlay_repo(&name) {
             for (id, _) in orepo.p.db.present_states()? {
                 collect(&orepo.p.state_path(&id), false, dry, &mut entries);
-            }
-        }
-        let snap = format!("@{}", folder.replace('/', "%2F"));
-        for (id, _) in &states {
-            if let Some(s) = repo.p.db.state(id)? {
-                for n in s.caches.values().filter(|n| n.ends_with(&snap)) {
-                    collect(&repo.p.cache_path(id, n), false, dry, &mut entries);
-                }
             }
         }
         let r = share(entries, dry);

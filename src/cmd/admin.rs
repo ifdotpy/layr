@@ -219,7 +219,6 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if a.has("--caches") {
                     // Caches saved on a protected line may warm other users' lines.
                     let shared = repo.policy().rule_for(&l.name).is_some();
-                    record_caches(ctx, repo, &s.id, &repo.working(&l), &caches, shared)?;
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
                     for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
@@ -299,10 +298,6 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     if let Err(e) = crate::source_times::record(&w, &ready) {
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
-    #[cfg(target_os = "macos")]
-    for p in &ready {
-        prepare_cache_copy(repo, l, &w, p)?;
-    }
     Ok(refused)
 }
 
@@ -318,79 +313,6 @@ fn prepared_caches_state(ctx: &Ctx, repo: &Repo, l: &Line, msg: &str, only: &[St
         .filter(|p| (only.is_empty() || only.contains(p)) && !damaged.contains(p) && !refused.contains(p))
         .collect();
     repo.prepare_caches_state(ctx, l, msg, &caches)
-}
-
-#[cfg(target_os = "macos")]
-fn prepare_cache_copy(repo: &Repo, l: &Line, w: &Path, p: &str) -> Result<()> {
-    {
-        let cp = fsutil::safe_join(w, p)?;
-        if !btrfs::is_subvolume(&cp) {
-            return Ok(());
-        }
-        let name = format!("{}@{}", l.head, p.replace('/', "%2F"));
-        let copies = if repo.p.cache_path(&l.head, &name).exists() { 1 } else { 2 };
-        for _ in 0..copies {
-            btrfs::prepare_snapshot(&cp, &repo.p.work_dir(), true)?;
-        }
-    }
-    Ok(())
-}
-
-/// Snapshot the caches at `paths` of a working folder (`w`) as the caches of `state` and record
-/// them (`save.caches`, with their subvolume UUIDs). `shared`: they may go to other users' lines.
-/// A cache that an earlier save already gave the state keeps its snapshot and is recorded again,
-/// so the record names every cache of `paths` that the state has.
-pub fn record_caches(
-    ctx: &Ctx,
-    repo: &Repo,
-    state: &str,
-    w: &Path,
-    paths: &[String],
-    shared: bool,
-) -> Result<BTreeMap<String, String>> {
-    let (mut caches, mut made) = (BTreeMap::new(), Vec::new());
-    // Any error of the loop, also after an earlier snapshot of this call, removes the snapshots
-    // this call made: no record names them.
-    let taken = (|| -> Result<()> {
-        for p in paths {
-            let cp = fsutil::safe_join(w, p)?;
-            let name = format!("{state}@{}", p.replace('/', "%2F"));
-            if !crate::model::is_cache_name(&name, state) {
-                continue;
-            }
-            let snap = repo.p.cache_path(state, &name);
-            if snap.exists() {
-                caches.insert(p.clone(), name);
-            } else if btrfs::is_subvolume(&cp) {
-                btrfs::snapshot(&cp, &snap, true)?;
-                made.push(snap);
-                caches.insert(p.clone(), name);
-            }
-        }
-        Ok(())
-    })();
-    let undo = |e: anyhow::Error| {
-        for snap in &made {
-            let _ = btrfs::delete_tree(snap);
-        }
-        e
-    };
-    taken.map_err(undo)?;
-    // Nothing to record when the state already names each of them (a repeated save). A state
-    // whose record lost some (an older layr replaced its caches) gets them back.
-    let known = repo.state(state).map_err(undo)?.caches;
-    if made.is_empty() && caches.iter().all(|(p, n)| known.get(p) == Some(n)) {
-        return Ok(caches);
-    }
-    let mut uuids = serde_json::Map::new();
-    for snap in caches.values() {
-        let info = btrfs::subvol_info(&repo.p.cache_path(state, snap)).map_err(undo)?;
-        uuids.insert(snap.clone(), serde_json::Value::String(info.uuid));
-    }
-    let mut rec = Record::new("save.layers");
-    rec.data = serde_json::json!({"state": state, "layers": caches, "uuids": uuids, "shared": shared, "platform": crate::model::cache_platform()});
-    repo.commit_record(ctx, rec).map_err(undo)?;
-    Ok(caches)
 }
 
 /// Undo the newest operation of the given kinds on a line.
@@ -1421,7 +1343,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     let copies = crate::store_remote::store_copies(repo)?;
     let mut evict = Vec::new();
     for id in rows {
-        let plain = db.state(&id)?.is_some_and(|s| s.caches.is_empty());
+        let plain = db.state(&id)?.is_some();
         // A copy counts only on the store the remote names now and readable here (`store_copies`),
         // and only a tree that the store format can restore exactly goes (`restorable`).
         if plain && !named.contains(&id) && copies.contains_key(&id) && crate::store_remote::restorable(repo, &id)? {
@@ -1541,7 +1463,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
             repo.commit_record(ctx, rec)?;
         }
-        // Cache snapshots beyond `retention.caches` (build output; the states stay).
+        // Old cache snapshots of states (build output; the states stay).
         let caches = trash_excess_caches(&repo.p)?;
         if !caches.is_empty() {
             let mut rec = Record::new("gc");
@@ -1666,39 +1588,29 @@ fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize
     }
     let old = excess_caches(&repo.p)?;
     let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
-    say(format!("cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size));
+    say(format!("old cache snapshots of states: {}, {} bytes", old.len(), size));
     states += old.len();
     bytes += size;
     Ok((states, bytes))
 }
 
-/// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
-/// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
-/// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
+/// The cache snapshots of states (`<state>@<path>` in `states/`), from layr before cache overlays:
+/// no line takes them, so they all go (docs/cache-overlays.md, section 8). The states stay.
+/// Returns `(state, snapshot name)`.
 pub fn excess_caches(p: &Project) -> Result<Vec<(String, String)>> {
-    let keep_n = p.config_u64("retention.caches", 5) as usize;
-    let mut heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
-    heads.extend(p.db.refs("", ids::now_ms())?.into_iter().map(|r| r.target));
-    let mut with_caches: Vec<(i64, String, Vec<String>)> = Vec::new();
-    for (id, _) in p.db.present_states()? {
-        if let Some(s) = p.db.state(&id)? {
-            let snaps: Vec<String> = s.caches.values().filter(|n| p.cache_path(&id, n).exists()).cloned().collect();
-            if !snaps.is_empty() {
-                with_caches.push((s.time, id, snaps));
-            }
-        }
-    }
-    with_caches.sort_by_key(|x| std::cmp::Reverse(x.0));
     let mut out = Vec::new();
-    for (_, id, snaps) in with_caches.into_iter().skip(keep_n) {
-        if !heads.contains(&id) {
-            out.extend(snaps.into_iter().map(|n| (id.clone(), n)));
+    for e in std::fs::read_dir(p.states_dir()).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some((id, _)) = name.split_once('@') {
+            if crate::model::is_cache_name(&name, id) {
+                out.push((id.to_string(), name.clone()));
+            }
         }
     }
     Ok(out)
 }
 
-/// Move the cache snapshots that retention lets go into the trash. Returns their names.
+/// Move the old cache snapshots of states into the trash. Returns their names.
 pub fn trash_excess_caches(p: &Project) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for (id, name) in excess_caches(p)? {
@@ -1969,16 +1881,6 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     outln!(ctx, "deleted snapshot without record: {name}");
                 } else {
                     outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
-                }
-            }
-            // A cache snapshot that its state does not name: a save stopped before its record.
-            Some(s) if name.contains('@') && !s.caches.values().any(|n| *n == name) => {
-                problems += 1;
-                if a.has("--repair") {
-                    btrfs::delete_tree(&e.path())?;
-                    outln!(ctx, "deleted cache snapshot without record: {name}");
-                } else {
-                    outln!(ctx, "cache snapshot without record (leftover of an interrupted save): {name} (use --repair)");
                 }
             }
             Some(_) => {}
@@ -3309,55 +3211,6 @@ pub(crate) fn human_size(n: u64) -> String {
     }
 }
 
-#[cfg(test)]
-mod record_caches_tests {
-    use super::*;
-    use crate::ctx::Caller;
-    use crate::model::Actor;
-
-    /// A cache snapshot that a later failure of the same call leaves unnamed is removed.
-    #[test]
-    fn a_failed_call_removes_the_snapshots_it_made() -> Result<()> {
-        // Snapshots need the subvolume file system: the APFS (or btrfs) test root, as in storage tests.
-        let Some(base) = std::env::var_os("LAYR_APFS_TEST_ROOT").or_else(|| std::env::var_os("LAYR_OVERLAYFS_TEST_ROOT")) else {
-            eprintln!("skipped: set LAYR_APFS_TEST_ROOT to a subvolume file system");
-            return Ok(());
-        };
-        let dir = std::path::PathBuf::from(base).join(format!("layr-record-caches-{}", ids::new_id()));
-        let ctx = Ctx {
-            store: crate::store::Store::open(&dir)?,
-            caller: Caller::from_uid(0),
-            cwd: dir.clone(),
-            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
-            out: std::cell::RefCell::new(Box::new(std::io::sink())),
-        };
-        let project_dir = ctx.store.project_dir("p").unwrap();
-        std::fs::create_dir_all(project_dir.join("meta/db"))?;
-        std::fs::create_dir(project_dir.join("states"))?;
-        let id = ids::new_id();
-        let p = Project {
-            store: &ctx.store,
-            name: "p".into(),
-            dir: project_dir.clone(),
-            id: id.clone(),
-            db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
-        };
-        let mut rec = crate::model::Record::new("project");
-        rec.data = serde_json::json!({"id": id, "name": "p", "config": {}});
-        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p, ctx: None };
-        let work = dir.join("work");
-        std::fs::create_dir_all(&work)?;
-        crate::storage::create_subvolume(&work.join("a"))?;
-        let state = ids::new_id();
-        // The first cache is snapshotted; the second path escapes the working folder and fails.
-        let paths = ["a".to_string(), "../escape".to_string()];
-        assert!(record_caches(&ctx, &repo, &state, &work, &paths, false).is_err());
-        assert_eq!(std::fs::read_dir(repo.p.states_dir())?.count(), 0, "the failed call leaves no snapshot");
-        std::fs::remove_dir_all(dir).ok();
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod move_folder_tests {

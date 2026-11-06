@@ -663,11 +663,6 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     if std::env::var_os("LAYR_TRACE").is_some() {
         eprintln!("trace push-journal {}", serde_json::to_string(&stats)?);
     }
-    for (id, _) in repo.p.db.present_states()? {
-        for name in repo.state(&id)?.caches.values() {
-            report.omitted.push(format!("cache snapshot {name}: legacy cache, use a peer remote or save it as a cache state"));
-        }
-    }
     super::gitpack::push(store, repo, opts, &mut report)?;
     Ok(report)
 }

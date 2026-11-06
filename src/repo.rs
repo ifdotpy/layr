@@ -101,15 +101,6 @@ impl Status {
     }
 }
 
-/// Whether a cache saved on `saved` (None: by an older layr) may warm a line on the platform
-/// `local`. `here`: the cache was saved on this machine.
-pub fn cache_fits(saved: Option<&str>, local: &str, here: bool) -> bool {
-    match saved {
-        Some(p) => p == local,
-        None => here,
-    }
-}
-
 /// A write of the working folder that a command made under its line lock, before its commit. It
 /// keeps the tree that the folder had (`before`) and the tree written (`after`). Dropped without
 /// `commit`, it writes `before` back, so a failed commit leaves the folder as the command found it.
@@ -2142,46 +2133,15 @@ impl<'a> Repo<'a> {
         fsutil::chown_nofollow(w, uid, gid)?;
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
         crate::gitbridge::make_git_folder(self, line, state, w)?;
-        let st = self.state(state)?;
-        // Caches of this machine's setting, and the caches the state carries (a live move).
-        let mut paths: Vec<String> = self.p.config_strings("regenerable");
-        for k in st.caches.keys() {
-            if !paths.contains(k) {
-                paths.push(k.clone());
-            }
-        }
-        // These always get a cache, warm or empty. A folder that the line's `.layrattributes`
-        // makes regenerable gets one only warm, from an ancestor that saved it.
-        let fixed = paths.len();
-        let (regenerable, ignored) = (Rules::attribute(w, "regenerable"), Rules::new(w));
-        for k in self.saved_cache_paths(state)? {
-            let parent = Path::new(&k).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-            let parent_ok = parent.is_empty() || fsutil::lmeta(w, &parent).map(|m| m.is_dir()).unwrap_or(false);
-            if !paths.contains(&k) && parent_ok && regenerable.ignored(&k, true) && ignored.ignored(&k, true) {
-                paths.push(k);
-            }
-        }
-        for (i, path) in paths.iter().enumerate() {
-            // Versioned files win: a folder that holds files of the state comes from the state,
-            // also when a record of an older layr lists it as a cache.
-            if holds_files(w, path) || cached.contains(path) {
+        // The caches of this machine's setting always get a folder: the cache overlays fill it, or
+        // it starts empty. Folders that a `.layrattributes` file makes regenerable come from the
+        // cache overlays alone (`take_caches`).
+        for path in self.p.config_strings("regenerable") {
+            // Versioned files win: a folder that holds files of the state comes from the state.
+            if holds_files(w, &path) || cached.contains(&path) {
                 continue;
             }
-            let cp = fsutil::safe_join(w, path)?;
-            if let Some(src) = self.warm_cache(state, path, uid)? {
-                if cp.symlink_metadata().is_ok() {
-                    fsutil::remove_entry(w, path)?;
-                }
-                fsutil::make_parents(w, path, Some((uid, gid)))?;
-                let uniform = btrfs::cache_snapshot(&src, &cp)?;
-                // The copy shares its blocks; only its files change owner. The saving owner is not
-                // read here, so the walk always runs.
-                give_cache_tree(&cp, uniform, None, uid, gid)?;
-                continue;
-            }
-            if i < fixed {
-                make_cache(w, path, uid, gid)?;
-            }
+            make_cache(w, &path, uid, gid)?;
         }
         Ok(())
     }
@@ -2440,64 +2400,6 @@ impl<'a> Repo<'a> {
         Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files(&head, p)))
     }
 
-    /// The cache paths that `state` or its ancestors saved (the search of `warm_cache`).
-    fn saved_cache_paths(&self, state: &str) -> Result<BTreeSet<String>> {
-        const SEARCH: usize = 200;
-        let (mut seen, mut found) = (BTreeSet::new(), BTreeSet::new());
-        let mut q = std::collections::VecDeque::from([state.to_string()]);
-        while let Some(id) = q.pop_front() {
-            if seen.len() >= SEARCH {
-                break;
-            }
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            if let Some(rec) = self.p.db.state(&id)? {
-                found.extend(rec.caches.keys().cloned());
-                q.extend(rec.parents);
-            }
-        }
-        Ok(found)
-    }
-
-    /// The cache snapshot that a line of `uid` starting at `state` takes for `path`: the state's
-    /// own, or else the one of its nearest ancestor that has one on this machine (the build
-    /// output closest to the line's content). A cache made by another user is taken only if it
-    /// was made on a protected line (`cache_shared`): a cache holds code that review does not see.
-    /// A cache is taken only on the platform it was saved on (`model::cache_platform`); a cache
-    /// of an older layr that does not name its platform only on the machine that saved it.
-    pub fn warm_cache(&self, state: &str, path: &str, uid: u32) -> Result<Option<PathBuf>> {
-        const SEARCH: usize = 200;
-        let local = self.p.store.machine.id.clone();
-        let platform = crate::model::cache_platform();
-        let mut seen = BTreeSet::new();
-        let mut q = std::collections::VecDeque::from([state.to_string()]);
-        while let Some(id) = q.pop_front() {
-            if seen.len() >= SEARCH {
-                break;
-            }
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let rec = match self.p.db.state(&id)? {
-                Some(r) => r,
-                None => continue,
-            };
-            if let Some(snap) = rec.caches.get(path) {
-                let src = self.p.cache_path(&id, snap);
-                let owner_of_line = rec.line.as_ref().and_then(|l| self.p.db.line_by_id(l).ok().flatten()).map(|l| l.owner);
-                let allowed = rec.cache_shared || rec.cache_by == Some(uid) || owner_of_line == Some(uid);
-                // Another state's cache only from this machine; the state's own also after a move.
-                let here = self.p.db.state_machine(&id)?.as_deref() == Some(local.as_str());
-                if src.exists() && allowed && cache_fits(rec.cache_platform.as_deref(), &platform, here) && (id == state || here)
-                {
-                    return Ok(Some(src));
-                }
-            }
-            q.extend(rec.parents);
-        }
-        Ok(None)
-    }
 
     /// Record a new head for a line (and optionally a working state change).
     #[allow(clippy::too_many_arguments)]
@@ -4259,19 +4161,6 @@ mod cache_copy_tests {
 
 #[cfg(test)]
 mod cache_platform_tests {
-    use super::cache_fits;
-
-    #[test]
-    fn a_cache_warms_only_lines_of_its_platform() {
-        // A Mac build in a Linux line: never, also after a move to this machine.
-        assert!(!cache_fits(Some("macos-aarch64"), "linux-aarch64", false));
-        assert!(!cache_fits(Some("macos-aarch64"), "linux-aarch64", true));
-        assert!(!cache_fits(Some("linux-x86_64"), "linux-aarch64", false));
-        assert!(cache_fits(Some("linux-aarch64"), "linux-aarch64", false));
-        // An older record names no platform: only a cache saved on this machine.
-        assert!(cache_fits(None, "linux-aarch64", true));
-        assert!(!cache_fits(None, "linux-aarch64", false));
-    }
     #[test]
     fn auxiliary_states_resolve_but_source_commands_refuse_them() {
         use super::*;

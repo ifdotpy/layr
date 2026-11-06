@@ -221,13 +221,12 @@ is valid for a state, so it never decides that by itself:
 - A cache is build output for one operating system and processor. Each save records its
   platform (`<os>-<arch>`, for example `linux-aarch64` or `macos-aarch64`), and a line takes a
   cache only on the same platform, so a live move (`sync --caches`) between a Mac and a Linux
-  machine never puts Mac binaries into a Linux line. A cache of an older layr, which names no
-  platform, warms only lines on the machine that saved it.
+  machine never puts Mac binaries into a Linux line.
 - A check starts from the warm caches of its state, but its build output is not kept.
-- Layr keeps the cache snapshots of line heads and of the newest `retention.caches` (5) states
-  with caches; the states themselves stay. `save --caches`, `line delete` and gc apply this
-  limit, so it holds without the daemon. Under the store lock they only rename the extra
-  snapshots (and a deleted line's folder) into `meta/trash`; the same command deletes the trash
+- Caches live in cache overlays (docs/cache-overlays.md). The cache snapshots of states that older
+  layr made (`<state>@<path>`) warm no line; `save --caches` and gc remove them, and the states
+  stay. Under the store lock they only rename those snapshots (and a deleted line's folder) into
+  `meta/trash`; the same command deletes the trash
   after it releases the lock, so other commands do not wait for the deletion. A trash left by
   an interrupted command goes with the next one. `gc --dry-run` lists the caches it would delete.
 - On APFS a cache snapshot copies every file (minutes for build output). `save --caches` makes

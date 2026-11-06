@@ -278,8 +278,8 @@ No daemon runs `gc --repair`. `layr daemon` writes a daily report to its log, `l
 gap in an operation that should have freed the data.
 
 `layr gc --repair` makes the table equal to the replay (pins of live processes kept, pins of dead
-ones released), marks the leaked states dead, releases expired refs, trims cache snapshots beyond
-`retention.caches`, runs the existing cache and overlay upkeep, runs the free step, and empties
+ones released), marks the leaked states dead, releases expired refs, removes the old cache
+snapshots of states, runs the existing cache and overlay upkeep, runs the free step, and empties
 the trash. The replay and the overlay pass (cache overlay lines of deleted lines, states beyond
 `history`) are read before the store lock. Under the lock they are used when no record came in
 since (the count and the newest row of `records` are the same), and only their difference is
