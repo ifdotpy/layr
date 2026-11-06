@@ -1760,11 +1760,6 @@ mod tests {
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
     #[test]
-<<<<<<< head
-    fn opening_a_current_database_takes_no_write_lock() {
-||||||| base
-    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
-=======
     fn root_revokes_the_evidence_of_every_user_of_its_machine_only() {
         let db = memory();
         let state = "01a12290-0000-7000-8000-000000000003";
@@ -1801,8 +1796,7 @@ mod tests {
         assert_eq!(left, vec![foreign.id.clone()], "root revokes its machine's users only");
     }
     #[test]
-    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
->>>>>>> origin-https/root-revoke
+    fn opening_a_current_database_takes_no_write_lock() {
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layr.sqlite");
