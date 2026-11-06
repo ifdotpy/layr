@@ -31,9 +31,9 @@ const IOPRIO_CLASS_SHIFT: libc::c_int = 13;
 /// dedicated to background work: on Linux these priorities apply per thread.
 #[cfg(target_os = "linux")]
 pub fn lower_thread_priority() {
-    // SAFETY: both calls operate on the calling thread, and have no pointer arguments.
+    let _ = rustix::process::setpriority_process(None, NICE_LOWEST);
+    // SAFETY: ioprio_set operates on the calling thread and has no pointer arguments.
     unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, NICE_LOWEST);
         libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_BE_LOWEST);
     }
 }
@@ -164,7 +164,7 @@ pub const SUBVOL_RDONLY: u64 = 1 << 1;
 /// The UAPI `btrfs_ioctl_search_key`, in native byte order.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, zerocopy::FromBytes, zerocopy::IntoBytes, zerocopy::KnownLayout, zerocopy::Immutable)]
 pub struct SearchKey {
     pub tree_id: u64,
     pub min_objectid: u64,
@@ -178,6 +178,30 @@ pub struct SearchKey {
     pub nr_items: u32,
     pub unused: u32,
     pub unused1: [u64; 4],
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+// The packed DST has no dynamic trailing padding; its backing Vec<u64> still provides UAPI alignment.
+#[repr(C, packed)]
+#[derive(zerocopy::FromBytes, zerocopy::IntoBytes, zerocopy::KnownLayout, zerocopy::Immutable)]
+struct SearchArgs {
+    key: SearchKey,
+    buf_size: u64,
+    buf: [u8],
+}
+
+#[cfg(all(test, target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn tree_search_uapi_layout() {
+    use std::mem::{offset_of, size_of};
+    assert_eq!(size_of::<SearchKey>(), 104);
+    assert_eq!(offset_of!(SearchKey, nr_items), 64);
+    assert_eq!(offset_of!(SearchArgs, key), 0);
+    assert_eq!(offset_of!(SearchArgs, buf_size), 104);
+    use zerocopy::{FromBytes, IntoBytes};
+    let mut storage = [0u64; 15];
+    let args = SearchArgs::mut_from_bytes(storage.as_mut_bytes()).unwrap();
+    assert_eq!(args.buf.as_ptr() as usize - args as *const SearchArgs as *const () as usize, 112);
 }
 
 /// Reusable, aligned storage for TREE_SEARCH_V2's flexible array argument.
@@ -196,32 +220,32 @@ impl TreeSearch {
     }
 
     pub fn run(&mut self, fd: BorrowedFd<'_>, key: &mut SearchKey) -> io::Result<(usize, &[u8])> {
+        use zerocopy::{FromBytes, IntoBytes};
         const TREE_SEARCH_V2: libc::c_ulong = 0xc070_9411;
         const WORD: usize = std::mem::size_of::<u64>();
         let prefix = std::mem::size_of::<SearchKey>() + WORD;
         loop {
-            // SAFETY: the allocation is aligned for SearchKey and contains the key, size and
-            // output buffer; the returned slice cannot outlive or overlap a subsequent call.
-            unsafe {
-                let ptr = self.args.as_mut_ptr().cast::<u8>();
-                ptr.cast::<SearchKey>().write(*key);
-                let size_ptr = ptr.add(std::mem::size_of::<SearchKey>()).cast::<u64>();
-                size_ptr.write(self.size as u64);
-                if libc::ioctl(fd.as_raw_fd(), TREE_SEARCH_V2 as _, ptr) < 0 {
-                    let error = io::Error::last_os_error();
-                    let required = usize::try_from(size_ptr.read()).unwrap_or(0);
-                    if error.raw_os_error() != Some(libc::EOVERFLOW) || required <= self.size {
-                        return Err(error);
-                    }
-                    let len = prefix.checked_add(required).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-                    self.args.resize(len.div_ceil(WORD), 0);
-                    self.size = required;
-                    continue;
+            let bytes = &mut self.args.as_mut_bytes()[..prefix + self.size];
+            let args = SearchArgs::mut_from_bytes(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            args.key = *key;
+            args.buf_size = self.size as u64;
+            // SAFETY: args is aligned and initialized, and its flexible buffer has buf_size bytes.
+            let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TREE_SEARCH_V2 as _, args as *mut SearchArgs as *mut libc::c_void) };
+            if rc < 0 {
+                let error = io::Error::last_os_error();
+                let required = usize::try_from(args.buf_size).unwrap_or(0);
+                if error.raw_os_error() != Some(libc::EOVERFLOW) || required <= self.size {
+                    return Err(error);
                 }
-                *key = ptr.cast::<SearchKey>().read();
-                return Ok((key.nr_items as usize, std::slice::from_raw_parts(ptr.add(prefix), self.size)));
+                let len = prefix.checked_add(required).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                self.args.resize(len.div_ceil(WORD), 0);
+                self.size = required;
+                continue;
             }
+            *key = args.key;
+            break;
         }
+        Ok((key.nr_items as usize, &self.args.as_bytes()[prefix..prefix + self.size]))
     }
 }
 
