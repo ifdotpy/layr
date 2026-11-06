@@ -729,4 +729,22 @@ mod tests {
         assert!(!check_digest_ok(&data), "a changed result no longer matches its signed digest");
         assert!(check_digest_ok(&serde_json::json!({"attestation": {"payload_digest": "x"}})), "no check, nothing to match");
     }
+
+    #[test]
+    fn a_check_result_with_floats_keeps_its_digest_through_a_record() {
+        // A probe result has ratios: a record that is written, then parsed by a reader, must hash the same.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let f = f64::from_bits(x);
+            if !f.is_finite() {
+                continue;
+            }
+            let written = serde_json::to_string(&serde_json::json!({ "ratio": f })).unwrap();
+            let read: serde_json::Value = serde_json::from_str(&written).unwrap();
+            assert_eq!(serde_json::to_string(&read).unwrap(), written, "{f:e} changed through a parse");
+        }
+    }
 }
