@@ -954,18 +954,18 @@ impl Db {
         Ok(v)
     }
 
-    /// States of a kind for a line, newest first.
     /// Park entries of older layr versions (`stash` states that are not dropped) with their line,
     /// oldest first. They have the `park` owner kind, which has an index: a cheap check.
     pub fn old_park_entries(&self) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare_cached(
             "SELECT o.state, o.holder FROM owners o JOIN states s ON s.id=o.state
-             WHERE o.kind='park' AND s.deleted=0 ORDER BY s.time, s.id",
+             WHERE o.kind='park' AND s.deleted=0 AND s.dropped=0 ORDER BY s.time, s.id",
         )?;
         let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
+    /// States of a kind for a line, newest first.
     pub fn line_states(&self, line: &str, kind: StateKind) -> Result<Vec<StateRec>> {
         let mut st = self.conn.prepare_cached(
             "SELECT rec FROM states WHERE line=?1 AND kind=?2 AND deleted=0 AND dropped=0 ORDER BY time DESC, id DESC",

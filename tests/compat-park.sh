@@ -26,6 +26,11 @@ has "and the older one second" "park@{1}: parked.main.1: On main: first" "$out"
 eq "the moved line has the old state as its head" "$first" "$(l rev-parse parked.main.1)"
 eq "the entry of the other line moved too" "park@{0}: parked.w.1: On w: on-w" "$(cd "$P/w" && l park list)"
 eq "a second park command moves nothing" "" "$(l park list 2>&1 >/dev/null)"
+parked_count() { l line list --json | python3 -c 'import json,sys; print(sum(x["name"].startswith("parked.") for x in json.load(sys.stdin)))'; }
+eq "three parked lines after the move" "3" "$(parked_count)"
+l park list >/dev/null 2>&1; l park list >/dev/null 2>&1
+eq "more park commands make no more lines" "3" "$(parked_count)"
+eq "no old entry is left" "0" "$(sqlite3 "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" "SELECT COUNT(*) FROM owners WHERE kind='park'")"
 eq "fsck finds no problem" "0 problem(s)" "$(l fsck | tail -1)"
 ok "gc --repair runs after the move" l gc --repair -q
 l park pop -q
