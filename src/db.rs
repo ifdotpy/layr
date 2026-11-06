@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 const DERIVED: &[&str] = &[
     "record_lines",
@@ -1498,12 +1498,41 @@ mod tests {
     }
 
     #[test]
+    fn opening_main_schema_nine_requires_and_backfills_the_line_index() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-log-main-nine-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(SCHEMA)?;
+        // Main's schema 9 has no operation-log index. It must not be treated as current.
+        conn.execute_batch("DROP TRIGGER records_index_lines; DROP TABLE record_lines; DROP INDEX records_time_seq")?;
+        conn.pragma_update(None, "user_version", 9)?;
+        let old = Db { conn, stale: true };
+        let mut rec = Record::new("save");
+        rec.id = "main-nine-record".into();
+        rec.machine = "machine".into();
+        rec.time = 1;
+        rec.seq = 1;
+        rec.data = serde_json::json!({"line": "wanted"});
+        old.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
+        drop(old);
+        let db = Db::open(&path)?;
+        assert!(db.stale, "main schema 9 must trigger a rebuild instead of creating an empty index");
+        assert!(db.rebuild(true, |_| Ok(()))?);
+        assert_eq!(db.log_records(Some("wanted"), 1)?[0].id, rec.id);
+        assert_eq!(db.conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?, 10);
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn rebuilding_line_index_keeps_interleaved_log_order() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("layr-log-migration-{}", ids::new_id()));
         std::fs::create_dir_all(&dir)?;
         let conn = Connection::open(dir.join("layr.sqlite"))?;
         conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", 8)?;
+        conn.pragma_update(None, "user_version", 9)?;
         let db = Db { conn, stale: true };
         for i in 0..400 {
             let mut rec = Record::new(if i % 13 == 0 { "sync" } else { "save" });

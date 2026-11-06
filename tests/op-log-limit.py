@@ -15,6 +15,7 @@ parser.add_argument("binary", type=lambda p: str(Path(p).resolve()))
 parser.add_argument("root", type=Path)
 parser.add_argument("--baseline", type=lambda p: str(Path(p).resolve()))
 parser.add_argument("--records", type=int, default=100)
+parser.add_argument("--baseline-schema", type=int, default=8)
 args = parser.parse_args()
 source = (Path(__file__).resolve().parent.parent / "src/db.rs").read_text()
 schema = source.split('pub(crate) const SCHEMA: &str = r#"', 1)[1].split('"#;', 1)[0]
@@ -54,7 +55,7 @@ def fixture(binary, name, baseline=False):
         ddl = ddl.replace("CREATE INDEX IF NOT EXISTS records_time_seq ON records(time, seq);", "")
         ddl = re.sub(r"-- kind 0:.*?END;", "", ddl, flags=re.S)
     conn.executescript(ddl)
-    conn.execute(f"PRAGMA user_version={version - 1 if baseline else version}")
+    conn.execute(f"PRAGMA user_version={args.baseline_schema if baseline else version}")
     conn.execute("INSERT INTO lines(id,name,owner,machine,head,time) VALUES(?,?,?,?,?,0)",
                  (line_id, "main", os.getuid(), machine, ""))
     for record in records:
