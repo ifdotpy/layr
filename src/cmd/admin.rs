@@ -452,7 +452,12 @@ pub fn undo(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut found = None;
             for r in repo.p.db.records(5000)? {
                 let local = r.lines.keys().all(|lid| {
-                    repo.p.db.line_by_id(lid).ok().flatten().map(|l| repo.working(&l).exists()).unwrap_or(false)
+                    repo.p
+                        .db
+                        .line_by_id(lid)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|l| repo.working(&l).exists() || super::park::is_parked(&l.name))
                         || r.op == "line.delete"
                 });
                 if r.actor.uid == ctx.caller.uid
@@ -859,6 +864,9 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 back.head = b.head.clone();
                 restored.push(back);
             }
+            (Some(b), _) if super::park::is_parked(&b.name) => {
+                // A parked line comes back without a folder, as it was.
+            }
             (Some(b), _) => {
                 // The line was deleted: make it again from its last content.
                 let src = ch
@@ -884,6 +892,10 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     repo.snapshot_state(staged, &repo.p.stage_path(&l.id), false)?;
                     repo.mark_stage(&l)?;
                 }
+            }
+            (None, Some(l)) if alive && !repo.working(l).exists() => {
+                // The operation created a line without a folder (a parked line): the record deletes it.
+                repo.drop_stage(l)?;
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
@@ -1999,7 +2011,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     for l in repo.lines()? {
-        if l.machine == repo.p.store.machine.id && !repo.working(&l).exists() {
+        if l.machine == repo.p.store.machine.id && !repo.working(&l).exists() && !super::park::is_parked(&l.name) {
             problems += 1;
             outln!(ctx, "line {} has no working folder (layr adopt {})", l.name, l.name);
         }
