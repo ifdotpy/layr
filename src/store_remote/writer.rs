@@ -7,9 +7,9 @@ use super::{
 };
 use crate::{ctx::Ctx, fsutil, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
-use layr_hashers::{ContentAddress, Digest};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -299,12 +299,7 @@ fn publish_initial_slots(store: &Store, paper: &str, mut vault: String) -> Resul
         }
     }
     initialization_failpoint("machine")?;
-    let descriptor = Descriptor {
-        format: 2,
-        project: store.project.clone(),
-        recipient: keys::recipient_of(&vault)?,
-        mode: Default::default(),
-    };
+    let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&vault)?, mode: Default::default() };
     if !store.backend.put_new("store.json", canonical(&serde_json::to_value(&descriptor)?)?)? {
         if store.descriptor()?.recipient != descriptor.recipient {
             bail!("store is being created by another writer");
@@ -480,9 +475,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 let handles: Vec<_> = batch
                     .iter()
                     .map(|(expected, tip)| {
-                        scope.spawn(move || {
-                            Ok(backend.list(&format!("states/{tip}/"))?.iter().any(|object| &object.key == expected))
-                        })
+                        scope.spawn(move || Ok(backend.list(&format!("states/{tip}/"))?.iter().any(|object| &object.key == expected)))
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("tip check panicked")))).collect()
@@ -906,11 +899,9 @@ fn upload_state_journal(
         // and a framed entry in a layer that goes up as chunks (a cache pushed before chunks) is read again, so it
         // moves to chunks once and a fetch reads it in parallel.
         if let (Some(old_tree), Some(time)) = (manifest, time) {
-            if let Some(old) = old_tree
-                .files
-                .get(path)
-                .filter(|old| old.0 == mode && old.1 == meta.size && old_tree.times.get(path) == Some(&time))
-            {
+            if let Some(old) = old_tree.files.get(path).filter(|old| {
+                old.0 == mode && old.1 == meta.size && old_tree.times.get(path) == Some(&time)
+            }) {
                 let ids = old_tree.chunks.get(path);
                 // An empty file has no chunks in either form.
                 if ids.is_some() == chunker.is_some() || meta.size == 0 {
@@ -1088,19 +1079,8 @@ fn upload_state(
     btrfs: Option<format::BtrfsIdentity>,
 ) -> Result<(Pushed, usize, u64)> {
     let mut index = ContentHashes { entries: std::mem::take(hashes), ..Default::default() };
-    let result = upload_state_journal(
-        store,
-        descriptor,
-        state,
-        root,
-        base,
-        &mut index,
-        &mut BTreeMap::new(),
-        None,
-        base_root,
-        btrfs,
-        None,
-    );
+    let result =
+        upload_state_journal(store, descriptor, state, root, base, &mut index, &mut BTreeMap::new(), None, base_root, btrfs, None);
     *hashes = index.entries;
     result
 }
@@ -2086,12 +2066,7 @@ mod tests {
         store.backend = super::super::backend::Backend::file(destination.into());
         let identity = keys::generate_identity();
         let paper = keys::generate_identity();
-        let descriptor = Descriptor {
-            format: 2,
-            project: store.project.clone(),
-            recipient: keys::recipient_of(&identity).unwrap(),
-            mode: Default::default(),
-        };
+        let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&identity).unwrap(), mode: Default::default() };
         let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(paper_file).unwrap();
         writeln!(output, "{}", keys::words_of_identity(&paper).unwrap()).unwrap();
         store

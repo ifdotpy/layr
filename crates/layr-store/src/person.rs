@@ -27,8 +27,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use layr_hashers::ContentAddress;
 use serde::{Deserialize, Serialize};
+use layr_hashers::ContentAddress;
 
 /// A person's signing identity, encrypted with the existing age key helpers.
 /// The secret seed is only returned in memory; persist `sealed`, never the seed.

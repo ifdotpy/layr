@@ -702,7 +702,12 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let opts = store_remote::ConfigureOptions {
                     paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)),
                     paper_key_tty: a.has("--paper-key-tty"),
-                    mode: mode.unwrap_or_default(),
+                    // A new store is Private unless it asks for a paper key, which only a Secret store has.
+                    mode: mode.unwrap_or(if a.has("--paper-key-out") || a.has("--paper-key-tty") {
+                        layr_store::format::Mode::Secret
+                    } else {
+                        layr_store::format::Mode::Private
+                    }),
                 };
                 let configured = store.configure(ctx, &opts)?;
                 store.save_pin(ctx, repo, name)?;

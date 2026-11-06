@@ -2,8 +2,8 @@
 use super::{reader, writer, Options, Store};
 use crate::{ctx::Ctx, ids, model::Record, repo::Repo};
 use anyhow::{bail, Context, Result};
-use layr_hashers::{ContentAddress, Digest};
 use layr_model::release::{self, File, Files};
+use layr_hashers::{ContentAddress, Digest};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -259,8 +259,11 @@ impl Store {
                 }
             }
         }
-        let list: Vec<serde_json::Value> =
-            files.files.iter().map(|f| serde_json::json!({"name": f.name, "size": f.size, "sha256": f.sha256})).collect();
+        let list: Vec<serde_json::Value> = files
+            .files
+            .iter()
+            .map(|f| serde_json::json!({"name": f.name, "size": f.size, "sha256": f.sha256}))
+            .collect();
         let body = serde_json::to_vec(&serde_json::json!({"version": version, "state": files.state, "files": list}))?;
         let key = format!("public/release/{version}/files.json");
         if !self.backend.put_new(&key, body.clone())? && self.backend.get(&key)?.as_deref() != Some(body.as_slice()) {
