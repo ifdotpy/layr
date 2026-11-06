@@ -15,6 +15,27 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
+use zerocopy::FromZeros;
+
+const CHECK_OPEN_FILES_COUNT: u64 = 1024;
+const PASSWD_INITIAL_BYTES: usize = 16 * 1024;
+const GROUPS_INITIAL_COUNT: usize = 1024;
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+const XATTR_INITIAL_VALUE_BYTES: usize = 256;
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+const XATTR_INITIAL_NAMES_BYTES: usize = 512;
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+const XATTR_GROWTH_SLACK_BYTES: usize = 64;
+#[cfg(target_os = "macos")]
+const ATTR_BULK_BUFFER_BYTES: usize = 256 * 1024;
+#[cfg(target_os = "macos")]
+const DARWIN_SUPPLEMENTARY_GROUPS_COUNT: usize = 16;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+const BTRFS_ROOT_INODE: u64 = 256;
+#[cfg(target_os = "macos")]
+const CLONE_ACL: u32 = 0x0004;
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
 
 #[cfg(target_os = "linux")]
 const NICE_LOWEST: libc::c_int = 19;
@@ -93,8 +114,10 @@ mod priority_tests {
     use super::{IOPRIO_BE_LOWEST, IOPRIO_CLASS_BE, IOPRIO_CLASS_SHIFT, IOPRIO_WHO_PROCESS, NICE_LOWEST};
 
     fn priority() -> (libc::c_int, libc::c_long) {
-        // SAFETY: both calls query the calling thread and have no pointer arguments.
-        unsafe { (libc::getpriority(libc::PRIO_PROCESS, 0), libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0)) }
+        // SAFETY: ioprio_get queries only the calling thread and takes no pointers.
+        unsafe {
+            (rustix::process::getpriority_process(None).unwrap(), libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0))
+        }
     }
 
     #[test]
@@ -122,28 +145,20 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
                 // Darwin exposes RLIMIT_AS as RLIMIT_RSS and rejects an address-space cap.
                 // Keep the other hard limits there; Linux also enforces virtual memory.
                 #[cfg(target_os = "linux")]
-                (libc::RLIMIT_AS, memory),
-                (libc::RLIMIT_NPROC, processes),
-                (libc::RLIMIT_CPU, seconds),
-                (libc::RLIMIT_NOFILE, 1024),
-                (libc::RLIMIT_CORE, 0),
-                (libc::RLIMIT_FSIZE, memory),
+                (rustix::process::Resource::As, memory),
+                (rustix::process::Resource::Nproc, processes),
+                (rustix::process::Resource::Cpu, seconds),
+                (rustix::process::Resource::Nofile, CHECK_OPEN_FILES_COUNT),
+                (rustix::process::Resource::Core, 0),
+                (rustix::process::Resource::Fsize, memory),
             ] {
                 // Only root raises a hard limit: a lower hard limit of the caller stays in force.
-                let mut now = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-                if libc::getrlimit(resource, &mut now) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let value = (value as libc::rlim_t).min(now.rlim_max);
-                let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
-                if libc::setrlimit(resource, &limit) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                let now = rustix::process::getrlimit(resource);
+                let value = now.maximum.map_or(value, |maximum| value.min(maximum));
+                rustix::process::setrlimit(resource, rustix::process::Rlimit { current: Some(value), maximum: Some(value) })?;
             }
             #[cfg(target_os = "linux")]
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
+            rustix::thread::set_no_new_privs(true)?;
             Ok(())
         });
     }
@@ -158,6 +173,12 @@ const SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
 const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419;
 const SUBVOL_SETFLAGS: libc::c_ulong = 0x4008_941a;
 const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
+#[cfg(target_os = "linux")]
+const BTRFS_FS_INFO: libc::c_ulong = 0x8400_941f;
+#[cfg(target_os = "linux")]
+const BTRFS_SET_RECEIVED_SUBVOL: libc::c_ulong = 0xc0c8_9425;
+#[cfg(target_os = "linux")]
+const BTRFS_SEND: libc::c_ulong = 0x4048_9426;
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
 
@@ -259,13 +280,14 @@ struct VolArgsV2 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, FromZeros)]
 struct Timespec {
     sec: u64,
     nsec: u32,
 }
 
 #[repr(C)]
+#[derive(FromZeros)]
 struct SubvolInfoArgs {
     treeid: u64,
     name: [u8; 256],
@@ -306,8 +328,7 @@ fn vol_args(fd: i64, flags: u64, name: &str) -> Result<Box<VolArgsV2>> {
 }
 
 fn ioctl_ptr<T>(fd: BorrowedFd, req: libc::c_ulong, arg: &mut T) -> io::Result<()> {
-    // SAFETY: `fd` is a valid open descriptor for the duration of the call, `arg` points to a
-    // properly sized and aligned argument structure of the request.
+    // SAFETY: fd stays open and arg has the size and alignment required by the request.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), req as _, arg as *mut T) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -366,7 +387,7 @@ pub fn filesystem_uuid(fd: BorrowedFd) -> io::Result<[u8; 16]> {
         rest: [u8; 992],
     }
     let mut info = FsInfo { max_id: 0, devices: 0, uuid: [0; 16], rest: [0; 992] };
-    ioctl_ptr(fd, 0x8400_941f, &mut info)?;
+    ioctl_ptr(fd, BTRFS_FS_INFO, &mut info)?;
     Ok(info.uuid)
 }
 
@@ -400,7 +421,7 @@ pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::
         flags: 0,
         reserved: [0; 16],
     };
-    ioctl_ptr(fd, 0xc0c8_9425, &mut args)
+    ioctl_ptr(fd, BTRFS_SET_RECEIVED_SUBVOL, &mut args)
 }
 
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
@@ -419,7 +440,7 @@ struct InoLookupArgs {
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_id(fd: BorrowedFd) -> io::Result<u64> {
     // Object 256 is the first free inode: the root folder of the subvolume.
-    let mut a = Box::new(InoLookupArgs { treeid: 0, objectid: 256, name: [0; 4080] });
+    let mut a = Box::new(InoLookupArgs { treeid: 0, objectid: BTRFS_ROOT_INODE, name: [0; 4080] });
     ioctl_ptr(fd, INO_LOOKUP, &mut *a)?;
     Ok(a.treeid)
 }
@@ -435,8 +456,7 @@ pub struct RawSubvolInfo {
 }
 
 pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
-    // SAFETY: all-zero bytes are a valid value of this plain C structure.
-    let mut a: Box<SubvolInfoArgs> = Box::new(unsafe { std::mem::zeroed() });
+    let mut a = Box::new(SubvolInfoArgs::new_zeroed());
     ioctl_ptr(fd, GET_SUBVOL_INFO, &mut *a)?;
     Ok(RawSubvolInfo {
         tree_id: a.treeid,
@@ -462,17 +482,18 @@ pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::R
         version: u32,
         reserved: [u8; 28],
     }
-    // BTRFS_SEND_FLAG_NO_FILE_DATA. Version zero selects the original protocol.
+    const BTRFS_SEND_NO_FILE_DATA: u64 = 1;
+    // Version zero selects the original protocol.
     let mut args = SendArgs {
         send_fd: out.as_raw_fd() as i64,
         clone_sources_count: 0,
         clone_sources: 0,
         parent_root,
-        flags: 1,
+        flags: BTRFS_SEND_NO_FILE_DATA,
         version: 0,
         reserved: [0; 28],
     };
-    ioctl_ptr(src, 0x4048_9426, &mut args)
+    ioctl_ptr(src, BTRFS_SEND, &mut args)
 }
 
 /// Reflink a byte range from `src` into `dst`.
@@ -487,7 +508,13 @@ const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
 const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
 /// Extent flags that give no stable device offset: unknown, delayed allocation, inline data.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-const FIEMAP_UNSTABLE: u32 = 0x2 | 0x4 | 0x200;
+const FIEMAP_UNSTABLE: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_DATA_INLINE;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x200;
 
 /// `struct file_dedupe_range` with one `struct file_dedupe_range_info`.
 #[repr(C)]
@@ -584,8 +611,7 @@ pub enum Fork {
 /// `fork`. Only call it while the process has one thread (the service loop).
 // Scoped pools must have returned before any fork; the service parent stays single-threaded.
 pub fn fork() -> io::Result<Fork> {
-    // SAFETY: the service calls this from its single-threaded main loop, so the child is a
-    // complete copy of a process with one thread and may run normal Rust code.
+    // SAFETY: the service forks only from its single-threaded main loop, allowing normal Rust in the child.
     match unsafe { libc::fork() } {
         -1 => Err(io::Error::last_os_error()),
         0 => {
@@ -616,8 +642,7 @@ pub fn terminate_requested() -> bool {
 }
 
 fn set_terminate_action(handler: libc::sighandler_t) -> io::Result<()> {
-    // SAFETY: the action is a zeroed `sigaction` with the handler and an empty mask. The handler
-    // only stores to an atomic, which is async-signal-safe.
+    // SAFETY: sigaction is initialized with an empty mask and a handler that only stores to an atomic.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = handler;
@@ -634,9 +659,7 @@ fn set_terminate_action(handler: libc::sighandler_t) -> io::Result<()> {
 pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Vec<u32>) {
     use std::os::unix::process::CommandExt;
     let gids: Vec<rustix::process::Gid> = groups.iter().map(|g| rustix::process::Gid::from_raw(*g)).collect();
-    // SAFETY: the closure runs in the child between fork and exec. It only makes the
-    // async-signal-safe system calls setgroups, setgid and setuid (raw, through rustix, which
-    // does not allocate here) and reads values that were moved into it before the fork.
+    // SAFETY: pre_exec uses only nonallocating credential syscalls and values moved in before fork.
     unsafe {
         cmd.pre_exec(move || {
             rustix::thread::set_thread_groups(&gids)?;
@@ -653,8 +676,7 @@ pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, groups: Ve
 /// Set the file system uid and gid of the calling thread; returns the previous ids.
 #[cfg(target_os = "linux")]
 pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
-    // SAFETY: setfsgid/setfsuid have no memory arguments; the second call with the same value
-    // returns the current id, which confirms the change.
+    // SAFETY: setfsgid/setfsuid take no pointers; repeating the call verifies the current ID.
     unsafe {
         let old_gid = libc::setfsgid(gid) as u32;
         if libc::setfsgid(gid) as u32 != gid {
@@ -670,11 +692,19 @@ pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
 }
 
 /// Set the supplementary groups of the process (the service child is single threaded).
+#[cfg(target_os = "linux")]
+pub fn set_groups(groups: &[u32]) -> io::Result<()> {
+    // The service calls this only in its single-threaded request child.
+    let groups: Vec<_> = groups.iter().copied().map(rustix::process::Gid::from_raw).collect();
+    Ok(rustix::thread::set_thread_groups(&groups)?)
+}
+
+#[cfg(target_os = "macos")]
 pub fn set_groups(groups: &[u32]) -> io::Result<()> {
     // Darwin stores at most NGROUPS_MAX (16) supplementary groups. Its directory
     // service can return more memberships than the kernel credential can contain.
     #[cfg(target_os = "macos")]
-    let groups = &groups[..groups.len().min(16)];
+    let groups = &groups[..groups.len().min(DARWIN_SUPPLEMENTARY_GROUPS_COUNT)];
     // SAFETY: the pointer and length describe a valid slice of gid_t for the call.
     let rc = unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) };
     if rc != 0 {
@@ -684,19 +714,7 @@ pub fn set_groups(groups: &[u32]) -> io::Result<()> {
 }
 
 pub fn groups() -> io::Result<Vec<u32>> {
-    // SAFETY: a first call with a zero size returns the count; the second fills a buffer of
-    // that size.
-    unsafe {
-        let n = libc::getgroups(0, std::ptr::null_mut());
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut v = vec![0u32; n as usize];
-        if n > 0 && libc::getgroups(n, v.as_mut_ptr()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(v)
-    }
+    Ok(rustix::process::getgroups()?.into_iter().map(|gid| gid.as_raw()).collect())
 }
 
 // ----- the user database -----
@@ -709,29 +727,39 @@ pub struct UserInfo {
 }
 
 fn passwd(by_uid: Option<u32>, by_name: Option<&str>) -> Option<UserInfo> {
-    let mut buf = vec![0u8; 16384];
-    // SAFETY: getpwuid_r/getpwnam_r write into `pw` and `buf` (sizes passed) and set `result`
-    // to `&pw` on success; the strings are read before `buf` goes out of scope.
-    unsafe {
-        let mut pw: libc::passwd = std::mem::zeroed();
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        let rc = match (by_uid, by_name) {
-            (Some(u), _) => libc::getpwuid_r(u, &mut pw, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), &mut result),
-            (None, Some(n)) => {
-                let c = CString::new(n).ok()?;
-                libc::getpwnam_r(c.as_ptr(), &mut pw, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), &mut result)
+    passwd_with_buffer(by_uid, by_name, PASSWD_INITIAL_BYTES)
+}
+
+fn passwd_with_buffer(by_uid: Option<u32>, by_name: Option<&str>, initial_bytes: usize) -> Option<UserInfo> {
+    let name = by_name.map(CString::new).transpose().ok()?;
+    let mut buf = vec![0u8; initial_bytes];
+    loop {
+        // SAFETY: NSS writes pw/result and bounded buf; strings are copied before buf is resized or dropped.
+        unsafe {
+            let mut pw = std::mem::MaybeUninit::<libc::passwd>::uninit();
+            let mut result = std::ptr::null_mut();
+            let rc = match (by_uid, name.as_ref()) {
+                (Some(uid), _) => libc::getpwuid_r(uid, pw.as_mut_ptr(), buf.as_mut_ptr().cast(), buf.len(), &mut result),
+                (None, Some(name)) => {
+                    libc::getpwnam_r(name.as_ptr(), pw.as_mut_ptr(), buf.as_mut_ptr().cast(), buf.len(), &mut result)
+                }
+                _ => return None,
+            };
+            if rc == libc::ERANGE {
+                buf.resize(buf.len().max(1).checked_mul(2)?, 0);
+                continue;
             }
-            _ => return None,
-        };
-        if rc != 0 || result.is_null() {
-            return None;
+            if rc != 0 || result.is_null() {
+                return None;
+            }
+            let pw = pw.assume_init();
+            return Some(UserInfo {
+                uid: pw.pw_uid,
+                gid: pw.pw_gid,
+                name: CStr::from_ptr(pw.pw_name).to_string_lossy().into_owned(),
+                home: CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned(),
+            });
         }
-        Some(UserInfo {
-            uid: pw.pw_uid,
-            gid: pw.pw_gid,
-            name: CStr::from_ptr(pw.pw_name).to_string_lossy().into_owned(),
-            home: CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned(),
-        })
     }
 }
 
@@ -749,30 +777,78 @@ pub fn user_groups(name: &str, gid: u32) -> Vec<u32> {
         Ok(c) => c,
         Err(_) => return vec![gid],
     };
-    let mut groups: Vec<libc::gid_t> = vec![0; 1024];
-    let mut n: libc::c_int = groups.len() as libc::c_int;
-    // SAFETY: `groups` has room for `n` entries; getgrouplist writes at most `n` and stores the
-    // real count in `n`.
-    let rc = unsafe { libc::getgrouplist(c.as_ptr(), gid as _, groups.as_mut_ptr().cast(), &mut n) };
-    if rc < 0 {
-        return vec![gid];
+    lookup_groups(gid, |groups, count| {
+        // SAFETY: count is the slice capacity on entry; NSS writes at most that many gids.
+        unsafe { libc::getgrouplist(c.as_ptr(), gid, groups.as_mut_ptr(), count) }
+    })
+}
+
+fn lookup_groups(gid: u32, mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int) -> Vec<u32> {
+    let mut groups = vec![0; GROUPS_INITIAL_COUNT];
+    loop {
+        let Ok(mut count) = libc::c_int::try_from(groups.len()) else { return vec![gid] };
+        let rc = lookup(&mut groups, &mut count);
+        if rc >= 0 {
+            groups.truncate(count as usize);
+            return groups;
+        }
+        // getgrouplist reports the required count, rather than returning ERANGE.
+        let Ok(required) = usize::try_from(count) else { return vec![gid] };
+        if required <= groups.len() {
+            return vec![gid];
+        }
+        groups.resize(required, 0);
     }
-    groups.truncate(n as usize);
-    groups
+}
+
+#[cfg(test)]
+mod nss_tests {
+    use super::*;
+
+    #[test]
+    fn passwd_grows_after_erange() {
+        let uid = rustix::process::getuid().as_raw();
+        let expected = user_by_uid(uid).expect("current user in NSS");
+        let actual = passwd_with_buffer(Some(uid), None, 1).expect("retry small NSS buffer");
+        assert_eq!(
+            (actual.uid, actual.gid, actual.name, actual.home),
+            (expected.uid, expected.gid, expected.name, expected.home)
+        );
+    }
+
+    #[test]
+    fn group_lookup_retries_required_count() {
+        let required = GROUPS_INITIAL_COUNT + 1;
+        let mut calls = 0;
+        let groups = lookup_groups(7, |groups, count| {
+            calls += 1;
+            *count = required as libc::c_int;
+            if groups.len() < required {
+                return -1;
+            }
+            groups.fill(9);
+            groups[0] = 7;
+            required as libc::c_int
+        });
+        assert_eq!(calls, 2);
+        assert_eq!(groups.len(), required);
+        assert_eq!(groups[0], 7);
+        assert!(groups[1..].iter().all(|gid| *gid == 9));
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub fn switch_user_before_exec(cmd: &mut Command, uid: u32, gid: u32, mut groups: Vec<u32>) {
     use std::os::unix::process::CommandExt;
     // Match Darwin's fixed kernel group limit, as in set_groups.
-    groups.truncate(16);
+    groups.truncate(DARWIN_SUPPLEMENTARY_GROUPS_COUNT);
     // SAFETY: the child calls only async-signal-safe credential syscalls before exec.
     unsafe {
         cmd.pre_exec(move || {
             if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0 || libc::setgid(gid) != 0 || libc::setuid(uid) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::geteuid() != uid {
+            if rustix::process::geteuid().as_raw() != uid {
                 return Err(io::Error::other("uid did not change"));
             }
             Ok(())
@@ -785,7 +861,7 @@ pub fn set_fs_ids(uid: u32, gid: u32) -> Result<(u32, u32)> {
     // temporary effective IDs restrict all its file access, with saved root retained.
     // SAFETY: these syscalls have no pointer arguments. Restore root before changing gid.
     unsafe {
-        let old = (libc::geteuid(), libc::getegid());
+        let old = (rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw());
         if uid == 0 && libc::seteuid(0) != 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -810,15 +886,9 @@ fn cpath(path: &std::path::Path) -> io::Result<CString> {
 /// `ext4`, `xfs`). Other file systems show their type number.
 #[cfg(target_os = "macos")]
 pub fn fs_type_name(path: &std::path::Path) -> io::Result<String> {
-    let path = cpath(path)?;
-    // SAFETY: statfs initializes a valid native structure; path is NUL-terminated.
-    unsafe {
-        let mut stat: libc::statfs = std::mem::zeroed();
-        if libc::statfs(path.as_ptr(), &mut stat) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(CStr::from_ptr(stat.f_fstypename.as_ptr()).to_string_lossy().into_owned())
-    }
+    let stat = rustix::fs::statfs(path)?;
+    let name: Vec<u8> = stat.f_fstypename.iter().take_while(|b| **b != 0).map(|b| *b as u8).collect();
+    Ok(String::from_utf8_lossy(&name).into_owned())
 }
 
 /// The name of the file system at `path`, as `layr volume list` shows it (`apfs`, `btrfs`,
@@ -827,26 +897,24 @@ pub fn fs_type_name(path: &std::path::Path) -> io::Result<String> {
 pub fn fs_type_name(path: &std::path::Path) -> io::Result<String> {
     let st = rustix::fs::statfs(path)?;
     let magic = st.f_type as i64;
+    const BTRFS_SUPER_MAGIC: i64 = libc::BTRFS_SUPER_MAGIC as i64;
+    const EXT4_SUPER_MAGIC: i64 = libc::EXT4_SUPER_MAGIC as i64;
+    const XFS_SUPER_MAGIC: i64 = libc::XFS_SUPER_MAGIC as i64;
+    const OVERLAYFS_SUPER_MAGIC: i64 = libc::OVERLAYFS_SUPER_MAGIC as i64;
+    const TMPFS_MAGIC: i64 = libc::TMPFS_MAGIC as i64;
     Ok(match magic {
-        0x9123_683E => "btrfs".into(),
-        0xEF53 => "ext4".into(),
-        0x5846_5342 => "xfs".into(),
-        0x794C_7630 => "overlayfs".into(),
-        0x0102_1994 => "tmpfs".into(),
+        BTRFS_SUPER_MAGIC => "btrfs".into(),
+        EXT4_SUPER_MAGIC => "ext4".into(),
+        XFS_SUPER_MAGIC => "xfs".into(),
+        OVERLAYFS_SUPER_MAGIC => "overlayfs".into(),
+        TMPFS_MAGIC => "tmpfs".into(),
         other => format!("fs-type-{other:#x}"),
     })
 }
 
 #[cfg(target_os = "macos")]
 pub fn apfs_supported(path: &std::path::Path) -> bool {
-    let Ok(path) = cpath(path) else {
-        return false;
-    };
-    // SAFETY: statfs initializes a valid native structure; path is NUL-terminated.
-    unsafe {
-        let mut stat: libc::statfs = std::mem::zeroed();
-        libc::statfs(path.as_ptr(), &mut stat) == 0 && CStr::from_ptr(stat.f_fstypename.as_ptr()).to_bytes() == b"apfs"
-    }
+    fs_type_name(path).is_ok_and(|name| name == "apfs")
 }
 
 /// The name of the entry at `path` as the volume stores it. On a volume that ignores case,
@@ -936,7 +1004,7 @@ pub fn case_sensitive(path: &std::path::Path) -> bool {
 #[cfg(target_os = "macos")]
 pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
     use rustix::fs::{open, openat, Mode, OFlags};
-    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    use std::os::unix::ffi::OsStrExt;
     use std::path::Component;
     fn open_parent(path: &std::path::Path) -> io::Result<std::os::fd::OwnedFd> {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -959,11 +1027,12 @@ pub fn apfs_clone(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()
     )?;
     let destination = open_parent(dst)?;
     let name = CString::new(dst.file_name().ok_or_else(|| io::Error::other("missing clone destination name"))?.as_bytes())?;
-    // SAFETY: the descriptors stay live. Each path component was opened without following
-    // links. The destination is a single name. CLONE_NOOWNERCOPY | CLONE_ACL retains the ACL.
-    if unsafe { libc::fclonefileat(source.as_raw_fd(), destination.as_raw_fd(), name.as_ptr(), 0x0002 | 0x0004) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    rustix::fs::fclonefileat(
+        &source,
+        &destination,
+        &name,
+        rustix::fs::CloneFlags::NOOWNERCOPY | rustix::fs::CloneFlags::from_bits_retain(CLONE_ACL),
+    )?;
     Ok(())
 }
 #[cfg(target_os = "macos")]
@@ -1026,12 +1095,7 @@ pub fn apfs_data_identity(path: &std::path::Path) -> io::Result<ApfsDataIdentity
 /// on the device.
 #[cfg(target_os = "macos")]
 pub fn fsync_data(f: &std::fs::File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: the descriptor belongs to `f`, which is open for the call.
-    if unsafe { libc::fsync(f.as_raw_fd()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(rustix::fs::fsync(f)?)
 }
 
 /// The physical extents of a file: (file offset, length, device offset). `None` when APFS does
@@ -1110,8 +1174,8 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
         forkattr: libc::ATTR_CMNEXT_CLONEID,
     };
     let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
-    if buf.len() < 256 * 1024 {
-        buf.resize(256 * 1024, 0);
+    if buf.len() < ATTR_BULK_BUFFER_BYTES {
+        buf.resize(ATTR_BULK_BUFFER_BYTES, 0);
     }
     let mut out = Vec::new();
     loop {
@@ -1202,40 +1266,36 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
     }
 }
 
+// Retry when an attribute grows between the size query and read.
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> io::Result<Vec<u8>> {
+    let mut buffer = vec![0; initial_bytes];
+    loop {
+        match read(&mut buffer) {
+            Ok(size) => {
+                buffer.truncate(size);
+                return Ok(buffer);
+            }
+            Err(rustix::io::Errno::RANGE) => {
+                let size = read(&mut [])?;
+                buffer.resize(size.saturating_add(XATTR_GROWTH_SLACK_BYTES).max(buffer.len().saturating_mul(2)), 0);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn apfs_marker(path: &std::path::Path, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
     apfs_attribute(path, c"com.layr.subvolume", value)
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
-    let path = cpath(path)?;
-    // SAFETY: paths and buffers remain live for the calls, the buffer length is bounded.
-    unsafe {
-        if let Some(v) = value {
-            if libc::setxattr(path.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            return Ok(Vec::new());
-        }
-        // Ask for the size first: the removed paths of a thin layer can be large.
-        loop {
-            let size = libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW);
-            if size < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let mut v = vec![0u8; size as usize + 1];
-            let n = libc::getxattr(path.as_ptr(), name.as_ptr(), v.as_mut_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW);
-            if n < 0 {
-                let e = io::Error::last_os_error();
-                if e.raw_os_error() == Some(libc::ERANGE) {
-                    continue;
-                }
-                return Err(e);
-            }
-            v.truncate(n as usize);
-            return Ok(v);
-        }
+    if let Some(value) = value {
+        rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
+        return Ok(Vec::new());
     }
+    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_immutable(path: &std::path::Path, readonly: bool) -> io::Result<()> {
@@ -1256,23 +1316,13 @@ pub fn apfs_immutable(path: &std::path::Path, readonly: bool) -> io::Result<()> 
 
 #[cfg(target_os = "macos")]
 pub fn apfs_publish(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
-    let (src, dst) = (cpath(src)?, cpath(dst)?);
-    // SAFETY: both paths are valid C strings. RENAME_EXCL never replaces an existing entry.
-    if unsafe { libc::renamex_np(src.as_ptr(), dst.as_ptr(), libc::RENAME_EXCL) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(rustix::fs::renameat_with(rustix::fs::CWD, src, rustix::fs::CWD, dst, rustix::fs::RenameFlags::NOREPLACE)?)
 }
 
 /// Exchange two entries in one step.
 #[cfg(target_os = "macos")]
 pub fn apfs_swap(a: &std::path::Path, b: &std::path::Path) -> io::Result<()> {
-    let (a, b) = (cpath(a)?, cpath(b)?);
-    // SAFETY: both paths are valid C strings. RENAME_SWAP needs both entries to exist.
-    if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(rustix::fs::renameat_with(rustix::fs::CWD, a, rustix::fs::CWD, b, rustix::fs::RenameFlags::EXCHANGE)?)
 }
 
 #[cfg(target_os = "macos")]
@@ -1310,27 +1360,20 @@ pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::Borr
 
 #[cfg(target_os = "macos")]
 pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let name = CString::new(name)?;
-    // SAFETY: both descriptors are live; name is one NUL-terminated component.
-    // CLONE_NOOWNERCOPY | CLONE_ACL retains the source ACL with the caller's ownership.
-    if unsafe { libc::fclonefileat(src.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0x0002 | 0x0004) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(rustix::fs::fclonefileat(
+        src,
+        dir,
+        name,
+        rustix::fs::CloneFlags::NOOWNERCOPY | rustix::fs::CloneFlags::from_bits_retain(CLONE_ACL),
+    )?)
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: fd is live; fstat initializes the structure before its flags are read.
-    unsafe {
-        let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd.as_raw_fd(), &mut st) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if st.st_flags & libc::UF_IMMUTABLE != 0 && libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    let st = rustix::fs::fstat(fd)?;
+    // SAFETY: fd remains open and fchflags takes only integer flags.
+    if st.st_flags & libc::UF_IMMUTABLE != 0 && unsafe { libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) } != 0
+    {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -1344,75 +1387,28 @@ pub fn apfs_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>
 /// `read_value` refuses stays empty. Reading a value costs a system call of its own.
 #[cfg(target_os = "macos")]
 pub fn apfs_xattrs_where(path: &std::path::Path, read_value: impl Fn(&[u8]) -> bool) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let cp = cpath(path)?;
-    // Most entries have none or a few small attributes: one call each with a buffer that fits
-    // them, and a second call with the exact size only when the buffer was too small.
-    let mut names = vec![0u8; 512];
-    // SAFETY: the path and the buffers remain valid during each call.
-    let n = loop {
-        let n = unsafe { libc::listxattr(cp.as_ptr(), names.as_mut_ptr().cast(), names.len(), libc::XATTR_NOFOLLOW) };
-        if n >= 0 {
-            break n as usize;
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ERANGE) {
-            return Err(error);
-        }
-        let size = unsafe { libc::listxattr(cp.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW) };
-        if size < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        names = vec![0u8; size as usize + 64];
-    };
-    names.truncate(n);
-    let mut result = Vec::new();
-    for name in names.split(|b| *b == 0).filter(|s| !s.is_empty()) {
-        if !read_value(name) {
-            result.push((name.to_vec(), Vec::new()));
-            continue;
-        }
-        let cn = std::ffi::CString::new(name)?;
-        let mut value = vec![0u8; 256];
-        let n = loop {
-            // SAFETY: as above.
-            let n = unsafe { libc::getxattr(cp.as_ptr(), cn.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW) };
-            if n >= 0 {
-                break n as usize;
-            }
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ERANGE) {
-                return Err(error);
-            }
-            let size = unsafe { libc::getxattr(cp.as_ptr(), cn.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW) };
-            if size < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            value = vec![0u8; size as usize + 64];
-        };
-        value.truncate(n);
-        result.push((name.to_vec(), value));
-    }
-    Ok(result)
+    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
+    names
+        .split(|b| *b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let value = if read_value(name) { apfs_attribute(path, &CString::new(name)?, None)? } else { Vec::new() };
+            Ok((name.to_vec(), value))
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
 pub fn apfs_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
-    let path = cpath(path)?;
-    // SAFETY: both strings remain live; NOFOLLOW addresses the link itself.
-    if unsafe { libc::removexattr(path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    Ok(rustix::fs::lremovexattr(path, name)?)
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_mtime(path: &std::path::Path, sec: i64, nsec: i64) -> io::Result<()> {
-    let path = cpath(path)?;
-    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec { tv_sec: sec, tv_nsec: nsec }];
-    // SAFETY: the path and two timespec values remain live for the call.
-    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let times = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_OMIT },
+        last_modification: rustix::fs::Timespec { tv_sec: sec, tv_nsec: nsec },
+    };
+    Ok(rustix::fs::utimensat(rustix::fs::CWD, path, &times, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?)
 }
 
 /// Set the creation time of the entry itself. APFS clones keep it; new entries need it set.
@@ -1458,13 +1454,7 @@ pub fn peer_credentials(sock: &std::os::unix::net::UnixStream) -> io::Result<(u3
 
 #[cfg(target_os = "macos")]
 pub fn apfs_owners_enabled(path: &std::path::Path) -> io::Result<bool> {
-    let path = cpath(path)?;
-    let mut st = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: statfs initializes the structure on success.
-    if unsafe { libc::statfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let st = unsafe { st.assume_init() };
+    let st = rustix::fs::statfs(path)?;
     Ok(st.f_flags & (libc::MNT_IGNORE_OWNERSHIP as u32) == 0)
 }
 
@@ -1488,6 +1478,7 @@ pub fn apfs_has_acl(path: &std::path::Path) -> io::Result<bool> {
 /// The ACL of `path` (the link itself) as text; `None` without an ACL.
 #[cfg(target_os = "macos")]
 pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
+    // SAFETY: these declarations match the macOS ACL C ABI.
     unsafe extern "C" {
         fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
         fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
@@ -1496,7 +1487,7 @@ pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
     let path = cpath(path)?;
     // SAFETY: the ACL and the text are owned by libc, copied, and freed once.
     unsafe {
-        let acl = acl_get_link_np(path.as_ptr(), 0x100);
+        let acl = acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED);
         if acl.is_null() {
             let error = io::Error::last_os_error();
             return match error.raw_os_error() {
@@ -1520,6 +1511,7 @@ pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
 
 #[cfg(target_os = "macos")]
 pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
+    // SAFETY: these declarations match the macOS ACL C ABI.
     unsafe extern "C" {
         fn acl_init(count: libc::c_int) -> *mut libc::c_void;
         fn acl_set_link_np(path: *const libc::c_char, kind: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
@@ -1532,7 +1524,7 @@ pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
         if acl.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let result = acl_set_link_np(path.as_ptr(), 0x100, acl);
+        let result = acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
         let error = io::Error::last_os_error();
         acl_free(acl);
         if result != 0 {
@@ -1544,11 +1536,6 @@ pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
 
 // ----- OverlayFS mount and metadata operations -----
 #[cfg(feature = "overlayfs")]
-fn overlay_path(path: &std::path::Path) -> io::Result<CString> {
-    use std::os::unix::ffi::OsStrExt;
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::other("NUL in path"))
-}
-#[cfg(feature = "overlayfs")]
 pub fn overlay_mount(
     source: Option<&std::path::Path>,
     target: &std::path::Path,
@@ -1556,103 +1543,60 @@ pub fn overlay_mount(
     flags: libc::c_ulong,
     options: Option<&str>,
 ) -> io::Result<()> {
-    let source = source.map(overlay_path).transpose()?;
-    let target = overlay_path(target)?;
+    use rustix::mount::{mount, mount_bind, mount_change, mount_move, mount_remount, MountFlags, MountPropagationFlags};
     let options = options.map(CString::new).transpose().map_err(|_| io::Error::other("NUL in mount options"))?;
-    // SAFETY: all strings and optional pointers remain valid for mount.
-    let rc = unsafe {
-        libc::mount(
-            source.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-            target.as_ptr(),
-            kind.map_or(std::ptr::null(), |s| s.as_ptr()),
-            flags,
-            options.as_ref().map_or(std::ptr::null(), |s| s.as_ptr().cast()),
-        )
-    };
-    if rc == 0 {
-        Ok(())
+    let mount_flags = MountFlags::from_bits_retain(flags as u32);
+    let source = source.unwrap_or_else(|| std::path::Path::new(""));
+    if flags & libc::MS_REMOUNT != 0 {
+        mount_remount(
+            target,
+            MountFlags::from_bits_retain((flags & !libc::MS_REMOUNT) as u32),
+            options.as_deref().unwrap_or(c""),
+        )?;
+    } else if flags & libc::MS_BIND != 0 {
+        mount_bind(source, target)?;
+    } else if flags & libc::MS_MOVE != 0 {
+        mount_move(source, target)?;
+    } else if flags & (libc::MS_SHARED | libc::MS_PRIVATE) != 0 {
+        mount_change(target, MountPropagationFlags::from_bits_retain(flags as u32))?;
     } else {
-        Err(io::Error::last_os_error())
+        mount(source, target, kind.unwrap_or(c""), mount_flags, options.as_deref())?;
     }
+    Ok(())
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_unmount(path: &std::path::Path) -> io::Result<()> {
-    let p = overlay_path(path)?;
-    // SAFETY: p is a terminated path. Never use lazy detach for managed data.
-    if unsafe { libc::umount2(p.as_ptr(), 0) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    // Never use lazy detach for managed data.
+    Ok(rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty())?)
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>) -> io::Result<Vec<u8>> {
-    let p = overlay_path(path)?;
     if let Some(value) = value {
-        // SAFETY: path, name, and the input buffer are valid for the call.
-        if unsafe { libc::lsetxattr(p.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
         return Ok(Vec::new());
     }
-    // SAFETY: null buffer requests the attribute size.
-    let n = unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut buf = vec![0; n as usize];
-    // SAFETY: the output buffer has the supplied capacity.
-    let n = unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    buf.truncate(n as usize);
-    Ok(buf)
+    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
-    let p = overlay_path(path)?;
-    // SAFETY: both strings remain valid for the call.
-    if unsafe { libc::lremovexattr(p.as_ptr(), name.as_ptr()) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    Ok(rustix::fs::lremovexattr(path, name)?)
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let p = overlay_path(path)?;
-    // SAFETY: null buffer requests the list size.
-    let n = unsafe { libc::llistxattr(p.as_ptr(), std::ptr::null_mut(), 0) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut names = vec![0u8; n as usize];
-    // SAFETY: names is writable for its supplied length.
-    let n = unsafe { libc::llistxattr(p.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    names.truncate(n as usize);
+    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
     names
         .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|n| {
-            let name = CString::new(n)?;
-            Ok((n.to_vec(), overlay_attribute(path, &name, None)?))
-        })
+        .filter(|name| !name.is_empty())
+        .map(|name| Ok((name.to_vec(), overlay_attribute(path, &CString::new(name)?, None)?)))
         .collect()
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_mtime(path: &std::path::Path, sec: i64, nano: i64) -> io::Result<()> {
-    let p = overlay_path(path)?;
-    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec { tv_sec: sec, tv_nsec: nano }];
-    // SAFETY: the two timespec entries and path remain valid for the call.
-    if unsafe { libc::utimensat(libc::AT_FDCWD, p.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let times = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_OMIT },
+        last_modification: rustix::fs::Timespec { tv_sec: sec, tv_nsec: nano },
+    };
+    Ok(rustix::fs::utimensat(rustix::fs::CWD, path, &times, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?)
 }
 
 /// Permanently drop all user and group privileges in a single-threaded service child.
@@ -1664,7 +1608,13 @@ pub fn drop_to_user(uid: u32, gid: u32) -> Result<()> {
         anyhow::bail!("registry.user must use an unprivileged primary group");
     }
     set_groups(&[])?;
-    // SAFETY: the caller is a dedicated child, before it reads any network data.
+    #[cfg(target_os = "linux")]
+    {
+        rustix::thread::set_thread_gid(rustix::process::Gid::from_raw(gid))?;
+        rustix::thread::set_thread_uid(rustix::process::Uid::from_raw(uid))?;
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: the caller is a dedicated single-threaded child; these calls have no pointers.
     if unsafe { libc::setgid(gid) } != 0 || unsafe { libc::setuid(uid) } != 0 {
         return Err(io::Error::last_os_error().into());
     }
@@ -1702,8 +1652,8 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
         forkattr: libc::ATTR_CMNEXT_PRIVATESIZE | libc::ATTR_CMNEXT_CLONEID,
     };
     let flags = libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED;
-    if buf.len() < 256 * 1024 {
-        buf.resize(256 * 1024, 0);
+    if buf.len() < ATTR_BULK_BUFFER_BYTES {
+        buf.resize(ATTR_BULK_BUFFER_BYTES, 0);
     }
     let mut out = Vec::new();
     loop {
@@ -1768,7 +1718,6 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
 /// flags of the extent (`FIEMAP_EXTENT_*`). Used to find files with the same data.
 #[cfg(target_os = "linux")]
 pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>> {
-    const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     const EXTENT_LAST: u32 = 0x1;
     const COUNT: usize = 256;
     #[repr(C)]
@@ -1794,7 +1743,15 @@ pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>
     let mut out = Vec::new();
     let mut start = 0u64;
     loop {
-        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
+        let mut map = Map {
+            start,
+            length: u64::MAX - start,
+            flags: 0,
+            mapped: 0,
+            count: COUNT as u32,
+            reserved: 0,
+            extents: [Extent::default(); COUNT],
+        };
         // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
         if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
             return Err(io::Error::last_os_error());
@@ -1827,7 +1784,6 @@ pub struct MappedExtent {
 /// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
 #[cfg(target_os = "linux")]
 pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
-    const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     const EXTENT_LAST: u32 = 0x1;
     const EXTENT_SHARED: u32 = 0x2000;
     const COUNT: usize = 256;
@@ -1854,7 +1810,15 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
     let mut out = Vec::new();
     let mut start = 0u64;
     loop {
-        let mut map = Map { start, length: u64::MAX - start, flags: 0, mapped: 0, count: COUNT as u32, reserved: 0, extents: [Extent::default(); COUNT] };
+        let mut map = Map {
+            start,
+            length: u64::MAX - start,
+            flags: 0,
+            mapped: 0,
+            count: COUNT as u32,
+            reserved: 0,
+            extents: [Extent::default(); COUNT],
+        };
         // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
         if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
             return Err(io::Error::last_os_error());
@@ -1882,8 +1846,93 @@ pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
 
 #[cfg(all(test, target_os = "linux"))]
 pub fn test_thread_priority() -> (libc::c_int, libc::c_int) {
-    // SAFETY: these queries inspect only the calling thread and have no pointer arguments.
+    // SAFETY: ioprio_get queries only the calling thread and takes no pointers.
     unsafe {
-        (libc::getpriority(libc::PRIO_PROCESS, 0), libc::syscall(libc::SYS_ioprio_get, 1, 0) as libc::c_int)
+        (
+            rustix::process::getpriority_process(None).unwrap(),
+            libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0) as libc::c_int,
+        )
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", feature = "overlayfs")))]
+mod metadata_tests {
+    use super::*;
+    #[cfg(target_os = "macos")]
+    use super::{
+        apfs_attribute as attribute, apfs_mtime as mtime, apfs_remove_attribute as remove_attribute, apfs_xattrs as xattrs,
+    };
+    #[cfg(feature = "overlayfs")]
+    use super::{
+        overlay_attribute as attribute, overlay_mtime as mtime, overlay_remove_attribute as remove_attribute,
+        overlay_xattrs as xattrs,
+    };
+
+    #[test]
+    fn attribute_growth_race_retries() {
+        let mut calls = 0;
+        let value = read_xattr_buffer(1, |buffer| {
+            calls += 1;
+            if buffer.is_empty() {
+                return Ok(2);
+            }
+            if buffer.len() < 128 {
+                return Err(rustix::io::Errno::RANGE);
+            }
+            buffer[..128].fill(7);
+            Ok(128)
+        })
+        .unwrap();
+        assert_eq!(value, vec![7; 128]);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn attributes_and_mtime_do_not_follow_symlinks() -> io::Result<()> {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let root = std::env::temp_dir().join(format!("layr-sys-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| {
+            let file = root.join("file");
+            let link = root.join("link");
+            std::fs::write(&file, b"data")?;
+            symlink(&file, &link)?;
+            let name = c"user.layr-test";
+            let value = vec![42; 4096];
+            attribute(&file, name, Some(&value))?;
+            assert_eq!(attribute(&file, name, None)?, value);
+            assert!(xattrs(&file)?.iter().any(|(key, data)| key == name.to_bytes() && data == &value));
+            assert!(attribute(&link, name, None).is_err());
+            let before = std::fs::metadata(&file)?;
+            mtime(&link, 1_600_000_000, 123)?;
+            let after = std::fs::metadata(&file)?;
+            let link_meta = std::fs::symlink_metadata(&link)?;
+            assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
+            assert_eq!((link_meta.mtime(), link_meta.mtime_nsec()), (1_600_000_000, 123));
+            remove_attribute(&file, name)?;
+            assert!(attribute(&file, name, None).is_err());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn check_limits_apply_only_to_child() -> Result<()> {
+        let before = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "ulimit -n"]);
+        check_limits_before_exec(&mut cmd, 1 << 30, 1 << 20, 10)?;
+        let output = cmd.output()?;
+        assert!(output.status.success());
+        let actual: u64 = std::str::from_utf8(&output.stdout)?.trim().parse()?;
+        assert_eq!(actual, before.maximum.map_or(CHECK_OPEN_FILES_COUNT, |maximum| maximum.min(CHECK_OPEN_FILES_COUNT)));
+        assert_eq!(rustix::process::getrlimit(rustix::process::Resource::Nofile), before);
+        Ok(())
     }
 }
