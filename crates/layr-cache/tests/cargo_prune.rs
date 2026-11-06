@@ -193,6 +193,49 @@ fn warm_builds_the_sweep_commands_so_the_next_build_compiles_nothing() {
     assert!(!t.exists(), "nothing was built");
 }
 
+#[test]
+fn warm_runs_every_sweep_command_when_one_fails() {
+    let dir = tmp("warm-fails");
+    let target = project(&dir, Some("sweep = [[\"build\", \"--features\", \"extra\"], [\"build\", \"--release\"]]"));
+    // The feature build does not compile; the release build does.
+    std::fs::write(dir.join("src/lib.rs"), "pub fn a() -> i32 {\n    1\n}\n#[cfg(feature = \"extra\")]\ncompile_error!(\"broken\");\n").unwrap();
+    let e = format!("{:#}", cargo::warm(&host(), &target).unwrap_err());
+    assert!(e.contains("cargo build --features extra"), "{e}");
+    assert!(!e.contains("--release"), "{e}");
+    let stderr = cargo_in(&dir, &target, &["build", "--release"]);
+    assert!(!stderr.contains("Compiling"), "the command after the failed one still warmed its profile: {stderr}");
+}
+
+#[test]
+fn warm_builds_the_crates_that_do_not_need_a_broken_one() {
+    // A workspace: `broken` does not compile; `fine` does not need it, but waits for `slow`, whose build script
+    // runs for a second. Without --keep-going cargo starts no new job after `broken` fails, so `fine` stays cold.
+    let dir = tmp("warm-keep-going");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"broken\", \"fine\", \"slow\"]\nresolver = \"2\"\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--workspace\"]]\n",
+    )
+    .unwrap();
+    for (name, body, deps) in [
+        ("broken", "compile_error!(\"broken\");\n", ""),
+        ("fine", "pub fn f() { slow::s() }\n", "\n[dependencies]\nslow = { path = \"../slow\" }\n"),
+        ("slow", "pub fn s() {}\n", ""),
+    ] {
+        std::fs::create_dir_all(dir.join(name).join("src")).unwrap();
+        std::fs::write(
+            dir.join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{deps}"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(name).join("src/lib.rs"), body).unwrap();
+    }
+    std::fs::write(dir.join("slow/build.rs"), "fn main() { std::thread::sleep(std::time::Duration::from_secs(1)); }\n").unwrap();
+    let target = dir.join("target");
+    assert!(cargo::warm(&host(), &target).is_err());
+    let stderr = cargo_in(&dir, &target, &["build", "-p", "fine"]);
+    assert!(!stderr.contains("Compiling"), "the crate that compiles is warm: {stderr}");
+}
+
 /// A helper process that takes an exclusive flock on `path` and prints `locked`. It is killed on drop.
 struct Holder {
     child: std::process::Child,
