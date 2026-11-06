@@ -1,8 +1,7 @@
 #!/bin/bash
 # Warm caches: a new line takes the build output of its nearest ancestor that has one; build
 # output of another user only from a protected line; caches come only from an explicit
-# save --caches, never from a check; gc keeps the caches of line heads and of the newest states;
-# each save --caches on a state adds to the caches that earlier saves gave it.
+# save --caches, never from a check; the caches live in cache overlays, never as snapshots of states.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -43,7 +42,7 @@ as layr-admin sh -c "cd $P/main && mkdir -p target && echo 1 > target/count && e
 head_before=$(tip layr-admin main)
 ok "save --caches on a clean main" in_line layr-admin main save -q --caches
 eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
-has "the head of main keeps the build output" "@target" "$(ls $LAYR_ROOT/projects/w/states)"
+no "the build output goes to the cache overlay, not to a snapshot of the state" sh -c "ls $LAYR_ROOT/projects/w/states | grep -q @"
 
 # 4. A new line from main starts warm, owns its copy, and shares the blocks.
 as layr-u1 $L --project w line new -q a2 main
@@ -69,51 +68,11 @@ in_line layr-u2 a3 line new -q b2 'head@{0}'
 no "to another user it does not" test -e $P/b2/target/mine
 eq "who gets the shared output of the nearest ancestor instead" "1" "$(cat $P/b2/target/count)"
 
-# 7. gc keeps the caches of line heads and of the newest states only.
+# 7. A new save keeps the caches in the overlay; a new line from main takes the newest.
 ok "main keeps its build output at its new head" in_line layr-admin main save -q --caches
 as layr-u2 $L --project w line delete -D -q a1
-l --project w config retention.caches 0
-n_before=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
 l --project w gc --repair -q
-n_after=$(ls $LAYR_ROOT/projects/w/states | grep -c @)
-ok "gc deletes the caches of old states" test "$n_after" -lt "$n_before"
 as layr-u1 $L --project w line new -q a4 main
 eq "the head of main keeps its cache" "1" "$(cat $P/a4/target/count)"
-
-# 8. Each save --caches on the same head keeps the caches that earlier saves gave it: here a
-#    second cache folder, saved after the first.
-# db caches <state>: "<path>=<subvolume UUID>" of each cache of the state in the database.
-# db drop <state> <path>: forget one, as an older layr did (the newest record replaced the list).
-db() {
-    python3 - "$LAYR_ROOT/projects/w/meta/db/layr.sqlite" "$@" <<'PY'
-import json, sqlite3, sys
-c = sqlite3.connect(sys.argv[1])
-op, display = sys.argv[2], sys.argv[3]
-sid, raw = c.execute("SELECT id, rec FROM states WHERE display=?", (display,)).fetchone()
-v = json.loads(raw)
-if op == "id":
-    print(sid)
-elif op == "drop":
-    v["layer_uuids"].pop(v["layers"].pop(sys.argv[4], None), None)
-    c.execute("UPDATE states SET rec=? WHERE id=?", (json.dumps(v), sid))
-    c.commit()
-else:
-    print(" ".join(f"{p}={v['layer_uuids'][s]}" for p, s in sorted(v.get("layers", {}).items())))
-PY
-}
-snap_uuid() { btrfs subvolume show "$LAYR_ROOT/projects/w/states/$1" | awk '$1 == "UUID:" {print $2}'; }
-l --project w config regenerable '["target","gen"]'
-as layr-admin sh -c "mkdir $P/main/gen && echo g > $P/main/gen/out"
-head=$(tip layr-admin main)
-id=$(db id $head)
-target_uuid=$(snap_uuid $id@target)
-ok "a second save --caches on the same head" in_line layr-admin main save -q --caches
-eq "the head of main did not move" "$head" "$(tip layr-admin main)"
-eq "the head names both caches, the earlier with its first snapshot" "gen=$(snap_uuid $id@gen) target=$target_uuid" "$(db caches $head)"
-db drop $head target
-ok "save --caches on a head that an older layr left with fewer caches" in_line layr-admin main save -q --caches
-eq "names the lost cache again" "gen=$(snap_uuid $id@gen) target=$target_uuid" "$(db caches $head)"
-as layr-u1 $L --project w line new -q a5 main
-eq "a new line from that head takes the earlier cache" "1" "$(cat $P/a5/target/count)"
-eq "and the later one" "g" "$(cat $P/a5/gen/out)"
+no "no cache snapshot of a state" sh -c "ls $LAYR_ROOT/projects/w/states | grep -q @"
 finish

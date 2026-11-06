@@ -230,17 +230,16 @@ target     archive  layr  1 state, 812 MiB (macos-aarch64-...)
 
 ## 8. Compatibility
 
-- **Stores with old caches.** `StateRec.caches` stays readable. `line new <state>` and `try` look
-  for a cache overlay state first and then for an old cache of the state or an ancestor, with
-  the rules of today (protected line or same user; platform). `gc` keeps old cache snapshots by
-  `retention.caches` as today, until no state has one.
+- **Stores with old caches.** The old cache snapshots of states (`StateRec.caches`) warm no line,
+  travel to no peer and stay out of store pushes. `save --caches` and `gc` move them to the trash;
+  the states stay. `retention.caches` is gone.
 - **`save --caches`** keeps its name and meaning for the user: it saves the caches of the line.
   It writes cache overlay states and no more `StateRec.caches`. On a protected line with no
   changes it no longer needs to give the caches to the head state: the caches belong to the line.
 - **`regenerable`** keeps its meaning. The `cache` commands are removed (section 15). `overlay repair`
   turns a plain folder at a cache path into a nested layer, as `cache repair` did.
-- **`sync --caches`** (live move) carries cache overlays as it carries other overlays; the old
-  flag keeps the old cache snapshots for one release.
+- **`sync --caches`** (live move) carries cache overlays as it carries other overlays. The old
+  cache snapshots of states do not travel.
 - **Older layr binaries** read the overlay records as ordinary overlay records: properties are
   extra fields of `overlay.<name>`. An older binary shows a folder overlay as an overlay with no
   files and does not take its states into new lines.
@@ -335,11 +334,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
 - `layr cache list -v` (removed in section 15) showed the size of each cache folder and the overlay state
   the line saved; `overlay list` shows both.
 - `layr fsck --caches` reports the cache data that nothing keeps, by overlay, with its bytes: states
-  beyond `history` or of deleted lines, overlay lines of deleted lines, and cache snapshots beyond
-  `retention.caches`. The operations that make cache data dead delete it, so the report is 0 after
+  beyond `history` or of deleted lines, overlay lines of deleted lines, and old cache snapshots of
+  states. The operations that make cache data dead delete it, so the report is 0 after
   them; it exits 1 when it finds some. It only reads.
-- When a line head leaves a state with cache snapshots, the free step at the end of that command moves the
-  snapshots beyond `retention.caches` to the trash (before, only `save --caches`, `line delete` and `gc` did).
 - `save --caches` applies `gc=lru:<size>` to the folders it saves (before, only `gc` did), and `gc` applies it to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
 - `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the
@@ -354,7 +351,8 @@ Limits of slice b:
 
 - `save --caches` still also writes the old caches of a state (`StateRec.caches`), so `try`, the
   live move (`sync --caches`) and older binaries keep working. That is two snapshots per folder.
-  Slice d moves the live move to cache overlays; then the old write can go.
+  Slice d moves the live move to cache overlays; then the old write can go (done: `save --caches`
+  writes cache overlays only).
 - Only `layr merge <line>` merges caches; the merge queue and `merge <state>` do not.
 - A union never deletes a file of the target's folder.
 - Tested with one user on macOS. The Linux root suite (t14, t15 with several users) is not run
@@ -406,7 +404,7 @@ Limits of slice d:
   machines the project trusts, so trusted peers get caches and other peers do not.
 - A store encrypts an overlay for its readers: a trusted machine opens a cache overlay with its
   machine slot, which the next push makes; the owner's paper key opens it too.
-- The live move (`sync --caches`) still uses the old state caches.
+- The live move (`sync --caches`) carries the cache overlays; the old state caches are gone.
 
 ## 15. Command change (owner decision, 2026-10-27)
 

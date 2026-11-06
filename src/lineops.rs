@@ -262,7 +262,6 @@ impl Repo<'_> {
             || !self.pending_moves(line).is_empty()
             || !self.cache_paths(&working)?.is_empty()
             || !self.cache_paths(&self.state_root(target)?)?.is_empty()
-            || !self.state(target)?.caches.is_empty()
             || crate::busy::user_of(&working)?.is_some()
         {
             return Ok(false);

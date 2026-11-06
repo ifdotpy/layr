@@ -783,7 +783,7 @@ impl<'a> Project<'a> {
                 return Ok(());
             }
             // A subvolume with known nested subvolumes is destroyed at once, with no search.
-            if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints(path))? {
+            if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints())? {
                 return Ok(());
             }
             // What needs a search or a file by file delete waits for the end of the last lock.
@@ -799,18 +799,10 @@ impl<'a> Project<'a> {
         crate::storage::delete_tree(path)
     }
     /// The paths of nested subvolumes (caches) that a working folder of a line can hold: the
-    /// machine setting, the caches that the head of the line saved and the folders of the cache
-    /// overlays.
+    /// machine setting and the folders of the cache overlays.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    fn nested_hints(&self, path: &Path) -> Vec<String> {
+    fn nested_hints(&self) -> Vec<String> {
         let mut hints = self.config_strings("regenerable");
-        let line = match (path.parent() == Some(self.lines_dir().as_path()), path.file_name()) {
-            (true, Some(name)) => self.db.line_by_name(&name.to_string_lossy()).ok().flatten(),
-            _ => None,
-        };
-        if let Some(rec) = line.and_then(|l| self.db.state(&l.head).ok().flatten()) {
-            hints.extend(rec.caches.keys().cloned());
-        }
         // The folders of the cache overlays (`overlay.<name>.folder`).
         let mut names: Vec<String> = Vec::new();
         for entry in fs::read_dir(self.dir.join("meta/overlays")).into_iter().flatten().flatten() {

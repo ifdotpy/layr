@@ -120,7 +120,8 @@ ok "the copy keeps the sharing (under 1.5x the source)" test "$NC" -le "$((NS * 
 if [ "$(findmnt -n -o FSTYPE -T "$D" 2>/dev/null)" = ext4 ]; then
     echo "SKIP far below a flattened copy (ext4 shares layers, not extents)"
 else
-    ok "the copy is far below a flattened copy" test "$((NC * 2))" -lt "$TS"
+    # The cache is in the line folder and in its overlay: a flattened copy holds it twice.
+    ok "the copy is far below a flattened copy" test "$((NC * 3 / 2))" -lt "$TS"
 fi
 
 if [ "$OWNED" = 1 ]; then
