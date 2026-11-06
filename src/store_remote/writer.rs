@@ -516,8 +516,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 continue;
             }
         }
-        // Pinned before the trees are read: gc keeps the state until this command ends.
-        repo.hold(repo.pin(&[id.as_str()])?);
+        // Pinned before the trees are read: gc keeps the state until this command ends. A state that a free step
+        // already queued (no owner keeps it; a deleted line's state that a thin layer still uses as its base) is
+        // not sent: nothing on the remote needs it.
+        match repo.pin(&[id.as_str()]) {
+            Ok(pin) => repo.hold(pin),
+            Err(e) => {
+                report.omitted.push(format!("{} {}: {e:#}", id, serde_json::to_value(state.kind)?));
+                continue;
+            }
+        }
         states.push(state);
     }
     states.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
