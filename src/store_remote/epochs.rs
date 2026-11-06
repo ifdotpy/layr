@@ -118,7 +118,7 @@ fn resolve_chain(
         backend.unlock_reader(&identity)?;
     }
     let original = reader::records(root, root_identity, &descriptor.project)?;
-    let root_writers = layr_store::public::trusted_writers(&descriptor.project, &original.lines)?;
+    let root_writers = layr_store::public::trusted_writers_checked(&descriptor.project, &original.lines)?;
     root.unlock_reader(&identity)?;
     let current = reader::records(&scoped, &identity, &descriptor.project)?;
     if current.lines.is_empty() || !current.gaps.is_empty() {
@@ -128,7 +128,7 @@ fn resolve_chain(
     if original.lines.iter().any(|line| !current.lines.contains(line)) {
         bail!("rotation in progress: current epoch does not yet preserve the complete root history");
     }
-    let trusted = layr_store::public::trusted_writers(&descriptor.project, &current.lines)?;
+    let trusted = layr_store::public::trusted_writers_checked(&descriptor.project, &current.lines)?;
     if root_writers.iter().any(|(id, key)| trusted.get(id) != Some(key)) {
         bail!("project epoch changes root writer identity");
     }
@@ -393,7 +393,7 @@ impl Store {
         if !remote.gaps.is_empty() {
             bail!("complete the remote record history before rotating");
         }
-        let trusted = layr_store::public::trusted_writers(&descriptor.project, &remote.lines)?;
+        let trusted = layr_store::public::trusted_writers_checked(&descriptor.project, &remote.lines)?;
         if trusted.get(&self.machine) != Some(&self.key.verifying_key()) {
             bail!("rotation requires a trusted writer machine");
         }

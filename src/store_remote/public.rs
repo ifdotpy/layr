@@ -1,7 +1,7 @@
 //! Publish and open the ordinary public reader slot.
 use super::{backend::Backend, keys, reader, Descriptor, Store};
 use anyhow::{bail, Context, Result};
-use layr_store::public::{trusted_writers, Manifest};
+use layr_store::public::{trusted_writers_checked as trusted_writers, Manifest};
 
 pub(super) fn identity(backend: &Backend, descriptor: &Descriptor) -> Result<Option<String>> {
     let Some(bytes) = backend.public_manifest()? else { return Ok(None) };

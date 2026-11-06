@@ -615,10 +615,23 @@ impl Project {
         }
         out
     }
+    /// The first common ancestor of `a` and `b`, in the breadth-first order of `a`, that is no ancestor of another
+    /// common ancestor. Linear in the history: every proper ancestor of a common ancestor is common too, so one walk
+    /// from the parents of the common ancestors finds the ones that are not best.
     pub fn merge_base(&self, a: &str, b: &str) -> Option<String> {
         let right: BTreeSet<_> = self.ancestors(b).into_iter().collect();
         let common: Vec<_> = self.ancestors(a).into_iter().filter(|id| right.contains(id)).collect();
-        common.iter().find(|c| !common.iter().any(|d| d != *c && self.ancestors(d).contains(c))).cloned()
+        let mut below: BTreeSet<String> = BTreeSet::new();
+        let mut queue: std::collections::VecDeque<String> =
+            common.iter().filter_map(|id| self.state(id)).flat_map(|s| s.parents.iter().cloned()).collect();
+        while let Some(id) = queue.pop_front() {
+            if below.insert(id.clone()) {
+                if let Some(s) = self.state(&id) {
+                    queue.extend(s.parents.iter().filter(|p| !below.contains(*p)).cloned());
+                }
+            }
+        }
+        common.into_iter().find(|c| !below.contains(c))
     }
     /// Signed discussion records, in stable record order, with actor and timestamp.
     pub fn comments(&self, change: &str) -> Vec<Value> {
