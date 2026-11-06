@@ -574,22 +574,6 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     Ok(0)
 }
 
-/// Removed folder-switch commands never change files or create a line.
-pub fn removed_switch(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let name = args.iter().find(|a| !a.starts_with('-')).map(String::as_str);
-    let folder = match here(ctx) {
-        Ok(h) => match name {
-            Some(n) if crate::store::check_name("line", n).is_ok() => h.repo.p.line_path(n),
-            _ => h.line.as_ref().map(|l| h.repo.working(l)).unwrap_or_else(|| h.repo.p.line_path("<name>")),
-        },
-        Err(_) => ctx.store.root.join("projects/<project>/lines").join(name.unwrap_or("<name>")),
-    };
-    Err(exit(
-        2,
-        format!("A line is a folder. Use 'cd {}' to work there. Create a line with 'layr line new <name>'.", folder.display()),
-    ))
-}
-
 /// Give a line a working folder on this machine (after a move or a restore).
 pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().value("--state").flag("--head");

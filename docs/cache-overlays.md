@@ -410,18 +410,16 @@ Limits of slice d:
 
 ## 15. Command change (owner decision, 2026-10-27)
 
-A cache is an overlay. The `layr cache` command group is removed. Each form fails with exit
-status 2 and names its replacement:
+A cache is an overlay. The `layr cache` command group is removed, with no hint. The replacements:
 
-| Removed form | Replacement | Message |
-| --- | --- | --- |
-| `layr cache list [-v]` | `layr overlay list` | `layr cache list was removed. Use 'layr overlay list'.` |
-| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --caches` | `layr cache add was removed. Use 'regenerable' in .layrattributes, then 'layr save --caches'.` |
-| `layr cache remove <path>` | `-regenerable` in `.layrattributes`, or `layr config regenerable` without the path | `layr cache remove was removed. Use '-regenerable' in .layrattributes, or 'layr config regenerable' without the path.` |
-| `layr cache repair` | `layr overlay repair <overlay>` | `layr cache repair was removed. Use 'layr overlay repair <overlay>'.` |
-| `layr cache pull <line or state>` | `layr line new <name> <line>`, or `layr merge <line>` | `layr cache pull was removed. Use 'layr line new <name> <line>' or 'layr merge <line>'.` |
+| Removed form | Replacement |
+| --- | --- |
+| `layr cache list [-v]` | `layr overlay list` |
+| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --caches` |
+| `layr cache remove <path>` | `-regenerable` in `.layrattributes`, or `layr config regenerable` without the path |
+| `layr cache repair` | `layr overlay repair <overlay>` |
+| `layr cache pull <line or state>` | `layr line new <name> <line>`, or `layr merge <line>` |
 
-A bare `layr cache`, or any other form, fails with `layr cache was removed. Use 'layr overlay list'.`
 The lines that carry caches are unchanged:
 `line new` takes them, and `merge` brings them back.
 
@@ -690,7 +688,8 @@ Build tools compare file times: cargo builds a crate again when a source file is
 build output. A line from a state, a merge and a follow pass write source files with the time of
 the write (as `git checkout` does), so a warm cache looked stale and one or more crates compiled.
 
-- A cache save (`save --caches`, the follow pass, a local merge) writes `.layr-times` into each
+- A cache save (`save --caches`, the follow pass, a local merge, the save-back of a passing check and
+  `save --caches --save-back`) writes `.layr-times` into each
   cache folder before the snapshot: path, time, size and content hash (git blob id) of each tracked
   file of the working copy (the ignore rules keep it). It runs before the project lock.
 - The file goes with the cache: snapshots, copies and overlay layers carry it, and it goes away

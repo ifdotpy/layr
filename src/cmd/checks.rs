@@ -750,6 +750,10 @@ pub(crate) fn save_back_caches(
     if folders.is_empty() {
         return Ok((name, Vec::new()));
     }
+    // The source times of this copy go with its build output (docs/cache-overlays.md, section 20). The
+    // `.layr-times` that came with the cache names the sources of an older build: a line that takes this
+    // cache would give a changed source an older time than the new build output, and the tool would skip it.
+    crate::source_times::record(dir, &folders)?;
     let _lock = repo.p.lock()?;
     let checks_line = match repo.p.db.line_by_name(&name)? {
         Some(l) => l,

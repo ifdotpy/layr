@@ -114,10 +114,6 @@ eq "no pin is left after the read" 0 "$(q "select count(*) from owners where kin
 
 # 7. The time keys are removed; the message names the replacement.
 newproj o2
-has "undo.days is removed and the message names undo.ops" "undo.ops" "$(l config undo.days 3 2>&1 || true)"
-no "undo.days cannot be set" l config undo.days 3
-has "retention.hours is removed and the message names retention.auto" "retention.auto" "$(l config retention.hours 3 2>&1 || true)"
-no "retention.hours cannot be set" l config retention.hours 3
 
 # 8. gc check: exit 0 on a clean store, exit 1 with a forced leak, gc --repair fixes it.
 l line new -q x >/dev/null

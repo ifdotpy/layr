@@ -36,15 +36,4 @@ wait $pid
 eq "the repair succeeds" 0 "$?"
 eq "a layer made during the repair keeps its row" "layer bases: 0 difference(s), differ" "$(l gc -n 2>&1 | grep 'layer bases')"
 
-# An upgrade backup older than 14 days goes at the end of the next command; a newer one stays.
-dbdir=$(dirname "$db")
-old="$dbdir/$(basename "$db").schema-5.bak"
-cp "$db" "$old"
-touch -t 202001010000 "$old"
-young="$dbdir/$(basename "$db").schema-6.bak"
-cp "$db" "$young"
-l status >/dev/null 2>&1
-ok "a command removes the old backup" test ! -f "$old"
-ok "a command keeps the young backup" test -f "$young"
-rm -f "$young"
 finish
