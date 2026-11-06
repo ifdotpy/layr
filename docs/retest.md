@@ -177,8 +177,8 @@ retest = [["test", "--workspace", "--no-run"]]
   (see "Freshness"). The listing adds `-v --message-format json`. A command whose units are not all fresh
   skips the folder; the listing never builds a unit that is not fresh.
 - An entry of `sweep` can be an object for a test that builds into a folder of its own below `target`:
-  `{"target_dir" = "provider-contract-compile", "args" = ["check", "--offline", "-p", "x"], "env" = { RUSTFLAGS = "" }}`
-  (TOML inline table). The follow pass builds it with `CARGO_TARGET_DIR=target/<target_dir>` and the project `env`
+  `{ target_dir = "provider-contract-compile", args = ["check", "--offline", "-p", "x"], env = { RUSTFLAGS = "" } }`
+  (a TOML inline table in the `sweep` array). The follow pass builds it with `CARGO_TARGET_DIR=target/<target_dir>` and the project `env`
   plus its own `env`, and the prune of `save --caches` keeps the units of that command there and keeps the folder
   however old it is. `retest` does not run these entries.
 - `retest` (optional) lists the commands of the retest build. `layr retest sweep` sweeps `target/retest` with
