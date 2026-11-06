@@ -30,7 +30,8 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
             // A dep-info file that cannot be read names nothing that cargo uses either.
             let Ok(bytes) = fs::read(entry.path()) else { continue };
             let text = String::from_utf8_lossy(&bytes);
-            match place(&text, stem, rel, &at_profile) {
+            let encoded: Vec<Vec<u8>> = unit_dep_files(&profile, stem)?.iter().filter_map(|f| fs::read(f).ok()).collect();
+            match place(&text, &encoded, stem, rel, &at_profile) {
                 Place::Here => {}
                 Place::Stale => stale += remove_fingerprint(&profile, stem)?,
                 Place::Moved { old, new } => move_unit(&profile, stem, &entry.path(), &text, &old, &new)?,
@@ -97,11 +98,13 @@ enum Place {
     Moved { old: PathBuf, new: PathBuf },
 }
 
-/// What the dep-info `text` of the unit `stem` says about the place where it was built, when its profile folder
-/// (`rel` below the target folder) is used at `at_profile`. A compiled-in path (`env!`) of the old place makes the
+/// What the dep-info of the unit `stem` (its `text` file and its `encoded` binary files) says about the place where it
+/// was built, when its profile folder (`rel` below the target folder) is used at `at_profile`. A source out of the
+/// package (`include_str!("../../other/x.json")`) is relative in the text file and absolute in the binary one, which is
+/// the one cargo checks. A compiled-in path (`env!`) of the old place makes the
 /// unit stale. A source of the old place out of the target folder moves with the unit when the new place has a file
 /// with the same bytes at the same path below its root: cargo then checks the new file, as for a relative source.
-fn place(text: &str, stem: &str, rel: &Path, at_profile: &Path) -> Place {
+fn place(text: &str, encoded: &[Vec<u8>], stem: &str, rel: &Path, at_profile: &Path) -> Place {
     // The first rule names the dep-info file itself, at the place of the build: `<profile>/deps/<stem>.d: ...`.
     let first = text.lines().next().unwrap_or("");
     let Some(built) = first.find(&format!("/deps/{stem}.d:")).map(|i| Path::new(&first[..i])) else { return Place::Here };
@@ -133,6 +136,10 @@ fn place(text: &str, stem: &str, rel: &Path, at_profile: &Path) -> Place {
             sources.extend(paths(list).filter(|p| old(p) && !Path::new(p).starts_with(old_target)));
         }
     }
+    for bytes in encoded {
+        let found = encoded_paths(bytes, old_root.as_os_str().as_encoded_bytes());
+        sources.extend(found.into_iter().filter(|p| !Path::new(p).starts_with(old_target)));
+    }
     if sources.is_empty() {
         return Place::Here;
     }
@@ -153,24 +160,51 @@ fn place(text: &str, stem: &str, rel: &Path, at_profile: &Path) -> Place {
 fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: &Path) -> Result<()> {
     let escape = |p: &Path| format!("{}/", p.display()).replace(' ', "\\ ");
     rewrite(d, text.replace(&escape(old), &escape(new)).into_bytes())?;
-    let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(()) };
-    let suffix = format!("-{hash}");
     let (old, new) = (old.as_os_str().as_encoded_bytes(), new.as_os_str().as_encoded_bytes());
+    for file in unit_dep_files(profile, stem)? {
+        let bytes = fs::read(&file)?;
+        let moved = rewrite_encoded(&bytes, old, new);
+        if moved != bytes {
+            rewrite(&file, moved)?;
+        }
+    }
+    Ok(())
+}
+
+/// The binary dep-info files of the unit `stem` (`<name>-<hash>`): `.fingerprint/<package>-<hash>/dep-*`.
+fn unit_dep_files(profile: &Path, stem: &str) -> Result<Vec<PathBuf>> {
+    let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(Vec::new()) };
+    let suffix = format!("-{hash}");
+    let mut out = Vec::new();
     for unit in fs::read_dir(profile.join(".fingerprint"))?.flatten() {
         if !unit.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)) || !unit.file_type()?.is_dir() {
             continue;
         }
         for file in fs::read_dir(unit.path())?.flatten() {
             if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
-                let bytes = fs::read(file.path())?;
-                let moved = rewrite_encoded(&bytes, old, new);
-                if moved != bytes {
-                    rewrite(&file.path(), moved)?;
-                }
+                out.push(file.path());
             }
         }
     }
-    Ok(())
+    Ok(out)
+}
+
+/// The paths below `old` in a binary dep-info of cargo (see `rewrite_encoded`).
+fn encoded_paths(bytes: &[u8], old: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(len) = bytes.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize) {
+            let path = bytes.get(i + 4..i + 4 + len).unwrap_or_default();
+            if path.len() > old.len() && path.starts_with(old) && path[old.len()] == b'/' {
+                out.push(String::from_utf8_lossy(path).into_owned());
+                i += 4 + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Writes `bytes` to `path` and gives the file its old modification time back.
@@ -351,6 +385,22 @@ mod tests {
             b.extend(0u32.to_le_bytes());
             b
         };
+        // A source out of the package that only the binary dep-info names by its absolute path, with `..` parts.
+        fs::create_dir_all(old_line.join("crates/a/src")).unwrap();
+        fs::create_dir_all(new_line.join("crates/a/src")).unwrap();
+        fs::create_dir_all(old_line.join("crates/http")).unwrap();
+        fs::create_dir_all(new_line.join("crates/http")).unwrap();
+        fs::write(old_line.join("crates/http/openapi.json"), "{}").unwrap();
+        fs::write(new_line.join("crates/http/openapi.json"), "{}").unwrap();
+        unit(
+            &target,
+            "store-ddd",
+            "store",
+            &format!("{d}/store-ddd.d: crates/a/src/lib.rs crates/a/src/../../http/openapi.json\n"),
+        );
+        let store_dep = target.join("debug/.fingerprint/store-ddd/dep-test-lib-store");
+        let include = |root: &dyn std::fmt::Display| format!("{root}/crates/a/src/../../http/openapi.json");
+        fs::write(&store_dep, encoded(&[include(&o), "src/lib.rs".into()])).unwrap();
         unit(&target, "json-aaa", "json", &text("json-aaa", "clippy.toml"));
         let dep = target.join("debug/.fingerprint/json-aaa/dep-lib-json");
         fs::write(&dep, encoded(&[format!("{o}/tools/clippy.toml"), format!("{o}/Cargo.toml"), "src/lib.rs".into()])).unwrap();
@@ -367,6 +417,8 @@ mod tests {
             encoded(&[format!("{n}/tools/clippy.toml"), format!("{n}/Cargo.toml"), "src/lib.rs".into()])
         );
         assert_eq!(fs::metadata(&dep).unwrap().modified().unwrap(), time, "the time stays");
+        assert!(fresh(&target, "store", "ddd"), "a unit whose old path is only in the binary dep-info moves");
+        assert_eq!(fs::read(&store_dep).unwrap(), encoded(&[include(&n), "src/lib.rs".into()]));
         let moved = fs::read_to_string(target.join("debug/deps/json-aaa.d")).unwrap();
         assert!(moved.contains(&format!("{n}/Cargo.toml")) && !moved.contains(&o.to_string()), "{moved}");
         // At the new place the unit names no old place.
