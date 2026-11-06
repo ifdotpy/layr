@@ -261,6 +261,21 @@ enum FsId {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Mounts {
+    None,
+    Below,
+    Unknown,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+impl Mounts {
+    fn resolve_directories(self) -> bool {
+        self != Self::None
+    }
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn file_filesystem(dir_dev: u64, file_dev: u64, dir_fs: FsId, resolve: impl FnOnce() -> FsId) -> FsId {
     if dir_dev == file_dev {
         dir_fs
@@ -304,7 +319,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    let nested = std::sync::atomic::AtomicBool::new(false);
+    let mounts = Mutex::new(Mounts::Unknown);
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
@@ -314,9 +329,10 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     crate::sys::lower_thread_priority();
                     if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
                         eprintln!("note: nested mount {}: walking files instead", mount.display());
-                        nested.store(true, std::sync::atomic::Ordering::Relaxed);
+                        *mounts.lock().unwrap() = Mounts::Below;
                         return Ok(None);
                     }
+                    *mounts.lock().unwrap() = Mounts::None;
                     crate::btrfs_scan::plan(root, &paths).map(Some)
                 })
                 .join()
@@ -365,6 +381,8 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
             }
         }
     };
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let mounts = mounts.into_inner().unwrap();
     // OverlayFS layer registry entries contain metadata as well as data trees.
     let mut units: Vec<(usize, PathBuf)> = Vec::new();
     for (i, (name, path)) in parts.iter().enumerate() {
@@ -399,8 +417,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     crate::fsutil::work_queue(units, |(i, path), _add| {
         let in_trash = parts[i].0 == "trash" || parts[i].0.ends_with(": trash");
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        let unit_fs =
-            if nested.load(std::sync::atomic::Ordering::Relaxed) { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
+        let unit_fs = if mounts.resolve_directories() { filesystem_or_empty(&path) } else { Ok(filesystems[i]) };
         let mut own = 0u64;
         let mut local: HashMap<(FsId, ExtentKey), u64> = HashMap::new();
         let mut collect = |h: &crate::fsutil::Held, fsid: FsId| {
@@ -498,6 +515,15 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
 mod tests {
     use super::vanished;
     use std::path::PathBuf;
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn unknown_mounts_require_directory_filesystem_checks() {
+        use super::Mounts;
+        assert!(!Mounts::None.resolve_directories());
+        assert!(Mounts::Below.resolve_directories());
+        assert!(Mounts::Unknown.resolve_directories());
+    }
 
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     #[test]
