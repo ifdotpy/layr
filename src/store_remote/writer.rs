@@ -607,12 +607,23 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                         }
                         let records = remote_records.as_ref().unwrap();
                         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
-                        let attempt = &present[&id];
-                        let (_, canonical, tree) = source.tree(&id, attempt)?;
-                        let depth = source.tree_depth(&id, attempt)?;
-                        let restored = Pushed { attempt: attempt.clone(), tree, depth, canonical };
-                        index.insert(id.clone(), cache_tree(&mut tree_cache, &restored, 0));
-                        pushed = Some(restored);
+                        let attempt = present[&id].clone();
+                        // A delta tree whose base another machine never finished (or swept) cannot be read: the
+                        // state is not a usable base, so this state goes up as a complete tree.
+                        let read = source.tree(&id, &attempt).and_then(|(_, canonical, tree)| {
+                            Ok(Pushed { depth: source.tree_depth(&id, &attempt)?, attempt: attempt.clone(), tree, canonical })
+                        });
+                        match read {
+                            Ok(restored) => {
+                                index.insert(id.clone(), cache_tree(&mut tree_cache, &restored, 0));
+                                pushed = Some(restored);
+                            }
+                            Err(e) => {
+                                eprintln!("layr: the remote tree of {} cannot be read ({e:#}); a complete tree goes instead", crate::ids::short(&id));
+                                index.remove(&id);
+                                present.remove(&id);
+                            }
+                        }
                     }
                 }
                 pushed.map(|pushed| {
