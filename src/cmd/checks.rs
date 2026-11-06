@@ -322,10 +322,19 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             jobs.insert((state.to_owned(), name.clone()));
         }
     }
-    for change in repo.p.db.changes()? {
-        for state in repo.p.db.change_versions(&change)? {
+    // Change checks: the newest version of each open change. A change whose newest version a protected line holds
+    // already, or whose line is deleted, is done; an older version is superseded.
+    if !changes.is_empty() {
+        let merged = protected_history(repo, &policy)?;
+        for change in repo.p.db.changes()? {
+            let Some(newest) = repo.p.db.change_versions(&change)?.pop() else { continue };
+            if merged.contains(&newest.id)
+                || newest.line.as_deref().map(|l| repo.p.db.line_deleted(l)).transpose()?.unwrap_or(false)
+            {
+                continue;
+            }
             for name in &changes {
-                jobs.insert((state.id.clone(), name.clone()));
+                jobs.insert((newest.id.clone(), name.clone()));
             }
         }
     }
@@ -371,11 +380,29 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             commands.insert(name.clone(), command);
         }
     }
+    // Newest states first (state ids grow with time): a new change is checked before an old one.
     let jobs = jobs
         .into_iter()
+        .rev()
         .flat_map(|(state, name)| platforms_of(&platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
         .collect();
     Ok(Plan { policy, main_states, heads, jobs, commands, privileged })
+}
+
+/// The states in the history of the heads of the protected lines.
+fn protected_history(repo: &Repo, policy: &layr_model::Project) -> Result<BTreeSet<String>> {
+    let access = policy.access_policy(crate::ids::now_ms(), false);
+    let mut seen = BTreeSet::new();
+    let mut pending: Vec<String> =
+        repo.lines()?.into_iter().filter(|l| access.rule_for(&l.name).is_some()).map(|l| l.head).collect();
+    while let Some(id) = pending.pop() {
+        if seen.insert(id.clone()) {
+            if let Some(state) = repo.p.db.state(&id)? {
+                pending.extend(state.parents);
+            }
+        }
+    }
+    Ok(seen)
 }
 
 /// Whether an active executor check of `state` ran the argv `argv` with the privileged mode

@@ -30,7 +30,7 @@ only. Fetch into an existing project never grants local access.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `checks.changes` | `[]` | Checks for every immutable logical change version |
+| `checks.changes` | `[]` | Checks for the newest version of each open change: not yet in a protected line, its line not deleted. Newer states run first |
 | `checks.lines` | `{}` | Protected line names mapped to check name arrays |
 | `checks.privileged` | `[]` | Explicit names permitted to execute as root |
 | `checks.platforms` | `{}` | Check names mapped to a platform or a list of platforms: `linux`, `macos` (any architecture), or `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`. A check must pass once on each entry; an unset name runs once on any platform. A merge into a protected line needs a passing run on each entry: this machine runs its own platform, and a queue entry waits (stays pending) for a runner of another one |

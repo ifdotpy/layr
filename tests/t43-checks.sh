@@ -65,7 +65,8 @@ no 'invalid check config is rejected' l config checks.changes smoke
 no 'zero timeout is rejected' l config checks.timeout 0
 no 'privileged-only requires local opt-in' watch_checks --once --privileged-only
 report=$(watch_checks --once --json)
-ok 'a machine without runner opt-in only reports all pending checks' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["checks"]==[] and r["pending"]>r["pending_privileged"]>0' "$report"
+# No change is open yet: only the check of main is pending (merged changes of main's history plan nothing).
+ok 'a machine without runner opt-in only reports all pending checks' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["checks"]==[] and r["pending"]>0' "$report"
 l config --local checks.privileged-runner true
 ok 'privileged opt-in alone never enables execution' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["pending"]>0' "$(watch_checks --once --json)"
 l config --local checks.privileged-runner false
@@ -74,7 +75,7 @@ ok 'root opts this machine in as a runner' l config --local checks.runner true
 rc=0; first=$(watch_checks --once --json) || rc=$?
 ok 'the initial main gets a sandboxed check' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["work_done"] and any(c["name"]=="smoke" and c["exit"]==0 for c in r["checks"]); assert all(not c["privileged"] for c in r["checks"])' "$first"
 idle=$(watch_checks --once --json)
-ok 'rerun is idle with pending privileged work' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["count"]==0 and not r["checks"] and r["pending_privileged"]>0' "$idle"
+ok 'rerun is idle' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["count"]==0 and not r["checks"]' "$idle"
 no 'a reader cannot change command policy' as_reader config check.smoke true
 no 'a reader cannot change watcher policy' as_reader config checks.changes '[]'
 # A new pushed change version arrives while the watcher remains active.
@@ -159,10 +160,13 @@ for r in rows:
  assert d.execute('select target from refs where name=?',(c['log_ref'],)).fetchone()[0]==c['output_state']
 PY
 ok 'signed check and derived output records verify' l fsck
+# Only the newest version of an open change is planned: a revoke of the older one runs nothing.
 as_reader attest revoke "$PUSHED" >/dev/null
+ok 'a revoked older version is not planned again' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["checks"]==[]' "$(watch_checks --once --json)"
+as_reader attest revoke "$AMENDED" >/dev/null
 rc=0; retried=$(watch_checks --once --json) || rc=$?
 eq 'a revoked failed check reruns and reports failure' 1 "$rc"
-ok 'revocation permits exactly the revoked version to rerun' python3 -c 'import json,sys; rows=json.loads(sys.argv[1])["checks"]; assert len(rows)==2 and all(r["state"]==sys.argv[2] for r in rows)' "$retried" "$PUSHED"
+ok 'revocation permits exactly the revoked version to rerun' python3 -c 'import json,sys; rows=json.loads(sys.argv[1])["checks"]; assert len(rows)==2 and all(r["state"]==sys.argv[2] for r in rows)' "$retried" "$AMENDED"
 # Multiple protected main heads arriving together must all be checked.
 project_config checks.changes '[]'
 project_config check.smoke 'echo checked-main'
