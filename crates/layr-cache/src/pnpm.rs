@@ -268,13 +268,8 @@ fn part_of(dst: &Path) -> std::path::PathBuf {
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
 fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
     let program = if cfg!(target_os = "macos") { MACOS_CP } else { "cp" };
-<<<<<<< head
     let part = part_of(dst);
     let _ = std::fs::remove_dir_all(&part);
-||||||| base
-    let made = exec(host, "cp", |c| {
-=======
->>>>>>> origin-https/main
     let made = exec(host, program, |c| {
         if cfg!(target_os = "macos") {
             c.args(["-cRp"]).arg(src).arg(&part)
@@ -323,5 +318,38 @@ mod tests {
 
         // Stop at command selection; no filesystem copy or PATH lookup occurs.
         assert!(copy(&CheckProgram, Path::new(""), Path::new("")).is_err());
+    }
+
+    fn project(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-pnpm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::write(root.join("node_modules/pkg/index.js"), "whole").unwrap();
+        root
+    }
+
+    #[test]
+    fn a_copy_cut_short_is_never_put_back() {
+        // A stop in the middle of the copy leaves only the part: the folder stays as it is.
+        let root = project("part");
+        std::fs::create_dir_all(root.join("node_modules.layr-prune.part/pkg")).unwrap();
+        assert_eq!(recover_with(&root.join("node_modules")), Ok(false));
+        assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "whole");
+        assert!(!root.join("node_modules.layr-prune.part").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_finished_copy_is_put_back_by_renames_and_leaves_nothing_behind() {
+        let root = project("restore");
+        std::fs::create_dir_all(root.join("node_modules.layr-prune/pkg")).unwrap();
+        std::fs::write(root.join("node_modules.layr-prune/pkg/index.js"), "copy").unwrap();
+        std::fs::remove_file(root.join("node_modules/pkg/index.js")).unwrap();
+        assert_eq!(recover_with(&root.join("node_modules")), Ok(true));
+        assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "copy");
+        let mut left: Vec<String> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        left.sort();
+        assert_eq!(left, vec!["node_modules".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
