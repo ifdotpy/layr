@@ -1995,7 +1995,12 @@ mod view_tests {
         assert_eq!(db.saved_view(&subject)?, Some(view));
         let argv = vec!["sh".to_string(), "-c".into(), "check argument".into()];
         for (id, code, ord) in [("first", 7, "1"), ("second", 0, "2")] {
-            let raw = serde_json::json!({"r":{"data":{"check":{"argv":argv,"command":"sh -c check argument","exit":code}}}});
+            let check = serde_json::json!({"argv":argv,"command":"sh -c check argument","exit":code});
+            let digest = {
+                use layr_hashers::{ContentAddress, Digest};
+                hex::encode(ContentAddress::digest(serde_json::to_vec(&check)?))
+            };
+            let raw = serde_json::json!({"r":{"data":{"check":check,"attestation":{"payload_digest":digest}}}});
             db.conn.execute("INSERT INTO records(id,op,raw) VALUES(?1,'attest',?2)", params![id, raw.to_string()])?;
             db.conn.execute(
                 "INSERT INTO attestations(id,subject,kind,machine,uid,ord) VALUES(?1,?2,'check','machine',1,?3)",
