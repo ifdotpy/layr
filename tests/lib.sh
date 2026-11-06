@@ -111,7 +111,30 @@ has() { # has <description> <needle> <haystack>
     case "$3" in *"$2"*) PASS=$((PASS + 1)); echo "PASS $1" ;; *) FAIL=$((FAIL + 1)); printf 'FAIL %s\n  missing: %s\n  in: %s\n' "$1" "$2" "$3" ;; esac
 }
 
+# No garbage is left (docs/ownership.md): data goes in the operation that makes it dead, with no gc. At the end of
+# each test the owners of every project of the test store equal the replay of its records with no leaked state
+# (`layr gc`, a check), and no cache data is unreachable (`fsck --caches`). A test that makes garbage on purpose (a
+# crash, a leak) sets LAYR_TEST_GARBAGE_OK=1.
+garbage_check() {
+    [ -n "${LAYR_TEST_GARBAGE_OK:-}" ] && return 0
+    # A test that unsets LAYR_ROOT (set -u) has no store to check.
+    [ -n "${LAYR_ROOT:-}" ] && [ -d "$LAYR_ROOT/projects" ] || return 0
+    local d name out
+    for d in "$LAYR_ROOT"/projects/*/; do
+        name=$(basename "$d")
+        case "$name" in *%*) continue ;; esac
+        [ -f "$d/meta/db/layr.sqlite" ] || continue
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" gc 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no garbage is left in project $name (layr gc)"; echo "$out" | sed 's/^/  /' | head -8
+        fi
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --caches 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --caches)"; echo "$out" | sed 's/^/  /' | head -8
+        fi
+    done
+}
+
 finish() {
+    garbage_check
     echo "$(basename "$0"): $PASS passed, $FAIL failed"
     [ "$FAIL" -eq 0 ]
 }

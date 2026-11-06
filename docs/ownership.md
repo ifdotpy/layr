@@ -86,7 +86,18 @@ Before a line delete, its final state gets a complete tree (APFS, `thin::make_ke
 
 ## Storage that a live state needs
 
-On APFS a thin state is a layer over a base state (`src/thin.rs`). A dead state whose storage is
+On APFS a thin state is a layer over a base state (`src/thin.rs`). A command that moves a line head
+to a thin state whose chain is longer than `thin.chain` (32) starts `layr __keyframe` in the
+background: it gives that head a complete tree under the project lock and runs the free step, so no
+chain grows without end and the bases below can go. The walk is at most `thin.chain` steps for each
+moved head; nothing walks the project. A command that opened the layers of that head before reads them
+without the lock, so the layer stays `thin.view_seconds` (60 s, as a view in use) after the complete
+tree is made, and only then goes.
+
+A view is a complete copy of a thin state that a read made (`thin::complete_tree`). When a command
+makes a new view, only the newest `thin.views` (16) stay; the others go to the trash, and the next
+read makes them again. A view in use stays: one of a pinned state, or one used in the last
+`thin.view_seconds` (60). A dead state whose storage is
 the base of a live state's layer keeps its storage until no live layer uses it. The free step
 asks the layers on disk (`thin::delete_states`), so a dead base stays queued and goes when its last
 dependent layer goes, or when a keyframe (the existing upkeep, `layr gc --repair`) re-bases that
@@ -141,10 +152,14 @@ Owners and freeing:
   thin layer keeps its tree too.
 - Record owners keep only the record: `parent`, `derived`, `ref`, `tag`, `remote-ref` and
   `export`. Such a state can lose its tree and is built again on the next command that needs it.
-- Until the owners model frees states on the operation that drops the last owner (PR #135),
-  `layr gc --repair` frees the trees of imported states that no tree owner keeps. It repeats
-  until nothing more goes, so a base goes after its layers. `layr gc -n --repair` lists them.
-  The record stays.
+- The operation that drops the last tree owner of an imported state frees its tree: the owners
+  code queues the state, and the free step at the end of the command moves the tree to the trash
+  when git can build it again (`gitbridge::buildable_states`). The record stays. A base of a
+  present thin layer stays queued until its layers go. On APFS the states of a line's history are
+  thin layers, so an imported state there usually stays as their base.
+- The newest `import.trees` (16) trees that git built stay without a tree owner, so a second `try`
+  or `bisect` of the same commit reads its tree (`meta/built/<state>`). A new build frees the
+  oldest beyond that count that no tree owner keeps and no layer uses as its base.
 
 Costs: a build reads the changed Git trees and writes the changed files. A read from git keeps one
 object reader (`cat-file --batch`) for the command and walks the trees of each commit itself, so the
@@ -228,6 +243,14 @@ state is freed:
   after a free, layr runs `git gc --prune=now` in the background when more than 1 GiB of loose
   or unreferenced objects collected (`git count-objects`);
 - OCI derived refs: a `ref` owner with an expiry (`oci.retention`, default 30 days), not `None`.
+  A ref with an expiry (`ref set --ttl`, OCI) ends at the first command after its time: the free
+  step at the end of that command writes its `ref.expire` record and frees what only it kept.
+  Before, only `gc --repair` expired refs.
+
+The operation that makes such data dead removes it, at the end of the command (`free.rs`): a line
+delete removes the saved status and live compare of the line and its overlay bases, and a head
+that moves away from a state removes that state's git index unless a line head still names it or
+it has a Git commit. Only the named items are looked at.
 
 Quarantine data (`git-damaged-*`) is never freed automatically: it can hold the only copy. `layr gc`
 lists it with its size and age, and `layr gc --drop-quarantine <path>` removes one after the owner

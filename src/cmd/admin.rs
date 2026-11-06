@@ -186,7 +186,11 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         }
                     }
                     // Retention when caches are made, not only in gc: no daemon has to run.
-                    trash_excess_caches(repo)?;
+                    trash_excess_caches(&repo.p)?;
+                    // The size limit of a folder overlay (`gc=lru:<size>`), now that a build may have grown it.
+                    if let Err(e) = repo.cache_lru_line(&l, &caches) {
+                        eprintln!("warning: cache size limits not applied: {e:#}");
+                    }
                 }
                 if !a.has("-q") {
                     outln!(ctx, "{} {}", l.name, ids::display(&s.id));
@@ -1435,7 +1439,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
             for id in c.freed.iter().take(50) {
                 outln!(ctx, "\t{}", ids::short(id));
             }
-            let caches = excess_caches(repo)?;
+            let caches = excess_caches(&repo.p)?;
             outln!(ctx, "would delete {} cache(s)", caches.len());
             for (_, name) in caches.iter().take(50) {
                 outln!(ctx, "\t{name}");
@@ -1481,7 +1485,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
             repo.commit_record(ctx, rec)?;
         }
         // Cache snapshots beyond `retention.caches` (build output; the states stay).
-        let caches = trash_excess_caches(repo)?;
+        let caches = trash_excess_caches(&repo.p)?;
         if !caches.is_empty() {
             let mut rec = Record::new("gc");
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
@@ -1567,9 +1571,6 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
     Ok(freed)
 }
 
-/// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
-/// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
-/// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
 /// `layr fsck --caches`: the cache data of this project that nothing keeps, by reason, with its bytes
 /// (apparent sizes). The operations that make cache data dead delete it, so after them the report is
 /// 0 (docs/cache-overlays.md). It only reads. Exit code 1 when it finds any.
@@ -1594,7 +1595,7 @@ fn fsck_caches(ctx: &Ctx) -> Result<i32> {
         states += dead.len() + orphans.len();
         bytes += size;
     }
-    let old = excess_caches(repo)?;
+    let old = excess_caches(&repo.p)?;
     let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
     outln!(ctx, "cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size);
     states += old.len();
@@ -1603,14 +1604,17 @@ fn fsck_caches(ctx: &Ctx) -> Result<i32> {
     Ok(if states == 0 { 0 } else { 1 })
 }
 
-pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
-    let keep_n = repo.p.config_u64("retention.caches", 5) as usize;
-    let mut heads: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
-    heads.extend(repo.p.db.refs("", ids::now_ms())?.into_iter().map(|r| r.target));
+/// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
+/// for the heads of lines and for the newest `retention.caches` (5) states with caches. The
+/// states themselves stay; only their cache snapshots go. Returns `(state, snapshot name)`.
+pub fn excess_caches(p: &Project) -> Result<Vec<(String, String)>> {
+    let keep_n = p.config_u64("retention.caches", 5) as usize;
+    let mut heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
+    heads.extend(p.db.refs("", ids::now_ms())?.into_iter().map(|r| r.target));
     let mut with_caches: Vec<(i64, String, Vec<String>)> = Vec::new();
-    for (id, _) in repo.p.db.present_states()? {
-        if let Some(s) = repo.p.db.state(&id)? {
-            let snaps: Vec<String> = s.caches.values().filter(|n| repo.p.cache_path(&id, n).exists()).cloned().collect();
+    for (id, _) in p.db.present_states()? {
+        if let Some(s) = p.db.state(&id)? {
+            let snaps: Vec<String> = s.caches.values().filter(|n| p.cache_path(&id, n).exists()).cloned().collect();
             if !snaps.is_empty() {
                 with_caches.push((s.time, id, snaps));
             }
@@ -1627,10 +1631,10 @@ pub fn excess_caches(repo: &Repo) -> Result<Vec<(String, String)>> {
 }
 
 /// Move the cache snapshots that retention lets go into the trash. Returns their names.
-pub fn trash_excess_caches(repo: &Repo) -> Result<Vec<String>> {
+pub fn trash_excess_caches(p: &Project) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for (id, name) in excess_caches(repo)? {
-        repo.p.trash(&repo.p.cache_path(&id, &name))?;
+    for (id, name) in excess_caches(p)? {
+        p.trash(&p.cache_path(&id, &name))?;
         out.push(name);
     }
     Ok(out)
@@ -1771,7 +1775,7 @@ fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Re
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
 /// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
 /// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
-const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+use crate::owners::TREE_OWNERS;
 
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
@@ -1785,7 +1789,8 @@ fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
 }
 
 /// Rounds of freeing: a round frees the states that no owner keeps and no present layer uses as
-/// its base. A base is freed in a later round, after its layers went.
+/// its base. A base is freed in a later round, after its layers went. A tree that git built lately
+/// stays, as in the free step (`gitbridge::keep_newest_built`).
 fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
     let mut freed = Vec::new();
     loop {
@@ -1804,7 +1809,7 @@ fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
             .present_states()?
             .into_iter()
             .map(|(id, _)| id)
-            .filter(|id| !kept.contains(id) && !bases.contains(id))
+            .filter(|id| !kept.contains(id) && !bases.contains(id) && !crate::gitbridge::recently_built(&repo.p, id))
             .collect();
         let round: Vec<String> = crate::gitbridge::buildable_set(repo, &candidates)?.into_iter().collect();
         if round.is_empty() {

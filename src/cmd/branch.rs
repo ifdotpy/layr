@@ -316,7 +316,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // The owner of a deleted line no longer reads the git objects.
             crate::gitbridge::sync_store_access(repo)?;
             // The line's head no longer keeps its caches.
-            super::admin::trash_excess_caches(repo)?;
+            super::admin::trash_excess_caches(&repo.p)?;
             // Its cache overlay lines go too, with their states.
             if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
                 eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");

@@ -831,6 +831,9 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 opts.only_caches = Some(caches_of_lines(repo, &orepo, &opts.caches_of)?);
             }
             merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, &opts)?, &name, "fetch");
+            // Fetched states of another machine move its overlay lines: the history limit applies now, as after a
+            // local move, so the states beyond it go in this command.
+            repo.after_overlay_move(ctx, &name);
             Ok(())
         };
         match one() {

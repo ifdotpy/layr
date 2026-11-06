@@ -338,7 +338,9 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   beyond `history` or of deleted lines, overlay lines of deleted lines, and cache snapshots beyond
   `retention.caches`. The operations that make cache data dead delete it, so the report is 0 after
   them; it exits 1 when it finds some. It only reads.
-- `gc` applies `gc=lru:<size>` to the folder of each line (the newer of access and change time;
+- When a line head leaves a state with cache snapshots, the free step at the end of that command moves the
+  snapshots beyond `retention.caches` to the trash (before, only `save --caches`, `line delete` and `gc` did).
+- `save --caches` applies `gc=lru:<size>` to the folders it saves (before, only `gc` did), and `gc` applies it to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
 - `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the
   line, and their states at once (the overlay's `history` keeps only the heads of the overlay lines

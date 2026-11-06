@@ -485,6 +485,16 @@ impl Db {
                      ON CONFLICT(line, machine) DO UPDATE SET head=?3, time=?4, ord=?5 WHERE excluded.ord > line_heads.ord",
                 )?
                 .execute(params![id, rec.machine, a.head, rec.time, ord])?;
+                crate::free::head_moved(&a.head);
+            }
+            // The head the line left, and a deleted line: their derived data goes at the end of the command.
+            match (&ch.before, &ch.after) {
+                (Some(b), Some(a)) if b.head != a.head => crate::free::head_left(&b.head),
+                (Some(b), None) => {
+                    crate::free::head_left(&b.head);
+                    crate::free::line_deleted(id);
+                }
+                _ => {}
             }
             let row_machine: Option<String> =
                 tx.prepare_cached("SELECT machine FROM lines WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;

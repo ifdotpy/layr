@@ -364,7 +364,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
         }
     };
     // The free step: after the commit and the store lock (docs/ownership.md).
-    crate::free::finish(&ctx.store);
+    crate::free::finish(&ctx);
     code
 }
 

@@ -7,13 +7,48 @@
 
 use crate::store::{Project, Store};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
 /// the command ends and forgets them.
 static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+
+/// The queue that a free pass of this process left for a project (`(store root, project name)`): the states that
+/// wait as the base of a live layer. The free step at the end of the command skips a project whose queue is still
+/// the same, so a command that ran the pass itself (`gc --repair`) does not walk the layers again.
+static LEFT_QUEUED: Mutex<BTreeMap<(PathBuf, String), Vec<String>>> = Mutex::new(BTreeMap::new());
+
+/// Line heads that records of this command moved to (`Db::derive`): at the end of the command a thin head with a
+/// long chain gets a complete tree, in the background (`keyframe_heads`).
+static MOVED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// States that a line head left, and lines that a record deleted, in this command (`Db::derive`): their derived
+/// data goes at the end of the command (`drop_derived`).
+static LEFT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static DELETED_LINES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A line head left `state`.
+pub fn head_left(state: &str) {
+    if let Ok(mut left) = LEFT.lock() {
+        left.insert(state.to_string());
+    }
+}
+
+/// A record deleted the line `id`.
+pub fn line_deleted(id: &str) {
+    if let Ok(mut deleted) = DELETED_LINES.lock() {
+        deleted.insert(id.to_string());
+    }
+}
+
+/// A record moved a line head to `state`.
+pub fn head_moved(state: &str) {
+    if let Ok(mut moved) = MOVED.lock() {
+        moved.insert(state.to_string());
+    }
+}
 
 /// Called when a project opens: its queue is checked at the end of the command.
 pub fn register(store: &Store, name: &str) {
@@ -25,7 +60,8 @@ pub fn register(store: &Store, name: &str) {
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
-pub fn finish(store: &Store) {
+pub fn finish(ctx: &crate::ctx::Ctx) {
+    let store = &ctx.store;
     release_held();
     let names: Vec<String> = match OPENED.lock() {
         Ok(mut opened) => {
@@ -35,9 +71,26 @@ pub fn finish(store: &Store) {
         }
         Err(_) => return,
     };
+    let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
+        if !moved.is_empty() {
+            keyframe_heads(store, &name, &moved);
+        }
+        if !left.is_empty() || !deleted.is_empty() {
+            if let Err(e) = drop_derived(store, &name, &left, &deleted) {
+                eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
+            }
+        }
+        // A ref whose time ran out releases its owners now: the free step below frees what it kept.
+        if expired_refs(store, &name) {
+            if let Err(e) = expire_refs(ctx, &name) {
+                eprintln!("layr: expired refs of {name} stay until the next command: {e:#}");
+            }
+        }
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
-        if !pending(store, &name) {
+        if !pending(store, &name) || unchanged_queue(store, &name) {
             continue;
         }
         let Ok(p) = Project::open(store, &name) else { continue };
@@ -55,6 +108,136 @@ pub fn finish(store: &Store) {
     }
 }
 
+/// The heads in `moved` that are thin states of project `name` with a chain longer than `thin.chain`: each gets a
+/// complete tree in a background process (`layr __keyframe`), so that no chain grows without end and the bases
+/// below it can go. A layer walk of at most `thin.chain` steps per moved head; no walk of the project.
+fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(dir) = store.project_dir(name) else { return };
+        let delta = |id: &str| dir.join("deltas").join(id);
+        if !moved.iter().any(|id| delta(id).is_dir()) {
+            return;
+        }
+        let Ok(p) = Project::open(store, name) else { return };
+        let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
+        for id in moved.iter().filter(|id| p.delta_path(id).is_dir()) {
+            if crate::thin::chain_len(&p, id) > max {
+                spawn_keyframe(&store.root, name, id);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (store, name, moved);
+}
+
+/// Start `layr __keyframe <store> <project> <state>` in the background; without it the next command tries again.
+#[cfg(target_os = "macos")]
+fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let _ = std::process::Command::new(exe)
+        .args(["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// The background keyframe (`layr __keyframe`): under the project lock, a head that still is a thin state with a
+/// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
+/// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
+/// free step moves the bases that nothing uses now. One process per project makes complete trees at a time; another
+/// one finds the work done or leaves it to the next save.
+#[cfg(target_os = "macos")]
+pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
+    let store = Store::open(root)?;
+    let p = Project::open(&store, name)?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("keyframe.lock"))?;
+    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        return Ok(());
+    }
+    {
+        let _lock = p.lock()?;
+        let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
+        if !p.delta_path(id).is_dir() || crate::thin::chain_len(&p, id) <= max {
+            return Ok(());
+        }
+        crate::thin::complete_tree(&p, id)?;
+    }
+    // The wait holds no lock: the keyframe of a newer head must not wait for it.
+    drop(lock);
+    let wait = p.config_u64("thin.view_seconds", crate::thin::VIEW_IN_USE_SECONDS);
+    std::thread::sleep(std::time::Duration::from_secs(wait));
+    {
+        let _lock = p.lock()?;
+        // A command can remove the view in the wait: then the state stays thin and the next save tries again.
+        if p.state_path(id).is_dir() && p.delta_path(id).is_dir() {
+            crate::thin::make_keyframe(&p, id)?;
+        }
+    }
+    finish_project(&p)?;
+    Ok(())
+}
+
+/// The derived data of lines that a record deleted (the saved status and live compare, the overlay bases) and the
+/// git index of a state that no line head names any more and that has no Git commit. Only the named items are
+/// looked at; nothing walks the project.
+fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BTreeSet<String>) -> Result<()> {
+    let p = Project::open(store, name)?;
+    for id in deleted {
+        let _ = std::fs::remove_file(p.meta_dir().join("status").join(format!("{id}.cache")));
+        let _ = std::fs::remove_file(p.meta_dir().join("overlap-live").join(format!("{id}.json")));
+        if let Ok(rd) = std::fs::read_dir(p.base_dir()) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().split('@').next() == Some(id.as_str()) {
+                    let _ = crate::storage::delete_tree(&e.path());
+                }
+            }
+        }
+    }
+    if !left.is_empty() {
+        let heads: BTreeSet<String> = p.db.lines()?.into_iter().map(|l| l.head).collect();
+        let mut caches_left = false;
+        for state in left.iter().filter(|s| !heads.contains(*s) && crate::model::is_uuid(s)) {
+            if p.db.git_commit_of(state)?.is_none() {
+                let _ = std::fs::remove_file(p.git_dir().join("layr-index").join(state));
+            }
+            caches_left |= p.db.state(state)?.is_some_and(|s| s.caches.values().any(|n| p.cache_path(state, n).exists()));
+        }
+        // A head left a state with cache snapshots: it no longer keeps them, so those beyond `retention.caches` go.
+        if caches_left {
+            let _lock = p.lock()?;
+            crate::cmd::admin::trash_excess_caches(&p)?;
+        }
+    }
+    Ok(())
+}
+
+/// True when a ref of project `name` has expired (a read-only query; no project open).
+fn expired_refs(store: &Store, name: &str) -> bool {
+    let Ok(dir) = store.project_dir(name) else { return false };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM refs WHERE deleted=0 AND expires_at IS NOT NULL AND expires_at<=?1)",
+        [crate::ids::now_ms()],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// The `ref.expire` record of each expired ref of project `name`, under its lock.
+fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
+    let repo = crate::repo::Repo::open(ctx, name)?;
+    let _lock = repo.p.lock()?;
+    for expired in repo.p.db.expired_refs(crate::ids::now_ms())? {
+        let mut rec = crate::model::Record::new("ref.expire");
+        rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name: expired.name.clone(), before: Some(expired), after: None }});
+        repo.commit_record(ctx, rec)?;
+    }
+    Ok(())
+}
+
 /// True when a project has queued states or pins to release. Reads the database directly.
 fn pending(store: &Store, name: &str) -> bool {
     let Ok(dir) = store.project_dir(name) else { return false };
@@ -66,6 +249,22 @@ fn pending(store: &Store, name: &str) -> bool {
         |r| r.get::<_, bool>(0),
     )
     .unwrap_or(false)
+}
+
+/// True when a free pass of this process left the queue of project `name` as it is now and no pin is held: a new
+/// pass would find the same waiting bases.
+fn unchanged_queue(store: &Store, name: &str) -> bool {
+    let Some(left) = LEFT_QUEUED.lock().ok().and_then(|m| m.get(&(store.root.clone(), name.to_string())).cloned()) else {
+        return false;
+    };
+    let Ok(dir) = store.project_dir(name) else { return false };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+    let pins = conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| r.get::<_, bool>(0)).unwrap_or(true);
+    let Ok(mut st) = conn.prepare("SELECT state FROM free_queue ORDER BY state") else { return false };
+    let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return false };
+    let now: Vec<String> = rows.flatten().collect();
+    !pins && now == left
 }
 
 /// Move the storage of every dead queued state of a project to the trash. A state that a live
@@ -80,7 +279,13 @@ pub fn finish_project(p: &Project) -> Result<usize> {
         // A caller that already holds the lock (it is not taken twice: a second lock would wait).
         let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
         release_dead_pins(p)?;
-        free_queued(p)?
+        let gone = free_queued(p)?;
+        let mut left = p.db.queued_frees()?;
+        left.sort();
+        if let Ok(mut m) = LEFT_QUEUED.lock() {
+            m.insert((p.store.root.clone(), p.name.clone()), left);
+        }
+        gone
     };
     if !gone.is_empty() {
         crate::store::kick_trash(&p.trash_dir()?);
@@ -92,8 +297,15 @@ pub fn finish_project(p: &Project) -> Result<usize> {
 fn free_queued(p: &Project) -> Result<Vec<String>> {
     let queued = p.db.queued_frees()?;
     let mut dead = Vec::new();
+    let mut treeless = Vec::new();
     for state in queued {
         if p.db.is_owned(&state)? {
+            // Only record owners keep it (it lost its last tree owner): an imported state can lose its tree, git
+            // builds it again on read. The others keep their tree.
+            if !p.db.has_tree_owner(&state)? && p.has_state(&state) {
+                treeless.push(state);
+                continue;
+            }
             // Owned again (a record named it after its death): it is live, if its storage is here.
             if p.has_state(&state) {
                 p.db.set_present(&state, true)?;
@@ -103,8 +315,9 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
             dead.push(state);
         }
     }
+    let mut gone_trees = drop_trees(p, treeless)?;
     if dead.is_empty() {
-        return Ok(Vec::new());
+        return Ok(std::mem::take(&mut gone_trees));
     }
     for state in &dead {
         if let Some(s) = p.db.state(state)? {
@@ -113,8 +326,43 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
             }
         }
     }
-    let gone = p.delete_states(&dead);
+    let mut gone = p.delete_states(&dead);
     p.db.dequeue_frees(&gone)?;
+    gone.extend(gone_trees);
+    Ok(gone)
+}
+
+/// The trees of the owned states `states` that only record owners keep: an imported state that git can build
+/// loses its tree and stays as a record (`present=0`). A base of a present thin layer stays queued until its layers
+/// go. Any other state keeps its tree and leaves the queue. Returns the states whose tree went.
+fn drop_trees(p: &Project, states: Vec<String>) -> Result<Vec<String>> {
+    if states.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bases: BTreeSet<String> = p.db.present_layer_bases()?.into_iter().collect();
+    // A tree that git built lately stays (`gitbridge::keep_newest_built` frees it when newer ones push it out).
+    let (recent, states): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| crate::gitbridge::recently_built(p, s));
+    for state in &recent {
+        p.db.set_present(state, true)?;
+    }
+    p.db.dequeue_frees(&recent)?;
+    let (waiting, candidates): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| bases.contains(s));
+    let buildable = crate::gitbridge::buildable_states(p, &candidates)?;
+    // Owned again, and not a tree that git can build: it is live, as in `free_queued`.
+    let keep: Vec<String> = candidates.iter().filter(|s| !buildable.contains(*s)).cloned().collect();
+    for state in &keep {
+        p.db.set_present(state, true)?;
+    }
+    p.db.dequeue_frees(&keep)?;
+    let drop: Vec<String> = buildable.into_iter().collect();
+    let gone = p.delete_states(&drop);
+    for state in &gone {
+        if !p.has_state(state) {
+            p.db.set_present(state, false)?;
+        }
+    }
+    p.db.dequeue_frees(&gone)?;
+    let _ = waiting;
     Ok(gone)
 }
 
