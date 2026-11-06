@@ -207,7 +207,9 @@ pub(crate) fn active_checks(repo: &Repo, subject: &Subject) -> Result<BTreeMap<S
     for a in repo.p.db.attestations(&subject.id, None)? {
         let Some(rec) = repo.p.db.record(&a.attestation_id)? else { continue };
         if a.kind == "check" && &a.subject == subject {
-            active.insert(a.attestation_id.clone(), (a, rec));
+            if layr_model::validation::check_digest_ok(&rec.data) {
+                active.insert(a.attestation_id.clone(), (a, rec));
+            }
         } else if a.kind == "revoke" {
             for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 let remove = active

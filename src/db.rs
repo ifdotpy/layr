@@ -1152,12 +1152,19 @@ impl Db {
 
     /// Match command arguments, not their display text. With no requested exit, use the newest result.
     pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
-        let mut statement=self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data'))
+        let mut statement=self.conn.prepare_cached("SELECT COALESCE(json_extract(r.raw,'$.r.data.check'),json_extract(r.raw,'$.r.data')),
+            json_extract(r.raw,'$.r.data')
             FROM attestations a JOIN records r ON r.id=a.id WHERE a.subject=?1 AND a.kind='check'
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)
             ORDER BY a.ord DESC")?;
-        let rows = statement.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        for row in rows {
+        let rows = statement
+            .query_map(params![state], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (row, data) in rows {
+            // A result whose digest differs from its signed payload digest counts as no result.
+            if !layr_model::validation::check_digest_ok(&serde_json::from_str(&data)?) {
+                continue;
+            }
             let result: serde_json::Value = serde_json::from_str(&row)?;
             let matches = match result.get("argv") {
                 Some(value) => {

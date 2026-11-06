@@ -80,6 +80,15 @@ pub fn is_name(s: &str) -> bool {
 }
 
 /// A cache snapshot name: `<state-id>@<path with '/' as %2F>`.
+/// Whether the check result of a record (`data.check`) has the payload digest that its attestation signed. A result
+/// that does not counts as no result.
+pub fn check_digest_ok(data: &serde_json::Value) -> bool {
+    use layr_hashers::{ContentAddress, Digest};
+    let Some(result) = data.get("check") else { return true };
+    let Ok(bytes) = serde_json::to_vec(result) else { return false };
+    data["attestation"]["payload_digest"].as_str() == Some(hex::encode(ContentAddress::digest(bytes)).as_str())
+}
+
 pub fn is_cache_name(s: &str, state: &str) -> bool {
     match s.split_once('@') {
         Some((id, p)) => {
@@ -414,11 +423,10 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         if let Some(id) = &a.payload_ref {
             uuid("payload reference", id)?;
         }
-        if let Some(result) = d.get("check") {
-            use layr_hashers::{ContentAddress, Digest};
-            if a.kind != "check" || a.payload_digest != hex::encode(ContentAddress::digest(serde_json::to_vec(result)?)) {
-                bail!("check payload digest does not match its signed result");
-            }
+        // A check result whose digest differs from the signed payload digest stays in the history (its record is
+        // signed, and later records of its machine need it), but it counts as no result (`check_digest_ok`).
+        if d.get("check").is_some() && a.kind != "check" {
+            bail!("a check result belongs to a check attestation");
         }
     }
     if let Some(v) = d.get("revokes") {
@@ -708,5 +716,17 @@ mod tests {
         assert!(validate(&r).is_err());
         r.data["attestation"]["subject"]["kind"] = serde_json::json!("state");
         assert!(validate(&r).is_err());
+    }
+
+    #[test]
+    fn a_check_result_with_another_digest_counts_as_no_result() {
+        use layr_hashers::{ContentAddress, Digest};
+        let result = serde_json::json!({"name": "test", "exit": 0, "argv": ["sh", "-c", "true"]});
+        let digest = hex::encode(ContentAddress::digest(serde_json::to_vec(&result).unwrap()));
+        let mut data = serde_json::json!({"check": result, "attestation": {"payload_digest": digest}});
+        assert!(check_digest_ok(&data));
+        data["check"]["exit"] = serde_json::json!(1);
+        assert!(!check_digest_ok(&data), "a changed result no longer matches its signed digest");
+        assert!(check_digest_ok(&serde_json::json!({"attestation": {"payload_digest": "x"}})), "no check, nothing to match");
     }
 }
