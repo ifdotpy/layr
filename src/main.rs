@@ -76,6 +76,7 @@ mod sys;
 mod thin;
 mod trace;
 mod tree;
+mod usage;
 mod volumes;
 
 use std::collections::HashMap;
@@ -208,31 +209,40 @@ fn main() {
             std::process::exit(1);
         }
     }
+    // The commands that run in the caller's process (retest, person, mount) are counted here; the
+    // others where they run (`service::run_as`).
+    let started = std::time::Instant::now();
+    let early = |argv: &[String], code: i32| {
+        let agent = std::env::var_os("LAYR_SESSION").is_some();
+        let ms = started.elapsed().as_millis() as u64;
+        usage::count(&store::default_root(), argv, rustix::process::getuid().as_raw(), agent, code, ms);
+        code
+    };
     if argv.first().map(String::as_str) == Some("retest") {
         // Runs in the caller's process: it starts cargo and takes minutes, which the daemon must not do.
         match layr_retest::main(&argv[1..]) {
-            Ok(code) => std::process::exit(code),
+            Ok(code) => std::process::exit(early(&argv, code)),
             Err(error) => {
                 eprintln!("layr retest: {error:#}");
-                std::process::exit(1);
+                std::process::exit(early(&argv, 1));
             }
         }
     }
     if argv.first().map(String::as_str) == Some("person") {
         match person::run(&argv[1..]) {
-            Ok(code) => std::process::exit(code),
+            Ok(code) => std::process::exit(early(&argv, code)),
             Err(error) => {
                 eprintln!("layr person: {error:#}");
-                std::process::exit(1);
+                std::process::exit(early(&argv, 1));
             }
         }
     }
     if argv.first().map(String::as_str) == Some("mount") {
         match disk::run(&argv[1..]) {
-            Ok(code) => std::process::exit(code),
+            Ok(code) => std::process::exit(early(&argv, code)),
             Err(error) => {
                 eprintln!("layr mount: {error:#}");
-                std::process::exit(1);
+                std::process::exit(early(&argv, 1));
             }
         }
     }

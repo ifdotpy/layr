@@ -229,6 +229,7 @@ Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
    init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
+   usage [--days <n>] [--json]
    daemon [--allow-root-snapshots]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
@@ -247,6 +248,7 @@ pub const COMMANDS: &[&str] = &[
     "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
     "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
     "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
+    "usage",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -351,6 +353,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "follow" => followcmd::follow(ctx, &rest),
         "volume" => volume::volume(ctx, &rest),
         "project" => project::project(ctx, &rest),
+        "usage" => crate::usage::show(ctx, &rest),
         "fetch" => remote::fetch(ctx, &rest),
         "pull" => remote::pull(ctx, &rest),
         "push" => remote::push(ctx, &rest),
