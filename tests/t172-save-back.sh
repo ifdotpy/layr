@@ -27,6 +27,8 @@ cd "$T/c/store/projects/p/lines/main" || exit 1
 cl line new job main >/dev/null 2>&1
 cd "$T/c/store/projects/p/lines/job" || exit 1
 echo job > target/a
+# A source change that the job built: the saved cache must name these bytes, not the laptop's.
+echo job-edit > change.txt
 states=$(cl log --all --json 2>/dev/null | wc -l)
 no "--save-back needs --caches" cl save --save-back main
 no "and a known line" cl save --caches --save-back nosuch
@@ -36,6 +38,7 @@ has "the caches go to the save-back line of main" "main.checks-" "$plat"
 main_id=$(cd "$T/c/store/projects/p/lines/main" && cl log --json 2>/dev/null | head -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 has "with main's head as their source" "\"source\":\"$main_id\"" "$out"
 has "and the cache folder" '"path":"target"' "$out"
+ok "the saved cache records the source bytes of the job" grep -q " $(git hash-object change.txt) change.txt\$" target/.layr-times
 eq "no source state is made" "$states" "$(cl log --all --json 2>/dev/null | wc -l)"
 cl push origin -q --caches >/dev/null 2>&1
 
