@@ -75,6 +75,21 @@ The previous Git forms fail with the new command name.
 The previous command transport form fails with `layr sync <remote>` in the message.
 Tests can use `layr sync work --command -- <command> [<arguments>]` with an explicit peer remote.
 
+## A git mirror of a store remote
+
+`layr config remote.<store>.mirror <git remote>` makes `layr push <store>` push to that git remote too, after the
+store push. It pushes the line of the command, every protected line, and each line whose mirror push failed before,
+each to the branch of its name (as `layr git push <git remote> <line>`). The store is the source of truth: a git
+failure never fails or undoes the store push. It prints `warning: mirror <git remote>: line <line> not pushed: <error>`,
+and the next push tries the line again. With `--json` the report has a `mirror` object: `remote`, `pushed` and `failed`
+(each with `line` and `error`). A queue pass with `queue.push <store>` pushes this way too, so a merge that a daemon
+makes reaches both remotes.
+
+```sh
+layr config remote.cloud.mirror origin
+layr push cloud
+```
+
 ## Btrfs execution and sync
 
 Metadata comparisons call the kernel directly. They do not start a `btrfs send` process.
