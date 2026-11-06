@@ -83,6 +83,7 @@ impl Store {
         paths: &[String],
         rename: Option<&str>,
         expect: Option<&str>,
+        public: bool,
     ) -> Result<Files> {
         if paths.is_empty() || paths.len() > release::MAX_FILES {
             bail!("attach needs 1 to 64 files");
@@ -158,11 +159,17 @@ impl Store {
             bail!("project epoch changed; retry attach");
         }
         let mut files = Vec::new();
+        let mut plain = Vec::new();
         for (name, file) in prepared {
+            // The same open file, read again from its start for the public copy (`--public-files`).
+            let again = if public { Some(file.try_clone()?) } else { None };
             let (ciphertext, size, sha256) = encrypt(file, &recipient)?;
             let object = format!("files/{}.age", ids::new_id());
             if !self.backend.put_file_new(&object, ciphertext)? {
                 bail!("release object id already exists; retry attach");
+            }
+            if let Some(again) = again {
+                plain.push((name.clone(), again));
             }
             files.push(File { name, size, sha256, object });
         }
@@ -183,7 +190,40 @@ impl Store {
         repo.commit_record(ctx, record)?;
         writer::push_locked(self, ctx, repo, &Options::default())?;
         check_ref(&self.release_model()?, name, &files.state)?;
+        if public {
+            self.publish_plain(&files, plain)?;
+        }
         Ok(files)
+    }
+
+    /// `--public-files`: each file as plaintext at `public/release/<version>/<name>`, then the list of names,
+    /// sizes and SHA-256 at `public/release/<version>/files.json`, all create-only, the list last. The gateway serves
+    /// them without sign-in (`/p/<project>/release/<version>/<name>`, `.../latest`); the signed `release.files`
+    /// record binds the same digests. A retry after a partial publish finds the same bytes and goes on.
+    fn publish_plain(&self, files: &Files, plain: Vec<(String, fs::File)>) -> Result<()> {
+        let version = files.reference.strip_prefix("release/").context("release ref must start with release/")?;
+        for (name, mut file) in plain {
+            let entry = files.files.iter().find(|f| f.name == name).context("public file is not in the release list")?;
+            file.seek(SeekFrom::Start(0))?;
+            let key = format!("public/release/{version}/{name}");
+            if !self.backend.put_file_new(&key, file)? {
+                let body = self.backend.get(&key)?.with_context(|| format!("{key} exists but cannot be read"))?;
+                if hex::encode(ContentAddress::digest(&body)) != entry.sha256 {
+                    bail!("{key} already holds other bytes");
+                }
+            }
+        }
+        let list: Vec<serde_json::Value> = files
+            .files
+            .iter()
+            .map(|f| serde_json::json!({"name": f.name, "size": f.size, "sha256": f.sha256}))
+            .collect();
+        let body = serde_json::to_vec(&serde_json::json!({"version": version, "state": files.state, "files": list}))?;
+        let key = format!("public/release/{version}/files.json");
+        if !self.backend.put_new(&key, body.clone())? && self.backend.get(&key)?.as_deref() != Some(body.as_slice()) {
+            bail!("{key} already lists other files");
+        }
+        Ok(())
     }
 
     pub fn get_release_file(&mut self, ctx: &Ctx, file: &File, directory: &Path) -> Result<()> {
