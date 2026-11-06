@@ -1,8 +1,8 @@
 #!/bin/bash
 # ci: macos overlayfs
 # Failure paths leave no temporary data: a cache copy that fails (save --caches), a forced save,
-# a trash entry that cannot be deleted, saved scans of every gc path, a stray cache snapshot
-# (fsck), and a temporary clone of a dead dedup run.
+# a trash entry that cannot be deleted, saved scans of every gc path, an old cache snapshot
+# (gc), and a temporary clone of a dead dedup run.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -27,12 +27,11 @@ if [ "$(uname -s)" = Darwin ]; then
     chmod 644 z-cache/secret; rm -f z-cache/secret
 fi
 
-# A stray snapshot: a cache snapshot folder that no state record names.
+# An old cache snapshot of a state (`<state>@<path>`, before cache overlays): gc removes it.
 sid=$(ls "$P/states" | grep -v '@' | head -1)
 mkdir "$P/states/$sid@stray"
-has "fsck reports a cache snapshot without record" "cache snapshot without record" "$(l fsck 2>&1)"
-l fsck --repair >/dev/null 2>&1
-ok "fsck --repair removes it" test ! -e "$P/states/$sid@stray"
+l gc --repair -q >/dev/null 2>&1
+ok "gc removes it" test ! -e "$P/states/$sid@stray"
 
 echo four >> notes.txt; l save --force -q
 eq "a forced save leaves no prepared layer" "0" "$(work_copies prepared-save-)"

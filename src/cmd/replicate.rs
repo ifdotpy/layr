@@ -34,7 +34,6 @@ const MAX_CLONE_SOURCES: usize = 8;
 struct SendFeatures {
     compressed: bool,
     clones: bool,
-    cache_names: bool,
     identities: BTreeMap<String, (String, Option<u64>)>,
 }
 
@@ -43,7 +42,6 @@ impl SendFeatures {
         Self {
             compressed: hello["compressed_send_v2"].as_bool().unwrap_or(false),
             identities: serde_json::from_value(hello["clone_identities_v1"].clone()).unwrap_or_default(),
-            cache_names: hello.get("caches").is_some(),
             clones: hello["clone_sources_v1"].as_bool().unwrap_or(false),
         }
     }
@@ -222,15 +220,6 @@ fn seqs(p: &Project) -> Result<BTreeMap<String, u64>> {
     Ok(p.db.max_seqs()?.into_iter().collect())
 }
 
-/// Cache snapshots on this machine (`<state-id>@<path>`).
-fn present_caches(p: &Project) -> Result<BTreeSet<String>> {
-    Ok(std::fs::read_dir(p.states_dir())?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.contains('@'))
-        .collect())
-}
-
 /// The states this side can send as btrfs streams. A tree built from git (an imported state, with
 /// an empty signed `subvol`) has the UUID of this machine's snapshot, which no signed record names,
 /// so the receiver would refuse it. Such a state reaches a peer as its record only.
@@ -375,27 +364,11 @@ fn plan(
     Ok(out)
 }
 
-fn send_cache<R: Read, W: Write>(w: &mut Wire<R, W>, repo: &Repo, snap: &str, features: &SendFeatures) -> Result<u64> {
-    w.json(&json!({"op": if features.cache_names { "cache" } else { "layer" }, "name": snap}))?;
-    let child =
-        btrfs::send_optimized(None, &repo.p.cache_path(snap.split('@').next().unwrap_or(""), snap), &[], features.compressed)?
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-    let n = w.send_stream(child)?;
-    if w.recv_json()?["op"] != "ok" {
-        bail!("peer did not store cache {snap}");
-    }
-    Ok(n)
-}
-
 fn send_states<R: Read, W: Write>(
     ctx: &Ctx,
     w: &mut Wire<R, W>,
     repo: &Repo,
     list: &[(String, Option<String>)],
-    caches: bool,
-    peer_caches: &BTreeSet<String>,
     peer_states: &BTreeSet<String>,
     features: SendFeatures,
 ) -> Result<(usize, u64)> {
@@ -403,18 +376,6 @@ fn send_states<R: Read, W: Write>(
     let mut bytes = 0;
     let mut have = peer_states.clone();
     let mut identities = features.identities.clone();
-    // Caches of states the peer has already (sent earlier without --caches).
-    if caches {
-        for id in peer_states {
-            if let Some(s) = repo.p.db.state(id)? {
-                for snap in s.caches.values() {
-                    if !peer_caches.contains(snap) && repo.p.cache_path(id, snap).exists() {
-                        bytes += send_cache(w, repo, snap, &features)?;
-                    }
-                }
-            }
-        }
-    }
     for (id, parent) in list {
         let clones: Vec<String> = if features.clones {
             have.iter()
@@ -459,18 +420,6 @@ fn send_states<R: Read, W: Write>(
         have.insert(id.clone());
         if let Ok((uuid, transid)) = btrfs::send_clone_identity(&repo.p.state_path(id)) {
             identities.insert(id.clone(), (uuid, Some(transid)));
-        }
-        // Regenerable caches travel only for a live move (warm builds on the peer).
-        if caches {
-            if let Some(s) = repo.p.db.state(id)? {
-                for snap in s.caches.values() {
-                    let path = repo.p.cache_path(id, snap);
-                    if !path.exists() || peer_caches.contains(snap) {
-                        continue;
-                    }
-                    bytes += send_cache(w, repo, snap, &features)?;
-                }
-            }
         }
     }
     w.json(&json!({"op": "done"}))?;
@@ -517,21 +466,6 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
         }
         let res = match v["op"].as_str() {
             Some("done") => break,
-            Some("cache" | "layer") => {
-                // Only a cache that a known state names.
-                let name = v["name"].as_str().unwrap_or("").to_string();
-                let id = name.split('@').next().unwrap_or("").to_string();
-                let known = p.db.state(&id).ok().flatten().map(|s| s.caches.values().any(|x| x == &name)).unwrap_or(false);
-                if !known || !crate::model::is_cache_name(&name, &id) {
-                    bail!("unknown cache {name:?}");
-                }
-                if p.cache_path(&id, &name).exists() {
-                    bail!("cache {name} exists here already");
-                }
-                // The cache must be the subvolume that the signed save.caches record names.
-                let uuid = p.db.cache_uuid(&id, &name)?.ok_or_else(|| anyhow!("no signed subvolume id for cache {name}"))?;
-                receive_one(w, p, &name, &uuid, false, &[])
-            }
             Some("state") => {
                 // Only a state that a signed record names, as the subvolume that record names.
                 let id = v["id"].as_str().unwrap_or("").to_string();
@@ -615,7 +549,7 @@ pub fn exchange(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine, "caches": present_caches(&repo.p)?}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine}))?;
         let hello = w.recv_json()?;
         if direction != "sync" && hello["direction_v1"] != true {
             bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
@@ -626,7 +560,6 @@ pub fn exchange(
             bail!("the peer holds another project ({peer_project})");
         }
         let peer = (hello["machine"].as_str().unwrap_or("").to_string(), hello["public_key"].as_str().unwrap_or("").to_string());
-        let peer_caches: BTreeSet<String> = serde_json::from_value(hello["caches"].clone()).unwrap_or_default();
         let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
         let peer_present: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
         // Records both ways.
@@ -653,7 +586,7 @@ pub fn exchange(
         if direction != "fetch" {
             let list = plan(repo, &mine, &peer_present, auto, caches)?;
             let (n, b) =
-                send_states(ctx, &mut w, repo, &list, caches, &peer_caches, &peer_present, SendFeatures::from_hello(&hello))?;
+                send_states(ctx, &mut w, repo, &list, &peer_present, SendFeatures::from_hello(&hello))?;
             sent = n;
             bytes = b;
         } else {
@@ -671,7 +604,7 @@ pub fn exchange(
                 .cloned()
                 .collect()
         };
-        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches, "have_caches": present_caches(&repo.p)?}))?;
+        w.json(&json!({"op": "want", "clone_identities_v1": clone_identities(&repo.p)?, "ids": want, "have": mine_now, "caches": caches}))?;
         let got = recv_states(&mut w, &repo.p, direction != "push")?;
         let overlay_omitted = if hello["overlay_sync_v1"] == true {
             exchange_overlays(ctx, &mut w, repo, direction, auto, caches, &peer.0, &peer.1, true)?
@@ -781,7 +714,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p, ctx: Some(ctx) };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?, "caches": present_caches(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     if direction == "fetch" && !lines.is_empty() {
         bail!("the client sent records during fetch");
@@ -846,10 +779,9 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         have2.insert(id.clone());
         list.push((id, parent));
     }
-    let peer_caches: BTreeSet<String> = serde_json::from_value(want["have_caches"].clone()).unwrap_or_default();
     let mut features = SendFeatures::from_hello(&hello);
     features.identities = serde_json::from_value(want["clone_identities_v1"].clone()).unwrap_or_default();
-    send_states(ctx, &mut w, &repo, &list, want["caches"].as_bool().unwrap_or(false), &peer_caches, &have, features)?;
+    send_states(ctx, &mut w, &repo, &list, &have, features)?;
     if hello["overlay_sync_v1"] == true {
         exchange_overlays(
             ctx,
@@ -930,11 +862,10 @@ fn exchange_overlays<R: Read, W: Write>(
                 }
                 let seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
                 let have: BTreeSet<String> = serde_json::from_value(hello["present"].clone())?;
-                let have_caches: BTreeSet<String> = serde_json::from_value(hello["caches"].clone())?;
                 send_records(w, &missing_lines(&orepo.p, &seqs)?)?;
                 let _ = w.recv_json()?;
                 let list = plan(&orepo, &present(&orepo.p)?, &have, auto, caches)?;
-                send_states(ctx, w, &orepo, &list, caches, &have_caches, &have, SendFeatures::from_hello(&hello))?;
+                send_states(ctx, w, &orepo, &list, &have, SendFeatures::from_hello(&hello))?;
                 let mut overlay_transfer = std::mem::replace(&mut w.transfer, parent_transfer);
                 overlay_transfer.direction = direction.into();
                 if overlay_transfer.records_sent > 0 || overlay_transfer.states_sent > 0 {
@@ -979,7 +910,7 @@ fn exchange_overlays<R: Read, W: Write>(
                     bail!("overlay project id differs");
                 }
                 w.json(&json!({"op":"overlay.hello","seqs":seqs(&project)?,"present":present(&project)?,
-                    "caches":present_caches(&project)?,"clone_identities_v1":clone_identities(&project)?,
+                    "clone_identities_v1":clone_identities(&project)?,
                     "compressed_send_v2":btrfs::supports_compressed_receive(),"clone_sources_v1":true}))?;
                 let parent_transfer = std::mem::take(&mut w.transfer);
                 let lines = recv_records(w)?;
