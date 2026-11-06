@@ -834,7 +834,34 @@ pub fn user_groups(name: &str, gid: u32) -> io::Result<Vec<u32>> {
     })
 }
 
-fn lookup_groups(mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int) -> io::Result<Vec<u32>> {
+#[derive(Clone, Copy)]
+enum GroupCount {
+    RequiredTotal,
+    FilledCapacity,
+}
+
+fn group_buffer_growth(capacity: usize, reported: usize, semantics: GroupCount) -> io::Result<usize> {
+    if reported > GROUPS_MAX_COUNT || capacity == GROUPS_MAX_COUNT {
+        return Err(io::Error::other(format!("supplementary group count exceeds the limit of {GROUPS_MAX_COUNT}")));
+    }
+    match semantics {
+        // Darwin can stop at the filled capacity without counting the remaining memberships.
+        GroupCount::FilledCapacity if reported >= capacity => Ok(reported.max(capacity.saturating_mul(2)).min(GROUPS_MAX_COUNT)),
+        // glibc reports the complete required count on insufficient space.
+        GroupCount::RequiredTotal if reported > capacity => Ok(reported),
+        _ => Err(io::Error::other("NSS group lookup failed without a larger required count")),
+    }
+}
+
+fn lookup_groups(lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int) -> io::Result<Vec<u32>> {
+    let semantics = if cfg!(target_os = "macos") { GroupCount::FilledCapacity } else { GroupCount::RequiredTotal };
+    lookup_groups_with_count(semantics, lookup)
+}
+
+fn lookup_groups_with_count(
+    semantics: GroupCount,
+    mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) -> libc::c_int,
+) -> io::Result<Vec<u32>> {
     let mut groups = Vec::new();
     resize_lookup_buffer(&mut groups, GROUPS_INITIAL_COUNT, GROUPS_MAX_COUNT, "supplementary group count")?;
     loop {
@@ -848,11 +875,8 @@ fn lookup_groups(mut lookup: impl FnMut(&mut [libc::gid_t], &mut libc::c_int) ->
             groups.truncate(required);
             return Ok(groups);
         }
-        // getgrouplist reports the required count, rather than returning ERANGE.
-        if required <= groups.len() {
-            return Err(io::Error::other("NSS group lookup failed without a larger required count"));
-        }
-        resize_lookup_buffer(&mut groups, required, GROUPS_MAX_COUNT, "supplementary group count")?;
+        let next = group_buffer_growth(groups.len(), required, semantics)?;
+        resize_lookup_buffer(&mut groups, next, GROUPS_MAX_COUNT, "supplementary group count")?;
     }
 }
 
@@ -893,6 +917,32 @@ mod nss_tests {
             0
         })
         .is_err());
+    }
+
+    #[test]
+    fn darwin_filled_capacity_response_grows_and_preserves_memberships() {
+        let required = GROUPS_INITIAL_COUNT + 1;
+        let mut calls = 0;
+        let groups = lookup_groups_with_count(GroupCount::FilledCapacity, |groups, count| {
+            calls += 1;
+            if groups.len() < required {
+                *count = groups.len() as libc::c_int;
+                return -1;
+            }
+            groups[..required].fill(9);
+            groups[0] = 7;
+            *count = required as libc::c_int;
+            0
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(groups.len(), required);
+        assert_eq!(groups[0], 7);
+        assert!(groups[1..].iter().all(|gid| *gid == 9));
+        assert_eq!(group_buffer_growth(1024, 1024, GroupCount::FilledCapacity).unwrap(), 2048);
+        assert!(group_buffer_growth(1024, 1024, GroupCount::RequiredTotal).is_err());
+        assert!(group_buffer_growth(GROUPS_MAX_COUNT, GROUPS_MAX_COUNT, GroupCount::FilledCapacity).is_err());
+        assert!(group_buffer_growth(1024, 0, GroupCount::FilledCapacity).is_err());
     }
 
     #[test]
