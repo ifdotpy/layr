@@ -927,7 +927,13 @@ fn clone_complete_with(
     each_parallel(&dirs, |(rel, e)| {
         use std::os::macos::fs::MetadataExt as MacMetadataExt;
         let p = if rel.is_empty() { dst.to_path_buf() } else { dst.join(rel) };
-        let sealed = fs::symlink_metadata(&p)?.st_flags() & libc::UF_IMMUTABLE != 0;
+        // A folder that a writer removed during the copy is not in it: the scan after the copy sees the change.
+        let m = match fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !rel.is_empty() => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let sealed = m.st_flags() & libc::UF_IMMUTABLE != 0;
         if sealed {
             crate::sys::apfs_immutable(&p, false)?;
         }
@@ -1161,19 +1167,22 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
             let _t = crate::trace::span(format!("APFS copy {} changed entries again", paths.len()));
             if needs_file_copies(src, &after, keep_links) {
                 // Hard links survive only a copy of the whole tree with its map of inodes.
-                let mut copied = false;
+                let mut last = None;
                 for _ in 0..crate::thin::COPY_ROUNDS {
                     crate::thin::settle(round);
                     let now = scan(src)?;
                     delete_tree(&temp)?;
-                    if clone_complete_with(src, &temp, &now, readonly, keep_links).is_ok() {
-                        before = now;
-                        copied = true;
-                        break;
+                    match clone_complete_with(src, &temp, &now, readonly, keep_links) {
+                        Ok(()) => {
+                            before = now;
+                            last = None;
+                            break;
+                        }
+                        Err(e) => last = Some(e),
                     }
                 }
-                if !copied {
-                    bail!("cannot copy {} while it changes", src.display());
+                if let Some(e) = last {
+                    return Err(e.context(format!("cannot copy {} while it changes", src.display())));
                 }
                 continue;
             }
