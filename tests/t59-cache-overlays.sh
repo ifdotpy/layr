@@ -23,7 +23,7 @@ rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
 out=$(l save --caches)
 has "save --caches names the cache overlay" "target: overlay cache.target" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
-row=$(l overlay list | grep cache.target)
+row=$(l overlay list --size | grep cache.target)
 eq "overlay list shows the state of the folder" "cache" "$(echo "$row" | cut -f6)"
 has "overlay list shows the size of the cache" "B" "$(echo "$row" | cut -f7)"
 has "overlay list shows the saved overlay state" "saved " "$(echo "$row" | cut -f8)"
@@ -106,13 +106,8 @@ no "a second overlay for the same folder fails" l overlay create deps2 --folder 
 no "a folder overlay is not shared" l overlay create deps3 --folder x --mode shared
 no "an absolute folder fails" l overlay create deps4 --folder /tmp
 
-# 8b. The removed cache commands name their replacements; overlay repair makes a cache again.
-has "cache add names its replacement" "layr cache add was removed. Use 'regenerable' in .layrattributes" "$(l cache add x 2>&1)"
-has "cache list names overlay list" "layr cache list was removed. Use 'layr overlay list'." "$(l cache list -v 2>&1)"
-has "cache pull names the line and merge commands" "layr cache pull was removed. Use 'layr line new <name> <line>' or 'layr merge <line>'." "$(l cache pull rel 2>&1)"
-has "cache repair names overlay repair" "layr cache repair was removed. Use 'layr overlay repair <overlay>'." "$(l cache repair 2>&1)"
-has "cache remove names -regenerable" "layr cache remove was removed. Use '-regenerable' in .layrattributes" "$(l cache remove target 2>&1)"
-no "each removed form fails" l cache list
+# 8b. The removed cache command is unknown; overlay repair makes a cache again.
+no "cache list fails" l cache list
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo tool > target/debug/x
 eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair cache.target)"

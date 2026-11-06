@@ -124,34 +124,17 @@ fn cached_tree(cache: &Option<super::push_cache::TreeCache>, entry: &Cached) -> 
 }
 fn load_index(dir: &Path) -> Result<BTreeMap<String, Cached>> {
     let path = dir.join("pushed-v2.json.zst");
-    let bytes = if path.exists() {
-        match std::fs::read(&path).ok().and_then(|bytes| zst::decompress_with_limit(&bytes, None, 8 << 20).ok()) {
-            Some(bytes) => bytes,
-            None => return Ok(BTreeMap::new()),
-        }
-    } else if dir.join("pushed.json").exists() {
-        std::fs::read(dir.join("pushed.json"))?
-    } else {
+    // The index is a cache: a missing or unreadable one is empty, and pushes find the states again.
+    let Some(bytes) = std::fs::read(&path).ok().and_then(|bytes| zst::decompress_with_limit(&bytes, None, 8 << 20).ok()) else {
         return Ok(BTreeMap::new());
     };
-    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(_) => return Ok(BTreeMap::new()),
+    let Ok(index) = serde_json::from_slice::<PushIndex>(&bytes) else {
+        return Ok(BTreeMap::new());
     };
-    let mut states = if value.get("format").is_some() {
-        let Ok(index) = serde_json::from_value::<PushIndex>(value) else {
-            return Ok(BTreeMap::new());
-        };
-        if index.format != 1 && index.format != 2 {
-            return Ok(BTreeMap::new());
-        }
-        index.states
-    } else {
-        let Ok(legacy) = serde_json::from_value::<BTreeMap<String, Pushed>>(value) else {
-            return Ok(BTreeMap::new());
-        };
-        legacy.into_iter().map(|(id, pushed)| (id, Cached { attempt: pushed.attempt, depth: pushed.depth, root: None })).collect()
-    };
+    if index.format != 2 {
+        return Ok(BTreeMap::new());
+    }
+    let mut states = index.states;
     states.retain(|id, entry| valid_cached(id, entry));
     Ok(states)
 }
@@ -1789,26 +1772,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pushed_cache_migrates_without_changing_completion() {
+    fn the_old_push_index_is_ignored_and_removed() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let id = crate::ids::new_id();
-        let pushed =
-            Pushed { attempt: "0123abcd".into(), tree: Tree::default(), depth: 0, canonical: Vec::new() };
-        let legacy = BTreeMap::from([(id.clone(), pushed)]);
-        std::fs::write(root.join("pushed.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
-        let index = load_index(&root).unwrap();
-        assert_eq!(index[&id].attempt, "0123abcd");
-        assert_eq!(index[&id].depth, 0);
-        assert!(index[&id].root.is_none());
+        let pushed = Pushed { attempt: "0123abcd".into(), tree: Tree::default(), depth: 0, canonical: Vec::new() };
+        let old = BTreeMap::from([(id.clone(), pushed)]);
+        std::fs::write(root.join("pushed.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(load_index(&root).unwrap().is_empty());
+        let index = BTreeMap::from([(id.clone(), Cached { attempt: "0123abcd".into(), depth: 0, root: None })]);
         checkpoint(&root, &index).unwrap();
         assert_eq!(load_index(&root).unwrap()[&id].attempt, "0123abcd");
-        let json: serde_json::Value =
-            serde_json::from_slice(&zst::decompress(&std::fs::read(root.join("pushed-v2.json.zst")).unwrap(), None).unwrap())
-                .unwrap();
-        assert_eq!(json["format"], 2);
         assert!(!root.join("pushed.json").exists());
-        assert!(json["states"][&id].get("tree").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

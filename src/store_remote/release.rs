@@ -181,7 +181,7 @@ impl Store {
             }
             files.push(File { name, size, sha256, object });
         }
-        let _lock = repo.p.lock()?;
+        let lock = repo.p.lock()?;
         if repo.p.db.ref_value(name, ids::now_ms())?.as_ref().map(|r| &r.target) != Some(&before.target) {
             bail!("release ref '{name}' changed during attach");
         }
@@ -197,6 +197,8 @@ impl Store {
         record.data = serde_json::to_value(&files)?;
         repo.commit_record(ctx, record)?;
         writer::push_locked(self, ctx, repo, &Options::default())?;
+        // The public copies are plain remote objects: their upload (minutes for large files) holds no project lock.
+        drop(lock);
         check_ref(&self.release_model()?, name, &files.state)?;
         if public {
             self.publish_plain(&files, plain)?;

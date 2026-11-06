@@ -229,8 +229,6 @@ l sync peer --command -- "${transport[@]}" >/dev/null
 eq "sync includes a live ref to an automatic state" pinned-sync "$(B show "$auto_sync:ref-auto.txt")"
 
 has "old command transport names sync remote" "layr sync <remote>" "$(l sync -- false 2>&1 || true)"
-has "old machines form names remote list" "layr remote list" "$(l machines 2>&1 || true)"
-has "old Git sync form names git sync" "layr git sync" "$(l git-sync 2>&1 || true)"
 retired=$(printf '\142\141\143\153\165\160')
 has "the removed whole-project command is unknown" "is not a layr command" "$(l "$retired" 2>&1 || true)"
 has "old fetch form names git fetch" "layr git" "$(l fetch origin 2>&1 || true)"

@@ -91,7 +91,7 @@ eq "and the other cache warm" "bin" "$(cat $PV/v1/out/bin)"
 #    a cache (a subvolume with the same files) becomes a plain folder again, by save --caches.
 no "overlay repair needs a cache overlay, which the folder has not" in_v layr-admin main overlay repair cache.artifacts
 no "and a plain folder" is_cache $PV/main/artifacts
-has "cache add names regenerable" "layr cache add was removed. Use 'regenerable' in .layrattributes" "$(in_v layr-admin main cache add artifacts 2>&1)"
+no "cache add is no command" in_v layr-admin main cache add artifacts
 no "and leaves it a plain folder" is_cache $PV/main/artifacts
 no "cache remove is removed" l --project v cache remove artifacts
 ok "an automatic state" in_v layr-admin main save -q --force --note quiet

@@ -56,39 +56,8 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         Ok(made)
     };
     let mut report = Report::default();
-    let mut pending: BTreeMap<_, _> = project.states.iter().map(|(id, s)| (id.clone(), s.state.clone())).collect();
-    let mut graphs = BTreeMap::new();
-    while !pending.is_empty() {
-        let id = pending
-            .iter()
-            .find(|(_, s)| s.parents.first().is_none_or(|p| graphs.contains_key(p)))
-            .map(|(id, _)| id.clone())
-            .context("store state ancestry has a gap or cycle")?;
-        let state = pending.remove(&id).expect("pending state");
-        let graph = layr_model::index::graph(&state, |id| graphs.get(id).cloned().context("missing parent graph"))?;
-        report.graphs += usize::from(publish(wrap(Data::Graph(graph.clone())))?);
-        graphs.insert(id, graph);
-    }
-    let attempts = reader::attempts(&store.backend)?;
-    let mut source = reader::Reader::new(&store.backend, &identity, &trusted);
-    for state in project.states.values().map(|s| &s.state) {
-        let Some(attempt) = attempts.get(&state.id) else {
-            report.unavailable_paths.push(state.id.clone());
-            continue;
-        };
-        let tree = source.tree(&state.id, attempt)?.2;
-        let parent = match state.parents.first() {
-            Some(parent) => match attempts.get(parent) {
-                Some(attempt) => source.tree(parent, attempt)?.2,
-                None => {
-                    report.unavailable_paths.push(state.id.clone());
-                    continue;
-                }
-            },
-            None => layr_store::format::Tree::default(),
-        };
-        report.paths += usize::from(publish(wrap(Data::Paths(layr_model::index::paths(&state.id, &parent, &tree))))?);
-    }
+    // The heads first: they need only the records, and a reader without them reads every record segment. A later
+    // failure of the graphs or paths leaves the store with its heads.
     let watermark = layr_model::index::watermark(&records.lines)?;
     let mut seq = 0;
     let mut snapshots = Vec::new();
@@ -111,15 +80,16 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         snapshots.push(snapshot);
     }
     let mut heads = layr_model::index::heads(project, watermark, 1)?;
+    let mut unchanged = false;
     for snapshot in &snapshots {
         if let Data::Heads(existing) = &snapshot.data {
             heads.seq = existing.seq;
             if *existing == heads {
-                return Ok(report);
+                unchanged = true;
             }
         }
     }
-    loop {
+    while !unchanged {
         seq = seq.checked_add(1).context("index snapshot sequence overflow")?;
         heads.seq = seq;
         let index = wrap(Data::Heads(heads.clone()));
@@ -132,6 +102,53 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         if old.data == index.data {
             break;
         }
+    }
+    let mut pending: BTreeMap<_, _> = project.states.iter().map(|(id, s)| (id.clone(), s.state.clone())).collect();
+    let mut graphs = BTreeMap::new();
+    while !pending.is_empty() {
+        let id = pending
+            .iter()
+            .find(|(_, s)| s.parents.first().is_none_or(|p| graphs.contains_key(p)))
+            .map(|(id, _)| id.clone())
+            .context("store state ancestry has a gap or cycle")?;
+        let state = pending.remove(&id).expect("pending state");
+        let graph = layr_model::index::graph(&state, |id| graphs.get(id).cloned().context("missing parent graph"))?;
+        report.graphs += usize::from(publish(wrap(Data::Graph(graph.clone())))?);
+        graphs.insert(id, graph);
+    }
+    let attempts = reader::attempts(&store.backend)?;
+    let mut source = reader::Reader::new(&store.backend, &identity, &trusted);
+    for state in project.states.values().map(|s| &s.state) {
+        let Some(attempt) = attempts.get(&state.id) else {
+            report.unavailable_paths.push(state.id.clone());
+            continue;
+        };
+        // A tree that cannot be read (a push that stopped, an object that is gone) leaves that state without paths;
+        // the rest of the index goes on.
+        let trees = (|| -> Result<_> {
+            let tree = source.tree(&state.id, attempt)?.2;
+            let parent = match state.parents.first() {
+                Some(parent) => match attempts.get(parent) {
+                    Some(attempt) => Some(source.tree(parent, attempt)?.2),
+                    None => None,
+                },
+                None => Some(layr_store::format::Tree::default()),
+            };
+            Ok(parent.map(|parent| (tree, parent)))
+        })();
+        let (tree, parent) = match trees {
+            Ok(Some(trees)) => trees,
+            Ok(None) => {
+                report.unavailable_paths.push(state.id.clone());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("layr: index paths of state {}: {e:#}", crate::ids::short(&state.id));
+                report.unavailable_paths.push(state.id.clone());
+                continue;
+            }
+        };
+        report.paths += usize::from(publish(wrap(Data::Paths(layr_model::index::paths(&state.id, &parent, &tree))))?);
     }
     Ok(report)
 }

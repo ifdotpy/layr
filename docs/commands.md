@@ -6,7 +6,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 | Group         | Commands                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------- |
-| work          | `status [--json]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
+| work          | `status [--json] [--no-overlaps] [--no-ignored]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
@@ -17,7 +17,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--json]`, `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>`, `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>` |
 | refs          | `ref set <name> <rev> [--expect <rev>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
@@ -185,13 +185,10 @@ Use `--all-lines` to save auto states for all lines. `--all` applies only to nam
 Use `restore --ours` or `restore --theirs` for conflicts.
 Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
 
-Removed command names fail and show their replacements. They are not aliases.
-`branch`, `commit`, `stash`, `cherry-pick`, `rebase`, and `revert` use the new names above.
-`checkout` and `switch` are removed because a line is a folder.
-The old `--no-commit`, `--autostash`, and `--layers` options fail and name `--no-save`, `--autopark`, and `--caches`.
-The `cache` command group is removed. Its forms fail and name their replacements: `cache list` is
-`overlay list`, `cache repair` is `overlay repair <overlay>`, `cache add` and `cache remove` are the
-`regenerable` attribute in `.layrattributes`, and `cache pull` is `line new <name> <line>` or `merge <line>`.
+Git command names (`branch`, `commit`, `stash`, `checkout`, `switch`, `cherry-pick`, `rebase`,
+`revert`, `worktree`) are no layr commands. They fail like any unknown command, with no hint.
+The same holds for removed layr commands (`cache`, `layer`, `approvals`, `machines`, `git-sync`)
+and removed options (`--no-commit`, `--autostash`, `--layers`).
 Git commands under `layr git` keep Git words.
 
 `du [<line>...] [--json]` shows the disk space of each line on this machine: `total` is the
@@ -231,27 +228,12 @@ only checks.
 `gc` also compares the `bases` table (the base of each thin layer) with the layers on disk, and prints
 each difference. `gc --repair` makes the table match the disk.
 
-### Schema upgrades and their backups
+### Schema upgrades
 
-A layr upgrade that changes the schema rebuilds the derived tables from the records. Before the
-rebuild changes anything, it keeps a copy of the project database: `VACUUM INTO` a temporary name
-in the database folder (`meta/db/`), renamed to `layr.sqlite.schema-<old>.bak`. The `<old>` is the
-schema version before the upgrade. Only the newest backup is kept. The rebuild prints one line:
-`database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
-database (a 400 MB database needs 400 MB more until the backup goes).
-
-A backup older than 14 days goes at the end of the next command on the project.
-
-To roll back to the old layr:
-
-1. Stop the service and the daemon (`launchctl unload` or `systemctl stop` for the layr unit).
-2. Install the old layr binary (the one that wrote the backup's schema version).
-3. In the database folder, remove `layr.sqlite-wal` and `layr.sqlite-shm` if they exist. Then move the
-   new database aside and rename the backup into place:
-   `mv layr.sqlite layr.sqlite.upgraded` and `mv layr.sqlite.schema-<old>.bak layr.sqlite`.
-4. Start the service. Check `layr status` and `layr line list`.
-
-The backup has the records up to the upgrade. Changes made after the upgrade are lost on rollback.
+A layr upgrade that changes the schema rebuilds the derived tables from the records, in one
+transaction. The records stay as they are, so the rebuild loses nothing. Layr keeps no copy of
+the database. An older layr cannot open a database after the upgrade. The rebuild also removes
+the copies `layr.sqlite.schema-<old>.bak` that older layr versions made.
 
 Keys that keep states (count rings, `layr config <key> <n>`):
 
@@ -262,7 +244,7 @@ Keys that keep states (count rings, `layr config <key> <n>`):
 | `undo.deleted` | 5 | the final and staged states of the newest deleted lines (`layr undo` brings a line back) |
 | `retention.caches` | 5 | the cache snapshots of the newest states with caches (`gc --repair` trims the rest) |
 
-`retention.hours` and `undo.days` were removed: setting one fails and names its replacement. An
+An
 operation past `undo.ops` cannot be undone: `layr undo` says that the states of the operation
 were freed. A state that a store remote holds (a successful `layr push <store-remote>` names it, the remote
 still has the recorded URL, and this machine reads that store) is kept while eviction is off (the
