@@ -2452,7 +2452,9 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     };
     // Checks before anything changes.
-    let top = git_text(&["rev-parse", "--show-toplevel"]).map_err(|_| exit(128, format!("fatal: {} is not a Git checkout", src.display())))?;
+    // The git error says why: no checkout, or a git that does not run.
+    let top = git_text(&["rev-parse", "--show-toplevel"])
+        .map_err(|e| exit(128, format!("fatal: {} is not a Git checkout: {e:#}", src.display())))?;
     if std::path::Path::new(&top).canonicalize().ok().as_deref() != Some(src.as_path()) {
         return Err(exit(128, format!("fatal: {} is inside the checkout {top}; give its top folder", src.display())));
     }
