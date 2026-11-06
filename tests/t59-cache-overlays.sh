@@ -23,7 +23,7 @@ rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
 out=$(l save --caches)
 has "save --caches names the cache overlay" "target: overlay cache.target" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
-row=$(l overlay list | grep cache.target)
+row=$(l overlay list --size | grep cache.target)
 eq "overlay list shows the state of the folder" "cache" "$(echo "$row" | cut -f6)"
 has "overlay list shows the size of the cache" "B" "$(echo "$row" | cut -f7)"
 has "overlay list shows the saved overlay state" "saved " "$(echo "$row" | cut -f8)"
