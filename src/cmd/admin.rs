@@ -1019,19 +1019,9 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     let n: usize = a.get("-n").map(|v| v.parse()).transpose()?.unwrap_or(30);
-    let line = h.line.clone();
-    let mut shown = 0;
-    for r in repo.p.db.records(100000)? {
-        if !a.has("--all") {
-            if let Some(l) = &line {
-                if !matches!(r.op.as_str(), "push" | "sync")
-                    && !r.lines.contains_key(&l.id)
-                    && r.data.get("line").and_then(|v| v.as_str()) != Some(&l.id)
-                {
-                    continue;
-                }
-            }
-        }
+    let line = if a.has("--all") { None } else { h.line.as_ref().map(|line| line.id.as_str()) };
+    // Preserve the historical behavior: -n 0 prints the first matching record.
+    for r in repo.p.db.log_records(line, n.max(1))? {
         if a.has("--json") {
             outln!(ctx, "{}", serde_json::to_string(&r)?);
         } else {
@@ -1061,10 +1051,6 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 what,
                 undone
             );
-        }
-        shown += 1;
-        if shown >= n {
-            break;
         }
     }
     Ok(0)
@@ -3382,5 +3368,78 @@ mod move_folder_tests {
         assert_eq!(std::fs::read_link(to.join("debug/link")).unwrap(), std::path::PathBuf::from("x"));
         assert!(to.join("debug/deps").is_dir());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod op_log_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::model::Record;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn op_log_limits_decoding_in_the_actual_command() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-op-log-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let store = crate::store::Store::open(&dir.join("store"))?;
+        let project_dir = store.project_dir("p")?;
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        std::fs::create_dir_all(project_dir.join("lines/main"))?;
+        std::fs::write(project_dir.join("lines/main/fixture"), "op log fixture\n")?;
+        let db = crate::db::Db::open(&crate::store::db_file(&project_dir))?;
+        let uid = std::fs::metadata(&dir)?.uid();
+        let mut project = Record::new("project");
+        project.id = ids::new_id();
+        project.machine = store.machine.id.clone();
+        project.data = serde_json::json!({"id": ids::new_id()});
+        db.insert_record(&project, &serde_json::json!({"r": project, "s": ""}).to_string())?;
+        db.conn.execute(
+            "INSERT INTO lines(id,name,owner,machine,head,time) VALUES('wanted','main',?1,?2,'',0)",
+            rusqlite::params![uid, store.machine.id],
+        )?;
+        for i in 1..=41 {
+            let mut rec = Record::new("save");
+            rec.id = ids::new_id();
+            rec.machine = store.machine.id.clone();
+            rec.seq = i;
+            rec.time = i as i64;
+            rec.data = serde_json::json!({"line": "wanted"});
+            let mut raw = serde_json::json!({"r": rec, "s": ""});
+            if i == 1 {
+                raw["r"]["actor"] = serde_json::Value::Null;
+            }
+            db.insert_record(&rec, &raw.to_string())?;
+        }
+        let output = dir.join("output");
+        let mut ctx = Ctx {
+            store,
+            caller: Caller::from_uid(uid),
+            cwd: project_dir.join("lines/main"),
+            env: std::collections::HashMap::new(),
+            out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
+        };
+        for all in [false, true] {
+            for (limit, count) in [("1", 1), ("0", 1), ("30", 30)] {
+                *ctx.out.borrow_mut() = Box::new(std::fs::File::create(&output)?);
+                let mut args: Vec<String> = ["log", "--json", "-n", limit].into_iter().map(String::from).collect();
+                if all {
+                    args.push("--all".into());
+                }
+                assert_eq!(op(&ctx, &args)?, 0);
+                let text = std::fs::read_to_string(&output)?;
+                assert_eq!(text.lines().count(), count);
+                let first: Record = serde_json::from_str(text.lines().next().unwrap())?;
+                assert_eq!(first.seq, 41);
+            }
+        }
+        // Outside a line, an omitted --all still reads the project log.
+        ctx.cwd = project_dir;
+        assert_eq!(op(&ctx, &["log".into(), "-n".into(), "1".into()])?, 0);
+        assert!(op(&ctx, &["log".into(), "-n".into(), "100".into()]).is_err());
+        drop(ctx);
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }
