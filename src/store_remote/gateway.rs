@@ -415,7 +415,7 @@ impl Gateway {
                     .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
                     .body(data.clone());
             }
-            let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT);
+            let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE);
             send_again(idempotent, || {
                 request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into)
             })
@@ -848,7 +848,9 @@ impl Gateway {
         let response = self.send(Method::DELETE, &format!("objects/{key}"), Some(token), None, None)?;
         match response.status().as_u16() {
             204 => Ok(()),
-            status => bail!("gateway delete: HTTP {status}"),
+            // A delete is done when the object is gone: an earlier pass (or a retry of this request) deleted it.
+            404 => absent::<()>(response).map(|_| ()).with_context(|| format!("gateway delete {key}")),
+            status => bail!("gateway delete {key}: HTTP {status}"),
         }
     }
 }
@@ -960,6 +962,38 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         assert!(result.unwrap().is_empty(), "a 502 and a closed connection are asked again for a read");
+    }
+
+    #[test]
+    fn a_delete_of_a_gone_object_is_done_and_an_error_names_the_key() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, body) in [("404 Not Found", "no such object"), ("404 Not Found", "no such project"), ("403 Forbidden", "")] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(request.starts_with(b"DELETE "));
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        let key = "states/01a1af29-70f7-7566-ac60-2a4fc1b7b4d5/bf9b1e4e.tree.age";
+        gateway.delete(key).unwrap();
+        let error = format!("{:#}", gateway.delete(key).unwrap_err());
+        assert!(error.contains("no such project") && error.contains(key), "{error}");
+        let error = format!("{:#}", gateway.delete(key).unwrap_err());
+        assert!(error.contains("403") && error.contains(key), "{error}");
+        server.join().unwrap();
     }
 
     #[test]
