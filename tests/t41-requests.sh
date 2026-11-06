@@ -86,6 +86,11 @@ refused = submit('approve', state, env=bob)
 result = apply(refused, 'refused')
 check('not an approver' in result['reason'] and outcome(refused)['op'] == 'request.refused', 'non-approver gets a signed refusal with a plain reason')
 check(len(data(['attestations', state, '--kind', 'approval', '--json'])) == 1, 'refused approval writes no attestation')
+# A new version after Ann's approval: --since-review --person shows what is new to that person.
+(cwd / 'feature.txt').write_text('review me\nsecond\n')
+run(['save', '-qam', 'review', '--amend'])
+check('second' in run(['change', 'diff', change, '--since-review', '--person', 'ann@example.com']).stdout, 'since-review of a person diffs the version the person approved and the newest')
+check('approved no version' in run(['change', 'diff', change, '--since-review', '--person', 'bob@example.com'], success=False).stderr, 'a person with no approval gets a plain error')
 
 entry = submit('queue-add', state)
 apply(entry)
