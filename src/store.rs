@@ -1526,16 +1526,19 @@ impl<'a> Project<'a> {
             return Ok(Some("a trust outside the delegation of its broker"));
         }
         let Some(limits) = terms.get(&record.machine) else { return Ok(None) };
-        // Every line the record moves is a new line, or one that a record of the same machine made.
-        let mut own = true;
+        // A line the record moves is its own when it is new, or when a record of the same machine made it.
+        let mut lines = Vec::new();
         for (id, change) in &record.lines {
-            own &= match self.db.line_machine(id)? {
+            let own = match self.db.line_machine(id)? {
                 None => change.before.is_none(),
                 Some(machine) => machine == record.machine,
             };
+            let name = change.after.as_ref().map(|after| after.name.as_str());
+            lines.push(layr_store::trust::LineMove { id, new: change.before.is_none(), name, own });
         }
+        let payload = layr_store::trust::Payload { states: record.states.iter().map(|s| s.line.as_deref()).collect(), lines };
         let overlay = self.name.split_once('%').map(|(_, name)| name);
-        Ok(limits.refusal(record.time, &record.op, &record.data, overlay, own))
+        Ok(limits.refusal(record.time, &record.op, &record.data, overlay, &payload))
     }
 
     /// The owners that the records with an effect give (`Db::recomputed_owners`).
@@ -1678,6 +1681,66 @@ mod tests {
         for bad in ["sap%", "%keys", "sap%keys%x", "sap%../x", "../sap%keys", "sap/x"] {
             assert!(store.project_dir(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A cache writer's record has no effect beyond its role (docs/ci-trust.md): a `config` record that also makes a
+    /// source state or moves a line is stored, and changes nothing.
+    #[test]
+    fn a_writer_config_record_makes_no_source_state_and_moves_no_line() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-writer-{}", ids::new_id()));
+        let result = (|| -> Result<()> {
+            let store = Store::open(&base.join("store"))?;
+            let actor = Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
+            // The project folder by hand: no subvolume, so the test runs on any file system.
+            let dir = store.project_dir("p")?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            fs::create_dir(dir.join("states"))?;
+            let id = ids::new_id();
+            let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: id.clone(), db: Db::open(&db_file(&dir))? };
+            let mut project = Record::new("project");
+            project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+            p.append(project, &actor)?;
+            let job_key = SigningKey::from_bytes(&[9u8; 32]);
+            let (job, public_key) = (ids::new_id(), hex::encode(job_key.verifying_key().to_bytes()));
+            let mut trust = Record::new("machine.trust");
+            trust.data = serde_json::json!({"machine": job, "public_key": public_key, "expires_at": ids::now_ms() + 3_600_000,
+                "role": "writer"});
+            p.append(trust, &actor)?;
+            let signed = |seq: u64, op: &str, extra: serde_json::Value| -> Result<String> {
+                let mut rec = Record::new(op);
+                (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), job.clone(), seq, ids::now_ms());
+                (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), extra["data"].clone());
+                if let Some(states) = extra.get("states") {
+                    rec.states = serde_json::from_value(states.clone())?;
+                }
+                if let Some(lines) = extra.get("lines") {
+                    rec.lines = serde_json::from_value(lines.clone())?;
+                }
+                oplog::sign_line(&rec, &job_key)
+            };
+            let source = ids::new_id();
+            let state = serde_json::json!({"id": source, "kind": "commit", "subvol": "", "time": 1,
+                "author": crate::model::Author::default()});
+            let made = serde_json::json!({"before": null, "after": {"name": "main", "head": source, "owner": 0, "machine": job}});
+            let forged =
+                serde_json::json!({"states": [state], "lines": {ids::new_id(): made}, "data": {"config": {"core.x": "1"}}});
+            let lines = [
+                signed(1, "machine", serde_json::json!({"data": {"name": "job", "public_key": public_key}}))?,
+                signed(2, "config", forged)?,
+                signed(3, "config", serde_json::json!({"data": {"config": {"core.y": "2"}}}))?,
+            ];
+            p.import_lines(&lines, Trust::All)?;
+            for when in ["on import", "after a rebuild"] {
+                assert!(p.db.state(&source)?.is_none(), "{when}: the writer's source state is not taken");
+                assert!(p.db.line_by_name("main")?.is_none(), "{when}: the writer's line is not taken");
+                assert!(p.db.config(&format!("core.x@{job}"))?.is_none(), "{when}: nor its settings");
+                assert!(p.db.config(&format!("core.y@{job}"))?.is_some(), "{when}: a plain config record counts");
+                p.rebuild_index()?;
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&base);
+        result
     }
 }
 
