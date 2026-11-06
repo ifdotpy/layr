@@ -20,7 +20,7 @@ const USAGE: &str =
        layr overlay set <name> <properties>
        layr overlay remote add <name> <remote> <git url> | list <name> | remove <name> <remote>
        layr overlay show-to-project <name>
-       layr overlay list
+       layr overlay list [--json] [--size]
        layr overlay readers <name> [<principal>...]
        layr overlay managers <name> [machine:<id>...]
        layr overlay use [--add|--remove] <name>... | --none
@@ -268,7 +268,13 @@ fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
 
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
 fn props_spec(spec: Spec) -> Spec {
-    spec.value("--history").flag("--quiet").flag("--no-quiet").value("--merge").value("--gc").value("--key-files").value("--prune")
+    spec.value("--history")
+        .flag("--quiet")
+        .flag("--no-quiet")
+        .value("--merge")
+        .value("--gc")
+        .value("--key-files")
+        .value("--prune")
 }
 
 /// `--key-files a,b` as the setting value; `none` clears it.
@@ -382,7 +388,15 @@ struct InLine {
 /// The state of a line's folder in `overlay list` and `overlay repair` (one rule for both).
 pub(crate) const NOT_CACHE_PATH: &str = "not a cache path in this line";
 
-fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str, kind: FolderIn) -> InLine {
+fn folder_in_line(
+    repo: &Repo,
+    l: &crate::model::Line,
+    name: &str,
+    folder: &str,
+    kind: FolderIn,
+    with_size: bool,
+    op: Option<&Project>,
+) -> InLine {
     let cp = repo.working(l).join(folder);
     let state = match (kind, btrfs::is_subvolume(&cp)) {
         (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
@@ -392,17 +406,28 @@ fn folder_in_line(repo: &Repo, l: &crate::model::Line, name: &str, folder: &str,
         (FolderIn::Cache, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
         (FolderIn::Cache, false) => "absent".to_string(),
     };
-    let size = (state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
-    let saved = repo
-        .overlay_project(name)
-        .ok()
-        .and_then(|p| p.db.line_by_name(&crate::overlay::cache_line_name(&l.id)).ok().flatten())
-        .map(|ol| ids::short(&ol.head));
+    let size = (with_size && state == "cache").then(|| crate::cache_overlay::tree_size(&cp));
+    let saved =
+        op.and_then(|p| p.db.line_by_name(&crate::overlay::cache_line_name(&l.id)).ok().flatten()).map(|ol| ids::short(&ol.head));
     InLine { state, size, saved }
 }
 
+/// Read settings through the listing's existing overlay handle.
+fn listing_settings(settings: &crate::db::Db, name: &str) -> Result<(Props, Option<String>)> {
+    let get = |suffix: &str| settings.overlay_config(&format!("overlay.{name}.{suffix}"));
+    let mut values = BTreeMap::new();
+    for prop in PROPS {
+        if let Some(value) = get(prop)? {
+            values.insert(*prop, value);
+        }
+    }
+    let props = Props::from_settings(|key| values.get(key).cloned());
+    let folder = get("folder")?.and_then(|v| v.as_str().map(str::to_owned));
+    Ok((props, folder))
+}
+
 fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--json"), args)?;
+    let a = parse(&Spec::new().flag("--json").flag("--size"), args)?;
     let mut rows = Vec::new();
     let h = here(ctx)?;
     let repo = &h.repo;
@@ -415,15 +440,20 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(i) => i,
             None => continue,
         };
-        let readers = repo.overlay_project(&name).map(|p| reader_list(&p)).unwrap_or_default();
+        let op = repo.overlay_project(&name).ok();
+        let readers = op.as_ref().map(reader_list).unwrap_or_default();
         let mark = if shown.contains(&name) { "* " } else { "  " };
-        let owner = crate::ctx::Caller::from_uid(info.owner).user;
-        let props = repo.overlay_props(&name)?;
-        let folder = repo.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
+        // Hidden settings live in the overlay; public settings live in the parent.
+        let settings = if info.hidden {
+            &op.as_ref().ok_or_else(|| exit(1, format!("error: no local project for hidden overlay '{name}'")))?.db
+        } else {
+            &repo.p.db
+        };
+        let (props, folder) = listing_settings(settings, &name)?;
         let line_state = match (&h.line, &folder) {
             (Some(l), Some(f)) => {
                 let kind = repo.folder_kind(l, f)?;
-                Some(folder_in_line(repo, l, &name, f, kind))
+                Some(folder_in_line(repo, l, &name, f, kind, a.has("--size"), op.as_ref()))
             }
             _ => None,
         };
@@ -435,11 +465,15 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 "saved":line_state.as_ref().and_then(|s| s.saved.clone()),
             }));
         } else {
+            let owner = crate::ctx::Caller::from_uid(info.owner).user;
             let mut described = props.describe();
             if let Some(f) = &folder {
                 described.insert(0, format!("folder={f}"));
             }
-            let keys = repo.key_files(&name)?;
+            let keys = settings
+                .overlay_config(&format!("overlay.{name}.key-files"))?
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .unwrap_or_default();
             if !keys.is_empty() {
                 described.push(format!("key-files={}", keys.join(",")));
             }
@@ -1192,6 +1226,34 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn listing_settings_reads_public_and_hidden_sources() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-list-settings-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let parent = crate::db::Db::open(&dir.join("parent.sqlite"))?;
+        let overlay = crate::db::Db::open(&dir.join("overlay.sqlite"))?;
+        for (db, key, value, ord) in [
+            (&parent, "overlay.public.history", "2", "1"),
+            (&parent, "overlay.public.history@machine", "4", "2"),
+            (&parent, "overlay.public.folder", "\"target\"", "1"),
+            (&parent, "overlay.private.history", "99", "1"),
+            (&overlay, "overlay.private.history", "3", "1"),
+            (&overlay, "overlay.private.quiet", "true", "1"),
+        ] {
+            db.conn.execute("INSERT INTO config (key, value, ord) VALUES (?1, ?2, ?3)", (key, value, ord))?;
+        }
+        let (public, folder) = listing_settings(&parent, "public")?;
+        assert_eq!(public.history, Some(4));
+        assert_eq!(folder.as_deref(), Some("target"));
+        let (private, folder) = listing_settings(&overlay, "private")?;
+        assert_eq!(private.history, Some(3));
+        assert!(private.quiet);
+        assert_eq!(folder, None);
+        drop((parent, overlay));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn operation_output_only_contains_public_fields_and_cli_names() {
