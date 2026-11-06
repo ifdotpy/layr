@@ -188,6 +188,14 @@ ends; the end of the command marks it dead, and the free step of that command fr
 processes are released by the next free step and by `gc --repair`. A pinned state also keeps its
 ancestors, because its parent rows stay.
 
+`gc` removes the trees of some states whose records stay: states with a copy on a store remote
+(eviction) and imported states that git builds again. It reserves each tree first: a row `drop`
+with its holder, written in one transaction with the check for pins. A pinned state is not reserved.
+A pin of a reserved state is refused ("layr gc is removing the tree of state X from this machine;
+read it again"). The release marks the state absent and drops the row in one transaction; a reader
+after it gets the state back from its remote or from git. A reservation of a dead process is
+finished by the next `gc`. The owners check does not compare `drop` rows.
+
 A reader of an UNOWNED state (an old leftover) is not pinned, by design: pinning it would count as an
 owner and keep it. Only an explicit `gc --repair` racing such a read can remove it.
 
