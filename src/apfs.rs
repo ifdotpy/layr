@@ -882,20 +882,24 @@ fn clone_complete_with(
     readonly: bool,
     keep_links: bool,
 ) -> Result<()> {
-    if needs_file_copies(src, entries, keep_links) {
+    if entries.values().any(|e| e.meta.ftype == crate::fsutil::FType::Special) {
         return copy_tree(src, dst, true, &mut BTreeMap::new());
     }
-    // Clone whole subtrees that hold no nested layer. A nested layer stays outside the tree: as
-    // in a file-by-file copy, its folder is empty and carries no marker. A line's `.git` is such
-    // a layer. The work follows the tree without its nested layers, not their size.
+    // Clone whole subtrees that hold no nested layer and no hard link. A nested layer stays outside the tree: as
+    // in a file-by-file copy, its folder is empty and carries no marker. A line's `.git` is such a layer. A file
+    // with more than one link is copied by itself, so its links stay links; the rest of its folder is cloned at
+    // once (one hard link in a large build folder made the whole tree a file-by-file copy). The work follows the
+    // tree without its nested layers and outside the folders of linked files, not their size.
     let nested: BTreeSet<&str> = nested_layers(src, entries).into_iter().map(|p| p.as_str()).collect();
-    if nested.is_empty() {
+    let linked: BTreeSet<&str> = if keep_links { hard_linked(entries) } else { BTreeSet::new() };
+    if nested.is_empty() && linked.is_empty() {
         let _t = crate::trace::span("APFS clone root");
         crate::sys::apfs_clone(src, dst)?;
     } else {
-        let _t = crate::trace::span(format!("APFS clone around {} nested layers", nested.len()));
+        let _t =
+            crate::trace::span(format!("APFS clone around {} nested layers and {} linked files", nested.len(), linked.len()));
         let mut ancestors = BTreeSet::new();
-        for rel in &nested {
+        for rel in nested.iter().chain(linked.iter()) {
             let mut at = *rel;
             while let Some((parent, _)) = at.rsplit_once('/') {
                 ancestors.insert(parent);
@@ -903,7 +907,13 @@ fn clone_complete_with(
             }
         }
         ancestors.insert("");
-        clone_around(src, dst, "", &nested, &ancestors, readonly)?;
+        let (mut links, mut sealed) = (BTreeMap::new(), Vec::new());
+        let around = Around { nested: &nested, linked: &linked, ancestors: &ancestors };
+        clone_around(src, dst, "", &around, readonly, &mut links, &mut sealed)?;
+        // The flags of the linked files last: a link to a file that is immutable already cannot be made.
+        for path in sealed {
+            crate::sys::apfs_immutable(&path, true)?;
+        }
     }
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
@@ -917,7 +927,13 @@ fn clone_complete_with(
     each_parallel(&dirs, |(rel, e)| {
         use std::os::macos::fs::MetadataExt as MacMetadataExt;
         let p = if rel.is_empty() { dst.to_path_buf() } else { dst.join(rel) };
-        let sealed = fs::symlink_metadata(&p)?.st_flags() & libc::UF_IMMUTABLE != 0;
+        // A folder that a writer removed during the copy is not in it: the scan after the copy sees the change.
+        let m = match fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !rel.is_empty() => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let sealed = m.st_flags() & libc::UF_IMMUTABLE != 0;
         if sealed {
             crate::sys::apfs_immutable(&p, false)?;
         }
@@ -929,16 +945,37 @@ fn clone_complete_with(
     })
 }
 
-/// Clone the folder `rel` of `src` that holds nested layers: its own entries one by one, whole
-/// subtrees at once, each nested layer as an empty folder with its creation time and mode.
+/// The files of a scan that have more than one link inside it (the members of each hard link group).
+fn hard_linked(entries: &BTreeMap<String, ScanEntry>) -> BTreeSet<&str> {
+    let mut groups: BTreeMap<(u64, u64), Vec<&str>> = BTreeMap::new();
+    for (rel, e) in entries.iter().filter(|(_, e)| e.meta.is_file()) {
+        groups.entry((e.fingerprint.0, e.fingerprint.1)).or_default().push(rel.as_str());
+    }
+    groups.into_values().filter(|members| members.len() > 1).flatten().collect()
+}
+
+/// What `clone_around` walks around: the nested layers (empty folders in the copy), the linked files (copied one by
+/// one, links kept) and the folders above them (walked entry by entry).
+struct Around<'a> {
+    nested: &'a BTreeSet<&'a str>,
+    linked: &'a BTreeSet<&'a str>,
+    ancestors: &'a BTreeSet<&'a str>,
+}
+
+/// Clone the folder `rel` of `src` that holds nested layers or linked files: its own entries one by one, whole
+/// subtrees at once, each nested layer as an empty folder with its creation time and mode, each linked file by
+/// itself (`links`: the first copy of each inode, so the next one becomes its link). A read-only copy of a sealed
+/// linked file goes to `sealed`, for its flag after the walk.
 fn clone_around(
     src: &Path,
     dst: &Path,
     rel: &str,
-    nested: &BTreeSet<&str>,
-    ancestors: &BTreeSet<&str>,
+    around: &Around,
     readonly: bool,
+    links: &mut BTreeMap<(u64, u64), std::path::PathBuf>,
+    sealed: &mut Vec<std::path::PathBuf>,
 ) -> Result<()> {
+    let (nested, ancestors) = (around.nested, around.ancestors);
     let (from, to) = if rel.is_empty() { (src.to_path_buf(), dst.to_path_buf()) } else { (src.join(rel), dst.join(rel)) };
     let m = fs::symlink_metadata(&from)?;
     fs::create_dir(&to)?;
@@ -952,7 +989,14 @@ fn clone_around(
             keep_birthtime(&cm, &cto)?;
             fs::set_permissions(&cto, fs::Permissions::from_mode(cm.mode() & 0o7777))?;
         } else if ancestors.contains(child.as_str()) {
-            clone_around(src, dst, &child, nested, ancestors, readonly)?;
+            clone_around(src, dst, &child, around, readonly, links, sealed)?;
+        } else if around.linked.contains(child.as_str()) {
+            copy_tree(&cfrom, &cto, false, links).with_context(|| format!("copy {}", cfrom.display()))?;
+            // A read-only copy keeps the flags of its entries, as a clone does.
+            use std::os::macos::fs::MetadataExt as MacMetadataExt;
+            if readonly && fs::symlink_metadata(&cfrom)?.st_flags() & libc::UF_IMMUTABLE != 0 {
+                sealed.push(cto.clone());
+            }
         } else {
             // An entry that a writer removed during the copy: the scan after the copy sees the
             // change. Any other failure stops the copy.
@@ -1123,19 +1167,22 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
             let _t = crate::trace::span(format!("APFS copy {} changed entries again", paths.len()));
             if needs_file_copies(src, &after, keep_links) {
                 // Hard links survive only a copy of the whole tree with its map of inodes.
-                let mut copied = false;
+                let mut last = None;
                 for _ in 0..crate::thin::COPY_ROUNDS {
                     crate::thin::settle(round);
                     let now = scan(src)?;
                     delete_tree(&temp)?;
-                    if clone_complete_with(src, &temp, &now, readonly, keep_links).is_ok() {
-                        before = now;
-                        copied = true;
-                        break;
+                    match clone_complete_with(src, &temp, &now, readonly, keep_links) {
+                        Ok(()) => {
+                            before = now;
+                            last = None;
+                            break;
+                        }
+                        Err(e) => last = Some(e),
                     }
                 }
-                if !copied {
-                    bail!("cannot copy {} while it changes", src.display());
+                if let Some(e) = last {
+                    return Err(e.context(format!("cannot copy {} while it changes", src.display())));
                 }
                 continue;
             }
@@ -1758,6 +1805,38 @@ mod tests {
         assert_eq!(fs::read(branch.join("a"))?, b"branch");
         delete_tree(&dst).context("delete readonly snapshot")?;
         assert!(!dst.exists());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn hard_links_in_two_folders_stay_links_and_the_other_folders_are_cloned() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        for d in ["out/a", "out/b", "big/x"] {
+            fs::create_dir_all(src.join(d))?;
+        }
+        fs::write(src.join("out/a/lib"), b"linked")?;
+        fs::hard_link(src.join("out/a/lib"), src.join("out/b/lib"))?;
+        fs::write(src.join("out/a/own"), b"own")?;
+        for i in 0..50 {
+            fs::write(src.join(format!("big/x/f{i}")), format!("file {i}"))?;
+        }
+        let dst = s.0.join("state");
+        snapshot(&src, &dst, true)?;
+        let ino = |p: &str| fs::symlink_metadata(dst.join(p)).map(|m| m.ino());
+        assert_eq!(ino("out/a/lib")?, ino("out/b/lib")?, "the links stay links across folders");
+        assert_ne!(ino("out/a/lib")?, fs::symlink_metadata(src.join("out/a/lib"))?.ino());
+        assert_eq!(fs::read(dst.join("out/a/own"))?, b"own");
+        assert_eq!(fs::read(dst.join("big/x/f49"))?, b"file 49");
+        assert!(fs::write(dst.join("out/b/lib"), b"bad").is_err(), "a read-only copy keeps the flags of a linked file");
+        assert!(fs::write(dst.join("big/x/f1"), b"bad").is_err());
+        let writable = s.0.join("branch");
+        snapshot(&dst, &writable, false)?;
+        fs::write(writable.join("out/a/lib"), b"changed")?;
+        assert_eq!(fs::read(writable.join("out/b/lib"))?, b"changed", "a writable copy keeps the links too");
+        assert_eq!(fs::read(dst.join("out/b/lib"))?, b"linked");
         Ok(())
     }
 
