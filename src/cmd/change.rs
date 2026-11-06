@@ -35,10 +35,11 @@ pub fn version(value: &str) -> Result<usize> {
 }
 
 pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--json").flag("--since-review").value("--from").value("--to"), args)?;
+    let a = parse(&Spec::new().flag("--json").flag("--since-review").value("--person").value("--from").value("--to"), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let usage = "usage: layr change (list|show <id>|log <id>|diff <id> [--from vN|--since-review] [--to vN]) [--json]";
+    let usage =
+        "usage: layr change (list|show <id>|log <id>|diff <id> [--from vN|--since-review [--person <login>]] [--to vN]) [--json]";
     let command = a.pos.first().map(String::as_str).unwrap_or("");
     if command == "list" && a.pos.len() == 1 {
         let mut rows = Vec::new();
@@ -146,11 +147,18 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if versions.len() < 2 && (a.get("--from").is_none() || a.get("--to").is_none()) {
                 bail!("change {id} has only one version");
             }
+            if a.has("--person") && !a.has("--since-review") {
+                bail!("--person names whose review --since-review uses");
+            }
             let from = if a.has("--since-review") {
                 if a.has("--from") {
                     bail!("--since-review and --from name the same version; give one");
                 }
-                reviewed(repo, ctx, &versions)?.ok_or_else(|| anyhow::anyhow!("you approved no version of change {id}"))?
+                let person = a.get("--person");
+                reviewed(repo, ctx, &versions, person)?.ok_or_else(|| match person {
+                    Some(login) => anyhow::anyhow!("{login} approved no version of change {id}"),
+                    None => anyhow::anyhow!("you approved no version of change {id}"),
+                })?
             } else {
                 a.get("--from").map(version).transpose()?.unwrap_or_else(|| versions.len().saturating_sub(2))
             };
@@ -172,7 +180,12 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// The newest version of a change that the caller approved (an `approval` attestation of this machine and this
 /// user on the state of that version), as an index into `versions`.
-fn reviewed(repo: &Repo, ctx: &Ctx, versions: &[StateRec]) -> Result<Option<usize>> {
+fn reviewed(repo: &Repo, ctx: &Ctx, versions: &[StateRec], person: Option<&str>) -> Result<Option<usize>> {
+    // A person's approval comes through a signed request (`layr request approve --person`), with the person as signer.
+    if let Some(login) = person {
+        let model = repo.read_model()?;
+        return Ok(versions.iter().rposition(|v| !model.person_attestations(&v.id, login).is_empty()));
+    }
     for (i, v) in versions.iter().enumerate().rev() {
         for a in repo.p.db.attestations(&v.id, Some("approval"))? {
             let mine = a.signer == repo.p.store.machine.id

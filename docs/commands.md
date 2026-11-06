@@ -23,7 +23,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
-| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN\|--since-review] [--to vM]` |
+| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN\|--since-review [--person <login>]] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
@@ -396,7 +396,8 @@ A name pattern filters the array. JSON output does not support `--all` or `--rem
 
 `layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
 `--since-review` starts at the newest version that you approved (an approval of this machine and your user), so
-a reviewer sees only what changed after their review.
+a reviewer sees only what changed after their review. With `--person <login>` it starts at the newest version that
+person approved through a signed request (`layr request approve --person`).
 The `files` array gives each changed file patch, its status, and added and removed line counts.
 Each version is compared with its own first parent. Changes to the base stay out of the interdiff.
 
