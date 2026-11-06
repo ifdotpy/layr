@@ -158,10 +158,32 @@ impl Ctx {
 #[macro_export]
 macro_rules! outln {
     ($ctx:expr) => { $ctx.print("\n") };
-    ($ctx:expr, $($t:tt)*) => { $ctx.print(&format!("{}\n", format!($($t)*))) };
+    ($ctx:expr, $($t:tt)*) => { $ctx.print(&format!("{}\n", format_args!($($t)*))) };
 }
 
 #[macro_export]
 macro_rules! out {
     ($ctx:expr, $($t:tt)*) => { $ctx.print(&format!($($t)*)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    #[test]
+    fn outln_keeps_each_formatted_line_in_one_print_call() {
+        struct Output(RefCell<Vec<String>>);
+        impl Output {
+            fn print(&self, text: &str) {
+                self.0.borrow_mut().push(text.to_string());
+            }
+        }
+        let output = Output(RefCell::new(Vec::new()));
+        let name = "λ";
+        outln!(output);
+        outln!(output, "");
+        outln!(output, "{name}: {:08x} {:>width$}", 42, "text", width = 6);
+        outln!(output, "{}", "first\nsecond\n");
+        assert_eq!(&*output.0.borrow(), &["\n", "\n", "λ: 0000002a   text\n", "first\nsecond\n\n"]);
+    }
 }

@@ -8,6 +8,15 @@ use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Cache only the schema query definition; every open still reads its database.
+static SCHEMA_CHECK: LazyLock<(Vec<&'static str>, String)> = LazyLock::new(|| {
+    let wanted: Vec<&str> =
+        SCHEMA.lines().filter_map(|l| l.split(" IF NOT EXISTS ").nth(1)).filter_map(|l| l.split([' ', '(']).next()).collect();
+    let sql = format!("SELECT COUNT(*) FROM sqlite_master WHERE name IN ({})", vec!["?"; wanted.len()].join(","));
+    (wanted, sql)
+});
 
 /// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
 /// an error after the commit point, on a full disk).
@@ -167,16 +176,8 @@ impl Db {
             if version != SCHEMA_VERSION {
                 return Ok(false);
             }
-            let wanted: Vec<&str> = SCHEMA
-                .lines()
-                .filter_map(|l| l.split(" IF NOT EXISTS ").nth(1))
-                .filter_map(|l| l.split([' ', '(']).next())
-                .collect();
-            let have: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM sqlite_master WHERE name IN ({})", vec!["?"; wanted.len()].join(",")),
-                rusqlite::params_from_iter(wanted.iter()),
-                |r| r.get(0),
-            )?;
+            let (wanted, sql) = &*SCHEMA_CHECK;
+            let have: i64 = conn.query_row(sql, rusqlite::params_from_iter(wanted.iter()), |r| r.get(0))?;
             Ok(have as usize == wanted.len())
         })();
         let _ = conn.execute_batch("COMMIT");
@@ -1452,6 +1453,25 @@ mod tests {
     use crate::model::Subject;
     use crate::model::{Author, StateKind, StateRec};
     use layr_hashers::{ContentAddress, Digest};
+
+    #[test]
+    fn schema_check_observes_changes_between_opens() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-schema-check-{}", ids::new_id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("layr.sqlite");
+        let db = Db::open(&path)?;
+        assert!(Db::schema_is_current(&db.conn)?);
+        db.conn.execute_batch("DROP INDEX states_line")?;
+        assert!(!Db::schema_is_current(&db.conn)?);
+        drop(db);
+        let reopened = Db::open(&path)?;
+        assert!(Db::schema_is_current(&reopened.conn)?);
+        reopened.conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1)?;
+        assert!(!Db::schema_is_current(&reopened.conn)?);
+        drop(reopened);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn log_records_keep_the_observed_insertion_order_for_fully_tied_records() -> Result<()> {
