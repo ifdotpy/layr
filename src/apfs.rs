@@ -836,7 +836,7 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
     }
 }
 
-<<<<<<< head
+/// Below this workload, thread startup costs more than it saves.
 const PARALLEL_FROM: usize = 64;
 
 /// Run `f` for each item, retaining the small-work serial path.
@@ -848,22 +848,6 @@ fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> R
         use rayon::prelude::*;
         items.par_iter().map(f).collect::<Vec<_>>().into_iter().collect()
     })?
-=======
-/// Below this workload, thread startup costs more than it saves.
-const PARALLEL_FROM: usize = 64;
-
-/// Run `f` for each item with up to four threads; the first error wins.
-fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if items.len() < PARALLEL_FROM || threads == 1 {
-        return items.iter().try_for_each(|p| f(p));
-    }
-    let chunk = items.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(|| part.iter().try_for_each(|p| f(p)))).collect();
-        workers.into_iter().try_for_each(|w| w.join().unwrap())
-    })
->>>>>>> origin/main
 }
 /// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
 /// links (a recursive clone copies hard links as separate files).
@@ -1570,13 +1554,7 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
 /// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
 /// and the first error in that order is returned.
 fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
-<<<<<<< head
-    const PARALLEL_FROM: usize = 64;
     if paths.len() < PARALLEL_FROM {
-=======
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
-    if threads == 1 || paths.len() < PARALLEL_FROM {
->>>>>>> origin/main
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(std::num::NonZeroUsize::new(paths.len()).unwrap()), || {
