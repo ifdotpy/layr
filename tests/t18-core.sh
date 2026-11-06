@@ -102,6 +102,10 @@ eq 'amend keeps ChangeId' "$S3" "$(l rev-parse changes/$C)"
 eq 'first change version stays addressable' "$S2" "$(l rev-parse changes/$C/v1)"
 eq 'second change version resolves' "$S3" "$(l rev-parse changes/$C/v2)"
 has 'interdiff shows the amended patch' second "$(l change diff "$C" --from v1 --to v2)"
+l approve "$S2" >/dev/null
+has 'since-review diffs the approved version and the newest' second "$(l change diff "$C" --since-review)"
+l approve "$S3" >/dev/null
+eq 'after an approval of the newest version nothing is new' '' "$(l change diff "$C" --since-review)"
 eq 'change show includes attestations for the earlier version' 1 "$(l change show "$C" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["versions"][0]["attestations"])>0 and 1)')"
 has 'change log records amend' state "$(l change log "$C")"
 no 'version zero fails' l rev-parse changes/$C/v0
