@@ -101,6 +101,9 @@ fn places_of(indexes: &BTreeMap<String, Index>) -> Places {
 }
 
 /// The published pack indexes of the layer, by pack.
+/// Index fetches in flight at once: each is a small, latency-bound request.
+const INDEX_FETCHES: usize = 64;
+
 pub(crate) fn indexes(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result<BTreeMap<String, Index>> {
     // A release of another machine may delete a listed pack before its index is read; its live chunks are in a new
     // pack then, so the listing runs again.
@@ -126,9 +129,9 @@ fn indexes_once(backend: &Backend, dir: Option<&Path>, identity: &str) -> Result
     // Indexes are small: fetch the missing ones many at a time.
     let packs: Vec<String> = packs.into_iter().collect();
     let mut out = BTreeMap::new();
-    for batch in packs.chunks(64) {
+    for batch in packs.chunks(INDEX_FETCHES) {
         let loaded: Vec<Result<Index>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch.iter().map(|pack| scope.spawn(move || index(backend, dir, identity, pack))).collect();
+            let handles: Vec<_> = batch.iter().map(|pack| scope.spawn(move || { let _worker = crate::fsutil::PoolWorker::enter(); index(backend, dir, identity, pack) })).collect();
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("index read panicked")))).collect()
         });
         for (pack, index) in batch.iter().zip(loaded) {
@@ -186,18 +189,25 @@ impl Uploader {
             .map(|_| {
                 let (queue, done, backend, recipient, dir) =
                     (queue.clone(), done.clone(), backend.clone(), recipient.to_string(), dir.to_path_buf());
-                std::thread::spawn(move || loop {
-                    let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
-                        return;
-                    };
-                    let _ = done.send(upload(&backend, &recipient, &dir, builder));
+                std::thread::spawn(move || {
+                    let _worker = crate::fsutil::PoolWorker::enter();
+                    loop {
+                        let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
+                            return;
+                        };
+                        let _ = done.send(upload(&backend, &recipient, &dir, builder));
+                    }
                 })
             })
             .collect();
         Self { jobs: Some(jobs), results, threads, sent: 0 }
     }
     fn send(&mut self, builder: Builder) -> Result<()> {
-        self.jobs.as_ref().context("uploader is closed")?.send(builder).map_err(|_| anyhow::anyhow!("pack upload threads stopped"))?;
+        self.jobs
+            .as_ref()
+            .context("uploader is closed")?
+            .send(builder)
+            .map_err(|_| anyhow::anyhow!("pack upload threads stopped"))?;
         self.sent += 1;
         Ok(())
     }
@@ -250,10 +260,28 @@ fn upload(backend: &Backend, recipient: &str, dir: &Path, builder: Builder) -> R
     Ok(bytes)
 }
 
-/// Packs compressed and uploaded at once: zstd at the pack level takes about 0.1 s per MiB on
-/// one core, so a cache of some GiB needs every core.
+/// Bound memory held by queued or decoded packs independently of CPU count.
+const TRANSFER_BUFFER_BUDGET: usize = 256 << 20;
+
+/// A Vec may reserve twice the bytes it holds while a transport or decoder grows it.
+const VEC_GROWTH_WORST: usize = 2;
+
+fn pack_bounds() -> (usize, usize) {
+    let compressed = layr_store::zst::compress_bound(chunks::PACK_LIMIT);
+    (compressed, keys::ciphertext_len(compressed))
+}
+
+/// One active upload and one queued pack per worker, allowing growth of each representation.
+fn worker_cap() -> usize {
+    let (compressed, encrypted) = pack_bounds();
+    let active = VEC_GROWTH_WORST * (chunks::PACK_LIMIT + compressed + encrypted);
+    let upload_workers = TRANSFER_BUFFER_BUDGET / (active + chunks::PACK_LIMIT);
+    let reader_workers = (TRANSFER_BUFFER_BUDGET - (KEEP_BEHIND + READER_CACHE + 1) * chunks::PACK_LIMIT) / active - 1;
+    upload_workers.min(reader_workers).max(1)
+}
+
 fn parallel() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16)
+    crate::fsutil::workers().min(worker_cap())
 }
 
 impl<'a> Writer<'a> {
@@ -316,7 +344,8 @@ impl<'a> Writer<'a> {
         }
         let mut ids = Vec::new();
         let started = std::time::Instant::now();
-        let pieces: Vec<(String, &[u8])> = chunks::split(data).into_iter().map(|chunk| (chunks::id(&self.key, chunk), chunk)).collect();
+        let pieces: Vec<(String, &[u8])> =
+            chunks::split(data).into_iter().map(|chunk| (chunks::id(&self.key, chunk), chunk)).collect();
         self.split_time += started.elapsed();
         for (id, chunk) in pieces {
             self.add(&id, chunk)?;
@@ -361,7 +390,12 @@ impl<'a> Writer<'a> {
     /// deletion may have released it since the push started. Missing chunks go up again from the
     /// files in `root`. A deletion between this check and the tree publication remains possible;
     /// `fsck` reports such a tree and the next push of its line repairs it.
-    pub(crate) fn finish(&mut self, root: &Path, chunked: &BTreeMap<String, Vec<String>>, content: &dyn Fn(&Path, &str) -> Result<Vec<u8>>) -> Result<()> {
+    pub(crate) fn finish(
+        &mut self,
+        root: &Path,
+        chunked: &BTreeMap<String, Vec<String>>,
+        content: &dyn Fn(&Path, &str) -> Result<Vec<u8>>,
+    ) -> Result<()> {
         self.flush()?;
         if self.reused.is_empty() {
             return Ok(());
@@ -405,8 +439,17 @@ pub(crate) struct Reader<'a> {
     prefetch: Option<Prefetch>,
 }
 
-/// Packs that the prefetch keeps decoded ahead of the reader: about 256 MiB.
-const AHEAD: usize = 64;
+const KEEP_BEHIND: usize = 4;
+const READER_CACHE: usize = 8;
+/// Retained decoded packs use `(KEEP_BEHIND + READER_CACHE + ahead) * PACK_LIMIT`.
+/// Active decoders (including the synchronous reader) each reserve twice the sum of the
+/// decoded, compressed, and encrypted size bounds for geometric Vec growth. The total
+/// is at most TRANSFER_BUFFER_BUDGET; queued prefetch jobs do not hold pack buffers.
+fn ahead_limit(workers: usize) -> usize {
+    let (compressed, encrypted) = pack_bounds();
+    let active = (workers + 1) * VEC_GROWTH_WORST * (chunks::PACK_LIMIT + compressed + encrypted);
+    (TRANSFER_BUFFER_BUDGET - active) / chunks::PACK_LIMIT - KEEP_BEHIND - READER_CACHE
+}
 
 /// Decoded packs by position in the plan, and the positions that finished (loaded or failed).
 type Ready = (BTreeMap<usize, std::sync::Arc<Vec<u8>>>, BTreeSet<usize>);
@@ -420,6 +463,7 @@ struct Shared {
     reader: std::sync::atomic::AtomicUsize,
     next: std::sync::atomic::AtomicUsize,
     stop: std::sync::atomic::AtomicBool,
+    ahead: usize,
 }
 
 struct Prefetch {
@@ -439,42 +483,54 @@ impl Prefetch {
             reader: std::sync::atomic::AtomicUsize::new(0),
             next: std::sync::atomic::AtomicUsize::new(0),
             stop: std::sync::atomic::AtomicBool::new(false),
+            ahead: ahead_limit(parallel()),
         });
         let threads = (0..parallel())
             .map(|_| {
-                let (shared, backend, identity, indexes) = (shared.clone(), backend.clone(), identity.to_string(), indexes.clone());
-                std::thread::spawn(move || loop {
-                    let at = shared.next.fetch_add(1, Ordering::SeqCst);
-                    if at >= shared.order.len() {
-                        return;
-                    }
-                    // Stay within AHEAD packs of the reader.
-                    {
-                        let mut guard = shared.ready.lock().unwrap();
-                        while at >= shared.reader.load(Ordering::SeqCst) + AHEAD && !shared.stop.load(Ordering::SeqCst) {
-                            guard = shared.changed.wait(guard).unwrap();
+                let (shared, backend, identity, indexes) =
+                    (shared.clone(), backend.clone(), identity.to_string(), indexes.clone());
+                std::thread::spawn(move || {
+                    let _worker = crate::fsutil::PoolWorker::enter();
+                    loop {
+                        let at = shared.next.fetch_add(1, Ordering::SeqCst);
+                        if at >= shared.order.len() {
+                            return;
                         }
+                        // Stay within AHEAD packs of the reader.
+                        {
+                            let mut guard = shared.ready.lock().unwrap();
+                            while at >= shared.reader.load(Ordering::SeqCst) + shared.ahead && !shared.stop.load(Ordering::SeqCst) {
+                                guard = shared.changed.wait(guard).unwrap();
+                            }
+                        }
+                        if shared.stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let pack = &shared.order[at];
+                        let loaded = (|| -> Result<Vec<u8>> {
+                            let index = match indexes.get(pack) {
+                                Some(index) => index.clone(),
+                                None => index(&backend, None, &identity, pack)?,
+                            };
+                            let body = backend
+                                .get(&chunks::pack_name(pack))?
+                                .with_context(|| format!("chunk pack {pack} is missing"))?;
+                            anyhow::ensure!(body.len() <= pack_bounds().1, "encrypted pack exceeds its size limit");
+                            chunks::open_pack(&keys::decrypt(&identity, &body)?, &index)
+                        })();
+                        let mut guard = shared.ready.lock().unwrap();
+                        // A failure (a release moved the chunks, a read error) is not reported here:
+                        // the reader loads the pack itself and reports, or lists the packs again.
+                        if let Ok(mut data) = loaded {
+                            data.shrink_to_fit();
+                            let keep = shared.reader.load(Ordering::SeqCst).saturating_sub(KEEP_BEHIND);
+                            if at >= keep {
+                                guard.0.insert(at, std::sync::Arc::new(data));
+                            }
+                        }
+                        guard.1.insert(at);
+                        shared.changed.notify_all();
                     }
-                    if shared.stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let pack = &shared.order[at];
-                    let loaded = (|| -> Result<Vec<u8>> {
-                        let index = match indexes.get(pack) {
-                            Some(index) => index.clone(),
-                            None => index(&backend, None, &identity, pack)?,
-                        };
-                        let body = backend.get(&chunks::pack_name(pack))?.with_context(|| format!("chunk pack {pack} is missing"))?;
-                        chunks::open_pack(&keys::decrypt(&identity, &body)?, &index)
-                    })();
-                    let mut guard = shared.ready.lock().unwrap();
-                    // A failure (a release moved the chunks, a read error) is not reported here:
-                    // the reader loads the pack itself and reports, or lists the packs again.
-                    if let Ok(data) = loaded {
-                        guard.0.insert(at, std::sync::Arc::new(data));
-                    }
-                    guard.1.insert(at);
-                    shared.changed.notify_all();
                 })
             })
             .collect();
@@ -489,11 +545,11 @@ impl Prefetch {
         self.shared.reader.fetch_max(at, Ordering::SeqCst);
         self.shared.changed.notify_all();
         let mut guard = self.shared.ready.lock().unwrap();
+        // Keep a few packs behind the reader: deduplicated chunks often point back.
+        let keep = self.shared.reader.load(Ordering::SeqCst).saturating_sub(KEEP_BEHIND);
+        guard.0.retain(|position, _| *position >= keep);
         loop {
             if let Some(data) = guard.0.get(&at).cloned() {
-                // Keep a few packs behind the reader: deduplicated chunks often point back.
-                let keep = self.shared.reader.load(Ordering::SeqCst).saturating_sub(4);
-                guard.0.retain(|position, _| *position >= keep);
                 return Some(data);
             }
             if guard.1.contains(&at) || self.shared.stop.load(Ordering::SeqCst) {
@@ -575,8 +631,11 @@ impl<'a> Reader<'a> {
         let Some(body) = self.backend.get(&chunks::pack_name(pack))? else {
             return Ok(None);
         };
-        let data = std::sync::Arc::new(chunks::open_pack(&keys::decrypt(&self.identity, &body)?, &index)?);
-        if self.packs.len() >= 8 {
+        anyhow::ensure!(body.len() <= pack_bounds().1, "encrypted pack exceeds its size limit");
+        let mut decoded = chunks::open_pack(&keys::decrypt(&self.identity, &body)?, &index)?;
+        decoded.shrink_to_fit();
+        let data = std::sync::Arc::new(decoded);
+        if self.packs.len() >= READER_CACHE {
             self.packs.clear();
         }
         self.packs.insert(pack.to_string(), data.clone());
@@ -672,7 +731,79 @@ pub(crate) fn release(store: &Store, identity: &str, recipient: &str, dead: &BTr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prefetch_budget_covers_all_pack_holders() {
+        let plain = layr_store::chunks::PACK_LIMIT;
+        let compressed = layr_store::zst::compress_bound(plain);
+        let encrypted = layr_store::keys::ciphertext_len(compressed);
+        for workers in 1..=super::worker_cap() {
+            let retained = (super::KEEP_BEHIND + super::READER_CACHE + super::ahead_limit(workers)) * plain;
+            let active = (workers + 1) * super::VEC_GROWTH_WORST * (plain + compressed + encrypted);
+            assert!(retained + active <= super::TRANSFER_BUFFER_BUDGET, "{workers} workers");
+        }
+    }
+
+    #[test]
+    fn grease_worst_case_fits_bound() {
+        use base64::Engine;
+        let tag = format!("{}-grease", "x".repeat(8));
+        let args = format!(" {}", "x".repeat(8)).repeat(4);
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode([0; 99]);
+        let lines = encoded.as_bytes().chunks(64).count();
+        let stanza_len = 3 + tag.len() + args.len() + 1 + encoded.len() + lines;
+        let grease_bound = layr_store::keys::ciphertext_len(0) - 184 - 16;
+        assert!(stanza_len <= grease_bound);
+    }
+
+    #[test]
+    fn oversized_window_pack_is_bounded() {
+        let frame = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x88, 0x09, 0x00, 0x00, 0x61];
+        let index = layr_store::chunks::Index { v: 1, chunks: vec![(String::new(), 0, 1)] };
+        let error = layr_store::chunks::open_pack(&frame, &index).unwrap_err();
+        assert!(error.to_string().contains("pack frame content size is missing"));
+    }
+
+    #[test]
+    fn incompressible_final_chunk_reaches_pack_limit() {
+        use rand::RngCore;
+        let mut bytes = vec![0u8; layr_store::chunks::PACK_LIMIT - 1];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let mut builder = layr_store::chunks::Builder::default();
+        for chunk in bytes[..layr_store::chunks::PACK_TARGET - 1].chunks(layr_store::chunks::MAX) {
+            builder.add(String::new(), chunk);
+        }
+        assert!(!builder.full());
+        builder.add(String::new(), &bytes[layr_store::chunks::PACK_TARGET - 1..]);
+        assert!(builder.full());
+        let (frame, index) = builder.finish().unwrap();
+        assert!(frame.len() <= layr_store::zst::compress_bound(layr_store::chunks::PACK_LIMIT));
+        layr_store::zst::check_pack_header(&frame, layr_store::chunks::PACK_LIMIT).unwrap();
+        assert_eq!(layr_store::chunks::open_pack(&frame, &index).unwrap(), bytes);
+    }
+
+    #[test]
+    fn age_bound_matches_ciphertext_size() {
+        let identity = layr_store::keys::generate_identity();
+        let recipient = layr_store::keys::recipient_of(&identity).unwrap();
+        for size in [0, 1, 65536, 65537] {
+            let body = layr_store::keys::encrypt(&recipient, &vec![0; size]).unwrap();
+            assert!(body.len() <= layr_store::keys::ciphertext_len(size));
+            assert_eq!(body.capacity(), layr_store::keys::ciphertext_len(size));
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn decoded_pack_has_exact_capacity() {
+        let mut builder = Builder::default();
+        while !builder.full() {
+            builder.add(String::new(), &[1; 256 * 1024]);
+        }
+        let (frame, index) = builder.finish().unwrap();
+        let data = chunks::open_pack(&frame, &index).unwrap();
+        assert_eq!(data.len(), data.capacity());
+    }
 
     fn store(root: &Path) -> Store {
         Store {

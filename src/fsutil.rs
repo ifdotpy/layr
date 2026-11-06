@@ -1275,9 +1275,28 @@ pub struct Space {
     pub unique: u64,
 }
 
+thread_local! { static IN_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Marks a pool worker for the lifetime of its job loop.
+pub struct PoolWorker(bool);
+impl PoolWorker {
+    pub fn enter() -> Self {
+        Self(IN_POOL.with(|inside| inside.replace(true)))
+    }
+}
+impl Drop for PoolWorker {
+    fn drop(&mut self) {
+        IN_POOL.with(|inside| inside.set(self.0));
+    }
+}
+
 /// Use the parallelism available to this process, including system-imposed limits.
 pub fn workers() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    if IN_POOL.with(std::cell::Cell::get) {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    }
 }
 
 /// Run a dynamic queue of background jobs, each of which can add more jobs.
@@ -1303,6 +1322,7 @@ pub fn work_queue<T: Send>(seed: Vec<T>, work: impl Fn(T, &dyn Fn(T)) + Sync) {
     std::thread::scope(|scope| {
         for _ in 0..workers() {
             scope.spawn(|| {
+                let _worker = PoolWorker::enter();
                 crate::sys::lower_thread_priority();
                 loop {
                     let job = {
@@ -1593,5 +1613,13 @@ mod write_tests {
         atomic_write(&dir.join("file"), b"data", 0o600).unwrap();
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pool_worker_test {
+    #[test]
+    fn nested_workers_are_serial() {
+        super::work_queue(vec![()], |(), _| assert_eq!(super::workers(), 1));
     }
 }

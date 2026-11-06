@@ -170,10 +170,16 @@ impl Index {
 
 /// A pack: chunks in order, as one zstd frame. `add` until `full`, then `finish`.
 #[cfg(feature = "native")]
-#[derive(Default)]
 pub struct Builder {
     data: Vec<u8>,
     index: Index,
+}
+
+#[cfg(feature = "native")]
+impl Default for Builder {
+    fn default() -> Self {
+        Self { data: Vec::with_capacity(PACK_LIMIT), index: Index::default() }
+    }
 }
 
 #[cfg(feature = "native")]
@@ -197,7 +203,13 @@ impl Builder {
 
 /// The plaintext of a pack, checked against its index.
 pub fn open_pack(frame: &[u8], index: &Index) -> anyhow::Result<Vec<u8>> {
-    let data = crate::zst::decompress_with_limit(frame, None, PACK_LIMIT)?;
+    let size = usize::try_from(index.size())?;
+    anyhow::ensure!(size <= PACK_LIMIT, "pack exceeds its size limit");
+    crate::zst::check_pack_header(frame, PACK_LIMIT)?;
+    #[cfg(feature = "native")]
+    let data = crate::zst::decompress_pack(frame, size, PACK_LIMIT)?;
+    #[cfg(not(feature = "native"))]
+    let data = crate::zst::decompress_with_limit(frame, None, size)?;
     anyhow::ensure!(data.len() as u64 == index.size(), "pack size differs from its index");
     Ok(data)
 }
@@ -237,7 +249,8 @@ mod tests {
         assert_eq!(lengths.iter().sum::<usize>(), 1 << 20);
         assert_eq!(lengths, PINNED.to_vec());
     }
-    const PINNED: &[usize] = &[83931, 66477, 104326, 58501, 72892, 66658, 66748, 81136, 67277, 68591, 82002, 117972, 99038, 13027];
+    const PINNED: &[usize] =
+        &[83931, 66477, 104326, 58501, 72892, 66658, 66748, 81136, 67277, 68591, 82002, 117972, 99038, 13027];
 
     #[test]
     fn an_insertion_changes_only_nearby_chunks() {

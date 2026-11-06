@@ -11,9 +11,9 @@
 
 use crate::storage;
 use anyhow::{bail, ensure, Context, Result};
+use layr_hashers::FastCryptographic;
 use rusqlite::types::Value;
 use rusqlite::OpenFlags;
-use layr_hashers::FastCryptographic;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Read;
@@ -202,9 +202,8 @@ pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
 
 /// Copy the folder `src` (a project or a part of one) into `dst`, entry by entry.
 fn walk(c: &mut storage::Copier, src: &Path, dst: &Path, rel: &mut Vec<String>, out: &mut Sink) -> Result<()> {
-    let mut entries = fs::read_dir(src)
-        .with_context(|| format!("read {}", src.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries =
+        fs::read_dir(src).with_context(|| format!("read {}", src.display()))?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -249,7 +248,11 @@ fn entry(c: &mut storage::Copier, s: &Path, d: &Path, m: &fs::Metadata, rel: &mu
         c.file(s, d, m)
     } else if m.file_type().is_symlink() {
         c.symlink(s, d, m)
-    } else if m.file_type().is_fifo() || m.file_type().is_socket() || m.file_type().is_block_device() || m.file_type().is_char_device() {
+    } else if m.file_type().is_fifo()
+        || m.file_type().is_socket()
+        || m.file_type().is_block_device()
+        || m.file_type().is_char_device()
+    {
         bail!("cannot copy special file {}", s.display())
     } else {
         bail!("cannot copy {}", s.display())
@@ -306,7 +309,13 @@ fn compare_dir(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -> 
         Ok(set)
     };
     let (sn, dn) = (names(s)?, names(d)?);
-    ensure!(sn == dn, "different entries in {}: only in source {:?}, only in copy {:?}", rel.join("/"), sn.difference(&dn).collect::<Vec<_>>(), dn.difference(&sn).collect::<Vec<_>>());
+    ensure!(
+        sn == dn,
+        "different entries in {}: only in source {:?}, only in copy {:?}",
+        rel.join("/"),
+        sn.difference(&dn).collect::<Vec<_>>(),
+        dn.difference(&sn).collect::<Vec<_>>()
+    );
     for name in sn {
         let (sp, dp) = (s.join(&name), d.join(&name));
         rel.push(name.clone());
@@ -361,20 +370,26 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
     }
 }
 
-/// Compares the bytes of each pair of files, on up to four threads: the work is reading, and the files are many.
+/// Compares the bytes of each pair of files, in parallel: the work is reading, and the files are many.
 /// The first difference or error wins, and the other threads stop.
 fn compare_contents(files: &[(PathBuf, PathBuf, String)]) -> Result<()> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4).min(files.len().max(1));
+    let threads = crate::fsutil::workers().min(files.len().max(1));
     let next = AtomicUsize::new(0);
     let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
+                let _worker = crate::fsutil::PoolWorker::enter();
                 let (mut a, mut b) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
                 while failed.lock().map(|f| f.is_none()).unwrap_or(false) {
                     let Some((s, d, rel)) = files.get(next.fetch_add(1, Ordering::Relaxed)) else { return };
-                    let r = same_content(s, d, &mut a, &mut b)
-                        .and_then(|same| if same { Ok(()) } else { Err(anyhow::anyhow!("{rel}: content differs")) });
+                    let r = same_content(s, d, &mut a, &mut b).and_then(|same| {
+                        if same {
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!("{rel}: content differs"))
+                        }
+                    });
                     if let Err(e) = r {
                         if let Ok(mut f) = failed.lock() {
                             f.get_or_insert(e);
@@ -428,7 +443,8 @@ fn compare_db(s: &Path, d: &Path, name: &str) -> Result<()> {
     };
     let (sc, dc) = (open(s)?, open(d)?);
     let tables = |c: &rusqlite::Connection| -> Result<Vec<String>> {
-        let mut stmt = c.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let mut stmt =
+            c.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     };

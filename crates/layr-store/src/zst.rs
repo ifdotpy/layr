@@ -16,6 +16,35 @@ fn error(code: usize) -> anyhow::Error {
     anyhow!("zstd: {}", zstd_safe::get_error_name(code))
 }
 
+/// Validate the zstd frame header before decoding an indexed pack on any platform.
+/// The pack writer always sets ContentSizeFlag, so unknown-size frames are not pack frames.
+/// Format: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#frames
+pub fn check_pack_header(frame: &[u8], limit: usize) -> Result<()> {
+    anyhow::ensure!(frame.get(..4) == Some(&[0x28, 0xb5, 0x2f, 0xfd]), "invalid pack frame magic");
+    let descriptor = *frame.get(4).ok_or_else(|| anyhow::anyhow!("short pack frame header"))?;
+    anyhow::ensure!(descriptor & 0x08 == 0, "reserved pack frame header bit");
+    let single = descriptor & 0x20 != 0;
+    let size_flag = descriptor >> 6;
+    anyhow::ensure!(single || size_flag != 0, "pack frame content size is missing");
+    let mut offset = 5;
+    let window = if single { None } else {
+        let byte = *frame.get(offset).ok_or_else(|| anyhow::anyhow!("short pack frame header"))?;
+        offset += 1;
+        let base = 1u64 << (10 + (byte >> 3));
+        Some(base + (base / 8) * u64::from(byte & 7))
+    };
+    offset += [0, 1, 2, 4][(descriptor & 3) as usize];
+    let width = match size_flag { 0 => 1, 1 => 2, 2 => 4, _ => 8 };
+    let field = frame.get(offset..offset + width).ok_or_else(|| anyhow::anyhow!("short pack frame header"))?;
+    let mut bytes = [0u8; 8];
+    bytes[..width].copy_from_slice(field);
+    let mut content = u64::from_le_bytes(bytes);
+    if width == 2 { content += 256; }
+    anyhow::ensure!(content <= limit as u64, "pack frame content size exceeds its limit");
+    anyhow::ensure!(window.unwrap_or(content) <= limit as u64, "pack frame window exceeds its limit");
+    Ok(())
+}
+
 /// One frame decoded; `base` is the raw dictionary of a delta frame.
 pub fn decompress(frame: &[u8], base: Option<&[u8]>) -> Result<Vec<u8>> {
     decompress_with_limit(frame, base, LIMIT)
@@ -25,10 +54,28 @@ pub fn decompress(frame: &[u8], base: Option<&[u8]>) -> Result<Vec<u8>> {
 /// Metadata and intermediate frames continue to use the default limit.
 #[cfg(feature = "native")]
 pub fn decompress_with_limit(frame: &[u8], base: Option<&[u8]>, limit: usize) -> Result<Vec<u8>> {
-    if zstd_safe::get_frame_content_size(frame)
-        .map_err(|_| anyhow!("invalid zstd frame header"))?
-        .is_some_and(|size| size > limit as u64)
-    {
+    decompress_stream(frame, base, limit)
+}
+
+/// Decode an indexed pack directly into its size-bounded output, without a streaming window.
+#[cfg(feature = "native")]
+pub fn decompress_pack(frame: &[u8], size: usize, limit: usize) -> Result<Vec<u8>> {
+    anyhow::ensure!(size <= limit, "pack exceeds its size limit");
+    anyhow::ensure!(zstd_safe::find_frame_compressed_size(frame).map_err(error)? == frame.len(), "bytes after the zstd frame");
+    let mut dctx = DCtx::create();
+    let window_log = usize::BITS - (limit - 1).leading_zeros();
+    dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(window_log)).map_err(error)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(size)?;
+    dctx.decompress(&mut out, frame).map_err(error)?;
+    anyhow::ensure!(out.len() == size, "pack size differs from its index");
+    Ok(out)
+}
+
+#[cfg(feature = "native")]
+fn decompress_stream(frame: &[u8], base: Option<&[u8]>, limit: usize) -> Result<Vec<u8>> {
+    let size = zstd_safe::get_frame_content_size(frame).map_err(|_| anyhow!("invalid zstd frame header"))?;
+    if size.is_some_and(|size| size > limit as u64) {
         bail!("a zstd frame decodes to more than {limit} bytes");
     }
     let mut dctx = DCtx::create();
@@ -37,6 +84,10 @@ pub fn decompress_with_limit(frame: &[u8], base: Option<&[u8]>, limit: usize) ->
         dctx.ref_prefix(base).map_err(error)?;
     }
     let mut out = Vec::new();
+    if let Some(size) = size.map(|n| n as usize) {
+        if size > limit { bail!("a zstd frame decodes to more than {limit} bytes"); }
+        out.try_reserve_exact(size)?;
+    }
     let mut input = InBuffer::around(frame);
     let mut chunk = vec![0u8; DCtx::out_size()];
     loop {
@@ -115,6 +166,10 @@ fn decompress_rust(frame: &[u8], base: Option<&[u8]>, limit: usize) -> Result<Ve
     }
     Ok(out)
 }
+
+/// Maximum encoded length of a zstd frame for an input of this size.
+#[cfg(feature = "native")]
+pub fn compress_bound(size: usize) -> usize { zstd_safe::compress_bound(size) }
 
 /// The zstd level of the writer.
 pub const LEVEL: i32 = 3;

@@ -25,14 +25,12 @@ fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
 fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
-        let workers = destinations.len().min(8);
-        let barrier = std::sync::Barrier::new(workers);
+        let workers = destinations.len().min(crate::fsutil::workers());
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
                 .map(|worker| {
-                    let barrier = &barrier;
                     scope.spawn(move || -> Result<()> {
-                        barrier.wait();
+                        let _worker = crate::fsutil::PoolWorker::enter();
                         for dst in destinations.iter().skip(worker).step_by(workers) {
                             crate::storage::snapshot(src, dst, false)?;
                         }

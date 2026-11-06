@@ -63,14 +63,19 @@ fn walk(root: &Path, dir: &Path, rules: &Rules, out: &mut Vec<(String, std::fs::
     Ok(())
 }
 
-/// The content hash (git blob id) of each file, on a few threads. None for a file that cannot be read.
+/// The content hash (git blob id) of each file, in parallel. None for a file that cannot be read.
 fn hash_all(w: &Path, rels: &[&str]) -> Vec<Option<String>> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
+    let threads = crate::fsutil::workers();
     let chunk = rels.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
         let parts: Vec<_> = rels
             .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().map(|rel| hash_file(&w.join(rel))).collect::<Vec<_>>()))
+            .map(|part| {
+                s.spawn(move || {
+                    let _worker = crate::fsutil::PoolWorker::enter();
+                    part.iter().map(|rel| hash_file(&w.join(rel))).collect::<Vec<_>>()
+                })
+            })
             .collect();
         parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     })

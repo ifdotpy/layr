@@ -15,8 +15,8 @@ use crate::ignore_rules::Rules;
 use crate::model::Line;
 use crate::repo::{skip_path, Repo, Snap};
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 use layr_hashers::{Digest, GitCompatible};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,8 +33,6 @@ const COMPARE_DIR: &str = "overlap-compares";
 const LIVE_DIR: &str = "overlap-live";
 /// Format of the saved live compares. Bump it when `compare` changes its results.
 const LIVE_FORMAT: u32 = 1;
-/// Threads that compare saved states at once.
-const COMPARE_THREADS: usize = 4;
 
 #[derive(Debug, Serialize)]
 pub struct Overlap {
@@ -113,7 +111,12 @@ pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), r
 }
 
 /// The test of `compare` for one path: whether the path changed from `base` to `live`.
-pub(crate) fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
+pub(crate) fn recheck(
+    base: &(impl Src + ?Sized),
+    live: &(impl Src + ?Sized),
+    rules: &Rules,
+    path: &str,
+) -> Result<Option<Found>> {
     let old = fsutil::lmeta(base, path);
     let new = fsutil::lmeta(live, path);
     if old.is_none() && new.is_none() {
@@ -272,10 +275,11 @@ impl StateCompare {
     }
 }
 
-/// Run the state compares on up to `COMPARE_THREADS` threads. The results keep the order of `jobs`.
+/// Run the state compares using the available CPUs. The results keep the order of `jobs`.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     let next = AtomicUsize::new(0);
     let worker = || -> Result<Vec<(usize, Vec<Found>)>> {
+        let _worker = crate::fsutil::PoolWorker::enter();
         let mut done = Vec::new();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
@@ -285,7 +289,7 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     };
     let mut out: Vec<Option<Vec<Found>>> = jobs.iter().map(|_| None).collect();
     std::thread::scope(|s| -> Result<()> {
-        let handles: Vec<_> = (0..COMPARE_THREADS.min(jobs.len())).map(|_| s.spawn(worker)).collect();
+        let handles: Vec<_> = (0..crate::fsutil::workers().min(jobs.len())).map(|_| s.spawn(worker)).collect();
         for h in handles {
             let done = h.join().map_err(|_| anyhow!("status overlap compare panicked"))??;
             for (i, found) in done {
