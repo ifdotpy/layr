@@ -831,7 +831,7 @@ pub fn stored_remote_refs(repo: &Repo, remote: &str) -> Result<Vec<(String, Stri
 }
 
 /// The state of a Git commit that the store maps (an imported state, or a state with a tree here).
-fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
+pub(crate) fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
     for st in repo.p.db.state_of_commit(oid)? {
         // An imported state is mapped by its record, which holds the Git objects of the commit
         // (earlier versions imported only the tip and their records lack them). Other states are
