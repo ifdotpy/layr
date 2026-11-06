@@ -444,6 +444,14 @@ fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMa
     Ok(Needs::Ready)
 }
 
+/// Print once per process why a job stays pending here, so a watcher does not repeat it each pass.
+fn tell_pending(state: &str, name: &str, why: &str) {
+    static TOLD: std::sync::Mutex<BTreeSet<(String, String)>> = std::sync::Mutex::new(BTreeSet::new());
+    if TOLD.lock().map(|mut told| told.insert((state.to_string(), name.to_string()))).unwrap_or(true) {
+        eprintln!("layr checks: {name} of {} does not run on this machine: {why}", crate::ids::short(state));
+    }
+}
+
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
     let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
@@ -500,6 +508,17 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
             if is_privileged {
                 pending_privileged += 1;
             }
+            let why = if !local.runner {
+                "this machine is no check runner (layr config --local checks.runner true)".to_string()
+            } else if is_privileged && cfg!(target_os = "macos") {
+                "privileged checks run only on Linux".to_string()
+            } else if is_privileged && !local.privileged {
+                "this machine is no privileged runner (layr config --local checks.privileged-runner true)".to_string()
+            } else {
+                let host = if cfg!(target_os = "macos") { "macOS runs checks without a sandbox" } else { "a privileged check runs as root" };
+                format!("{host}, so only a state of main or a state that a maintainer approved runs here (layr approve, or layr try <state> --check {name})")
+            };
+            tell_pending(&state, &name, &why);
             continue;
         }
         let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, true, |dir| {

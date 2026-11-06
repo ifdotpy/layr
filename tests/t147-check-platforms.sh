@@ -37,4 +37,16 @@ eq "a check without platforms takes a result from any platform" 0 "$(l checks pe
 no "an unknown platform is refused" l config checks.platforms '{"unit":"windows"}'
 no "an empty list is refused" l config checks.platforms '{"unit":[]}'
 no "pending refuses an OS without an architecture" l checks pending --platform linux
+
+# macOS runs checks without a sandbox: a state that is not of main and has no approval waits, and the run says why.
+if [ "$(uname -s)" = Darwin ]; then
+    l line new topic -q
+    cd "$LAYR_ROOT/projects/p/lines/topic" || exit 1
+    echo t > t.txt; l add t.txt >/dev/null; l save -qm topic
+    l protect topic >/dev/null 2>&1 || true
+    l config checks.lines '{"main":["unit"],"topic":["unit"]}' >/dev/null
+    err=$(l checks run --state topic 2>&1 >/dev/null)
+    has "a job that waits says so" "unit of " "$err"
+    has "and why" "only a state of main or a state that a maintainer approved runs here" "$err"
+fi
 finish
