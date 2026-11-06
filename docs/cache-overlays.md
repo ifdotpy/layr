@@ -98,7 +98,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | `layr merge <line>` | Merges each follow overlay of the source line, with the overlay's `merge` property. A cache overlay unions the files into the target's folder. |
 | `layr overlay repair <overlay>` | In the current line, the folder of that folder overlay: a plain folder becomes a cache again; a cache with versioned files becomes a plain folder. In a line where the folder is no cache path, it prints `not a cache path in this line` and exits 0 (section 3). |
 | `layr overlay remove <cache overlay>` | Removes the cache overlay from the project (section 18). Refuses a versioned overlay. |
-| `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder, its size on disk and its saved state (was `layr cache list -v`). |
+| `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder and its saved state; add `--size` to recursively measure its apparent file size (was `layr cache list -v`). |
 | `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
 | `layr gc [-n] [--dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. With `--dedup`, also shares equal cache content (section 16). |
 | `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
@@ -425,6 +425,7 @@ A bare `layr cache`, or any other form, fails with `layr cache was removed. Use 
 The lines that carry caches are unchanged:
 `line new` takes them, and `merge` brings them back.
 
+- `overlay list` does not walk cache contents by default. Add `--size` to measure the apparent size of active cache folders (without following links or entering other layers). Text shows `-` when size is not computed; JSON omits `size` unless measured, and a measured empty cache is `0`. `--json --size` combines both options.
 - `overlay list` shows folder overlays only. A regenerable folder with no overlay has no row. It
   has no overlay until its first `save --caches`, and a folder with versioned files never gets one.
   `save --caches` prints why a folder is no cache.
