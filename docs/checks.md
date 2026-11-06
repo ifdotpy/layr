@@ -33,7 +33,8 @@ only. Fetch into an existing project never grants local access.
 | `checks.changes` | `[]` | Checks for every immutable logical change version |
 | `checks.lines` | `{}` | Protected line names mapped to check name arrays |
 | `checks.privileged` | `[]` | Explicit names permitted to execute as root |
-| `checks.platforms` | `{}` | Check names mapped to a platform or a list of platforms: `linux`, `macos` (any architecture), or `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`. A check must pass once on each entry; an unset name runs once on any platform |
+| `checks.platforms` | `{}` | Check names mapped to a platform or a list of platforms: `linux`, `macos` (any architecture), or `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`. A check must pass once on each entry; an unset name runs once on any platform. A merge into a protected line needs a passing run on each entry: this machine runs its own platform, and a queue entry waits (stays pending) for a runner of another one |
+| `checks.after` | `{}` | Check names mapped to the checks they need, as `{"deploy": ["fmt", "clippy", "test@linux-aarch64"]}`. A check runs only after each need passed on the same state (on that platform when the entry names one). A pass runs the needed checks first. A failed need skips the check and a need with no result makes it wait, both with no attestation |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
 | `checks.memory` | `4294967296` | Linux per-process address-space limit; maximum file size on either platform |
 | `checks.processes` | `256` (Linux), `4096` (Mac) | Hard process limit for the sandbox user |
@@ -90,6 +91,12 @@ other users. A check of any other state, such as a pull request, gives nothing b
 check gives nothing back either: its copy is a plain folder of root. A runner that pushes after its
 checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <head>` (or
 `checks watch --once`), `layr push <remote> --caches`.
+
+A build outside `checks run`, such as a CI job, gives its caches back the same way with
+`layr save --caches --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
+folders of the current line go to `<line>.checks-<os>-<arch>` with the line's head as their source
+state, and no source state is made (a cache writer machine may run it, docs/ci-trust.md). Then
+`layr push <remote> --caches` publishes them.
 
 The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read

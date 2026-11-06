@@ -5,6 +5,8 @@
 //! that the dep-info names by its absolute path. Such a unit stays fresh at the new place and names the old one:
 //! a test runs the binary of the other line, or fails when that line is gone.
 //! `relocate` removes the fingerprints of these units, so the next build makes them again. The other units stay.
+//! A unit whose only old paths are sources out of its package (a workspace `Cargo.toml`, a `clippy.toml`) that the
+//! new place has with the same bytes is moved instead: its dep-info names the new place, and it stays fresh.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -27,8 +29,11 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
             }
             // A dep-info file that cannot be read names nothing that cargo uses either.
             let Ok(bytes) = fs::read(entry.path()) else { continue };
-            if names_old_place(&String::from_utf8_lossy(&bytes), stem, rel, &at_profile) {
-                stale += remove_fingerprint(&profile, stem)?;
+            let text = String::from_utf8_lossy(&bytes);
+            match place(&text, stem, rel, &at_profile) {
+                Place::Here => {}
+                Place::Stale => stale += remove_fingerprint(&profile, stem)?,
+                Place::Moved { old, new } => move_unit(&profile, stem, &entry.path(), &text, &old, &new)?,
             }
         }
     }
@@ -81,41 +86,123 @@ fn profiles(target: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Whether the dep-info `text` of the unit `stem` names the place where it was built, when its profile folder
-/// (`rel` below the target folder) is used at `at_profile`.
-fn names_old_place(text: &str, stem: &str, rel: &Path, at_profile: &Path) -> bool {
+/// What a unit's dep-info says about the place where it was built.
+#[derive(Debug, PartialEq)]
+enum Place {
+    /// It names no old place (or it was built here).
+    Here,
+    /// It names the old place in a way that only a new build fixes.
+    Stale,
+    /// It names only sources of the old place (`old`, a line root) that the new place (`new`) has with the same bytes.
+    Moved { old: PathBuf, new: PathBuf },
+}
+
+/// What the dep-info `text` of the unit `stem` says about the place where it was built, when its profile folder
+/// (`rel` below the target folder) is used at `at_profile`. A compiled-in path (`env!`) of the old place makes the
+/// unit stale. A source of the old place out of the target folder moves with the unit when the new place has a file
+/// with the same bytes at the same path below its root: cargo then checks the new file, as for a relative source.
+fn place(text: &str, stem: &str, rel: &Path, at_profile: &Path) -> Place {
     // The first rule names the dep-info file itself, at the place of the build: `<profile>/deps/<stem>.d: ...`.
     let first = text.lines().next().unwrap_or("");
-    let Some(built) = first.find(&format!("/deps/{stem}.d:")).map(|i| Path::new(&first[..i])) else { return false };
+    let Some(built) = first.find(&format!("/deps/{stem}.d:")).map(|i| Path::new(&first[..i])) else { return Place::Here };
     if built == at_profile {
-        return false;
+        return Place::Here;
     }
-    let Some(old_target) = built.ancestors().nth(rel.components().count()) else { return false };
+    let Some(old_target) = built.ancestors().nth(rel.components().count()) else { return Place::Here };
     // The old place without the end that both places share: `<old line>` of `<old line>/target/debug`.
     let old_root = without_common_end(built, at_profile);
     if old_root.components().all(|c| matches!(c, Component::RootDir)) {
-        return false;
+        return Place::Here;
     }
+    let new_root = without_common_end(at_profile, built);
     let old = |p: &str| Path::new(p).starts_with(&old_root);
+    let mut sources = std::collections::BTreeSet::new();
     for line in text.lines() {
         if let Some(env) = line.strip_prefix("# env-dep:") {
             let Some((name, value)) = env.split_once('=') else { continue };
             // A binary path is in the target folder; other build outputs there (OUT_DIR) are copied with it.
             if old(value) && (name.starts_with("CARGO_BIN_EXE_") || !Path::new(value).starts_with(old_target)) {
-                return true;
+                return Place::Stale;
             }
         } else if !line.starts_with('#') {
             // `targets: sources`, or `source:`. The targets are in the target folder.
-            let sources = match line.split_once(": ") {
+            let list = match line.split_once(": ") {
                 Some((_, s)) => s,
                 None => line.strip_suffix(':').unwrap_or(""),
             };
-            if paths(sources).any(|p| old(&p) && !Path::new(&p).starts_with(old_target)) {
-                return true;
+            sources.extend(paths(list).filter(|p| old(p) && !Path::new(p).starts_with(old_target)));
+        }
+    }
+    if sources.is_empty() {
+        return Place::Here;
+    }
+    let same = |p: &String| {
+        let there = new_root.join(Path::new(p).strip_prefix(&old_root).unwrap_or(Path::new(p)));
+        matches!((fs::read(p), fs::read(&there)), (Ok(a), Ok(b)) if a == b)
+    };
+    if sources.iter().all(same) {
+        Place::Moved { old: old_root, new: new_root }
+    } else {
+        Place::Stale
+    }
+}
+
+/// Moves the unit `stem` from the line root `old` to `new`: its text dep-info (`deps/<stem>.d`, at `d`) and the binary
+/// dep-info files of its fingerprint (`.fingerprint/<package>-<hash>/dep-*`) name the new root. Their times stay, so
+/// cargo's compare of the source times with them gives what it gave before.
+fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: &Path) -> Result<()> {
+    let escape = |p: &Path| format!("{}/", p.display()).replace(' ', "\\ ");
+    rewrite(d, text.replace(&escape(old), &escape(new)).into_bytes())?;
+    let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(()) };
+    let suffix = format!("-{hash}");
+    let (old, new) = (old.as_os_str().as_encoded_bytes(), new.as_os_str().as_encoded_bytes());
+    for unit in fs::read_dir(profile.join(".fingerprint"))?.flatten() {
+        if !unit.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)) || !unit.file_type()?.is_dir() {
+            continue;
+        }
+        for file in fs::read_dir(unit.path())?.flatten() {
+            if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
+                let bytes = fs::read(file.path())?;
+                let moved = rewrite_encoded(&bytes, old, new);
+                if moved != bytes {
+                    rewrite(&file.path(), moved)?;
+                }
             }
         }
     }
-    false
+    Ok(())
+}
+
+/// Writes `bytes` to `path` and gives the file its old modification time back.
+fn rewrite(path: &Path, bytes: Vec<u8>) -> Result<()> {
+    let time = fs::metadata(path)?.modified()?;
+    fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
+    fs::File::options().write(true).open(path)?.set_modified(time)?;
+    Ok(())
+}
+
+/// A binary dep-info of cargo with each path below `old` moved below `new`. A path there is its length (u32, little
+/// end) and its bytes; an environment value is stored the same way, but a unit with an old one is stale (`place`).
+fn rewrite_encoded(bytes: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(len) = bytes.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize) {
+            let start = i + 4;
+            let path = bytes.get(start..start + len).unwrap_or_default();
+            if path.len() > old.len() && path.starts_with(old) && path[old.len()] == b'/' {
+                let rest = &path[old.len()..];
+                out.extend(((new.len() + rest.len()) as u32).to_le_bytes());
+                out.extend(new);
+                out.extend(rest);
+                i = start + len;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// `a` without the trailing components that it shares with `b`.
@@ -233,6 +320,58 @@ mod tests {
         unit(&target, "it-fff", "my-x", &format!("{old}/it-fff.d: tests/it.rs\n\n# env-dep:CARGO_BIN_EXE_x=/lines/old/target/debug/x\n"));
         assert_eq!(relocate(&target, Path::new("/lines/old/target")).unwrap(), 0);
         assert!(fresh(&target, "my-x", "fff"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_unit_whose_old_sources_the_new_line_has_moves_and_stays_fresh() {
+        let root = scratch("moved");
+        let (old_line, new_line) = (root.join("old"), root.join("new"));
+        let target = new_line.join("target");
+        for line in [&old_line, &new_line] {
+            fs::create_dir_all(line.join("tools")).unwrap();
+            fs::write(line.join("Cargo.toml"), "[workspace]\n").unwrap();
+            fs::write(line.join("tools/clippy.toml"), "msrv = \"1.80\"\n").unwrap();
+        }
+        fs::write(new_line.join("tools/other.toml"), "a\n").unwrap();
+        let (o, d) = (old_line.display(), format!("{}/target/debug/deps", old_line.display()));
+        let text = |stem: &str, extra: &str| {
+            format!("{d}/{stem}.d: src/lib.rs {o}/Cargo.toml {o}/tools/{extra}\n\nsrc/lib.rs:\n{o}/Cargo.toml:\n")
+        };
+        // The binary dep-info: a header, then per file its kind, length, path and a checksum flag.
+        let encoded = |paths: &[String]| {
+            let mut b = vec![1, 0, 0, 0, 0xff, 1];
+            b.extend((paths.len() as u32).to_le_bytes());
+            for p in paths {
+                b.push(1);
+                b.extend((p.len() as u32).to_le_bytes());
+                b.extend(p.as_bytes());
+                b.push(0);
+            }
+            b.extend(0u32.to_le_bytes());
+            b
+        };
+        unit(&target, "json-aaa", "json", &text("json-aaa", "clippy.toml"));
+        let dep = target.join("debug/.fingerprint/json-aaa/dep-lib-json");
+        fs::write(&dep, encoded(&[format!("{o}/tools/clippy.toml"), format!("{o}/Cargo.toml"), "src/lib.rs".into()])).unwrap();
+        // A source that the new line has with other bytes, or does not have: the unit goes stale.
+        fs::write(old_line.join("tools/other.toml"), "b\n").unwrap();
+        unit(&target, "lint-bbb", "lint", &text("lint-bbb", "other.toml"));
+        unit(&target, "gone-ccc", "gone", &text("gone-ccc", "missing.toml"));
+        let time = fs::metadata(&dep).unwrap().modified().unwrap();
+        assert_eq!(relocate(&target, &target).unwrap(), 2);
+        assert!(fresh(&target, "json", "aaa") && !fresh(&target, "lint", "bbb") && !fresh(&target, "gone", "ccc"));
+        let n = new_line.display();
+        assert_eq!(
+            fs::read(&dep).unwrap(),
+            encoded(&[format!("{n}/tools/clippy.toml"), format!("{n}/Cargo.toml"), "src/lib.rs".into()])
+        );
+        assert_eq!(fs::metadata(&dep).unwrap().modified().unwrap(), time, "the time stays");
+        let moved = fs::read_to_string(target.join("debug/deps/json-aaa.d")).unwrap();
+        assert!(moved.contains(&format!("{n}/Cargo.toml")) && !moved.contains(&o.to_string()), "{moved}");
+        // At the new place the unit names no old place.
+        assert_eq!(relocate(&target, &target).unwrap(), 0);
+        assert!(fresh(&target, "json", "aaa"));
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -21,6 +21,7 @@ pub mod person;
 pub mod public;
 pub mod request;
 pub mod session;
+pub mod trust;
 
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub mod reader;

@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.34.0](https://github.com/ifdotpy/layr/compare/v0.33.0...v0.34.0) (2026-11-06)
+
+
+### Features
+
+* **caches:** a sweep entry with its own target folder, command and env ([#332](https://github.com/ifdotpy/layr/issues/332)) ([fd87e6f](https://github.com/ifdotpy/layr/commit/fd87e6f5f8683eb4bc753610622404e688a69720))
+* **change:** change diff --since-review starts at the version you approved ([#326](https://github.com/ifdotpy/layr/issues/326)) ([7d357ab](https://github.com/ifdotpy/layr/commit/7d357ab768943cc4a1228c9ae51b6e6e37019bc4))
+* **merge:** a protected merge needs a passing check on each platform of checks.platforms ([#325](https://github.com/ifdotpy/layr/issues/325)) ([c9b85e7](https://github.com/ifdotpy/layr/commit/c9b85e7f38e618e0b30935037aa9cab3bfa2271f))
+* **probes:** HTML structure snapshots drop generated ids, times and ignored attributes ([#327](https://github.com/ifdotpy/layr/issues/327)) ([217ff18](https://github.com/ifdotpy/layr/commit/217ff18e8b83ef098d01cc798a85233e81f6c752))
+
+
+### Bug Fixes
+
+* **caches:** gc=lru removes whole build units and the folders it empties ([#330](https://github.com/ifdotpy/layr/issues/330)) ([9d001fb](https://github.com/ifdotpy/layr/commit/9d001fba9748c78c768b6ebf4665605e8aca59aa))
+* **gateway:** reads and create-only writes are asked again while the gateway restarts ([#329](https://github.com/ifdotpy/layr/issues/329)) ([3cd92e8](https://github.com/ifdotpy/layr/commit/3cd92e8014fb66221f5d521112b718bfe1c1713f))
+* **paths:** one argument with many lines names the cause ([#328](https://github.com/ifdotpy/layr/issues/328)) ([aa94d71](https://github.com/ifdotpy/layr/commit/aa94d712bd848ed1f6a72078cec8284e4645036e))
+* **release:** public release files reach the gateway at the root of the store ([#324](https://github.com/ifdotpy/layr/issues/324)) ([2162af3](https://github.com/ifdotpy/layr/commit/2162af3b4bc13a3c525c6f8a3452f85bf68643aa))
+* **remote:** a 404 that says no such project is an error, not a missing object ([#334](https://github.com/ifdotpy/layr/issues/334)) ([7231496](https://github.com/ifdotpy/layr/commit/72314966d04c2dbefb64706bc4b836b9cf83423c))
+* **revs:** a Git commit id with several states resolves to one of them ([#333](https://github.com/ifdotpy/layr/issues/333)) ([7dc73e5](https://github.com/ifdotpy/layr/commit/7dc73e5d90cdaf8279a6c54e70cd8d3fc36597e0))
+
+## [0.33.0](https://github.com/ifdotpy/layr/compare/v0.32.0...v0.33.0) (2026-11-06)
+
+
+### Features
+
+* **checks:** checks.after runs a check only after the checks it needs passed ([#316](https://github.com/ifdotpy/layr/issues/316)) ([2781b1b](https://github.com/ifdotpy/layr/commit/2781b1b689b8993ea94d350b46b271deb48a3f35))
+
+
+### Bug Fixes
+
+* **remote:** a Git pack that lists commits it does not hold does not stop a clone ([#321](https://github.com/ifdotpy/layr/issues/321)) ([9d29fd2](https://github.com/ifdotpy/layr/commit/9d29fd20d664f7c72dbc763092a43dd73ebb3bef))
+
+
+### Performance
+
+* **remote:** bound transfer memory and zstd decoding, size the retest gate to the host ([#319](https://github.com/ifdotpy/layr/issues/319)) ([3febac2](https://github.com/ifdotpy/layr/commit/3febac28c7338c27c6e386b7d00794574cf76692))
+
 ## [0.32.0](https://github.com/ifdotpy/layr/compare/v0.31.0...v0.32.0) (2026-11-06)
 
 

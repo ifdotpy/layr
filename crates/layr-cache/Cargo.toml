@@ -2,6 +2,7 @@
 name = "layr-cache"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Language adapters that prune layr cache folders to the live set"
 license = "MIT"
 publish = false

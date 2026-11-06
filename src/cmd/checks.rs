@@ -51,6 +51,19 @@ pub fn validate_config(key: &str, value: &Value) -> Result<()> {
                 }
             }
         }
+        "checks.after" => {
+            for (name, needs) in value.as_object().context("checks.after must be an object of check names to check arrays")? {
+                crate::oci::valid_component(name)?;
+                for need in needs.as_array().context("checks.after maps a check name to an array of checks")? {
+                    let need = need.as_str().context("checks.after needs string check names")?;
+                    let (check, platform) = split_need(need);
+                    crate::oci::valid_component(check)?;
+                    if platform.is_some_and(|p| !PLATFORMS.contains(&p)) {
+                        bail!("check platform must be one of {}", PLATFORMS.join(", "));
+                    }
+                }
+            }
+        }
         "checks.timeout" => {
             number(key, value, 1, 86400)?;
         }
@@ -78,12 +91,12 @@ pub fn platform() -> String {
 }
 
 /// Whether the platform `have` (`<os>-<arch>`) meets the entry `want` of `checks.platforms`.
-fn meets(want: &str, have: &str) -> bool {
+pub(crate) fn meets(want: &str, have: &str) -> bool {
     have == want || have.strip_prefix(want).is_some_and(|arch| arch.starts_with('-'))
 }
 
 /// The platform entries of the check `name`; None: one run on any platform.
-fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
+pub(crate) fn platforms_of(platforms: &Value, name: &str) -> Vec<Option<String>> {
     match platforms.get(name) {
         Some(Value::String(one)) => vec![Some(one.clone())],
         Some(Value::Array(list)) => list.iter().filter_map(|e| e.as_str().map(|e| Some(e.to_owned()))).collect(),
@@ -383,6 +396,54 @@ fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: O
     }))
 }
 
+/// An entry of `checks.after`: `<check>` or `<check>@<platform>`.
+fn split_need(need: &str) -> (&str, Option<&str>) {
+    match need.split_once('@') {
+        Some((check, platform)) => (check, Some(platform)),
+        None => (need, None),
+    }
+}
+
+/// What the checks that a job needs (`checks.after`) say about its state.
+#[derive(Debug, PartialEq)]
+enum Needs {
+    /// Each one passed (on its platform, when the entry names one).
+    Ready,
+    /// One has no result yet: the job waits, with no attestation.
+    Wait(String),
+    /// One failed: the job does not run, with no attestation.
+    Skip(String),
+}
+
+/// The state of the checks that the check `name` needs on `state`. A passing result on any platform counts unless
+/// the entry names one.
+fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMap<String, String>) -> Result<Needs> {
+    let Some(list) = after.get(name).and_then(Value::as_array) else {
+        return Ok(Needs::Ready);
+    };
+    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let results: Vec<Value> = crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
+    for need in list.iter().filter_map(Value::as_str) {
+        let (check, platform) = split_need(need);
+        let Some(command) = commands.get(check) else {
+            return Ok(Needs::Skip(format!("it needs check '{check}', which is not configured")));
+        };
+        let argv = json!(layr_model::protection::check_argv(command));
+        let on = |r: &&Value| {
+            r["argv"] == argv && platform.is_none_or(|want| r["platform"].as_str().is_some_and(|have| meets(want, have)))
+        };
+        let exits: Vec<i64> = results.iter().filter(on).filter_map(|r| r["exit"].as_i64()).collect();
+        if exits.contains(&0) {
+            continue;
+        }
+        if !exits.is_empty() {
+            return Ok(Needs::Skip(format!("check '{need}' failed")));
+        }
+        return Ok(Needs::Wait(format!("check '{need}' has no result yet")));
+    }
+    Ok(Needs::Ready)
+}
+
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
     let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
@@ -399,6 +460,10 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
     if privileged_only && !(local.runner && local.privileged) {
         bail!("privileged watcher requires local checks.runner and checks.privileged-runner true");
     }
+    let after = setting(&policy, "checks.after", json!({}))?;
+    // The jobs that need other checks (`checks.after`) go last, so in one pass the checks they need run first.
+    let (mut jobs, later): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|(_, name, _)| after.get(name.as_str()).is_none());
+    jobs.extend(later);
     let mut results = Vec::new();
     let mut pending = 0;
     let mut pending_privileged = 0;
@@ -414,6 +479,13 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
         }
         if attested(repo, &state, &argv, is_privileged, want.as_deref())? {
             continue;
+        }
+        match needs(repo, &state, &name, &after, &commands)? {
+            Needs::Ready => {}
+            Needs::Wait(why) | Needs::Skip(why) => {
+                eprintln!("layr checks: {name} of {} does not run now: {why}", crate::ids::short(&state));
+                continue;
+            }
         }
         // Collected sources have metadata but cannot be executed. Never attest them as passing.
         if !repo.tree_available(&state) {
@@ -635,44 +707,56 @@ fn execute(
 /// leaves the check result as it is.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
-    let r = (|| -> Result<usize> {
-        // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
-        // could warm it): it becomes a cache first, as in `save --caches`, so the first build of a platform is saved.
-        let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
-        for p in repo.cache_paths(dir)? {
-            if !paths.contains(&p) {
-                paths.push(p);
-            }
-        }
-        let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
-        let mut folders = Vec::new();
-        for folder in paths {
-            let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
-            if !path.is_dir() {
-                continue;
-            }
-            if !crate::storage::is_subvolume(&path) {
-                crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
-            }
-            if crate::storage::is_subvolume(&path) {
-                folders.push(folder);
-            }
-        }
-        if folders.is_empty() {
-            eprintln!("layr checks: caches of {state} not saved: the check left no cache folder");
-            return Ok(0);
-        }
-        let name = format!("{line}.checks-{}", platform());
-        let _lock = repo.p.lock()?;
-        let checks_line = match repo.p.db.line_by_name(&name)? {
-            Some(l) => l,
-            None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
-        };
-        Ok(repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?.len())
-    })();
-    if let Err(e) = r {
-        eprintln!("layr checks: caches of {state} not saved: {e:#}");
+    match save_back_caches(ctx, repo, line, state, dir) {
+        Ok((_, saved)) if saved.is_empty() => eprintln!("layr checks: caches of {state} not saved: the check left no cache folder"),
+        Ok(_) => {}
+        Err(e) => eprintln!("layr checks: caches of {state} not saved: {e:#}"),
     }
+}
+
+/// `save_back` for any caller (`checks run`, `save --caches --save-back`): the save-back line's name and the saved
+/// caches (folder, overlay, cache state). Empty when `dir` has no cache folder.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn save_back_caches(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &str,
+    state: &str,
+    dir: &std::path::Path,
+) -> Result<(String, Vec<(String, String, String)>)> {
+    // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
+    // could warm it): it becomes a cache first, as in `save --caches`, so the first build of a platform is saved.
+    let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+    for p in repo.cache_paths(dir)? {
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
+    let mut folders = Vec::new();
+    for folder in paths {
+        let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
+        if !path.is_dir() {
+            continue;
+        }
+        if !crate::storage::is_subvolume(&path) {
+            crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
+        }
+        if crate::storage::is_subvolume(&path) {
+            folders.push(folder);
+        }
+    }
+    let name = format!("{line}.checks-{}", platform());
+    if folders.is_empty() {
+        return Ok((name, Vec::new()));
+    }
+    let _lock = repo.p.lock()?;
+    let checks_line = match repo.p.db.line_by_name(&name)? {
+        Some(l) => l,
+        None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+    };
+    let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
+    Ok((name, saved))
 }
 
 /// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were

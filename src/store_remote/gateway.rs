@@ -72,18 +72,45 @@ fn bytes(response: Response, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(data)
 }
+
+/// The answer to a 404 for an object of a project that this client already opened: the object is missing, unless
+/// the gateway says that the project is missing (it could not load the project, as in the seconds after its restart).
+fn absent<T>(response: Response) -> Result<Option<T>> {
+    let body = bytes(response, 4096).unwrap_or_default();
+    if String::from_utf8_lossy(&body).contains("no such project") {
+        bail!("gateway: HTTP 404 (no such project) for an open project; the gateway did not load it, try again");
+    }
+    Ok(None)
+}
 /// Tries of a request that the gateway refuses as busy (503 or 429) before the error goes to the caller.
 const BUSY_TRIES: u32 = 8;
 
 /// Sends with `send` again while the gateway answers busy (503, 429): it waits `Retry-After` (at most 30 s) or a
 /// doubling backoff from 0.5 s to 8 s, at most `BUSY_TRIES` times. A refused request did nothing on the gateway, so
 /// a GET, a conditional PUT and a DELETE may go again. Other answers return at once.
-fn send_busy(mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
+fn send_busy(send: impl FnMut() -> Result<Response>) -> Result<Response> {
+    send_again(false, send)
+}
+
+/// `send_busy` for a request that a repeat cannot harm (GET, HEAD, a create-only PUT that answers 412 when the first
+/// one landed): it is sent again also on 502 and 504 and when the connection fails, as when the gateway restarts
+/// for a release or a project change (about 2 s).
+fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
     let mut wait = std::time::Duration::from_millis(500);
     let mut attempt = 1;
     loop {
-        let response = send()?;
-        if !matches!(response.status().as_u16(), 429 | 503) || attempt >= BUSY_TRIES {
+        let response = match send() {
+            Ok(response) => response,
+            Err(_) if idempotent && attempt < BUSY_TRIES => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_secs(8));
+                attempt += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let again = matches!(response.status().as_u16(), 429 | 503) || (idempotent && matches!(response.status().as_u16(), 502 | 504));
+        if !again || attempt >= BUSY_TRIES {
             return Ok(response);
         }
         let after = response
@@ -388,7 +415,10 @@ impl Gateway {
                     .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
                     .body(data.clone());
             }
-            send_busy(|| request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into))
+            let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT);
+            send_again(idempotent, || {
+                request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            })
         };
         if person {
             let response = send(Some(&self.session_token(false)?))?;
@@ -510,7 +540,7 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         // Anonymous routes are GET only and never carry a token or private read proof.
-        self.http.get(url).send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        send_again(true, || self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))
     }
 
     /// A side metadata request must not turn a writer into a public-only reader.
@@ -546,7 +576,8 @@ impl Gateway {
                 }
                 Ok(Some(body))
             }
-            404 => Ok(None),
+            404 if matches!(logical, "store.json" | "public.json") => Ok(None),
+            404 => absent(response),
             status => bail!("gateway public object: HTTP {status}"),
         }
     }
@@ -637,7 +668,8 @@ impl Gateway {
         match response.status().as_u16() {
             404 if key == "store.json" && self.machine.is_some()
                 && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_none() => bail!("gateway bootstrap: HTTP 404 (no such project); check the project name and a missing or wrong LAYR_GATEWAY_TOKEN_FILE grant"),
-            404 => Ok(None),
+            404 if key == "store.json" => Ok(None),
+            404 => absent(response),
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
             status => bail!("gateway get: HTTP {status}"),
         }
@@ -734,14 +766,16 @@ impl Gateway {
                 }
                 Ok(Some(response))
             }
-            404 => Ok(None),
+            404 => absent(response),
             status => bail!("gateway get: HTTP {status}"),
         }
     }
 
     pub fn put_file_new(&self, key: &str, file: std::fs::File) -> Result<bool> {
         let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
-        if self.is_public() || !super::format::release_file(logical) {
+        // A public release file lives at the root of the store, outside the epochs.
+        let public = epoch_path(key).is_none() && super::format::public_release_file(key);
+        if self.is_public() || !(super::format::release_file(logical) || public) {
             bail!("invalid release write");
         }
         let length = file.metadata()?.len();
@@ -890,6 +924,77 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn a_restarting_gateway_is_asked_again_for_a_read() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for answer in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                match answer {
+                    0 => write!(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
+                    // The gateway process stops: the connection closes before any answer.
+                    1 => drop(stream),
+                    _ => {
+                        let body = serde_json::to_vec(&serde_json::json!({"objects": [], "continuation": null})).unwrap();
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                        let _ = stream.write_all(&body);
+                    }
+                }
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        let result = gateway.list("states/");
+        server.join().unwrap();
+        assert!(result.unwrap().is_empty(), "a 502 and a closed connection are asked again for a read");
+    }
+
+    #[test]
+    fn a_missing_project_is_not_a_missing_object() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for body in ["no such project", "no such object", "no such project", "no such object"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    .unwrap();
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        gateway.token = Some("fixture.write".into());
+        // A key that the grant reads, then a data part that a public reader reads.
+        for key in ["keys/fixture.age", "states/01a1aad8-a8ed-7385-8cda-05195b72afa3/681e275b.0000.data.age"] {
+            if key.starts_with("states/") {
+                gateway.use_public_access();
+            }
+            let error = gateway.get(key).unwrap_err().to_string();
+            assert!(error.contains("no such project"), "{error}");
+            assert!(gateway.get(key).unwrap().is_none(), "a 404 for the object itself is a missing object");
+        }
+        server.join().unwrap();
     }
 
     #[test]

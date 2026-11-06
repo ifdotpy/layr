@@ -831,7 +831,7 @@ pub fn stored_remote_refs(repo: &Repo, remote: &str) -> Result<Vec<(String, Stri
 }
 
 /// The state of a Git commit that the store maps (an imported state, or a state with a tree here).
-fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
+pub(crate) fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
     for st in repo.p.db.state_of_commit(oid)? {
         // An imported state is mapped by its record, which holds the Git objects of the commit
         // (earlier versions imported only the tip and their records lack them). Other states are
@@ -2507,6 +2507,36 @@ pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<V
         bail!("git pack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(out.stdout)
+}
+
+/// The commits of `new` that a pack of `new` without the history of `covered` holds: `git rev-list new ^covered`.
+/// A commit of `new` that a covered commit reaches is in the pack of that commit, not in this one.
+pub fn commits_outside(repo: &Repo, new: &[String], covered: &[String]) -> Result<Vec<String>> {
+    if new.is_empty() {
+        return Ok(Vec::new());
+    }
+    let s = store(repo);
+    let mut child = base_cmd(&s)
+        .args(["rev-list", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().context("rev-list has no input")?;
+    let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        for line in lines {
+            writeln!(input, "{line}")?;
+        }
+        Ok(())
+    });
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| anyhow!("rev-list writer failed"))??;
+    if !out.status.success() {
+        bail!("git rev-list failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let listed: std::collections::BTreeSet<&str> = std::str::from_utf8(&out.stdout)?.lines().collect();
+    Ok(new.iter().filter(|c| listed.contains(c.as_str())).cloned().collect())
 }
 
 /// Add the objects of a pack to the git store as loose objects, as a restored import writes them

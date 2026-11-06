@@ -376,7 +376,7 @@ impl<'a> Repo<'a> {
             ctx,
             self,
             &name,
-            &self.cache_readers()?,
+            &self.cache_readers(&name)?,
             Mode::Follow,
             false,
             &cache_props(),
@@ -387,11 +387,18 @@ impl<'a> Repo<'a> {
         Ok(name)
     }
 
-    /// The readers of a cache overlay besides its owner: the machines this project trusts (this
-    /// machine included), so that store copies and peer sync give caches only to them. Local users
-    /// take a cache by the rules of `usable_cache`.
-    fn cache_readers(&self) -> Result<Vec<String>> {
-        Ok(crate::store_remote::overlays::trusted_keys(self)?.into_keys().map(|m| format!("machine:{m}")).collect())
+    /// The readers of cache overlay `name` besides its owner: the machines this project trusts (this
+    /// machine included), so that store copies and peer sync give caches only to them. A limited
+    /// machine reads it while its trust lasts and when the trust names it (docs/ci-trust.md). Local
+    /// users take a cache by the rules of `usable_cache`.
+    fn cache_readers(&self, name: &str) -> Result<Vec<String>> {
+        let terms = self.p.trust_terms(&[])?;
+        let now = crate::ids::now_ms();
+        Ok(crate::store_remote::overlays::trusted_keys(self)?
+            .into_keys()
+            .filter(|m| terms.get(m).is_none_or(|t| t.live(now) && t.reads(name)))
+            .map(|m| format!("machine:{m}"))
+            .collect())
     }
 
     /// Add machines that the project trusts since the cache overlay was made to its readers. Only a
@@ -407,13 +414,18 @@ impl<'a> Repo<'a> {
                 .filter(|(_, r)| **r >= crate::access::Role::Reader)
                 .map(|(p, _)| p.clone())
                 .collect();
-            let want = self.cache_readers()?;
+            let want = self.cache_readers(name)?;
             if want.iter().all(|m| have.contains(m)) || !orepo.is_admin(ctx) {
                 return Ok(());
             }
             crate::overlay_managers::of(self, name)?.require(&ctx.store.machine.id)?;
             let info = self.need_overlay(name)?;
-            let mut readers: Vec<String> = have.into_iter().filter(|p| *p != format!("user:{}", info.owner)).collect();
+            // Machines whose trust ended leave the list (their key slots stay until a new epoch, docs/ci-trust.md).
+            let terms = self.p.trust_terms(&[])?;
+            let now = crate::ids::now_ms();
+            let ended = |p: &str| p.strip_prefix("machine:").and_then(|m| terms.get(m)).is_some_and(|t| !t.live(now));
+            let mut readers: Vec<String> =
+                have.into_iter().filter(|p| *p != format!("user:{}", info.owner) && !ended(p)).collect();
             for m in want {
                 if !readers.contains(&m) {
                     readers.push(m);
@@ -1095,15 +1107,43 @@ impl<'a> Repo<'a> {
     }
 }
 
-/// Delete the least recently used files below `root` until their sizes add up to `limit` at most.
+/// The build unit that a cache file belongs to: the folder above `deps`, `.fingerprint`, `build` or `incremental`
+/// and the hash of the `<name>-<16 hex>` token of the file or of its folder (cargo names every output of a unit
+/// so). A file
+/// outside such a unit is a unit of its own.
+fn unit_of(rel: &str) -> String {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let hashed = |s: &str| {
+        let stem = s.split('.').next().unwrap_or(s);
+        // The hash alone names the unit: its rlib is `lib<name>-<hash>`, its fingerprint folder `<name>-<hash>`.
+        stem.rsplit_once('-')
+            .filter(|(name, hash)| !name.is_empty() && hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|(_, hash)| hash.to_string())
+    };
+    for (i, part) in parts.iter().enumerate() {
+        if matches!(*part, "deps" | ".fingerprint" | "build" | "incremental") {
+            if let Some(unit) = parts[i + 1..].iter().find_map(|p| hashed(p)) {
+                return format!("{}/{unit}", parts[..i].join("/"));
+            }
+        }
+    }
+    rel.to_string()
+}
+
+/// Delete the least recently used build units below `root` (all files of one unit together, `unit_of`) until the
+/// sizes add up to `limit` at most, then the folders that this left empty. Deleting single files left units with a
+/// fingerprint and no outputs, and empty unit folders.
 pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
     use std::os::unix::fs::MetadataExt;
-    let mut files: Vec<(i64, u64, String)> = Vec::new();
+    let mut units: BTreeMap<String, (i64, u64, Vec<String>)> = BTreeMap::new();
     let mut total = 0u64;
     fsutil::walk(root, "", &mut |rel, m| {
         if !m.is_dir() {
             let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            files.push((used, m.size, rel.to_string()));
+            let unit = units.entry(unit_of(rel)).or_insert((0, 0, Vec::new()));
+            unit.0 = unit.0.max(used);
+            unit.1 += m.size;
+            unit.2.push(rel.to_string());
             total += m.size;
         }
         Ok(true)
@@ -1111,14 +1151,36 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
     if total <= limit {
         return Ok(0);
     }
-    files.sort();
+    let mut order: Vec<(i64, u64, Vec<String>)> = units.into_values().collect();
+    order.sort_by_key(|(used, _, _)| *used);
     let mut freed = 0;
-    for (_, size, rel) in files {
+    let mut parents = std::collections::BTreeSet::new();
+    for (_, size, files) in order {
         if total - freed <= limit {
             break;
         }
-        if fsutil::remove_entry(root, &rel).is_ok() {
-            freed += size;
+        for rel in &files {
+            if fsutil::remove_entry(root, rel).is_ok() {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    parents.insert(parent.to_string());
+                }
+            }
+        }
+        freed += size;
+    }
+    // Folders that the trim emptied go too, deepest first, up to the root.
+    let mut folders: Vec<String> = parents.into_iter().collect();
+    folders.sort_by_key(|f| std::cmp::Reverse(f.matches('/').count()));
+    for folder in folders {
+        let mut f = folder.as_str();
+        loop {
+            if std::fs::remove_dir(root.join(f)).is_err() {
+                break;
+            }
+            match f.rsplit_once('/') {
+                Some((up, _)) => f = up,
+                None => break,
+            }
         }
     }
     Ok(freed)
@@ -1127,6 +1189,35 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lru_trim_removes_whole_units_and_their_empty_folders() {
+        let root = std::env::temp_dir().join(format!("layr-lru-{}", crate::ids::new_id()));
+        let write = |rel: &str, bytes: usize, age: i64| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, vec![0u8; bytes]).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age as u64);
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_accessed(t).set_modified(t)).unwrap();
+        };
+        // An old unit: its fingerprint, its rlib and its build script folder.
+        write("debug/.fingerprint/old-0123456789abcdef/lib-old", 10, 9000);
+        write("debug/deps/libold-0123456789abcdef.rlib", 1000, 9000);
+        write("debug/build/old-0123456789abcdef/out/gen.rs", 10, 9000);
+        // A new unit that stays.
+        write("debug/.fingerprint/new-fedcba9876543210/lib-new", 10, 10);
+        write("debug/deps/libnew-fedcba9876543210.rlib", 1000, 10);
+        assert_eq!(unit_of("debug/deps/libold-0123456789abcdef.rlib"), "debug/0123456789abcdef");
+        assert_eq!(unit_of("debug/.fingerprint/old-0123456789abcdef/lib-old"), "debug/0123456789abcdef");
+        let freed = lru_trim(&root, 1500).unwrap();
+        assert_eq!(freed, 1020, "the whole old unit goes");
+        assert!(!root.join("debug/.fingerprint/old-0123456789abcdef").exists(), "no empty unit folder stays");
+        assert!(!root.join("debug/build/old-0123456789abcdef").exists());
+        assert!(root.join("debug/deps/libnew-fedcba9876543210.rlib").exists());
+        assert!(root.join("debug/.fingerprint/new-fedcba9876543210/lib-new").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn folder_paths_and_cache_names() {

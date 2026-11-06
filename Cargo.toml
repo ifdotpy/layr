@@ -2,6 +2,9 @@
 members = ["crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.99.1"
+
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that
 # main makes for installs. A profile folder is swept only when a command lists it: without the release command,
@@ -13,8 +16,9 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-version = "0.32.0"
+version = "0.34.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Local version control on btrfs, APFS and OverlayFS"
 license = "MIT"
 publish = false
