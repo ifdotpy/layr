@@ -209,14 +209,7 @@ fn authorize_evidence(
             repo.p.config_value(&format!("check.{check}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(|| {
                 anyhow::anyhow!("check '{check}' of ref '{name}' is not defined (layr config check.{check} '<command>')")
             })?;
-        let argv = layr_model::protection::check_argv(&command);
-        let evidence = layr_model::protection::required_check(
-            check,
-            Some(&command),
-            repo.p.db.check_exit(&target.target, &argv, Some(0))?.is_some(),
-            None,
-        );
-        if evidence.result != layr_model::protection::CheckResult::Passed {
+        if !super::attest::check_passed(repo, &target.target, &command)? {
             bail!(
                 "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run 'layr try {} --check {check}' first",
                 ids::short(&target.target),

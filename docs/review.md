@@ -42,7 +42,10 @@ The operation gives the actor, machine, time, kind, source state, target line, a
 Versions from older records omit this field. `change log` lists their operations.
 `change diff` compares each version's patch against its own parent, so unrelated base changes do not enter the interdiff.
 
-Attestation kinds: `check`, `approval`, `origin`, `import`, `quarantine`, and `revoke`.
+Attestation kinds: `check`, `approval`, `origin`, `import`, `quarantine`, `revoke`, and `bisect`.
+`bisect run` writes a `bisect` attestation of the first bad state; its payload is the result
+(`layr attestations <state> --kind bisect`). Line and ref protection read a required check only as a
+check attestation of the exact state and command with exit 0.
 Each attestation is part of an immutable operation record with a machine signature.
 It records the exact subject state, optional ChangeId, payload digest, signer, and time.
 `--payload` reads a file as the caller and records its SHA-256 digest. It does not store the file contents.
