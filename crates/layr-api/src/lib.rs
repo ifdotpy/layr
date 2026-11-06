@@ -14,6 +14,7 @@
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 
 /// The Layr release this contract ships with, maintained by release-please.
 pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
@@ -66,6 +67,34 @@ pub struct Version {
     pub format: u32,
     pub version: String,
     pub build: String,
+}
+
+/// A positive database schema version, validated on construction and JSON decoding.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct SchemaVersion(NonZeroU32);
+
+impl SchemaVersion {
+    pub const fn new(value: NonZeroU32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// CLI/daemon negotiation capabilities. Store markers continue to use [`Version`].
+///
+/// The flattened build fields preserve the existing hello reply; peers must also report
+/// a positive schema version before they can exchange commands.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Peer {
+    /// Build identity and local store format supported by this peer.
+    #[serde(flatten)]
+    pub version: Version,
+    /// Database schema supported by this peer, independent of the local store format.
+    pub schema: SchemaVersion,
 }
 
 /// The closed set of store states emitted by `store-version`.
@@ -212,6 +241,31 @@ impl From<StoreVersionReport> for WireReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_hello_preserves_version_fields_and_requires_a_positive_schema() {
+        let version = Version { format: 1, version: RELEASE.into(), build: "test".into() };
+        let peer = Peer { version: version.clone(), schema: SchemaVersion::new(NonZeroU32::new(10).unwrap()) };
+        let mut json = serde_json::to_value(&version).unwrap();
+        assert!(serde_json::from_value::<Peer>(json.clone()).is_err(), "old hello lacks schema");
+        json["schema"] = 10.into();
+        assert_eq!(serde_json::to_value(&peer).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Peer>(json.clone()).unwrap(), peer);
+        assert_eq!(peer.schema.get(), 10);
+        // Existing Studio probes can continue decoding the unchanged build fields.
+        assert_eq!(serde_json::from_value::<Version>(json.clone()).unwrap(), version);
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(4294967296_u64),
+            serde_json::json!("10"),
+            serde_json::Value::Null,
+        ] {
+            json["schema"] = invalid;
+            assert!(serde_json::from_value::<Peer>(json.clone()).is_err(), "accepted {json}");
+        }
+    }
 
     #[test]
     fn contradictory_reports_are_rejected() {

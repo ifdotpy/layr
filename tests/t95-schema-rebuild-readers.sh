@@ -40,7 +40,7 @@ for f in holder r1 r2 r3 r4; do
     has "$f lists w" "w" "$(cat "$out/$f.txt")"
     ok "$f has no fatal error" test -z "$(grep -i fatal "$out/$f.txt")"
 done
-eq "project is at schema 9 after the rebuild" "9" "$(sqlite3 "$db" 'PRAGMA user_version')"
+eq "project is at schema 10 after the rebuild" "10" "$(sqlite3 "$db" 'PRAGMA user_version')"
 eq "rebuilt lines are listed" "2" "$(l line list | wc -l | tr -d ' ')"
 eq "the records stay" "$records_before" "$(sqlite3 "$db" 'SELECT COUNT(*) FROM records')"
 eq "the upgrade keeps no database copy, and the old copy is gone" "0" "$(ls "$(dirname "$db")" | grep -c 'schema-')"

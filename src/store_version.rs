@@ -5,8 +5,9 @@
 //! at this format: no migration.
 use anyhow::{bail, Context, Result};
 pub use layr_api::Version;
-use layr_api::{StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR, RELEASE};
+use layr_api::{Peer, SchemaVersion, StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR, RELEASE};
 use std::fs::{self, File, OpenOptions};
+use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -16,6 +17,26 @@ const LOCK: &str = ".layr-version.lock";
 
 pub fn binary() -> Version {
     Version { format: FORMAT, version: RELEASE.into(), build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into() }
+}
+
+/// Advertise the binary's database schema without changing the store marker contract.
+pub fn peer() -> Result<Peer> {
+    let schema = NonZeroU32::new(u32::try_from(crate::db::SCHEMA_VERSION)?).context("database schema must be positive")?;
+    Ok(Peer { version: binary(), schema: SchemaVersion::new(schema) })
+}
+
+/// Peers must agree on both the store format and the derived database schema.
+pub fn require_peer_compatible(binary: &Peer, other: &Peer, source: &str) -> Result<()> {
+    if binary.version.format != other.version.format || binary.schema != other.schema {
+        bail!(
+            "incompatible {source}: {}, database schema {}; this binary uses {}, database schema {}; upgrade both the CLI and the daemon",
+            description(&other.version),
+            other.schema.get(),
+            description(&binary.version),
+            binary.schema.get()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn description(version: &Version) -> String {
