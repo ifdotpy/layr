@@ -211,6 +211,11 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
         if g.len() == 1 {
             return Ok(g[0].clone());
         }
+        // Several states of one full Git commit id (a state that a push exported and the import of the same commit
+        // on another machine): they hold the same tree. The one whose tree this machine has or builds goes first.
+        if g.len() > 1 && lower.len() == 40 {
+            return Ok(crate::gitbridge::mapped_state(repo, &lower)?.unwrap_or_else(|| g[0].clone()));
+        }
         // A commit that layr made without a record: `git rev-parse HEAD` in a line.
         if g.is_empty() {
             if let Some(st) = crate::gitbridge::state_of_history_commit(repo, &lower)? {
