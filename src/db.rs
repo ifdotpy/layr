@@ -478,7 +478,7 @@ impl Db {
             if let Some(a) = rec.data.get("attestation") {
                 if a["kind"] == "revoke" {
                     for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
-                        tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2")?
+                        tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND (uid=?2 OR ?2=0)")?
                             .execute(params![id, rec.actor.uid as i64])?;
                     }
                 }
@@ -1121,9 +1121,11 @@ impl Db {
             if a.kind == "revoke" {
                 for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
                     self.conn
+                        // Root of the signing machine revokes for every user of it: the row takes the
+                        // target's user, so the revocation matches it (only on the same machine).
                         .prepare_cached(
                             "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
-                         SELECT ?1,?2,?3,?4,?5 FROM attestations WHERE id=?2 AND subject=?6",
+                         SELECT ?1,?2,?3,CASE WHEN ?4=0 AND machine=?3 THEN uid ELSE ?4 END,?5 FROM attestations WHERE id=?2 AND subject=?6",
                         )?
                         .execute(params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id])?;
                 }
@@ -1149,9 +1151,10 @@ impl Db {
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
-    pub fn own_attestations(&self, subject: &str, machine: &str, uid: u32, kind: Option<&str>) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND uid=?3 AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
-        let v = st.query_map(params![subject, machine, uid as i64, kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+    /// The attestations of `subject` that `machine` made for `uid` (any user when None), but revokes.
+    pub fn own_attestations(&self, subject: &str, machine: &str, uid: Option<u32>, kind: Option<&str>) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND (?3 IS NULL OR uid=?3) AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
+        let v = st.query_map(params![subject, machine, uid.map(i64::from), kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 

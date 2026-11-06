@@ -3072,7 +3072,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     if withdraw {
         rec.data["revokes"] =
-            serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, ctx.caller.uid, Some("approval"))?);
+            serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, Some(ctx.caller.uid), Some("approval"))?);
     }
     let rec = repo.commit_record(ctx, rec)?;
     if a.has("--json") {
