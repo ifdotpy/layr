@@ -2061,7 +2061,9 @@ mod metadata_tests {
             std::fs::write(&file, b"data")?;
             symlink(&file, &link)?;
             let name = c"user.layr-test";
-            let value = vec![42; 4096];
+            // Exceed the initial read buffer while leaving room for headers in ext4's xattr block.
+            const TEST_XATTR_VALUE_BYTES: usize = 1024;
+            let value = vec![42; TEST_XATTR_VALUE_BYTES];
             attribute(&file, name, Some(&value))?;
             assert_eq!(attribute(&file, name, None)?, value);
             assert!(xattrs(&file)?.iter().any(|(key, data)| key == name.to_bytes() && data == &value));
