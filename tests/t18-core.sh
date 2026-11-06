@@ -18,11 +18,15 @@ for gitname in branch commit checkout switch stash cherry-pick rebase revert wor
     eq "$gitname exits 1" 1 "$rc"
     has "$gitname is not a layr command" "'$gitname' is not a layr command" "$output"
 done
-for removed in "merge --no-commit head" "pick --no-commit head" "invert --no-commit head" "replay --autostash head" "save --layers"; do
+for removed in "merge --no-commit head" "pick --no-commit head" "invert --no-commit head" "replay --autostash head" "save --layers" \
+    "merge --no-save head" "pick --no-save head" "invert -n head" "replay --autopark head"; do
     no "$removed is an unknown option" l $removed
     has "$removed names no replacement" "unknown option" "$(l $removed 2>&1)"
 done
 eq 'the removed options changed nothing' "$S1" "$(l rev-parse head)"
+for cmd in merge pick invert replay; do
+    has "$cmd --continue says to fix the files and save" "on a conflict: fix the files" "$(l $cmd --continue 2>&1)"
+done
 removed_cli '--all-lines' save --all
 for revision in HEAD 'HEAD~1' 'HEAD^2' 'HEAD@{0}' 'HEAD:notes.txt' 'HEAD^{tree}'; do
     removed_cli head rev-parse "$revision"

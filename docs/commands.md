@@ -195,7 +195,7 @@ Park entries of older layr versions were states on the line. The first `park` co
 makes each one a parked line, in the same order. Until then they keep their trees.
 `pick` applies a state. `replay` applies states on a new base. `invert` reverses a state.
 Use `restore --ours` or `restore --theirs` for conflicts.
-Use `--no-save` with `merge`, `pick`, or `invert`. Use `--autopark` with `replay`.
+`merge`, `pick`, `invert` and `replay` never stop on a conflict: the state keeps the conflicts, and `--continue` says to fix the files and run `save -m`. `--abort` undoes the operation.
 
 Git command names (`branch`, `commit`, `stash`, `checkout`, `switch`, `cherry-pick`, `rebase`,
 `revert`, `worktree`) are no layr commands. They fail like any unknown command, with no hint.
