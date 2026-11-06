@@ -1,6 +1,6 @@
 # Store format v2
 
-The decisions in `remote-design.md` define this format. Desk v1 stores remain read only.
+The decisions in `remote-design.md` define this format.
 
 ## Objects
 
@@ -240,7 +240,6 @@ The store keeps all record segments and complete states by default.
 | Condition | Result |
 |---|---|
 | Unsupported store or tree version | Stop before an import or write |
-| Desk v1 write | Reject; import into a new local project |
 | No readable slot | Reject reads; allow an upload with the public recipient |
 | Record sequence gap | Import the contiguous prefix; report the gap |
 | Conflicting record bytes | Reject the machine's segment set |

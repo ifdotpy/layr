@@ -1036,7 +1036,6 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 auto: a.has("--auto"),
                 caches: a.has("--caches"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
-                desk_prefix: None,
                 public: false,
                 caches_of: caches_of(&a),
                 only_caches: None,
@@ -1215,7 +1214,6 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
         &Spec::new()
             .value("--paper-key")
-            .value("--desk-prefix")
             .value("--volume")
             .flag("--public")
             .flag("--auto")
@@ -1247,7 +1245,6 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             auto: a.has("--auto"),
             caches: a.has("--caches"),
             paper_key: a.get("--paper-key").map(str::to_owned),
-            desk_prefix: a.get("--desk-prefix").map(str::to_owned),
             caches_of: caches_of(&a),
             only_caches: None,
             heads: a.has("--heads"),
