@@ -50,7 +50,7 @@ libc = "0.2"
 rand = "0.8"
 rayon = "1"
 regex = "1"
-rustix = { version = "1", features = ["fs", "net", "process", "thread", "event", "stdio", "pipe", "termios"] }
+rustix = { version = "1", features = ["fs", "net", "process", "thread", "event", "stdio", "pipe", "termios", "mount"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
