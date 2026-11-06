@@ -976,7 +976,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< head
     fn a_release_file_goes_again_from_its_start_while_the_gateway_restarts() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1015,8 +1014,9 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(created);
         assert!(bodies.len() == 2 && bodies.iter().all(|b| *b == expected), "both tries send the whole file");
-||||||| base
-=======
+    }
+
+    #[test]
     fn a_delete_error_names_the_key_and_the_answer() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1050,7 +1050,6 @@ mod tests {
         let error = format!("{:#}", gateway.delete(key).unwrap_err());
         assert!(error.contains("403") && error.contains("only state data parts") && error.contains(key), "{error}");
         server.join().unwrap();
->>>>>>> origin-https/main
     }
 
     #[test]
