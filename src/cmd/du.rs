@@ -76,7 +76,6 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
         std::thread::scope(|s| {
             for _ in 0..crate::fsutil::workers().min(lines.len()) {
                 s.spawn(|| {
-                    let _worker = crate::fsutil::PoolWorker::enter();
                     crate::sys::lower_thread_priority();
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

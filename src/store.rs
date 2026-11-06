@@ -347,7 +347,10 @@ fn waiting_message(meta: &Path) -> String {
         return PLAIN.to_string();
     }
     let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
-    format!("layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s", holder["command"].as_str().unwrap_or(""))
+    format!(
+        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
+        holder["command"].as_str().unwrap_or("")
+    )
 }
 
 /// True when a process with this pid exists (it may belong to another user).
@@ -646,22 +649,23 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
         // Another emptier deleted it, or an entry of it, at the same time: that is no failure. A path that is still
         // here goes in the next pass.
         Err(_) if fs::symlink_metadata(path).is_err() => *deleted += 1,
-        Err(e)
-            if e.chain()
-                .any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
+        Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     true
 }
 
-/// A folder with at least this many entries is emptied in parallel.
+/// A folder with at least this many entries is emptied on `TRASH_THREADS` threads.
 #[cfg(target_os = "macos")]
 const TRASH_PARALLEL_FROM: usize = 64;
+/// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
+/// half the time of one (40,363 files: 4.7 s to 2.4 s).
+#[cfg(target_os = "macos")]
+const TRASH_THREADS: usize = 4;
 /// True while threads empty a folder: a folder inside their work is emptied by the thread that finds it.
 #[cfg(target_os = "macos")]
 static TRASH_PARALLEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// APFS deletes in the calling thread’s system time: 40,363 files took 4.7 s on one thread, 2.4 s on four.
 /// `empty_tree` of each of `entries`. False when the budget ended first.
 #[cfg(target_os = "macos")]
 fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> bool {
@@ -680,9 +684,8 @@ fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted:
     let next = AtomicUsize::new(0);
     let results: std::sync::Mutex<(usize, Vec<String>, bool)> = std::sync::Mutex::new((0, Vec::new(), true));
     std::thread::scope(|scope| {
-        for _ in 0..crate::fsutil::workers().min(entries.len()) {
+        for _ in 0..TRASH_THREADS {
             scope.spawn(|| {
-                let _worker = crate::fsutil::PoolWorker::enter();
                 let (mut d, mut f, mut done) = (0, Vec::new(), true);
                 while let Some(e) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
                     if late() {

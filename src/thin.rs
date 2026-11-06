@@ -516,13 +516,12 @@ pub fn diff(
     // Extended attributes and ACLs are not in the scan: read them for the entries that look equal.
     // An unreadable entry differs. Threads share the work, as the scan does.
     let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
-    let threads = crate::fsutil::workers();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     let differ: Vec<&str> = std::thread::scope(|scope| {
         let jobs: Vec<_> = equal
             .chunks(equal.len().div_ceil(threads).max(1))
             .map(|chunk| {
                 scope.spawn(move || {
-                    let _worker = crate::fsutil::PoolWorker::enter();
                     chunk
                         .iter()
                         .copied()
@@ -671,7 +670,10 @@ pub fn add_entries<'a>(
                 clone_from_source(&from, &to)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
-                let complete = write.iter().filter(|w| w.starts_with(&below)).all(|w| fs::symlink_metadata(dst.join(w)).is_ok());
+                let complete = write
+                    .iter()
+                    .filter(|w| w.starts_with(&below))
+                    .all(|w| fs::symlink_metadata(dst.join(w)).is_ok());
                 if complete {
                     cloned.insert(k.to_string());
                 } else {

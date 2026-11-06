@@ -497,7 +497,7 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
         busy: usize,
         error: Option<anyhow::Error>,
     }
-    let threads = crate::fsutil::workers();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     let root_dir = Arc::new(dir);
     let queue =
         Mutex::new(Queue { jobs: vec![Job { parent: None, name: String::new(), rel: String::new() }], busy: 0, error: None });
@@ -506,7 +506,6 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
-                    let _worker = crate::fsutil::PoolWorker::enter();
                     let (mut found, mut gone) = (Vec::new(), Vec::new());
                     let mut buf = Vec::new();
                     loop {
@@ -871,23 +870,15 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
 /// Below this workload, thread startup costs more than it saves.
 const PARALLEL_FROM: usize = 64;
 
-/// Run `f` for each item in parallel; the first error wins.
+/// Run `f` for each item with up to four threads; the first error wins.
 fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Sync) -> Result<()> {
-    let threads = crate::fsutil::workers();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     if items.len() < PARALLEL_FROM || threads == 1 {
         return items.iter().try_for_each(|p| f(p));
     }
     let chunk = items.len().div_ceil(threads);
     std::thread::scope(|scope| {
-        let workers: Vec<_> = items
-            .chunks(chunk)
-            .map(|part| {
-                scope.spawn(|| {
-                    let _worker = crate::fsutil::PoolWorker::enter();
-                    part.iter().try_for_each(|p| f(p))
-                })
-            })
-            .collect();
+        let workers: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(|| part.iter().try_for_each(|p| f(p)))).collect();
         workers.into_iter().try_for_each(|w| w.join().unwrap())
     })
 }
@@ -904,7 +895,11 @@ pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntr
 
 /// Folders inside the tree that are trees of their own (nested layers).
 fn nested_layers<'a>(src: &Path, entries: &'a BTreeMap<String, ScanEntry>) -> Vec<&'a String> {
-    entries.iter().filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p))).map(|(p, _)| p).collect()
+    entries
+        .iter()
+        .filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
+        .map(|(p, _)| p)
+        .collect()
 }
 
 /// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
@@ -982,8 +977,7 @@ fn clone_around(
     fs::create_dir(&to)?;
     for e in fs::read_dir(&from)? {
         let name = e?.file_name();
-        let child =
-            if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
+        let child = if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
         let (cfrom, cto) = (from.join(&name), to.join(&name));
         if nested.contains(child.as_str()) {
             let cm = fs::symlink_metadata(&cfrom)?;
@@ -1433,13 +1427,12 @@ fn candidates_scanned_with(
             .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
             .map(|(p, _)| p)
             .collect();
-        let threads = crate::fsutil::workers();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
         let stored_differ: Vec<&String> = std::thread::scope(|scope| {
             let jobs: Vec<_> = same_data
                 .chunks(same_data.len().div_ceil(threads).max(1))
                 .map(|chunk| {
                     scope.spawn(move || {
-                        let _worker = crate::fsutil::PoolWorker::enter();
                         chunk
                             .iter()
                             .copied()
@@ -1601,14 +1594,10 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
     Ok(true)
 }
 
-/// `changed_ranges` of each path in parallel. The results keep the order of `paths`,
+/// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
 /// and the first error in that order is returned.
-fn changed_ranges_all(
-    parent: &(impl Src + ?Sized),
-    child: &(impl Src + ?Sized),
-    paths: &[String],
-) -> Result<Vec<Vec<(u64, u64)>>> {
-    let threads = crate::fsutil::workers();
+fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 4);
     if threads == 1 || paths.len() < PARALLEL_FROM {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
@@ -1616,12 +1605,7 @@ fn changed_ranges_all(
     std::thread::scope(|scope| {
         let jobs: Vec<_> = paths
             .chunks(chunk)
-            .map(|part| {
-                scope.spawn(move || {
-                    let _worker = crate::fsutil::PoolWorker::enter();
-                    part.iter().map(|p| changed_ranges(parent, child, p)).collect::<Result<Vec<_>>>()
-                })
-            })
+            .map(|part| scope.spawn(move || part.iter().map(|p| changed_ranges(parent, child, p)).collect::<Result<Vec<_>>>()))
             .collect();
         let mut out = Vec::with_capacity(paths.len());
         for job in jobs {
@@ -2279,9 +2263,7 @@ impl Copier {
             None => None,
         };
         let same = match (identity.clone_id, &extents) {
-            (Some(id), Some(extents)) => {
-                self.shared.get(&id).and_then(|copies| copies.iter().find(|(e, _)| e == extents)).map(|(_, p)| p.clone())
-            }
+            (Some(id), Some(extents)) => self.shared.get(&id).and_then(|copies| copies.iter().find(|(e, _)| e == extents)).map(|(_, p)| p.clone()),
             _ => None,
         };
         let cloned = match same {
@@ -2293,11 +2275,7 @@ impl Copier {
         };
         if !cloned {
             let mut from = File::open(src).with_context(|| format!("open {}", src.display()))?;
-            let mut to = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(dst)
-                .with_context(|| format!("create {}", dst.display()))?;
+            let mut to = fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
             io::copy(&mut from, &mut to).with_context(|| format!("copy {}", src.display()))?;
         }
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
