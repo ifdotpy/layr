@@ -907,8 +907,13 @@ fn clone_complete_with(
             }
         }
         ancestors.insert("");
-        let mut links = BTreeMap::new();
-        clone_around(src, dst, "", &Around { nested: &nested, linked: &linked, ancestors: &ancestors }, readonly, &mut links)?;
+        let (mut links, mut sealed) = (BTreeMap::new(), Vec::new());
+        let around = Around { nested: &nested, linked: &linked, ancestors: &ancestors };
+        clone_around(src, dst, "", &around, readonly, &mut links, &mut sealed)?;
+        // The flags of the linked files last: a link to a file that is immutable already cannot be made.
+        for path in sealed {
+            crate::sys::apfs_immutable(&path, true)?;
+        }
     }
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
@@ -953,7 +958,8 @@ struct Around<'a> {
 
 /// Clone the folder `rel` of `src` that holds nested layers or linked files: its own entries one by one, whole
 /// subtrees at once, each nested layer as an empty folder with its creation time and mode, each linked file by
-/// itself (`links`: the first copy of each inode, so the next one becomes its link).
+/// itself (`links`: the first copy of each inode, so the next one becomes its link). A read-only copy of a sealed
+/// linked file goes to `sealed`, for its flag after the walk.
 fn clone_around(
     src: &Path,
     dst: &Path,
@@ -961,6 +967,7 @@ fn clone_around(
     around: &Around,
     readonly: bool,
     links: &mut BTreeMap<(u64, u64), std::path::PathBuf>,
+    sealed: &mut Vec<std::path::PathBuf>,
 ) -> Result<()> {
     let (nested, ancestors) = (around.nested, around.ancestors);
     let (from, to) = if rel.is_empty() { (src.to_path_buf(), dst.to_path_buf()) } else { (src.join(rel), dst.join(rel)) };
@@ -976,13 +983,13 @@ fn clone_around(
             keep_birthtime(&cm, &cto)?;
             fs::set_permissions(&cto, fs::Permissions::from_mode(cm.mode() & 0o7777))?;
         } else if ancestors.contains(child.as_str()) {
-            clone_around(src, dst, &child, around, readonly, links)?;
+            clone_around(src, dst, &child, around, readonly, links, sealed)?;
         } else if around.linked.contains(child.as_str()) {
             copy_tree(&cfrom, &cto, false, links).with_context(|| format!("copy {}", cfrom.display()))?;
             // A read-only copy keeps the flags of its entries, as a clone does.
             use std::os::macos::fs::MetadataExt as MacMetadataExt;
             if readonly && fs::symlink_metadata(&cfrom)?.st_flags() & libc::UF_IMMUTABLE != 0 {
-                crate::sys::apfs_immutable(&cto, true)?;
+                sealed.push(cto.clone());
             }
         } else {
             // An entry that a writer removed during the copy: the scan after the copy sees the
