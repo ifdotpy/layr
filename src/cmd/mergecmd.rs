@@ -575,7 +575,9 @@ fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access:
 
 /// Approvals of a protected line: the reviewed state (`theirs`) needs the rule's number of
 /// approvals of exactly that state, from users who may approve and who are not authors of the
-/// states the merge brings in.
+/// states the merge brings in. An approval of an earlier version of the change counts when the
+/// newer version changed only paths that keep approvals (`--keep-approvals`). Each owner group
+/// (`--owner`) whose paths the change touches needs an approval by one of its principals.
 fn check_approvals(
     ctx: &Ctx,
     repo: &Repo,
@@ -585,10 +587,11 @@ fn check_approvals(
     theirs: &str,
 ) -> Result<()> {
     let rule = match rule {
-        Some(r) if r.approvals > 0 && !ctx.caller.is_root() => r,
+        Some(r) if (r.approvals > 0 || !r.owners.is_empty()) && !ctx.caller.is_root() => r,
         _ => return Ok(()),
     };
-    let count = approval_count(repo, rule, head, theirs)?;
+    let subjects = approval_subjects(repo, rule, theirs)?;
+    let count = counted_approvers(repo, rule, head, theirs, &subjects)?.len();
     if (count as u32) < rule.approvals {
         let from: Vec<String> = rule.approvers.iter().map(|k| crate::access::show_principal(k)).collect();
         return Err(exit(
@@ -603,35 +606,118 @@ fn check_approvals(
             ),
         ));
     }
+    if let Some((pattern, who)) = missing_owner(repo, rule, head, theirs, &subjects)? {
+        let from: Vec<String> = who.iter().map(|k| crate::access::show_principal(k)).collect();
+        return Err(exit(
+            1,
+            format!(
+                "error: state {} changes '{pattern}', which in line '{}' needs an approval by {} other than its authors",
+                ids::short(theirs),
+                line.name,
+                from.join(" or ")
+            ),
+        ));
+    }
     Ok(())
 }
 
-/// The approvals of `theirs` that a merge into a line with `rule` at `head` counts.
-fn approval_count(repo: &Repo, rule: &crate::access::Rule, head: &str, theirs: &str) -> Result<usize> {
+/// The states whose approvals count for `theirs`: itself, and the earlier versions of its change after which it
+/// changed only paths that keep approvals (`Rule::keeps_approval`).
+fn approval_subjects(repo: &Repo, rule: &crate::access::Rule, theirs: &str) -> Result<Vec<String>> {
+    let mut subjects = vec![theirs.to_string()];
+    if rule.keep_approvals.is_empty() {
+        return Ok(subjects);
+    }
+    let Some(state) = repo.p.db.state(theirs)? else { return Ok(subjects) };
+    let Some(change) = &state.change_id else { return Ok(subjects) };
+    let model = repo.read_model()?;
+    let new = repo.state_src(theirs)?;
+    for version in repo.p.db.change_versions(change)? {
+        if version.id == theirs || version.time > state.time {
+            continue;
+        }
+        if repo.p.db.approvals(&version.id)?.is_empty() && model.person_approvals(&version.id).is_empty() {
+            continue;
+        }
+        let changed = changes::file_changes(&repo.state_src(&version.id)?, &new)?;
+        if rule.keeps_approval(changed.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()]).flatten()) {
+            subjects.push(version.id);
+        }
+    }
+    Ok(subjects)
+}
+
+/// The approvers (`uid:<n>`, `person:<login>`) of the `subjects` that `rule` lets approve a merge of `theirs` at
+/// `head`: not authors of the states that `theirs` brings in.
+fn counted_approvers(
+    repo: &Repo,
+    rule: &crate::access::Rule,
+    head: &str,
+    theirs: &str,
+    subjects: &[String],
+) -> Result<std::collections::BTreeSet<String>> {
     let pol = repo.policy();
-    let counted = layr_model::protection::approvals(
-        theirs,
-        Some(head),
-        layr_model::protection::ApprovalMode::Merge,
-        &repo.p.db.approvals(theirs)?,
-        |id| {
-            let state = repo.p.db.state(id)?;
-            if state.as_ref().is_some_and(|state| state.kind.auxiliary()) {
-                repo.source_state(id)?;
-            }
-            Ok(state)
-        },
-        |uid| pol.may_approve(rule, &crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid)),
-    )?;
-    Ok(counted.len()
-        + crate::access::person_approval_count(
-            repo,
-            &pol,
-            rule,
-            Some(head),
+    let model = repo.read_model()?;
+    let shared = crate::access::shared_policy(&pol);
+    let mode = layr_model::protection::ApprovalMode::Merge;
+    let incoming = model.incoming_person_authors(theirs, Some(head), mode);
+    let mut out = std::collections::BTreeSet::new();
+    for subject in subjects {
+        // The approvals of `subject` against the authors of `theirs`: an approval never counts for a state that
+        // its approver wrote.
+        let counted = layr_model::protection::approvals(
             theirs,
-            layr_model::protection::ApprovalMode::Merge,
-        )?)
+            Some(head),
+            mode,
+            &repo.p.db.approvals(subject)?,
+            |id| {
+                let state = repo.p.db.state(id)?;
+                if state.as_ref().is_some_and(|state| state.kind.auxiliary()) {
+                    repo.source_state(id)?;
+                }
+                Ok(state)
+            },
+            |uid| pol.may_approve(rule, &crate::access::Who::of(uid, crate::ctx::Caller::from_uid(uid).gid)),
+        )?;
+        out.extend(counted.iter().map(|a| format!("uid:{}", a.approver)));
+        for approval in model.allowed_person_approvals(subject, Some(head), mode, &shared, rule) {
+            if let Some(login) = approval.person.filter(|login| !incoming.contains(login)) {
+                out.insert(format!("person:{login}"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The first owner group (`Rule::owners`) whose paths the change of `theirs` touches (since its merge base with
+/// `head`) and that has no approval by one of its principals.
+fn missing_owner(
+    repo: &Repo,
+    rule: &crate::access::Rule,
+    head: &str,
+    theirs: &str,
+    subjects: &[String],
+) -> Result<Option<(String, Vec<String>)>> {
+    if rule.owners.is_empty() {
+        return Ok(None);
+    }
+    let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_string());
+    let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
+    let paths: Vec<&str> = changed.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()]).flatten().collect();
+    for (pattern, who) in rule.owners_for(paths.iter().copied()) {
+        let mut met = false;
+        for principal in &who {
+            let owner = crate::access::Rule { approvers: vec![principal.clone()], ..rule.clone() };
+            if !counted_approvers(repo, &owner, head, theirs, subjects)?.is_empty() {
+                met = true;
+                break;
+            }
+        }
+        if !met {
+            return Ok(Some((pattern, who)));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether a finished merge of `theirs` into a protected line (from `before` to `after`) met the
@@ -648,7 +734,12 @@ pub(crate) fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &s
             return Ok(false);
         }
     }
-    Ok(rule.approvals == 0 || approval_count(repo, rule, before, theirs)? as u32 >= rule.approvals)
+    if rule.approvals == 0 && rule.owners.is_empty() {
+        return Ok(true);
+    }
+    let subjects = approval_subjects(repo, rule, theirs)?;
+    Ok(counted_approvers(repo, rule, before, theirs, &subjects)?.len() as u32 >= rule.approvals
+        && missing_owner(repo, rule, before, theirs, &subjects)?.is_none())
 }
 
 /// Run the checks of a merge on the candidate state. Callers run it without the line lock

@@ -65,11 +65,32 @@ The new kinds support separate cache and derived states through the store API.
 
 The database schema version stays at 6. New tables are additive. Optional fields are absent from old state records.
 
+## Path rules of approvals
+
+A line rule can ask for approvals by path. Both rules count approvals as `--approvals` does: by users or people other
+than the authors of the states that the merge brings in.
+
+- `--owner <path>=<principal>[,<principal>]` (repeatable): a change of the path (a folder, a file, or a glob) needs an
+  approval of the merged state by one of these principals. Each owner group that the change touches needs its own
+  approval, also when several rules match the line. The change is the difference between the merge base and the
+  merged state. A person owner approves with `layr request approve --person`. An empty list removes the owners of
+  the path.
+- `--keep-approvals <path>[,<path>]`: an approval of an earlier version of the same change counts for a newer version
+  when the newer version changed only these paths after it. A change of any other path needs a new approval. When
+  several rules match the line, a path keeps approvals only when every rule keeps it. An empty value clears the list.
+
+```sh
+layr protect main --approvals 1 --keep-approvals docs,CHANGELOG.md
+layr protect main --owner 'crates/store=person:ann@example.com,user:alice'
+```
+
+`merge` enforces both rules. `change show` and the model status count approvals of the exact state only.
+
 ## Ref protection and the merge queue
 
 `protect` accepts ref patterns such as `env/prod` and `release/*`.
 Ref rules accept `--update`, `--expect`, `--no-expect`, `--approvals`, `--approvers`, and `--check`.
-They refuse `--direct`, `--no-direct`, `--rewrite`, and `--path`, which apply to lines.
+They refuse `--direct`, `--no-direct`, `--rewrite`, `--path`, `--owner`, and `--keep-approvals`, which apply to lines.
 
 A protected ref requires its update role and, by default, `--expect`.
 Create a ref before you enable its default protection rule, or use `--no-expect` for its first update.

@@ -164,6 +164,22 @@ impl Project {
         policy: &crate::policy::Policy,
         rule: &crate::policy::Rule,
     ) -> Vec<Approval> {
+        let authors = self.incoming_person_authors(subject, base, mode);
+        self.person_approvals(subject)
+            .into_iter()
+            .filter(|(login, _)| !authors.contains(login) && policy.person_may_approve(rule, login))
+            .map(|(login, time)| Approval {
+                approver: u32::MAX,
+                person: Some(login),
+                state: subject.into(),
+                time,
+                met: Some(true),
+            })
+            .collect()
+    }
+
+    /// The authors (emails and person logins) of the states that `subject` brings in over `base`.
+    pub fn incoming_person_authors(&self, subject: &str, base: Option<&str>, mode: ApprovalMode) -> BTreeSet<String> {
         let have: BTreeSet<_> = base.map(|s| self.ancestors(s).into_iter().collect()).unwrap_or_default();
         let mut pending = vec![subject.to_string()];
         let mut seen = BTreeSet::new();
@@ -187,17 +203,7 @@ impl Project {
                 }
             }
         }
-        self.person_approvals(subject)
-            .into_iter()
-            .filter(|(login, _)| !authors.contains(login) && policy.person_may_approve(rule, login))
-            .map(|(login, time)| Approval {
-                approver: u32::MAX,
-                person: Some(login),
-                state: subject.into(),
-                time,
-                met: Some(true),
-            })
-            .collect()
+        authors
     }
 
     pub fn merge_status(&self, state: &str, target: &str, context: &Context) -> Result<MergeStatus> {

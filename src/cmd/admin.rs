@@ -3094,6 +3094,8 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--path")
         .value("--approvals")
         .value("--approvers")
+        .value("--owner")
+        .value("--keep-approvals")
         .flag("--remove");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
@@ -3129,7 +3131,19 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             if checks.is_empty() { "-".into() } else { checks },
                             x.direct,
                             x.rewrite.name(),
-                            if paths.is_empty() { String::new() } else { format!("\tpaths {}", paths.join(",")) },
+                            if paths.is_empty() { String::new() } else { format!("\tpaths {}", paths.join(",")) }
+                                + &x.owners
+                                    .iter()
+                                    .map(|(p, who)| {
+                                        let who: Vec<String> = who.iter().map(|k| crate::access::show_principal(k)).collect();
+                                        format!("\towner {p}={}", who.join(","))
+                                    })
+                                    .collect::<String>()
+                                + &if x.keep_approvals.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("\tkeep-approvals {}", x.keep_approvals.join(","))
+                                },
                             if x.approvals == 0 {
                                 String::new()
                             } else {
@@ -3149,9 +3163,10 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Some(p) => p.clone(),
     };
-    if crate::model::ref_namespace(&pattern) && ["--direct", "--no-direct", "--rewrite", "--path"].iter().any(|flag| a.has(flag))
+    if crate::model::ref_namespace(&pattern)
+        && ["--direct", "--no-direct", "--rewrite", "--path", "--owner", "--keep-approvals"].iter().any(|flag| a.has(flag))
     {
-        bail!("ref protection does not accept --direct, --no-direct, --rewrite or --path");
+        bail!("ref protection does not accept --direct, --no-direct, --rewrite, --path, --owner or --keep-approvals");
     }
     repo.require(ctx, "access")?;
     let _lock = repo.p.lock()?;
@@ -3203,6 +3218,33 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 r.paths.remove(path);
             } else {
                 r.paths.insert(path.to_string(), role(rl)?);
+            }
+        }
+        // `--owner <path>=<principal>[,<principal>]` (repeatable): a change of the path needs an approval by one of
+        // them; an empty list removes the owners of the path.
+        for owner in a.all("--owner") {
+            let (path, who) =
+                owner.split_once('=').ok_or_else(|| exit(128, "usage: --owner <path>=<principal>[,<principal>]"))?;
+            fsutil::check_rel(path.trim_end_matches('/')).map_err(|_| exit(128, format!("fatal: bad path '{path}'")))?;
+            let mut principals = Vec::new();
+            for w in who.split(',').filter(|x| !x.is_empty()) {
+                principals.push(
+                    crate::access::parse_principal(w).ok_or_else(|| exit(128, format!("fatal: unknown user or group '{w}'")))?,
+                );
+            }
+            if principals.is_empty() {
+                r.owners.remove(path);
+            } else {
+                r.owners.insert(path.to_string(), principals);
+            }
+        }
+        // `--keep-approvals <path>[,<path>]`: a newer version that changes only these paths keeps the approvals of the
+        // earlier one; an empty value clears the list.
+        if let Some(list) = a.get("--keep-approvals") {
+            r.keep_approvals = Vec::new();
+            for path in list.split(',').filter(|x| !x.is_empty()) {
+                fsutil::check_rel(path.trim_end_matches('/')).map_err(|_| exit(128, format!("fatal: bad path '{path}'")))?;
+                r.keep_approvals.push(path.to_string());
             }
         }
         all.insert(pattern, r);
