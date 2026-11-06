@@ -448,11 +448,26 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         // without scanning historical states, so a later push can complete that replica.
         let mut tips: std::collections::BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
         tips.extend(repo.p.db.refs("", crate::ids::now_ms())?.into_iter().map(|reference| reference.target));
-        for tip in tips {
-            if let Some(cached) = index.get(&tip) {
-                let expected = format::tree_name(&tip, &cached.attempt);
-                if !store.backend.list(&format!("states/{tip}/"))?.iter().any(|object| object.key == expected) {
-                    index.remove(&tip);
+        let checks: Vec<(String, String)> = tips
+            .into_iter()
+            .filter_map(|tip| index.get(&tip).map(|cached| (format::tree_name(&tip, &cached.attempt), tip)))
+            .collect();
+        // One list per tip, many at a time: a project with hundreds of lines and refs pays the
+        // latency of the remote once per batch, not once per tip.
+        let backend = &store.backend;
+        for batch in checks.chunks(32) {
+            let found: Vec<Result<bool>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(expected, tip)| {
+                        scope.spawn(move || Ok(backend.list(&format!("states/{tip}/"))?.iter().any(|object| &object.key == expected)))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("tip check panicked")))).collect()
+            });
+            for ((_, tip), found) in batch.iter().zip(found) {
+                if !found? {
+                    index.remove(tip);
                 }
             }
         }
