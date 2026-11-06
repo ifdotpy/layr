@@ -150,13 +150,23 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
         }
     }
     for (profile, live) in plans.iter_mut() {
+        let outputs = outputs_of.entry(profile.clone()).or_insert_with(|| outputs(profile));
+        let hashed: BTreeSet<&str> = outputs.iter().map(|o| o.hash.as_str()).collect();
         for name in live.crates.clone() {
             if matched.contains(&(profile.clone(), name.clone())) {
                 continue;
             }
-            // The newest unit of the crate is the one whose build wrote the unhashed output.
-            let newest = marked(profile, "lib", &name).into_iter().max_by_key(|(_, t)| *t);
-            live.hashes.extend(newest.map(|(h, _)| h));
+            // The newest unit of the crate is the one whose build wrote the unhashed output. A unit with a hashed
+            // output (the `.rmeta` and `.d` of a `check` or `clippy` of a crate with a `cdylib`) wrote none: it is
+            // not that unit, even when it is newer.
+            let units = marked(profile, "lib", &name);
+            let writers: Vec<&(String, SystemTime)> = units.iter().filter(|(h, _)| !hashed.contains(h.as_str())).collect();
+            let newest = if writers.is_empty() {
+                units.iter().max_by_key(|(_, t)| *t)
+            } else {
+                writers.into_iter().max_by_key(|(_, t)| *t)
+            };
+            live.hashes.extend(newest.map(|(h, _)| h.clone()));
         }
     }
     Ok(plans)
@@ -708,6 +718,29 @@ mod tests {
         assert!(live.paths.contains(Path::new("app")) && live.paths.contains(Path::new("libdy.dylib")), "{live:?}");
         assert!(live.paths.contains(Path::new("build/lib-a-0123456789abcdef/out")), "{live:?}");
         std::fs::remove_dir_all(debug.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn plan_takes_the_build_unit_of_an_unhashed_library_and_not_a_newer_check_unit() {
+        // A crate with a cdylib: its build writes `libcw.rlib` and `libcw.dylib` without a hash. A later clippy
+        // of the same crate is a newer unit of kind lib that writes a hashed `.rmeta` and `.d`.
+        let debug = tempdir("cdylib").join("debug");
+        let target = debug.parent().unwrap().to_path_buf();
+        let d = debug.display().to_string();
+        touch(&debug.join("deps/libcw.rlib"), 9);
+        touch(&debug.join("deps/libcw.dylib"), 9);
+        touch(&debug.join(format!(".fingerprint/cw-{H3}/lib-cw")), 1);
+        touch(&debug.join(format!(".fingerprint/cw-{H4}/lib-cw")), 1);
+        at(&debug.join(format!(".fingerprint/cw-{H3}/lib-cw")), 100);
+        at(&debug.join(format!(".fingerprint/cw-{H4}/lib-cw")), 200);
+        touch(&debug.join(format!("deps/libcw-{H4}.rmeta")), 5);
+        touch(&debug.join(format!("deps/cw-{H4}.d")), 5);
+        let msg = serde_json::json!({"reason": "compiler-artifact", "target": {"name": "cw", "kind": ["cdylib", "rlib"]},
+            "filenames": [format!("{d}/deps/libcw.rlib"), format!("{d}/deps/libcw.dylib")], "executable": null});
+        let plans = plan(&target, msg.to_string().as_bytes()).unwrap();
+        let live = &plans[&debug];
+        assert!(live.hashes.contains(H3) && !live.hashes.contains(H4), "{live:?}");
+        std::fs::remove_dir_all(target).unwrap();
     }
 
     #[test]

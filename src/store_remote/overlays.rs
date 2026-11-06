@@ -436,7 +436,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             .collect();
         let mut previous = remote.get(&name).cloned();
         // A record whose publication was interrupted remains the source of its retry.
-        for line in orepo.p.export_jsonl()?.lines() {
+        for line in orepo.p.effective_jsonl()?.lines() {
             let rec = oplog::parse_line(line, None)?.record;
             if rec.op == "overlay.key" && rec.data["store"].as_str() == Some(&descriptor.recipient) {
                 let next = parse(line, &repo.p.id, &descriptor.recipient, &trusted)?;
@@ -823,7 +823,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             }
             let mut orepo = Repo { p: op, ctx: None };
             for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
-                crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()))?;
+                crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
             let mut opts = opts.clone();

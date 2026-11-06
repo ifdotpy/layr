@@ -32,6 +32,44 @@ pub(super) fn operation_name(op: &str) -> String {
     }
 }
 
+/// `save --caches --save-back <line>` (docs/ci-trust.md): the caches of the current line go to the save-back line of
+/// `<line>` (`<line>.checks-<os>-<arch>`), as a passing `checks run` gives them back, with the head of the current
+/// line as their source state. No source state is made, so a cache writer machine (a CI job) may run it.
+fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
+    if !a.has("--caches") {
+        return Err(exit(2, "--save-back saves caches: use it with --caches"));
+    }
+    if ["-m", "-F", "--amend", "--all-lines", "--cache", "--running", "--force"].iter().any(|f| a.has(f) || a.get(f).is_some()) {
+        return Err(exit(2, "--save-back takes only --caches, --json and -q"));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(exit(1, "--save-back needs Linux or macOS"));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let h = here(ctx)?;
+        let repo = &h.repo;
+        let line = h.line()?.clone();
+        repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
+        if repo.p.db.line_by_name(target)?.is_none() {
+            return Err(exit(1, format!("error: no line {target}")));
+        }
+        let (name, saved) = super::checks::save_back_caches(ctx, repo, target, &line.head, &repo.working(&line))?;
+        if a.has("--json") {
+            let caches: Vec<_> =
+                saved.iter().map(|(path, overlay, state)| serde_json::json!({"path":path,"overlay":overlay,"state":state})).collect();
+            outln!(ctx, "{}", serde_json::json!({"line": name, "source": line.head, "caches": caches}));
+        } else if !a.has("-q") {
+            if saved.is_empty() {
+                outln!(ctx, "no cache folder to save");
+            }
+            for (path, overlay, state) in &saved {
+                outln!(ctx, "{path}: overlay {overlay} {} on {name}", ids::short(state));
+            }
+        }
+        Ok(0)
+    }
+}
+
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
@@ -52,8 +90,13 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--cache")
         .removed("--layers", "--caches")
         .flag("--all-lines")
+        .value("--save-back")
+        .flag("--json")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if let Some(target) = a.get("--save-back") {
+        return save_back(ctx, &a, target);
+    }
     if a.has("-m") || a.has("-F") || a.has("--amend") {
         return super::work::commit(ctx, args);
     }
@@ -1266,7 +1309,7 @@ impl OwnersCheck {
 }
 
 fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
-    let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+    let want = repo.p.recomputed_owners()?;
     let (missing, extra) = repo.p.db.owners_diff(&want)?;
     let stale = repo.p.db.stale_undo_rows()?;
     let freed = repo.p.db.unowned_by(&kept_rows(repo, &want)?)?;
@@ -1425,7 +1468,7 @@ pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
 pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
-        None => repo.p.db.owners_diff(&repo.p.db.recomputed_owners(&repo.p.store.machine.id)?)?,
+        None => repo.p.db.owners_diff(&repo.p.recomputed_owners()?)?,
     };
     repo.p.db.apply_owners_diff(&missing, &extra)?;
     for holder in repo.p.db.pin_holders()? {
@@ -1470,7 +1513,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         let (mark, diff) = {
             let _t = crate::trace::begin("repair: plan");
             snapshot(repo, || {
-                let want = repo.p.db.recomputed_owners(&repo.p.store.machine.id)?;
+                let want = repo.p.recomputed_owners()?;
                 Ok((repo.p.db.records_mark()?, repo.p.db.owners_diff(&want)?))
             })?
         };
@@ -2820,6 +2863,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let pol = repo.policy();
     match sub {
+        "grant" | "revoke" if rest.get(1).map(String::as_str) == Some("trust") => delegate(ctx, repo, sub == "revoke", rest),
         "person-key" if rest.len() == 2 => {
             repo.require(ctx, "access")?;
             let login = &rest[0];
@@ -2928,6 +2972,63 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => Err(exit(128, "usage: layr access [list|grant|revoke|deny|allow|check] ...")),
     }
+}
+
+/// `layr access grant machine:<broker> trust --max-hours <n> [--role reader|writer] [--overlays a,b] [--name-prefix p]`
+/// and `layr access revoke machine:<broker> trust` (docs/ci-trust.md): a `trust.delegate` record. The broker then
+/// trusts other machines with `remote trust --expires`, and those trusts count only inside the delegation.
+fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) -> Result<i32> {
+    let spec = Spec::new().value("--max-hours").value("--role").value("--overlays").value("--name-prefix").flag("--json");
+    let a = parse(&spec, rest)?;
+    repo.require(ctx, "access")?;
+    let usage = "usage: layr access grant machine:<id|name> trust --max-hours <n> [--role reader|writer] [--overlays a,b] [--name-prefix p]";
+    let who = a.pos.first().and_then(|p| p.strip_prefix("machine:")).ok_or_else(|| exit(128, usage))?;
+    let broker = if crate::model::is_uuid(who) {
+        who.to_string()
+    } else {
+        repo.p.db.machine_by_name(who)?.ok_or_else(|| exit(128, format!("unknown machine {who}")))?
+    };
+    if repo.p.db.trusted(&broker)?.is_none() {
+        return Err(exit(128, format!("machine {} is not trusted", ids::short(&broker))));
+    }
+    let mut data = serde_json::json!({"machine": broker});
+    if revoke {
+        data["revoked"] = serde_json::json!(true);
+    } else {
+        let hours: i64 = a.get("--max-hours").and_then(|h| h.parse().ok()).filter(|h| *h > 0).ok_or_else(|| exit(128, usage))?;
+        let role = a.get("--role").unwrap_or("reader");
+        if layr_store::trust::Role::parse(role).is_none() {
+            return Err(exit(128, format!("--role {role}: use reader or writer")));
+        }
+        data["max_hours"] = serde_json::json!(hours);
+        data["role"] = serde_json::json!(role);
+        if let Some(list) = a.get("--overlays") {
+            let names: Vec<&str> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+            for name in &names {
+                if repo.overlay_info(name)?.is_none() {
+                    return Err(exit(128, format!("unknown overlay {name}")));
+                }
+            }
+            data["overlays"] = serde_json::json!(names);
+        }
+        if let Some(prefix) = a.get("--name-prefix") {
+            data["name_prefix"] = serde_json::json!(prefix);
+        }
+    }
+    {
+        let _lock = repo.p.lock()?;
+        let mut record = Record::new("trust.delegate");
+        record.data = data.clone();
+        repo.p.append(record, &ctx.actor())?;
+    }
+    if a.has("--json") {
+        outln!(ctx, "{data}");
+    } else if revoke {
+        outln!(ctx, "machine {} trusts no other machine", ids::short(&broker));
+    } else {
+        outln!(ctx, "machine {} may trust other machines for at most {} h", ids::short(&broker), data["max_hours"]);
+    }
+    Ok(0)
 }
 
 /// `layr approve [<rev>] [--withdraw]`: approve an exact state (or withdraw the approval). A

@@ -707,44 +707,56 @@ fn execute(
 /// leaves the check result as it is.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
-    let r = (|| -> Result<usize> {
-        // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
-        // could warm it): it becomes a cache first, as in `save --caches`, so the first build of a platform is saved.
-        let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
-        for p in repo.cache_paths(dir)? {
-            if !paths.contains(&p) {
-                paths.push(p);
-            }
-        }
-        let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
-        let mut folders = Vec::new();
-        for folder in paths {
-            let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
-            if !path.is_dir() {
-                continue;
-            }
-            if !crate::storage::is_subvolume(&path) {
-                crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
-            }
-            if crate::storage::is_subvolume(&path) {
-                folders.push(folder);
-            }
-        }
-        if folders.is_empty() {
-            eprintln!("layr checks: caches of {state} not saved: the check left no cache folder");
-            return Ok(0);
-        }
-        let name = format!("{line}.checks-{}", platform());
-        let _lock = repo.p.lock()?;
-        let checks_line = match repo.p.db.line_by_name(&name)? {
-            Some(l) => l,
-            None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
-        };
-        Ok(repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?.len())
-    })();
-    if let Err(e) = r {
-        eprintln!("layr checks: caches of {state} not saved: {e:#}");
+    match save_back_caches(ctx, repo, line, state, dir) {
+        Ok((_, saved)) if saved.is_empty() => eprintln!("layr checks: caches of {state} not saved: the check left no cache folder"),
+        Ok(_) => {}
+        Err(e) => eprintln!("layr checks: caches of {state} not saved: {e:#}"),
     }
+}
+
+/// `save_back` for any caller (`checks run`, `save --caches --save-back`): the save-back line's name and the saved
+/// caches (folder, overlay, cache state). Empty when `dir` has no cache folder.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn save_back_caches(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &str,
+    state: &str,
+    dir: &std::path::Path,
+) -> Result<(String, Vec<(String, String, String)>)> {
+    // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
+    // could warm it): it becomes a cache first, as in `save --caches`, so the first build of a platform is saved.
+    let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+    for p in repo.cache_paths(dir)? {
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
+    let mut folders = Vec::new();
+    for folder in paths {
+        let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
+        if !path.is_dir() {
+            continue;
+        }
+        if !crate::storage::is_subvolume(&path) {
+            crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
+        }
+        if crate::storage::is_subvolume(&path) {
+            folders.push(folder);
+        }
+    }
+    let name = format!("{line}.checks-{}", platform());
+    if folders.is_empty() {
+        return Ok((name, Vec::new()));
+    }
+    let _lock = repo.p.lock()?;
+    let checks_line = match repo.p.db.line_by_name(&name)? {
+        Some(l) => l,
+        None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+    };
+    let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
+    Ok((name, saved))
 }
 
 /// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were

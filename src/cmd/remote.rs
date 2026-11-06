@@ -591,7 +591,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--person")
             .value("--invite-out")
             .value("--remove")
-            .value("--reason"),
+            .value("--reason")
+            .value("--expires")
+            .value("--role")
+            .value("--overlays")
+            .value("--name"),
         args,
     )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
@@ -605,9 +609,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let machine = &ctx.store.machine;
         let public_key = hex::encode(machine.key.verifying_key().to_bytes());
         if a.has("--json") {
-            outln!(ctx, "{}", json!({"id": machine.id, "public_key": public_key}));
+            outln!(ctx, "{}", json!({"id": machine.id, "public_key": public_key, "name": machine.name}));
         } else {
-            outln!(ctx, "id {}\npublic_key {public_key}", machine.id);
+            outln!(ctx, "id {}\npublic_key {public_key}\nname {}", machine.id, machine.name);
         }
         return Ok(0);
     }
@@ -801,6 +805,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let raw: [u8; 32] = bytes.try_into().map_err(|_| exit(128, "invalid machine key"))?;
             ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|_| exit(128, "invalid machine key"))?;
             let key = hex::encode(raw);
+            let limits = trust_limits(repo, &a, &full)?;
             match remote_kind {
                 Kind::Store => {
                     let mut store = store_remote::open_named(&a.pos[1], repo)?;
@@ -808,26 +813,67 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     {
                         let _lock = repo.p.lock()?;
                         store.save_pin(ctx, repo, &a.pos[1])?;
-                        replicate::trust(ctx, &repo.p, &full, &key)?;
+                        replicate::trust(ctx, &repo.p, &full, &key, limits.as_ref())?;
                     }
                     store.trust(repo, &full, Some(&key))?;
                 }
                 Kind::Peer { .. } => {
                     let _lock = repo.p.lock()?;
-                    replicate::trust(ctx, &repo.p, &full, &key)?;
+                    replicate::trust(ctx, &repo.p, &full, &key, limits.as_ref())?;
                 }
                 Kind::Registry => unreachable!(),
             }
             if a.has("--json") {
-                outln!(ctx, "{}", json!({"trusted": full}));
+                let mut out = json!({"trusted": full});
+                if let Some(serde_json::Value::Object(limits)) = &limits {
+                    for (k, v) in limits {
+                        out[k] = v.clone();
+                    }
+                }
+                outln!(ctx, "{out}");
             } else {
                 outln!(ctx, "trusted machine {}", crate::ids::short(&full));
+            }
+        }
+        "untrust" if a.pos.len() == 3 => {
+            // A suspected leak (docs/ci-trust.md): the machine's later records count nowhere, and every key it
+            // could read goes to a new epoch now.
+            repo.require(ctx, "remote")?;
+            let name = &a.pos[1];
+            if kind(&remote_url(repo, name)?)? != Kind::Store {
+                bail!("remote untrust requires a store remote");
+            }
+            let id = &a.pos[2];
+            let full = if crate::model::is_uuid(id) {
+                id.clone()
+            } else {
+                repo.p.db.machine_by_name(id)?.ok_or_else(|| exit(128, format!("unknown machine {id}")))?
+            };
+            if full == repo.p.store.machine.id {
+                bail!("a machine cannot untrust itself");
+            }
+            if repo.p.db.trusted(&full)?.is_none() {
+                return Err(exit(128, format!("machine {} is not trusted", crate::ids::short(&full))));
+            }
+            {
+                let _lock = repo.p.lock()?;
+                let mut record = crate::model::Record::new("machine.untrust");
+                record.data = json!({"machine": full});
+                repo.p.append(record, &ctx.actor())?;
+            }
+            let mut store = store_remote::open_named(name, repo)?;
+            let mode = store_remote::epochs::project_mode(repo)?;
+            let change = store.change_mode(ctx, repo, name, mode, &[format!("machine:{full}")], Some("untrust"), true)?;
+            if a.has("--json") {
+                outln!(ctx, "{}", json!({"untrusted": full, "rotated": change.rotated, "overlays": change.tightened}));
+            } else {
+                outln!(ctx, "untrusted machine {}; new key epoch", crate::ids::short(&full));
             }
         }
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
@@ -1278,4 +1324,58 @@ mod tests {
         }
         assert!(!kind("s3://access:secret@bucket/p").unwrap_err().to_string().contains("secret"));
     }
+}
+
+/// The limits of `remote trust` (docs/ci-trust.md): `--expires <RFC 3339 time or duration>`, `--role reader|writer`
+/// (reader by default) and `--overlays <name>,<name>`. None without any of them: a full trust without an end.
+fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str) -> Result<Option<serde_json::Value>> {
+    if !["--expires", "--role", "--overlays", "--name"].iter().any(|f| a.get(f).is_some()) {
+        if repo.p.trust_terms(&[])?.brokers.contains_key(&repo.p.store.machine.id) {
+            return Err(exit(128, "this machine is a broker: it trusts only with --expires inside its delegation"));
+        }
+        return Ok(None);
+    }
+    let mut limits = json!({});
+    if let Some(text) = a.get("--expires") {
+        let now = crate::ids::now_ms();
+        let at = match chrono::DateTime::parse_from_rfc3339(text) {
+            Ok(time) => time.timestamp_millis(),
+            Err(_) => now + super::admin::duration_ms(text)?,
+        };
+        if at <= now {
+            return Err(exit(128, format!("--expires {text} is not in the future")));
+        }
+        limits["expires_at"] = json!(at);
+    }
+    let role = a.get("--role").unwrap_or("reader");
+    if layr_store::trust::Role::parse(role).is_none() {
+        return Err(exit(128, format!("--role {role}: use reader or writer")));
+    }
+    limits["role"] = json!(role);
+    if let Some(list) = a.get("--overlays") {
+        let names: Vec<&str> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        for name in &names {
+            if repo.overlay_info(name)?.is_none() {
+                return Err(exit(128, format!("unknown overlay {name}")));
+            }
+        }
+        limits["overlays"] = json!(names);
+    }
+    // The machine's name, for a delegation with a name prefix: given (a new machine sends `remote self --json`), or
+    // from its records.
+    let name = match a.get("--name") {
+        Some(name) => Some(name.to_string()),
+        None => repo.p.db.machine_name(machine)?,
+    };
+    if let Some(name) = name {
+        limits["name"] = json!(name);
+    }
+    // A broker (docs/ci-trust.md) trusts only inside its delegation: a trust outside it would count nowhere.
+    let rules = repo.p.trust_terms(&[])?;
+    let mut data = limits.clone();
+    data["machine"] = json!(machine);
+    if !rules.trust_counts(&repo.p.store.machine.id, crate::ids::now_ms(), &data) {
+        return Err(exit(128, "this broker's delegation does not cover the trust (end, role, overlays or name prefix)"));
+    }
+    Ok(Some(limits))
 }

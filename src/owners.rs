@@ -588,8 +588,9 @@ impl Db {
         Ok(v)
     }
 
-    /// The owners that the stored records give: a replay into a temporary database.
-    pub fn recomputed_owners(&self, local: &str) -> Result<Vec<Row>> {
+    /// The owners that the stored records give: a replay into a temporary database of the records that `counts`
+    /// (`Project::refusal`).
+    pub fn recomputed_owners(&self, local: &str, counts: &dyn Fn(&crate::model::Record) -> Result<bool>) -> Result<Vec<Row>> {
         let mem = Db { conn: Connection::open_in_memory()?, stale: false };
         mem.conn.set_prepared_statement_cache_capacity(crate::db::STATEMENT_CACHE_CAPACITY);
         mem.conn.execute_batch(SCHEMA)?;
@@ -597,7 +598,9 @@ impl Db {
             for raw in self.all_lines()? {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
                 mem.insert_record(&rec, &raw)?;
-                mem.derive(&rec, &|_| true, local)?;
+                if counts(&rec)? {
+                    mem.derive(&rec, &|_| true, local)?;
+                }
             }
             Ok(())
         })?;
@@ -938,7 +941,7 @@ mod tests {
         for r in &recs {
             apply(&forward, r);
         }
-        let want = forward.recomputed_owners(MACHINE).unwrap();
+        let want = forward.recomputed_owners(MACHINE, &|_| Ok(true)).unwrap();
         assert_eq!(forward.owner_rows().unwrap(), want, "stored owners equal the replay");
         // Reverse arrival: the same rows once every record is in.
         let reverse = memory();
@@ -1027,6 +1030,6 @@ mod tests {
         }
         let line_undo: Vec<String> = db.all_holders("undo").unwrap().into_iter().filter(|h| h.starts_with(LINE)).collect();
         assert_eq!(line_undo, vec![undo_of_delete], "only the undo of the delete record stays");
-        assert_eq!(db.owner_rows().unwrap(), db.recomputed_owners(MACHINE).unwrap(), "the replay agrees");
+        assert_eq!(db.owner_rows().unwrap(), db.recomputed_owners(MACHINE, &|_| Ok(true)).unwrap(), "the replay agrees");
     }
 }

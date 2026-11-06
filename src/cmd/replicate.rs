@@ -258,8 +258,9 @@ fn take_lines(p: &Project, lines: &[String], trust: Trust) -> Result<usize> {
     p.import_lines(lines, trust)
 }
 
-/// Record that this project trusts a machine's records (its id and key).
-pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str) -> Result<bool> {
+/// Record that this project trusts a machine's records (its id and key), with `limits` (`expires_at`, `role`,
+/// `overlays`, docs/ci-trust.md) when given.
+pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str, limits: Option<&Value>) -> Result<bool> {
     if machine == p.store.machine.id {
         return Ok(false);
     }
@@ -271,6 +272,11 @@ pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str) -> Result<bool> {
     }
     let mut rec = crate::model::Record::new("machine.trust");
     rec.data = json!({"machine": machine, "public_key": key});
+    if let Some(Value::Object(limits)) = limits {
+        for (k, v) in limits {
+            rec.data[k] = v.clone();
+        }
+    }
     p.append(rec, &ctx.actor())?;
     Ok(true)
 }
@@ -639,7 +645,7 @@ pub fn exchange(
             }
             let n = take_lines(&repo.p, &lines, Trust::Peer(&peer.0, &peer.1))?;
             if direction != "push" && !peer.0.is_empty() && repo.p.db.machine_key(&peer.0)?.as_deref() == Some(peer.1.as_str()) {
-                trust(ctx, &repo.p, &peer.0, &peer.1)?;
+                trust(ctx, &repo.p, &peer.0, &peer.1, None)?;
             }
             n
         };
@@ -809,7 +815,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if bootstrap {
             for (m, k) in repo.p.machine_keys_of(&lines) {
-                trust(ctx, &repo.p, &m, &k)?;
+                trust(ctx, &repo.p, &m, &k, None)?;
             }
         }
     }
@@ -1011,7 +1017,7 @@ fn exchange_overlays<R: Read, W: Write>(
                     bail!("overlay project id differs");
                 }
                 for (machine, key) in &trusted {
-                    trust(ctx, &project, machine, &hex::encode(key.to_bytes()))?;
+                    trust(ctx, &project, machine, &hex::encode(key.to_bytes()), None)?;
                 }
                 drop(_lock);
                 w.json(&json!({"op":"overlay.ready"}))?;
