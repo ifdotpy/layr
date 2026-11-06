@@ -131,11 +131,25 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
             }
         }
     }
-    let mut trusted = BTreeSet::from([creator.context("push the project before making its store public")?]);
+    let creator = creator.context("push the project before making its store public")?;
+    // A limited machine (`crate::trust`) is no writer and vouches for nobody.
+    let limited = crate::trust::terms(
+        &creator,
+        parsed.iter().filter(|(_, v)| matches!(v["op"].as_str(), Some("machine.trust" | "machine.untrust"))).map(|(_, v)| {
+            crate::trust::TrustRecord {
+                signer: v["machine"].as_str().unwrap_or(""),
+                time: v["time"].as_i64().unwrap_or(0),
+                op: v["op"].as_str().unwrap_or(""),
+                data: &v["data"],
+            }
+        }),
+    );
+    let mut trusted = BTreeSet::from([creator]);
     loop {
         let before = trusted.len();
         for (_, value) in &parsed {
-            if value["op"] != "machine.trust" || !trusted.contains(value["machine"].as_str().unwrap_or("")) {
+            let signer = value["machine"].as_str().unwrap_or("");
+            if value["op"] != "machine.trust" || !trusted.contains(signer) || limited.contains_key(signer) {
                 continue;
             }
             let target = value["data"]["machine"].as_str().unwrap_or("");
@@ -150,7 +164,7 @@ pub fn trusted_writers(project: &str, lines: &[String]) -> Result<BTreeMap<Strin
             break;
         }
     }
-    Ok(keys.into_iter().filter(|(machine, _)| trusted.contains(machine)).collect())
+    Ok(keys.into_iter().filter(|(machine, _)| trusted.contains(machine) && !limited.contains_key(machine)).collect())
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -246,6 +260,29 @@ mod tests {
         assert!(!trusted.contains_key(ROGUE));
         lines[0] = registration(OWNER, &rogue);
         assert!(trusted_writers(PROJECT, &lines).is_err());
+    }
+    #[test]
+    fn a_limited_machine_is_no_writer_and_vouches_for_nobody() {
+        let (_, _, _, owner) = fixture();
+        let job = SigningKey::from_bytes(&[8; 32]);
+        let rogue = SigningKey::from_bytes(&[9; 32]);
+        let hex_key = |key: &SigningKey| hex::encode(key.verifying_key().to_bytes());
+        let lines = vec![
+            registration(OWNER, &owner),
+            registration(WRITER, &job),
+            registration(ROGUE, &rogue),
+            line(OWNER, 2, "project", serde_json::json!({"id":PROJECT}), &owner),
+            line(
+                OWNER,
+                3,
+                "machine.trust",
+                serde_json::json!({"machine":WRITER,"public_key":hex_key(&job),"expires_at":4_102_444_800_000_i64,"role":"writer"}),
+                &owner,
+            ),
+            line(WRITER, 2, "machine.trust", serde_json::json!({"machine":ROGUE,"public_key":hex_key(&rogue)}), &job),
+        ];
+        let trusted = trusted_writers(PROJECT, &lines).unwrap();
+        assert_eq!(trusted.keys().collect::<Vec<_>>(), [OWNER]);
     }
     #[test]
     fn rejects_missing_or_ambiguous_project_authority() {

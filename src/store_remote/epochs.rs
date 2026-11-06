@@ -216,7 +216,7 @@ fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Res
 
 fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
     let mut found = None;
-    for line in repo.p.export_jsonl()?.lines() {
+    for line in repo.p.effective_jsonl()?.lines() {
         let record = oplog::parse_line(line, None)?.record;
         if record.op != "project.key" || record.machine != store.machine { continue; }
         let key: Key = serde_json::from_value(record.data.clone())?;
@@ -236,7 +236,7 @@ fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
 }
 fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String,String>> {
     let mut readers = None;
-    for line in repo.p.export_jsonl()?.lines() {
+    for line in repo.p.effective_jsonl()?.lines() {
         let r = oplog::parse_line(line, None)?.record;
         if r.op == "project.readers" && r.data["epoch"] == key.epoch {
             readers = Some(serde_json::from_value(r.data["readers"].clone())?);
@@ -249,7 +249,7 @@ fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String,String>> {
 
 pub(crate) fn project_mode(repo: &Repo) -> Result<Mode> {
     let mut mode = Mode::Private;
-    for line in repo.p.export_jsonl()?.lines() {
+    for line in repo.p.effective_jsonl()?.lines() {
         let r = oplog::parse_line(line, None)?.record;
         if r.op == "project.mode" {
             mode = serde_json::from_value(r.data["mode"].clone())?;
@@ -263,7 +263,7 @@ pub(crate) fn overlay_mode(repo: &Repo) -> Result<Mode> {
 fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     let anchor = store.root_descriptor()?.recipient;
-    for line in repo.p.export_jsonl()?.lines() {
+    for line in repo.p.effective_jsonl()?.lines() {
         let r = oplog::parse_line(line, None)?.record;
         if r.op == "project.reader" && r.data["store"] == anchor {
             map.insert(
@@ -276,6 +276,9 @@ fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<Str
         }
     }
     let known = super::overlays::trusted_keys(repo)?;
+    // A machine whose trust ended or that was untrusted gets no slot of a new epoch (docs/ci-trust.md).
+    let terms = repo.p.trust_terms(&[])?;
+    let now = crate::ids::now_ms();
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let remote = reader::records(&store.backend, &identity, &descriptor.project)?;
@@ -290,6 +293,9 @@ fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<Str
             }
             if remove.iter().any(|p| p == &format!("machine:{id}") || p == id) {
                 map.insert(format!("machine:{id}"), String::new());
+                continue;
+            }
+            if terms.get(id).is_some_and(|t| !t.live(now)) {
                 continue;
             }
             let mut public = repo
@@ -520,7 +526,7 @@ impl Store {
                     history.push((backend.clone(), old_identity.clone()));
                 }
             }
-            let recorded = repo.p.export_jsonl()?.lines().filter_map(|line|oplog::parse_line(line,None).ok())
+            let recorded = repo.p.effective_jsonl()?.lines().filter_map(|line|oplog::parse_line(line,None).ok())
                 .any(|r|r.record.op == "project.mode" && r.record.data["epoch"] == key.epoch);
             if !recorded {
                 let mut event = Record::new("project.mode");
