@@ -77,9 +77,6 @@ The project keeps its available lines. Run `layr fetch origin` later to create t
 Private overlay files stay local. Legacy cache layer snapshots require a peer remote.
 The `--caches` option sends states of kind `cache`.
 
-To import a Desk v1 vault, set `LAYR_PAPER_KEY_FILE` to the Desk paper file. Then use `layr clone <vault URL> <project>`.
-The import creates line `main`, preserves history order, and verifies each file's SHA-256.
-The source vault stays read only. Add a new v2 remote to save the imported history.
 
 ### Read a store as a disk
 

@@ -7,7 +7,6 @@ pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod gitpack;
 mod index;
-mod legacy;
 pub(crate) mod overlays;
 mod public;
 mod push_cache;
@@ -34,7 +33,6 @@ pub struct Options {
     pub auto: bool,
     pub caches: bool,
     pub paper_key: Option<String>,
-    pub desk_prefix: Option<String>,
     /// `--caches-of <line>`: restore only the cache states that `line new X <line>` takes for these lines.
     pub caches_of: Vec<String>,
     /// `--heads`: restore only the heads of the lines; the other states stay on the remote and come on first read.
@@ -458,14 +456,6 @@ impl Store {
             self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
         }
-        if self.backend.get("vault.json")?.is_some() {
-            let vault: serde_json::Value =
-                serde_json::from_slice(&self.backend.get("vault.json")?.context("missing vault.json")?)?;
-            if vault["format"].as_u64() != Some(1) {
-                bail!("unsupported Desk vault format");
-            }
-            return Ok(Configured { created: false, recovery_key_file: None });
-        }
         if self.project.is_empty() {
             bail!("the remote store is empty");
         }
@@ -501,8 +491,8 @@ impl Store {
         if let Some(pin) = &self.pin {
             let mut pin = pin.clone();
             // Learn the public paper recipient once. LAYR_PAPER_KEY_FILE may hold the paper key of
-            // another store (a Desk source, for example): a key that does not open this store's
-            // paper slot is not this store's paper key, so nothing is recorded.
+            // another store: a key that does not open this store's paper slot is not this store's
+            // paper key, so nothing is recorded.
             if let (None, Some(paper)) = (&pin.paper_recipient, &self.paper_key_text) {
                 let opener = keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?;
                 let root = self.backend.root();
@@ -702,9 +692,6 @@ impl Store {
         if repo.p.is_overlay() {
             bail!("private overlay projects cannot be pushed to a store");
         }
-        if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
-            bail!("Desk v1 stores are read only; clone into a local project and add a new v2 remote");
-        }
         // Recheck the descriptor pin before discovery or any write-related request.
         let descriptor = self.descriptor()?;
         // Check before the writer can publish any object, even when the caller is local root.
@@ -756,9 +743,6 @@ impl Store {
             }
         }
         self.connect(ctx)?;
-        if self.backend.get("vault.json")?.is_some() && self.backend.get("store.json")?.is_none() {
-            bail!("Desk v1 is read only; use layr clone with LAYR_PAPER_KEY_FILE");
-        }
         let mut report = reader::fetch(self, ctx, repo, opts)?;
         overlays::fetch(self, ctx, repo, opts, &mut report)?;
         let pending = self.dir.join("pending-lines.json");
@@ -775,14 +759,8 @@ impl Store {
         if !repo.p.id.is_empty() {
             bail!("clone needs an empty project");
         }
-        let mut report = if self.backend.get("store.json")?.is_none() && self.backend.get("vault.json")?.is_some() {
-            legacy::import(self, ctx, repo, opts)?
-        } else {
-            reader::fetch(self, ctx, repo, opts)?
-        };
-        if self.backend.get("store.json")?.is_some() {
-            overlays::fetch(self, ctx, repo, opts, &mut report)?;
-        }
+        let mut report = reader::fetch(self, ctx, repo, opts)?;
+        overlays::fetch(self, ctx, repo, opts, &mut report)?;
         report.missing_lines = self.materialize_clone_lines(ctx, repo, None)?;
         Ok(report)
     }
