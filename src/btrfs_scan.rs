@@ -15,6 +15,8 @@ use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use zerocopy::byteorder::{little_endian as le, native_endian as ne};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 pub type PartId = usize;
 pub struct TreeUnit {
@@ -82,45 +84,92 @@ const ROOT_REF: u32 = 156;
 const MAX_KEY_TYPE: u32 = u8::MAX as u32;
 const SEARCH_BUFFER: usize = 1024 * 1024;
 const LOOKUP_BUFFER: usize = 16 * 1024;
+#[cfg(test)]
 const HEADER_SIZE: usize = 32;
+#[cfg(test)]
 const HEADER_OBJECTID: usize = 8;
+#[cfg(test)]
 const HEADER_OFFSET: usize = 16;
+#[cfg(test)]
 const HEADER_TYPE: usize = 24;
+#[cfg(test)]
 const HEADER_LEN: usize = 28;
-const INODE_MODE: usize = 52;
-const REF_NAME_LEN: usize = 8;
-const REF_HEADER: usize = 10;
-const EXTREF_PARENT: usize = 0;
+#[cfg(test)]
 const EXTREF_NAME_LEN: usize = 16;
+#[cfg(test)]
 const EXTREF_HEADER: usize = 18;
-const EXTENT_GENERATION: usize = 0;
+#[cfg(test)]
 const EXTENT_TYPE: usize = 20;
+#[cfg(test)]
 const EXTENT_INLINE_HEADER: usize = 21;
+#[cfg(test)]
 const EXTENT_BYTENR: usize = 21;
+#[cfg(test)]
 const EXTENT_DISK_BYTES: usize = 29;
+#[cfg(test)]
 const EXTENT_REGULAR_SIZE: usize = 53;
 const FILE_EXTENT_INLINE: u8 = 0;
 const FILE_EXTENT_REG: u8 = 1;
 const FILE_EXTENT_PREALLOC: u8 = 2;
-const ROOT_REF_DIRID: usize = 0;
 
 fn invalid() -> io::Error {
     io::Error::new(ErrorKind::InvalidData, "invalid btrfs tree search item")
 }
-fn bytes<const N: usize>(b: &[u8], off: usize) -> io::Result<[u8; N]> {
-    b.get(off..off.checked_add(N).ok_or_else(invalid)?).ok_or_else(invalid)?.try_into().map_err(|_| invalid())
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct SearchHeader {
+    transid: ne::U64,
+    objectid: ne::U64,
+    offset: ne::U64,
+    kind: ne::U32,
+    len: ne::U32,
 }
-fn le64(b: &[u8], off: usize) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(bytes(b, off)?))
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct InodeItem {
+    before_mode: [u8; 52],
+    mode: le::U32,
 }
-fn le16(b: &[u8], off: usize) -> io::Result<u16> {
-    Ok(u16::from_le_bytes(bytes(b, off)?))
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct InodeRef {
+    index: le::U64,
+    name_len: le::U16,
 }
-fn native64(b: &[u8], off: usize) -> io::Result<u64> {
-    Ok(u64::from_ne_bytes(bytes(b, off)?))
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct InodeExtref {
+    parent: le::U64,
+    index: le::U64,
+    name_len: le::U16,
 }
-fn native32(b: &[u8], off: usize) -> io::Result<u32> {
-    Ok(u32::from_ne_bytes(bytes(b, off)?))
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct RootRef {
+    dirid: le::U64,
+}
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct ExtentPrefix {
+    generation: le::U64,
+    ram_bytes: le::U64,
+    compression: u8,
+    encryption: u8,
+    other_encoding: le::U16,
+    kind: u8,
+}
+#[repr(C)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+struct RegularExtent {
+    prefix: ExtentPrefix,
+    disk_bytenr: le::U64,
+    disk_num_bytes: le::U64,
+    offset: le::U64,
+    num_bytes: le::U64,
+}
+
+fn parse<T: FromBytes + KnownLayout + Immutable>(bytes: &[u8]) -> io::Result<&T> {
+    T::ref_from_prefix(bytes).map(|(value, _)| value).map_err(|_| invalid())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,10 +188,8 @@ fn advance(k: Key) -> Option<Key> {
     }
 }
 fn header(b: &[u8]) -> io::Result<(Key, usize)> {
-    Ok((
-        Key { ino: native64(b, HEADER_OBJECTID)?, kind: native32(b, HEADER_TYPE)?, offset: native64(b, HEADER_OFFSET)? },
-        native32(b, HEADER_LEN)? as usize,
-    ))
+    let h: &SearchHeader = parse(b)?;
+    Ok((Key { ino: h.objectid.get(), kind: h.kind.get(), offset: h.offset.get() }, h.len.get() as usize))
 }
 fn search(
     file: &File,
@@ -160,9 +207,9 @@ fn search(
         let mut pos = 0usize;
         let mut last = None;
         for _ in 0..count {
-            let h = buf.get(pos..pos + HEADER_SIZE).ok_or_else(invalid)?;
+            let h = buf.get(pos..pos + std::mem::size_of::<SearchHeader>()).ok_or_else(invalid)?;
             let (k, len) = header(h)?;
-            let start = pos + HEADER_SIZE;
+            let start = pos + std::mem::size_of::<SearchHeader>();
             let end = start.checked_add(len).ok_or_else(invalid)?;
             f(k, buf.get(start..end).ok_or_else(invalid)?)?;
             pos = end;
@@ -196,43 +243,45 @@ fn query(tree: u64) -> SearchKey {
     }
 }
 fn parents(key: Key, item: &[u8], out: &mut Vec<u64>) -> io::Result<()> {
-    let (hdr, name, parent) = match key.kind {
-        INODE_REF => (REF_HEADER, REF_NAME_LEN, false),
-        INODE_EXTREF => (EXTREF_HEADER, EXTREF_NAME_LEN, true),
-        _ => return Ok(()),
-    };
     let mut pos = 0;
     while pos < item.len() {
         let rest = &item[pos..];
-        let p = if parent { le64(rest, EXTREF_PARENT)? } else { key.offset };
-        let len = le16(rest, name)? as usize;
+        let (hdr, len, parent) = match key.kind {
+            INODE_REF => {
+                let r: &InodeRef = parse(rest)?;
+                (std::mem::size_of::<InodeRef>(), r.name_len.get() as usize, key.offset)
+            }
+            INODE_EXTREF => {
+                let r: &InodeExtref = parse(rest)?;
+                (std::mem::size_of::<InodeExtref>(), r.name_len.get() as usize, r.parent.get())
+            }
+            _ => return Ok(()),
+        };
         pos = pos.checked_add(hdr + len).filter(|&n| n <= item.len()).ok_or_else(invalid)?;
-        out.push(p);
+        out.push(parent);
     }
     Ok(())
 }
 fn extent(ino: u64, offset: u64, item: &[u8]) -> io::Result<Option<(ExtentKey, u64)>> {
-    let ty = *item.get(EXTENT_TYPE).ok_or_else(invalid)?;
-    match ty {
-        FILE_EXTENT_INLINE => Ok(Some((
-            // Snapshot copies retain the inode, offset, item generation and stored payload.
-            ExtentKey::Inline {
-                ino,
-                offset,
-                generation: le64(item, EXTENT_GENERATION)?,
-                payload: u64::from_le_bytes(bytes(
-                    &FastCryptographic::hash(item.get(EXTENT_INLINE_HEADER..).ok_or_else(invalid)?),
-                    0,
-                )?),
-            },
-            item.len().checked_sub(EXTENT_INLINE_HEADER).ok_or_else(invalid)? as u64,
-        ))),
+    let prefix: &ExtentPrefix = parse(item)?;
+    match prefix.kind {
+        FILE_EXTENT_INLINE => {
+            let payload = &item[std::mem::size_of::<ExtentPrefix>()..];
+            let hash = FastCryptographic::hash(payload);
+            Ok(Some((
+                ExtentKey::Inline {
+                    ino,
+                    offset,
+                    generation: prefix.generation.get(),
+                    payload: u64::from_le_bytes(hash[..8].try_into().map_err(|_| invalid())?),
+                },
+                payload.len() as u64,
+            )))
+        }
         FILE_EXTENT_REG | FILE_EXTENT_PREALLOC => {
-            if item.len() < EXTENT_REGULAR_SIZE {
-                return Err(invalid());
-            }
-            let disk = le64(item, EXTENT_BYTENR)?;
-            Ok((disk != 0).then_some((ExtentKey::Disk(disk), le64(item, EXTENT_DISK_BYTES)?)))
+            let extent: &RegularExtent = parse(item)?;
+            let disk = extent.disk_bytenr.get();
+            Ok((disk != 0).then_some((ExtentKey::Disk(disk), extent.disk_num_bytes.get())))
         }
         _ => Err(invalid()),
     }
@@ -400,7 +449,7 @@ pub fn plan(store: &Path, parts: &[PathBuf]) -> io::Result<Plan> {
     q.max_type = ROOT_REF;
     search(&root, &mut TreeSearch::new(SEARCH_BUFFER), q, |k, item| {
         if k.kind == ROOT_REF {
-            children.entry(k.ino).or_default().push((k.offset, le64(item, ROOT_REF_DIRID)?));
+            children.entry(k.ino).or_default().push((k.offset, parse::<RootRef>(item)?.dirid.get()));
         }
         Ok(())
     })?;
@@ -437,7 +486,7 @@ pub fn visit(unit: &TreeUnit, f: &mut dyn FnMut(PartId, &Held)) -> io::Result<()
         }
         match k.kind {
             INODE_ITEM => {
-                let mode = u32::from_le_bytes(bytes(item, INODE_MODE)?);
+                let mode = parse::<InodeItem>(item)?.mode.get();
                 if mode & libc::S_IFMT == libc::S_IFREG {
                     groups.start(k.ino);
                 }
@@ -475,6 +524,31 @@ pub fn visit(unit: &TreeUnit, f: &mut dyn FnMut(PartId, &Held)) -> io::Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uapi_layouts() {
+        use super::*;
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<SearchHeader>(), 32);
+        assert_eq!(offset_of!(SearchHeader, objectid), 8);
+        assert_eq!(offset_of!(SearchHeader, offset), 16);
+        assert_eq!(offset_of!(SearchHeader, kind), 24);
+        assert_eq!(offset_of!(SearchHeader, len), 28);
+        assert_eq!(size_of::<InodeItem>(), 56);
+        assert_eq!(offset_of!(InodeItem, mode), 52);
+        assert_eq!(size_of::<InodeRef>(), 10);
+        assert_eq!(offset_of!(InodeRef, name_len), 8);
+        assert_eq!(size_of::<InodeExtref>(), 18);
+        assert_eq!(offset_of!(InodeExtref, parent), 0);
+        assert_eq!(offset_of!(InodeExtref, name_len), 16);
+        assert_eq!(size_of::<RootRef>(), 8);
+        assert_eq!(offset_of!(RootRef, dirid), 0);
+        assert_eq!(size_of::<ExtentPrefix>(), 21);
+        assert_eq!(offset_of!(ExtentPrefix, generation), 0);
+        assert_eq!(offset_of!(ExtentPrefix, kind), 20);
+        assert_eq!(size_of::<RegularExtent>(), 53);
+        assert_eq!(offset_of!(RegularExtent, disk_bytenr), 21);
+        assert_eq!(offset_of!(RegularExtent, disk_num_bytes), 29);
+    }
     use super::*;
 
     #[test]
