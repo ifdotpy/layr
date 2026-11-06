@@ -463,7 +463,7 @@ impl Db {
             if let Some(a) = rec.data.get("attestation") {
                 if a["kind"] == "revoke" {
                     for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
-                        tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND uid=?2")?
+                        tx.prepare_cached("UPDATE approvals SET withdrawn=1 WHERE id=?1 AND (uid=?2 OR ?2=0)")?
                             .execute(params![id, rec.actor.uid as i64])?;
                     }
                 }
@@ -1106,9 +1106,11 @@ impl Db {
             if a.kind == "revoke" {
                 for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
                     self.conn
+                        // Root of the signing machine revokes for every user of it: the row takes the
+                        // target's user, so the revocation matches it (only on the same machine).
                         .prepare_cached(
                             "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
-                         SELECT ?1,?2,?3,?4,?5 FROM attestations WHERE id=?2 AND subject=?6",
+                         SELECT ?1,?2,?3,CASE WHEN ?4=0 AND machine=?3 THEN uid ELSE ?4 END,?5 FROM attestations WHERE id=?2 AND subject=?6",
                         )?
                         .execute(params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id])?;
                 }
@@ -1134,9 +1136,10 @@ impl Db {
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
-    pub fn own_attestations(&self, subject: &str, machine: &str, uid: u32, kind: Option<&str>) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND uid=?3 AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
-        let v = st.query_map(params![subject, machine, uid as i64, kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+    /// The attestations of `subject` that `machine` made for `uid` (any user when None), but revokes.
+    pub fn own_attestations(&self, subject: &str, machine: &str, uid: Option<u32>, kind: Option<&str>) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached("SELECT id FROM attestations WHERE subject=?1 AND machine=?2 AND (?3 IS NULL OR uid=?3) AND (?4 IS NULL OR kind=?4) AND kind<>'revoke'")?;
+        let v = st.query_map(params![subject, machine, uid.map(i64::from), kind], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 
@@ -1757,7 +1760,49 @@ mod tests {
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
     #[test]
+<<<<<<< head
     fn opening_a_current_database_takes_no_write_lock() {
+||||||| base
+    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
+=======
+    fn root_revokes_the_evidence_of_every_user_of_its_machine_only() {
+        let db = memory();
+        let state = "01a12290-0000-7000-8000-000000000003";
+        let machine = "01a12290-0000-7000-8000-00000000aaaa";
+        let attest = |seq: u64, uid: u32, signer: &str, kind: &str, revokes: Vec<String>| {
+            let mut r = state_record(seq, state, vec![]);
+            r.states.clear();
+            r.id = format!("01a12290-0000-7000-8000-{seq:012}");
+            r.op = "attest".into();
+            r.time = seq as i64;
+            r.actor.uid = uid;
+            r.machine = signer.into();
+            r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:kind.into(),payload_digest:"0".repeat(64),payload_ref:None,signer:signer.into(),time:seq as i64},"revokes":revokes});
+            r
+        };
+        let other_machine = "01a12290-0000-7000-8000-00000000bbbb";
+        let runner = attest(1, 1001, machine, "check", vec![]);
+        let foreign = attest(2, 1001, other_machine, "check", vec![]);
+        for r in [&runner, &foreign] {
+            db.derive(r, &|_| true, machine).unwrap();
+        }
+        assert_eq!(db.own_attestations(state, machine, Some(0), None).unwrap(), Vec::<String>::new());
+        assert_eq!(db.own_attestations(state, machine, None, None).unwrap(), vec![runner.id.clone()]);
+        // A root revoke of this machine names the runner's check (and, forged, another machine's).
+        let revoke = attest(3, 0, machine, "revoke", vec![runner.id.clone(), foreign.id.clone()]);
+        db.derive(&revoke, &|_| true, machine).unwrap();
+        // The filter of the evidence reads (`checks`, `check_exit`).
+        let mut st = db
+            .conn
+            .prepare("SELECT id FROM attestations a WHERE kind='check' AND NOT EXISTS (SELECT 1 FROM attestation_revocations v
+                WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord) ORDER BY id")
+            .unwrap();
+        let left: Vec<String> = st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(left, vec![foreign.id.clone()], "root revokes its machine's users only");
+    }
+    #[test]
+    fn opening_a_current_database_takes_no_write_lock_and_still_imports_late_records() {
+>>>>>>> origin-https/root-revoke
         let dir = std::env::temp_dir().join(format!("layr-db-open-{}", crate::ids::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layr.sqlite");
