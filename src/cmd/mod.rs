@@ -229,14 +229,8 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
-<<<<<<< head
-   init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
-   usage [--days <n>] [--json]
-||||||| base
-   init [--allow-root-snapshots], projects, project delete <project>, config, cache, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
-=======
    init [--allow-root-snapshots], projects, project delete <project>, config, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
->>>>>>> origin-https/main
+   usage [--days <n>] [--json]
    daemon [--allow-root-snapshots]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
@@ -250,25 +244,11 @@ const OVERLAY_READS: &[&str] =
 pub const COMMANDS: &[&str] = &[
     "help", "--help", "-h", "version", "--version", "status", "diff", "show", "log", "rev-parse", "merge-base", "blame",
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
-<<<<<<< head
-    "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
-    "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
-    "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
-    "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
-    "usage",
-||||||| base
-    "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "approvals",
-    "checks", "ref", "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe",
-    "gc", "du", "fsck", "reindex", "init", "projects", "machines", "debug", "config", "cache", "layer", "remote", "fetch", "pull",
-    "push", "git-sync", "git", "clone", "overlay", "export", "sync", "serve-peer", "worktree", "branch", "commit", "stash",
-    "cherry-pick", "rebase", "revert", "checkout", "switch", "person", "mount", "daemon", "follow", "volume", "project",
-=======
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
->>>>>>> origin-https/main
+    "usage",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
