@@ -98,7 +98,7 @@ fn xml_frame(attrs: &BTreeMap<String, String>) -> Option<Value> {
 }
 pub(super) fn normalize(text: &str, extension: &str, ignore: &[String]) -> Result<Document> {
     match extension {
-        "html" => html(text),
+        "html" => html(text, ignore),
         "xml" => xml(text, ignore),
         "json" => {
             let value: Value = serde_json::from_str(text)?;
@@ -121,7 +121,66 @@ pub(super) fn normalize(text: &str, extension: &str, ignore: &[String]) -> Resul
         _ => bail!("unsupported structure extension '{extension}'"),
     }
 }
-fn html(text: &str) -> Result<Document> {
+/// An `id` value that a framework generates per render (React `:r1:`, numbered or hashed ids): it is noise in a
+/// structure diff.
+fn generated_id(value: &str) -> bool {
+    let digits = value.bytes().filter(u8::is_ascii_digit).count();
+    let hex_run = value
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .any(|run| run.len() >= 8 && run.bytes().any(|b| b.is_ascii_digit()));
+    value.contains(':') || digits >= 4 || hex_run
+}
+
+/// Text with its dates and times (`2026-11-06`, `2026-11-06T03:16:19Z`, `03:16`, `03:16:19`) as `<time>`: a page that
+/// shows the time of its build or of the request differs on every run.
+fn without_times(text: &str) -> String {
+    let b = text.as_bytes();
+    let digits = |at: usize, n: usize| at + n <= b.len() && b[at..at + n].iter().all(u8::is_ascii_digit);
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let mut end = None;
+        if boundary && digits(i, 4) && b.get(i + 4) == Some(&b'-') && digits(i + 5, 2) && b.get(i + 7) == Some(&b'-') && digits(i + 8, 2) {
+            let mut j = i + 10;
+            if matches!(b.get(j), Some(b'T') | Some(b' ')) && digits(j + 1, 2) && b.get(j + 3) == Some(&b':') && digits(j + 4, 2) {
+                j += 6;
+                if b.get(j) == Some(&b':') && digits(j + 1, 2) {
+                    j += 3;
+                    while j < b.len() && (b[j] == b'.' || b[j].is_ascii_digit()) {
+                        j += 1;
+                    }
+                }
+                if b.get(j) == Some(&b'Z') {
+                    j += 1;
+                }
+            }
+            end = Some(j);
+        } else if boundary && digits(i, 2) && b.get(i + 2) == Some(&b':') && digits(i + 3, 2) {
+            let mut j = i + 5;
+            if b.get(j) == Some(&b':') && digits(j + 1, 2) {
+                j += 3;
+            }
+            if j >= b.len() || !b[j].is_ascii_alphanumeric() {
+                end = Some(j);
+            }
+        }
+        match end {
+            Some(j) => {
+                out.push_str("<time>");
+                i = j;
+            }
+            None => {
+                let c = text[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn html(text: &str, ignore: &[String]) -> Result<Document> {
     use html5gum::{DefaultEmitter, Token, Tokenizer};
     let mut doc = Document::default();
     let mut pending = String::new();
@@ -129,14 +188,20 @@ fn html(text: &str) -> Result<Document> {
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(text, emitter) {
         match token? {
-            Token::String(s) => pending.push_str(&String::from_utf8_lossy(&s)),
+            Token::String(s) => pending.push_str(&without_times(&String::from_utf8_lossy(&s))),
             Token::StartTag(tag) => {
                 doc.flush_text(&mut pending, None);
                 let name = String::from_utf8_lossy(&tag.name).into_owned();
                 let mut line = format!("<{name}");
                 for (key, value) in tag.attributes {
                     let key = String::from_utf8_lossy(&key);
-                    if key == "nonce" || (key.starts_with("data-") && key.ends_with("id")) {
+                    let value_text = String::from_utf8_lossy(&value);
+                    if key == "nonce"
+                        || (key.starts_with("data-") && key.ends_with("id"))
+                        || ignore.iter().any(|i| i.as_str() == key.as_ref())
+                        || (matches!(key.as_ref(), "id" | "for" | "aria-labelledby" | "aria-describedby" | "aria-controls")
+                            && generated_id(&value_text))
+                    {
                         continue;
                     }
                     line.push_str(&format!(" {key}=\"{}\"", escape(&String::from_utf8_lossy(&value))));
@@ -357,6 +422,20 @@ mod tests {
         assert_eq!(result["elements_removed"], 0);
         assert_eq!(result["text_changes"], 2);
         assert_eq!(result["structure_regions"], json!([]));
+    }
+    #[test]
+    fn html_drops_generated_ids_times_and_ignored_attributes() {
+        let ignore = vec!["data-build".to_string()];
+        let a = normalize("<p id=':r1:' data-build='a1'>Built 2026-11-06T03:16:19Z at 03:16</p><a id='home'>x</a>", "html", &ignore)
+            .unwrap();
+        let b = normalize("<p id=':r9:' data-build='b2'>Built 2026-11-07T10:00:00Z at 10:00</p><a id='home'>x</a>", "html", &ignore)
+            .unwrap();
+        assert_eq!(a.text(), b.text());
+        assert!(a.text().contains("Built &lt;time&gt; at &lt;time&gt;"), "{}", a.text());
+        assert!(a.text().contains("id=\"home\""), "a stable id stays");
+        let other = normalize("<p>Built</p><a id='away'>x</a>", "html", &ignore).unwrap();
+        assert_ne!(a.text(), other.text());
+        assert_eq!(without_times("v1.2:34 and 1234:56"), "v1.2:34 and 1234:56");
     }
     #[test]
     fn xml_frames_survive_ignored_coordinates_and_attribute_changes() {
