@@ -23,7 +23,8 @@ pub struct Tool {
     pub lockfile: &'static str,
     pub prune: &'static [&'static [&'static str]],
     pub warm: &'static [&'static str],
-    /// The install that makes a damaged folder whole again from the local store (`repair_with`).
+    /// The install that makes a damaged folder whole again from the local store (`repair_with`). It runs the
+    /// lifecycle scripts, as the project's own install does: a postinstall puts platform binaries in place.
     pub repair: &'static [&'static str],
 }
 
@@ -35,7 +36,7 @@ pub const PNPM: Tool = Tool {
         &["prune", "--ignore-scripts", "--reporter=silent"],
     ],
     warm: &["install", "--frozen-lockfile", "--reporter=silent"],
-    repair: &["install", "--frozen-lockfile", "--offline", "--force", "--ignore-scripts", "--reporter=silent"],
+    repair: &["install", "--frozen-lockfile", "--offline", "--force", "--reporter=silent"],
 };
 
 pub const NPM: Tool = Tool {
@@ -43,7 +44,7 @@ pub const NPM: Tool = Tool {
     lockfile: "package-lock.json",
     prune: &[&["prune", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]],
     warm: &["install", "--no-audit", "--no-fund", "--loglevel=error"],
-    repair: &["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
+    repair: &["ci", "--offline", "--no-audit", "--no-fund", "--loglevel=error"],
 };
 
 /// The pnpm adapter (`layr-adapter`): `node_modules` next to `pnpm-lock.yaml`.
