@@ -240,7 +240,7 @@ schema version before the upgrade. Only the newest backup is kept. The rebuild p
 `database backup: <path> (schema <old>, before the upgrade)`. The copy needs the same space as the
 database (a 400 MB database needs 400 MB more until the backup goes).
 
-`gc` lists each backup older than 14 days with its size; `gc --repair` removes them.
+A backup older than 14 days goes at the end of the next command on the project.
 
 To roll back to the old layr:
 

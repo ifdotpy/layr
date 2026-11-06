@@ -83,6 +83,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
                 eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
             }
         }
+        drop_old_backups(store, &name);
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
         if expired_refs(store, &name) {
             if let Err(e) = expire_refs(ctx, &name) {
@@ -211,6 +212,19 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
         }
     }
     Ok(())
+}
+
+/// How long the database backup of a schema upgrade stays (`layr.sqlite.schema-<old>.bak`, docs/commands.md).
+const BACKUP_DAYS: u64 = 14;
+
+/// The database backup of a schema upgrade of project `name` goes when it is older than `BACKUP_DAYS`: only the
+/// newest one exists (`Db::backup_before_upgrade`), so this is one read of the database folder.
+fn drop_old_backups(store: &Store, name: &str) {
+    let Ok(dir) = store.project_dir(name) else { return };
+    let Ok(old) = crate::db::old_upgrade_backups(&crate::store::db_file(&dir), BACKUP_DAYS) else { return };
+    for (path, _, _) in old {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// True when a ref of project `name` has expired (a read-only query; no project open).

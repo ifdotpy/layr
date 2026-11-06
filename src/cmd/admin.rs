@@ -1395,9 +1395,24 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     Ok(gone)
 }
 
-/// The periodic repair of a project (`service.rs`): it prints nothing.
-pub fn gc_repair_quiet(ctx: &Ctx, repo: &Repo) -> Result<usize> {
-    repair_project(ctx, repo, false, true, false, None)
+/// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --caches` would find, in
+/// one line, or None when both are clean. It only reads. The operations that make data dead free it, so a report
+/// names a gap in them (docs/ownership.md).
+pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
+    let c = snapshot(repo, || owners_check(repo))?;
+    let (cache_items, cache_bytes) = cache_garbage(repo)?;
+    if c.clean() && cache_items == 0 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "owners {} missing, {} extra; {} leaked state(s), {}; {} cache item(s), {}; `layr gc --repair` frees them",
+        c.missing.len(),
+        c.extra.len(),
+        c.freed.len(),
+        human_size(states_bytes(repo, &c.freed)),
+        cache_items,
+        human_size(cache_bytes)
+    )))
 }
 
 /// Replace the owners table with the replay of the records (live pins kept) and mark the leaked
@@ -1578,6 +1593,18 @@ fn fsck_caches(ctx: &Ctx) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     repo.require(ctx, "fsck")?;
+    let (states, bytes) = cache_garbage_with(repo, &mut |line| outln!(ctx, "{line}"))?;
+    outln!(ctx, "unreachable cache data: {states} item(s), {bytes} bytes");
+    Ok(if states == 0 { 0 } else { 1 })
+}
+
+/// The cache data of this project that nothing keeps: items and bytes (`fsck --caches`).
+fn cache_garbage(repo: &Repo) -> Result<(usize, u64)> {
+    cache_garbage_with(repo, &mut |_| {})
+}
+
+/// `cache_garbage`, with a line for each kind to `say`.
+fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize, u64)> {
     let _lock = repo.p.lock()?;
     let (mut states, mut bytes) = (0usize, 0u64);
     for name in repo.overlay_names()? {
@@ -1591,17 +1618,16 @@ fn fsck_caches(ctx: &Ctx) -> Result<i32> {
         let orphans = repo.orphan_cache_lines(&orepo)?;
         let dead = repo.cache_unreachable(&name)?;
         let size: u64 = dead.iter().map(|id| crate::cache_overlay::tree_size(&orepo.p.state_path(id))).sum();
-        outln!(ctx, "overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines", dead.len(), size, orphans.len());
+        say(format!("overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines", dead.len(), size, orphans.len()));
         states += dead.len() + orphans.len();
         bytes += size;
     }
     let old = excess_caches(&repo.p)?;
     let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
-    outln!(ctx, "cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size);
+    say(format!("cache snapshots beyond retention.caches: {}, {} bytes", old.len(), size));
     states += old.len();
     bytes += size;
-    outln!(ctx, "unreachable cache data: {states} item(s), {bytes} bytes");
-    Ok(if states == 0 { 0 } else { 1 })
+    Ok((states, bytes))
 }
 
 /// Cache snapshots (build output) are large and only the newest ones warm new lines: they stay
@@ -1724,17 +1750,6 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "layer bases: {} difference(s), {verb}", bases_diff.len());
         for line in bases_diff.iter().take(20) {
             outln!(ctx, "\t{line}");
-        }
-    }
-    // Upgrade backups (schema changes, src/db.rs) older than 14 days. --repair removes them.
-    let db_file = crate::store::db_file(&h.repo.p.dir);
-    let old_backups = crate::db::old_upgrade_backups(&db_file, 14)?;
-    for (path, bytes, days) in &old_backups {
-        outln!(ctx, "old upgrade backup: {} ({:.1} MiB, {days} days old)", path.display(), *bytes as f64 / 1_048_576.0);
-    }
-    if a.has("--repair") && !a.has("-n") {
-        for (path, _, _) in &old_backups {
-            std::fs::remove_file(path)?;
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;

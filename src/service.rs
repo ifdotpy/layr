@@ -397,7 +397,8 @@ fn disk_full_hint(root: &Path) -> String {
 /// folder. It is local to this machine and is never sent to other machines.
 const PERIODIC_CHECKS: &str = "periodic-checks.json";
 
-/// Periodic work: automatic states of busy lines, access to the git store, retention.
+/// Periodic work: automatic states of busy lines, access to the git store. No repair: the operations that make
+/// data dead free it, and the daily garbage report (`garbage_report`) names a gap.
 fn periodic(root: &Path, hourly: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
@@ -477,9 +478,31 @@ fn periodic(root: &Path, hourly: bool) {
             if let Ok(_lock) = repo.p.lock() {
                 let _ = crate::gitbridge::sync_store_access(&repo);
             }
-            if let Err(e) = crate::cmd::admin::gc_repair_quiet(&ctx, &repo) {
-                eprintln!("layr periodic repair ({name}): {e:#}");
-            }
+        }
+    }
+}
+
+/// The daily garbage report: for each project of the store at `root`, one line in the service log when
+/// `layr gc` or `layr fsck --caches` would find something. It changes nothing: the operations that make data dead
+/// free it, and a report names a gap in them.
+fn garbage_report(root: &Path, caller: Caller) {
+    let Ok(store) = Store::open(root) else { return };
+    let names = store.project_names().unwrap_or_default();
+    drop(store);
+    for name in names.into_iter().filter(|n| !n.contains('%')) {
+        let Ok(store) = Store::open(root) else { return };
+        let ctx = Ctx {
+            store,
+            caller: caller.clone(),
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };
+        match crate::cmd::admin::garbage_report(&repo) {
+            Ok(Some(found)) => eprintln!("layr garbage report ({name}): {found}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("layr garbage report ({name}): {e:#}"),
         }
     }
 }
@@ -493,7 +516,7 @@ fn user_socket_path() -> PathBuf {
 
 /// `layr daemon [--socket <path>] [--tick <seconds>]`. Root serves every local user (Linux, or
 /// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
-/// uid, switches no user and runs no periodic gc or state freeing, only the follow tick.
+/// uid, switches no user and runs no periodic saves, only the follow tick and the daily garbage report.
 /// How long a stopping service waits for its running requests. The service managers allow more
 /// (`TimeoutStopSec` of packaging/systemd/layr.service, `ExitTimeOut` of the launchd plist).
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(80);
@@ -567,6 +590,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     crate::sys::catch_terminate()?;
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
     let mut last_hourly: i64 = 0;
+    let mut last_daily: i64 = 0;
     let mut next = std::time::Instant::now() + std::time::Duration::from_secs(tick);
     // Running request processes, by caller: limits keep one user from exhausting the service.
     let mut children: HashMap<i32, u32> = HashMap::new();
@@ -669,6 +693,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             // Periodic work in a child, so the service stays responsive and single threaded.
             let now = crate::ids::now_ms();
             let hourly = now - last_hourly >= 3_600_000;
+            let daily = now - last_daily >= 86_400_000;
             match crate::sys::fork() {
                 Ok(crate::sys::Fork::Child) => {
                     drop(listener);
@@ -679,7 +704,10 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                     crate::follow::tick(&root, caller.clone());
                     // Dead cache states in remotes that nobody pushes to (docs/cache-overlays.md).
                     if hourly {
-                        crate::store_remote::sweep_tick(&root, caller);
+                        crate::store_remote::sweep_tick(&root, caller.clone());
+                    }
+                    if daily {
+                        garbage_report(&root, caller);
                     }
                     std::process::exit(0);
                 }
@@ -687,6 +715,9 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                     periodic_child = Some(pid);
                     if hourly {
                         last_hourly = now;
+                    }
+                    if daily {
+                        last_daily = now;
                     }
                 }
                 Err(e) => eprintln!("layr service: fork failed: {e}"),
