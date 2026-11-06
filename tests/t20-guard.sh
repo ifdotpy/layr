@@ -17,6 +17,8 @@ TIP=$(l rev-parse head)
 RESULT=$(l bisect run --json --good "$GOOD" --bad head -- sh -c "$CMD")
 eq 'bisect finds the first bad commit' "$BAD" "$(l rev-parse "$(printf '%s' "$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')")"
 eq 'bisect does not move the line' "$TIP" "$(l rev-parse head)"
+eq 'the finding is a bisect attestation of the first bad state' "1" "$(l attestations "$BAD" --kind bisect --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+eq 'other states get no bisect attestation' "0" "$(l attestations "$GOOD" --kind bisect --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 RESULT=$(l bisect run --json --good "$GOOD" --bad head -- sh -c "$CMD")
 eq 'bisect reuses every check on repeat' True "$(printf '%s' "$RESULT" | python3 -c 'import json,sys; print(all(s["reused"] for s in json.load(sys.stdin)["steps"]))')"
 no 'bisect refuses an invalid good bound' l bisect run --good head --bad "$GOOD" -- sh -c "$CMD"

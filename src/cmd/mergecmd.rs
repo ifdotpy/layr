@@ -729,8 +729,7 @@ pub(crate) fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &s
         let Some(cmd) = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)) else {
             return Ok(false);
         };
-        let argv = layr_model::protection::check_argv(&cmd);
-        if repo.p.db.check_exit(after, &argv, Some(0))?.is_none() {
+        if !super::attest::check_passed(repo, after, &cmd)? {
             return Ok(false);
         }
     }
@@ -788,13 +787,7 @@ fn run_line_checks(
             }
             continue;
         }
-        let evidence = layr_model::protection::required_check(
-            name,
-            Some(command),
-            repo.p.db.check_exit(candidate, &argv, Some(0))?.is_some(),
-            None,
-        );
-        if evidence.result == layr_model::protection::CheckResult::Passed {
+        if super::attest::check_passed(repo, candidate, command)? {
             continue;
         }
         let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
