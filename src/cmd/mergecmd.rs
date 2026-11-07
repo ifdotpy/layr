@@ -491,10 +491,10 @@ fn finish(
     // Without overlays both trees are read in their layers: a complete view of a thin state
     // cost one clone of the whole tree, also for a fast-forward that changes one file.
     let view = if layers.is_empty() { None } else { Some(repo.assemble(line, new_head, &layers)?) };
-    let old_root = repo.head_src(line)?;
+    let old_root = repo.head_src_to_write(line)?;
     let new_root = match &view {
         Some(v) => crate::repo::snap(&v.path),
-        None => repo.state_src(new_head)?,
+        None => repo.state_src_to_write(new_head)?,
     };
     drop(trees);
     let wdir = repo.working(line);

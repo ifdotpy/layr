@@ -466,11 +466,40 @@ impl<'a> Repo<'a> {
         Ok(self.p.state_path(id))
     }
 
+    /// `state_src` for a command that writes a working folder from the tree under its line lock
+    /// only (`finish`): `gc` and `keyframe` take the project lock, so the layers must stay for the
+    /// whole write and its write-back. A view that it reads is marked as used, as `state_root`
+    /// marks it, so no `gc` removes it now. A chain longer than `thin.chain` can become a keyframe,
+    /// which drops its top layer: it is read as a complete tree, as before.
+    pub fn state_src_to_write(&self, id: &str) -> Result<Snap> {
+        #[cfg(target_os = "macos")]
+        {
+            self.check_state(id)?;
+            if self.p.delta_path(id).is_dir() {
+                if self.p.state_path(id).is_dir() {
+                    crate::thin::touch_view(&self.p, id);
+                } else if crate::thin::chain_len(&self.p, id) > self.p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize {
+                    return Ok(snap(&self.state_root(id)?));
+                }
+            }
+        }
+        self.state_src(id)
+    }
+
     /// The head of a line to read (`state_src`). A line with overlays reads its base.
     pub fn head_src(&self, line: &Line) -> Result<Snap> {
+        self.head_src_with(line, false)
+    }
+
+    /// `head_src` with `state_src_to_write`.
+    pub fn head_src_to_write(&self, line: &Line) -> Result<Snap> {
+        self.head_src_with(line, true)
+    }
+
+    fn head_src_with(&self, line: &Line, write: bool) -> Result<Snap> {
         let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
         if layers.is_empty() {
-            return self.state_src(&line.head);
+            return if write { self.state_src_to_write(&line.head) } else { self.state_src(&line.head) };
         }
         let base = self.head_tree(line)?;
         #[cfg(target_os = "macos")]
@@ -3681,14 +3710,15 @@ pub fn holds_files_in(tree: &Snap, path: &str) -> bool {
         if let Some(root) = tree.folder() {
             return holds_files(root, path);
         }
-        // As `holds_files`: an invalid path, or a path through a link, holds files.
+        // As `holds_files`: an invalid path holds files.
         if fsutil::safe_join(tree.top(), path).is_err() {
             return true;
         }
+        // A path below a file or a link: `holds_files` cannot open it as a folder.
         let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
         for i in 1..comps.len() {
             match tree.entry(&comps[..i].join("/")) {
-                Ok(Some(e)) if e.meta.ftype == fsutil::FType::Symlink => return true,
+                Ok(Some(e)) if !e.meta.is_dir() => return true,
                 Ok(_) => {}
                 Err(_) => return true,
             }

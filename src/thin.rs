@@ -1176,7 +1176,7 @@ fn view_stamp(p: &Project, id: &str) -> PathBuf {
     p.meta_dir().join("views").join(id)
 }
 
-fn touch_view(p: &Project, id: &str) {
+pub(crate) fn touch_view(p: &Project, id: &str) {
     let stamp = view_stamp(p, id);
     if let Some(dir) = stamp.parent() {
         let _ = fs::create_dir_all(dir);
@@ -1768,8 +1768,8 @@ mod tests {
         let layered = Layered::over(&layer, Layered::complete(&base))?;
         check_same(&layered, &work);
         // The layers answer `holds_files` as the complete tree does.
-        let paths = ["", "a", "a/deep", "b", "gone", "gone/inner", "quiet", "fresh", "swap-file", "swap-dir", "link", "linkdir"];
-        for p in paths.into_iter().chain(["linkdir/inner", "missing", "missing/below"]) {
+        let paths = ["", "a", "a/deep", "a/edit/below", "b", "gone", "gone/inner", "quiet", "fresh", "swap-file", "swap-dir"];
+        for p in paths.into_iter().chain(["swap-dir/below", "link", "linkdir", "linkdir/inner", "missing", "missing/below"]) {
             assert_eq!(crate::repo::holds_files_in(&layered, p), crate::repo::holds_files(&work, p), "holds_files of '{p}'");
         }
         assert!(layered.find("gone/inner/file")?.is_none());
