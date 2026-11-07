@@ -1494,6 +1494,7 @@ dependencies = [
  "layr-cache",
  "layr-hashers",
  "layr-model",
+ "layr-objects",
  "layr-retest",
  "layr-store",
  "libc",
@@ -1568,6 +1569,21 @@ dependencies = [
  "serde_json",
  "similar",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "layr-objects"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "hmac",
+ "layr-hashers",
+ "layr-store",
+ "rayon",
+ "rustix",
+ "sha2 0.10.9",
+ "zstd-safe",
 ]
 
 [[package]]
