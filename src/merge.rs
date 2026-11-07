@@ -1191,6 +1191,7 @@ mod merge_sides_tests {
                 "derive.inputs.build" => Some("source".into()),
                 _ => None,
             };
+            let uid = rustix::process::geteuid().as_raw();
             let i = Input {
                 base: &base,
                 ours: &ours,
@@ -1202,15 +1203,20 @@ mod merge_sides_tests {
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &config,
-                run_as: Some((rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())),
-                allow_root: false,
+                run_as: Some((uid, rustix::process::getegid().as_raw())),
+                // This fixture explicitly authorizes its own derive command under the test identity.
+                allow_root: uid == 0,
             };
             let out = merge_sides(&i, &sides)?;
             assert_eq!(std::fs::read(result.join(".gitattributes"))?, b"ours");
             assert_eq!(std::fs::read(result.join(".layrattributes"))?, std::fs::read(theirs.join(".layrattributes"))?);
             assert_eq!(std::fs::read(result.join("moved"))?, b"moved");
             assert_eq!(std::fs::read(result.join("z"))?, b"ours");
-            assert_eq!(std::fs::read(result.join("source"))?, b"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n");
+            let source = std::fs::read_to_string(result.join("source"))?;
+            let merge = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
+            let diff3 = "<<<<<<< ours\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> theirs\n";
+            // git merge-file respects merge.conflictStyle, including diff3 and zdiff3.
+            assert!(source == merge || source == diff3, "{source}");
             assert_eq!(std::fs::read(result.join("generated"))?, std::fs::read(result.join("source"))?);
             assert_eq!(
                 out.conflicts.iter().map(|c| (c.path.as_str(), c.kind.as_str())).collect::<Vec<_>>(),
