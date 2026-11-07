@@ -255,13 +255,7 @@ pub const COMMANDS: &[&str] = &[
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
-<<<<<<< head
-    "usage", "objects", "migrate",
-||||||| base
-    "usage",
-=======
-    "usage", "fs", "tool",
->>>>>>> fs-views
+    "usage", "objects", "migrate", "fs", "tool",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {

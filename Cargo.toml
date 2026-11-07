@@ -19,13 +19,7 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-<<<<<<< head
-version = "0.40.0"
-||||||| base
-version = "0.39.1"
-=======
 version.workspace = true
->>>>>>> fs-views
 edition = "2021"
 rust-version.workspace = true
 description = "Local version control on btrfs, APFS and OverlayFS"
