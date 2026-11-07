@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.40.1](https://github.com/ifdotpy/layr/compare/v0.40.0...v0.40.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **release:** layr and layr-api share the workspace version; store-version types its daemon field ([#424](https://github.com/ifdotpy/layr/issues/424)) ([20095de](https://github.com/ifdotpy/layr/commit/20095de273fa3a415afd9e968cd99fb6840b8ec2))
+
+
+### Performance
+
+* **apfs:** fast-forward merge and line new without whole-tree copies ([#417](https://github.com/ifdotpy/layr/issues/417)) ([526d97e](https://github.com/ifdotpy/layr/commit/526d97ed07f12b75d3da7b7c616d4ac8cc54bbc5))
+
 ## [0.40.0](https://github.com/ifdotpy/layr/compare/v0.39.1...v0.40.0) (2026-11-07)
 
 
