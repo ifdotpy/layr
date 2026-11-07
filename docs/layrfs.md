@@ -89,6 +89,31 @@ not indexed, and its tools fall back.
 `tests/t197-layrfs-tools.sh` writes a file and searches for it at once 1,000 times while another
 process creates and removes files, with and without a watcher.
 
+## Virtual lines
+
+A virtual line (`layr line new <name> --view virtual`, see [views.md](views.md)) is a LayrFS
+FSKit mount. Reads through that mount cost one XPC call each (`rg -l` over Chromium took 12 times as
+long), so the server never reads through it:
+
+- The server knows a virtual line by its folder: a `layrfs` mount whose line has a
+  `meta/vlines/<line id>/view.json` in its project. It reads the lower tree (the complete tree of
+  the start state) and the upper folder from there.
+- The index is built from the lower tree, walked natively, and then every path that the upper
+  folder adds, changes or removes (its entries and the whiteouts in `com.layr.removed`).
+- To decide which changed paths rg searches, the server walks a small skeleton of the merged view
+  with ripgrep's own walker: the folders on the way to the path with their ignore files, and the
+  subtree of the path (empty files, real ignore files). The same rules apply as for rg on the mount.
+  A changed ignore file at the root makes the skeleton as large as the tree (Chromium: one pass of
+  about a minute).
+- `rg` reads the upper file if the upper folder has the path, else the lower file, on APFS.
+- The lower tree never changes. The server watches the upper folder (writes through the mount land
+  there), and every query compares the times of the upper folders and the whiteouts first.
+- A line that changes its view (`layr line show`) gets a new index of the new kind.
+
+`tests/t199-virtual-lines.sh` (manual, it needs the signed extension) compares `layr tool rg|find`
+on a virtual line with the real tools on the mount and on a folder line with the same changes, also
+right after a new file, a delete, a rename, a new folder and changed ignore files.
+
 ## Limits
 
 - Memory: the index holds paths and kinds, about 200 bytes per entry (Chromium `src`, 516,265

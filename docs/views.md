@@ -78,7 +78,8 @@ Run `line show` and `line delete` outside the line's folder.
 - The extension's sandbox puts `com.apple.quarantine` (agent `LayrFS`) on each file it makes, and cannot remove it.
   The mount hides the mark, and Layr removes it from the upper folder before a save or a conversion.
 - The extension serves every call. Directory listings cross XPC every time, so `find` over a large tree is slower
-  than in a folder. Small writes cost about 2.5 ms each.
+  than in a folder. Small writes cost about 2.5 ms each. Agents search with `layr tool rg|find` (docs/layrfs.md):
+  the tool server reads the lower tree and the upper folder directly and never goes through the mount.
 - A crash of the extension ends the mount. The upper folder and the changes in it stay; `line show --virtual`
   mounts it again.
 

@@ -47,3 +47,24 @@ Two checks after the run, one `rg -l TODO` each on a new virtual line (same load
 | Kernel data cache (`datacache=writeback`, open and close calls on) | 253 | 435 |
 
 Neither changed the result much; the lock change stays, the data cache stays off.
+
+## Search through the LayrFS tool server
+
+[tools.sh](tools.sh), raw output [tools-results.txt](tools-results.txt). `layr tool rg|find` (docs/layrfs.md)
+serves a virtual line from its lower tree and upper folder, never through the mount. Median of 3 after one
+warm-up, seconds. The load average was 45 to 80 during this run, higher than in the run above, so the real
+`rg` on the folder line took 285 s here (21.7 s above); compare within this table.
+
+| Call | Folder line, real tool | Folder line, `layr tool` | Virtual line, `layr tool` |
+| --- | ---: | ---: | ---: |
+| `rg -l TODO` | 285.2 | 40.1 | 34.3 |
+| `rg -l TODO` after a new file just before | | | 32.3 |
+| `find . -type f` | 26.6 | 0.71 | 0.26 |
+
+- Index build: 2.4 s for the folder line, 2.5 s for the virtual line (lower tree walk plus the upper folder).
+- The real `rg -l TODO` on the mount took 254.8 s in the run above: the tool server makes the virtual line
+  about as fast as a folder line served the same way.
+- `layr tool find` output equals `find` on the mount (sorted). `layr tool rg` output equals `rg --sort path`
+  on the mount for `-l TODO base`, `-n kMaxValue base` and `--files base`, after a new file and a delete
+  just before (checked on the `base` folder, 4,263 files, to keep the run short). The whole-tree `rg`
+  check of tools.sh had a quoting bug in this run and compared nothing; it is fixed in the script.
