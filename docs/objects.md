@@ -39,15 +39,13 @@ lowercase hex digits.
 | `times` | a times table (section 4) | every write |
 | `chunk` | a content-defined part of a large blob (section 5) | cold writes |
 | `opaque` | bytes whose structure the id does not describe: a pack data file (section 6), an encrypted object of a Secret overlay | packs, transfer |
-| `part` | file frames of one push, one after the other (zstd frames: whole files or deltas) | V1 client |
-| `state-tree` | the signed store tree of one state: a JSON header line, then the zstd frame of the canonical tree JSON | V1 client |
 | `chunk-pack` | a pack of content-defined chunks of a cache layer | V1 client |
 | `git-pack` | a Git pack of imported commits | V1 client |
 
-The last four types belong to the Layr Cloud V1 client (ifdotpy/layr#423); their bytes are defined
-in its contract, `docs/remotes.md`, section "Layr Cloud API v1". They use the id rule of this
-section unchanged. An upload names the type in the header `Layr-Object-Type`. `part` and
-`state-tree` leave Public and Private remotes when V1 moves to `tree` and `times` (section 14).
+The last two types belong to the Layr Cloud V1 client (ifdotpy/layr#423, `docs/remotes.md`,
+section "Layr Cloud API v1"); they use the id rule of this section unchanged. An upload names the
+type in the header `Layr-Object-Type`. The V1 client sends states as trees, times tables and packs
+of this file (section 14).
 
 - **SHA-256** is the persisted content hash of layr (`layr_hashers::ContentAddress`). It runs on
   the ARMv8 SHA extensions and SHA-NI; a second write of Chromium, which hashes every file
@@ -378,9 +376,9 @@ objects that no state names.
 
 ## 14. The two tree formats
 
-Decision (maintainer, 2026-11-07): `tree` with `times` is the single target format. The Layr Cloud
-V1 client moves to the state body `{"times":"<id>","tree":"<id>"}` and to packs instead of parts,
-with no interim format. The table records why.
+Decided (Layr and LayrFS, 2026-11-07): `tree` wins. The Layr Cloud V1 client (#423) sends states as
+`{"times","tree"}` with packs of this file; `part` and `state-tree` are gone. The comparison below is
+kept as the reason.
 
 | | `tree` (this file) | `state-tree` (V1 client, store format v2) |
 | --- | --- | --- |
@@ -393,12 +391,16 @@ with no interim format. The table records why.
 | change of one file in a big tree | rewrites the folders on its path | rewrites the whole map |
 | signed | by the record that names it | header signature inside the object |
 
-What V1 changes to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
+What V1 would change to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
 push sends the trees, times tables and packs (section 6) that the server lacks (`POST
 /objects/missing` with tree, times and pack ids); the server finds a blob through the pack indexes
 (or reads them to build its own index). `part` and `state-tree` then go away for Public and Private
-remotes; `chunk-pack` and `git-pack` stay as they are. `tree` needs no change: it holds no storage
-positions, so a reader finds bytes through the pack indexes.
+remotes; `chunk-pack` and `git-pack` stay as they are.
+
+What `tree` would change to serve as the V1 state tree: nothing in its encoding, but it does not
+hold storage positions, so a reader needs pack indexes to find bytes. The reverse (the V1
+`state-tree` as the only tree) would lose content addressing of folders, folders and attributes,
+and stable ids across pushes; this file does not recommend it.
 
 ## 15. Measurements
 
