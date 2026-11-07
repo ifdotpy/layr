@@ -1560,13 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-<<<<<<< head
-version = "0.39.1"
-||||||| base
-version = "0.40.0"
-=======
 version = "0.40.1"
->>>>>>> origin-https/main
 dependencies = [
  "age",
  "anyhow",
@@ -1616,13 +1610,7 @@ version = "0.1.0"
 
 [[package]]
 name = "layr-api"
-<<<<<<< head
-version = "0.39.1"
-||||||| base
-version = "0.37.0"
-=======
 version = "0.40.1"
->>>>>>> origin-https/main
 dependencies = [
  "serde",
  "serde_json",
