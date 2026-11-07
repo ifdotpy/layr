@@ -56,6 +56,11 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let mut lines = Vec::new();
     for l in repo.lines()? {
+        // The folder of a virtual line is a mount; its upper folder is in the project's meta folder.
+        #[cfg(target_os = "macos")]
+        if crate::views::of(repo, &l).is_some() {
+            continue;
+        }
         if a.pos.is_empty() || a.pos.contains(&l.name) {
             let path = repo.working(&l);
             if path.is_dir() {
