@@ -75,7 +75,9 @@ pub fn missing_times(store: &Store, root: &Id) -> Result<Vec<Id>> {
     let mut missing = Vec::new();
     let mut stack = vec![*root];
     while let Some(id) = stack.pop() {
-        if !seen.insert(id) { continue; }
+        if !seen.insert(id) {
+            continue;
+        }
         if !store.has(&id) {
             missing.push(id);
             continue;
@@ -225,7 +227,7 @@ mod tests {
         let w = write_tree(&a, &src, &options(Temperature::Hot)).unwrap();
         let (tree, times) = (w.tree.unwrap(), w.times.unwrap());
         let ids = reachable(&a, &tree).unwrap();
-        // Four trees (root, a, a/b and none for the link), three distinct blobs: "same" equals "one".
+        // Three trees (root, a, a/b and none for the link), three distinct blobs: "same" equals "one".
         assert_eq!(ids.iter().filter(|(_, k)| *k == Kind::Tree).count(), 3);
         assert_eq!(ids.iter().filter(|(_, k)| *k == Kind::Blob).count(), 3);
         assert_eq!(ids[0], (tree, Kind::Tree), "the root tree comes first");
@@ -233,10 +235,10 @@ mod tests {
         let b = Store::open(&s.join("b"), Keying::Plain).unwrap();
         assert_eq!(missing_trees(&b, &tree).unwrap(), vec![tree]);
         let mut all = ids.clone();
-        all.push((times, Kind::Times));
+        all.extend(a.times_ids(&times).unwrap().into_iter().map(|id| (id, Kind::Times)));
         let packs = build_packs(&a, &all).unwrap();
         assert_eq!(packs.len(), 1);
-        assert_eq!(packs[0].objects, 7);
+        assert_eq!(packs[0].objects, 9);
         for p in &packs {
             assert_eq!(add_pack(&b, &p.data, &p.index).unwrap(), p.id);
             // Again: the same pack is left as it is.

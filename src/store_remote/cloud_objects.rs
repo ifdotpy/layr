@@ -37,34 +37,23 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
         _ => None,
     };
     let _pin = repo.pin(&[state.id.as_str()])?;
-    let root = repo.state_root(&state.id)?;
+    let source = repo.state_src(&state.id)?;
+    let root = crate::objstore::SnapshotSource(&source);
     let options = WriteOptions {
         temperature: Temperature::Cold,
         previous: base.as_ref().map(|(_, r)| r.tree),
         exclude: vec![b".git".to_vec()],
         similar: false,
     };
-    let report = match base {
-        Some((parent, r)) => {
-            let _parent_pin = repo.pin(&[parent.as_str()])?;
-            let mut paths: Vec<Vec<u8>> = Vec::new();
-            for change in crate::changes::candidates(&repo.state_src(&parent)?, &repo.state_src(&state.id)?)? {
-                paths.push(change.path.into_bytes());
-                if let Some(old) = change.old_path {
-                    paths.push(old.into_bytes());
-                }
-            }
-            paths.sort();
-            paths.dedup();
-            layr_objects::write::write_changed(
-                objects,
-                &root,
-                &layr_objects::write::Base { tree: r.tree, times: r.times },
-                &paths,
-                &options,
-            )?
-        }
-        None => layr_objects::write_tree(objects, &root, &options)?,
+    let report = match crate::objstore::write_base(repo, objects, &state.id, first.map(String::as_str), &source)? {
+        Some((r, paths)) => layr_objects::write::write_changed_from(
+            objects,
+            &root,
+            &layr_objects::write::Base { tree: r.tree, times: r.times },
+            &paths,
+            &options,
+        )?,
+        None => layr_objects::write::write_tree_from(objects, &root, &options)?,
     };
     let found = StateRef {
         tree: report.tree.context("a write gives a tree")?,
@@ -80,8 +69,24 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let scope = store.api_scope();
     let lines: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
     let required = reader::required_states(repo, &lines, opts)?;
+    let objects = open(repo)?;
+    let mut local = repo.p.db.present_states()?;
+    // Migrated history can be local without a snapshot. It must still be included in a push.
+    let mut known: HashSet<String> = local.iter().map(|(id, _)| id.clone()).collect();
+    let mut query = repo.p.db.conn.prepare("SELECT id, rec FROM states WHERE deleted=0 AND present=0")?;
+    let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, raw) = row?;
+        let state: StateRec = serde_json::from_str(&raw)?;
+        if let (Some(tree), Some(times)) = (state.tree, state.times) {
+            if objects.has(&Id::parse(&tree)?) && objects.has(&Id::parse(&times)?) && known.insert(id.clone()) {
+                local.push((id, false));
+            }
+        }
+    }
+    drop(query);
     let mut candidates = Vec::new();
-    for (id, deleted) in repo.p.db.present_states()? {
+    for (id, deleted) in local {
         if deleted {
             continue;
         }
@@ -112,7 +117,6 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
         return Ok(());
     }
     crate::secrets::check_states(ctx, repo, states.iter().map(|s| s.id.as_str()))?;
-    let objects = open(repo)?;
     let states = writer::parents_first(states)?;
     let mut refs = Vec::with_capacity(states.len());
     for state in &states {
@@ -123,8 +127,9 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let mut reach: Vec<(Id, Kind)> = Vec::new();
     let mut seen = HashSet::new();
     for (_, r) in &refs {
-        for item in objects.times_ids(&r.times)?.into_iter().map(|id| (id, Kind::Times))
-            .chain(transfer::reachable(&objects, &r.tree)?) {
+        for item in
+            objects.times_ids(&r.times)?.into_iter().map(|id| (id, Kind::Times)).chain(transfer::reachable(&objects, &r.tree)?)
+        {
             if seen.insert(item.0) {
                 reach.push(item);
             }

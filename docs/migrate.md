@@ -220,14 +220,20 @@ After `--delete-old`, you cannot go back to the old storage on this machine.
 Before `--delete-old`, the old snapshots are still the full truth. To undo the migration:
 
 1. Stop everything that writes to the project (see above).
-2. Delete the object store and the migration table of the project:
+2. Disable object writes:
+
+   ```sh
+   layr config objects.enabled false
+   ```
+
+3. Delete the object store and the migration table of the project:
 
    ```sh
    rm -rf ~/Projects/layr-store/projects/<project>/meta/objects
    rm -rf ~/Projects/layr-store/projects/<project>/meta/migrate
    ```
 
-3. Check the project with `layr fsck`.
+4. Check the project with `layr fsck`.
 
 The history keeps the records that named the trees, but without the object store they change
 nothing: every command reads the old snapshots again. A later `layr migrate` starts from the
@@ -235,8 +241,12 @@ beginning.
 
 ## New saves after the migration
 
-A save still writes a snapshot in this version. Run `layr migrate` again from time to time: it
-moves only the states made since the last run.
+After a successful migration, new source states include a tree and a times table. This includes
+named and automatic saves. Snapshots remain available for daily commands. You do not need to
+repeat the migration to record new saves in the object store.
+
+Before `--delete-old` removes any snapshot, it checks the object checkout of every candidate
+against its snapshot. A missing or damaged object stops the deletion.
 
 ## Remotes
 

@@ -414,7 +414,8 @@ The steps for users are in `docs/migrate.md`. Code: `src/cmd/migrate.rs`, `src/o
    1; nothing is deleted.
 6. **Mapping table.** A verified state is appended to `meta/migrate/map` (a header line
    `layr-migrate-map 1`, then `<state id> <tree> <times>` per line, synced). `--resume` skips the
-   states in it. A last line without a newline is a write that a crash cut: it is ignored and
+   states already recorded. It checks unrecorded entries against their snapshots before publishing them.
+   A last line without a newline is a write that a crash cut: it is ignored and
    removed by the next append.
 7. **Records.** Every 64 verified states, and at the end, one signed record with the operation
    `state.tree` gives them their fields:
@@ -426,13 +427,15 @@ The steps for users are in `docs/migrate.md`. Code: `src/cmd/migrate.rs`, `src/o
    The state keeps its id and its signed save record; the derived row and `StateRec` get `tree` and
    `times`. A later record of the same state replaces both (order key: time, machine, sequence).
    Line heads, refs, tags, parks, queue entries, changes, attestations, approvals and the Git
-   mapping name state ids and stay as they are. A save does not write a tree yet: a second
-   `layr migrate` moves the states made since.
+   mapping name state ids and stay as they are. A successful migration sets `objects.enabled`.
+   New source states then include their tree and times in the signed save record. Object writes
+   finish before the record is published; cache and derived states remain snapshots.
 8. **Repack** (`layr objects repack`): hot blobs outside the hot set turn cold, loose objects go
    into packs.
 9. **Old storage.** Without `--delete-old` the snapshots stay and the run prints what
    `--delete-old` frees. With it, after every source state is recorded, the snapshots of the
-   recorded states go (`drop_trees`: reserved against pins, moved to the trash, marked absent),
+   recorded states are checked again against a complete object checkout before any snapshot goes
+   (`drop_trees`: reserved against pins, moved to the trash, marked absent),
    except line heads (status and save read them on every command), states with cache snapshots,
    states that a cache overlay names, and on APFS thin layers that a kept layer builds on.
 
@@ -447,7 +450,7 @@ Reads after the migration:
 
 The tree of a state counts only when the local object store holds the tree and the times table: a
 `state.tree` record from another machine without its objects changes no read. A rollback before
-`--delete-old` removes `meta/objects` and `meta/migrate`: every reader then uses the snapshots, and
+`--delete-old` disables `objects.enabled` and removes `meta/objects` and `meta/migrate`: every reader then uses the snapshots, and
 a later run moves every state again.
 
 **Remotes.** This version moves only the local store. A store remote keeps format v2 and its

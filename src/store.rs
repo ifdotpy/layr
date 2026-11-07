@@ -1307,6 +1307,7 @@ impl<'a> Project<'a> {
     /// Snapshots must already exist and the caller must hold the project lock.
     pub(crate) fn append_batch(&self, mut records: Vec<Record>, actor: &Actor) -> Result<Vec<Record>> {
         let _t = crate::trace::span("record batch");
+        crate::objstore::record_states(self, &mut records)?;
         let Some(first) = records.first() else { return Ok(records) };
         let m = &self.store.machine;
         let present = self.state_present();

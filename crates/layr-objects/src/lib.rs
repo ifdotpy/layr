@@ -291,6 +291,28 @@ mod tests {
     }
 
     #[test]
+    fn incremental_hard_links_match_a_full_write() {
+        let dir = scratch("incremental-links");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a"), "first").unwrap();
+        fs::hard_link(src.join("a"), src.join("sub/b")).unwrap();
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false };
+        let first = write_tree(&store, &src, &opts).unwrap();
+        let base = write::Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        fs::write(src.join("a"), "changed through one name").unwrap();
+        let inc = write::write_changed(&store, &src, &base, &[b"a".to_vec()], &opts).unwrap();
+        let full = write_tree(&store, &src, &opts).unwrap();
+        assert_eq!(inc.tree, full.tree);
+        assert_eq!(inc.times, full.times);
+        fs::hard_link(src.join("a"), src.join("new")).unwrap();
+        let inc = write::write_changed(&store, &src, &base, &[b"new".to_vec()], &opts).unwrap();
+        let full = write_tree(&store, &src, &opts).unwrap();
+        assert_eq!(inc.tree, full.tree);
+    }
+
+    #[test]
     fn a_save_writes_only_the_times_on_the_way_to_a_change() {
         let dir = scratch("times-path");
         let src = dir.join("src");

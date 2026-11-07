@@ -62,7 +62,8 @@ pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full:
         _ => None,
     };
     let pin = h.repo.pin(&[&id])?;
-    let root = h.repo.state_root(&id)?;
+    let source = h.repo.state_src(&id)?;
+    let root = crate::objstore::SnapshotSource(&source);
     let previous = match parent {
         Some(tree) => Some(tree),
         None if cold => base.as_ref().map(|(_, r)| r.tree).or(match &first {
@@ -73,24 +74,14 @@ pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full:
     };
     let temperature = if cold { Temperature::Cold } else { Temperature::Hot };
     let options = WriteOptions { temperature, previous, exclude: Vec::new(), similar: false };
-    let (report, changed) = match base {
-        Some((parent_state, r)) => {
-            let _parent_pin = h.repo.pin(&[&parent_state])?;
-            let changes = crate::changes::candidates(&h.repo.state_src(&parent_state)?, &h.repo.state_src(&id)?)?;
-            let mut paths: Vec<Vec<u8>> = Vec::new();
-            for c in changes {
-                paths.push(c.path.into_bytes());
-                if let Some(old) = c.old_path {
-                    paths.push(old.into_bytes());
-                }
-            }
-            paths.sort();
-            paths.dedup();
+    let incremental = if full { None } else { crate::objstore::write_base(&h.repo, store, &id, first.as_deref(), &source)? };
+    let (report, changed) = match incremental {
+        Some((r, paths)) => {
             let base = layr_objects::write::Base { tree: r.tree, times: r.times };
             let n = paths.len();
-            (layr_objects::write::write_changed(store, &root, &base, &paths, &options)?, Some(n))
+            (layr_objects::write::write_changed_from(store, &root, &base, &paths, &options)?, Some(n))
         }
-        None => (layr_objects::write_tree(store, &root, &options)?, None),
+        None => (layr_objects::write::write_tree_from(store, &root, &options)?, None),
     };
     drop(pin);
     let tree = report.tree.expect("a write gives a tree");

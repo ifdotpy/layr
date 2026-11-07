@@ -105,7 +105,7 @@ pub struct StateRec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_of: Option<String>,
     /// The root tree of the state in the project's object store (docs/objects.md, section 8), as
-    /// 64 hex digits. A save record does not carry it yet: a later `state.tree` record of
+    /// 64 hex digits. New saves carry it after migration; a later `state.tree` record of
     /// `layr migrate` adds it after the tree was checked out and compared with the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,

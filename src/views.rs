@@ -403,7 +403,25 @@ fn write_state(
         }
     };
     if complete {
-        t.merged.materialize(&repo.p.state_path(&id), true)?;
+        let path = repo.p.state_path(&id);
+        let made = (|| -> Result<()> {
+            t.merged.materialize(&path, false)?;
+            crate::storage::write_info(
+                &path,
+                &crate::storage::SubvolInfo {
+                    uuid: ids::new_id(),
+                    received_uuid: None,
+                    parent_uuid: None,
+                    readonly: true,
+                    base: None,
+                },
+            )?;
+            crate::storage::seal(&path, true, false)
+        })();
+        if let Err(error) = made {
+            let _ = repo.p.delete_state(&id);
+            return Err(error);
+        }
     }
     let described = (|| -> Result<StateRec> {
         if !complete {

@@ -63,7 +63,7 @@ eq "a listing through the mount" "$(cd "$P/lines/nat" && ls -A | grep -v '^.git$
 base_tree=$(sed -n 's/^lower=//p' "$P"/meta/vlines/*/layrfs-view.conf)
 has "the lower tree is a complete state tree" "$P/states/" "$base_tree"
 ok "the lower tree exists" test -f "$base_tree/notes.txt"
-ok "the lower tree stays sealed" test -n "$(ls -lO "$base_tree/notes.txt" | grep uchg)"
+no "the lower tree stays sealed" bash -c 'echo forbidden >> "$1"' _ "$base_tree/notes.txt"
 
 # `layr tool rg|find` in the virtual line against the real tools on the mount and on the folder line.
 N=$P/lines/nat
@@ -129,7 +129,13 @@ d=$(cd "$V" && l diff)
 has "diff shows the new line" "+line 21" "$d"
 has "diff shows the mode change" "new mode 100755" "$d"
 no "layr add is refused in a virtual line" bash -c "cd '$V' && '$LAYR' add new.txt"
-no "layr save without -m is refused" bash -c "cd '$V' && '$LAYR' save"
+before_auto=$(l rev-parse virt)
+ok "automatic save in a virtual line" bash -c "cd '$V' && '$LAYR' save"
+eq "automatic save keeps the named head" "$before_auto" "$(l rev-parse virt)"
+has "automatic save contains the edits" "line 21" "$(l show 'virt@{0}:notes.txt')"
+auto=$(l rev-parse 'virt@{0}')
+ok "repeating an automatic save succeeds" bash -c "cd '$V' && '$LAYR' save"
+eq "unchanged automatic save is reused" "$auto" "$(l rev-parse 'virt@{0}')"
 
 ok "save -m in the virtual line" bash -c "cd '$V' && '$LAYR' save -m edits"
 (cd "$P/lines/nat" && l add new.txt newdir moved.txt sub2 newlink > /dev/null && l save -a -m edits > /dev/null)

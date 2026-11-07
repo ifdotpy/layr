@@ -108,3 +108,154 @@ pub fn entry(store: &Store, root: &Id, path: &str) -> Result<crate::gitbridge::E
             .collect(),
     ))
 }
+
+/// Enable object writes only after a successful migration. This is a project setting so other
+/// updated writers also keep new history in the portable format.
+pub const ENABLED: &str = "objects.enabled";
+
+pub struct SnapshotSource<'a>(pub &'a crate::repo::Snap);
+impl layr_objects::write::Source for SnapshotSource<'_> {
+    fn path(&self, relative: &[u8]) -> Result<PathBuf> {
+        use crate::fsutil::Src;
+        let path = self.0.at(std::str::from_utf8(relative).context("a layr path is not UTF-8")?)?;
+        #[cfg(target_os = "macos")]
+        if path.symlink_metadata().is_ok() && crate::sys::apfs_has_acl(&path)? {
+            anyhow::bail!("cannot migrate {}: native ACLs are not represented by the object format", path.display());
+        }
+        Ok(path)
+    }
+
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        use std::os::unix::ffi::OsStrExt;
+        let rel = std::str::from_utf8(relative).context("a layr path is not UTF-8")?;
+        let mut names = std::collections::BTreeSet::new();
+        #[cfg(target_os = "macos")]
+        let folders: Vec<PathBuf> = self.0.layers.iter().map(|l| l.root.join(rel)).collect();
+        #[cfg(not(target_os = "macos"))]
+        let folders = vec![self.0.join(rel)];
+        for folder in folders {
+            match std::fs::symlink_metadata(&folder) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            for entry in std::fs::read_dir(folder)? {
+                let name = entry?.file_name().as_bytes().to_vec();
+                let child = if relative.is_empty() { name.clone() } else { [relative, b"/", &name].concat() };
+                match std::fs::symlink_metadata(self.path(&child)?) {
+                    Ok(_) => {
+                        names.insert(name);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+}
+
+/// Attach portable objects before signing each new source state. Snapshots remain the hot
+/// working representation; the record is never published before its objects have been written.
+pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Result<()> {
+    if p.is_overlay() || p.config_value(ENABLED)?.and_then(|v| v.as_bool()) != Some(true) {
+        return Ok(());
+    }
+    let store = open(p)?;
+    for state in records.iter_mut().flat_map(|r| &mut r.states) {
+        if state.kind.auxiliary() || state.tree.is_some() || !p.has_state(&state.id) {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        let source = crate::thin::Layered::of_state(p, &state.id)?;
+        #[cfg(not(target_os = "macos"))]
+        let source = p.state_path(&state.id);
+        let source = SnapshotSource(&source);
+        let options = layr_objects::WriteOptions {
+            temperature: layr_objects::Temperature::Hot,
+            previous: None,
+            exclude: Vec::new(),
+            similar: false,
+        };
+        #[allow(unused_mut)]
+        let mut incremental: Option<(StateRef, Vec<Vec<u8>>)> = None;
+        #[cfg(target_os = "macos")]
+        {
+            incremental = incremental_base(p, &store, &state.id)?;
+        }
+        let written = match incremental {
+            Some((refs, paths)) => layr_objects::write::write_changed_from(
+                &store,
+                &source,
+                &layr_objects::write::Base { tree: refs.tree, times: refs.times },
+                &paths,
+                &options,
+            )?,
+            None => layr_objects::write::write_tree_from(&store, &source, &options)?,
+        };
+        let refs = StateRef {
+            tree: written.tree.context("object write gave no tree")?,
+            times: written.times.context("object write gave no times")?,
+        };
+        store.set_state(&state.id, &refs)?;
+        state.tree = Some(refs.tree.hex());
+        state.times = Some(refs.times.hex());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn incremental_base(p: &Project, store: &Store, state: &str) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
+    let Some(base) = crate::thin::layer_base(p, state)? else { return Ok(None) };
+    let Some(refs) = store.state_ref(&base)? else { return Ok(None) };
+    let delta = p.delta_path(state);
+    let mut paths: std::collections::BTreeSet<String> =
+        crate::storage::scan_shared(&delta, false)?.keys().filter(|s| !s.is_empty()).cloned().collect();
+    paths.extend(crate::thin::removed_of(&delta)?);
+    Ok(Some((refs, paths.into_iter().map(String::into_bytes).collect())))
+}
+
+/// Select an incremental base without losing time-only or attribute-only changes.
+pub fn write_base(
+    repo: &Repo,
+    store: &Store,
+    state: &str,
+    parent: Option<&str>,
+    source: &crate::repo::Snap,
+) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
+    #[cfg(target_os = "macos")]
+    if let Some(base) = incremental_base(&repo.p, store, state)? {
+        return Ok(Some(base));
+    }
+    let Some(parent_state) = parent else { return Ok(None) };
+    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
+    if !repo.p.has_state(parent_state) {
+        return Ok(None);
+    }
+    let _pin = repo.pin(&[parent_state])?;
+    let parent = repo.state_src(parent_state)?;
+    #[cfg(target_os = "macos")]
+    let changes = crate::storage::with_stored_compare(|| crate::changes::candidates(&parent, source))?;
+    #[cfg(not(target_os = "macos"))]
+    let changes = crate::changes::candidates(&parent, source)?;
+    let mut paths = std::collections::BTreeSet::new();
+    for change in changes {
+        paths.insert(change.path);
+        paths.extend(change.old_path);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let old = parent.scan(false)?;
+        for (path, entry) in source.scan(false)? {
+            if !path.is_empty()
+                && old.get(&path).is_none_or(|previous| {
+                    (previous.fingerprint.4, previous.fingerprint.5) != (entry.fingerprint.4, entry.fingerprint.5)
+                })
+            {
+                paths.insert(path);
+            }
+        }
+    }
+    Ok(Some((refs, paths.into_iter().map(String::into_bytes).collect())))
+}

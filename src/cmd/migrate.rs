@@ -370,7 +370,11 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if p.unrecorded.contains(id) {
                     let (_, comparison, _, _) = super::objects::compare_checkout(&h, &store, id, r)?;
                     if !comparison.differences.is_empty() {
-                        bail!("state {} no longer matches its migration journal: {}", ids::short(id), comparison.differences.join("; "));
+                        bail!(
+                            "state {} no longer matches its migration journal: {}",
+                            ids::short(id),
+                            comparison.differences.join("; ")
+                        );
                     }
                 }
                 map.insert(id.clone(), serde_json::json!({"times": r.times.hex(), "tree": r.tree.hex()}));
@@ -462,6 +466,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         p.freed
     );
     outln!(ctx, "object store: {} ({} bytes)", human(stat.total_bytes()), stat.total_bytes());
+    super::admin::set_config(ctx, repo, crate::objstore::ENABLED, serde_json::json!(true))?;
     delete_old(ctx, &h, a.has("--delete-old"), false)?;
     std::fs::remove_file(&marker)?;
     Ok(0)

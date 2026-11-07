@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-version = "0.40.0"
+version = "0.39.1"
 dependencies = [
  "age",
  "anyhow",

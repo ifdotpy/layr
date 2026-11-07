@@ -23,7 +23,7 @@ chmod 755 $T/src/bin/run.sh
 ln -s ../notes.txt $T/src/bin/notes-link
 ln -s missing/target $T/src/dangling
 python3 -I -c 'import random,sys; random.seed(7); sys.stdout.buffer.write(random.randbytes(3 << 20))' > $T/src/big.bin
-ln $T/src/notes.txt $T/src/notes-hard.txt
+ln $T/src/src/main.rs $T/src/main-hard.rs
 # An extended attribute, where the file system and the tools allow one (verify compares them).
 if [ "$(uname -s)" = Darwin ]; then
     xattr -w user.layr-test value $T/src/bin/run.sh

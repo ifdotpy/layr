@@ -203,4 +203,16 @@ has "diff between two migrated states (snapshots made again from the objects)" "
 ok "fsck passes after the migration" l fsck
 ok "gc passes after the migration" l gc
 
+# New saves keep the portable state complete without another migration.
+echo 'after migration' >> notes.txt
+l save -a -m 'after migration' >/dev/null
+new=$(l rev-parse head)
+new_id=$(uuid_of "$new")
+eq "new saves carry tree and times" "1" "$(DB "SELECT count(*) FROM states WHERE id='$new_id' AND json_extract(rec,'$.tree') IS NOT NULL AND json_extract(rec,'$.times') IS NOT NULL")"
+ok "new saved objects verify" l objects verify "$new"
+l objects checkout "$new" $T/new-checkout >/dev/null
+same_tree "$P/main" "$T/new-checkout" >/dev/null
+ok "new object content includes the edit" grep -q 'after migration' "$T/new-checkout/notes.txt"
+ok "records with object fields survive replay" l fsck
+
 finish

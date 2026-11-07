@@ -12,9 +12,26 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// A folder or a layered snapshot. Paths resolve to immutable files; names are the merged
+/// immediate children of a folder. This lets saves read changed entries without a full checkout.
+pub trait Source: Sync {
+    fn path(&self, relative: &[u8]) -> Result<PathBuf>;
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>>;
+}
+
+struct Folder<'a>(&'a Path);
+impl Source for Folder<'_> {
+    fn path(&self, relative: &[u8]) -> Result<PathBuf> {
+        Ok(self.0.join(fsx::os(relative)))
+    }
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        fs::read_dir(self.path(relative)?)?.map(|e| Ok(e?.file_name().as_bytes().to_vec())).collect()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
@@ -117,6 +134,7 @@ pub struct WriteReport {
 type Inodes = HashMap<(u64, u64), Vec<Vec<u8>>>;
 
 struct Walk<'a> {
+    source: &'a dyn Source,
     store: &'a Store,
     options: &'a WriteOptions,
     files: AtomicU64,
@@ -130,7 +148,11 @@ struct Walk<'a> {
 
 /// Write the tree of the folder `root` into `store`.
 pub fn write_tree(store: &Store, root: &Path, options: &WriteOptions) -> Result<WriteReport> {
-    write(store, root, options, None)
+    write_tree_from(store, &Folder(root), options)
+}
+
+pub fn write_tree_from(store: &Store, source: &dyn Source, options: &WriteOptions) -> Result<WriteReport> {
+    write(store, source, options, None)
 }
 
 /// A tree and its times table that an earlier write made.
@@ -145,8 +167,7 @@ pub struct Base {
 /// folders on the way to a changed path are read; every other entry and its times come from
 /// `base`. A save of a few files costs milliseconds, not a walk of the folder.
 ///
-/// Hard link groups: the groups of `base` whose paths did not change stay; changed files with
-/// more than one link form groups among themselves. A full write is exact.
+/// If a changed path touches hard links, a full walk preserves the complete link groups.
 pub fn write_changed(
     store: &Store,
     root: &Path,
@@ -154,6 +175,28 @@ pub fn write_changed(
     changed: &[Vec<u8>],
     options: &WriteOptions,
 ) -> Result<WriteReport> {
+    write_changed_from(store, &Folder(root), base, changed, options)
+}
+
+pub fn write_changed_from(
+    store: &Store,
+    source: &dyn Source,
+    base: &Base,
+    changed: &[Vec<u8>],
+    options: &WriteOptions,
+) -> Result<WriteReport> {
+    // A changed member can still share an inode with an unchanged path. Rebuild link groups
+    // from the source in that case; retaining only the untouched groups would split the link.
+    let previous = store.get_tree(&base.tree)?;
+    let affects =
+        |path: &[u8], changed: &[u8]| path == changed || (path.starts_with(changed) && path.get(changed.len()) == Some(&b'/'));
+    let links_changed = previous.links.iter().flatten().any(|path| changed.iter().any(|c| affects(path, c)));
+    let new_link = changed.iter().any(|path| {
+        source.path(path).ok().and_then(|p| fs::symlink_metadata(p).ok()).is_some_and(|m| m.is_file() && m.nlink() > 1)
+    });
+    if links_changed || new_link {
+        return write_tree_from(store, source, options);
+    }
     let mut plan = Plan { changed: HashSet::new(), dirty: HashSet::new() };
     for path in changed {
         plan.changed.insert(path.clone());
@@ -164,7 +207,7 @@ pub fn write_changed(
         }
     }
     plan.dirty.insert(Vec::new());
-    write(store, root, options, Some((base, &plan)))
+    write(store, source, options, Some((base, &plan)))
 }
 
 struct Plan {
@@ -173,8 +216,10 @@ struct Plan {
     dirty: HashSet<Vec<u8>>,
 }
 
-fn write(store: &Store, root: &Path, options: &WriteOptions, base: Option<(&Base, &Plan)>) -> Result<WriteReport> {
+fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Option<(&Base, &Plan)>) -> Result<WriteReport> {
+    let root = source.path(b"")?;
     let walk = Walk {
+        source,
         store,
         options,
         files: AtomicU64::new(0),
@@ -187,24 +232,27 @@ fn write(store: &Store, root: &Path, options: &WriteOptions, base: Option<(&Base
             _ => None,
         },
     };
-    let meta = fs::symlink_metadata(root).with_context(|| root.display().to_string())?;
+    let meta = fs::symlink_metadata(&root).with_context(|| root.display().to_string())?;
     if !meta.is_dir() {
         bail!("{} is not a folder", root.display());
     }
     let mut kept_groups = Vec::new();
     let (mut tree, below) = match base {
-        None => walk.folder(root, b"", options.previous)?,
+        None => walk.folder(&root, b"", options.previous)?,
         Some((base, plan)) => {
             let base_tree = store.get_tree(&base.tree)?;
             let base_times = store.get_times(&base.times)?;
             let touched =
                 |p: &Vec<u8>| plan.changed.iter().any(|c| p == c || (p.starts_with(c) && p.get(c.len()) == Some(&b'/')));
             kept_groups = base_tree.links.iter().filter(|g| !g.iter().any(touched)).cloned().collect();
-            walk.folder_changed(root, b"", &base_tree, &base_times, plan)?
+            walk.folder_changed(&root, b"", &base_tree, &base_times, plan)?
         }
     };
-    let mut groups: Vec<Vec<Vec<u8>>> =
-        walk.inodes.into_inner().expect("no panic holds the lock").into_values().filter(|g| g.len() > 1).collect();
+    let inodes = walk.inodes.into_inner().expect("no panic holds the lock");
+    if base.is_some() && !inodes.is_empty() {
+        return write_tree_from(store, source, options);
+    }
+    let mut groups: Vec<Vec<Vec<u8>>> = inodes.into_values().filter(|g| g.len() > 1).collect();
     groups.extend(kept_groups);
     let report_groups = groups.len() as u64;
     tree.links = groups;
@@ -224,15 +272,14 @@ fn write(store: &Store, root: &Path, options: &WriteOptions, base: Option<(&Base
 
 /// The entries of a folder with their metadata, sorted by name bytes (the top-level excludes left
 /// out).
-fn list(dir: &Path, rel: &[u8], options: &WriteOptions) -> Result<Vec<(Vec<u8>, fs::Metadata)>> {
-    let mut names: Vec<(Vec<u8>, fs::Metadata)> = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-        let entry = entry?;
-        if rel.is_empty() && options.exclude.iter().any(|x| x.as_slice() == entry.file_name().as_bytes()) {
+fn list(source: &dyn Source, rel: &[u8], options: &WriteOptions) -> Result<Vec<(Vec<u8>, fs::Metadata)>> {
+    let mut names = Vec::new();
+    for name in source.names(rel)? {
+        if rel.is_empty() && options.exclude.contains(&name) {
             continue;
         }
-        let meta = fs::symlink_metadata(entry.path())?;
-        names.push((entry.file_name().as_bytes().to_vec(), meta));
+        let meta = fs::symlink_metadata(source.path(&join(rel, &name))?)?;
+        names.push((name, meta));
     }
     names.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(names)
@@ -261,16 +308,20 @@ impl Walk<'_> {
             base_at.insert(&e.name, (e, r));
         }
         let before: HashMap<Vec<u8>, Node> = base.entries.iter().map(|e| (e.name.clone(), e.node.clone())).collect();
-        let names = list(dir, rel, self.options)?;
+        let names = list(self.source, rel, self.options)?;
         let done = names
             .into_par_iter()
             .map(|(name, meta)| -> Result<(Entry, Record)> {
                 let child = join(rel, &name);
                 match base_at.get(name.as_slice()) {
                     Some(&(e, r)) if !plan.changed.contains(&child) && !plan.dirty.contains(&child) => Ok((e.clone(), *r)),
-                    Some(&(e, r)) if !plan.changed.contains(&child) && meta.is_dir() && matches!(e.node, Node::Dir { .. }) => {
+                    Some(&(e, r))
+                        if (!plan.changed.contains(&child) || plan.dirty.contains(&child))
+                            && meta.is_dir()
+                            && matches!(e.node, Node::Dir { .. }) =>
+                    {
                         let (Node::Dir { tree }, Record::Folder(sub_times)) = (&e.node, r) else { unreachable!() };
-                        let path = dir.join(fsx::os(&name));
+                        let path = self.source.path(&join(rel, &name))?;
                         let (mut sub, below) = self.folder_changed(
                             &path,
                             &child,
@@ -301,7 +352,7 @@ impl Walk<'_> {
     /// The tree of one folder, without hard link groups (the root gets them), and the times
     /// records of its entries, in the tree's order.
     fn folder(&self, dir: &Path, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
-        let names = list(dir, rel, self.options)?;
+        let names = list(self.source, rel, self.options)?;
         let before: HashMap<Vec<u8>, Node> = match previous {
             Some(id) => self.store.get_tree(&id)?.entries.into_iter().map(|e| (e.name, e.node)).collect(),
             None => HashMap::new(),
@@ -316,13 +367,13 @@ impl Walk<'_> {
 
     fn entry(
         &self,
-        dir: &Path,
+        _dir: &Path,
         rel: &[u8],
         name: Vec<u8>,
         meta: fs::Metadata,
         before: &HashMap<Vec<u8>, Node>,
     ) -> Result<(Entry, Record)> {
-        let path = dir.join(fsx::os(&name));
+        let path = self.source.path(&join(rel, &name))?;
         let ft = meta.file_type();
         let xattrs = fsx::xattrs(&path).with_context(|| format!("cannot read the attributes of {}", path.display()))?;
         let mode = meta.mode() & MODE_BITS;
