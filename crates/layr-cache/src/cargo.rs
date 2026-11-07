@@ -723,7 +723,7 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
 
 #[cfg(test)]
 mod pinned_env_tests {
-    use super::pinned_env;
+    use super::{pinned_env, unit_of};
 
     #[test]
     fn the_files_of_one_unit_have_one_unit() {

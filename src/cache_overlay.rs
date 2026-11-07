@@ -919,13 +919,9 @@ impl<'a> Repo<'a> {
             }
         };
         let _t = crate::trace::named(|| format!("warm {folder} of line {}", line.name));
-        let done = crate::cache_hook::run_mode(
-            crate::cache_hook::Mode::Warm,
-            setting.as_deref(),
-            &path,
-            uid,
-            crate::cache_hook::WARM_LIMIT,
-        );
+        let done = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
+            crate::cache_hook::run_mode(crate::cache_hook::Mode::Warm, setting.as_deref(), &path, uid, crate::cache_hook::WARM_LIMIT)
+        });
         // Only a damage is recorded here: a mark from an earlier prune stays until a prune succeeds.
         if !done.folder_ok {
             if let Err(e) = self.set_damaged(line, folder, true) {
@@ -1011,8 +1007,9 @@ impl<'a> Repo<'a> {
         // A folder that an interrupted step left damaged is repaired first; it stays marked (and saves skip it) until
         // the repair succeeds. A prune alone cannot tell a whole folder from one with missing files.
         if self.damaged_folders(line).is_ok_and(|d| d.contains(folder)) {
-            let fixed =
-                crate::cache_hook::run_mode(crate::cache_hook::Mode::Repair, setting.as_deref(), &path, uid, Self::prune_limit());
+            let fixed = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
+                crate::cache_hook::run_mode(crate::cache_hook::Mode::Repair, setting.as_deref(), &path, uid, Self::prune_limit())
+            });
             if !fixed.log.is_empty() {
                 eprintln!("layr: repair {}", fixed.log);
             }
@@ -1020,13 +1017,20 @@ impl<'a> Repo<'a> {
                 return;
             }
         }
-        let done = crate::cache_hook::run(setting.as_deref(), &path, uid, Self::prune_limit());
+        let done = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
+            crate::cache_hook::run(setting.as_deref(), &path, uid, Self::prune_limit())
+        });
         if let Err(e) = self.set_damaged(line, folder, !done.folder_ok) {
             eprintln!("layr: prune {folder}: cannot record the damaged state: {e:#}");
         }
         if !done.log.is_empty() {
             eprintln!("layr: prune {}", done.log);
         }
+    }
+
+    /// The folder for the temporary copies of the cache hooks: on the store's volume, outside every work tree.
+    fn hook_scratch(&self) -> PathBuf {
+        self.p.work_dir().join("cache-hooks")
     }
 
     /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is the line lock

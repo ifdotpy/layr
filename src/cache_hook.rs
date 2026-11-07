@@ -46,6 +46,7 @@ const ENV_SETTING: &str = "LAYR_CACHE_HOOK_SETTING";
 const ENV_FOLDER: &str = "LAYR_CACHE_HOOK_FOLDER";
 const ENV_LIMIT_MS: &str = "LAYR_CACHE_HOOK_LIMIT_MS";
 const ENV_AT: &str = "LAYR_CACHE_HOOK_AT";
+const ENV_SCRATCH: &str = "LAYR_CACHE_HOOK_SCRATCH";
 /// The line in the worker's stdout that carries its report, so the parent finds it among other output.
 const REPORT_MARK: &str = "LAYR-CACHE-HOOK ";
 
@@ -96,6 +97,28 @@ pub struct Launch {
 /// What an adapter gets from the worker: its commands run in the worker's group, and the time limit.
 struct WorkerHost {
     until: Instant,
+    /// The scratch folder of core (`with_scratch`), from the worker's environment.
+    scratch: Option<PathBuf>,
+}
+
+impl WorkerHost {
+    fn new(limit: Duration) -> WorkerHost {
+        WorkerHost { until: Instant::now() + limit, scratch: std::env::var_os(ENV_SCRATCH).map(PathBuf::from) }
+    }
+}
+
+thread_local! {
+    /// The scratch folder that hooks started by this thread pass to their worker (`with_scratch`).
+    static SCRATCH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `dir` as the scratch folder of the hooks it starts (a folder on the store's volume, outside any
+/// work tree, for an adapter's temporary copies).
+pub fn with_scratch<T>(dir: Option<PathBuf>, f: impl FnOnce() -> T) -> T {
+    let old = SCRATCH.with(|s| s.replace(dir));
+    let out = f();
+    SCRATCH.with(|s| *s.borrow_mut() = old);
+    out
 }
 
 impl Host for WorkerHost {
@@ -107,6 +130,10 @@ impl Host for WorkerHost {
 
     fn deadline(&self) -> Instant {
         self.until
+    }
+
+    fn scratch(&self) -> Option<PathBuf> {
+        self.scratch.clone()
     }
 
     fn clone_tree(&self, src: &Path, dst: &Path) -> std::io::Result<bool> {
@@ -286,6 +313,9 @@ fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&s
         (ENV_LIMIT_MS.into(), limit.as_millis().to_string()),
         ("PATH".into(), owner_path(uid)),
     ];
+    if let Some(dir) = SCRATCH.with(|s| s.borrow().clone()) {
+        vars.push((ENV_SCRATCH.into(), dir.display().to_string()));
+    }
     vars.extend(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     let mut cmd = Command::new(&launch.exe);
     crate::sys::inherit_background(&mut cmd);
@@ -477,7 +507,7 @@ fn prune_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>,
         Ok(a) => a,
         Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
     };
-    let host = WorkerHost { until: Instant::now() + limit };
+    let host = WorkerHost::new(limit);
     match found.prune(&host, folder) {
         Outcome::Pruned { freed } => Report { adapter: found.name().into(), pruned: true, freed, restored: false, folder_ok: true, reason: String::new() },
         Outcome::Skipped { reason } => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
@@ -490,7 +520,7 @@ fn warm_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, 
         Ok(a) => a,
         Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
     };
-    let host = WorkerHost { until: Instant::now() + limit };
+    let host = WorkerHost::new(limit);
     let (pruned, reason) = match found.warm(&host, folder) {
         Ok(()) => (true, String::new()),
         Err(reason) => (false, reason),
@@ -505,7 +535,7 @@ fn repair_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>
         // Without an adapter nothing changed the folder: it is as whole as it can be.
         Err(_) => return Report { adapter: "-".into(), pruned: true, freed: 0, restored: false, folder_ok: true, reason: String::new() },
     };
-    let host = WorkerHost { until: Instant::now() + limit };
+    let host = WorkerHost::new(limit);
     let (pruned, reason) = match found.repair(&host, folder) {
         Ok(()) => (true, String::new()),
         Err(reason) => (false, reason),
@@ -520,7 +550,7 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
         // Without an adapter nothing changed the folder under this hook.
         Err(_) => return Report { adapter: "-".into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason: String::new() },
     };
-    match found.recover(folder) {
+    match found.recover(&WorkerHost::new(RECOVER_LIMIT), folder) {
         Ok(restored) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored, folder_ok: true, reason: String::new() },
         Err(reason) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: false, reason },
     }
@@ -600,7 +630,7 @@ mod tests {
                 _ => Err("no build".into()),
             }
         }
-        fn recover(&self, folder: &Path) -> Result<bool, String> {
+        fn recover(&self, _host: &dyn Host, folder: &Path) -> Result<bool, String> {
             match self.0 {
                 "hard-restore" if copy_of(folder).exists() => {
                     let _ = std::fs::remove_file(folder.join("partial.txt"));
@@ -702,7 +732,7 @@ mod tests {
         std::fs::write(src.join("pkg/lib/index.js"), "whole").unwrap();
         let dst = src.with_file_name(format!("{}-copy", src.file_name().unwrap().to_string_lossy()));
         let _ = std::fs::remove_dir_all(&dst);
-        let host = WorkerHost { until: Instant::now() + Duration::from_secs(5) };
+        let host = WorkerHost { until: Instant::now() + Duration::from_secs(5), scratch: None };
         assert!(host.clone_tree(&src, &dst).unwrap());
         assert_eq!(std::fs::read_to_string(dst.join("pkg/lib/index.js")).unwrap(), "whole");
         assert_eq!(names(&dst), names(&src));
