@@ -290,6 +290,34 @@ mod tests {
     }
 
     #[test]
+    fn a_save_writes_only_the_times_on_the_way_to_a_change() {
+        let dir = scratch("times-path");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::create_dir_all(src.join("c/d")).unwrap();
+        fs::write(src.join("a/b/f"), "one\n").unwrap();
+        fs::write(src.join("c/d/g"), "two\n").unwrap();
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let first = write_tree(&store, &src, &opts).unwrap();
+        let base = write::Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        fs::write(src.join("a/b/f"), "changed\n").unwrap();
+        times::set(&src.join("a/b/f"), 5_000_000_000).unwrap();
+        let next = write::write_changed(&store, &src, &base, &[b"a/b/f".to_vec()], &opts).unwrap();
+        let before: std::collections::HashSet<Id> = store.times_ids(&base.times).unwrap().into_iter().collect();
+        let after = store.times_ids(&next.times.unwrap()).unwrap();
+        assert_eq!(after.len(), before.len(), "the same folders");
+        let new = after.iter().filter(|id| !before.contains(id)).count();
+        assert_eq!(new, 3, "the root, a and a/b are new; c and c/d are shared");
+        // The new state checks out with its times, the old one with its own.
+        let out = dir.join("out");
+        checkout_with(&store, &next.tree.unwrap(), Some(&next.times.unwrap()), &out).unwrap();
+        let cmp = compare_with(&src, &out, true).unwrap();
+        assert!(cmp.differences.is_empty(), "{:#?}", cmp.differences);
+        make_writable(&dir);
+    }
+
+    #[test]
     fn every_checkout_write_goes_through_the_writer() {
         let dir = scratch("writer");
         let src = dir.join("src");
@@ -465,12 +493,13 @@ mod tests {
         };
         tree.normalize();
         let t = 1_700_000_000_000_000_000i64;
+        let bin_times = times::Times { own: t + 1, records: vec![] };
         let times = times::Times {
+            own: t,
             records: vec![
-                times::Record { ns: t, below: Some(3) },
-                times::Record { ns: t, below: None },
-                times::Record { ns: t + 1, below: Some(0) },
-                times::Record { ns: t, below: None },
+                times::Record::Time(t),
+                times::Record::Folder(k.id(Kind::Times, &bin_times.encode())),
+                times::Record::Time(t),
             ],
         };
         let key = id::epoch_key("AGE-SECRET-KEY-1EXAMPLE", "epoch-1");
@@ -481,6 +510,7 @@ mod tests {
             format!("opaque \"\" {}", k.id(Kind::Opaque, b"")),
             format!("empty tree {} {}", hex::encode(empty_tree.encode()), k.id(Kind::Tree, &empty_tree.encode())),
             format!("tree {} {}", hex::encode(tree.encode()), k.id(Kind::Tree, &tree.encode())),
+            format!("times of bin {} {}", hex::encode(bin_times.encode()), k.id(Kind::Times, &bin_times.encode())),
             format!("times {} {}", hex::encode(times.encode()), k.id(Kind::Times, &times.encode())),
             format!("epoch key {}", hex::encode(key)),
             format!("keyed blob \"hello\\n\" {}", Keying::Keyed(key).id(Kind::Blob, b"hello\n")),
@@ -497,7 +527,8 @@ chunk \"abc\" ada203fc3bdbffd43c38aae4e8af47e642b35cf6d7985e81a29483c746db3309
 opaque \"\" 2b528cd00f2cb0427c1a0f8b5cc0c511032d28d1383fa0639ce3b13225c78132
 empty tree 010000 463e15cd99aa5c788c292f8d1c5e510ac9c2b9f79817c06c2457f0dcf3931242
 tree 010305612e74787401a403062cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb40106757365722e6b01760362696e02ed03463e15cd99aa5c788c292f8d1c5e510ac9c2b9f79817c06c2457f0dcf393124200046c696e6b030005612e7478740000 9e1e4e5228345fd99d1edcd9c3c6f946dcc323909dcdfbee7c6166869e1e41ae
-times 01048080d0e2c6bfce972f04000002010100 d933f571ed05c330c18ca8485491c62926e2262ac10999989d09002347ecd042
+times of bin 018280d0e2c6bfce972f00 2f2937d3648fcaca72b8935e42260a72ba52ad3c9c599114b98b5f663fd387f6
+times 018080d0e2c6bfce972f030000012f2937d3648fcaca72b8935e42260a72ba52ad3c9c599114b98b5f663fd387f60000 87c7087f0a07a0665fa76ddf82b89fbdca680c02ee26dc0b42d6fa878940257d
 epoch key 975c2d8e41c44ccf4aea50a2294bdd7b95ad5fab019182e8d24193e2951c398b
 keyed blob \"hello\\n\" ed428789bac0bafb394f8234a3fce8cc1069cf68a7dede6d0338ef3033971447";
 

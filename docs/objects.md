@@ -41,15 +41,13 @@ lowercase hex digits.
 | `times` | a times table (section 4) | every write |
 | `chunk` | a content-defined part of a large blob (section 5) | cold writes |
 | `opaque` | bytes whose structure the id does not describe: a pack data file (section 6), an encrypted object of a Secret overlay | packs, transfer |
-| `part` | file frames of one push, one after the other (zstd frames: whole files or deltas) | V1 client |
-| `state-tree` | the signed store tree of one state: a JSON header line, then the zstd frame of the canonical tree JSON | V1 client |
 | `chunk-pack` | a pack of content-defined chunks of a cache layer | V1 client |
 | `git-pack` | a Git pack of imported commits | V1 client |
 
-The last four types belong to the Layr Cloud V1 client (ifdotpy/layr#423); their bytes are defined
-in its contract, `docs/remotes.md`, section "Layr Cloud API v1". They use the id rule of this
-section unchanged. An upload names the type in the header `Layr-Object-Type`. `part` and
-`state-tree` leave Public and Private remotes when V1 moves to `tree` and `times` (section 14).
+The last two types belong to the Layr Cloud V1 client (ifdotpy/layr#423, `docs/remotes.md`,
+section "Layr Cloud API v1"); they use the id rule of this section unchanged. An upload names the
+type in the header `Layr-Object-Type`. The V1 client sends states as trees, times tables and packs
+of this file (section 14).
 
 - **SHA-256** is the persisted content hash of layr (`layr_hashers::ContentAddress`). It runs on
   the ARMv8 SHA extensions and SHA-NI; a second write of Chromium, which hashes every file
@@ -126,25 +124,29 @@ A FIFO, a socket or a device in a folder stops a write with an error.
 
 ## 4. Times table
 
+One table per folder, like the trees. A state names the table of its root folder.
+
 ```text
-times  = version:u8 = 0x01   count:varint   record*count
-record = delta:zigzag-varint   span:varint
+times  = version:u8 = 0x01   own:zigzag-varint   count:varint   record*count
+record = 0x00 delta:zigzag-varint     a file or a symbolic link
+       | 0x01 id:32                   a folder: the id of its times table
 ```
 
-- Records are in **tree order**: the root folder first, then the entries of each folder in tree
-  order (sorted by name bytes), each folder's entries right after the folder's own record
-  (pre-order). So record `i` belongs to the `i`-th entry of a pre-order walk of the tree.
+- Records follow the entries of the folder's tree, in tree order (sorted by name bytes), one for
+  each entry.
 - A time is the modification time in **nanoseconds** since the Unix epoch, as a signed 64-bit
-  number (seconds × 10⁹ + nanoseconds). `delta` is the time minus the previous record's time (the
-  first record: minus 0), zigzag-encoded (`(v << 1) ^ (v >> 63)`).
-- `span` is 0 for a file or a symbolic link, and 1 + the number of records below it for a folder.
-  The root spans every other record, and each folder lies inside its parent. With spans a reader
-  skips a folder without its tree: an incremental write copies the records of unchanged folders.
+  number (seconds x 10^9 + nanoseconds). `own` is the time of this folder, zigzag-encoded
+  (`(v << 1) ^ (v >> 63)`). `delta` is the entry's time minus the previous file time of this table
+  (the first: minus `own`), zigzag-encoded.
 - Files that share a time cost two bytes each.
+- A save writes the tables on the way to a change and shares all the others, whatever the size of
+  the tree. Equal folders with equal times share a table across states.
+- To send a state, walk the tables from its root table (`Store::times_ids`): the root id alone does
+  not reach them.
 
-A checkout with a times table sets every modification time: files and links first, then folders
-deepest first (a new entry changes the time of its folder). The access time is left as it is.
-Build tools that compare times (cargo, ninja, make) then see an unchanged tree (section 15).
+A checkout with a times table sets every modification time: the entries of a folder first, then
+the folder (a new entry changes the time of its folder). The access time is left as it is. Build
+tools that compare times (cargo, ninja, make) then see an unchanged tree (section 15).
 
 ## 5. Stored forms of one object
 
@@ -184,7 +186,7 @@ form 'c' chunked:  count:varint   (chunk-id:32   length:varint)*count
 
 ## 6. Packs
 
-A pack holds many objects in zstd blocks; the writer makes one block per pack (one stream). **The same pack format is used locally and on remotes**
+A pack holds many objects in zstd blocks; the writer makes blocks of about 4 MiB. **The same pack format is used locally and on remotes**
 (S3 stores and Layr Cloud): a repack writes packs, and a push sends them as they are.
 
 ```text
@@ -202,10 +204,13 @@ A pack holds many objects in zstd blocks; the writer makes one block per pack (o
 - Entries are sorted by id, ids are unique, and each entry lies inside its block's plain bytes.
   `type` is a type byte (section 5). `form` is `r` (raw: the content of a tree, times table, chunk
   or whole blob), `d` (a delta body as in section 5) or `c` (a chunk list).
-- The writer puts every entry of a pack into one block (one zstd stream) at level 19, with
-  long-distance matching when the block is larger than the 8 MiB window of level 19 (section 15).
-  A reader accepts any number of blocks. A read decodes the block of its entry; a store keeps up to
-  512 MiB of decoded blocks, and a checkout reads in path order, so it decodes each pack about once.
+- The writer cuts a pack into blocks of about 4 MiB of plain bytes, one zstd frame each, at level
+  19. A reader accepts any number of blocks. A read decodes the block of its entry, and a store keeps
+  up to 512 MiB of decoded blocks. A block is the unit of a cold read: 4 MiB against one stream per
+  pack makes a read of one file 13 times faster for 4.2% more bytes (section 15).
+- A reader opens an index without decoding it and searches its sorted entries in place, so opening a
+  store costs nothing per object. The index checksum is checked when a pack is received; every
+  object read is checked against its id.
 - A pack holds about 56 MiB of plain bytes, so a compressed pack stays below 64 MiB, the largest
   single upload of Layr Cloud. A repack compresses one pack per thread.
 - Order inside a pack: the trees and times of the imported states first (they hold ids, which do
@@ -271,7 +276,7 @@ Two steps, as Git does with loose objects and `git gc`:
    (section 15).
 2. **Repack** (`layr objects repack`, also run by `layr gc` when a project has an object store):
    hot blobs outside the hot set turn cold, the first repack trains the store dictionary, then every
-   loose object goes into packs (one stream per pack, level 19).
+   loose object goes into packs (blocks of about 4 MiB, level 19).
 
 ## 11. Large folders (next step)
 
@@ -329,11 +334,16 @@ bytes 010305612e74787401a403062cf8d83d9ee29543b34a87727421fdecb7e3f3a183d3376390
 id    9e1e4e5228345fd99d1edcd9c3c6f946dcc323909dcdfbee7c6166869e1e41ae
 ```
 
-Its times table: root and `a.txt` and `link` at 1,700,000,000,000,000,000 ns, `bin` 1 ns later:
+Its times tables: root and `a.txt` and `link` at 1,700,000,000,000,000,000 ns, `bin` 1 ns later:
 
 ```text
-bytes 01 04 8080d0e2c6bfce972f 04 00 00 02 01 01 00
-id    d933f571ed05c330c18ca8485491c62926e2262ac10999989d09002347ecd042
+times of bin
+bytes 01 8280d0e2c6bfce972f 00
+id    2f2937d3648fcaca72b8935e42260a72ba52ad3c9c599114b98b5f663fd387f6
+
+times of the root
+bytes 01 8080d0e2c6bfce972f 03  00 00  01 2f2937d3648fcaca72b8935e42260a72ba52ad3c9c599114b98b5f663fd387f6  00 00
+id    87c7087f0a07a0665fa76ddf82b89fbdca680c02ee26dc0b42d6fa878940257d
 ```
 
 Keyed ids, with the identity `AGE-SECRET-KEY-1EXAMPLE` and the epoch `epoch-1`:
@@ -451,9 +461,9 @@ state body (section 14).
 
 ## 14. The two tree formats
 
-Decision (maintainer, 2026-11-07): `tree` with `times` is the single target format. The Layr Cloud
-V1 client moves to the state body `{"times":"<id>","tree":"<id>"}` and to packs instead of parts,
-with no interim format. The table records why.
+Decided (Layr and LayrFS, 2026-11-07): `tree` wins. The Layr Cloud V1 client (#423) sends states as
+`{"times","tree"}` with packs of this file; `part` and `state-tree` are gone. The comparison below is
+kept as the reason.
 
 | | `tree` (this file) | `state-tree` (V1 client, store format v2) |
 | --- | --- | --- |
@@ -466,12 +476,16 @@ with no interim format. The table records why.
 | change of one file in a big tree | rewrites the folders on its path | rewrites the whole map |
 | signed | by the record that names it | header signature inside the object |
 
-What V1 changes to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
+What V1 would change to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
 push sends the trees, times tables and packs (section 6) that the server lacks (`POST
 /objects/missing` with tree, times and pack ids); the server finds a blob through the pack indexes
 (or reads them to build its own index). `part` and `state-tree` then go away for Public and Private
-remotes; `chunk-pack` and `git-pack` stay as they are. `tree` needs no change: it holds no storage
-positions, so a reader finds bytes through the pack indexes.
+remotes; `chunk-pack` and `git-pack` stay as they are.
+
+What `tree` would change to serve as the V1 state tree: nothing in its encoding, but it does not
+hold storage positions, so a reader needs pack indexes to find bytes. The reverse (the V1
+`state-tree` as the only tree) would lose content addressing of folders, folders and attributes,
+and stable ids across pushes; this file does not recommend it.
 
 ## 15. Measurements
 
@@ -493,7 +507,7 @@ of the stores below.
 | dictionary in packs | 0.4 to 0.5 % larger in 1 MiB blocks of small sources; larger in 1, 4 and 8 MiB blocks of the history and in 4 MiB blocks of Chromium (this crate's matrix, below) | none in packs |
 | delta against the previous version | 32 times smaller than a whole level-19 frame on 213 changed files (benchmark) | saves write deltas |
 | delta base by similarity (keep at 5 % or more) | 0.04 % on the history below (14 renames) | same path only |
-| pack compression | one stream is 18.7 to 27.6 % of raw against 26.5 to 31.2 % file by file at level 19 (benchmark); on Chromium one stream per pack is 4.0 % smaller than 4 MiB blocks | one level-19 stream per pack |
+| pack compression | one stream is 18.7 to 27.6 % of raw against 26.5 to 31.2 % file by file at level 19 (benchmark); on Chromium one stream per pack is 4.2 % smaller than 4 MiB blocks, but a cold read is 13 times slower (see "Reads, block size and saves") | level 19, blocks of 4 MiB |
 | long-distance matching | 0 to 3 % on large streams (benchmark); nothing below the 8 MiB window | on above 8 MiB |
 | level 9 | slow and a small gain | not used |
 
@@ -541,10 +555,57 @@ one stream 1.86 MB (the same earlier window).
 | repack, 4 MiB blocks (first try) | 681 s | 73 packs, 1.407 GB |
 | repack, one stream per pack (the format) | 683 s | 73 packs, 1.350 GB and a 112 KiB dictionary, 1.26 GiB allocated |
 
-\* From the first round of this slice (before times tables and packs). The disk of the machine fell
-below its 25 GiB limit during this run, so a checkout from the packs of Chromium, the cold write
-with the dictionary and the save cost on Chromium were not measured; the history above and the
-unit tests check those paths.
+\* From the first round of this slice (before times tables and packs). The two repacks of this
+table ran without named states, so their objects were in id order; see the next section.
+
+### Reads, block size and saves
+
+Measured with `objects-bench` and `objects-read`; scripts and raw output are in
+`benchmarks/objects-20261107/`. Chromium `src` as above, load average 13 to 80. A cold read opens
+the store anew for each read, as a separate command does.
+
+The order of objects in a pack: with named states (path order) the packs of Chromium are 1.155 GB
+against 1.350 GB in id order, 14 % smaller. A store without named states also reads badly: in id
+order and one stream per pack, a checkout took 6,453 s and decoding every blob ran at 2 MB/s,
+because nearly every read decoded another 56 MiB block.
+
+Block size, in path order, times table still one object for the whole tree:
+
+| block | pack bytes | cold read of one blob, median | save of 1 file | save of 10 files | checkout | decode a tree |
+| --- | --- | --- | --- | --- | --- | --- |
+| one stream (up to 56 MiB) | 1,155,233,429 | 36.1 ms | 93 ms | 110 ms | 233 s | 51 MB/s |
+| 4 MiB | 1,203,893,968 | 2.7 ms | 38 ms | 65 ms | 109 s | 1,279 MB/s |
+| 1 MiB | 1,253,485,248 | 0.8 ms | 35 ms | 63 ms | | |
+
+The save columns in this table re-store unchanged files, so they write little. 4 MiB is the
+format's choice: 4.2 % more bytes than one stream for a read 13 times faster; 1 MiB costs twice that
+and gives a save almost nothing.
+
+The other costs of a save and of a read were the decoding of all pack indexes when a store opens
+(74 ms) and the one times table of the whole tree (17 ms to decode, 3 ms to encode, 24 ms to compress
+and write, per save). With indexes read in place and one times table per folder (the format now):
+
+| Chromium | before | now |
+| --- | --- | --- |
+| open the store | 74 ms | 2.25 ms |
+| open and read one old blob, median | 77 ms | 7.0 ms |
+| decode a tree, in parallel | 1,279 MB/s | 1,302 MB/s |
+| save of 1 changed file: first, then median of 5 | | 22.7 ms, 8.2 ms |
+| save of 10 changed files: first, then median of 5 | | 121 ms, 33.0 ms |
+| pack bytes, 73 packs, 583,186 objects | 1,203,893,968 | 1,210,079,112 |
+| walk all 47,032 times tables, one thread | | 564 ms |
+
+Each save here appends a line to the files and writes from the previous state. On the 60 states of
+this repository: pack 2,021,599 bytes (1,803,616 with one stream and one times table per state);
+checkout of the 60 states 7.24 s, the slowest 0.17 s; a cold read 3.2 ms, 28 of the 100 sampled
+blobs through deltas; decode 870 MB/s.
+
+Deltas and packs: with one stream per pack, the same 60 states gave a pack of 1,803,616 bytes with
+deltas and 1,772,064 without, so a pack finds the repeats by itself. Deltas matter before a repack:
+3,240,029 loose bytes against 5,839,574.
+
+A checkout of Chromium from its packs with the per-folder tables took 106.6 s (`cp -cR` of the same
+tree: 288 s), and every entry, byte and time compared equal to the source (26.6 s).
 
 This crate's matrix on the 536,155 objects (4.28 GB of plain payload, 1,038 blocks of 4 MiB, 18
 threads):

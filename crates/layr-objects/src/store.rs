@@ -15,7 +15,7 @@
 
 use crate::fsx;
 use crate::id::{Id, Keying, Kind};
-use crate::pack::{self, Builder, Index};
+use crate::pack::{self, Builder, Index, LazyIndex};
 use crate::tree::{varint_into, Reader, Tree};
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -24,8 +24,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::FileExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const MAGIC: &[u8; 4] = b"LOB1";
 const WHOLE: u8 = b'z';
@@ -67,8 +67,9 @@ impl Default for Options {
             chunk_min_file: 1 << 20,
             delta_max: 64 << 20,
             max_depth: 16,
-            // One zstd stream per pack (docs/objects.md section 15).
-            block_size: 56 << 20,
+            // 4 MiB: a read decodes one block, 13 times faster than one stream per pack, for 4.2%
+            // more bytes (docs/objects.md section 15).
+            block_size: 4 << 20,
             pack_plain_max: 56 << 20,
             pack_level: 19,
             pack_long: true,
@@ -159,17 +160,51 @@ struct Payload {
 }
 
 struct LoadedPack {
-    index: Index,
+    id: Id,
     data: File,
+    /// Read at the first lookup that reaches this pack.
+    index: OnceLock<LazyIndex>,
+    index_path: PathBuf,
+}
+
+impl LoadedPack {
+    fn index(&self) -> Result<&LazyIndex> {
+        if let Some(i) = self.index.get() {
+            return Ok(i);
+        }
+        let parsed = LazyIndex::parse(fs::read(&self.index_path)?, &self.id, self.data.metadata()?.len())
+            .with_context(|| format!("pack {}", self.id))?;
+        Ok(self.index.get_or_init(|| parsed))
+    }
 }
 
 /// The packs of a store, read once and again when a lookup misses (another process packed).
 #[derive(Default)]
 struct PackSet {
-    packs: Vec<LoadedPack>,
-    names: HashSet<Id>,
-    /// Object id to (pack, entry).
-    map: HashMap<Id, (u32, u32)>,
+    packs: Vec<Arc<LoadedPack>>,
+}
+
+impl PackSet {
+    /// The pack that holds `id` and its entry. `last` is the pack of the previous lookup: objects
+    /// read in path order are neighbors there, so most lookups search one index.
+    fn find(&self, id: &Id, last: &AtomicU32) -> Result<Option<(u32, pack::Entry)>> {
+        let hint = last.load(Ordering::Relaxed) as usize;
+        if let Some(p) = self.packs.get(hint) {
+            if let Some(e) = p.index()?.find(id)? {
+                return Ok(Some((hint as u32, e)));
+            }
+        }
+        for (n, p) in self.packs.iter().enumerate() {
+            if n == hint {
+                continue;
+            }
+            if let Some(e) = p.index()?.find(id)? {
+                last.store(n as u32, Ordering::Relaxed);
+                return Ok(Some((n as u32, e)));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Recently decoded blocks: a checkout reads objects in path order, so neighbors share blocks.
@@ -180,7 +215,7 @@ struct BlockCache {
     bytes: usize,
 }
 
-/// The decoded blocks a store keeps (a pack of one stream is one block of up to 56 MiB).
+/// The decoded blocks a store keeps.
 const CACHED_BYTES: usize = 512 << 20;
 
 /// Whole blobs up to this size use the store dictionary in their loose frame.
@@ -209,6 +244,8 @@ pub struct Store {
     pub added: Added,
     pub clone_hook: Option<CloneHook>,
     packs: RwLock<Arc<PackSet>>,
+    /// The pack of the last lookup (`PackSet::find`).
+    last_pack: AtomicU32,
     cache: Mutex<BlockCache>,
     /// The store dictionary for small whole blobs (`dicts/<id>`), once a repack trained one.
     dict: RwLock<Option<(Id, Arc<Vec<u8>>)>>,
@@ -255,6 +292,7 @@ impl Store {
             added: Added::default(),
             clone_hook: None,
             packs: RwLock::new(Arc::new(PackSet::default())),
+            last_pack: AtomicU32::new(0),
             cache: Mutex::new(BlockCache::default()),
             dict: RwLock::new(None),
         };
@@ -292,14 +330,15 @@ impl Store {
 
     /// A loose or packed object (not a hot blob).
     fn has_object(&self, id: &Id) -> bool {
-        self.object_path(id).exists() || self.pack_set().map.contains_key(id)
+        self.object_path(id).exists() || matches!(self.pack_set().find(id, &self.last_pack), Ok(Some(_)))
     }
 
     fn pack_set(&self) -> Arc<PackSet> {
         self.packs.read().expect("no panic holds the lock").clone()
     }
 
-    /// Read the pack indexes again; packs already open stay open.
+    /// List the packs again; packs already open stay open. An index is read when a lookup first
+    /// reaches its pack.
     fn reload_packs(&self) -> Result<Arc<PackSet>> {
         let old = self.pack_set();
         let mut set = PackSet::default();
@@ -313,23 +352,16 @@ impl Store {
         names.sort();
         for name in names {
             let id = Id::parse(&name)?;
-            let data_path = self.root.join("packs").join(format!("{name}.pack"));
-            let data = File::open(&data_path).with_context(|| format!("pack {name} has an index but no data"))?;
-            let index = match old.packs.iter().find(|p| p.index.pack == id) {
-                Some(p) => p.index.clone(),
+            let pack = match old.packs.iter().find(|p| p.id == id) {
+                Some(p) => p.clone(),
                 None => {
-                    let bytes = fs::read(self.root.join("packs").join(format!("{name}.idx")))?;
-                    let index = Index::decode(&bytes, data.metadata()?.len()).with_context(|| format!("pack {name}"))?;
-                    ensure!(index.pack == id, "pack index {name} names pack {}", index.pack);
-                    index
+                    let data_path = self.root.join("packs").join(format!("{name}.pack"));
+                    let data = File::open(&data_path).with_context(|| format!("pack {name} has an index but no data"))?;
+                    let index_path = self.root.join("packs").join(format!("{name}.idx"));
+                    Arc::new(LoadedPack { id, data, index: OnceLock::new(), index_path })
                 }
             };
-            let n = set.packs.len() as u32;
-            for (i, e) in index.entries.iter().enumerate() {
-                set.map.entry(e.id).or_insert((n, i as u32));
-            }
-            set.names.insert(id);
-            set.packs.push(LoadedPack { index, data });
+            set.packs.push(pack);
         }
         let set = Arc::new(set);
         *self.packs.write().expect("no panic holds the lock") = set.clone();
@@ -339,15 +371,15 @@ impl Store {
     /// The plain bytes of one block of a pack, checked against the index sizes.
     fn block(&self, set: &PackSet, pack: u32, block: u32) -> Result<Arc<Vec<u8>>> {
         let p = &set.packs[pack as usize];
-        let key = (p.index.pack, block);
+        let key = (p.id, block);
         if let Some(b) = self.cache.lock().expect("no panic holds the lock").blocks.get(&key) {
             return Ok(b.clone());
         }
-        let b = p.index.blocks[block as usize];
+        let b = p.index()?.blocks[block as usize];
         let mut frame = vec![0u8; b.compressed as usize];
         p.data.read_exact_at(&mut frame, b.offset)?;
         let plain = crate::zstdx::decompress(&frame, None, b.plain as usize)
-            .with_context(|| format!("block {block} of pack {}", p.index.pack))?;
+            .with_context(|| format!("block {block} of pack {}", p.id))?;
         let plain = Arc::new(plain);
         let mut cache = self.cache.lock().expect("no panic holds the lock");
         if cache.blocks.insert(key, plain.clone()).is_none() {
@@ -392,11 +424,12 @@ impl Store {
             Err(e) => return Err(e).with_context(|| format!("cannot read object {id}")),
         }
         let mut set = self.pack_set();
-        if !set.map.contains_key(id) {
+        let mut found = set.find(id, &self.last_pack)?;
+        if found.is_none() {
             set = self.reload_packs()?;
+            found = set.find(id, &self.last_pack)?;
         }
-        let Some(&(pack, entry)) = set.map.get(id) else { bail!("object {id} is missing") };
-        let e = set.packs[pack as usize].index.entries[entry as usize];
+        let Some((pack, e)) = found else { bail!("object {id} is missing") };
         let block = self.block(&set, pack, e.block)?;
         let bytes = block[e.offset as usize..(e.offset + e.length) as usize].to_vec();
         Ok(Payload { kind: e.kind, form: e.form, bytes })
@@ -975,10 +1008,13 @@ impl Store {
         }
         for p in &self.reload_packs()?.packs {
             s.packs += 1;
-            s.packed_objects += p.index.entries.len() as u64;
-            s.packed_plain_bytes += p.index.entries.iter().map(|e| u64::from(e.length)).sum::<u64>();
+            let index = p.index()?;
+            s.packed_objects += index.count as u64;
+            for i in 0..index.count {
+                s.packed_plain_bytes += u64::from(index.entry(i)?.length);
+            }
             s.pack_bytes += p.data.metadata()?.len();
-            s.pack_bytes += fs::metadata(self.root.join("packs").join(format!("{}.idx", p.index.pack)))?.len();
+            s.pack_bytes += fs::metadata(&p.index_path)?.len();
         }
         Ok(s)
     }
@@ -997,7 +1033,7 @@ impl Store {
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
                 let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) else { continue };
-                if set.map.contains_key(&id) {
+                if set.find(&id, &self.last_pack)?.is_some() {
                     fs::remove_file(entry.path())?;
                     report.removed += 1;
                     continue;
@@ -1102,8 +1138,9 @@ impl Store {
         let mut seen = HashSet::new();
         let (mut trees, mut others) = (Vec::new(), Vec::new());
         for state in states {
-            if let Some(tree) = self.state_tree(&state)? {
-                self.order_tree(&tree, loose, &mut seen, &mut trees, &mut others)?;
+            if let Some(r) = self.state_ref(&state)? {
+                self.order_tree(&r.tree, loose, &mut seen, &mut trees, &mut others)?;
+                self.order_times(&r.times, loose, &mut seen, &mut trees)?;
             }
         }
         let mut rest: Vec<Id> = loose.keys().filter(|id| !seen.contains(*id)).copied().collect();
@@ -1111,6 +1148,39 @@ impl Store {
         trees.extend(others);
         trees.extend(rest);
         Ok(trees)
+    }
+
+    /// A times table and the tables below it. A table already in a pack ends the walk: a table
+    /// is packed with or after the tables it names.
+    fn order_times(&self, id: &Id, loose: &HashMap<Id, u64>, seen: &mut HashSet<Id>, out: &mut Vec<Id>) -> Result<()> {
+        if !loose.contains_key(id) || !seen.insert(*id) {
+            return Ok(());
+        }
+        out.push(*id);
+        for r in self.get_times(id)?.records {
+            if let crate::times::Record::Folder(child) = r {
+                self.order_times(&child, loose, seen, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The times table `root` and every table below it (what a transfer of a state must send).
+    pub fn times_ids(&self, root: &Id) -> Result<Vec<Id>> {
+        let mut out = vec![*root];
+        let mut next = 0;
+        let mut seen: HashSet<Id> = HashSet::from([*root]);
+        while next < out.len() {
+            for r in self.get_times(&out[next])?.records {
+                if let crate::times::Record::Folder(child) = r {
+                    if seen.insert(child) {
+                        out.push(child);
+                    }
+                }
+            }
+            next += 1;
+        }
+        Ok(out)
     }
 
     fn order_tree(
