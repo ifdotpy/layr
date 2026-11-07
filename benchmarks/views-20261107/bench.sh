@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Virtual line (LayrFS mount) against a folder line (APFS clone) on one project. docs/views.md.
 # Needs the LayrFS extension (tools/layrfs/README.md) and a project in a test store:
 #   LAYR_ROOT=$TMPDIR/layr-bench/store bench.sh <layr binary> <project> [rg pattern]
