@@ -1,0 +1,121 @@
+{
+ "host": "Apple silicon Mac, macOS 27.2, internal SSD, APFS (case-insensitive), other agents running builds and tests",
+ "files": 10000,
+ "file_size": 4096,
+ "binaries": {
+  "base": {
+   "revision": "e36eb06",
+   "sha256": "e2a77fd4e647b370166739a26b3f9bcf86d3d16f3b9272968fa9ccf4627ae8cf"
+  },
+  "new": {
+   "sha256": "6ef42b4168265088a3537bef69dec558064c2c2b8c7ee97b62341d04c073e668"
+  }
+ },
+ "backends_py": {
+  "command": "python3 -I benchmarks/backends.py --binary <layr> --root <new dir> --files 10000 --repeats 1, three rounds, base and new alternate",
+  "runs": {
+   "base": [
+    {
+     "round": 1,
+     "line_new": 3.8491171669999993,
+     "merge": 7.179817332999999,
+     "load": 74.63134765625
+    },
+    {
+     "round": 2,
+     "line_new": 2.7137515830000005,
+     "merge": 6.161694459,
+     "load": 71.0849609375
+    },
+    {
+     "round": 3,
+     "line_new": 3.2161925420000017,
+     "merge": 6.971959667,
+     "load": 63.47265625
+    }
+   ],
+   "new": [
+    {
+     "round": 1,
+     "line_new": 3.464901459,
+     "merge": 1.191532292000005,
+     "load": 111.8330078125
+    },
+    {
+     "round": 2,
+     "line_new": 3.461593416999996,
+     "merge": 1.0597407079999996,
+     "load": 83.634765625
+    },
+    {
+     "round": 3,
+     "line_new": 0.9576014170000029,
+     "merge": 0.6873004159999994,
+     "load": 70.27978515625
+    }
+   ]
+  },
+  "median": {
+   "base": {
+    "line_new": 3.216,
+    "merge": 6.972
+   },
+   "new": {
+    "line_new": 3.462,
+    "merge": 1.06
+   }
+  }
+ },
+ "thin_head": {
+  "command": "python3 -I benchmarks/apfs-thin-head.py --root <new dir> --bin base=<layr> --bin new=<layr> --repeats 6",
+  "description": "one store per binary; each trial: change one file in line topic, save -m (a thin head without a view), line new from topic, merge topic into main (fast-forward); trials alternate the binary order",
+  "runs": {
+   "base": {
+    "line_new_thin": [
+     1.6840594170000003,
+     0.9908296250000035,
+     0.975385542000005,
+     1.5464751250000006,
+     6.614385167000002,
+     2.2472087909999914
+    ],
+    "merge_ff": [
+     2.942109500000001,
+     2.6172026249999973,
+     2.971299583000004,
+     3.5211872080000006,
+     46.793042541000005,
+     9.40994220799999
+    ]
+   },
+   "new": {
+    "line_new_thin": [
+     0.6683043749999982,
+     0.5507695840000011,
+     0.7995552500000045,
+     0.6086475829999998,
+     1.0349555829999986,
+     1.5613642080000005
+    ],
+    "merge_ff": [
+     0.745297665999999,
+     0.6366094580000023,
+     0.638646915999999,
+     0.6783497910000023,
+     1.396748708000004,
+     1.6267939170000005
+    ]
+   }
+  },
+  "median": {
+   "base": {
+    "line_new_thin": 1.615,
+    "merge_ff": 3.246
+   },
+   "new": {
+    "line_new_thin": 0.734,
+    "merge_ff": 0.712
+   }
+  }
+ }
+}

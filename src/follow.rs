@@ -218,7 +218,7 @@ impl<'a> Repo<'a> {
             }
             {
                 let _lock = self.p.lock()?;
-                if has_unsaved(&self.locked_status(&now)?.0) {
+                if has_unsaved(&self.locked_status_report(&now)?) {
                     return Ok(Some("up to date; caches not saved: unsaved work".into()));
                 }
             }
@@ -233,7 +233,7 @@ impl<'a> Repo<'a> {
         }
         {
             let _lock = self.p.lock()?;
-            let st = self.locked_status(&self.line(&line.id)?)?.0;
+            let st = self.locked_status_report(&self.line(&line.id)?)?;
             if has_unsaved(&st) {
                 return Ok(Some("skipped: unsaved work".into()));
             }

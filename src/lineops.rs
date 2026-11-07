@@ -5,7 +5,9 @@ use crate::ids;
 use crate::model::{Line, LineChange, Record};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
-use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "macos"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
     if count == 0 {
@@ -22,6 +24,7 @@ fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
 }
 
 /// Submit standard snapshots concurrently so the kernel can share transaction commits.
+#[cfg(not(target_os = "macos"))]
 fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
@@ -52,7 +55,7 @@ fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
             }
         })
     }
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
+    #[cfg(feature = "overlayfs")]
     {
         for dst in destinations {
             crate::storage::snapshot(src, dst, false)?;
@@ -133,6 +136,13 @@ impl Repo<'_> {
             .collect();
         let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(crate::store::temp_name())).collect();
         let result = (|| -> Result<Vec<Record>> {
+            // On APFS each folder is made from the layers of the state: a complete view of a thin
+            // state first, and a copy of the view after it, cloned the whole tree twice.
+            #[cfg(target_os = "macos")]
+            for tmp in &tmps {
+                self.snapshot_state(start, tmp, false)?;
+            }
+            #[cfg(not(target_os = "macos"))]
             snapshots(&self.state_root(start)?, &tmps)?;
             let mut recs = Vec::new();
             for (line, tmp) in lines.iter().zip(&tmps) {
