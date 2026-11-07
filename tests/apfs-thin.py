@@ -119,7 +119,7 @@ try:
         assert (project / 'deltas' / state).is_dir()
         if view.exists():
             subprocess.run(['chflags', '-R', 'nouchg', str(view)], check=True)
-            subprocess.run(['/bin/chmod', '-R', '-N', str(view)], check=True)
+            subprocess.run(['/usr/bin/find', str(view), '-exec', '/bin/chmod', '-h', '-N', '{}', '+'], check=True)
             shutil.rmtree(view)
         assert not view.exists(), view
     drop_view(head(work))
@@ -221,5 +221,6 @@ try:
     print('PASS a merge of thin states matches the line, and fsck passes', flush=True)
 finally:
     subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=True)
-    subprocess.run(['/bin/chmod', '-R', '-N', str(root)], check=True)
+    # Thin layers can contain dangling links; clear ACLs without following them.
+    subprocess.run(['/usr/bin/find', str(root), '-exec', '/bin/chmod', '-h', '-N', '{}', '+'], check=True)
     shutil.rmtree(root)
