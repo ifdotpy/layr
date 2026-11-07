@@ -1,0 +1,14 @@
+[package]
+name = "tooldaemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+ignore = "0.4"
+rayon = "1"
+
+[profile.release]
+debug = false
