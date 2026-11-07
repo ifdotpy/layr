@@ -2,10 +2,11 @@
 
 use super::api::{Api, Cas, RefUpdate};
 use super::backend::Backend;
-use super::{format, keys, reader, writer, Options, Store};
+use super::{writer, Options, Store};
 use crate::ctx::{Caller, Ctx};
 use crate::model::{LineChange, LineState, Record, StateRec};
 use crate::repo::Repo;
+use layr_objects::Kind;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -23,7 +24,12 @@ struct FakeState {
     /// Upload id to the object id, its type and the parts by number.
     uploads: BTreeMap<String, Upload>,
     segments: BTreeMap<(String, String, u64, u64), Vec<u8>>,
-    states: BTreeMap<(String, String), String>,
+    /// A state: its tree and times table.
+    states: BTreeMap<(String, String), (String, String)>,
+    /// Object id to the pack that holds it (from the pack indexes).
+    located: BTreeMap<String, String>,
+    /// Pack id to its index.
+    indexes: BTreeMap<String, Vec<u8>>,
     refs: BTreeMap<(String, String), (String, u64)>,
     machines: BTreeMap<String, String>,
     minimum: Option<String>,
@@ -169,13 +175,41 @@ impl Fake {
                     .unwrap()
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .filter(|id| !s.objects.contains_key(*id))
+                    .filter(|id| !s.objects.contains_key(*id) && !s.located.contains_key(*id))
                     .collect();
                 (200, json(serde_json::json!({ "missing": missing })), Vec::new())
             }
+            ("POST", ["objects", "locate"]) => {
+                let packs: BTreeMap<&str, &String> = body["ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|id| s.located.get(id).map(|pack| (id, pack)))
+                    .collect();
+                (200, json(serde_json::json!({ "packs": packs })), Vec::new())
+            }
+            ("PUT", ["packs", pack]) => {
+                let Some((_, data)) = s.objects.get(*pack) else { return (400, Vec::new(), Vec::new()) };
+                let Ok(index) = layr_objects::pack::Index::decode(&request.body, data.len() as u64) else {
+                    return (400, Vec::new(), Vec::new());
+                };
+                if index.pack.hex() != *pack {
+                    return (400, Vec::new(), Vec::new());
+                }
+                for entry in &index.entries {
+                    s.located.insert(entry.id.hex(), pack.to_string());
+                }
+                s.indexes.insert(pack.to_string(), request.body);
+                (200, Vec::new(), Vec::new())
+            }
+            ("GET", ["packs", pack]) => match s.indexes.get(*pack) {
+                Some(index) => (200, index.clone(), Vec::new()),
+                None => (404, Vec::new(), Vec::new()),
+            },
             ("PUT", ["objects", id]) => {
                 let kind = request.headers.get("layr-object-type").cloned().unwrap_or_default();
-                if request.body.len() > super::api::SINGLE_PUT_LIMIT || format::object_id(&kind, &request.body) != *id {
+                if request.body.len() > super::api::SINGLE_PUT_LIMIT || typed(&kind, &request.body) != *id {
                     return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
                 }
                 let new = s.objects.insert(id.to_string(), (kind, request.body)).is_none();
@@ -200,7 +234,7 @@ impl Fake {
             ("POST", ["objects", id, "uploads", upload, "complete"]) => {
                 let (object, kind, parts) = s.uploads.remove(*upload).unwrap();
                 let bytes: Vec<u8> = parts.into_values().flatten().collect();
-                if object != *id || format::object_id(&kind, &bytes) != *id {
+                if object != *id || typed(&kind, &bytes) != *id {
                     return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
                 }
                 s.objects.insert(object, (kind, bytes));
@@ -235,15 +269,19 @@ impl Fake {
                 }
             }
             ("PUT", ["states", state]) => {
-                let tree = body["tree"].as_str().unwrap().to_string();
-                if s.objects.get(&tree).is_none_or(|(kind, _)| kind != format::OBJECT_STATE_TREE) {
+                let (Some(tree), Some(times)) = (body["tree"].as_str(), body["times"].as_str()) else {
+                    return (400, json(serde_json::json!({"error":{"code":"invalid","message":"tree and times"}})), Vec::new());
+                };
+                // Both must be in a pack of the project.
+                if !s.located.contains_key(tree) || !s.located.contains_key(times) {
                     return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
                 }
+                let body = (tree.to_string(), times.to_string());
                 match s.states.get(&(scope.clone(), state.to_string())) {
-                    Some(old) if old != &tree => (409, Vec::new(), Vec::new()),
+                    Some(old) if old != &body => (409, Vec::new(), Vec::new()),
                     Some(_) => (200, Vec::new(), Vec::new()),
                     None => {
-                        s.states.insert((scope, state.to_string()), tree);
+                        s.states.insert((scope, state.to_string()), body);
                         (201, Vec::new(), Vec::new())
                     }
                 }
@@ -259,7 +297,7 @@ impl Fake {
                 (200, json(serde_json::json!({ "missing": missing })), Vec::new())
             }
             ("GET", ["states", state]) => match s.states.get(&(scope, state.to_string())) {
-                Some(tree) => (200, json(serde_json::json!({ "tree": tree })), Vec::new()),
+                Some((tree, times)) => (200, json(serde_json::json!({ "times": times, "tree": tree })), Vec::new()),
                 None => (404, Vec::new(), Vec::new()),
             },
             ("GET", ["refs"]) => {
@@ -311,6 +349,15 @@ impl Fake {
     }
 }
 
+/// The typed id of the server: `type` from the `Layr-Object-Type` header.
+fn typed(kind: &str, bytes: &[u8]) -> String {
+    use layr_hashers::Digest;
+    let mut hasher = layr_hashers::ContentAddress::new();
+    hasher.update(format!("{kind} {}\0", bytes.len()).as_bytes());
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 fn random_bytes(n: usize) -> Vec<u8> {
     use rand::RngCore;
     let mut bytes = vec![0; n];
@@ -323,24 +370,24 @@ fn an_object_over_64_mib_goes_up_in_parts_and_a_held_object_is_not_sent_again() 
     let fake = Fake::start(None);
     let api = fake.api();
     let bytes = random_bytes((64 << 20) + 4096);
-    let (id, new) = api.put_object(format::OBJECT_PART, &bytes).unwrap();
+    let (id, new) = api.put_object(Kind::Opaque, &bytes).unwrap();
     assert!(new);
-    assert_eq!(id, format::object_id("part", &bytes));
+    assert_eq!(id, typed("opaque", &bytes));
     assert_eq!(fake.count("POST /api/v1/projects/p/objects/missing"), 1, "a large upload asks first");
     assert_eq!(fake.count(&format!("POST /api/v1/projects/p/objects/{id}/uploads")), 2, "start and complete");
     assert_eq!(fake.count(&format!("PUT /api/v1/projects/p/objects/{id}/uploads/u1/")), 9, "8 MiB parts");
     assert_eq!(fake.count(&format!("PUT /api/v1/projects/p/objects/{id}")), 9, "no single PUT over 64 MiB");
-    assert_eq!(api.get_object("part", &id).unwrap().unwrap(), bytes);
+    assert_eq!(api.get_object(Kind::Opaque, &id).unwrap().unwrap(), bytes);
     // The project holds it now: the second upload sends nothing.
-    let (_, new) = api.put_object(format::OBJECT_PART, &bytes).unwrap();
+    let (_, new) = api.put_object(Kind::Opaque, &bytes).unwrap();
     assert!(!new);
     assert_eq!(fake.count(&format!("POST /api/v1/projects/p/objects/{id}/uploads")), 2);
-    // The typed id keeps types apart, and a read checks the bytes against the id.
-    assert_ne!(format::object_id("part", b"x"), format::object_id("state-tree", b"x"));
-    assert!(api.get_object("state-tree", &id).unwrap_err().to_string().contains("does not match its id"));
+    // The type is part of the id, and a read checks the bytes against the id.
+    assert_ne!(typed("blob", b"x"), typed("opaque", b"x"));
+    assert!(api.get_object(Kind::Blob, &id).unwrap_err().to_string().contains("does not match its id"));
     // A missing object is missing, and `objects/missing` names it.
-    let absent = format::object_id("part", b"absent");
-    assert_eq!(api.get_object("part", &absent).unwrap(), None);
+    let absent = typed("opaque", b"absent");
+    assert_eq!(api.get_object(Kind::Opaque, &absent).unwrap(), None);
     assert_eq!(api.objects_missing(&[id.clone(), absent.clone()]).unwrap(), vec![absent]);
 }
 
@@ -360,7 +407,7 @@ fn a_client_that_the_server_finds_too_old_stops_with_the_minimum_version() {
 fn a_write_without_a_token_names_the_login() {
     let fake = Fake::start(None);
     let api = Api::for_test(&fake.origin, "p", None);
-    let error = api.put_object("part", b"bytes").unwrap_err().to_string();
+    let error = api.put_object(Kind::Opaque, b"bytes").unwrap_err().to_string();
     assert!(error.contains("HTTP 401") && error.contains("layr login"), "{error}");
 }
 
@@ -477,8 +524,39 @@ fn push(store: &Store, ctx: &Ctx, repo: &Repo) -> anyhow::Result<super::Report> 
     Ok(report)
 }
 
+/// Reads `state` from the server as a fresh machine would: its body, the packs that hold its objects (in
+/// rounds: trees first), then a checkout with its times into `dst`.
+fn download(api: &Api, objects_dir: &Path, state: &str, dst: &Path) -> anyhow::Result<()> {
+    let r = api.get_state("", state)?.ok_or_else(|| anyhow::anyhow!("no state {state}"))?;
+    for _ in 0..8 {
+        let objects = layr_objects::Store::open(objects_dir, layr_objects::Keying::Plain)?;
+        let mut need: Vec<String> = layr_objects::transfer::missing_trees(&objects, &r.tree)?.iter().map(|i| i.hex()).collect();
+        if !objects.has(&r.times) {
+            need.push(r.times.hex());
+        }
+        if need.is_empty() {
+            for (id, kind) in layr_objects::transfer::reachable(&objects, &r.tree)? {
+                if kind == Kind::Blob && !objects.has(&id) {
+                    need.push(id.hex());
+                }
+            }
+        }
+        if need.is_empty() {
+            layr_objects::checkout_with(&objects, &r.tree, Some(&r.times), dst)?;
+            return Ok(());
+        }
+        let located = api.locate(&need)?;
+        anyhow::ensure!(located.len() == need.len(), "the server lacks objects");
+        for pack in located.values().collect::<std::collections::BTreeSet<_>>() {
+            let data = api.get_object(Kind::Opaque, pack)?.ok_or_else(|| anyhow::anyhow!("no pack {pack}"))?;
+            layr_objects::transfer::add_pack(&objects, &data, &api.get_pack_index(pack)?)?;
+        }
+    }
+    anyhow::bail!("objects did not come")
+}
+
 #[test]
-fn a_push_sends_typed_objects_states_records_and_one_ref_move_and_a_reader_gets_the_files_back() {
+fn a_push_sends_trees_times_and_packs_records_and_one_ref_move_and_a_reader_gets_the_files_back() {
     let root = std::env::temp_dir().join(crate::ids::new_id());
     std::fs::create_dir_all(&root).unwrap();
     let ctx = context(&root);
@@ -492,34 +570,31 @@ fn a_push_sends_typed_objects_states_records_and_one_ref_move_and_a_reader_gets_
         // The machine key went up before its records, and only this machine's segments.
         assert_eq!(server.machines.get(&store.machine), Some(&hex::encode(store.key.verifying_key().to_bytes())));
         assert!(server.segments.keys().all(|(_, writer, ..)| writer == &store.machine));
-        for state in &states {
-            let tree = &server.states[&(String::new(), state.clone())];
-            let (kind, bytes) = &server.objects[tree];
-            assert_eq!(kind, format::OBJECT_STATE_TREE);
-            let (header, _) = format::split_tree(bytes).unwrap();
-            assert_eq!((header.tree.as_str(), header.attempt.as_str()), ("full", format::CONTENT_ATTEMPT), "complete trees");
-        }
+        // Every object is an `opaque` pack data file with its index; every state names its tree and times.
+        assert!(!server.indexes.is_empty());
         for (id, (kind, bytes)) in &server.objects {
-            assert_eq!(&format::object_id(kind, bytes), id);
-            assert!(!bytes.starts_with(b"age-encryption.org/"), "plain objects");
+            assert_eq!(kind, "opaque");
+            assert_eq!(&typed(kind, bytes), id);
+            assert!(server.indexes.contains_key(id), "pack {id} has its index");
+        }
+        for state in &states {
+            let (tree, times) = &server.states[&(String::new(), state.clone())];
+            assert!(server.located.contains_key(tree) && server.located.contains_key(times));
         }
         assert_eq!(server.refs[&(String::new(), format!("lines/{line}"))].0, states[2]);
     }
-    // A reader with the machine keys of the records reads each state back from the server.
-    let identity = store.identity(&store.descriptor().unwrap(), None).unwrap();
-    assert_eq!(identity, keys::PLAIN);
-    let records = reader::records(&store.backend, &identity, PROJECT).unwrap();
-    assert!(records.gaps.is_empty());
-    let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
+    // The local object store holds the states as `layr objects` does.
+    let objects = layr_objects::Store::open(&repo.p.meta_dir().join("objects"), layr_objects::Keying::Plain).unwrap();
+    for state in &states {
+        assert!(objects.state_ref(state).unwrap().is_some());
+    }
+    // Another machine reads each state back from the server, with its times.
     for (n, state) in states.iter().enumerate() {
-        let (_, _, tree) = source.tree(state, format::CONTENT_ATTEMPT).unwrap();
-        assert!(tree.files.values().flat_map(|e| e.3.iter()).all(|link| link.is_content()), "links name parts by id");
-        assert_eq!(source.read_file(&tree, "payload").unwrap(), format!("version {}\n", n % 2).as_bytes());
+        let dst = root.join(format!("read-{n}"));
+        download(&fake.api(), &root.join("reader-objects"), state, &dst).unwrap();
         let local = repo.p.state_path(state);
-        assert_eq!(source.read_file(&tree, "stable").unwrap(), std::fs::read(local.join("stable")).unwrap());
-        if n == 2 {
-            assert_eq!(source.read_file(&tree, "dir/large").unwrap(), std::fs::read(local.join("dir/large")).unwrap());
-        }
+        assert!(layr_objects::compare(&local, &dst).unwrap().differences.is_empty(), "state {n} reads back equal");
+        assert_eq!(std::fs::read(dst.join("payload")).unwrap(), format!("version {}\n", n % 2).as_bytes());
     }
     // A second push sends no object, no state and no ref move, and asks for the states in one batch.
     let gets = fake.count("GET /api/v1/projects/p/states/");
@@ -534,6 +609,23 @@ fn a_push_sends_typed_objects_states_records_and_one_ref_move_and_a_reader_gets_
     assert_eq!(fake.count("POST /api/v1/projects/p/refs/cas"), cas);
     assert_eq!(fake.count("GET /api/v1/projects/p/states/"), gets, "no request per state");
     assert_eq!(fake.count("POST /api/v1/projects/p/states/missing"), batches + 1);
+    // A new state sends only the objects that the server lacks: its tree path and the new blob.
+    let packs = fake.state.lock().unwrap().indexes.len();
+    let next = add_state(&repo.p, &ctx, &states[2]);
+    move_line(&repo.p, &ctx, &line, Some(&states[2]), &next);
+    let store = api_store(&root, &ctx, &fake);
+    push(&store, &ctx, &repo).unwrap();
+    let server = fake.state.lock().unwrap();
+    assert_eq!(server.indexes.len(), packs + 1, "one new pack");
+    let index = server.indexes.values().find(|i| {
+        let decoded = layr_objects::pack::Index::decode(i, server.objects[&hex::encode(&i[4..36])].1.len() as u64).unwrap();
+        decoded.entries.iter().any(|e| e.kind == Kind::Times && server.states[&(String::new(), next.clone())].1 == e.id.hex())
+    });
+    let index = index.expect("the new pack holds the new times table");
+    let pack = &server.objects[&hex::encode(&index[4..36])].1;
+    let decoded = layr_objects::pack::Index::decode(index, pack.len() as u64).unwrap();
+    assert!(decoded.entries.len() <= 4, "a root tree, a times table and the changed blob: {}", decoded.entries.len());
+    drop(server);
     drop(repo);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -581,7 +673,7 @@ fn a_line_that_moved_on_the_server_fails_the_push_until_a_fetch_reads_it() {
 }
 
 #[test]
-fn a_missing_object_fails_the_read_of_its_file_and_names_the_object() {
+fn a_missing_pack_fails_the_read_and_names_the_pack() {
     let root = std::env::temp_dir().join(crate::ids::new_id());
     std::fs::create_dir_all(&root).unwrap();
     let ctx = context(&root);
@@ -589,16 +681,16 @@ fn a_missing_object_fails_the_read_of_its_file_and_names_the_object() {
     let store = api_store(&root, &ctx, &fake);
     let (repo, states, _) = project(&ctx);
     push(&store, &ctx, &repo).unwrap();
-    let records = reader::records(&store.backend, keys::PLAIN, PROJECT).unwrap();
-    let mut source = reader::Reader::new(&store.backend, keys::PLAIN, &records.keys);
-    let (_, _, tree) = source.tree(&states[2], format::CONTENT_ATTEMPT).unwrap();
-    let part = tree.files["dir/large"].3[0].0.clone();
-    fake.state.lock().unwrap().objects.remove(&part);
-    let mut fresh = reader::Reader::new(&store.backend, keys::PLAIN, &records.keys);
-    let error = format!("{:#}", fresh.read_file(&tree, "dir/large").unwrap_err());
-    assert!(error.contains(&part), "{error}");
-    // A state whose tree the server lacks is not listed.
-    assert!(store.backend.list(&format!("states/{}/", crate::ids::new_id())).unwrap().is_empty());
+    let pack = fake.state.lock().unwrap().indexes.keys().next().unwrap().clone();
+    fake.state.lock().unwrap().objects.remove(&pack);
+    let error = format!("{:#}", download(&fake.api(), &root.join("reader"), &states[2], &root.join("dst")).unwrap_err());
+    assert!(error.contains(&pack), "{error}");
+    // A pack whose index the server lost: `locate` no longer names its objects, so the read names them.
+    fake.state.lock().unwrap().located.clear();
+    let error = format!("{:#}", download(&fake.api(), &root.join("reader2"), &states[2], &root.join("dst2")).unwrap_err());
+    assert!(error.contains("lacks objects"), "{error}");
+    // A state that the server lacks.
+    assert!(fake.api().get_state("", &crate::ids::new_id()).unwrap().is_none());
     drop(repo);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -629,7 +721,7 @@ fn login_polls_until_the_person_signs_in_then_saves_the_session_and_registers_th
     // The next command reads the saved session as its token.
     let mut api = Api::for_test(&fake.origin, "p", None);
     api.connect(&ctx, PROJECT).unwrap();
-    api.put_object("part", b"with the session").unwrap();
+    api.put_object(Kind::Opaque, b"with the session").unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 

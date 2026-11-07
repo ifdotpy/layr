@@ -5,6 +5,7 @@ pub(crate) mod api;
 mod api_tests;
 pub(crate) mod backend;
 pub(crate) mod browse;
+mod cloud_objects;
 pub(crate) mod chunked;
 pub(crate) mod epochs;
 pub(crate) mod gateway;

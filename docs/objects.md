@@ -39,15 +39,13 @@ lowercase hex digits.
 | `times` | a times table (section 4) | every write |
 | `chunk` | a content-defined part of a large blob (section 5) | cold writes |
 | `opaque` | bytes whose structure the id does not describe: a pack data file (section 6), an encrypted object of a Secret overlay | packs, transfer |
-| `part` | file frames of one push, one after the other (zstd frames: whole files or deltas) | V1 client |
-| `state-tree` | the signed store tree of one state: a JSON header line, then the zstd frame of the canonical tree JSON | V1 client |
 | `chunk-pack` | a pack of content-defined chunks of a cache layer | V1 client |
 | `git-pack` | a Git pack of imported commits | V1 client |
 
-The last four types belong to the Layr Cloud V1 client (ifdotpy/layr#423); their bytes are defined
-in its contract, `docs/remotes.md`, section "Layr Cloud API v1". They use the id rule of this
-section unchanged. An upload names the type in the header `Layr-Object-Type`. Section 14 compares
-the two tree formats.
+The last two types belong to the Layr Cloud V1 client (ifdotpy/layr#423, `docs/remotes.md`,
+section "Layr Cloud API v1"); they use the id rule of this section unchanged. An upload names the
+type in the header `Layr-Object-Type`. The V1 client sends states as trees, times tables and packs
+of this file (section 14).
 
 - **SHA-256** is the persisted content hash of layr (`layr_hashers::ContentAddress`). It runs on
   the ARMv8 SHA extensions and SHA-NI; a second write of Chromium, which hashes every file
@@ -371,8 +369,9 @@ Open questions: checkout as the caller on a root service (before lines use objec
 
 ## 14. The two tree formats
 
-Two tree formats name the content of a state today. One of them must win; this is a decision for
-the Layr session, not for this slice.
+Decided (Layr and LayrFS, 2026-11-07): `tree` wins. The Layr Cloud V1 client (#423) sends states as
+`{"times","tree"}` with packs of this file; `part` and `state-tree` are gone. The comparison below is
+kept as the reason.
 
 | | `tree` (this file) | `state-tree` (V1 client, store format v2) |
 | --- | --- | --- |

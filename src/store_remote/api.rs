@@ -1,13 +1,14 @@
 //! Layr Cloud API v1 client for Public and Private remotes (layr-cloud docs/api.md, layr docs/remotes.md).
 //!
-//! The rest of the store code reads and writes keys of the store layout (`records/…`, `states/…`, `objects/…`).
-//! [`Api`] maps each key to its route: record segments to `/records`, a state tree to an object plus
-//! `PUT /states/<state>`, a frame part to `/objects/<id>`. Refs, the machine key and the person login are
-//! direct calls. Keys of the Secret layout (slots, epochs, public manifests) do not exist here.
+//! The record code reads and writes keys of the store layout (`records/…`); [`Api`] maps them to `/records`.
+//! States and objects use the object format of docs/objects.md (trees, times tables, blobs in packs) through
+//! direct calls (`cloud_objects`), as do refs, the machine key and the person login. Keys of the Secret
+//! layout (slots, epochs, public manifests) do not exist here.
 
 use super::backend::Object;
 use super::format;
 use anyhow::{anyhow, bail, Context, Result};
+use layr_objects::{Id, Keying, Kind, StateRef};
 use reqwest::{
     blocking::{Client, RequestBuilder, Response},
     Method, StatusCode,
@@ -350,8 +351,9 @@ impl Api {
 
     /// Uploads one object: true when it is new to the project. An object over 64 MiB goes up in parts, after
     /// a check that the project does not hold it yet.
-    pub(crate) fn put_object(&self, kind: &str, bytes: &[u8]) -> Result<(String, bool)> {
-        let id = format::object_id(kind, bytes);
+    pub(crate) fn put_object(&self, kind: Kind, bytes: &[u8]) -> Result<(String, bool)> {
+        let id = Keying::Plain.id(kind, bytes).hex();
+        let kind = kind.name();
         if bytes.len() > self.single_put_limit {
             if self.objects_missing(std::slice::from_ref(&id))?.is_empty() {
                 return Ok((id, false));
@@ -405,10 +407,8 @@ impl Api {
     }
 
     /// The bytes of an object, checked against its typed id. A `302` goes to a signed URL without the token.
-    pub(crate) fn get_object(&self, kind: &str, id: &str) -> Result<Option<Vec<u8>>> {
-        if !format::valid_object_id(id) {
-            bail!("invalid object id {id:?}");
-        }
+    pub(crate) fn get_object(&self, kind: Kind, id: &str) -> Result<Option<Vec<u8>>> {
+        let want = Id::parse(id)?;
         let url = self.project_url(&format!("objects/{id}"))?;
         let mut response = self.send(true, || self.request(Method::GET, url.clone()))?;
         if response.status().is_redirection() {
@@ -429,7 +429,7 @@ impl Api {
             return Err(self.failure(&format!("read of object {id}"), response));
         }
         let bytes = read_limited(response, OBJECT_READ_LIMIT)?;
-        if format::object_id(kind, &bytes) != id {
+        if Keying::Plain.id(kind, &bytes) != want {
             bail!("Layr Cloud object {id} does not match its id");
         }
         Ok(Some(bytes))
@@ -551,9 +551,54 @@ impl Api {
         Ok(has)
     }
 
-    pub(crate) fn put_state(&self, scope: &str, state: &str, tree: &str) -> Result<bool> {
+    /// Uploads the index of a pack whose data went up as an `opaque` object (`PUT /packs/<id>`). The server
+    /// checks the index against the data and every entry against its id.
+    pub(crate) fn put_pack_index(&self, pack: &str, index: &[u8]) -> Result<()> {
+        let url = self.project_url(&format!("packs/{pack}"))?;
+        let response = self.send(true, || {
+            self.request(Method::PUT, url.clone()).header("Content-Type", "application/octet-stream").body(index.to_vec())
+        })?;
+        if !response.status().is_success() {
+            return Err(self.failure(&format!("index of pack {pack}"), response));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_pack_index(&self, pack: &str) -> Result<Vec<u8>> {
+        let url = self.project_url(&format!("packs/{pack}"))?;
+        let response = self.send(true, || self.request(Method::GET, url.clone()))?;
+        if !response.status().is_success() {
+            return Err(self.failure(&format!("index of pack {pack}"), response));
+        }
+        read_limited(response, JSON_LIMIT)
+    }
+
+    /// The pack that holds each object of `ids` (`POST /objects/locate`, at most 1000 per request): object id
+    /// to pack id. An id that no pack of the project holds is left out.
+    pub(crate) fn locate(&self, ids: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut found = std::collections::BTreeMap::new();
+        for batch in ids.chunks(1000) {
+            let url = self.project_url("objects/locate")?;
+            let body = serde_json::json!({ "ids": batch });
+            let response = self.send(true, || self.request(Method::POST, url.clone()).json(&body))?;
+            #[derive(Deserialize)]
+            struct Located {
+                packs: std::collections::BTreeMap<String, String>,
+            }
+            for (object, pack) in self.json::<Located>("objects/locate", response)?.packs {
+                Id::parse(&object)?;
+                Id::parse(&pack)?;
+                found.insert(object, pack);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Publishes a state: `PUT /states/<state> {"times","tree"}` (docs/objects.md, "States"). True when the
+    /// server took it, false when it holds another body for the state.
+    pub(crate) fn put_state(&self, scope: &str, state: &str, r: &StateRef) -> Result<bool> {
         let url = self.project_url(&format!("{scope}states/{state}"))?;
-        let body = serde_json::json!({ "tree": tree });
+        let body = serde_json::json!({ "times": r.times.hex(), "tree": r.tree.hex() });
         let response = self.send(true, || self.request(Method::PUT, url.clone()).json(&body))?;
         let done = match response.status().as_u16() {
             200 | 201 => true,
@@ -564,7 +609,7 @@ impl Api {
         Ok(done)
     }
 
-    pub(crate) fn get_state(&self, scope: &str, state: &str) -> Result<Option<String>> {
+    pub(crate) fn get_state(&self, scope: &str, state: &str) -> Result<Option<StateRef>> {
         let url = self.project_url(&format!("{scope}states/{state}"))?;
         let response = self.send(true, || self.request(Method::GET, url.clone()))?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -573,12 +618,10 @@ impl Api {
         #[derive(Deserialize)]
         struct State {
             tree: String,
+            times: String,
         }
-        let tree = self.json::<State>(&format!("state {state}"), response)?.tree;
-        if !format::valid_object_id(&tree) {
-            bail!("Layr Cloud state {state}: invalid tree id");
-        }
-        Ok(Some(tree))
+        let body = self.json::<State>(&format!("state {state}"), response)?;
+        Ok(Some(StateRef { tree: Id::parse(&body.tree)?, times: Id::parse(&body.times)? }))
     }
 
     pub(crate) fn refs(&self, scope: &str, prefix: &str) -> Result<Vec<Ref>> {
@@ -682,15 +725,8 @@ impl Api {
         if rest == "store.json" {
             return if scope.is_empty() { self.descriptor() } else { Ok(None) };
         }
-        if let Some(id) = format::parse_object_name(rest) {
-            return self.get_object(format::OBJECT_PART, id);
-        }
         if let Some((writer, first, last)) = format::parse_segment_name(rest) {
             return self.get_segment(&scope, &writer, first, last);
-        }
-        if let Some((state, _)) = format::parse_tree_name(rest) {
-            let Some(tree) = self.get_state(&scope, &state)? else { return Ok(None) };
-            return self.get_object(format::OBJECT_STATE_TREE, &tree);
         }
         if secret_layout(rest) {
             return Ok(None);
@@ -700,19 +736,8 @@ impl Api {
 
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         let (scope, rest) = split_scope(key)?;
-        if let Some(id) = format::parse_object_name(rest) {
-            let (put, new) = self.put_object(format::OBJECT_PART, &body)?;
-            if put != id {
-                bail!("object {id} does not match its bytes");
-            }
-            return Ok(new);
-        }
         if let Some((writer, first, last)) = format::parse_segment_name(rest) {
             return self.post_segment(&scope, &writer, first, last, body);
-        }
-        if let Some((state, _)) = format::parse_tree_name(rest) {
-            let (tree, _) = self.put_object(format::OBJECT_STATE_TREE, &body)?;
-            return self.put_state(&scope, &state, &tree);
         }
         bail!("{key} cannot be written to Layr Cloud; the server keeps it")
     }
@@ -728,15 +753,8 @@ impl Api {
                 .map(|s| Object { key: format!("{scope}{}", format::segment_name(&s.writer, s.first, s.last)), modified: 0 })
                 .collect());
         }
-        if let Some(state) = rest.strip_prefix("states/").and_then(|s| s.strip_suffix('/')).filter(|s| crate::model::is_uuid(s)) {
-            return Ok(if self.state_held(&scope, state)? {
-                vec![Object { key: format!("{scope}{}", format::tree_name(state, format::CONTENT_ATTEMPT)), modified: 0 }]
-            } else {
-                Vec::new()
-            });
-        }
-        if rest.is_empty() || rest == "states/" || rest == "objects/" {
-            bail!("Layr Cloud does not list {prefix:?}; the client asks for each state");
+        if rest.is_empty() || rest.starts_with("states/") || rest.starts_with("objects/") {
+            bail!("Layr Cloud keeps states and objects by id (docs/objects.md); {prefix:?} has no listing");
         }
         if secret_layout(rest) || rest.starts_with("files/") {
             return Ok(Vec::new());

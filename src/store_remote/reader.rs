@@ -417,9 +417,9 @@ pub(super) fn pin_writer_keys(dir: &Path, keys: &BTreeMap<String, VerifyingKey>)
 }
 
 /// The states of the project for a read from the Layr Cloud API, which has no state listing: every state that
-/// the records name, with the one attempt of that API. A state that the server lacks fails its own read.
-fn api_attempts(repo: &Repo) -> Result<BTreeMap<String, String>> {
-    Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, format::CONTENT_ATTEMPT.to_string())).collect())
+/// the records name. `fetch` asks the server which of them it holds, in one batch.
+fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
+    Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, String::new())).collect())
 }
 
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
@@ -536,30 +536,8 @@ fn restore_one(
     }
     let result = (|| -> Result<usize> {
         let n = reader.restore_over(&tree, base.as_ref(), &stage)?;
-        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
-        let destination = repo.p.state_path(&id);
-        if destination.exists() {
-            repo.p.db.set_present(&id, true)?;
-            return Ok(0);
-        }
-        // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
-        crate::fsutil::rename_tree(&stage, &destination)?;
-        let publish = (|| -> Result<()> {
-            // Every backend gives the restored tree the identity of its signed state (a send names it).
-            let transid = header.btrfs.as_ref().map_or(0, |i| i.transid);
-            // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
-            // fresh one here, since no record names its snapshot.
-            let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
-            crate::storage::mark_received(&destination, &received, transid)?;
-            crate::storage::set_readonly(&destination)?;
-            repo.p.db.set_present(&id, true)?;
-            Ok(())
-        })();
-        if publish.is_err() {
-            let _ = crate::storage::delete_tree(&destination);
-        }
-        publish?;
-        Ok(n)
+        let published = publish_restored(repo, state, &stage, header.btrfs.as_ref().map_or(0, |i| i.transid))?;
+        Ok(if published { n } else { 0 })
     })();
     if stage.exists() {
         let _ = crate::storage::delete_tree(&stage);
@@ -567,9 +545,47 @@ fn restore_one(
     result
 }
 
+/// Make the restored folder `stage` the state `state`: renamed into place and sealed under the project
+/// lock, with the identity of its signed state (`transid` names the btrfs send it came from, else 0). False
+/// when the state was there already (`stage` stays for the caller to delete).
+pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stage: &Path, transid: u64) -> Result<bool> {
+    let id = &state.id;
+    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let destination = repo.p.state_path(id);
+    if destination.exists() {
+        repo.p.db.set_present(id, true)?;
+        return Ok(false);
+    }
+    // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
+    crate::fsutil::rename_tree(stage, &destination)?;
+    let publish = (|| -> Result<()> {
+        // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
+        // fresh one here, since no record names its snapshot.
+        let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
+        crate::storage::mark_received(&destination, &received, transid)?;
+        crate::storage::set_readonly(&destination)?;
+        repo.p.db.set_present(id, true)?;
+        Ok(())
+    })();
+    if publish.is_err() {
+        let _ = crate::storage::delete_tree(&destination);
+    }
+    publish?;
+    Ok(true)
+}
+
 /// Restore the listed states that are not on this machine, from the store's own trees. The
 /// machine keys come from this project's trusted records, so no record segment is read.
 pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Result<usize> {
+    if store.is_api() {
+        let mut states = Vec::new();
+        for id in ids.iter().filter(|id| !repo.p.has_state(id)) {
+            states.push(repo.state(id)?);
+        }
+        let mut report = Report::default();
+        super::cloud_objects::fetch_states(store, repo, states, &mut report)?;
+        return Ok(report.files);
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let mut keys = BTreeMap::new();
@@ -578,7 +594,7 @@ pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Resu
             hex::decode(&hex_key)?.try_into().map_err(|_| anyhow::anyhow!("trusted key of {machine} is not 32 bytes"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }
-    let states = if store.is_api() { api_attempts(repo)? } else { attempts(&store.backend)? };
+    let states = attempts(&store.backend)?;
     let mut reader = Reader::new(&store.backend, &identity, &keys);
     let mut files = 0;
     for id in ids {
@@ -650,7 +666,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     }).transpose()?;
     let mut left = Vec::new();
     let api = store.backend.api();
-    let states = if api.is_some() { api_attempts(repo)? } else { attempts(&store.backend)? };
+    let states = if api.is_some() { api_states(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     let mut asked = Vec::new();
@@ -722,6 +738,8 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
             }
         }
+        // The states come as trees, times tables and packs (docs/objects.md) through the local object store.
+        super::cloud_objects::fetch_states(store, repo, std::mem::take(&mut missing), &mut report)?;
     }
     if !left.is_empty() {
         // A read of such a state restores it from this remote (`restore_state`).

@@ -140,7 +140,9 @@ pub fn add_pack(store: &Store, data: &[u8], index: &[u8]) -> Result<Id> {
     for (n, block) in decoded.blocks.iter().enumerate() {
         let start = block.offset as usize;
         let frame = &data[start..start + block.compressed as usize];
-        plain.push(crate::zstdx::decompress(frame, None, block.plain as usize).with_context(|| format!("block {n} of pack {id}"))?);
+        plain.push(
+            crate::zstdx::decompress(frame, None, block.plain as usize).with_context(|| format!("block {n} of pack {id}"))?,
+        );
     }
     for entry in &decoded.entries {
         ensure!(entry.form == pack::RAW, "pack {id}: entry {} is not raw content", entry.id);

@@ -134,41 +134,28 @@ LAYR_GATEWAY_TOKEN_FILE=/private/token layr push cloud          # a machine with
   `POST /api/v1/login/<code>` (`202` while waiting, then `{"login","token","expires"}`), saves the
   session, and registers this machine's key with it.
 
-### Object ids
+### Objects, packs and states
 
-The id scheme of docs/objects.md (#415) holds for remote objects too:
+States use the object format of docs/objects.md: a state is a tree and a times table, files are
+blobs, and objects travel in packs. The ids are the typed ids of docs/objects.md section 2 (a blob
+id equals the Git SHA-256 blob id); the server checks every plain id.
 
-```text
-id = lowercase hex SHA-256("<type> <decimal length>\0" || bytes)
-```
-
-`bytes` are the plain bytes of the object as the server stores them (never encrypted in these
-modes), so the server and every reader check an object against its id. Types in use:
-
-| Type | Bytes |
-|---|---|
-| `blob` | a whole file (docs/objects.md; equal to the Git SHA-256 blob id) |
-| `tree` | a canonical tree of docs/objects.md |
-| `part` | file frames of one push, one after the other (zstd frames: whole files or deltas) |
-| `state-tree` | the signed tree of one state: one JSON header line, then the zstd frame of the canonical tree JSON |
-| `chunk-pack` | a pack of content-defined chunks of a cache layer |
-| `git-pack` | a Git pack of imported commits |
-
-An upload names the type in the header `Layr-Object-Type: <type>`; the server computes the id
-from the type, the length and the body, and refuses a mismatch (`400 invalid`). A read checks the
-id with the type that the reference names (a tree link names a `part`, a state names a
-`state-tree`).
-
-### Trees, states and links
-
-- A state tree is the store tree format (`layr_store::format::Tree`) with one change: a file
-  frame link names its object by id instead of state, attempt and part:
-  `[<part id>, "", 0, <offset>, <length>, "full"|"delta"]`. Secret stores and bare folder or
-  bucket stores keep `[<state>, <attempt>, <part>, ...]`.
-- A state tree is always complete (no tree delta against a base), and its header names the
-  attempt `00000000`: the content names the object, so a retry gives the same id.
-- `PUT /states/<state>` `{"tree":"<state-tree id>"}` publishes the state after its parts and its
-  tree object. `GET /states/<state>` gives the tree id back.
+- A push writes each state into the project's object store (`meta/objects`, the store of
+  `layr objects`): only the paths that changed since the first parent when the parent is there,
+  new blobs cold (a delta against the parent's blob, else a zstd frame).
+- It asks `POST /objects/missing` with the ids of the times tables, trees and blobs that the states
+  reach, and sends the missing ones in transfer packs (docs/objects.md section 6; raw entries
+  only, so the server checks each entry without another object): the data file as an `opaque`
+  object (`PUT /objects/<pack id>` with `Layr-Object-Type: opaque`, in parts over 64 MiB), then
+  its index (`PUT /packs/<pack id>`). A pack holds about 56 MiB of plain bytes.
+- Then `PUT /states/<state>` `{"times":"<id>","tree":"<id>"}` publishes each state;
+  `GET /states/<state>` gives the body back.
+- A fetch reads the state bodies, asks `POST /objects/locate` `{"ids":[...]}` (answer
+  `{"packs":{"<object id>":"<pack id>"}}`) for the missing trees and times tables, then for the
+  missing blobs, downloads those packs (`GET /objects/<pack id>`, `GET /packs/<pack id>`), adds
+  each to the object store after its checks (index, pack id, every entry against its id), and
+  checks each state out with its times.
+- Secret stores and bare folder or bucket stores keep the store v2 trees.
 - `POST /states/missing` `{"ids":[...]}` (at most 1000) gives `{"missing":[...]}`. A push asks
   once for the tips and every state that may go up, and a fetch once for the states it lacks, so
   neither sends a request per state.

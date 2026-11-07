@@ -11,7 +11,21 @@ import hashlib, http.server, json, os, ssl, sys, threading, urllib.parse
 folder, token = sys.argv[1], sys.argv[2]
 lock = threading.Lock()
 db = {'id': None, 'objects': {}, 'uploads': {}, 'segments': {}, 'states': {}, 'refs': {}, 'machines': {},
-      'minimum': None, 'log': []}
+      'packs': {}, 'located': {}, 'minimum': None, 'log': []}
+
+
+def index_entries(index, data):
+    """The object ids of a pack index (docs/objects.md, "Packs"), after its checks."""
+    import struct
+    body, total = index[:-32], index[-32:]
+    assert hashlib.sha256(body).digest() == total and body[:4] == b'LPI1'
+    pack = body[4:36].hex()
+    assert pack == typed('opaque', data), 'the index names another pack'
+    nblocks = struct.unpack_from('<I', body, 36)[0]
+    at = 40 + nblocks * 16
+    nentries = struct.unpack_from('<I', body, at)[0]
+    at += 4
+    return [body[at + i * 46: at + i * 46 + 32].hex() for i in range(nentries)]
 
 
 def typed(kind, body):
@@ -85,7 +99,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parts = rest.split('/')
         m = self.command
         if m == 'POST' and parts == ['objects', 'missing']:
-            return self.reply(200, {'missing': [i for i in body['ids'] if i not in db['objects']]})
+            return self.reply(200, {'missing': [i for i in body['ids'] if i not in db['objects'] and i not in db['located']]})
+        if m == 'POST' and parts == ['objects', 'locate']:
+            return self.reply(200, {'packs': {i: db['located'][i] for i in body['ids'] if i in db['located']}})
+        if parts[0] == 'packs' and len(parts) == 2:
+            pid = parts[1]
+            if m == 'PUT':
+                if pid not in db['objects']:
+                    return self.reply(400, {'error': {'code': 'invalid', 'message': 'no pack data'}})
+                for oid in index_entries(raw, db['objects'][pid][1]):
+                    db['located'][oid] = pid
+                db['packs'][pid] = raw
+                return self.reply(200, {})
+            if pid not in db['packs']:
+                return self.reply(404, {'error': {'code': 'not_found'}})
+            return self.reply(200, db['packs'][pid], 'application/octet-stream')
         if parts[0] == 'objects' and len(parts) == 2:
             oid = parts[1]
             if m == 'PUT':
@@ -123,17 +151,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parts[0] == 'states':
             key = (scope, parts[1])
             if m == 'PUT':
-                tree = body['tree']
-                if db['objects'].get(tree, ('', b''))[0] != 'state-tree':
-                    return self.reply(400, {'error': {'code': 'invalid'}})
-                if key in db['states'] and db['states'][key] != tree:
+                value = (body.get('tree'), body.get('times'))
+                if not all(v in db['located'] for v in value):
+                    return self.reply(400, {'error': {'code': 'invalid', 'message': 'tree and times must be in packs'}})
+                if key in db['states'] and db['states'][key] != value:
                     return self.reply(409, {'error': {'code': 'conflict'}})
                 new = key not in db['states']
-                db['states'][key] = tree
+                db['states'][key] = value
                 return self.reply(201 if new else 200)
             if key not in db['states']:
                 return self.reply(404, {'error': {'code': 'not_found'}})
-            return self.reply(200, {'tree': db['states'][key]})
+            tree, times = db['states'][key]
+            return self.reply(200, {'times': times, 'tree': tree})
         if parts == ['refs']:
             pre = query.get('prefix', '')
             refs = [{'name': n, 'target': t, 'version': 1} for (s, n), t in db['refs'].items()
