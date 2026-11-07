@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.40.0](https://github.com/ifdotpy/layr/compare/v0.39.1...v0.40.0) (2026-11-07)
+
+
+### Features
+
+* **queue:** a queued merge that waits for its checks keeps its candidate for the next pass ([#421](https://github.com/ifdotpy/layr/issues/421)) ([1a4da4d](https://github.com/ifdotpy/layr/commit/1a4da4d992e78dc4fe54d491ff0f8f760e11f901))
+
+
+### Bug Fixes
+
+* **caches:** a cache hook worker stops with its processes when the layr process that started it goes ([#419](https://github.com/ifdotpy/layr/issues/419)) ([32ca462](https://github.com/ifdotpy/layr/commit/32ca462389d2023bd4c23ef9127aa593def56d10))
+
 ## [0.39.1](https://github.com/ifdotpy/layr/compare/v0.39.0...v0.39.1) (2026-11-07)
 
 
