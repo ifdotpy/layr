@@ -1395,9 +1395,6 @@ fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()>
     if path.exists() {
         return Ok(());
     }
-    let mut compressed = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    compressed.write_all(header.as_bytes())?;
-    compressed.write_all(data)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o755))?;
     // Git objects are a rebuildable cache of durable records and state files. Publish complete
@@ -1405,8 +1402,11 @@ fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()>
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension(format!("tmp-{}", ids::new_id()));
     let result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o444).open(&tmp)?;
-        file.write_all(&compressed.finish()?)?;
+        let file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o444).open(&tmp)?;
+        let mut compressed = flate2::write::ZlibEncoder::new(file, flate2::Compression::default());
+        compressed.write_all(header.as_bytes())?;
+        compressed.write_all(data)?;
+        let file = compressed.finish()?;
         file.set_permissions(std::fs::Permissions::from_mode(0o444))?;
         drop(file);
         std::fs::rename(&tmp, &path)?;
@@ -1418,7 +1418,13 @@ fn write_object(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()>
     result
 }
 
-fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serde_json::Value) -> Result<String> {
+fn restore_import(
+    repo: &Repo,
+    export: &ExportContext,
+    state: &StateRec,
+    parents: &[String],
+    saved: serde_json::Value,
+) -> Result<String> {
     let _restore = crate::trace::span("Git restore import");
     let saved: GitImport = serde_json::from_value(saved).context("invalid stored Git import")?;
     if saved.format != 1 {
@@ -1435,12 +1441,12 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
     if git_parents != parents {
         bail!("stored Git parents do not match state {}", ids::short(&state.id));
     }
-    let s = init_store(repo)?;
+    let s = &export.store;
     for (oid, bytes) in saved.trees {
-        write_object(&s, "tree", &STANDARD.decode(bytes)?, &oid)?;
+        write_object(s, "tree", &STANDARD.decode(bytes)?, &oid)?;
     }
     let tree = tree_id(&raw)?;
-    let listed = base_cmd(&s).args(["ls-tree", "-r", "-z", tree]).output()?;
+    let listed = base_cmd(s).args(["ls-tree", "-r", "-z", tree]).output()?;
     if !listed.status.success() {
         bail!("cannot restore Git tree {tree}: {}", String::from_utf8_lossy(&listed.stderr));
     }
@@ -1454,7 +1460,7 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
         }
     }
     // Check the whole tree in one process, then read only blobs absent from the local cache.
-    let mut check = base_cmd(&s).args(["cat-file", "--batch-check"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let mut check = base_cmd(s).args(["cat-file", "--batch-check"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let mut input = check.stdin.take().unwrap();
     let ids: Vec<String> = entries.iter().map(|(_, oid, _)| oid.clone()).collect();
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
@@ -1485,7 +1491,7 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
                 f.read_to_end(&mut data)?;
                 data
             };
-            write_object(&s, "blob", &data, &oid)?;
+            write_object(s, "blob", &data, &oid)?;
         }
     }
     writer.join().map_err(|_| anyhow!("Git object check writer failed"))??;
@@ -1493,8 +1499,8 @@ fn restore_import(repo: &Repo, state: &StateRec, parents: &[String], saved: serd
         bail!("Git object check failed");
     }
     let commit = repo.p.db.git_commit_of(&state.id)?.context("Git import has no commit ID")?;
-    write_object(&s, "commit", &raw, &commit)?;
-    git_out(&s, &["update-ref", &history_ref(&state.id), &commit])?;
+    write_object(s, "commit", &raw, &commit)?;
+    git_out(s, &["update-ref", &history_ref(&state.id), &commit])?;
     Ok(commit)
 }
 
@@ -1534,7 +1540,16 @@ fn make_commit_once(repo: &Repo, state: &StateRec, message: Option<&str>) -> Res
         }
     }
     let parents: Vec<String> = anc.iter().map(|(_, c)| c.clone()).collect();
-    let c = commit_tree(repo, state, anc.as_ref(), &parents, message, &format!("refs/layr/squash/{}", ids::display(&state.id)))?;
+    let export = ExportContext::new(repo)?;
+    let c = commit_tree(
+        repo,
+        &export,
+        state,
+        anc.as_ref(),
+        &parents,
+        message,
+        &format!("refs/layr/squash/{}", ids::display(&state.id)),
+    )?;
     Ok((c, parents.into_iter().next()))
 }
 
@@ -1705,24 +1720,101 @@ fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String,
             stack.push((p.clone(), false));
         }
     }
-    for s in order {
-        let rec = repo.state(&s)?;
-        let parents: Vec<String> = rec
-            .parents
-            .iter()
-            .map(|p| known.get(p).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(p))))
-            .collect::<Result<_>>()?;
-        let base = rec.parents.first().map(|p| (p.clone(), known[p].clone()));
-        let c = if let Some(saved) = repo.p.db.git_import(&s)? {
-            restore_import(repo, &rec, &parents, saved)?
-        } else {
-            commit_tree(repo, &rec, base.as_ref(), &parents, None, &history_ref(&s))?
-        };
-        known.insert(s.clone(), c.clone());
-        made.push((s, c));
+    if !order.is_empty() {
+        let export = ExportContext::new(repo)?;
+        for s in order {
+            let rec = repo.state(&s)?;
+            let parents: Vec<String> = rec
+                .parents
+                .iter()
+                .map(|p| known.get(p).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(p))))
+                .collect::<Result<_>>()?;
+            let base = rec.parents.first().map(|p| (p.clone(), known[p].clone()));
+            let c = if let Some(saved) = repo.p.db.git_import(&s)? {
+                restore_import(repo, &export, &rec, &parents, saved)?
+            } else {
+                commit_tree(repo, &export, &rec, base.as_ref(), &parents, None, &history_ref(&s))?
+            };
+            known.insert(s.clone(), c.clone());
+            made.push((s, c));
+        }
     }
     let tip = known.get(state).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state)))?;
     Ok((tip, made))
+}
+
+/// Store and signing configuration shared by all commits in one export attempt.
+struct ExportContext {
+    store: PathBuf,
+    signing_email: Option<String>,
+}
+
+impl ExportContext {
+    fn new(repo: &Repo) -> Result<Self> {
+        Ok(Self::load(init_store(repo)?))
+    }
+
+    fn load(store: PathBuf) -> Self {
+        let signing_email = if git_out(&store, &["config", "--bool", "commit.gpgsign"]).is_ok_and(|v| v.trim() == "true") {
+            git_out(&store, &["config", "user.email"]).ok().map(|v| v.trim().to_string())
+        } else {
+            None
+        };
+        Self { store, signing_email }
+    }
+
+    fn signs(&self, email: &str) -> bool {
+        self.signing_email.as_deref() == Some(email)
+    }
+
+    fn commit(&self, state: &StateRec, tree: &str, parents: &[String], message: Option<&str>) -> Result<String> {
+        let s = &self.store;
+        let msg = message.map(|m| m.to_string()).unwrap_or_else(|| {
+            if state.message.is_empty() {
+                "layr state".to_string()
+            } else {
+                state.message.clone()
+            }
+        });
+        let secs = state.time / 1000;
+        let date = format!("{secs} +0000");
+        let commit_tree = |sign: bool| -> Result<std::process::Output> {
+            let mut c = base_cmd(s);
+            c.args(["commit-tree", tree]);
+            if sign {
+                c.arg("-S");
+            }
+            for p in parents {
+                c.args(["-p", p]);
+            }
+            c.env("GIT_AUTHOR_NAME", &state.author.name)
+                .env("GIT_AUTHOR_EMAIL", &state.author.email)
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_NAME", &state.author.name)
+                .env("GIT_COMMITTER_EMAIL", &state.author.email)
+                .env("GIT_COMMITTER_DATE", &date);
+            c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut ch = c.spawn()?;
+            ch.stdin.take().unwrap().write_all(msg.as_bytes())?;
+            Ok(ch.wait_with_output()?)
+        };
+        // `git commit-tree` ignores commit.gpgSign. Sign as git commit would, but only the
+        // caller's own states: another person's state must not carry the caller's signature.
+        let sign = self.signs(&state.author.email);
+        let mut out = commit_tree(sign)?;
+        if sign && !out.status.success() {
+            eprintln!(
+                "warning: could not sign the commit of state {} ({}); it is written unsigned",
+                state.id,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            out = commit_tree(false)?;
+        }
+        if !out.status.success() {
+            bail!("git commit-tree failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
 }
 
 /// Write the commit of a state: the tree from the index of `base` (a state with its commit) plus
@@ -1730,13 +1822,14 @@ fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String,
 /// `refname` is set to the commit.
 fn commit_tree(
     repo: &Repo,
+    export: &ExportContext,
     state: &StateRec,
     base: Option<&(String, String)>,
     parents: &[String],
     message: Option<&str>,
     refname: &str,
 ) -> Result<String> {
-    let s = init_store(repo)?;
+    let s = &export.store;
     let src = repo.state_src(&state.id)?;
     let tmp_idx = std::env::temp_dir().join(format!("layr-index-{}", ids::new_id()));
     let mut keep: Vec<crate::repo::Temp> = Vec::new();
@@ -1752,7 +1845,7 @@ fn commit_tree(
                 // gc may remove a kept index at any time: then the tree of the commit is read.
                 inherited = ai.exists() && std::fs::copy(&ai, &tmp_idx).is_ok();
                 if !inherited {
-                    let out = base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", ac]).output()?;
+                    let out = base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", ac]).output()?;
                     if !out.status.success() {
                         bail!("git read-tree failed");
                     }
@@ -1799,7 +1892,7 @@ fn commit_tree(
         // Changed paths are hashed again: see FORGET_CHANGED.
         let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
         for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
-            let mut c = base_cmd(&s);
+            let mut c = base_cmd(s);
             c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
             c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
             let mut ch = c.spawn()?;
@@ -1809,59 +1902,14 @@ fn commit_tree(
                 bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
             }
         }
-        let tree = String::from_utf8_lossy(&base_cmd(&s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
+        let tree = String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
             .trim()
             .to_string();
         if tree.is_empty() {
             bail!("git write-tree failed");
         }
-        let msg = message.map(|m| m.to_string()).unwrap_or_else(|| {
-            if state.message.is_empty() {
-                "layr state".to_string()
-            } else {
-                state.message.clone()
-            }
-        });
-        let secs = state.time / 1000;
-        let date = format!("{secs} +0000");
-        let commit_tree = |sign: bool| -> Result<std::process::Output> {
-            let mut c = base_cmd(&s);
-            c.args(["commit-tree", &tree]);
-            if sign {
-                c.arg("-S");
-            }
-            for p in parents {
-                c.args(["-p", p]);
-            }
-            c.env("GIT_AUTHOR_NAME", &state.author.name)
-                .env("GIT_AUTHOR_EMAIL", &state.author.email)
-                .env("GIT_AUTHOR_DATE", &date)
-                .env("GIT_COMMITTER_NAME", &state.author.name)
-                .env("GIT_COMMITTER_EMAIL", &state.author.email)
-                .env("GIT_COMMITTER_DATE", &date);
-            c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            let mut ch = c.spawn()?;
-            ch.stdin.take().unwrap().write_all(msg.as_bytes())?;
-            Ok(ch.wait_with_output()?)
-        };
-        // `git commit-tree` ignores commit.gpgSign. Sign as git commit would, but only the
-        // caller's own states: another person's state must not carry the caller's signature.
-        let sign = git_out(&s, &["config", "--bool", "commit.gpgsign"]).is_ok_and(|v| v.trim() == "true")
-            && git_out(&s, &["config", "user.email"]).is_ok_and(|v| v.trim() == state.author.email);
-        let mut out = commit_tree(sign)?;
-        if sign && !out.status.success() {
-            eprintln!(
-                "warning: could not sign the commit of state {} ({}); it is written unsigned",
-                state.id,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            out = commit_tree(false)?;
-        }
-        if !out.status.success() {
-            bail!("git commit-tree failed: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        git_out(&s, &["update-ref", refname, &commit])?;
+        let commit = export.commit(state, &tree, parents, message)?;
+        git_out(s, &["update-ref", refname, &commit])?;
         // Keep the index for the next export and for lines made from this state.
         keep_index(repo, &state.id, &tmp_idx, inherited)?;
         Ok(commit)
@@ -2742,3 +2790,202 @@ pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
 #[cfg(test)]
 #[path = "gitbridge_history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use layr_hashers::{Digest, GitCompatible};
+
+    fn object_id(kind: &str, data: &[u8]) -> String {
+        let mut hash = GitCompatible::new();
+        hash.update(format!("{kind} {}\0", data.len()).as_bytes());
+        hash.update(data);
+        hex::encode(hash.finalize())
+    }
+
+    fn scratch() -> Result<PathBuf> {
+        let root = std::env::temp_dir().join(format!("layr-export-test-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        Ok(root)
+    }
+
+    #[test]
+    fn loose_objects_match_buffered_bytes_and_reject_bad_identity() -> Result<()> {
+        let root = scratch()?;
+        let result = (|| -> Result<()> {
+            for data in [Vec::new(), b"hello\n".to_vec(), vec![b'x'; 1024 * 1024]] {
+                let oid = object_id("blob", &data);
+                write_object(&root, "blob", &data, &oid)?;
+                let path = root.join("objects").join(&oid[..2]).join(&oid[2..]);
+                let mut reference = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                reference.write_all(format!("blob {}\0", data.len()).as_bytes())?;
+                reference.write_all(&data)?;
+                assert_eq!(std::fs::read(&path)?, reference.finish()?);
+                assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o444);
+                write_object(&root, "blob", &data, &oid)?;
+                assert!(write_object(&root, "blob", b"different", &oid).is_err());
+                assert_eq!(std::fs::read_dir(path.parent().unwrap())?.count(), 1);
+            }
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    fn export_commit_identity_parents_and_signing_fallback() -> Result<()> {
+        let root = scratch()?;
+        let result = (|| -> Result<()> {
+            assert!(Command::new("git").args(["init", "--bare", "-q"]).arg(&root).status()?.success());
+            git_out(&root, &["config", "commit.gpgsign", "false"])?;
+            git_out(&root, &["config", "user.email", "author@example.test"])?;
+            let state: StateRec = serde_json::from_value(serde_json::json!({
+                "id": "test", "kind": "commit", "subvol": "", "time": 1700000000000i64,
+                "author": {"name": "Author", "email": "author@example.test"}, "message": "message"
+            }))?;
+            let tree_data = b"";
+            let tree = object_id("tree", tree_data);
+            write_object(&root, "tree", tree_data, &tree)?;
+            let export = ExportContext::load(root.clone());
+            let first = export.commit(&state, &tree, &[], None)?;
+            let expected = format!("tree {tree}\nauthor Author <author@example.test> 1700000000 +0000\ncommitter Author <author@example.test> 1700000000 +0000\n\nmessage");
+            assert_eq!(first, object_id("commit", expected.as_bytes()));
+            let second = export.commit(&state, &tree, std::slice::from_ref(&first), Some("second"))?;
+            let parents = vec![first.clone(), second.clone()];
+            let merged = export.commit(&state, &tree, &parents, Some("merge"))?;
+            let raw = git_out(&root, &["cat-file", "commit", &merged])?;
+            assert!(raw.starts_with(&format!("tree {tree}\nparent {first}\nparent {second}\n")));
+            git_out(&root, &["config", "commit.gpgsign", "true"])?;
+            git_out(&root, &["config", "gpg.program", "/nonexistent/layr-signing-test"])?;
+            let signing = ExportContext::load(root.clone());
+            assert!(signing.signs(&state.author.email));
+            assert!(!signing.signs("other@example.test"));
+            assert!(!export.signs(&state.author.email)); // One operation keeps its config snapshot.
+            assert_eq!(signing.commit(&state, &tree, &[], None)?, first);
+            // Exercise successful signing through the same commit writer as exports.
+            let key = root.join("signing-key");
+            assert!(Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).status()?.success());
+            git_out(&root, &["config", "gpg.format", "ssh"])?;
+            git_out(&root, &["config", "user.signingkey", key.to_str().unwrap()])?;
+            let allowed = root.join("allowed-signers");
+            std::fs::write(&allowed, format!("author@example.test {}", std::fs::read_to_string(key.with_extension("pub"))?))?;
+            git_out(&root, &["config", "gpg.ssh.allowedSignersFile", allowed.to_str().unwrap()])?;
+            let signed = ExportContext::load(root.clone()).commit(&state, &tree, &parents, None)?;
+            let raw = git_out(&root, &["cat-file", "commit", &signed])?;
+            assert!(raw.starts_with(&format!("tree {tree}\nparent {first}\nparent {second}\n")));
+            assert!(raw.contains("gpgsig -----BEGIN SSH SIGNATURE-----"));
+            git_out(&root, &["verify-commit", &signed])?;
+            git_out(&root, &["config", "commit.gpgsign", "invalid"])?;
+            assert!(!ExportContext::load(root.clone()).signs(&state.author.email));
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    fn write_object_buffered(s: &Path, kind: &str, data: &[u8], expected: &str) -> Result<()> {
+        let _write = crate::trace::span("Git write object");
+        use layr_hashers::{Digest, GitCompatible};
+        let header = format!("{kind} {}\0", data.len());
+        let mut hash = GitCompatible::new();
+        hash.update(header.as_bytes());
+        hash.update(data);
+        let oid = hex::encode(hash.finalize());
+        if oid != expected {
+            bail!("stored Git {kind} hash mismatch: expected {expected}, got {oid}");
+        }
+        let path = s.join("objects").join(&oid[..2]).join(&oid[2..]);
+        if path.exists() {
+            return Ok(());
+        }
+        let mut compressed = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        compressed.write_all(header.as_bytes())?;
+        compressed.write_all(data)?;
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o755))?;
+        // Git objects are a rebuildable cache of durable records and state files. Publish complete
+        // objects atomically, without forcing the whole filesystem twice for every loose object.
+        use std::os::unix::fs::OpenOptionsExt;
+        let tmp = path.with_extension(format!("tmp-{}", ids::new_id()));
+        let result = (|| -> Result<()> {
+            let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o444).open(&tmp)?;
+            file.write_all(&compressed.finish()?)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o444))?;
+            drop(file);
+            std::fs::rename(&tmp, &path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    /// Run each ignored case in a fresh process to compare peak RSS on incompressible objects.
+    fn large_object(buffered: bool) -> Result<()> {
+        use rand::{RngCore, SeedableRng};
+        let root = scratch()?;
+        let mut data = vec![0; 64 * 1024 * 1024];
+        rand::rngs::StdRng::seed_from_u64(0).fill_bytes(&mut data);
+        let oid = object_id("blob", &data);
+        let result =
+            if buffered { write_object_buffered(&root, "blob", &data, &oid) } else { write_object(&root, "blob", &data, &oid) };
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    #[ignore = "large-object measurement; run in an isolated temporary environment"]
+    fn large_object_buffered() -> Result<()> {
+        large_object(true)
+    }
+
+    #[test]
+    #[ignore = "large-object measurement; run in an isolated temporary environment"]
+    fn large_object_streamed() -> Result<()> {
+        large_object(false)
+    }
+    fn export_chain(reuse: bool) -> Result<()> {
+        let root = scratch()?;
+        let result = (|| -> Result<()> {
+            assert!(Command::new("git").args(["init", "--bare", "-q"]).arg(&root).status()?.success());
+            git_out(&root, &["config", "commit.gpgsign", "true"])?;
+            git_out(&root, &["config", "user.email", "someone-else@example.test"])?;
+            let state: StateRec = serde_json::from_value(serde_json::json!({
+                "id": "test", "kind": "commit", "subvol": "", "time": 1700000000000i64,
+                "author": {"name": "Author", "email": "author@example.test"}, "message": "message"
+            }))?;
+            let tree = object_id("tree", b"");
+            write_object(&root, "tree", b"", &tree)?;
+            let shared = reuse.then(|| ExportContext::load(root.clone()));
+            let mut parents = Vec::new();
+            // A short history with one process per commit and two config queries per context.
+            for _ in 0..32 {
+                let per_commit;
+                let export = if let Some(shared) = &shared {
+                    shared
+                } else {
+                    per_commit = ExportContext::load(root.clone());
+                    &per_commit
+                };
+                parents = vec![export.commit(&state, &tree, &parents, None)?];
+            }
+            println!("tip={}", parents[0]);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    #[ignore = "export context measurement; run in an isolated temporary environment"]
+    fn export_context_per_commit() -> Result<()> {
+        export_chain(false)
+    }
+
+    #[test]
+    #[ignore = "export context measurement; run in an isolated temporary environment"]
+    fn export_context_shared() -> Result<()> {
+        export_chain(true)
+    }
+}

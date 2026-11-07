@@ -126,20 +126,38 @@ struct Side {
     moved_from: HashMap<String, String>,
 }
 
+struct MergeSides {
+    ours: Side,
+    theirs: Side,
+    ours_changes: Vec<Change>,
+    theirs_changes: Vec<Change>,
+}
+
+impl MergeSides {
+    fn new(i: &Input) -> Result<Self> {
+        let (ours, ours_changes) = side(i.base, i.ours)?;
+        let (theirs, theirs_changes) = side(i.base, i.theirs)?;
+        Ok(Self { ours, theirs, ours_changes, theirs_changes })
+    }
+}
+
 fn side(base: &Path, child: &Path) -> Result<(Side, Vec<Change>)> {
     let list: Vec<Change> = changes::candidates(base, child)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
-    let mut by_path = HashMap::new();
-    let mut moved_from = HashMap::new();
-    for c in &list {
-        if let Some(o) = &c.old_path {
-            moved_from.insert(o.clone(), c.path.clone());
-        }
-        by_path.insert(c.path.clone(), c.clone());
-    }
-    Ok((Side { by_path, moved_from }, list))
+    Ok((Side::new(&list), list))
 }
 
 impl Side {
+    fn new(list: &[Change]) -> Self {
+        let mut by_path = HashMap::new();
+        let mut moved_from = HashMap::new();
+        for c in list {
+            if let Some(o) = &c.old_path {
+                moved_from.insert(o.clone(), c.path.clone());
+            }
+            by_path.insert(c.path.clone(), c.clone());
+        }
+        Self { by_path, moved_from }
+    }
     fn at(&self, p: &str) -> OursAt {
         if let Some(q) = self.moved_from.get(p) {
             return OursAt::Moved(q.clone());
@@ -210,19 +228,23 @@ impl<'a, 'b> Ctx<'a, 'b> {
 }
 
 pub fn merge(i: &Input) -> Result<Outcome> {
-    let attributes = merge_tree(i, true)?;
-    let mut out = merge_tree(i, false)?;
+    merge_sides(i, &MergeSides::new(i)?)
+}
+
+fn merge_sides(i: &Input, sides: &MergeSides) -> Result<Outcome> {
+    let attributes = merge_tree(i, sides, true)?;
+    let mut out = merge_tree(i, sides, false)?;
     out.conflicts.splice(0..0, attributes.conflicts);
     out.messages.splice(0..0, attributes.messages);
     out.changed.extend(attributes.changed);
     Ok(out)
 }
 
-fn merge_tree(i: &Input, attributes_only: bool) -> Result<Outcome> {
-    let (ours, olist) = side(i.base, i.ours)?;
-    let (theirs, tlist) = side(i.base, i.theirs)?;
-    let tlist: Vec<Change> = tlist
-        .into_iter()
+fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Outcome> {
+    let (ours, theirs) = (&sides.ours, &sides.theirs);
+    let tlist: Vec<&Change> = sides
+        .theirs_changes
+        .iter()
         .filter(|c| matches!(c.path.as_str(), ".gitattributes" | ".layrattributes") == attributes_only)
         .collect();
     let mut c = Ctx { i, attrs: Attrs::load(i.ours), out: Outcome::default(), blocked: BTreeSet::new() };
@@ -244,7 +266,7 @@ fn merge_tree(i: &Input, attributes_only: bool) -> Result<Outcome> {
                 c.conflict(&src, &format!("rename/rename ({q} vs {dst})"));
             }
             OursAt::Moved(_) => {
-                file_merge(&mut c, &src, &dst, &dst, &ours, &theirs)?;
+                file_merge(&mut c, &src, &dst, &dst, ours, theirs)?;
             }
             OursAt::Deleted => {
                 c.take_theirs(&dst, &dst)?;
@@ -261,7 +283,7 @@ fn merge_tree(i: &Input, attributes_only: bool) -> Result<Outcome> {
                 c.out.changed.insert(dst.clone());
                 c.out.changed.insert(src.clone());
                 prune(i.result, i.theirs, &src)?;
-                file_merge(&mut c, &src, &dst, &dst, &ours, &theirs)?;
+                file_merge(&mut c, &src, &dst, &dst, ours, theirs)?;
             }
         }
     }
@@ -367,7 +389,7 @@ fn merge_tree(i: &Input, attributes_only: bool) -> Result<Outcome> {
             c.conflict(&q, "delete/modify");
             continue;
         }
-        file_merge(&mut c, &p, &p, &q, &ours, &theirs)?;
+        file_merge(&mut c, &p, &p, &q, ours, theirs)?;
     }
 
     // 3. Folders deleted by theirs, deepest first.
@@ -383,8 +405,7 @@ fn merge_tree(i: &Input, attributes_only: bool) -> Result<Outcome> {
         }
     }
     if !attributes_only {
-        let (_, full_theirs) = side(i.base, i.theirs)?;
-        run_derives(&mut c, derives, &olist, &full_theirs)?;
+        run_derives(&mut c, derives, &sides.ours_changes, &sides.theirs_changes)?;
     }
     Ok(c.out)
 }
@@ -1112,5 +1133,151 @@ mod derive_tests {
         })();
         std::fs::remove_dir_all(root)?;
         result
+    }
+}
+
+#[cfg(test)]
+mod merge_sides_tests {
+    use super::*;
+
+    #[test]
+    fn shared_sides_preserve_attributes_derives_renames_and_conflict_order() -> Result<()> {
+        let root = private_dir()?;
+        let result = (|| -> Result<()> {
+            for sub in ["base", "ours", "theirs", "result"] {
+                std::fs::create_dir(root.join(sub))?;
+            }
+            let base = root.join("base");
+            let ours = root.join("ours");
+            let theirs = root.join("theirs");
+            let result = root.join("result");
+            let attrs = ".gitattributes merge=binary\nz merge=binary\n";
+            for (dir, label) in [(&base, "base"), (&ours, "ours"), (&theirs, "theirs")] {
+                std::fs::write(dir.join(".gitattributes"), label)?;
+                std::fs::write(dir.join(".layrattributes"), attrs)?;
+                std::fs::write(dir.join("z"), label)?;
+                std::fs::write(dir.join("source"), label)?;
+            }
+            std::fs::write(base.join("original"), "moved")?;
+            std::fs::write(theirs.join("moved"), "moved")?;
+            std::fs::write(theirs.join(".layrattributes"), format!("{attrs}generated derive=build\n"))?;
+            for name in [".gitattributes", ".layrattributes", "z", "source"] {
+                std::fs::copy(ours.join(name), result.join(name))?;
+            }
+            let change = |path: &str, old_path: Option<&str>, child: &Path| Change {
+                path: path.into(),
+                old_path: old_path.map(String::from),
+                old: fsutil::lmeta(&base, old_path.unwrap_or(path)),
+                new: fsutil::lmeta(child, path),
+                ranges: None,
+            };
+            let ours_changes = vec![
+                change(".gitattributes", None, &ours),
+                change("original", None, &ours),
+                change("source", None, &ours),
+                change("z", None, &ours),
+            ];
+            let theirs_changes = vec![
+                change(".gitattributes", None, &theirs),
+                change(".layrattributes", None, &theirs),
+                change("moved", Some("original"), &theirs),
+                change("source", None, &theirs),
+                change("z", None, &theirs),
+            ];
+            let sides =
+                MergeSides { ours: Side::new(&ours_changes), theirs: Side::new(&theirs_changes), ours_changes, theirs_changes };
+            let config = |key: &str| match key {
+                "derive.command.build" => Some("cat source > generated".into()),
+                "derive.inputs.build" => Some("source".into()),
+                _ => None,
+            };
+            let i = Input {
+                base: &base,
+                ours: &ours,
+                theirs: &theirs,
+                result: &result,
+                base_id: "b",
+                ours_id: "o",
+                theirs_id: "t",
+                ours_label: "ours",
+                theirs_label: "theirs",
+                config: &config,
+                run_as: Some((rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())),
+                allow_root: false,
+            };
+            let out = merge_sides(&i, &sides)?;
+            assert_eq!(std::fs::read(result.join(".gitattributes"))?, b"ours");
+            assert_eq!(std::fs::read(result.join(".layrattributes"))?, std::fs::read(theirs.join(".layrattributes"))?);
+            assert_eq!(std::fs::read(result.join("moved"))?, b"moved");
+            assert_eq!(std::fs::read(result.join("z"))?, b"ours");
+            assert_eq!(std::fs::read(result.join("source"))?, b"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n");
+            assert_eq!(std::fs::read(result.join("generated"))?, std::fs::read(result.join("source"))?);
+            assert_eq!(
+                out.conflicts.iter().map(|c| (c.path.as_str(), c.kind.as_str())).collect::<Vec<_>>(),
+                [(".gitattributes", "binary"), ("moved", "rename/delete"), ("source", "content"), ("z", "binary")]
+            );
+            assert_eq!(
+                out.messages,
+                [
+                    "CONFLICT (binary): .gitattributes changed on both sides; kept head",
+                    "CONFLICT (rename/delete): moved",
+                    "Auto-merging source",
+                    "CONFLICT (content): Merge conflict in source",
+                    "CONFLICT (binary): z changed on both sides; kept head",
+                    "Derived build",
+                ]
+            );
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+}
+
+#[cfg(test)]
+mod sides_measurements {
+    use super::*;
+
+    fn sides(reuse: bool) {
+        let changes: Vec<_> = (0..100_000)
+            .map(|n| Change {
+                path: format!("folder/file-{n}"),
+                old_path: None,
+                old: None,
+                new: None,
+                ranges: Some(vec![(0, 4096)]),
+            })
+            .collect();
+        let build = || (Side::new(&changes), changes.clone());
+        if reuse {
+            let (ours, ours_changes) = build();
+            let (theirs, theirs_changes) = build();
+            let sides = MergeSides { ours, theirs, ours_changes, theirs_changes };
+            for _ in [true, false] {
+                std::hint::black_box(&sides);
+            }
+        } else {
+            for attributes_only in [true, false] {
+                let ours = build();
+                let theirs = build();
+                std::hint::black_box((&ours, &theirs));
+                if !attributes_only {
+                    let (_, full_theirs) = build();
+                    std::hint::black_box(&full_theirs);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "candidate-map measurement; excludes filesystem candidate discovery"]
+    fn merge_sides_recomputed() {
+        sides(false)
+    }
+
+    #[test]
+    #[ignore = "candidate-map measurement; excludes filesystem candidate discovery"]
+    fn merge_sides_shared() {
+        sides(true)
     }
 }
