@@ -301,6 +301,10 @@ otherwise.
 Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
 bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree
 they need (`docs/ownership.md`, "States imported from Git").
+For imported history, `log -- <path>` and `show <rev> -- <path>` select changed paths from
+Git trees before loading file contents. Missing or corrupt blobs outside the selected paths do
+not fail these commands; selected blobs are still checked when their contents are loaded.
+Without a path filter, content reads still load all changed files.
 
 Revisions: `head`, `@`, `head~2`, `head^2`, line names, `line@machine`, tags, `origin/main`,
 state id prefixes, git commit ids (full or a prefix of at least 4 digits), `park@{n}` (the head of

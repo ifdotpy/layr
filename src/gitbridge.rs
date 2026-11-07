@@ -404,6 +404,10 @@ pub fn ls_remote(ctx: &Ctx, repo: &Repo, url: &str, branch: &str) -> Result<Opti
 
 /// One cat-file process bounds memory to one object and avoids a process per file/tree.
 struct CatFile {
+    #[cfg(test)]
+    blob_requests: usize,
+    #[cfg(test)]
+    decoded_blob_bytes: usize,
     child: std::process::Child,
     input: std::process::ChildStdin,
     output: std::io::BufReader<std::process::ChildStdout>,
@@ -414,10 +418,22 @@ impl CatFile {
         let mut child = base_cmd(s).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let input = child.stdin.take().unwrap();
         let output = std::io::BufReader::new(child.stdout.take().unwrap());
-        Ok(Self { child, input, output })
+        Ok(Self {
+            child,
+            input,
+            output,
+            #[cfg(test)]
+            blob_requests: 0,
+            #[cfg(test)]
+            decoded_blob_bytes: 0,
+        })
     }
 
     fn object(&mut self, oid: &str, kind: &str) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        if kind == "blob" {
+            self.blob_requests += 1;
+        }
         writeln!(self.input, "{oid}")?;
         self.input.flush()?;
         let mut header = String::new();
@@ -428,6 +444,10 @@ impl CatFile {
         }
         let mut data = vec![0; fields[2].parse()?];
         self.output.read_exact(&mut data)?;
+        #[cfg(test)]
+        if kind == "blob" {
+            self.decoded_blob_bytes += data.len();
+        }
         let mut newline = [0];
         self.output.read_exact(&mut newline)?;
         use layr_hashers::{Digest, GitCompatible};
@@ -2598,8 +2618,8 @@ fn forget_objects() {
 
 /// One changed file of a commit against its base: the (mode, object id) of each side, None when
 /// the side has no file there (absent, a folder, or a submodule).
-struct Delta {
-    path: String,
+pub(crate) struct Delta {
+    pub path: String,
     old: Option<(String, String)>,
     new: Option<(String, String)>,
 }
@@ -2672,8 +2692,9 @@ fn git_meta(mode: &str, size: usize) -> crate::fsutil::Meta {
     }
 }
 
-pub fn sides_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Sides> {
-    let (deltas, blobs) = with_objects(repo, |cat| {
+/// Discover changed paths and typed tree entries without requesting any blobs.
+pub(crate) fn deltas_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Vec<Delta>> {
+    with_objects(repo, |cat| {
         let new_tree = tree_id(&cat.object(new, "commit")?)?.to_string();
         let old_tree = match old {
             Some(o) => Some(tree_id(&cat.object(o, "commit")?)?.to_string()),
@@ -2682,19 +2703,27 @@ pub fn sides_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Sides> {
         let mut deltas = Vec::new();
         tree_deltas(cat, old_tree.as_deref(), Some(&new_tree), "", &mut deltas)?;
         deltas.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(deltas)
+    })
+}
+
+/// Load only the supplied tree deltas. Callers select paths before requesting any file bytes.
+pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
+    let blobs = with_objects(repo, |cat| {
         let mut blobs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for d in &deltas {
+        for d in deltas {
             for (_, oid) in d.old.iter().chain(d.new.iter()) {
                 if !blobs.contains_key(oid) {
                     blobs.insert(oid.clone(), cat.object(oid, "blob")?);
                 }
             }
         }
-        Ok((deltas, blobs))
+        Ok(blobs)
     })?;
+
     let (mut old_files, mut new_files) = (BTreeMap::new(), BTreeMap::new());
     let mut changes = Vec::new();
-    for d in &deltas {
+    for d in deltas {
         let old_meta = d.old.as_ref().map(|(mode, oid)| {
             let data = &blobs[oid];
             old_files.insert(d.path.clone(), data.clone());
@@ -2709,3 +2738,7 @@ pub fn sides_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Sides> {
     }
     Ok(Sides { old: GitFiles { files: old_files }, new: GitFiles { files: new_files }, changes })
 }
+
+#[cfg(test)]
+#[path = "gitbridge_history_tests.rs"]
+mod history_tests;

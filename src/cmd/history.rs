@@ -606,9 +606,9 @@ impl diff::Contents for Entries {
 }
 
 /// The sides of a state against its first parent, when the state is an imported state and its parent
-/// (if any) is an imported state: read from git objects (`gitbridge::sides_of`). The trees on disk are
-/// not needed, so a present state builds nothing either.
-fn git_sides(repo: &Repo, s: &StateRec) -> Result<Option<crate::gitbridge::Sides>> {
+/// (if any) is an imported state: select typed tree deltas before loading blobs. The trees on disk
+/// are not needed, so a present state builds nothing either.
+fn git_sides(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<crate::gitbridge::Sides>> {
     let Some(new) = crate::gitbridge::imported_commit(repo, &s.id)? else { return Ok(None) };
     let old = match s.parents.first() {
         None => None,
@@ -618,13 +618,18 @@ fn git_sides(repo: &Repo, s: &StateRec) -> Result<Option<crate::gitbridge::Sides
         },
     };
     // Without the Git objects, the trees are read below (a store remote may hold them).
-    Ok(crate::gitbridge::sides_of(repo, old.as_deref(), &new).ok())
+    Ok(crate::gitbridge::deltas_of(repo, old.as_deref(), &new)
+        .and_then(|mut deltas| {
+            deltas.retain(|d| matches(specs, &d.path));
+            crate::gitbridge::sides_of(repo, &deltas)
+        })
+        .ok())
 }
 
 /// The changes of a state against its first parent, and the two sides.
-fn state_changes(repo: &Repo, s: &StateRec) -> Result<(Entries, Entries, Vec<Change>)> {
+fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries, Entries, Vec<Change>)> {
     repo.source_state(&s.id)?;
-    if let Some(sides) = git_sides(repo, s)? {
+    if let Some(sides) = git_sides(repo, s, specs)? {
         let changes = sides.changes.into_iter().filter(|c| !skip_path(&c.path)).collect();
         return Ok((Entries::Git(sides.old), Entries::Git(sides.new), changes));
     }
@@ -851,7 +856,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if a.has("-s") {
             continue;
         }
-        let (old, new, list) = state_changes(repo, &s)?;
+        let (old, new, list) = state_changes(repo, &s, &specs)?;
         let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
         if list.is_empty() {
             continue;
@@ -1017,7 +1022,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !crate::gitbridge::readable(repo, &s.id)? {
                 return Ok(Vec::new());
             }
-            let (_o, _n, list) = state_changes(repo, s)?;
+            let (_o, _n, list) = state_changes(repo, s, &specs)?;
             Ok(list.into_iter().flat_map(|c| std::iter::once(c.path).chain(c.old_path)).collect())
         },
         |path| specs.is_empty() || matches(&specs, path),
@@ -1070,7 +1075,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         )?;
         first = false;
         if want_diff && crate::gitbridge::readable(repo, &s.id)? {
-            let (old, new, list) = state_changes(repo, s)?;
+            let (old, new, list) = state_changes(repo, s, &specs)?;
             let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
             if !list.is_empty() {
                 if blank {
