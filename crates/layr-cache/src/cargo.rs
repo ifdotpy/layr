@@ -559,6 +559,10 @@ impl CacheAdapter for Cargo {
         Some(Toolchain { program: "rustc", args: &["-vV"], files: &["rust-toolchain.toml", "rust-toolchain"] })
     }
 
+    fn unit_of(&self, path: &str) -> Option<String> {
+        unit_of(path)
+    }
+
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
         crate::relocate::relocate(folder, at).map_err(|e| format!("{e:#}"))
     }
@@ -571,6 +575,26 @@ impl CacheAdapter for Cargo {
             old.display()
         ))
     }
+}
+
+/// The unit of a file in a cargo target folder: `<profile path>/<name>-<hash>` for the files of `deps/`
+/// (`lib<name>-<hash>.rlib`, `.rmeta`, `.d`, test binaries), `.fingerprint/<name>-<hash>/`, `build/<name>-<hash>/`
+/// and `incremental/<name>-<hash>/`. The hash is cargo's 16 hex digits; other paths have no unit.
+pub fn unit_of(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let at = parts.iter().position(|p| matches!(*p, "deps" | ".fingerprint" | "build" | "incremental"))?;
+    let entry = parts.get(at + 1)?;
+    let stem = if parts[at] == "deps" {
+        let s = entry.strip_prefix("lib").filter(|s| s.contains('-')).unwrap_or(entry);
+        s.split('.').next().unwrap_or(s)
+    } else {
+        entry
+    };
+    let (name, hash) = stem.rsplit_once('-')?;
+    if name.is_empty() || hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        return None;
+    }
+    Some(format!("{}/{name}-{hash}", parts[..at].join("/")))
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
@@ -700,6 +724,19 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
 #[cfg(test)]
 mod pinned_env_tests {
     use super::pinned_env;
+
+    #[test]
+    fn the_files_of_one_unit_have_one_unit() {
+        let u = Some("target/debug/foo-0123456789abcdef".to_string());
+        assert_eq!(unit_of("target/debug/deps/libfoo-0123456789abcdef.rlib"), u);
+        assert_eq!(unit_of("target/debug/deps/libfoo-0123456789abcdef.rmeta"), u);
+        assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdef.d"), u);
+        assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdef"), u);
+        assert_eq!(unit_of("target/debug/.fingerprint/foo-0123456789abcdef/lib-foo.json"), u);
+        assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdee.d"), Some("target/debug/foo-0123456789abcdee".into()));
+        assert_eq!(unit_of("node_modules/x/build/index.js"), None);
+        assert_eq!(unit_of("target/debug/foo"), None);
+    }
 
     #[test]
     fn the_table_of_this_os_applies_over_the_plain_values() {
