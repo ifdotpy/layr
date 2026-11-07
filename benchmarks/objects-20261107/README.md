@@ -6,3 +6,4 @@ Scripts and raw output behind `docs/objects.md`, "Reads, block size and saves". 
 - `run2`: named states; history with and without deltas; Chromium with blocks of 56 and 4 MiB. Its read sample has the same fault.
 - `run3`: cold reads from a newly opened store and saves, by block size. Its saves re-store unchanged files.
 - `run4`: the final format, with real changes before each save.
+- `run5`: a checkout of Chromium from packs in the final format, compared with the source.
