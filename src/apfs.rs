@@ -861,7 +861,12 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         crate::sys::apfs_immutable(path, false)?;
         let mut paths = user_acls.lock().unwrap();
         paths.sort();
-        crate::sys::apfs_attribute(path, c"com.layr.user-acls", Some(&serde_json::to_vec(&*paths)?))?;
+        let bytes = serde_json::to_vec(&*paths)?;
+        let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+        let written = crate::sys::apfs_attribute(path, c"com.layr.user-acls", Some(&bytes));
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        written?;
         Ok(crate::sys::apfs_flag(path, true)?)
     };
     if files.len() >= PARALLEL_FROM || levels.iter().any(|level| level.len() >= PARALLEL_FROM) {
