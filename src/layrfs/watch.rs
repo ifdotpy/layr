@@ -70,7 +70,8 @@ mod imp {
                     }
                     let Some(rel) = relative(&root2, &path) else { continue };
                     let name = rel.file_name().map(|n| n.to_string_lossy().into_owned());
-                    let rules = matches!(name.as_deref(), Some(".gitignore" | ".ignore" | ".rgignore" | "exclude"));
+                    let rules = matches!(name.as_deref(), Some(".gitignore" | ".ignore" | ".rgignore"))
+                        || rel == Path::new(".git/info/exclude");
                     if flag & namespace != 0 || rules {
                         changed.push(rel);
                     }
@@ -125,11 +126,20 @@ mod imp {
             | WatchFlags::EXCL_UNLINK
     }
 
-    /// Watch `dir` and the folders below it.
+    /// Watch `dir` and the folders below it that rg enters. Ignored and hidden folders
+    /// (`target/`, `node_modules`, `.git`) are not watched: that keeps a JavaScript project
+    /// below `fs.inotify.max_user_watches`, and `find` checks those folders by their times.
+    /// The walk starts at the root and descends only towards `dir`, so that every ignore file on
+    /// the way applies.
     fn watch_tree(state: &mut State, root: &Path, dir: &Path) -> Result<()> {
-        let mut walk = ignore::WalkBuilder::new(dir);
-        walk.standard_filters(false);
+        let mut walk = ignore::WalkBuilder::new(root);
+        walk.add_custom_ignore_filename(".rgignore");
+        let target = dir.to_path_buf();
+        walk.filter_entry(move |e| target.starts_with(e.path()) || e.path().starts_with(&target));
         for e in walk.build().flatten() {
+            if !e.path().starts_with(dir) {
+                continue;
+            }
             if e.file_type().is_some_and(|t| t.is_dir()) {
                 match inotify::add_watch(&state.fd, e.path(), flags()) {
                     Ok(wd) => {
@@ -208,12 +218,17 @@ mod imp {
                 if flags.contains(ReadFlags::ISDIR) && flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO) {
                     new_dirs.push(path.clone());
                 }
-                if flags.intersects(ReadFlags::CLOSE_WRITE) && !flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO) {
-                    // A content change: only ignore files change the index.
-                    let name = path.file_name().map(|n| n.as_bytes()).unwrap_or(b"");
-                    if !matches!(name, b".gitignore" | b".ignore" | b".rgignore" | b"exclude") {
-                        continue;
-                    }
+                let name = path.file_name().map(|n| n.as_bytes()).unwrap_or(b"");
+                let rules = matches!(name, b".gitignore" | b".ignore" | b".rgignore");
+                if flags.intersects(ReadFlags::CLOSE_WRITE)
+                    && !flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO)
+                    && !rules
+                {
+                    continue; // a content change: only ignore files change the index
+                }
+                if rules {
+                    // Folders below may now be entered by rg (or no longer).
+                    new_dirs.push(path.parent().map(Path::to_path_buf).unwrap_or_default());
                 }
                 changed.push(path);
             }
@@ -223,7 +238,7 @@ mod imp {
         }
         for d in new_dirs {
             let abs = root.join(&d);
-            if watch_tree(&mut st, root, &abs).is_err() {
+            if abs.is_dir() && watch_tree(&mut st, root, &abs).is_err() {
                 rescan = true;
             }
         }

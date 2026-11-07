@@ -4,7 +4,6 @@
 //! the real `rg`.
 
 use super::index::{self, Kind, Tree};
-use super::Outcome;
 use grep_printer::{StandardBuilder, SummaryBuilder, SummaryKind};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder};
@@ -255,19 +254,31 @@ fn resolve(cwd: &Path, arg: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-pub fn run(
+/// What a served `rg` call does after the index was read.
+pub enum Step {
+    /// Done under the read lock (`--files`): the exit code.
+    Done(i32),
+    /// A content search over a fixed list of files, run without holding the index.
+    Search(Search),
+}
+
+pub struct Search {
+    o: Opts,
+    matcher: RegexMatcher,
+    files: Vec<(PathBuf, PathBuf, bool)>,
+    with_filename: bool,
+}
+
+/// Read the index for an `rg` call: resolve paths and list the files. `Err` is a fallback.
+pub fn plan(
     root: &Path,
     cwd: &Path,
     stdin_readable: bool,
     args: &[String],
     tree: &Tree,
     out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> Outcome {
-    match run_inner(root, cwd, stdin_readable, args, tree, out, err) {
-        Ok(code) => Outcome::Done(code),
-        Err(why) => Outcome::Fallback(why),
-    }
+) -> Result<Step, String> {
+    run_inner(root, cwd, stdin_readable, args, tree, out)
 }
 
 fn run_inner(
@@ -277,8 +288,7 @@ fn run_inner(
     args: &[String],
     tree: &Tree,
     out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> Result<i32, String> {
+) -> Result<Step, String> {
     let o = parse(args)?;
     if o.paths.is_empty() && stdin_readable && !o.files {
         return fallback("rg reads standard input");
@@ -334,7 +344,7 @@ fn run_inner(
                 }
             }
         }
-        return Ok(if listed { 0 } else { 1 });
+        return Ok(Step::Done(if listed { 0 } else { 1 }));
     }
 
     // The files in output order, with the path that is printed.
@@ -370,38 +380,48 @@ fn run_inner(
                 let _ = out.write_all(b"\n");
             }
         }
-        return Ok(if listed { 0 } else { 1 });
+        return Ok(Step::Done(if listed { 0 } else { 1 }));
     }
 
     let matcher = build_matcher(&o)?;
-    let results: Vec<(Vec<u8>, bool, Option<String>)> =
-        files.par_iter().map(|(abs, shown, explicit)| search_one(&o, &matcher, abs, shown, *explicit, with_filename)).collect();
-    let (mut matched, mut failed, mut printed) = (false, false, false);
-    let separate = o.mode == Mode::Lines && (o.after > 0 || o.before > 0);
-    for (bytes, m, e) in results {
-        matched |= m;
-        if let Some(e) = e {
-            failed = true;
-            if !o.no_messages {
-                let _ = writeln!(err, "rg: {e}");
+    Ok(Step::Search(Search { o, matcher, files, with_filename }))
+}
+
+impl Search {
+    /// Search the listed files; the exit code of rg.
+    pub fn run(self, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+        let Search { o, matcher, files, with_filename } = self;
+        let results: Vec<(Vec<u8>, bool, Option<String>)> = files
+            .par_iter()
+            .map(|(abs, shown, explicit)| search_one(&o, &matcher, abs, shown, *explicit, with_filename))
+            .collect();
+        let (mut matched, mut failed, mut printed) = (false, false, false);
+        let separate = o.mode == Mode::Lines && (o.after > 0 || o.before > 0);
+        for (bytes, m, e) in results {
+            matched |= m;
+            if let Some(e) = e {
+                failed = true;
+                if !o.no_messages {
+                    let _ = writeln!(err, "rg: {e}");
+                }
             }
+            if o.quiet || bytes.is_empty() {
+                continue;
+            }
+            if separate && printed {
+                let _ = out.write_all(b"--\n");
+            }
+            let _ = out.write_all(&bytes);
+            printed = true;
         }
-        if o.quiet || bytes.is_empty() {
-            continue;
+        if failed && !(o.quiet && matched) {
+            2
+        } else if matched {
+            0
+        } else {
+            1
         }
-        if separate && printed {
-            let _ = out.write_all(b"--\n");
-        }
-        let _ = out.write_all(&bytes);
-        printed = true;
     }
-    Ok(if failed && !(o.quiet && matched) {
-        2
-    } else if matched {
-        0
-    } else {
-        1
-    })
 }
 
 /// The printed path of a walked file: rg joins the argument and the path below it (`Path::join`),
@@ -448,7 +468,10 @@ fn search_one(
         .binary_detection(if explicit { BinaryDetection::convert(0) } else { BinaryDetection::quit(0) })
         .build();
     let shown_path = shown;
-    let error = |e: std::io::Error| Some(format!("{}: {e}", shown.display()));
+    // A walked file removed after the index listed it is skipped, as rg's own walk would not
+    // have found it; an explicit path still reports the error.
+    let error =
+        |e: std::io::Error| (explicit || e.kind() != std::io::ErrorKind::NotFound).then(|| format!("{}: {e}", shown.display()));
     match o.mode {
         Mode::Lines => {
             let mut printer =

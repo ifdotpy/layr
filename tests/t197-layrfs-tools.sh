@@ -96,6 +96,42 @@ same "a removed ignore file" "$W" --files
 printf 'target/\n' > .gitignore
 same "a restored ignore file" "$W" --files
 
+# stress <rounds>: write a file and search for it at once, remove it and list at once, while
+# another process keeps creating and removing files. Any stale answer counts.
+stress() {
+    local rounds=$1 bad=0 i out noise
+    mkdir -p stress noise
+    ( for n in $(seq 1 100000); do echo x > "noise/n$((n % 64))"; rm -f "noise/n$(((n + 32) % 64))"; done ) &
+    noise=$!
+    for i in $(seq 1 "$rounds"); do
+        echo "fn stress_$i() {}" > "stress/s$i.rs"
+        out=$("$LAYR" tool rg -l "stress_$i\b" </dev/null)
+        [ "$out" = "stress/s$i.rs" ] || { bad=$((bad + 1)); echo "round $i: rg saw '$out'" >&2; }
+        rm "stress/s$i.rs"
+        out=$("$LAYR" tool find stress -type f </dev/null)
+        [ -z "$out" ] || { bad=$((bad + 1)); echo "round $i: find saw '$out'" >&2; }
+    done
+    kill "$noise" 2>/dev/null; wait "$noise" 2>/dev/null
+    rm -rf stress noise
+    echo "$bad"
+}
+eq "1000 rounds of write then search see every change" "0" "$(stress 1000)"
+
+# Without a watcher, comparing folder times alone finds every change before a query.
+(
+    export LAYR_FS_SOCKET=$T/nowatch.sock LAYR_FS_NO_WATCH=1
+    eq "a server without a watcher indexes" "ready" "$("$LAYR" fs warm --wait)"
+    sleep 1.1 # folder times may have whole-second resolution
+    mkdir -p src/late && printf 'fn late() {}\n' > src/late/l.rs
+    rm top.rs
+    mv manual docs
+    printf 'target/\n*.log\n' > .gitignore
+    eq "a new file is found without a watcher" "src/late/l.rs:fn late() {}" "$("$LAYR" tool rg late </dev/null)"
+    check_all
+    eq "200 rounds without a watcher see every change" "0" "$(stress 200)"
+    "$LAYR" fs stop
+)
+
 # Links named after the tools work like `layr tool`.
 mkdir -p "$T/bin" && ln -s "$LAYR" "$T/bin/rg" && ln -s "$LAYR" "$T/bin/find"
 want=$(rg --sort path -n fn </dev/null)
@@ -127,4 +163,9 @@ LAYR_FS_SOCKET=$T/shared/fs.sock "$LAYR" fs stop
 echo keep > "$T/shared/not-a-socket"
 no "a file in place of the socket is not replaced" env LAYR_FS_SOCKET=$T/shared/not-a-socket "$LAYR" fs warm --wait
 eq "the file is kept" "keep" "$(cat "$T/shared/not-a-socket")"
+
+# A socket folder that others may write to is never used: another user could listen there.
+mkdir -p "$T/open" && chmod 777 "$T/open"
+no "a folder others may write to is not used" env LAYR_FS_SOCKET=$T/open/fs.sock "$LAYR" tool rg fn </dev/null
+no "no server listens there" test -S "$T/open/fs.sock"
 finish
