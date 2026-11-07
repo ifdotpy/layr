@@ -272,7 +272,15 @@ pub enum Trust<'a> {
     Peer(&'a str, &'a str),
     /// Every machine of the batch (a new replica or a restore).
     All,
+    /// Every machine that a Layr Cloud server serves: its access list decided who writes there. The records and
+    /// their effects come into the project, but a machine that this project does not trust yet cannot change
+    /// local trust (its `machine.trust`, `machine.untrust` and `trust.delegate` records have no effect), so peer
+    /// sync, cache readers and other remotes keep the local trusted set.
+    Server,
 }
+
+/// The record operations that change which machines a project trusts.
+const TRUST_OPS: &[&str] = &["machine.trust", "machine.untrust", "trust.delegate"];
 
 pub struct Project<'a> {
     pub store: &'a Store,
@@ -1364,7 +1372,7 @@ impl<'a> Project<'a> {
     ///
     /// Only records of trusted machines are taken (see `Trust`).
     pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
-        crate::overlay_managers::validate_import(self, lines)?;
+        crate::overlay_managers::validate_import(self, lines, matches!(trust, Trust::Server))?;
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {
@@ -1446,7 +1454,14 @@ impl<'a> Project<'a> {
         // they vouch for nobody.
         let terms = self.trust_terms(&fresh.iter().map(|s| &s.record).collect::<Vec<_>>())?;
         // Trust: known machines, then machines vouched for by trusted ones in this batch.
-        if !matches!(trust, Trust::All) {
+        // Under `Trust::Server`, the machines whose trust records count: trusted here before this batch.
+        let mut locally_trusted: BTreeSet<String> = BTreeSet::from([self.store.machine.id.clone()]);
+        for m in keys.keys() {
+            if self.db.trusted(m)?.is_some_and(|k| Some(&k) == keys.get(m)) {
+                locally_trusted.insert(m.clone());
+            }
+        }
+        if !matches!(trust, Trust::All | Trust::Server) {
             let mut trusted: BTreeSet<String> = BTreeSet::new();
             for m in keys.keys() {
                 if let Some(k) = self.db.trusted(m)? {
@@ -1500,7 +1515,15 @@ impl<'a> Project<'a> {
         self.db.with_tx(|| {
             for s in &fresh {
                 if self.db.insert_record(&s.record, &s.line)? {
-                    if let Some(why) = self.refusal(&terms, &s.record)? {
+                    let server_trust = matches!(trust, Trust::Server)
+                        && TRUST_OPS.contains(&s.record.op.as_str())
+                        && !locally_trusted.contains(&s.record.machine);
+                    let refused = if server_trust {
+                        Some("a trust change by a machine this project does not trust")
+                    } else {
+                        self.refusal(&terms, &s.record)?
+                    };
+                    if let Some(why) = refused {
                         if std::env::var_os("LAYR_TRACE").is_some() {
                             let (seq, machine, op) = (s.record.seq, crate::ids::short(&s.record.machine), &s.record.op);
                             eprintln!("trace record {seq} of machine {machine} ({op}) has no effect: {why}");

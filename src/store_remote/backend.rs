@@ -13,6 +13,8 @@ pub enum Backend {
     File(PathBuf, u32, u32),
     S3(super::s3::S3),
     Gateway(super::gateway::Gateway),
+    /// Layr Cloud API v1 (Public and Private projects).
+    Api(super::api::Api),
     Prefix(Box<Backend>, String),
     Epoch(Box<EpochBackend>),
 }
@@ -133,6 +135,7 @@ impl Backend {
             Self::Prefix(base, prefix) => base.get_stream(&format!("{prefix}{key}")),
             Self::S3(s) => Ok(s.get_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
             Self::Gateway(g) => Ok(g.release_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
+            Self::Api(a) => Ok(a.get(key)?.map(|b| Box::new(std::io::Cursor::new(b)) as Box<dyn Read>)),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
@@ -158,6 +161,11 @@ impl Backend {
             Self::Prefix(base, prefix) => base.put_file_new(&format!("{prefix}{key}"), source),
             Self::S3(s) => s.put_file_new(key, source),
             Self::Gateway(g) => g.put_file_new(key, source),
+            Self::Api(a) => {
+                let mut body = Vec::new();
+                source.read_to_end(&mut body)?;
+                a.put_new(key, body)
+            }
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
@@ -187,6 +195,14 @@ impl Backend {
     pub fn scoped(&self, prefix: &str) -> Result<Self> {
         check_key(prefix)?;
         Ok(Self::Prefix(Box::new(self.clone()), format!("{prefix}/")))
+    }
+    /// The Layr Cloud API client under this backend, if it is one (also through a prefix).
+    pub fn api(&self) -> Option<&super::api::Api> {
+        match self {
+            Self::Api(api) => Some(api),
+            Self::Prefix(base, _) => base.api(),
+            _ => None,
+        }
     }
     pub fn file(root: PathBuf) -> Self {
         Self::File(root, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())
@@ -230,7 +246,7 @@ impl Backend {
                 *s3 = super::s3::S3::with_env(bucket, prefix, env)?;
             }
             Self::Gateway(gateway) => gateway.connect_reader(env)?,
-            Self::File(..) | Self::Prefix(..) | Self::Epoch(..) => {}
+            Self::File(..) | Self::Prefix(..) | Self::Epoch(..) | Self::Api(_) => {}
         }
         Ok(backend)
     }
@@ -247,7 +263,7 @@ impl Backend {
             }
             Self::Prefix(base, _) => base.unlock_reader(identity),
             Self::Gateway(gateway) => gateway.set_identity(identity),
-            Self::File(..) | Self::S3(_) => Ok(()),
+            Self::File(..) | Self::S3(_) | Self::Api(_) => Ok(()),
         }
     }
 
@@ -269,7 +285,7 @@ impl Backend {
 
     /// A backend that sends its own requests (not a view of another backend): its calls are counted.
     fn is_leaf(&self) -> bool {
-        matches!(self, Self::S3(_) | Self::Gateway(_) | Self::File(..))
+        matches!(self, Self::S3(_) | Self::Gateway(_) | Self::Api(_) | Self::File(..))
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -299,6 +315,7 @@ impl Backend {
             Self::Prefix(base, prefix) => base.get(&format!("{prefix}{key}")),
             Self::S3(s) => s.get(key),
             Self::Gateway(g) => g.get(key),
+            Self::Api(a) => a.get(key),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 let mut f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
@@ -330,6 +347,7 @@ impl Backend {
             Self::Prefix(base, prefix) => base.put_new(&format!("{prefix}{key}"), body),
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
+            Self::Api(a) => a.put_new(key, body),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
@@ -393,6 +411,7 @@ impl Backend {
                 .collect(),
             Self::S3(s) => s.list(prefix),
             Self::Gateway(g) => g.list(prefix),
+            Self::Api(a) => a.list(prefix),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let mut out = Vec::new();
                 if root.exists() {
@@ -433,7 +452,7 @@ impl Backend {
                 }
                 out
             }
-            Self::S3(_) | Self::Gateway(_) => Vec::new(),
+            Self::S3(_) | Self::Gateway(_) | Self::Api(_) => Vec::new(),
         };
         out.sort();
         out.dedup();
@@ -459,6 +478,7 @@ impl Backend {
             Self::Prefix(base, prefix) => base.delete(&format!("{prefix}{key}")),
             Self::S3(s) => s.delete(key),
             Self::Gateway(g) => g.delete(key),
+            Self::Api(_) => bail!("Layr Cloud deletes objects itself (server-side garbage collection): {key}"),
             Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match fs::remove_file(path) {

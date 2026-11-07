@@ -698,7 +698,10 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let mut store = store_remote::open(url, repo)?;
                 store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
                 let mode = a.get("--mode").map(|m| layr_store::format::Mode::parse(m)).transpose()?;
-                store.require_mode(mode);
+                store.require_mode(mode)?;
+                if mode.is_none() && (a.has("--paper-key-out") || a.has("--paper-key-tty")) {
+                    store.choose_transport(Some(layr_store::format::Mode::Secret))?;
+                }
                 let opts = store_remote::ConfigureOptions {
                     paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)),
                     paper_key_tty: a.has("--paper-key-tty"),
@@ -916,6 +919,26 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     drop(h);
     exchange(ctx, args, "push")
+}
+/// `layr login <remote>`: a person signs in to Layr Cloud and registers this machine's signing key.
+pub fn login(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json"), args)?;
+    if a.pos.len() != 1 || !a.paths.is_empty() {
+        bail!("usage: layr login <remote>");
+    }
+    let h = here(ctx)?;
+    let store = store_remote::open_named(&a.pos[0], &h.repo)?;
+    let login = store.login(ctx, |link| {
+        if !a.has("--json") {
+            outln!(ctx, "open {link} and sign in with your passkey");
+        }
+    })?;
+    if a.has("--json") {
+        outln!(ctx, "{}", json!({"login": login, "machine": h.repo.p.store.machine.id}));
+    } else {
+        outln!(ctx, "signed in as {login}; this machine's key is registered");
+    }
+    Ok(0)
 }
 pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--json").flag("-q|--quiet").value("--remote"), args)?;
@@ -1268,7 +1291,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.use_public_access(a.has("--public"));
         // `--mode secret` refuses a server that serves this project as plain, and the reverse.
-        store.require_mode(a.get("--mode").map(layr_store::format::Mode::parse).transpose()?);
+        store.require_mode(a.get("--mode").map(layr_store::format::Mode::parse).transpose()?)?;
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
             public: a.has("--public"),

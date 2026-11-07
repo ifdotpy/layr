@@ -44,8 +44,9 @@ fn decode(identity: &str, body: &[u8]) -> Result<CommitList> {
 
 /// Send the Git objects of the imported commits that the remote does not list yet.
 pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
-    // A writer that cannot read the store cannot tell which commits it lists.
-    if !store.backend.can_read() || !gitbridge::has_store(repo) {
+    // A writer that cannot read the store cannot tell which commits it lists. Layr Cloud mirrors Public and
+    // Private projects to GitHub itself and has no Git pack route yet.
+    if !store.backend.can_read() || !gitbridge::has_store(repo) || store.is_api() {
         return Ok(());
     }
     let imported = repo.p.db.import_commits()?;

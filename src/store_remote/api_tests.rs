@@ -1,0 +1,769 @@
+//! The Layr Cloud API v1 client against an in-process fake server (layr-cloud docs/api.md).
+
+use super::api::{Api, Cas, RefUpdate};
+use super::backend::Backend;
+use super::{writer, Options, Store};
+use crate::ctx::{Caller, Ctx};
+use crate::model::{LineChange, LineState, Record, StateRec};
+use crate::repo::Repo;
+use layr_objects::Kind;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+const TOKEN: &str = "machine.token";
+
+type Upload = (String, String, BTreeMap<usize, Vec<u8>>);
+
+#[derive(Default)]
+struct FakeState {
+    project_id: Option<String>,
+    objects: BTreeMap<String, (String, Vec<u8>)>,
+    /// Upload id to the object id, its type and the parts by number.
+    uploads: BTreeMap<String, Upload>,
+    segments: BTreeMap<(String, String, u64, u64), Vec<u8>>,
+    /// A state: its tree and times table.
+    states: BTreeMap<(String, String), (String, String)>,
+    /// Object id to the pack that holds it (from the pack indexes).
+    located: BTreeMap<String, String>,
+    /// Pack id to its index.
+    indexes: BTreeMap<String, Vec<u8>>,
+    refs: BTreeMap<(String, String), (String, u64)>,
+    machines: BTreeMap<String, String>,
+    minimum: Option<String>,
+    part_size: usize,
+    login_polls: usize,
+    log: Vec<String>,
+}
+
+struct Fake {
+    origin: String,
+    state: Arc<Mutex<FakeState>>,
+}
+
+struct Request {
+    method: String,
+    path: String,
+    query: BTreeMap<String, String>,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Request> {
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut headers = HashMap::new();
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).ok()?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        let (name, value) = header.split_once(':')?;
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    let length: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let query =
+        query.split('&').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.to_string(), v.replace("%2F", "/"))).collect();
+    Some(Request { method, path: path.to_string(), query, headers, body })
+}
+
+fn reply(stream: &mut TcpStream, status: u16, body: &[u8], extra: &[(&str, &str)]) {
+    let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nLayr-Server: fake-1\r\n", body.len());
+    for (name, value) in extra {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+}
+
+fn json(value: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&value).unwrap()
+}
+
+impl Fake {
+    fn start(project_id: Option<&str>) -> Fake {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap());
+        let state = Arc::new(Mutex::new(FakeState {
+            project_id: project_id.map(str::to_owned),
+            part_size: 8 << 20,
+            ..Default::default()
+        }));
+        let shared = state.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let state = shared.clone();
+                std::thread::spawn(move || {
+                    let mut writer = stream.try_clone().unwrap();
+                    let mut reader = BufReader::new(stream);
+                    while let Some(request) = read_request(&mut reader) {
+                        let (status, body, extra) = Fake::handle(&state, request);
+                        let extra: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                        reply(&mut writer, status, &body, &extra);
+                    }
+                });
+            }
+        });
+        Fake { origin, state }
+    }
+
+    fn api(&self) -> Api {
+        Api::for_test(&self.origin, "p", Some(TOKEN))
+    }
+
+    fn handle(state: &Mutex<FakeState>, request: Request) -> (u16, Vec<u8>, Vec<(String, String)>) {
+        let mut s = state.lock().unwrap();
+        s.log.push(format!("{} {}", request.method, request.path));
+        assert!(request.headers.contains_key("layr-client"), "every request names the client version");
+        if let Some(minimum) = &s.minimum {
+            return (426, json(serde_json::json!({"error":{"code":"client_too_old","minimum":minimum}})), Vec::new());
+        }
+        let authorized = request.headers.get("authorization").map(String::as_str) == Some(&format!("Bearer {TOKEN}"));
+        let write = request.method != "GET";
+        if request.path.starts_with("/api/v1/login") {
+            if request.path == "/api/v1/login" {
+                return (200, json(serde_json::json!({"code":"c1","link":"/#/login?code=c1","expires":0})), Vec::new());
+            }
+            s.login_polls += 1;
+            if s.login_polls < 2 {
+                return (202, Vec::new(), Vec::new());
+            }
+            return (200, json(serde_json::json!({"login":"ann@example.com","token":TOKEN,"expires":0})), Vec::new());
+        }
+        if write && !authorized {
+            return (401, json(serde_json::json!({"error":{"code":"unauthorized","message":"no token"}})), Vec::new());
+        }
+        if let Some(machine) = request.path.strip_prefix("/api/v1/machines/") {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let key = body["public_key"].as_str().unwrap().to_string();
+            return match s.machines.get(machine) {
+                Some(old) if old != &key => (409, Vec::new(), Vec::new()),
+                _ => {
+                    s.machines.insert(machine.into(), key);
+                    (200, Vec::new(), Vec::new())
+                }
+            };
+        }
+        let Some(rest) = request.path.strip_prefix("/api/v1/projects/p") else { return (404, Vec::new(), Vec::new()) };
+        if rest.is_empty() {
+            return (200, json(serde_json::json!({"name":"p","mode":"private","role":"admin","id":s.project_id})), Vec::new());
+        }
+        let rest = rest.strip_prefix('/').unwrap();
+        let (scope, rest) = match rest.strip_prefix("overlays/").and_then(|r| r.split_once('/')) {
+            Some((name, rest)) => (format!("overlays/{name}/"), rest),
+            None => (String::new(), rest),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let parts: Vec<&str> = rest.split('/').collect();
+        match (request.method.as_str(), parts.as_slice()) {
+            ("POST", ["objects", "missing"]) => {
+                let missing: Vec<&str> = body["ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|id| !s.objects.contains_key(*id) && !s.located.contains_key(*id))
+                    .collect();
+                (200, json(serde_json::json!({ "missing": missing })), Vec::new())
+            }
+            ("POST", ["objects", "locate"]) => {
+                let packs: BTreeMap<&str, &String> = body["ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|id| s.located.get(id).map(|pack| (id, pack)))
+                    .collect();
+                (200, json(serde_json::json!({ "packs": packs })), Vec::new())
+            }
+            ("PUT", ["packs", pack]) => {
+                let Some((_, data)) = s.objects.get(*pack) else { return (400, Vec::new(), Vec::new()) };
+                let Ok(index) = layr_objects::pack::Index::decode(&request.body, data.len() as u64) else {
+                    return (400, Vec::new(), Vec::new());
+                };
+                if index.pack.hex() != *pack {
+                    return (400, Vec::new(), Vec::new());
+                }
+                for entry in &index.entries {
+                    s.located.insert(entry.id.hex(), pack.to_string());
+                }
+                s.indexes.insert(pack.to_string(), request.body);
+                (200, Vec::new(), Vec::new())
+            }
+            ("GET", ["packs", pack]) => match s.indexes.get(*pack) {
+                Some(index) => (200, index.clone(), Vec::new()),
+                None => (404, Vec::new(), Vec::new()),
+            },
+            ("PUT", ["objects", id]) => {
+                let kind = request.headers.get("layr-object-type").cloned().unwrap_or_default();
+                if request.body.len() > super::api::SINGLE_PUT_LIMIT || typed(&kind, &request.body) != *id {
+                    return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
+                }
+                let new = s.objects.insert(id.to_string(), (kind, request.body)).is_none();
+                (if new { 201 } else { 200 }, Vec::new(), Vec::new())
+            }
+            ("GET", ["objects", id]) => match s.objects.get(*id) {
+                Some((_, bytes)) => (200, bytes.clone(), Vec::new()),
+                None => (404, Vec::new(), Vec::new()),
+            },
+            ("POST", ["objects", id, "uploads"]) => {
+                let kind = request.headers.get("layr-object-type").cloned().unwrap_or_default();
+                let upload = format!("u{}", s.uploads.len() + 1);
+                s.uploads.insert(upload.clone(), (id.to_string(), kind, BTreeMap::new()));
+                let size = s.part_size;
+                (200, json(serde_json::json!({"upload":upload,"part_size":size})), Vec::new())
+            }
+            ("PUT", ["objects", _, "uploads", upload, n]) => {
+                let n: usize = n.parse().unwrap();
+                s.uploads.get_mut(*upload).unwrap().2.insert(n, request.body);
+                (200, Vec::new(), Vec::new())
+            }
+            ("POST", ["objects", id, "uploads", upload, "complete"]) => {
+                let (object, kind, parts) = s.uploads.remove(*upload).unwrap();
+                let bytes: Vec<u8> = parts.into_values().flatten().collect();
+                if object != *id || typed(&kind, &bytes) != *id {
+                    return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
+                }
+                s.objects.insert(object, (kind, bytes));
+                (201, Vec::new(), Vec::new())
+            }
+            ("GET", ["records"]) => {
+                let list: Vec<serde_json::Value> = s
+                    .segments
+                    .keys()
+                    .filter(|(sc, ..)| sc == &scope)
+                    .map(|(_, w, a, b)| serde_json::json!({"writer":w,"first":a,"last":b,"sha256":"","size":0}))
+                    .collect();
+                (200, json(serde_json::json!({"segments":list,"next":null})), Vec::new())
+            }
+            ("POST", ["records", writer, range]) => {
+                let (first, last) = range.split_once('-').unwrap();
+                let (first, last): (u64, u64) = (first.parse().unwrap(), last.parse().unwrap());
+                let held =
+                    s.segments.keys().filter(|(sc, w, ..)| sc == &scope && w == writer).map(|(.., b)| *b).max().unwrap_or(0);
+                if first != held + 1 {
+                    return (409, json(serde_json::json!({"error":{"code":"conflict"},"last":held})), Vec::new());
+                }
+                s.segments.insert((scope, writer.to_string(), first, last), request.body);
+                (201, Vec::new(), Vec::new())
+            }
+            ("GET", ["records", writer, range]) => {
+                let (first, last) = range.split_once('-').unwrap();
+                let key = (scope, writer.to_string(), first.parse().unwrap(), last.parse().unwrap());
+                match s.segments.get(&key) {
+                    Some(bytes) => (200, bytes.clone(), Vec::new()),
+                    None => (404, Vec::new(), Vec::new()),
+                }
+            }
+            ("PUT", ["states", state]) => {
+                let (Some(tree), Some(times)) = (body["tree"].as_str(), body["times"].as_str()) else {
+                    return (400, json(serde_json::json!({"error":{"code":"invalid","message":"tree and times"}})), Vec::new());
+                };
+                // Both must be in a pack of the project.
+                if !s.located.contains_key(tree) || !s.located.contains_key(times) {
+                    return (400, json(serde_json::json!({"error":{"code":"invalid"}})), Vec::new());
+                }
+                let body = (tree.to_string(), times.to_string());
+                match s.states.get(&(scope.clone(), state.to_string())) {
+                    Some(old) if old != &body => (409, Vec::new(), Vec::new()),
+                    Some(_) => (200, Vec::new(), Vec::new()),
+                    None => {
+                        s.states.insert((scope, state.to_string()), body);
+                        (201, Vec::new(), Vec::new())
+                    }
+                }
+            }
+            ("POST", ["states", "missing"]) => {
+                let missing: Vec<&str> = body["ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|id| !s.states.contains_key(&(scope.clone(), id.to_string())))
+                    .collect();
+                (200, json(serde_json::json!({ "missing": missing })), Vec::new())
+            }
+            ("GET", ["states", state]) => match s.states.get(&(scope, state.to_string())) {
+                Some((tree, times)) => (200, json(serde_json::json!({ "times": times, "tree": tree })), Vec::new()),
+                None => (404, Vec::new(), Vec::new()),
+            },
+            ("GET", ["refs"]) => {
+                let prefix = request.query.get("prefix").cloned().unwrap_or_default();
+                let refs: Vec<serde_json::Value> = s
+                    .refs
+                    .iter()
+                    .filter(|((sc, name), _)| sc == &scope && name.starts_with(&prefix))
+                    .map(|((_, name), (target, version))| serde_json::json!({"name":name,"target":target,"version":version}))
+                    .collect();
+                (200, json(serde_json::json!({ "refs": refs })), Vec::new())
+            }
+            ("POST", ["refs", "cas"]) => {
+                let updates = body["updates"].as_array().unwrap().clone();
+                let mut conflicts = Vec::new();
+                for update in &updates {
+                    assert!(update["record"].as_str().is_some_and(|r| !r.is_empty()), "each move names its record");
+                    let name = update["name"].as_str().unwrap().to_string();
+                    let actual = s.refs.get(&(scope.clone(), name.clone())).map(|(t, _)| t.clone());
+                    if actual.as_deref() != update["expect"].as_str() {
+                        conflicts.push(serde_json::json!({"name":name,"actual":actual}));
+                    }
+                }
+                if !conflicts.is_empty() {
+                    return (409, json(serde_json::json!({"error":{"code":"conflict"},"conflicts":conflicts})), Vec::new());
+                }
+                let mut moved = Vec::new();
+                for update in &updates {
+                    let name = update["name"].as_str().unwrap().to_string();
+                    match update["target"].as_str() {
+                        Some(target) => {
+                            let version = s.refs.get(&(scope.clone(), name.clone())).map_or(0, |(_, v)| v + 1);
+                            s.refs.insert((scope.clone(), name.clone()), (target.to_string(), version));
+                            moved.push(serde_json::json!({"name":name,"target":target,"version":version}));
+                        }
+                        None => {
+                            s.refs.remove(&(scope.clone(), name));
+                        }
+                    }
+                }
+                (200, json(serde_json::json!({ "refs": moved })), Vec::new())
+            }
+            _ => (404, json(serde_json::json!({"error":{"code":"not_found"}})), Vec::new()),
+        }
+    }
+
+    fn count(&self, prefix: &str) -> usize {
+        self.state.lock().unwrap().log.iter().filter(|l| l.starts_with(prefix)).count()
+    }
+}
+
+/// The typed id of the server: `type` from the `Layr-Object-Type` header.
+fn typed(kind: &str, bytes: &[u8]) -> String {
+    use layr_hashers::Digest;
+    let mut hasher = layr_hashers::ContentAddress::new();
+    hasher.update(format!("{kind} {}\0", bytes.len()).as_bytes());
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn random_bytes(n: usize) -> Vec<u8> {
+    use rand::RngCore;
+    let mut bytes = vec![0; n];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
+#[test]
+fn an_object_over_64_mib_goes_up_in_parts_and_a_held_object_is_not_sent_again() {
+    let fake = Fake::start(None);
+    let api = fake.api();
+    let bytes = random_bytes((64 << 20) + 4096);
+    let (id, new) = api.put_object(Kind::Opaque, &bytes).unwrap();
+    assert!(new);
+    assert_eq!(id, typed("opaque", &bytes));
+    assert_eq!(fake.count("POST /api/v1/projects/p/objects/missing"), 1, "a large upload asks first");
+    assert_eq!(fake.count(&format!("POST /api/v1/projects/p/objects/{id}/uploads")), 2, "start and complete");
+    assert_eq!(fake.count(&format!("PUT /api/v1/projects/p/objects/{id}/uploads/u1/")), 9, "8 MiB parts");
+    assert_eq!(fake.count(&format!("PUT /api/v1/projects/p/objects/{id}")), 9, "no single PUT over 64 MiB");
+    assert_eq!(api.get_object(Kind::Opaque, &id).unwrap().unwrap(), bytes);
+    // The project holds it now: the second upload sends nothing.
+    let (_, new) = api.put_object(Kind::Opaque, &bytes).unwrap();
+    assert!(!new);
+    assert_eq!(fake.count(&format!("POST /api/v1/projects/p/objects/{id}/uploads")), 2);
+    // The type is part of the id, and a read checks the bytes against the id.
+    assert_ne!(typed("blob", b"x"), typed("opaque", b"x"));
+    assert!(api.get_object(Kind::Blob, &id).unwrap_err().to_string().contains("does not match its id"));
+    // A missing object is missing, and `objects/missing` names it.
+    let absent = typed("opaque", b"absent");
+    assert_eq!(api.get_object(Kind::Opaque, &absent).unwrap(), None);
+    assert_eq!(api.objects_missing(&[id.clone(), absent.clone()]).unwrap(), vec![absent]);
+}
+
+#[test]
+fn a_client_that_the_server_finds_too_old_stops_with_the_minimum_version() {
+    let fake = Fake::start(None);
+    fake.state.lock().unwrap().minimum = Some("9.9.9".into());
+    let error = fake.api().project_info().unwrap_err().to_string();
+    assert!(error.contains("needs layr 9.9.9 or newer"), "{error}");
+    assert_eq!(fake.api().server_version(), None);
+    let api = fake.api();
+    let _ = api.project_info();
+    assert_eq!(api.server_version().as_deref(), Some("fake-1"));
+}
+
+#[test]
+fn a_write_without_a_token_names_the_login() {
+    let fake = Fake::start(None);
+    let api = Api::for_test(&fake.origin, "p", None);
+    let error = api.put_object(Kind::Opaque, b"bytes").unwrap_err().to_string();
+    assert!(error.contains("HTTP 401") && error.contains("layr login"), "{error}");
+}
+
+fn context(root: &Path) -> Ctx {
+    Ctx {
+        store: crate::store::Store::open(&root.join("local")).unwrap(),
+        caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
+        cwd: root.to_path_buf(),
+        env: HashMap::new(),
+        author: Default::default(),
+        out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
+    }
+}
+
+const PROJECT: &str = "01a12290-0000-7000-8000-0000000000a1";
+
+fn api_store(root: &Path, ctx: &Ctx, fake: &Fake) -> Store {
+    Store {
+        backend: Backend::Api(fake.api()),
+        url: "layr+https://cloud.test/p".into(),
+        project: PROJECT.into(),
+        machine: ctx.store.machine.id.clone(),
+        key: ctx.store.machine.key.clone(),
+        dir: root.join("local/meta/remote"),
+        paper_key_text: None,
+        person: None,
+        pin: None,
+        aws_profile: None,
+        layer: None,
+        epoch: None,
+        epoch_public: false,
+        publishing_epoch: false,
+        force_public: false,
+        public_clone: false,
+        public_reader: std::sync::atomic::AtomicBool::new(false),
+        mode: None,
+    }
+}
+
+/// A project with three states (the third repeats the first file and adds a large one) and one line at the head.
+fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
+    let dir = ctx.store.project_dir("p").unwrap();
+    std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+    std::fs::create_dir_all(dir.join("states")).unwrap();
+    let project = crate::store::Project {
+        store: &ctx.store,
+        name: "p".into(),
+        dir: dir.clone(),
+        id: PROJECT.into(),
+        db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+    };
+    let mut record = Record::new("project");
+    record.data = serde_json::json!({"id":PROJECT,"name":"p","config":{}});
+    project.append(record, &ctx.actor()).unwrap();
+    let mut states = Vec::new();
+    for n in 0..3 {
+        let id = crate::ids::new_id();
+        let path = project.state_path(&id);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("stable"), "unchanged content\n".repeat(100)).unwrap();
+        std::fs::write(path.join("payload"), format!("version {}\n", n % 2)).unwrap();
+        if n == 2 {
+            std::fs::create_dir(path.join("dir")).unwrap();
+            std::fs::write(path.join("dir/large"), random_bytes(3 << 20)).unwrap();
+        }
+        let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":"commit",
+            "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
+            "parents":states.last().cloned().into_iter().collect::<Vec<_>>(),"time":crate::ids::now_ms()}))
+        .unwrap();
+        let mut record = Record::new("state");
+        record.states.push(state);
+        project.append(record, &ctx.actor()).unwrap();
+        states.push(id);
+    }
+    let line = crate::ids::new_id();
+    move_line(&project, ctx, &line, None, &states[2]);
+    (Repo { p: project, ctx: None }, states, line)
+}
+
+fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String {
+    let id = crate::ids::new_id();
+    std::fs::create_dir(project.state_path(&id)).unwrap();
+    std::fs::write(project.state_path(&id).join("payload"), "next\n").unwrap();
+    let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":"commit",
+        "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
+        "parents":[parent],"time":crate::ids::now_ms()}))
+    .unwrap();
+    let mut record = Record::new("state");
+    record.states.push(state);
+    project.append(record, &ctx.actor()).unwrap();
+    id
+}
+
+fn move_line(project: &crate::store::Project, ctx: &Ctx, line: &str, before: Option<&str>, head: &str) {
+    let state = |head: &str| LineState {
+        name: "main".into(),
+        head: head.into(),
+        owner: ctx.caller.uid,
+        machine: ctx.store.machine.id.clone(),
+    };
+    let mut record = Record::new(if before.is_some() { "save" } else { "line.create" });
+    record.lines.insert(
+        line.into(),
+        LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
+    );
+    record.data = serde_json::json!({"name":"main"});
+    project.append(record, &ctx.actor()).unwrap();
+}
+
+fn push(store: &Store, ctx: &Ctx, repo: &Repo) -> anyhow::Result<super::Report> {
+    store.private_dir()?;
+    let mut report = writer::push(store, ctx, repo, &Options::default())?;
+    super::push_refs(store, repo, &mut report)?;
+    Ok(report)
+}
+
+/// Reads `state` from the server as a fresh machine would: its body, the packs that hold its objects (in
+/// rounds: trees first), then a checkout with its times into `dst`.
+fn download(api: &Api, objects_dir: &Path, state: &str, dst: &Path) -> anyhow::Result<()> {
+    let r = api.get_state("", state)?.ok_or_else(|| anyhow::anyhow!("no state {state}"))?;
+    for _ in 0..8 {
+        let objects = layr_objects::Store::open(objects_dir, layr_objects::Keying::Plain)?;
+        let mut need: Vec<String> = layr_objects::transfer::missing_trees(&objects, &r.tree)?.iter().map(|i| i.hex()).collect();
+        if !objects.has(&r.times) {
+            need.push(r.times.hex());
+        }
+        if need.is_empty() {
+            for (id, kind) in layr_objects::transfer::reachable(&objects, &r.tree)? {
+                if kind == Kind::Blob && !objects.has(&id) {
+                    need.push(id.hex());
+                }
+            }
+        }
+        if need.is_empty() {
+            layr_objects::checkout_with(&objects, &r.tree, Some(&r.times), dst)?;
+            return Ok(());
+        }
+        let located = api.locate(&need)?;
+        anyhow::ensure!(located.len() == need.len(), "the server lacks objects");
+        for pack in located.values().collect::<std::collections::BTreeSet<_>>() {
+            let data = api.get_object(Kind::Opaque, pack)?.ok_or_else(|| anyhow::anyhow!("no pack {pack}"))?;
+            layr_objects::transfer::add_pack(&objects, &data, &api.get_pack_index(pack)?)?;
+        }
+    }
+    anyhow::bail!("objects did not come")
+}
+
+#[test]
+fn a_push_sends_trees_times_and_packs_records_and_one_ref_move_and_a_reader_gets_the_files_back() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, states, line) = project(&ctx);
+    let report = push(&store, &ctx, &repo).unwrap();
+    assert_eq!(report.states, 3);
+    {
+        let server = fake.state.lock().unwrap();
+        // The machine key went up before its records, and only this machine's segments.
+        assert_eq!(server.machines.get(&store.machine), Some(&hex::encode(store.key.verifying_key().to_bytes())));
+        assert!(server.segments.keys().all(|(_, writer, ..)| writer == &store.machine));
+        // Every object is an `opaque` pack data file with its index; every state names its tree and times.
+        assert!(!server.indexes.is_empty());
+        for (id, (kind, bytes)) in &server.objects {
+            assert_eq!(kind, "opaque");
+            assert_eq!(&typed(kind, bytes), id);
+            assert!(server.indexes.contains_key(id), "pack {id} has its index");
+        }
+        for state in &states {
+            let (tree, times) = &server.states[&(String::new(), state.clone())];
+            assert!(server.located.contains_key(tree) && server.located.contains_key(times));
+        }
+        assert_eq!(server.refs[&(String::new(), format!("lines/{line}"))].0, states[2]);
+    }
+    // The local object store holds the states as `layr objects` does.
+    let objects = layr_objects::Store::open(&repo.p.meta_dir().join("objects"), layr_objects::Keying::Plain).unwrap();
+    for state in &states {
+        assert!(objects.state_ref(state).unwrap().is_some());
+    }
+    // Another machine reads each state back from the server, with its times.
+    for (n, state) in states.iter().enumerate() {
+        let dst = root.join(format!("read-{n}"));
+        download(&fake.api(), &root.join("reader-objects"), state, &dst).unwrap();
+        let local = repo.p.state_path(state);
+        assert!(layr_objects::compare(&local, &dst).unwrap().differences.is_empty(), "state {n} reads back equal");
+        assert_eq!(std::fs::read(dst.join("payload")).unwrap(), format!("version {}\n", n % 2).as_bytes());
+    }
+    // A second push sends no object, no state and no ref move, and asks for the states in one batch.
+    let gets = fake.count("GET /api/v1/projects/p/states/");
+    let batches = fake.count("POST /api/v1/projects/p/states/missing");
+    let puts = fake.count("PUT ");
+    let cas = fake.count("POST /api/v1/projects/p/refs/cas");
+    // A new command: a new client that knows nothing about the server yet.
+    let store = api_store(&root, &ctx, &fake);
+    let again = push(&store, &ctx, &repo).unwrap();
+    assert_eq!((again.states, again.records), (0, 0));
+    assert_eq!(fake.count("PUT "), puts);
+    assert_eq!(fake.count("POST /api/v1/projects/p/refs/cas"), cas);
+    assert_eq!(fake.count("GET /api/v1/projects/p/states/"), gets, "no request per state");
+    assert_eq!(fake.count("POST /api/v1/projects/p/states/missing"), batches + 1);
+    // A new state sends only the objects that the server lacks: its tree path and the new blob.
+    let packs = fake.state.lock().unwrap().indexes.len();
+    let next = add_state(&repo.p, &ctx, &states[2]);
+    move_line(&repo.p, &ctx, &line, Some(&states[2]), &next);
+    let store = api_store(&root, &ctx, &fake);
+    push(&store, &ctx, &repo).unwrap();
+    let server = fake.state.lock().unwrap();
+    assert_eq!(server.indexes.len(), packs + 1, "one new pack");
+    let index = server.indexes.values().find(|i| {
+        let decoded = layr_objects::pack::Index::decode(i, server.objects[&hex::encode(&i[4..36])].1.len() as u64).unwrap();
+        decoded.entries.iter().any(|e| e.kind == Kind::Times && server.states[&(String::new(), next.clone())].1 == e.id.hex())
+    });
+    let index = index.expect("the new pack holds the new times table");
+    let pack = &server.objects[&hex::encode(&index[4..36])].1;
+    let decoded = layr_objects::pack::Index::decode(index, pack.len() as u64).unwrap();
+    assert!(decoded.entries.len() <= 4, "a root tree, a times table and the changed blob: {}", decoded.entries.len());
+    drop(server);
+    drop(repo);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_line_that_moved_on_the_server_fails_the_push_until_a_fetch_reads_it() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, states, line) = project(&ctx);
+    push(&store, &ctx, &repo).unwrap();
+    let name = format!("lines/{line}");
+    // Another writer moves the line on the server.
+    fake.state.lock().unwrap().refs.insert((String::new(), name.clone()), (states[0].clone(), 7));
+    let next = add_state(&repo.p, &ctx, &states[2]);
+    move_line(&repo.p, &ctx, &line, Some(&states[2]), &next);
+    let error = push(&store, &ctx, &repo).unwrap_err().to_string();
+    assert!(error.contains(&name) && error.contains("layr fetch"), "{error}");
+    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name.clone())].0, states[0], "the server ref stays");
+    // The fetch reads the server ref; the next push expects it and moves the line.
+    let mut report = super::Report::default();
+    super::fetch_refs(&store, &repo, &mut report).unwrap();
+    assert!(report.omitted.iter().any(|o| o.contains("Layr Cloud has")), "{:?}", report.omitted);
+    push(&store, &ctx, &repo).unwrap();
+    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name.clone())].0, next);
+    // A head that does not contain the server's target is refused before any request, as a Git push without force.
+    let cas = fake.count("POST /api/v1/projects/p/refs/cas");
+    move_line(&repo.p, &ctx, &line, Some(&next), &states[1]);
+    let error = push(&store, &ctx, &repo).unwrap_err().to_string();
+    assert!(error.contains("does not contain it"), "{error}");
+    assert_eq!(fake.count("POST /api/v1/projects/p/refs/cas"), cas);
+    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name)].0, next);
+    // A direct compare and swap with a stale expectation is a conflict that names the actual target.
+    let update = RefUpdate {
+        name: "lines/x".into(),
+        expect: Some(states[0].clone()),
+        target: Some(states[1].clone()),
+        record: "r".into(),
+    };
+    assert_eq!(fake.api().cas("", &[update], "").unwrap(), Cas::Conflict(vec![("lines/x".into(), None)]));
+    drop(repo);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_missing_pack_fails_the_read_and_names_the_pack() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, states, _) = project(&ctx);
+    push(&store, &ctx, &repo).unwrap();
+    let pack = fake.state.lock().unwrap().indexes.keys().next().unwrap().clone();
+    fake.state.lock().unwrap().objects.remove(&pack);
+    let error = format!("{:#}", download(&fake.api(), &root.join("reader"), &states[2], &root.join("dst")).unwrap_err());
+    assert!(error.contains(&pack), "{error}");
+    // A pack whose index the server lost: `locate` no longer names its objects, so the read names them.
+    fake.state.lock().unwrap().located.clear();
+    let error = format!("{:#}", download(&fake.api(), &root.join("reader2"), &states[2], &root.join("dst2")).unwrap_err());
+    assert!(error.contains("lacks objects"), "{error}");
+    // A state that the server lacks.
+    assert!(fake.api().get_state("", &crate::ids::new_id()).unwrap().is_none());
+    drop(repo);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn login_polls_until_the_person_signs_in_then_saves_the_session_and_registers_the_machine() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let mut ctx = context(&root);
+    ctx.caller.home = root.join("home");
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let shown = std::cell::RefCell::new(String::new());
+    let login = store.login(&ctx, |link| *shown.borrow_mut() = link.into()).unwrap();
+    assert_eq!(login, "ann@example.com");
+    // The relative link joins the remote origin.
+    assert_eq!(*shown.borrow(), format!("{}#/login?code=c1", fake.origin));
+    // A link to another host or with another scheme is refused.
+    let api = fake.api();
+    for bad in ["https://evil.test/#/login?code=c1", "javascript:alert(1)", "//evil.test/login", "file:///etc/passwd"] {
+        assert!(api.login_link(bad).is_err(), "{bad}");
+    }
+    assert_eq!(api.login_link("login/c2").unwrap().as_str(), format!("{}login/c2", fake.origin));
+    assert!(fake.state.lock().unwrap().machines.contains_key(&store.machine));
+    let path = super::api::session_file(&ctx.caller.home, "127.0.0.1");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    // The next command reads the saved session as its token.
+    let mut api = Api::for_test(&fake.origin, "p", None);
+    api.connect(&ctx, PROJECT).unwrap();
+    api.put_object(Kind::Opaque, b"with the session").unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekeyed_writer_is_refused() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let (repo, _, _) = project(&ctx);
+    // A machine that only the server vouches for: its records come in, its trust of a third machine has no effect.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+    let third = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
+    let machine = "01a12290-0000-7000-8000-0000000000c1";
+    let other = "01a12290-0000-7000-8000-0000000000c2";
+    let sign = |seq: u64, op: &str, data: serde_json::Value| {
+        let mut record = Record::new(op);
+        record.id = format!("01a12290-0000-7000-8000-{:012x}", 0xd00 + seq);
+        record.machine = machine.into();
+        record.project = PROJECT.into();
+        record.seq = seq;
+        record.time = crate::ids::now_ms();
+        record.data = data;
+        crate::oplog::sign_line(&record, &key).unwrap()
+    };
+    let lines = vec![
+        sign(1, "machine", serde_json::json!({"name":"server-writer","public_key":hex::encode(key.verifying_key().to_bytes())})),
+        sign(2, "tag", serde_json::json!({"name":"from-server","state":null,"message":"m"})),
+        sign(3, "machine.trust", serde_json::json!({"machine":other,"public_key":hex::encode(third.verifying_key().to_bytes())})),
+    ];
+    // `Trust::Known` refuses this batch; `Trust::Server` takes it.
+    assert!(repo.p.import_lines(&lines, crate::store::Trust::Known).is_err());
+    assert_eq!(repo.p.import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
+    assert!(repo.p.db.record_line(machine, 3).unwrap().is_some(), "every record is stored");
+    assert_eq!(repo.p.db.trusted(machine).unwrap(), None, "the server's writer is not trusted here");
+    assert_eq!(repo.p.db.trusted(other).unwrap(), None, "its trust record has no effect");
+    // The writer key is pinned per remote on first sight; another key for the same machine is refused.
+    let dir = root.join("remote");
+    let id = machine.to_string();
+    super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id.clone(), key.verifying_key())])).unwrap();
+    super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id.clone(), key.verifying_key())])).unwrap();
+    let error = super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id, third.verifying_key())])).unwrap_err().to_string();
+    assert!(error.contains("another key"), "{error}");
+    drop(repo);
+    std::fs::remove_dir_all(root).unwrap();
+}

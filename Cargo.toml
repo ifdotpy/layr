@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
+members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers", "crates/layr-objects"]
 resolver = "2"
 
 [workspace.package]
@@ -39,6 +39,7 @@ layr-model = { path = "crates/layr-model" }
 layr-retest = { path = "crates/layr-retest" }
 layr-adapter = { path = "crates/layr-adapter" }
 layr-cache = { path = "crates/layr-cache" }
+layr-objects = { path = "crates/layr-objects" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 base64 = "0.22"
