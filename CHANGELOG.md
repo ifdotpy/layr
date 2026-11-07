@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.1](https://github.com/ifdotpy/layr/compare/v0.39.0...v0.39.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **caches:** a command stopped at its limit takes its child processes with it; the warm limit is 2 h ([#416](https://github.com/ifdotpy/layr/issues/416)) ([6d01b59](https://github.com/ifdotpy/layr/commit/6d01b592b97e15a34c6c00ab38b97fe6499ac1ed))
+
 ## [0.39.0](https://github.com/ifdotpy/layr/compare/v0.38.1...v0.39.0) (2026-11-07)
 
 
