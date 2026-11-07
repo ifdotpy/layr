@@ -10,29 +10,21 @@ fn host() -> LocalHost {
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Once;
-
-/// The pnpm environment of the test process. The store is a folder of the temp dir, not the user's store.
-fn env_once() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let store = std::env::temp_dir().join("layr-cache-pnpm-test-store");
-        std::env::set_var("pnpm_config_store_dir", store);
-        std::env::set_var("pnpm_config_registry", "http://127.0.0.1:9/");
-        std::env::set_var("npm_config_registry", "http://127.0.0.1:9/");
-    });
-}
 
 fn tmp(name: &str) -> PathBuf {
-    env_once();
     let base = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-cache-pnpm-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
+    // Each test owns its store. The deadline test can kill pnpm during a store write.
+    std::fs::write(
+        base.join("pnpm-workspace.yaml"),
+        format!("storeDir: {}\nregistry: http://127.0.0.1:9/\n", serde_json::to_string(&base.join("store")).unwrap()),
+    )
+    .unwrap();
     base
 }
 
 fn pnpm(dir: &Path, args: &[&str]) -> Output {
-    env_once();
     let o = Command::new("pnpm").args(args).current_dir(dir).stdin(Stdio::null()).output().unwrap();
     o
 }
@@ -70,7 +62,21 @@ fn tarball(dir: &Path, name: &str, preuninstall: Option<&str>) {
 fn project(dir: &Path, deps: &[&str]) {
     let list: Vec<String> = deps.iter().map(|d| format!("\"{d}\":\"file:./{d}-1.0.0.tgz\"")).collect();
     write_manifest(dir, &list);
+    let store = pnpm(dir, &["store", "path"]);
+    assert!(store.status.success(), "cannot locate the test store");
+    assert!(
+        Path::new(String::from_utf8_lossy(&store.stdout).trim()).starts_with(dir.join("store")),
+        "pnpm must use the test's own store: {}",
+        String::from_utf8_lossy(&store.stdout)
+    );
     pnpm_ok(dir, &["install", "--reporter=silent"]);
+    for name in deps {
+        assert_eq!(
+            std::fs::read_to_string(dir.join("node_modules").join(name).join("index.js")).unwrap(),
+            format!("module.exports = \"{name}\";\n"),
+            "initial install of {name} is incomplete",
+        );
+    }
 }
 
 fn write_manifest(dir: &Path, list: &[String]) {
