@@ -333,17 +333,6 @@ impl<'a> Writer<'a> {
         self.by_sha
     }
 
-    /// A file that the walk takes from the pushed tree without reading it: its chunks count as
-    /// reused, so `finish` checks that the store still has them.
-    pub(crate) fn reuse(&mut self, sha: &str, ids: &[String]) {
-        for id in ids {
-            if !self.written.contains(id) {
-                self.reused.insert(id.clone());
-            }
-        }
-        self.by_sha.entry(sha.to_string()).or_insert_with(|| ids.to_vec());
-    }
-
     /// The chunk ids of a file, after its new chunks are queued for upload.
     pub(crate) fn file(&mut self, sha: &str, data: &[u8]) -> Result<Vec<String>> {
         if let Some(ids) = self.by_sha.get(sha).cloned() {

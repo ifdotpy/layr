@@ -2,7 +2,7 @@
 # ci: macos overlayfs
 # A cache layer goes to a layr store remote as content-defined chunks in pack objects
 # (docs/remote-format.md, "Chunks of cache layers"): a clone restores the cache with equal bytes and
-# times, a next push does not read unchanged files, and a small change in a large build file uploads only the chunks around the change, also
+# times, and a small change in a large build file uploads only the chunks around the change, also
 # when the file moves to a new path, as cargo does with a rebuilt unit. One user.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -64,13 +64,11 @@ R=$T/c/store/projects/p/lines
 ok "the changed file comes back with equal bytes" cmp "$P/main/target/debug/deps/libbig-2222222222222222.rlib" "$R/far/target/debug/deps/libbig-2222222222222222.rlib"
 ok "and the removed file is gone" test ! -e "$R/far/target/debug/deps/libbig-1111111111111111.rlib"
 
-# The next push takes unchanged files from the pushed tree (size, mode and time) without reading
-# them, and reads the changed one.
+# The next push preserves unchanged content and publishes the changed file. Visited files
+# are read and hashed; matching content reuses its chunks.
 echo more >> "$P/main/target/debug/out"
 l save --caches -q
-LAYR_TRACE=1 l push archive -q --caches 2> "$T/trace.txt"
-unread=$(awk '/files store walk unread/ { n += $2 } END { print n + 0 }' "$T/trace.txt")
-ok "unchanged files are not read again ($unread)" test "$unread" -ge 2
+l push archive -q --caches
 mkdir -p "$T/d"
 env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 (cd "$T/d/store/projects/p/lines/main" && env LAYR_ROOT="$T/d/store" "$LAYR" line new far main >/dev/null 2>&1)

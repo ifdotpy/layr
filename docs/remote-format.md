@@ -164,16 +164,15 @@ machines. Source states keep frames.
   files it writes, in its order; background threads load and decode them ahead of it, at most 64
   packs ahead (about 256 MiB). A pack outside the plan, or dropped behind it, loads when needed.
 
-- Push manifest: a file whose path, mode, size and modification time (nanoseconds) equal its
-  entry in the pushed tree of the nearest pushed ancestor keeps that entry, and the walk does not
-  read it, as git and rsync trust their stat data. This works for frames and chunks, also when a
-  history limit deleted the ancestor here, because the pushed tree names the times (`times`). A
-  reused chunked entry counts as reused for the check before the tree publishes. An entry keeps
-  only its own form: a framed entry in a layer that goes up as chunks (a cache pushed before chunks)
-  is read again, in a full walk and in a delta, so the cache moves to chunks once, a fetch reads it
-  in parallel, and the next sweep deletes the old parts. `LAYR_PUSH_REHASH=1` reads every file again.
+- Push reads and hashes every visited file before reusing content by its hash. Equal path, mode,
+  size and modification time do not prove equal content. Native storage deltas can inherit
+  unchanged entries from their base; full walks visit every file. A framed entry in a layer that
+  goes up as chunks (a cache pushed before chunks) is visited again, so the cache moves to chunks
+  once, a fetch reads it in parallel, and the next sweep deletes the old parts. File modification
+  times (`times`) remain in the tree so restored caches preserve them.
 
-Measured with `layr push --caches` to a `file://` store on macOS. Base: a cargo `target/debug`
+Historical measurements before removing metadata-based content reuse, with `layr push --caches`
+to a `file://` store on macOS. Base: a cargo `target/debug`
 (2.2 GiB). Small: the same folder after a merge of a few changes (453 files differ). Big: after
 every workspace crate was rebuilt (1930 more files differ).
 
@@ -184,8 +183,7 @@ every workspace crate was rebuilt (1930 more files differ).
 | next push, big | 166 MiB, 20 s | 104 MiB, 7 s |
 | clone, cold archive (2 runs, alternating) | 19.8, 37.3 s | 18.8, 33.0 s |
 
-The next push reads only changed files (8322 of 8700 files unread for big). For the cold clone,
-the archive was on a disk image that was attached again before each clone.
+For the cold clone, the archive was on a disk image that was attached again before each clone.
 
 ## Keys and recovery
 
