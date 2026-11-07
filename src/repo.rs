@@ -1091,6 +1091,10 @@ impl<'a> Repo<'a> {
     /// The reads of a save before its lock: the head and the save base are pinned for the rest of
     /// the command (`hold`), then the automatic state is written (APFS).
     pub fn prepare_save(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if crate::views::of(self, line).is_some() {
+            return Ok(());
+        }
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
         // One scan of the working folder serves the candidates and the save layer below (macOS).
@@ -1189,6 +1193,10 @@ impl<'a> Repo<'a> {
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+        #[cfg(target_os = "macos")]
+        if let Some(view) = crate::views::of(self, line) {
+            return crate::views::save_working(ctx, self, line, &view, message);
+        }
         let st = self.save_working(ctx, line, message, running, force)?;
         // A cache folder that has no cache overlay state on this line yet gets its first one
         // (the cache of the line, as `save --caches` makes it). A failure keeps the state.

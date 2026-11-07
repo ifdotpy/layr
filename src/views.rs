@@ -390,15 +390,25 @@ fn write_state(
     d.removed = topmost(gone);
     let id = ids::new_id();
     let dst = repo.p.delta_path(&id);
-    thin::write_layer(&t.upper, &dst, &d, &line.head, false, None).map_err(|e| {
-        if thin::needs_complete(&e) {
-            e.context("a virtual line cannot save hard links yet; convert it with 'layr line show <line> --folder'")
-        } else {
-            e
+    // A reverted entry can live only in the lower tree. Hard links also need a complete
+    // snapshot so their identity survives. Ordinary edits still write only the upper layer.
+    let missing_upper = d.write.iter().any(|p| std::fs::symlink_metadata(t.upper.join(p)).is_err());
+    let complete = if missing_upper {
+        true
+    } else {
+        match thin::write_layer(&t.upper, &dst, &d, &line.head, false, None) {
+            Ok(()) => false,
+            Err(e) if thin::needs_complete(&e) => true,
+            Err(e) => return Err(e),
         }
-    })?;
+    };
+    if complete {
+        t.merged.materialize(&repo.p.state_path(&id), true)?;
+    }
     let described = (|| -> Result<StateRec> {
-        repo.p.db.record_base(&id, &line.head)?;
+        if !complete {
+            repo.p.db.record_base(&id, &line.head)?;
+        }
         repo.describe_state(ctx, id.clone(), kind, vec![line.head.clone()], message, Some(line))
     })();
     if described.is_err() {
@@ -442,6 +452,31 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
         }
     }
     Ok(0)
+}
+
+/// Save the working content without moving the named head. The caller holds the project
+/// lock, as for a folder line. Compare against the last automatic state to avoid duplicates.
+pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str) -> Result<Option<StateRec>> {
+    let prev = repo.save_base(line)?;
+    let mut previous = line.clone();
+    previous.head = prev;
+    let prior = trees(repo, &previous, v)?;
+    if file_changes(&prior, v)?.is_empty() {
+        return Ok(None);
+    }
+    let t = trees(repo, line, v)?;
+    let list = file_changes(&t, v)?;
+    crate::secrets::check_changes(ctx, repo, &t.head, &t.merged, &line.head, &list)?;
+    let st = write_state(ctx, repo, line, &t, &list, StateKind::Auto, message)?;
+    let mut rec = Record::new("save");
+    rec.data = serde_json::json!({"line": line.id, "head": line.head,
+        "working_before": repo.recorded_working(line)?, "working_after": st.id});
+    rec.states.push(st.clone());
+    if let Err(error) = repo.commit_record(ctx, rec) {
+        repo.discard_states(std::slice::from_ref(&st));
+        return Err(error);
+    }
+    Ok(Some(st))
 }
 
 /// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
