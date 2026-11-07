@@ -50,6 +50,7 @@ mod project_move;
 mod radar;
 mod recv;
 mod repo;
+mod runner;
 mod revs;
 mod rootcheck;
 mod secrets;

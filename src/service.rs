@@ -728,6 +728,13 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     let mut children: HashMap<i32, u32> = HashMap::new();
     // One periodic pass at a time: a pass longer than the tick must not start another.
     let mut periodic_child: Option<i32> = None;
+    // The check runner of a Layr Cloud gateway (src/runner.rs): one long-lived child while the
+    // store has runner settings. A user daemon runs it as its user; it restarts after 10 s.
+    let mut runner_child: Option<i32> = None;
+    let mut runner_start = std::time::Instant::now();
+    // The restart delay: 10 s, doubled after each run shorter than a minute, at most 60 s.
+    let mut runner_delay = 10u64;
+    let mut runner_started = std::time::Instant::now();
     let (max_total, max_per_user) =
         (limit("LAYR_MAX_REQUESTS", DEFAULT_MAX_REQUESTS), limit("LAYR_MAX_REQUESTS_PER_USER", DEFAULT_MAX_REQUESTS_PER_USER));
     loop {
@@ -737,6 +744,9 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             drop(listener);
             drop(registry_listeners);
             let _ = std::fs::remove_file(&sock);
+            if let Some(pid) = runner_child.and_then(rustix::process::Pid::from_raw) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+            }
             eprintln!("layr service: stopping after {} running requests", children.len());
             let deadline = std::time::Instant::now() + STOP_WAIT;
             while std::time::Instant::now() < deadline {
@@ -761,6 +771,33 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             children.remove(&pid);
             if periodic_child == Some(pid) {
                 periodic_child = None;
+            }
+            if runner_child == Some(pid) {
+                runner_child = None;
+                runner_delay =
+                    if runner_started.elapsed() < std::time::Duration::from_secs(60) { (runner_delay * 2).min(60) } else { 10 };
+                runner_start = std::time::Instant::now() + std::time::Duration::from_secs(runner_delay);
+            }
+        }
+        if user_mode && runner_child.is_none() && std::time::Instant::now() >= runner_start {
+            runner_start = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if root.join(crate::runner::DIR).join("config.json").exists() {
+                runner_started = std::time::Instant::now();
+                match crate::sys::fork() {
+                    Ok(crate::sys::Fork::Child) => {
+                        drop(listener);
+                        let code = match crate::runner::serve(&root) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                eprintln!("layr runner: {e:#}");
+                                1
+                            }
+                        };
+                        std::process::exit(code);
+                    }
+                    Ok(crate::sys::Fork::Parent(pid)) => runner_child = Some(pid),
+                    Err(e) => eprintln!("layr service: fork failed: {e}"),
+                }
             }
         }
         let wait = next.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
