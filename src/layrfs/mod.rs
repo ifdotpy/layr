@@ -160,6 +160,27 @@ fn tree_root(dir: &Path) -> Option<PathBuf> {
     dir.ancestors().find(|p| p.join(".git").symlink_metadata().is_ok()).map(Path::to_path_buf)
 }
 
+/// The lower tree and the upper folder of a virtual line mounted at `root` (docs/views.md): the
+/// index reads them directly on APFS, never through the mount. None for other trees.
+fn virtual_folders(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    #[cfg(target_os = "macos")]
+    {
+        if crate::sys::fs_type_name(root).ok()? != "layrfs" {
+            return None;
+        }
+        let name = root.file_name()?.to_str()?;
+        let meta = root.parent()?.parent()?.join("meta");
+        let v = crate::views::all_in(&meta).into_iter().find(|v| v.name == name && v.mounted)?;
+        let upper = meta.join("vlines").join(&v.line).join("upper");
+        Some((v.lower, upper))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        None
+    }
+}
+
 /// Standard input that `rg` would search: a file, a pipe or a socket.
 fn stdin_readable() -> bool {
     match rustix::fs::fstat(rustix::stdio::stdin()) {
@@ -209,7 +230,9 @@ fn spawn_server() {
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("layrfs.log"));
     let Ok(exe) = std::env::current_exe() else { return };
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(["fs", "serve"]).stdin(std::process::Stdio::null()).env_remove("LAYR_TOOL_ACTIVE");
+    // The server outlives the client: it must not keep the client's folder in use (a virtual
+    // line's mount could not be unmounted).
+    cmd.args(["fs", "serve"]).stdin(std::process::Stdio::null()).env_remove("LAYR_TOOL_ACTIVE").current_dir("/");
     if let Ok(log) = log {
         if let Ok(l2) = log.try_clone() {
             cmd.stdout(l2);

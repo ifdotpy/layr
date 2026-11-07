@@ -352,7 +352,7 @@ fn run_inner(
     let mut files: Vec<(PathBuf, PathBuf, bool)> = Vec::new(); // (absolute, shown, explicit)
     for t in &targets {
         match t {
-            Target::File { key, arg } => files.push((root.join(index::rel_path(key)), PathBuf::from(arg), true)),
+            Target::File { key, arg } => files.push((tree.content(root, key), PathBuf::from(arg), true)),
             Target::Dir { key, arg } => {
                 let skip = if key.is_empty() { 0 } else { key.len() + 1 };
                 for f in index::below_set(&tree.visible, key) {
@@ -361,11 +361,17 @@ fn run_inner(
                     }
                     let mut shown = Vec::new();
                     shown_bytes(&mut shown, arg.as_deref(), &f[skip..]);
-                    let mut abs = Vec::with_capacity(root_bytes.len() + 1 + f.len());
-                    abs.extend_from_slice(root_bytes);
-                    abs.push(b'/');
-                    abs.extend(f.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
-                    files.push((bytes_path(abs), bytes_path(shown), false));
+                    // A virtual line reads the upper or the lower file directly, not the mount.
+                    let abs = if tree.overlay.is_some() {
+                        tree.content(root, f)
+                    } else {
+                        let mut abs = Vec::with_capacity(root_bytes.len() + 1 + f.len());
+                        abs.extend_from_slice(root_bytes);
+                        abs.push(b'/');
+                        abs.extend(f.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
+                        bytes_path(abs)
+                    };
+                    files.push((abs, bytes_path(shown), false));
                 }
             }
         }

@@ -51,6 +51,214 @@ pub struct Tree {
     /// creation, removal or rename changes the time of its folder, so comparing these finds
     /// every change that the watcher has not delivered yet (`stale`).
     pub stamps: BTreeMap<Vec<u8>, Stamp>,
+    /// Set for a virtual line (docs/views.md): the tree is the merged view of an upper folder
+    /// over a lower tree, read directly on APFS and never through the mount.
+    pub overlay: Option<Overlay>,
+}
+
+/// The two folders of a virtual line and what the index knows of the upper one. The lower tree
+/// is the complete tree of a saved state: it never changes, so only the upper folder is watched
+/// and compared.
+#[derive(Default, Clone)]
+pub struct Overlay {
+    pub lower: PathBuf,
+    pub upper: PathBuf,
+    /// Every entry of the upper folder.
+    pub uall: BTreeMap<Vec<u8>, Kind>,
+    /// The time of every upper folder (the root is the empty key).
+    pub ustamps: BTreeMap<Vec<u8>, Stamp>,
+    /// The removed paths (whiteouts): the attribute `com.layr.removed` of the upper root.
+    pub removed: BTreeSet<Vec<u8>>,
+}
+
+/// The whiteouts of an upper folder, as keys.
+fn read_removed(upper: &Path) -> BTreeSet<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(v) = crate::sys::apfs_attribute(upper, c"com.layr.removed", None) else { return BTreeSet::new() };
+        let list: Vec<String> = serde_json::from_slice(&v).unwrap_or_default();
+        list.iter().filter(|p| !p.is_empty()).map(|p| key(Path::new(p))).collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = upper;
+        BTreeSet::new()
+    }
+}
+
+/// The ancestors of a key, nearest to the root first (without the root and the key).
+fn key_ancestors(k: &[u8]) -> impl Iterator<Item = &[u8]> {
+    k.iter().enumerate().filter(|(_, &b)| b == SEP).map(move |(i, _)| &k[..i])
+}
+
+fn join_key(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut k = dir.to_vec();
+    if !k.is_empty() {
+        k.push(SEP);
+    }
+    k.extend_from_slice(name);
+    k
+}
+
+impl Overlay {
+    fn new(lower: &Path, upper: &Path) -> Overlay {
+        let mut o = Overlay { lower: lower.to_path_buf(), upper: upper.to_path_buf(), ..Default::default() };
+        o.scan_upper(b"");
+        o.removed = read_removed(upper);
+        o
+    }
+
+    /// Add the upper folder `dir` and everything below it to `uall` and `ustamps`.
+    fn scan_upper(&mut self, dir: &[u8]) {
+        let abs = self.upper.join(rel_path(dir));
+        if let Ok(m) = std::fs::symlink_metadata(&abs) {
+            self.ustamps.insert(dir.to_vec(), stamp_of(&m));
+        }
+        let Ok(rd) = std::fs::read_dir(&abs) else { return };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let k = join_key(dir, e.file_name().as_bytes());
+            let kind = Kind::of(ft);
+            self.uall.insert(k.clone(), kind);
+            if kind == Kind::Dir {
+                self.scan_upper(&k);
+            }
+        }
+    }
+
+    /// True when a whiteout hides the lower entry at `k` (on it or on an ancestor).
+    fn hides(&self, k: &[u8]) -> bool {
+        !self.removed.is_empty() && (self.removed.contains(k) || key_ancestors(k).any(|a| self.removed.contains(a)))
+    }
+
+    /// The kind of the lower entry at `k`, when the merged view shows it.
+    fn lower_kind(&self, k: &[u8]) -> Option<Kind> {
+        if self.hides(k) {
+            return None;
+        }
+        std::fs::symlink_metadata(self.lower.join(rel_path(k))).ok().map(|m| Kind::of(m.file_type()))
+    }
+
+    /// The kind of the merged entry at `k` (the empty key is the root).
+    pub fn kind(&self, k: &[u8]) -> Option<Kind> {
+        if k.is_empty() {
+            return Some(Kind::Dir);
+        }
+        self.uall.get(k).copied().or_else(|| self.lower_kind(k))
+    }
+
+    /// The file to read for the merged entry at `k`: the upper file, else the lower file.
+    pub fn content(&self, k: &[u8]) -> PathBuf {
+        if self.uall.contains_key(k) {
+            self.upper.join(rel_path(k))
+        } else {
+            self.lower.join(rel_path(k))
+        }
+    }
+
+    /// The entries of the merged folder `dir`, by name.
+    fn list(&self, dir: &[u8]) -> BTreeMap<Vec<u8>, Kind> {
+        let mut out = BTreeMap::new();
+        if dir.is_empty() || self.uall.get(dir) == Some(&Kind::Dir) {
+            let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
+            for (k, v) in below(&self.uall, dir) {
+                if !k[skip..].contains(&SEP) {
+                    out.insert(k[skip..].to_vec(), *v);
+                }
+            }
+        }
+        if self.lower_kind(dir) == Some(Kind::Dir) {
+            if let Ok(rd) = std::fs::read_dir(self.lower.join(rel_path(dir))) {
+                for e in rd.flatten() {
+                    let name = e.file_name().as_bytes().to_vec();
+                    if out.contains_key(&name) || self.removed.contains(&join_key(dir, &name)) {
+                        continue;
+                    }
+                    if let Ok(ft) = e.file_type() {
+                        out.insert(name, Kind::of(ft));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every merged entry below `dir`, folders before their content.
+    fn walk(&self, dir: &[u8], out: &mut Vec<(Vec<u8>, Kind)>) {
+        for (name, kind) in self.list(dir) {
+            let k = join_key(dir, &name);
+            out.push((k.clone(), kind));
+            if kind == Kind::Dir {
+                self.walk(&k, out);
+            }
+        }
+    }
+
+    /// A skeleton of the merged view for ripgrep's walker: the folders on the way to `target`
+    /// with their ignore files, and the subtree of `target` (empty files, real ignore files). The
+    /// walker then applies exactly the rules that rg applies on the mount. Returns its root.
+    fn skeleton(&self, target: &[u8], kind: Kind) -> std::io::Result<PathBuf> {
+        let root = std::env::temp_dir().join(format!("layrfs-skeleton-{}-{}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&root)?;
+        let made = (|| -> std::io::Result<()> {
+            let rules_of = |dir: &[u8]| -> std::io::Result<()> {
+                for name in [&b".gitignore"[..], b".ignore", b".rgignore"] {
+                    let k = join_key(dir, name);
+                    if self.kind(&k) == Some(Kind::File) {
+                        copy_plain(&self.content(&k), &root.join(rel_path(&k)))?;
+                    }
+                }
+                Ok(())
+            };
+            // rg reads `.gitignore` files only in a git repository, and `.git/info/exclude`.
+            if self.kind(b".git").is_some() {
+                std::fs::create_dir_all(root.join(".git/info"))?;
+                let ex = key(Path::new(".git/info/exclude"));
+                if self.kind(&ex) == Some(Kind::File) {
+                    copy_plain(&self.content(&ex), &root.join(".git/info/exclude"))?;
+                }
+            }
+            rules_of(b"")?;
+            for a in key_ancestors(target) {
+                std::fs::create_dir_all(root.join(rel_path(a)))?;
+                rules_of(a)?;
+            }
+            let mut entries = vec![(target.to_vec(), kind)];
+            if kind == Kind::Dir {
+                self.walk(target, &mut entries);
+            }
+            for (k, kind) in entries {
+                let p = root.join(rel_path(&k));
+                match kind {
+                    Kind::Dir => std::fs::create_dir_all(&p)?,
+                    Kind::File if is_rules(key_name(&k)) => copy_plain(&self.content(&k), &p)?,
+                    Kind::File => {
+                        std::fs::File::create(&p)?;
+                    }
+                    Kind::Link => std::os::unix::fs::symlink("layrfs-skeleton-link", &p)?,
+                    Kind::Other => {}
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = made {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(e);
+        }
+        Ok(root)
+    }
+}
+
+/// The upper folders and the whiteouts that changed since the index saw them (`Tree::stale_virtual`).
+pub struct VirtualStale {
+    dirs: Vec<(Vec<u8>, Option<Stamp>)>,
+    removed: Option<BTreeSet<Vec<u8>>>,
+}
+
+impl VirtualStale {
+    pub fn is_empty(&self) -> bool {
+        self.dirs.is_empty() && self.removed.is_none()
+    }
 }
 
 /// A modification time: seconds and nanoseconds.
@@ -199,6 +407,7 @@ impl Tree {
             visible,
             walked,
             stamps: stamps.into_inner().unwrap().into_iter().collect(),
+            overlay: None,
         }
     }
 
@@ -421,9 +630,205 @@ impl Tree {
         }
     }
 
+    /// The index of a virtual line: the lower tree, walked natively, then every path that the
+    /// upper folder adds, changes or removes.
+    pub fn build_virtual(lower: &Path, upper: &Path) -> Tree {
+        let mut t = Tree::build(lower);
+        t.stamps.clear(); // the lower tree does not change
+        let o = Overlay::new(lower, upper);
+        let changed: Vec<PathBuf> = o.uall.keys().chain(o.removed.iter()).map(|k| rel_path(k)).collect();
+        t.overlay = Some(o);
+        t.refresh_virtual(&changed);
+        t
+    }
+
+    /// The file to read for the entry at `k`, below `root` (the mount of a virtual line).
+    pub fn content(&self, root: &Path, k: &[u8]) -> PathBuf {
+        match &self.overlay {
+            Some(o) => o.content(k),
+            None => root.join(rel_path(k)),
+        }
+    }
+
+    /// Bring the index of a virtual line up to date for changed merged paths.
+    pub fn refresh_virtual(&mut self, changed: &[PathBuf]) {
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for rel in changed {
+            let name = rel.file_name().map(|n| n.as_bytes()).unwrap_or(b"");
+            if rel.as_os_str().is_empty() || rel.starts_with(".git") {
+                targets = vec![PathBuf::new()];
+                break;
+            }
+            if is_rules(name) {
+                targets.push(rel.parent().map(Path::to_path_buf).unwrap_or_default());
+            } else {
+                targets.push(rel.clone());
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        let mut kept: Vec<PathBuf> = Vec::new();
+        for t in targets {
+            if kept.iter().any(|k| k.as_os_str().is_empty() || t.starts_with(k)) {
+                continue;
+            }
+            kept.push(t);
+        }
+        for t in kept {
+            self.refresh_virtual_one(&key(&t));
+        }
+    }
+
+    fn refresh_virtual_one(&mut self, k: &[u8]) {
+        let Some(o) = self.overlay.take() else { return };
+        for map in [&mut self.visible, &mut self.walked] {
+            let stale: Vec<Vec<u8>> = below_set(map, k).cloned().collect();
+            for s in stale {
+                map.remove(&s);
+            }
+            map.remove(k);
+        }
+        let stale: Vec<Vec<u8>> = below(&self.all, k).map(|(k, _)| k.clone()).collect();
+        for s in stale {
+            self.all.remove(&s);
+        }
+        if let Some(kind) = o.kind(k) {
+            for a in key_ancestors(k) {
+                self.all.entry(a.to_vec()).or_insert(Kind::Dir);
+            }
+            let mut entries = Vec::new();
+            if !k.is_empty() {
+                entries.push((k.to_vec(), kind));
+            }
+            if kind == Kind::Dir {
+                o.walk(k, &mut entries);
+            }
+            self.all.extend(entries);
+            let parent_walked = match k.iter().rposition(|&b| b == SEP) {
+                Some(i) => self.walked.contains(&k[..i]),
+                None => true,
+            };
+            if parent_walked {
+                self.visibility(&o, k, kind);
+            }
+        } else {
+            self.all.remove(k);
+        }
+        self.overlay = Some(o);
+    }
+
+    /// Which files of `target` and below rg searches, from ripgrep's walker over a skeleton.
+    fn visibility(&mut self, o: &Overlay, target: &[u8], kind: Kind) {
+        let Ok(skel) = o.skeleton(target, kind) else { return };
+        let abs = if target.is_empty() { skel.clone() } else { skel.join(rel_path(target)) };
+        let goal = abs.clone();
+        let mut walk = rg_walker(&skel);
+        walk.filter_entry(move |e| goal.starts_with(e.path()) || e.path().starts_with(&goal));
+        for e in walk.build().flatten() {
+            if !e.path().starts_with(&abs) {
+                continue;
+            }
+            if let (Some(ft), Ok(r)) = (e.file_type(), e.path().strip_prefix(&skel)) {
+                if ft.is_file() {
+                    self.visible.insert(key(r));
+                } else if ft.is_dir() && e.depth() > 0 {
+                    self.walked.insert(key(r));
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&skel);
+    }
+
+    /// The upper folders whose time changed, and a changed set of whiteouts. Nothing reads the
+    /// mount or the lower tree here.
+    pub fn stale_virtual(&self) -> VirtualStale {
+        let Some(o) = &self.overlay else { return VirtualStale { dirs: Vec::new(), removed: None } };
+        let clock =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(i64::MAX);
+        let dirs = o
+            .ustamps
+            .iter()
+            .filter_map(|(k, old)| {
+                let now = std::fs::symlink_metadata(o.upper.join(rel_path(k))).ok().map(|m| stamp_of(&m));
+                let racy = now.is_some_and(|n| clock - n.0 < 2);
+                (racy || now != Some(*old)).then(|| (k.clone(), now))
+            })
+            .collect();
+        let removed = read_removed(&o.upper);
+        VirtualStale { dirs, removed: (removed != o.removed).then_some(removed) }
+    }
+
+    /// Bring the index of a virtual line up to date for what `stale_virtual` found.
+    pub fn apply_stale_virtual(&mut self, st: VirtualStale) {
+        let Some(mut o) = self.overlay.take() else { return };
+        let mut changed: Vec<PathBuf> = Vec::new();
+        for (dir, now) in st.dirs {
+            if now.is_none() {
+                continue; // a removed upper folder: its parent lists the change
+            }
+            let mut on_disk: BTreeMap<Vec<u8>, Kind> = BTreeMap::new();
+            if let Ok(rd) = std::fs::read_dir(o.upper.join(rel_path(&dir))) {
+                for e in rd.flatten() {
+                    if let Ok(ft) = e.file_type() {
+                        on_disk.insert(e.file_name().as_bytes().to_vec(), Kind::of(ft));
+                    }
+                }
+            }
+            let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
+            let known: BTreeMap<Vec<u8>, Kind> =
+                below(&o.uall, &dir).filter(|(k, _)| !k[skip..].contains(&SEP)).map(|(k, v)| (k[skip..].to_vec(), *v)).collect();
+            for (name, kind) in &on_disk {
+                if known.get(name) != Some(kind) {
+                    let k = join_key(&dir, name);
+                    forget_below(&mut o, &k);
+                    o.uall.insert(k.clone(), *kind);
+                    if *kind == Kind::Dir {
+                        o.scan_upper(&k);
+                    }
+                    changed.push(rel_path(&k));
+                }
+            }
+            for name in known.keys() {
+                if !on_disk.contains_key(name) {
+                    let k = join_key(&dir, name);
+                    forget_below(&mut o, &k);
+                    o.uall.remove(&k);
+                    changed.push(rel_path(&k));
+                }
+            }
+            o.ustamps.insert(dir, now.unwrap());
+        }
+        if let Some(removed) = st.removed {
+            changed.extend(removed.symmetric_difference(&o.removed).map(|k| rel_path(k)));
+            o.removed = removed;
+        }
+        self.overlay = Some(o);
+        if !changed.is_empty() {
+            self.refresh_virtual(&changed);
+        }
+    }
+
     /// Bytes of keys held, an estimate of the memory use.
     pub fn key_bytes(&self) -> usize {
         self.all.keys().map(|k| k.len() + 48).sum::<usize>() + self.visible.iter().map(|k| k.len() + 40).sum::<usize>()
+    }
+}
+
+/// Copy the content only: `std::fs::copy` clones the file with its flags, and the files of a
+/// sealed state are immutable.
+fn copy_plain(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::write(to, std::fs::read(from)?)
+}
+
+/// Forget the upper entries and folder times below `k` (exclusive).
+fn forget_below(o: &mut Overlay, k: &[u8]) {
+    let gone: Vec<Vec<u8>> = below(&o.uall, k).map(|(k, _)| k.clone()).collect();
+    for g in gone {
+        o.uall.remove(&g);
+    }
+    let gone: Vec<Vec<u8>> = below(&o.ustamps, k).map(|(k, _)| k.clone()).chain([k.to_vec()]).collect();
+    for g in gone {
+        o.ustamps.remove(&g);
     }
 }
 
@@ -513,6 +918,61 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2100));
         assert!(t.stale(root, b"").is_empty(), "applied changes leave nothing stale");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A virtual tree (lower + upper + whiteouts) indexes like the same content in one folder,
+    /// also after changes of the upper folder and of the whiteouts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn virtual_index_equals_a_folder_with_the_merged_content() {
+        let d = tempfile_dir();
+        let (lower, upper, merged) = (d.join("lower"), d.join("upper"), d.join("merged"));
+        for root in [&lower, &merged] {
+            write(&root.join("src/a.rs"), "a");
+            write(&root.join("src/gone.rs"), "g");
+            write(&root.join("old/x.rs"), "x");
+            write(&root.join("vendor/v.rs"), "v");
+            write(&root.join(".ignore"), "vendor/\n");
+            write(&root.join(".hidden/h.rs"), "h");
+        }
+        std::fs::create_dir_all(&upper).unwrap();
+        let set_removed = |paths: &[&str]| {
+            let v = serde_json::to_vec(&paths).unwrap();
+            crate::sys::apfs_attribute(&upper, c"com.layr.removed", Some(&v)).unwrap();
+        };
+        // The upper folder: a changed ignore file, a new folder, removed paths.
+        write(&upper.join(".ignore"), "vendor/\n*.gen\n");
+        write(&upper.join("new/n.rs"), "n");
+        write(&upper.join("new/skip.gen"), "s");
+        set_removed(&["old", "src/gone.rs"]);
+        write(&merged.join(".ignore"), "vendor/\n*.gen\n");
+        write(&merged.join("new/n.rs"), "n");
+        write(&merged.join("new/skip.gen"), "s");
+        std::fs::remove_dir_all(merged.join("old")).unwrap();
+        std::fs::remove_file(merged.join("src/gone.rs")).unwrap();
+        let same = |t: &Tree, label: &str| {
+            let f = Tree::build(&merged);
+            assert_eq!(visible(t), visible(&f), "{label}: visible");
+            assert_eq!(t.all, f.all, "{label}: all");
+            assert_eq!(t.walked, f.walked, "{label}: walked");
+        };
+        let mut t = Tree::build_virtual(&lower, &upper);
+        same(&t, "build");
+        assert_eq!(t.content(Path::new("/mount"), &key(Path::new("new/n.rs"))), upper.join("new/n.rs"));
+        assert_eq!(t.content(Path::new("/mount"), &key(Path::new("src/a.rs"))), lower.join("src/a.rs"));
+        // Changes in the upper folder and the whiteouts, found by folder times.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write(&upper.join("src/b.rs"), "b");
+        write(&merged.join("src/b.rs"), "b");
+        std::fs::remove_dir_all(upper.join("new")).unwrap();
+        std::fs::remove_dir_all(merged.join("new")).unwrap();
+        set_removed(&["old", "src/gone.rs", "src/a.rs"]);
+        std::fs::remove_file(merged.join("src/a.rs")).unwrap();
+        let st = t.stale_virtual();
+        assert!(!st.is_empty());
+        t.apply_stale_virtual(st);
+        same(&t, "after changes");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn tempfile_dir() -> PathBuf {

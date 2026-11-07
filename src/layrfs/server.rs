@@ -22,6 +22,8 @@ enum State {
 
 struct Line {
     root: PathBuf,
+    /// A virtual line: its lower tree and upper folder (`super::virtual_folders`).
+    overlay: Option<(PathBuf, PathBuf)>,
     state: RwLock<State>,
     ready: (Mutex<bool>, Condvar),
     watcher: Mutex<Option<Arc<Watcher>>>,
@@ -37,6 +39,17 @@ struct LineSink(Weak<Line>);
 impl Sink for LineSink {
     fn changed(&self, paths: Vec<PathBuf>, rescan: bool) {
         let Some(line) = self.0.upgrade() else { return };
+        // A virtual line: the watcher reports upper paths; one compare of the upper folder times
+        // and the whiteouts finds every change, and never reads the mount.
+        if line.overlay.is_some() {
+            if let State::Ready(tree) = &mut *line.state.write().unwrap() {
+                let st = tree.stale_virtual();
+                if !st.is_empty() {
+                    tree.apply_stale_virtual(st);
+                }
+            }
+            return;
+        }
         // A rebuild (lost events, a changed `.git/info/exclude`) walks the tree without holding
         // the index; queries keep using the old one until the new one replaces it. Events that
         // come meanwhile wait in the watcher's queue and are applied after.
@@ -67,7 +80,11 @@ impl Line {
         // The watcher starts before the walk, so that no change during the walk is lost.
         // `LAYR_FS_NO_WATCH` leaves it out: every query then compares folder times (tests).
         let watch = std::env::var_os("LAYR_FS_NO_WATCH").is_none_or(|v| v.is_empty());
-        match if watch { Watcher::start(&self.root, sink).map(Some) } else { Ok(None) } {
+        let watched = match &self.overlay {
+            Some((_, upper)) => upper.clone(),
+            None => self.root.clone(),
+        };
+        match if watch { Watcher::start(&watched, sink).map(Some) } else { Ok(None) } {
             Ok(w) => *self.watcher.lock().unwrap() = w.map(Arc::new),
             Err(e) => {
                 *self.state.write().unwrap() = State::Failed(format!("{e:#}"));
@@ -76,10 +93,17 @@ impl Line {
                 return;
             }
         }
-        let mut tree = Tree::build(&self.root);
+        let mut tree = match &self.overlay {
+            Some((lower, upper)) => Tree::build_virtual(lower, upper),
+            None => Tree::build(&self.root),
+        };
         {
             let mut st = self.state.write().unwrap();
-            if let State::Building { pending, rescan } = &mut *st {
+            if self.overlay.is_some() {
+                // Changes during the build: the upper folder times tell them.
+                let stale = tree.stale_virtual();
+                tree.apply_stale_virtual(stale);
+            } else if let State::Building { pending, rescan } = &mut *st {
                 if *rescan {
                     tree = Tree::build(&self.root);
                 } else if !pending.is_empty() {
@@ -119,13 +143,17 @@ struct Server {
 impl Server {
     /// The line of `root`, created (and its build started) on first use.
     fn line(&self, root: &Path) -> Arc<Line> {
+        // A line changes between a folder and a virtual view (`layr line show`): its index is
+        // made again for the new kind.
+        let overlay = super::virtual_folders(root);
         let mut lines = self.lines.lock().unwrap();
-        if let Some(l) = lines.get(root) {
+        if let Some(l) = lines.get(root).filter(|l| l.overlay == overlay) {
             l.used.store(now_s(), Ordering::Relaxed);
             return l.clone();
         }
         let line = Arc::new(Line {
             root: root.to_path_buf(),
+            overlay,
             state: RwLock::new(State::Building { pending: Vec::new(), rescan: false }),
             ready: (Mutex::new(false), Condvar::new()),
             watcher: Mutex::new(None),
@@ -145,6 +173,8 @@ fn env_secs(name: &str, default: u64) -> u64 {
 pub fn serve(path: &Path) -> Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let dir = path.parent().context("socket path without a folder")?;
+    // Keep no folder of the caller in use (a virtual line's mount could not be unmounted).
+    let _ = std::env::set_current_dir("/");
     let me = rustix::process::getuid().as_raw();
     // A folder made here is private. An existing folder is not changed; it must be ours.
     if !dir.exists() {
@@ -273,7 +303,22 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
                     return reply(sock, serde_json::json!({"fallback": why}));
                 }
                 let State::Ready(tree) = &*st else { unreachable!() };
-                if !verify || tree.stale(&root, &scope).is_empty() {
+                if line.overlay.is_some() {
+                    // A virtual line: compare the upper folder only, never the mount.
+                    if tree.stale_virtual().is_empty() {
+                        plan(tree, &mut out)
+                    } else {
+                        drop(st);
+                        let mut st = line.state.write().unwrap();
+                        if let Some(why) = not_ready(&st) {
+                            return reply(sock, serde_json::json!({"fallback": why}));
+                        }
+                        let State::Ready(tree) = &mut *st else { unreachable!() };
+                        let stale = tree.stale_virtual();
+                        tree.apply_stale_virtual(stale);
+                        plan(tree, &mut out)
+                    }
+                } else if !verify || tree.stale(&root, &scope).is_empty() {
                     plan(tree, &mut out)
                 } else {
                     drop(st);

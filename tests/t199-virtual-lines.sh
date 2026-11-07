@@ -3,7 +3,9 @@
 # Virtual lines (docs/views.md): a line whose folder is a LayrFS mount of an upper folder over the
 # tree of its start state. Needs macOS 27 and the signed LayrFS extension, installed and enabled
 # (tools/layrfs/README.md). CI runners cannot load it, so no CI job selects this test; on a machine
-# without the extension it skips. Run: LAYR_APFS_TEST_ROOT=$TMPDIR tests/run.sh t197-virtual-lines
+# without the extension it skips. Run: LAYR_APFS_TEST_ROOT=$TMPDIR tests/run.sh t199-virtual-lines
+# The LayrFS tool server (`layr tool rg|find`) serves a virtual line from its lower tree and upper
+# folder, not through the mount; its output must equal the real tools on the mount and on a folder line.
 if [ "$(uname -s)" != Darwin ]; then
     echo "skip: virtual lines need macOS"
     exit 0
@@ -22,7 +24,10 @@ unmount_views() {
         umount "$mp" 2>/dev/null || umount -f "$mp"
     done
 }
-trap 'unmount_views; cleanup' EXIT
+command -v rg >/dev/null || { echo "FATAL: rg (ripgrep) is not on PATH" >&2; exit 1; }
+export LAYR_FS_SOCKET=$T/fs.sock LAYR_FS_STRICT=1 LAYR_FS_NO_WATCH=
+unset LAYR_FS_OFF LAYR_TOOL_ACTIVE RIPGREP_CONFIG_PATH
+trap '"$LAYR" fs stop >/dev/null 2>&1; unmount_views; cleanup' EXIT
 
 src=$T/src
 mkdir -p "$src/dir/sub" "$src/src"
@@ -35,6 +40,14 @@ echo trunc > "$src/dir/trunc.txt"
 echo b > "$src/dir/sub/b.txt"
 ln -s notes.txt "$src/link"
 printf 'target/\n*.log\n' > "$src/.gitignore"
+mkdir -p "$src/vendor" "$src/.hidden" "$src/src/deep"
+printf 'fn main() {\n    // TODO: one\n}\n' > "$src/src/lib.rs"
+printf 'fn deep() {} // TODO deep\n' > "$src/src/deep/x.rs"
+printf 'fn vendored() {} // TODO vendor\n' > "$src/vendor/v.rs"
+printf 'fn hidden() {} // TODO hidden\n' > "$src/.hidden/h.rs"
+printf 'TODO generated\n' > "$src/src/out.gen"
+printf 'vendor/\n' > "$src/.ignore"
+printf '*.gen\n' > "$src/.rgignore"
 l init demo --from "$src" > /dev/null
 P=$LAYR_ROOT/projects/demo
 cd "$P/lines/main"
@@ -51,6 +64,38 @@ base_tree=$(sed -n 's/^lower=//p' "$P"/meta/vlines/*/layrfs-view.conf)
 has "the lower tree is a complete state tree" "$P/states/" "$base_tree"
 ok "the lower tree exists" test -f "$base_tree/notes.txt"
 ok "the lower tree stays sealed" test -n "$(ls -lO "$base_tree/notes.txt" | grep uchg)"
+
+# `layr tool rg|find` in the virtual line against the real tools on the mount and on the folder line.
+N=$P/lines/nat
+eq "the tool server indexes the virtual line" "ready" "$(cd "$V" && "$LAYR" fs warm --wait)"
+eq "the tool server indexes the folder line" "ready" "$(cd "$N" && "$LAYR" fs warm --wait)"
+has "the server reads the lower tree and the upper folder" "$V" "$("$LAYR" fs status)"
+tools_same() { # tools_same <label>: every call in the virtual line equals the mount and the folder line
+    local label=$1 args want got nat
+    set -f
+    for args in "fn" "--files" "-l TODO" "-n TODO" "-c fn" "-i todo src" "--files-without-match TODO" "-t rust fn" "-g !src/deep TODO"; do
+        # shellcheck disable=SC2086
+        want=$(cd "$V" && rg --sort path $args </dev/null 2>&1; echo "exit $?")
+        # shellcheck disable=SC2086
+        got=$(cd "$V" && "$LAYR" tool rg $args </dev/null 2>&1; echo "exit $?")
+        # shellcheck disable=SC2086
+        nat=$(cd "$N" && rg --sort path $args </dev/null 2>&1; echo "exit $?")
+        eq "$label: layr tool rg $args equals rg on the mount" "$want" "$got"
+        eq "$label: layr tool rg $args equals rg on the folder line" "$nat" "$got"
+    done
+    for args in "." ". -type f" ". -type d" ". -name *.rs" "src -maxdepth 1"; do
+        # shellcheck disable=SC2086
+        want=$(cd "$V" && find $args </dev/null 2>&1 | LC_ALL=C sort)
+        # shellcheck disable=SC2086
+        got=$(cd "$V" && "$LAYR" tool find $args </dev/null 2>&1 | LC_ALL=C sort)
+        # shellcheck disable=SC2086
+        nat=$(cd "$N" && find $args </dev/null 2>&1 | grep -v -e '^\./\.git$' -e '^\./\.git/' | LC_ALL=C sort)
+        eq "$label: layr tool find $args equals find on the mount" "$want" "$got"
+        eq "$label: layr tool find $args equals find on the folder line" "$nat" "$got"
+    done
+    set +f
+}
+tools_same "start"
 
 # The same edits in the virtual line and in a folder line.
 edits() {
@@ -71,6 +116,7 @@ ok "edits through the mount" bash -c "cd '$V' && $(declare -f edits); edits"
 ok "the base tree did not change" test "$(cat "$base_tree/notes.txt" | wc -l | tr -d ' ')" = 20
 eq "the lower folder was moved with mv (EXDEV fallback)" "b" "$(cat "$V/sub2/b.txt")"
 ok "the upper folder holds the changes" test -f "$P"/meta/vlines/*/upper/new.txt
+tools_same "after edits"
 
 st=$(cd "$V" && l status)
 has "status: modified" "modified:   notes.txt" "$st"
@@ -107,6 +153,23 @@ st=$(cd "$V" && l status --short)
 has "status shows the delete of a saved new file" "D  newdir/n.txt" "$st"
 ok "second save" bash -c "cd '$V' && '$LAYR' save -m round2"
 ok "the second state equals the folder line's state" l diff --exit-code "$(l rev-parse nat)" "$(l rev-parse virt)"
+
+# Changes right before each call: a new file, a delete, a rename, a new folder, a changed ignore file.
+both() { (cd "$N" && eval "$1") && (cd "$V" && eval "$1"); }
+both 'printf "fn fresh() {} // TODO fresh\n" > src/fresh.rs'
+tools_same "a new file just before"
+both 'rm src/deep/x.rs'
+tools_same "a delete just before"
+both 'mv src/lib.rs src/lib2.rs'
+tools_same "a rename just before"
+both 'mkdir -p gen/a && printf "fn g() {} // TODO g\n" > gen/a/g.rs'
+tools_same "a new folder just before"
+both 'printf "vendor/\ngen/\n" > .ignore'
+tools_same "a changed ignore file just before"
+both 'rm .rgignore'
+tools_same "a removed ignore file just before"
+both 'echo "// TODO edited" >> src/main.rs'
+tools_same "a changed lower file just before"
 
 # gc keeps the lower tree of a virtual line.
 ok "gc with a virtual line" l gc
