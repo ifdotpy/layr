@@ -552,7 +552,10 @@ impl Store {
             return Ok(Configured { created: false, recovery_key_file: None });
         }
         if self.is_api() {
-            bail!("Layr Cloud has no project at {}, or this token cannot read it; create the project on the site first", self.url);
+            bail!(
+                "Layr Cloud has no project at {}, or this token cannot read it; create the project on the site first",
+                self.url
+            );
         }
         if self.project.is_empty() {
             bail!("the remote store is empty");
@@ -1497,6 +1500,17 @@ fn push_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
                 continue;
             }
         }
+        // Like a Git push without force: the new head must contain what the server had, or a move of another
+        // writer would be lost. The person merges it first.
+        if let (Some(expect), Some(target)) = (&expect, &head) {
+            if !reader::state_ancestry(repo, target)?.contains(expect) {
+                bail!(
+                    "Layr Cloud: {name} is at {} there, and head {} here does not contain it; merge it into the line, then push",
+                    crate::ids::short(expect),
+                    crate::ids::short(target)
+                );
+            }
+        }
         updates.push(api::RefUpdate { name, expect, target: head, record });
     }
     if updates.is_empty() {
@@ -1556,7 +1570,8 @@ fn fetch_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     let refs = api.refs(&store.api_scope(), "lines/")?;
     let mut tracked = std::collections::BTreeMap::new();
-    let lines: std::collections::BTreeMap<String, String> = repo.p.db.lines()?.into_iter().map(|line| (line.id, line.head)).collect();
+    let lines: std::collections::BTreeMap<String, String> =
+        repo.p.db.lines()?.into_iter().map(|line| (line.id, line.head)).collect();
     for reference in refs {
         let Some(target) = reference.target else { continue };
         if let Some(line) = reference.name.strip_prefix("lines/") {

@@ -1080,7 +1080,8 @@ fn upload_state_journal(
     drop(stage);
     let _publish = crate::trace::span("store tree publish");
     // On the Layr Cloud API an existing state keeps its tree: the links of this one name objects that went up.
-    if !store.backend.put_new(&format::tree_name(state, &attempt), keys::encrypt(&descriptor.recipient, &object)?)? && !by_content {
+    let published = store.backend.put_new(&format::tree_name(state, &attempt), keys::encrypt(&descriptor.recipient, &object)?)?;
+    if !published && !by_content {
         bail!("state attempt already exists; retry with a new attempt");
     }
     push_failpoint("after_publish", state);

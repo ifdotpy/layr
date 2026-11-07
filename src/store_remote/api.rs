@@ -90,6 +90,8 @@ pub struct Api {
     server: Arc<Mutex<Option<String>>>,
     /// Record segments listed in this command, by scope; a segment upload clears them.
     segments: Arc<Mutex<std::collections::BTreeMap<String, Vec<Segment>>>>,
+    /// The project as this command first read it.
+    info: Arc<Mutex<Option<ProjectInfo>>>,
     single_put_limit: usize,
 }
 
@@ -103,6 +105,7 @@ impl Clone for Api {
             local_project: Mutex::new(self.local_project.lock().expect("api project lock").clone()),
             server: self.server.clone(),
             segments: self.segments.clone(),
+            info: self.info.clone(),
             single_put_limit: self.single_put_limit,
         }
     }
@@ -170,6 +173,7 @@ impl Api {
             local_project: Mutex::new(String::new()),
             server: Arc::new(Mutex::new(None)),
             segments: Arc::new(Mutex::new(Default::default())),
+            info: Arc::new(Mutex::new(None)),
             single_put_limit: SINGLE_PUT_LIMIT,
         })
     }
@@ -290,13 +294,22 @@ impl Api {
         serde_json::from_slice(&read_limited(response, JSON_LIMIT)?).with_context(|| format!("Layr Cloud {what}: invalid JSON"))
     }
 
+    /// The project, read once per command while it has an id (a project without records gets one at its
+    /// first push).
     pub(crate) fn project_info(&self) -> Result<Option<ProjectInfo>> {
+        if let Some(info) = self.info.lock().map_err(|_| anyhow!("api info lock"))?.clone() {
+            return Ok(Some(info));
+        }
         let url = self.project_url("")?;
         let response = self.send(true, || self.request(Method::GET, url.clone()))?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        Ok(Some(self.json("project", response)?))
+        let info: ProjectInfo = self.json("project", response)?;
+        if info.id.as_ref().is_some_and(|id| !id.is_empty()) {
+            *self.info.lock().map_err(|_| anyhow!("api info lock"))? = Some(info.clone());
+        }
+        Ok(Some(info))
     }
 
     /// `store.json` as the rest of the store code reads it: the plain descriptor of the project mode.

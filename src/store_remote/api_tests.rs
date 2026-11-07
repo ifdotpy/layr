@@ -434,6 +434,20 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
     (Repo { p: project, ctx: None }, states, line)
 }
 
+fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String {
+    let id = crate::ids::new_id();
+    std::fs::create_dir(project.state_path(&id)).unwrap();
+    std::fs::write(project.state_path(&id).join("payload"), "next\n").unwrap();
+    let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":"commit",
+        "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
+        "parents":[parent],"time":crate::ids::now_ms()}))
+    .unwrap();
+    let mut record = Record::new("state");
+    record.states.push(state);
+    project.append(record, &ctx.actor()).unwrap();
+    id
+}
+
 fn move_line(project: &crate::store::Project, ctx: &Ctx, line: &str, before: Option<&str>, head: &str) {
     let state = |head: &str| LineState {
         name: "main".into(),
@@ -524,7 +538,8 @@ fn a_line_that_moved_on_the_server_fails_the_push_until_a_fetch_reads_it() {
     let name = format!("lines/{line}");
     // Another writer moves the line on the server.
     fake.state.lock().unwrap().refs.insert((String::new(), name.clone()), (states[0].clone(), 7));
-    move_line(&repo.p, &ctx, &line, Some(&states[2]), &states[1]);
+    let next = add_state(&repo.p, &ctx, &states[2]);
+    move_line(&repo.p, &ctx, &line, Some(&states[2]), &next);
     let error = push(&store, &ctx, &repo).unwrap_err().to_string();
     assert!(error.contains(&name) && error.contains("layr fetch"), "{error}");
     assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name.clone())].0, states[0], "the server ref stays");
@@ -533,7 +548,14 @@ fn a_line_that_moved_on_the_server_fails_the_push_until_a_fetch_reads_it() {
     super::fetch_refs(&store, &repo, &mut report).unwrap();
     assert!(report.omitted.iter().any(|o| o.contains("Layr Cloud has")), "{:?}", report.omitted);
     push(&store, &ctx, &repo).unwrap();
-    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name)].0, states[1]);
+    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name.clone())].0, next);
+    // A head that does not contain the server's target is refused before any request, as a Git push without force.
+    let cas = fake.count("POST /api/v1/projects/p/refs/cas");
+    move_line(&repo.p, &ctx, &line, Some(&next), &states[1]);
+    let error = push(&store, &ctx, &repo).unwrap_err().to_string();
+    assert!(error.contains("does not contain it"), "{error}");
+    assert_eq!(fake.count("POST /api/v1/projects/p/refs/cas"), cas);
+    assert_eq!(fake.state.lock().unwrap().refs[&(String::new(), name)].0, next);
     // A direct compare and swap with a stale expectation is a conflict that names the actual target.
     let update = RefUpdate {
         name: "lines/x".into(),

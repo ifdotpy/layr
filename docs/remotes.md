@@ -181,10 +181,18 @@ id with the type that the reference names (a tree link names a `part`, a state n
 - The server ref is the truth for the position of a line. After records and states, a push moves
   each changed line with one `POST /refs/cas`: `name` `lines/<line id>`, `expect` the target this
   machine last read from the server (null for a new line), `target` the local head, and `record`
-  the id of the newest record that moved the line. A `409 conflict` names the lines that moved on
-  the server: run `layr fetch <remote>` and push again. A fetch reads `GET /refs?prefix=lines/` and
-  keeps the targets as the next `expect`.
-- The client does not sweep: garbage collection is server-side.
+  the id of the newest record of this machine that moved the line. Only lines that this machine
+  moved go up. A head that does not contain the `expect` state is refused before the request, as
+  a Git push without force: merge what the server has first. A `409 conflict` names the lines that
+  moved on the server: run `layr fetch <remote>` and push again. A fetch reads
+  `GET /refs?prefix=lines/`, keeps the targets in `refs.json` of the remote folder as the next
+  `expect`, and names each line whose head here differs from the server.
+- Overlays: each overlay that the caller sees goes to `/overlays/<name>/` (records, states, refs)
+  as plain objects in the project's object store: no overlay keys, slots or epochs. A hidden
+  overlay stays on this machine until Layr Cloud has Secret overlay layers.
+- The client does not sweep, and `layr remote gc` and `verify` refuse: garbage collection is
+  server-side, and the server checks each object against its id on upload. Git packs of imported
+  commits do not go up: the server mirrors these projects to GitHub.
 
 ## Push roles
 

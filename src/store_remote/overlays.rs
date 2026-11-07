@@ -926,7 +926,8 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let project = if op.id.is_empty() {
                 let segments = api.segments(&scope)?;
                 let Some(first) = segments.iter().min_by_key(|s| s.first) else { return Ok(()) };
-                let body = api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
+                let body =
+                    api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
                 let line = String::from_utf8(body)?.lines().next().map(str::to_owned).context("empty overlay segment")?;
                 oplog::parse_line(&line, None)?.record.project
             } else {
