@@ -6,21 +6,42 @@
 # missing object fails a clone, and a server that needs a newer client stops the command with the version.
 . "$(dirname "$0")/lib.sh"
 
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/tls-key.pem" -out "$T/tls-cert.pem" -days 1 \
-    -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
-    -addext basicConstraints=critical,CA:FALSE >/dev/null 2>&1 || exit 1
+# Keep the trust anchor separate from the server certificate: TLS implementations differ
+# in whether they accept a self-signed end-entity certificate as a root.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/tls-ca-key.pem" -out "$T/tls-ca.pem" -days 1 \
+    -subj '/CN=Layr test CA' -addext basicConstraints=critical,CA:TRUE \
+    -addext keyUsage=critical,keyCertSign,cRLSign >/dev/null 2>&1 || exit 1
+openssl req -new -newkey rsa:2048 -nodes -keyout "$T/tls-key.pem" -out "$T/tls.csr" \
+    -subj /CN=localhost >/dev/null 2>&1 || exit 1
+cat > "$T/tls-ext.cnf" <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:localhost,IP:127.0.0.1
+EOF
+openssl x509 -req -in "$T/tls.csr" -CA "$T/tls-ca.pem" -CAkey "$T/tls-ca-key.pem" -CAcreateserial \
+    -out "$T/tls-cert.pem" -days 1 -extfile "$T/tls-ext.cnf" >/dev/null 2>&1 || exit 1
 umask 077
 echo test.machine.token > "$T/token"
-python3 "$(dirname "$0")/fake-cloud-api.py" "$T" test.machine.token &
+python3 "$(dirname "$0")/fake-cloud-api.py" "$T" test.machine.token > "$T/server.log" 2>&1 &
 SERVER=$!
 disown
 trap 'kill $SERVER 2>/dev/null; cleanup' EXIT
-for _ in $(seq 1 100); do [ -s "$T/port" ] && break; sleep 0.1; done
+for _ in $(seq 1 100); do
+    [ -s "$T/port" ] && break
+    kill -0 "$SERVER" 2>/dev/null || break
+    sleep 0.1
+done
+if [ ! -s "$T/port" ]; then
+    echo 'FAIL the Cloud test server did not start'
+    cat "$T/server.log"
+    exit 1
+fi
 PORT=$(cat "$T/port")
 URL="layr+https://localhost:$PORT/p"
-export LAYR_GATEWAY_CA_FILE=$T/tls-cert.pem LAYR_GATEWAY_TOKEN_FILE=$T/token
-stats() { curl -s --cacert "$T/tls-cert.pem" "https://localhost:$PORT/test/stats"; }
-admin() { curl -s --cacert "$T/tls-cert.pem" -X POST -d "$2" "https://localhost:$PORT/test/$1" >/dev/null; }
+export LAYR_GATEWAY_CA_FILE=$T/tls-ca.pem LAYR_GATEWAY_TOKEN_FILE=$T/token
+stats() { curl -s --cacert "$T/tls-ca.pem" "https://localhost:$PORT/test/stats"; }
+admin() { curl -s --cacert "$T/tls-ca.pem" -X POST -d "$2" "https://localhost:$PORT/test/$1" >/dev/null; }
 
 sample "$T/src"
 l init p --from "$T/src" -q >/dev/null
