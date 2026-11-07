@@ -118,4 +118,13 @@ eq "outside a git work tree the real find answers" "$T/bin/rg" \
 
 "$LAYR" fs stop
 no "the server stopped" "$LAYR" fs status
+
+# A socket in an existing folder leaves the folder's mode alone; a non-socket file is kept.
+mkdir -p "$T/shared" && chmod 755 "$T/shared"
+eq "a server in an existing folder starts" "ready" "$(LAYR_FS_SOCKET=$T/shared/fs.sock "$LAYR" fs warm --wait)"
+eq "the existing folder keeps its mode" "755" "$(stat_field mode "$T/shared")"
+LAYR_FS_SOCKET=$T/shared/fs.sock "$LAYR" fs stop
+echo keep > "$T/shared/not-a-socket"
+no "a file in place of the socket is not replaced" env LAYR_FS_SOCKET=$T/shared/not-a-socket "$LAYR" fs warm --wait
+eq "the file is kept" "keep" "$(cat "$T/shared/not-a-socket")"
 finish
