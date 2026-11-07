@@ -222,23 +222,60 @@ pub enum Listed {
 }
 
 /// The process that holds the lock file `lock`, named by pid and command. `except` is the pid of the waiting
-/// cargo, which also has the file open. `lsof` finds the holder on macOS and Linux, and `/proc/locks` on Linux.
+/// cargo, which also has the file open. Native process tables are tried before `lsof`.
 /// Diagnostics have a two-second budget. The text says `unknown` when neither finds a process.
 pub fn lock_holder(lock: &Path, except: u32) -> String {
     let mut pids: std::collections::BTreeSet<u32> = Default::default();
     let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let mut command = Command::new("lsof");
-    command.args(["-n", "-P", "-t"]).arg(lock).process_group(0);
-    if let Ok(out) = run(&mut command, Some(until)) {
-        pids.extend(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
-    }
     pids.extend(proc_locks(lock));
+    #[cfg(target_os = "macos")]
+    pids.extend(macos_openers(lock, until));
     pids.remove(&except);
+    if pids.is_empty() && std::time::Instant::now() < until {
+        let mut command = Command::new("lsof");
+        command.args(["-n", "-P", "-t"]).arg(lock).process_group(0);
+        if let Ok(out) = run(&mut command, Some(until)) {
+            pids.extend(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
+        }
+        pids.remove(&except);
+    }
     if pids.is_empty() {
-        return format!("unknown (lsof and /proc/locks name no process for {})", lock.display());
+        return format!("unknown (process tables and lsof name no process for {})", lock.display());
     }
     let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p, until))).collect();
     named.join(", ")
+}
+
+/// macOS file references, without lsof's scan of unrelated file metadata.
+#[cfg(target_os = "macos")]
+fn macos_openers(lock: &Path, until: std::time::Instant) -> Vec<u32> {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn proc_listpidspath(kind: u32, info: u32, path: *const c_char, flags: u32,
+                            buffer: *mut c_void, size: c_int) -> c_int;
+    }
+    let Ok(path) = CString::new(lock.as_os_str().as_bytes()) else { return Vec::new() };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Keep the caller's deadline even if a kernel query takes too long.
+    std::thread::spawn(move || {
+        const PROC_ALL_PIDS: u32 = 1;
+        // SAFETY: path is NUL-terminated; a null buffer requests its required size.
+        let size = unsafe { proc_listpidspath(PROC_ALL_PIDS, 0, path.as_ptr(), 0, std::ptr::null_mut(), 0) };
+        if size <= 0 {
+            return;
+        }
+        // Leave room for processes created between the two calls.
+        let mut pids = vec![0i32; size as usize / std::mem::size_of::<i32>() + 256];
+        let bytes = (pids.len() * std::mem::size_of::<i32>()) as c_int;
+        // SAFETY: the buffer is aligned and writable for `bytes`; path remains alive.
+        let count = unsafe {
+            proc_listpidspath(PROC_ALL_PIDS, 0, path.as_ptr(), 0, pids.as_mut_ptr().cast(), bytes)
+        };
+        pids.truncate(count.max(0) as usize / std::mem::size_of::<i32>());
+        let _ = tx.send(pids.into_iter().filter(|p| *p > 0).map(|p| p as u32).collect());
+    });
+    rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).unwrap_or_default()
 }
 
 /// The pids that hold a flock on the inode of `lock`, from `/proc/locks`. Empty without that file.
