@@ -123,7 +123,8 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let mut reach: Vec<(Id, Kind)> = Vec::new();
     let mut seen = HashSet::new();
     for (_, r) in &refs {
-        for item in std::iter::once((r.times, Kind::Times)).chain(transfer::reachable(&objects, &r.tree)?) {
+        for item in objects.times_ids(&r.times)?.into_iter().map(|id| (id, Kind::Times))
+            .chain(transfer::reachable(&objects, &r.tree)?) {
             if seen.insert(item.0) {
                 reach.push(item);
             }
@@ -173,9 +174,7 @@ pub(super) fn fetch_states(store: &Store, repo: &Repo, states: Vec<StateRec>, re
         let mut need = BTreeSet::new();
         for (_, r) in &refs {
             need.extend(transfer::missing_trees(&objects, &r.tree)?.into_iter().map(|id| id.hex()));
-            if !objects.has(&r.times) {
-                need.insert(r.times.hex());
-            }
+            need.extend(transfer::missing_times(&objects, &r.times)?.into_iter().map(|id| id.hex()));
         }
         if need.is_empty() {
             for (_, r) in &refs {

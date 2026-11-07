@@ -69,6 +69,26 @@ pub fn missing_trees(store: &Store, tree: &Id) -> Result<Vec<Id>> {
     Ok(missing)
 }
 
+/// Missing tables in the recursive times tree, stopping at each missing table until fetched.
+pub fn missing_times(store: &Store, root: &Id) -> Result<Vec<Id>> {
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) { continue; }
+        if !store.has(&id) {
+            missing.push(id);
+            continue;
+        }
+        for record in store.get_times(&id)?.records {
+            if let crate::times::Record::Folder(child) = record {
+                stack.push(child);
+            }
+        }
+    }
+    Ok(missing)
+}
+
 /// A transfer pack in memory: its id (the `opaque` id of `data`), the data file and the index file.
 pub struct BuiltPack {
     pub id: Id,

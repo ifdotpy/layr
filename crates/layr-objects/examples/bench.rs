@@ -1,7 +1,6 @@
 //! Measure the object store on plain folders (docs/objects.md, "Measurements").
 //!
 //! ```text
-<<<<<<< head
 //! objects-bench <store> import <folder> hot|cold [--previous <tree>] [--similar] [--exclude a,b] [--state <name>]
 //! objects-bench <store> changed <folder> <tree> <times> <path>... [--exclude a,b]
 //! objects-bench <store> checkout <tree> <folder> [--times <id>]
@@ -56,59 +55,6 @@ fn main() -> Result<()> {
             if let Some(state) = value(rest, "--state") {
                 store.set_state(state, &layr_objects::store::StateRef { tree: r.tree.unwrap(), times: r.times.unwrap() })?;
             }
-||||||| base
-=======
-//! objects-bench <store> import <folder> hot|cold [--previous <tree>] [--similar] [--exclude a,b]
-//! objects-bench <store> changed <folder> <tree> <times> <path>... [--exclude a,b]
-//! objects-bench <store> checkout <tree> <folder> [--times <id>]
-//! objects-bench <store> verify <original> <copy> [--times]
-//! objects-bench <store> repack [--level N] [--no-long] [--no-dict] [--block BYTES]
-//! objects-bench <store> matrix [--block BYTES]
-//! objects-bench <store> stat
-//! objects-bench - dictgain <folder>...
-//! ```
-//! `cargo run --release -p layr-objects --example objects-bench -- ...`
-use anyhow::{bail, Result};
-use layr_objects::write::{write_changed, Base};
-use layr_objects::zstdx::{self, Codec};
-use layr_objects::{checkout_with, compare_with, write_tree, Id, Keying, Store, Temperature, WriteOptions};
-use rayon::prelude::*;
-use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
-
-/// The dictionary size of the measurements (zstd's default for `--train`).
-const DICT_SIZE: usize = 112 << 10;
-
-fn flag(args: &[String], name: &str) -> bool {
-    args.iter().any(|a| a == name)
-}
-
-fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
-}
-
-fn mb_s(bytes: u64, seconds: f64) -> f64 {
-    bytes as f64 / (1 << 20) as f64 / seconds
-}
-
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.get(1).map(String::as_str) == Some("dictgain") {
-        return dictgain(&args[2..]);
-    }
-    let mut store = Store::open(Path::new(&args[0]), Keying::Plain)?;
-    let started = Instant::now();
-    let rest = &args[2..];
-    match args.get(1).map(String::as_str) {
-        Some("import") => {
-            let temperature = if rest.get(1).map(String::as_str) == Some("cold") { Temperature::Cold } else { Temperature::Hot };
-            let previous = value(rest, "--previous").map(Id::parse).transpose()?;
-            let exclude = value(rest, "--exclude")
-                .map_or(vec![b".git".to_vec()], |x| x.split(',').map(|s| s.as_bytes().to_vec()).collect());
-            let opts = WriteOptions { temperature, previous, exclude, similar: flag(rest, "--similar") };
-            let r = write_tree(&store, Path::new(&rest[0]), &opts)?;
->>>>>>> cloud-v1-client
             println!(
                 "tree {} times {} files {} dirs {} bytes {} new objects {} new bytes {} clones {} in {:.3}s",
                 r.tree.unwrap(),

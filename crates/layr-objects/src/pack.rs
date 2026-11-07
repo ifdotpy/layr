@@ -129,7 +129,6 @@ impl Index {
     }
 }
 
-<<<<<<< head
 /// A pack index for reading: the bytes of the index file, searched in place. Opening a store with
 /// many objects does not decode them, and a lookup is a binary search. `parse` checks the layout
 /// only: an object read through it is still checked against its id, and `Index::decode` (a received
@@ -290,79 +289,6 @@ mod tests {
         let mut cut = index.encode();
         cut.truncate(cut.len() - 1);
         assert!(LazyIndex::parse(cut, &index.pack, data_len).is_err(), "a cut index");
-||||||| base
-=======
-/// Collects payloads into blocks of about `block_size` plain bytes.
-pub struct Builder {
-    block_size: usize,
-    pub plain: Vec<Vec<u8>>,
-    pub entries: Vec<Entry>,
-}
-
-impl Builder {
-    pub fn new(block_size: usize) -> Self {
-        Builder { block_size, plain: Vec::new(), entries: Vec::new() }
-    }
-
-    pub fn add(&mut self, id: Id, kind: Kind, form: u8, payload: &[u8]) {
-        let start_new = match self.plain.last() {
-            None => true,
-            Some(b) => !b.is_empty() && b.len() + payload.len() > self.block_size,
-        };
-        if start_new {
-            self.plain.push(Vec::with_capacity(self.block_size.max(payload.len())));
-        }
-        let block = self.plain.len() - 1;
-        let buf = &mut self.plain[block];
-        self.entries.push(Entry { id, kind, form, block: block as u32, offset: buf.len() as u32, length: payload.len() as u32 });
-        buf.extend_from_slice(payload);
-    }
-
-    pub fn plain_len(&self) -> usize {
-        self.plain.iter().map(Vec::len).sum()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample() -> Index {
-        let mut entries = vec![
-            Entry { id: Id([3; 32]), kind: Kind::Blob, form: RAW, block: 0, offset: 0, length: 10 },
-            Entry { id: Id([1; 32]), kind: Kind::Tree, form: RAW, block: 1, offset: 5, length: 5 },
-        ];
-        entries.sort_by_key(|e| e.id);
-        Index {
-            pack: Id([9; 32]),
-            blocks: vec![Block { offset: 4, compressed: 7, plain: 10 }, Block { offset: 11, compressed: 3, plain: 10 }],
-            entries,
-        }
-    }
-
-    #[test]
-    fn an_index_round_trips_and_checks_itself() {
-        let index = sample();
-        let bytes = index.encode();
-        assert_eq!(Index::decode(&bytes, 14).unwrap(), index);
-        assert_eq!(index.find(&Id([3; 32])).unwrap().length, 10);
-        assert!(index.find(&Id([2; 32])).is_none());
-        assert!(Index::decode(&bytes, 15).is_err(), "the data file size must match");
-        for at in [0, 10, bytes.len() - 40, bytes.len() - 1] {
-            let mut bad = bytes.clone();
-            bad[at] ^= 1;
-            assert!(Index::decode(&bad, 14).is_err(), "a changed byte at {at}");
-        }
-        let mut leaves = sample();
-        leaves.entries[0].length = 11;
-        assert!(Index::decode(&leaves.encode(), 14).is_err());
-        let mut unsorted = sample();
-        unsorted.entries.swap(0, 1);
-        assert!(Index::decode(&unsorted.encode(), 14).is_err());
-        let mut gap = sample();
-        gap.blocks[1].offset = 12;
-        assert!(Index::decode(&gap.encode(), 15).is_err());
->>>>>>> cloud-v1-client
     }
 
     #[test]

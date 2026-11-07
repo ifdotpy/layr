@@ -12,11 +12,7 @@ pub mod followcmd;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
-<<<<<<< head
 pub mod migrate;
-||||||| base
-=======
->>>>>>> cloud-v1-client
 pub mod objects;
 pub mod oci;
 pub mod overlaycmd;
@@ -259,13 +255,7 @@ pub const COMMANDS: &[&str] = &[
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
-<<<<<<< head
     "usage", "objects", "migrate", "fs", "tool",
-||||||| base
-    "usage",
-=======
-    "usage", "objects",
->>>>>>> cloud-v1-client
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -363,11 +353,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "login" => remote::login(ctx, rest),
         "overlay" => overlaycmd::overlay(ctx, rest),
         "objects" => objects::objects(ctx, rest),
-<<<<<<< head
         "migrate" => migrate::migrate(ctx, rest),
-||||||| base
-=======
->>>>>>> cloud-v1-client
         "export" => transfer::export(ctx, rest),
         "sync" => remote::sync(ctx, rest),
         "serve-peer" => replicate::serve(ctx, rest),
