@@ -285,11 +285,17 @@ impl Layered {
         apfs::clone_complete(self.bottom(), dst, &entries, readonly)
             .with_context(|| format!("clone {}", self.bottom().display()))?;
         let result = (|| -> Result<()> {
+            let mut cloned = Vec::new();
             for l in self.layers.iter().rev().skip(1) {
-                apply(l, dst)?;
+                apply(l, dst, &mut cloned)?;
             }
+            // The clone of the bottom is writable already, and `apply` opens each folder it
+            // changes: only the entries cloned from the sealed layers keep their flags. A pass
+            // over the whole tree cost one call per entry.
             if !readonly {
-                apfs::seal(dst, false, false)?;
+                for p in cloned.iter().filter(|p| fs::symlink_metadata(p).is_ok()) {
+                    apfs::seal(p, false, false)?;
+                }
             }
             Ok(())
         })();
@@ -367,8 +373,8 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
     Ok(true)
 }
 
-/// Apply one layer to a writable complete tree.
-fn apply(layer: &Layer, dst: &Path) -> Result<()> {
+/// Apply one layer to a writable complete tree. The entries cloned from the layer go to `cloned`.
+fn apply(layer: &Layer, dst: &Path, cloned: &mut Vec<PathBuf>) -> Result<()> {
     for r in &layer.removed {
         let p = dst.join(r);
         if crate::fsutil::exact_metadata(&p, r).is_some() {
@@ -376,7 +382,7 @@ fn apply(layer: &Layer, dst: &Path) -> Result<()> {
             apfs::delete_tree(&p)?;
         }
     }
-    fn visit(layer: &Path, dst: &Path, rel: &str, dirs: &mut Vec<String>) -> Result<()> {
+    fn visit(layer: &Path, dst: &Path, rel: &str, dirs: &mut Vec<String>, cloned: &mut Vec<PathBuf>) -> Result<()> {
         let mut names: Vec<String> = fs::read_dir(layer.join(rel))?
             .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect::<std::io::Result<_>>()?;
@@ -388,7 +394,7 @@ fn apply(layer: &Layer, dst: &Path) -> Result<()> {
             match crate::fsutil::exact_metadata(&target, &child).ok_or(()) {
                 Ok(dm) if lm.is_dir() && dm.is_dir() => {
                     dirs.push(child.clone());
-                    visit(layer, dst, &child, dirs)?;
+                    visit(layer, dst, &child, dirs, cloned)?;
                 }
                 existing => {
                     open_parent(dst, &child)?;
@@ -396,13 +402,14 @@ fn apply(layer: &Layer, dst: &Path) -> Result<()> {
                         apfs::delete_tree(&target)?;
                     }
                     clone_entry(&layer.join(&child), &target, &lm)?;
+                    cloned.push(target);
                 }
             }
         }
         Ok(())
     }
     let mut dirs = Vec::new();
-    visit(&layer.root, dst, "", &mut dirs)?;
+    visit(&layer.root, dst, "", &mut dirs, cloned)?;
     for d in dirs.iter().rev() {
         copy_dir_meta(&layer.root.join(d), &dst.join(d), false)?;
     }
@@ -1760,6 +1767,11 @@ mod tests {
         assert_eq!(apfs::subvol_info(&layer)?.base.as_deref(), Some("base-id"));
         let layered = Layered::over(&layer, Layered::complete(&base))?;
         check_same(&layered, &work);
+        // The layers answer `holds_files` as the complete tree does.
+        let paths = ["", "a", "a/deep", "b", "gone", "gone/inner", "quiet", "fresh", "swap-file", "swap-dir", "link", "linkdir"];
+        for p in paths.into_iter().chain(["linkdir/inner", "missing", "missing/below"]) {
+            assert_eq!(crate::repo::holds_files_in(&layered, p), crate::repo::holds_files(&work, p), "holds_files of '{p}'");
+        }
         assert!(layered.find("gone/inner/file")?.is_none());
         assert!(layered.find("linkdir/inner")?.is_none(), "a path below a new link is absent");
         assert!(layer.join("quiet").is_dir() && d.removed.contains("quiet/one"));
@@ -1781,6 +1793,13 @@ mod tests {
         assert_eq!(fs::symlink_metadata(out.join("b"))?.mode() & 0o777, 0o750);
         fs::write(out.join("a/same"), b"writable")?;
         assert_eq!(fs::read(base.join("a/same"))?, b"same");
+        // Every entry of a writable tree is open, also those cloned from the sealed layer.
+        for (rel, _) in apfs::scan_with_data(&out, false)? {
+            use std::os::macos::fs::MetadataExt as _;
+            let flags = fs::symlink_metadata(if rel.is_empty() { out.clone() } else { out.join(&rel) })?.st_flags();
+            assert_eq!(flags & libc::UF_IMMUTABLE, 0, "'{rel}' of a writable tree is sealed");
+        }
+        fs::write(out.join("a/edit"), b"writable too")?;
         // A changed file with two names needs a complete tree.
         let work3 = s.0.join("work3");
         layered.materialize(&work3, false)?;

@@ -57,6 +57,7 @@ pub struct Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
+        let _t = crate::trace::named(|| format!("discard {}", self.path.display()));
         crate::store::discard_tree(&self.path);
     }
 }
@@ -109,8 +110,8 @@ impl Status {
 pub struct WorkingWrite<'a> {
     repo: &'a Repo<'a>,
     wdir: PathBuf,
-    before: PathBuf,
-    after: PathBuf,
+    before: Snap,
+    after: Snap,
     own: Option<(u32, u32)>,
     view: Option<Temp>,
     done: bool,
@@ -122,8 +123,8 @@ impl<'a> WorkingWrite<'a> {
         repo: &'a Repo<'a>,
         wdir: PathBuf,
         own: Option<(u32, u32)>,
-        before: PathBuf,
-        after: PathBuf,
+        before: Snap,
+        after: Snap,
         view: Option<Temp>,
     ) -> Self {
         WorkingWrite { repo, wdir, before, after, own, view, done: false }
@@ -1720,7 +1721,23 @@ impl<'a> Repo<'a> {
         {
             let token = self.index_token(line)?;
             let (st, scan, _, _) = self.status(line)?;
-            PREPARED_STATUS.with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan }));
+            PREPARED_STATUS
+                .with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan: Some(scan) }));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = line;
+        Ok(())
+    }
+
+    /// `prepare_status` for a command that needs only the status lists, not the copy of the
+    /// working folder (`locked_status_report`): merge, pick, replay. It reads the folder in place
+    /// (`status_report`), so no copy of the folder is made, sealed and deleted.
+    pub fn prepare_status_report(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let token = self.index_token(line)?;
+            let st = self.status_report(line)?;
+            PREPARED_STATUS.with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan: None }));
         }
         #[cfg(not(target_os = "macos"))]
         let _ = line;
@@ -1731,12 +1748,31 @@ impl<'a> Repo<'a> {
     pub fn locked_status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         #[cfg(target_os = "macos")]
         if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
-            if p.line == line.id && p.token == self.index_token(line)? {
+            if let (true, Some(scan)) = (p.line == line.id && p.token == self.index_token(line)?, p.scan) {
                 let (index, itemp) = self.index_view(line)?;
-                return Ok((p.st, p.scan, itemp, index));
+                return Ok((p.st, scan, itemp, index));
             }
         }
         self.status(line)
+    }
+
+    /// The status lists of a line, for a command that holds its line lock and needs no copy of
+    /// the working folder: the prepared one when the head and the index did not change, else a
+    /// read of the folder in place. On APFS that read needs no copy of the whole folder (seconds
+    /// for 10,000 files); a read that fails (the index changed during it) takes the copy.
+    pub fn locked_status_report(&self, line: &Line) -> Result<Status> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
+                if p.line == line.id && p.token == self.index_token(line)? {
+                    return Ok(p.st);
+                }
+            }
+            if let Ok(st) = self.status_report(line) {
+                return Ok(st);
+            }
+        }
+        Ok(self.status(line)?.0)
     }
 
     /// Drop what a command prepared before the lock and did not take: a status, and prepared
@@ -1937,8 +1973,8 @@ impl<'a> Repo<'a> {
     /// touches one, nothing is written and the paths are reported, unless `force`.
     pub fn apply_delta(
         &self,
-        from: &Path,
-        to: &Path,
+        from: &(impl fsutil::Src + ?Sized),
+        to: &(impl fsutil::Src + ?Sized),
         target: &Path,
         own: Option<(u32, u32)>,
         local: &BTreeSet<String>,
@@ -2396,8 +2432,10 @@ impl<'a> Repo<'a> {
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
-        let head = self.state_root(&line.head)?;
-        Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files(&head, p)))
+        // The layers of the head: a complete view of a thin head cost one clone of the whole tree
+        // after every merge (its `save --caches`).
+        let head = self.state_src(&line.head)?;
+        Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files_in(&head, p)))
     }
 
 
@@ -2455,6 +2493,7 @@ impl<'a> Repo<'a> {
 
     /// The `.git` folder of a line follows its head. A failure only warns: the move is done.
     pub fn after_head_moved(&self, line: &Line, new_head: &str) {
+        let _t = crate::trace::span("refresh .git folder");
         let mut moved = line.clone();
         moved.head = new_head.to_string();
         if let Err(e) = crate::gitbridge::refresh_git_folder(self, &moved) {
@@ -2944,7 +2983,7 @@ pub fn has_markers(data: &[u8]) -> bool {
 }
 
 /// Remove parent folders of `rel` in `target` that became empty and do not exist in `to`.
-fn prune_empty_parents(target: &Path, to: &Path, rel: &str) -> Result<()> {
+fn prune_empty_parents(target: &Path, to: &(impl fsutil::Src + ?Sized), rel: &str) -> Result<()> {
     let t = Tree::open(target)?;
     let mut comps: Vec<&str> = rel.split('/').collect();
     comps.pop();
@@ -3634,6 +3673,36 @@ fn is_leftover_name(name: &str, base: &str) -> bool {
     leftover_base(name) == Some(base)
 }
 
+/// `holds_files` for a tree to read (`Snap`): on APFS the layers of a thin state, with no
+/// complete copy of it.
+pub fn holds_files_in(tree: &Snap, path: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(root) = tree.folder() {
+            return holds_files(root, path);
+        }
+        // As `holds_files`: an invalid path, or a path through a link, holds files.
+        if fsutil::safe_join(tree.top(), path).is_err() {
+            return true;
+        }
+        let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        for i in 1..comps.len() {
+            match tree.entry(&comps[..i].join("/")) {
+                Ok(Some(e)) if e.meta.ftype == fsutil::FType::Symlink => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+        let entries = if comps.is_empty() { tree.scan(false) } else { tree.scan_at(&comps.join("/")) };
+        match entries {
+            Ok(entries) => entries.values().any(|e| !e.meta.is_dir()),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    holds_files(tree, path)
+}
+
 /// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
 /// below it (a folder of a state that holds versioned files). A path below such an entry counts;
 /// an error counts too, so that a folder whose files cannot be read never becomes a cache.
@@ -4245,7 +4314,8 @@ struct PreparedStatus {
     line: String,
     token: IndexToken,
     st: Status,
-    scan: Temp,
+    /// The copy of the working folder that `st` was read from; none for `prepare_status_report`.
+    scan: Option<Temp>,
 }
 #[cfg(target_os = "macos")]
 thread_local! {
