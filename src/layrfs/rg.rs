@@ -10,6 +10,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use rayon::prelude::*;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -306,23 +307,55 @@ fn run_inner(
     let with_filename = o.with_filename.unwrap_or(!(targets.len() == 1 && matches!(targets[0], Target::File { .. })));
     let filters = Filters::new(&o, root, cwd)?;
 
+    // `--files` without filters prints straight from the index keys.
+    if o.files && filters.is_empty() {
+        let mut listed = false;
+        let mut line = Vec::new();
+        for t in &targets {
+            match t {
+                Target::File { arg, .. } => {
+                    listed = true;
+                    if !o.quiet {
+                        let _ = writeln!(out, "{arg}");
+                    }
+                }
+                Target::Dir { key, arg } => {
+                    let skip = if key.is_empty() { 0 } else { key.len() + 1 };
+                    for f in index::below_set(&tree.visible, key) {
+                        listed = true;
+                        if o.quiet {
+                            break;
+                        }
+                        line.clear();
+                        shown_bytes(&mut line, arg.as_deref(), &f[skip..]);
+                        line.push(b'\n');
+                        let _ = out.write_all(&line);
+                    }
+                }
+            }
+        }
+        return Ok(if listed { 0 } else { 1 });
+    }
+
     // The files in output order, with the path that is printed.
-    let mut files: Vec<(PathBuf, String, bool)> = Vec::new(); // (absolute, shown, explicit)
+    let root_bytes = root.as_os_str().as_bytes();
+    let mut files: Vec<(PathBuf, PathBuf, bool)> = Vec::new(); // (absolute, shown, explicit)
     for t in &targets {
         match t {
-            Target::File { key, arg } => files.push((root.join(index::rel_path(key)), arg.clone(), true)),
+            Target::File { key, arg } => files.push((root.join(index::rel_path(key)), PathBuf::from(arg), true)),
             Target::Dir { key, arg } => {
+                let skip = if key.is_empty() { 0 } else { key.len() + 1 };
                 for f in index::below_set(&tree.visible, key) {
-                    let rel = index::rel_path(f);
-                    let below = index::rel_path(&f[if key.is_empty() { 0 } else { key.len() + 1 }..]);
-                    if !filters.keep(&rel, cwd) {
+                    if !filters.is_empty() && !filters.keep(&index::rel_path(f), cwd) {
                         continue;
                     }
-                    let shown = match arg {
-                        None => below.display().to_string(),
-                        Some(a) => Path::new(a).join(&below).display().to_string(),
-                    };
-                    files.push((root.join(&rel), shown, false));
+                    let mut shown = Vec::new();
+                    shown_bytes(&mut shown, arg.as_deref(), &f[skip..]);
+                    let mut abs = Vec::with_capacity(root_bytes.len() + 1 + f.len());
+                    abs.extend_from_slice(root_bytes);
+                    abs.push(b'/');
+                    abs.extend(f.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
+                    files.push((bytes_path(abs), bytes_path(shown), false));
                 }
             }
         }
@@ -333,7 +366,8 @@ fn run_inner(
         for (_, shown, _) in &files {
             listed = true;
             if !o.quiet {
-                let _ = writeln!(out, "{shown}");
+                let _ = out.write_all(shown.as_os_str().as_bytes());
+                let _ = out.write_all(b"\n");
             }
         }
         return Ok(if listed { 0 } else { 1 });
@@ -370,6 +404,22 @@ fn run_inner(
     })
 }
 
+/// The printed path of a walked file: rg joins the argument and the path below it (`Path::join`),
+/// and prints the path below the working folder alone when no argument was given.
+fn shown_bytes(buf: &mut Vec<u8>, arg: Option<&str>, below: &[u8]) {
+    if let Some(a) = arg {
+        buf.extend_from_slice(a.as_bytes());
+        if !a.ends_with('/') {
+            buf.push(b'/');
+        }
+    }
+    buf.extend(below.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
+}
+
+fn bytes_path(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(bytes))
+}
+
 fn build_matcher(o: &Opts) -> Result<RegexMatcher, String> {
     let mut b = RegexMatcherBuilder::new();
     b.case_insensitive(o.case == Case::Insensitive)
@@ -385,7 +435,7 @@ fn search_one(
     o: &Opts,
     matcher: &RegexMatcher,
     abs: &Path,
-    shown: &str,
+    shown: &Path,
     explicit: bool,
     with_filename: bool,
 ) -> (Vec<u8>, bool, Option<String>) {
@@ -397,8 +447,8 @@ fn search_one(
         .max_matches(o.max_count)
         .binary_detection(if explicit { BinaryDetection::convert(0) } else { BinaryDetection::quit(0) })
         .build();
-    let shown_path = Path::new(shown);
-    let error = |e: std::io::Error| Some(format!("{shown}: {e}"));
+    let shown_path = shown;
+    let error = |e: std::io::Error| Some(format!("{}: {e}", shown.display()));
     match o.mode {
         Mode::Lines => {
             let mut printer =
@@ -434,6 +484,10 @@ struct Filters {
 }
 
 impl Filters {
+    fn is_empty(&self) -> bool {
+        self.globs.is_none() && self.types.is_none()
+    }
+
     fn new(o: &Opts, root: &Path, cwd: &Path) -> Result<Filters, String> {
         let globs = if o.neg_globs.is_empty() {
             None

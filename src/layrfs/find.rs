@@ -144,6 +144,9 @@ pub fn run(cwd: &Path, args: &[String], tree: &Tree, out: &mut dyn Write) -> Out
             None => return Outcome::Fallback(format!("start {s} does not exist")),
         }
     }
+    // Only -name and -path need the printed path as text.
+    let text = e.conds.iter().any(|c| !matches!(c.test, Test::Type(_)));
+    let mut line = Vec::new();
     for (s, k, kind) in starts {
         if e.min_depth == 0 && e.matches(s, kind) {
             let _ = writeln!(out, "{s}");
@@ -154,13 +157,24 @@ pub fn run(cwd: &Path, args: &[String], tree: &Tree, out: &mut dyn Write) -> Out
         let skip = if k.is_empty() { 0 } else { k.len() + 1 };
         for (key, kind) in index::below(&tree.all, &k) {
             let below = &key[skip..];
-            let depth = 1 + below.iter().filter(|&&b| b == index::SEP).count();
-            if depth < e.min_depth || e.max_depth.is_some_and(|m| depth > m) {
-                continue;
+            if e.min_depth > 1 || e.max_depth.is_some() {
+                let depth = 1 + below.iter().filter(|&&b| b == index::SEP).count();
+                if depth < e.min_depth || e.max_depth.is_some_and(|m| depth > m) {
+                    continue;
+                }
             }
-            let shown = format!("{}/{}", s, index::rel_path(below).display());
-            if e.matches(&shown, *kind) {
-                let _ = writeln!(out, "{shown}");
+            line.clear();
+            line.extend_from_slice(s.as_bytes());
+            line.push(b'/');
+            line.extend(below.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
+            let keep = if text {
+                e.matches(&String::from_utf8_lossy(&line), *kind)
+            } else {
+                e.conds.iter().all(|c| matches!(c.test, Test::Type(t) if t == *kind) != c.negate)
+            };
+            if keep {
+                line.push(b'\n');
+                let _ = out.write_all(&line);
             }
         }
     }
