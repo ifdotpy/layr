@@ -46,8 +46,8 @@ lowercase hex digits.
 
 The last four types belong to the Layr Cloud V1 client (ifdotpy/layr#423); their bytes are defined
 in its contract, `docs/remotes.md`, section "Layr Cloud API v1". They use the id rule of this
-section unchanged. An upload names the type in the header `Layr-Object-Type`. Section 14 compares
-the two tree formats.
+section unchanged. An upload names the type in the header `Layr-Object-Type`. `part` and
+`state-tree` leave Public and Private remotes when V1 moves to `tree` and `times` (section 14).
 
 - **SHA-256** is the persisted content hash of layr (`layr_hashers::ContentAddress`). It runs on
   the ARMv8 SHA extensions and SHA-NI; a second write of Chromium, which hashes every file
@@ -242,7 +242,11 @@ files of processes that are gone.
 
 A state names its tree and its times table: `{"times":"<id>","tree":"<id>"}` (keys sorted, no
 spaces). Locally it is the file `states/<state id>`; on Layr Cloud it is the body of
-`PUT /states/<state>` (which today allows only `tree`: the API needs the `times` field).
+`PUT /states/<state>`.
+
+Note for the API contract (layr-cloud `docs/api.md`): `times` is a required field of
+`PUT /states/<state>`, an object id like `tree`. The server refuses a body without it, and both
+objects must be linked to the project before the state is.
 
 ## 9. Hot and cold
 
@@ -357,7 +361,10 @@ layr objects checkout <tree or rev> <folder>
   every entry, byte and time with the state, and removes the copy. Exit 1 on a difference.
 - `repack` evicts hot blobs outside the hot set and packs loose objects.
 - `checkout` makes a folder with the times of the state. It needs the `export` right and the
-  secret check of `layr export`; on a root service (Linux) it runs only for root in this slice.
+  secret check of `layr export`. On a root service every write of the checkout runs with the
+  caller's file identity (`privs::CallerFs`: file system uid, gid and groups, one step at a time on
+  one thread), while the store is read as root: every file belongs to the caller, and root never
+  writes into the caller's folder (`tests/t201-objects-service.sh`).
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
 Migration: import each state oldest first (`--cold` for history, hot for line heads), verify
@@ -366,13 +373,14 @@ reads move to trees; snapshots stop being the truth. Store format v3 on remotes 
 section 7 without `blobs/`: `objects/<id>` for single objects, `packs/<id>.pack` and `.idx`,
 `states/<id>`, and the v2 records and slots for keys.
 
-Open questions: checkout as the caller on a root service (before lines use objects); sharded trees
-(section 11); a repack that merges small packs; garbage collection of objects that no state names.
+Open questions: sharded trees (section 11); a repack that merges small packs; garbage collection of
+objects that no state names.
 
 ## 14. The two tree formats
 
-Two tree formats name the content of a state today. One of them must win; this is a decision for
-the Layr session, not for this slice.
+Decision (maintainer, 2026-11-07): `tree` with `times` is the single target format. The Layr Cloud
+V1 client moves to the state body `{"times":"<id>","tree":"<id>"}` and to packs instead of parts,
+with no interim format. The table records why.
 
 | | `tree` (this file) | `state-tree` (V1 client, store format v2) |
 | --- | --- | --- |
@@ -385,16 +393,12 @@ the Layr session, not for this slice.
 | change of one file in a big tree | rewrites the folders on its path | rewrites the whole map |
 | signed | by the record that names it | header signature inside the object |
 
-What V1 would change to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
+What V1 changes to use `tree`: the state body becomes `{"times":"<id>","tree":"<id>"}`; a
 push sends the trees, times tables and packs (section 6) that the server lacks (`POST
 /objects/missing` with tree, times and pack ids); the server finds a blob through the pack indexes
 (or reads them to build its own index). `part` and `state-tree` then go away for Public and Private
-remotes; `chunk-pack` and `git-pack` stay as they are.
-
-What `tree` would change to serve as the V1 state tree: nothing in its encoding, but it does not
-hold storage positions, so a reader needs pack indexes to find bytes. The reverse (the V1
-`state-tree` as the only tree) would lose content addressing of folders, folders and attributes,
-and stable ids across pushes; this file does not recommend it.
+remotes; `chunk-pack` and `git-pack` stay as they are. `tree` needs no change: it holds no storage
+positions, so a reader finds bytes through the pack indexes.
 
 ## 15. Measurements
 

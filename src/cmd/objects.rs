@@ -356,11 +356,9 @@ fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "export")?;
-    // The service runs as root on Linux; until the checkout writes as the caller, it writes only
-    // for root (docs/objects.md, "Open questions").
-    if rustix::process::geteuid().is_root() && !ctx.caller.is_root() {
-        bail!("layr objects checkout is experimental and writes only for root on a root service");
-    }
+    // On a root service every write of the checkout takes the caller's file identity, so the
+    // files belong to the caller and root never writes into the caller's folder.
+    let caller = crate::privs::CallerFs::of(ctx)?;
     let store = open(&h)?;
     let (refs, state) = match Id::parse(&a.pos[0]) {
         Ok(tree) => match store.states_of(&tree)?.into_iter().next() {
@@ -380,7 +378,10 @@ fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::secrets::check_contents(ctx, &h.repo, &state)?;
     let dst = if a.pos[1].starts_with('/') { std::path::PathBuf::from(&a.pos[1]) } else { ctx.cwd.join(&a.pos[1]) };
     let started = Instant::now();
-    let r = layr_objects::checkout_with(&store, &tree, Some(&refs.times), &dst)?;
+    let r = match &caller {
+        Some(c) => layr_objects::checkout_as(&store, &tree, Some(&refs.times), &dst, &|step| c.run(step))?,
+        None => layr_objects::checkout_with(&store, &tree, Some(&refs.times), &dst)?,
+    };
     outln!(
         ctx,
         "checked out tree {} to {}: {} files ({} clones, {} copies, {} decoded), {} folders, {} links in {:.2} s",

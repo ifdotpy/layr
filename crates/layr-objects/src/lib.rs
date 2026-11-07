@@ -14,7 +14,7 @@ pub mod tree;
 pub mod write;
 pub mod zstdx;
 
-pub use checkout::{checkout, checkout_with, CheckoutReport};
+pub use checkout::{checkout, checkout_as, checkout_with, CheckoutReport, Writer};
 pub use compare::{compare, compare_with, Comparison};
 pub use id::{Id, Keying, Kind};
 pub use store::{Form, Stat, StateRef, Store, Temperature};
@@ -287,6 +287,35 @@ mod tests {
         assert_eq!(inc.tree, full.tree, "the incremental tree equals the full tree");
         assert_eq!(inc.times, full.times, "and so do the times");
         assert!(inc.files < full.files, "it read only the changed files ({} of {})", inc.files, full.files);
+    }
+
+    #[test]
+    fn every_checkout_write_goes_through_the_writer() {
+        let dir = scratch("writer");
+        let src = dir.join("src");
+        sample(&src);
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let r = write_tree(&store, &src, &opts).unwrap();
+        let (tree, times) = (r.tree.unwrap(), r.times.unwrap());
+        let steps = std::sync::atomic::AtomicU64::new(0);
+        // The writer counts its steps: every entry, mode and time is one or more of them.
+        let counting = |f: &mut dyn FnMut() -> std::io::Result<()>| -> std::io::Result<()> {
+            steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            f()
+        };
+        let out = dir.join("out");
+        let co = checkout_as(&store, &tree, Some(&times), &out, &counting).unwrap();
+        let cmp = compare_with(&src, &out, true).unwrap();
+        assert!(cmp.differences.is_empty(), "{:#?}", cmp.differences);
+        let n = steps.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(n >= co.files + co.dirs + co.symlinks + co.times, "{n} steps for {co:?}");
+        // A writer that refuses (the caller may not write there) leaves nothing.
+        let refusing = |_: &mut dyn FnMut() -> std::io::Result<()>| -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        assert!(checkout_as(&store, &tree, Some(&times), &dir.join("refused"), &refusing).is_err());
+        assert!(!dir.join("refused").exists());
     }
 
     #[test]

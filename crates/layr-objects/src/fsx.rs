@@ -151,6 +151,31 @@ pub fn clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
     }
 }
 
+/// Make `dst` (absent) a clone of the open file `source`, or a byte copy where the file system
+/// cannot clone. True for a clone. The source was opened by the caller, so the step that makes
+/// `dst` needs no right to the source's folder.
+pub fn clone_or_copy_from(source: &File, dst: &Path) -> io::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    #[cfg(target_os = "macos")]
+    {
+        match rustix::fs::fclonefileat(source, rustix::fs::CWD, dst, rustix::fs::CloneFlags::NOOWNERCOPY) {
+            Ok(()) => return Ok(true),
+            Err(e) if e == rustix::io::Errno::NOTSUP || e == rustix::io::Errno::XDEV => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut target = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(dst)?;
+    #[cfg(target_os = "linux")]
+    if rustix::fs::ioctl_ficlone(&target, source).is_ok() {
+        return Ok(true);
+    }
+    let mut from = source;
+    from.seek(SeekFrom::Start(0))?;
+    io::copy(&mut from, &mut target)?;
+    Ok(false)
+}
+
 /// `clone_file`, or a byte copy where the file system cannot clone. True for a clone.
 pub fn clone_or_copy(src: &Path, dst: &Path) -> io::Result<bool> {
     if clone_file(src, dst)? {

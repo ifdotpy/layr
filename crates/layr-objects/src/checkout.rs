@@ -28,8 +28,18 @@ pub struct CheckoutReport {
     pub times: u64,
 }
 
+/// Runs one file system step that writes into the checkout folder. A root service passes one
+/// that takes the caller's file identity for the step (`privs` in layr), so every file belongs to
+/// the caller and root never writes into a caller's folder. Reads of the store stay outside it.
+pub type Writer<'a> = dyn Fn(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Sync + 'a;
+
+fn as_is(step: &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    step()
+}
+
 struct Run<'a> {
     store: &'a Store,
+    writer: &'a Writer<'a>,
     files: AtomicU64,
     clones: AtomicU64,
     copies: AtomicU64,
@@ -51,19 +61,39 @@ pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> 
 /// `checkout`, and with `times` (the times table of the state) every entry gets its recorded
 /// modification time, so build tools that compare times see an unchanged tree.
 pub fn checkout_with(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path) -> Result<CheckoutReport> {
-    match fs::read_dir(dst) {
-        Ok(mut entries) => {
-            if entries.next().is_some() {
-                bail!("{} is not empty", dst.display());
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(dst).with_context(|| format!("cannot make {}", dst.display()))?
-        }
-        Err(e) => return Err(e).with_context(|| dst.display().to_string()),
+    run_checkout(store, tree, times, dst, &as_is)
+}
+
+/// `checkout_with`, with every write through `writer`. The steps then run on one thread: on macOS
+/// a file identity is a process property (`seteuid`), so only one step may run at a time.
+pub fn checkout_as(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path, writer: &Writer<'_>) -> Result<CheckoutReport> {
+    rayon::ThreadPoolBuilder::new().num_threads(1).build()?.install(|| run_checkout(store, tree, times, dst, writer))
+}
+
+/// One write step through `writer`, with its result.
+fn step<T>(writer: &Writer<'_>, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut f = Some(f);
+    let mut out = None;
+    writer(&mut || {
+        out = Some((f.take().expect("a writer runs a step once"))()?);
+        Ok(())
+    })?;
+    out.ok_or_else(|| std::io::Error::other("the writer did not run the step"))
+}
+
+fn run_checkout(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path, writer: &Writer<'_>) -> Result<CheckoutReport> {
+    let empty = step(writer, || match fs::read_dir(dst) {
+        Ok(mut entries) => Ok(entries.next().is_none()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir(dst).map(|_| true),
+        Err(e) => Err(e),
+    })
+    .with_context(|| format!("cannot use {}", dst.display()))?;
+    if !empty {
+        bail!("{} is not empty", dst.display());
     }
     let run = Run {
         store,
+        writer,
         files: AtomicU64::new(0),
         clones: AtomicU64::new(0),
         copies: AtomicU64::new(0),
@@ -90,8 +120,11 @@ pub fn checkout_with(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path) -
         let first = dst.join(fsx::os(&group[0]));
         for other in &group[1..] {
             let path = dst.join(fsx::os(other));
-            fs::remove_file(&path).with_context(|| path.display().to_string())?;
-            fs::hard_link(&first, &path).with_context(|| path.display().to_string())?;
+            step(writer, || {
+                fs::remove_file(&path)?;
+                fs::hard_link(&first, &path)
+            })
+            .with_context(|| path.display().to_string())?;
             hard_links += 1;
         }
     }
@@ -99,10 +132,10 @@ pub fn checkout_with(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path) -
     // Deepest first: a folder that loses its write bit has no folder below it left to change.
     modes.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
     for (path, mode) in modes {
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+        step(writer, || fs::set_permissions(&path, fs::Permissions::from_mode(mode)))?;
     }
     let restored = match times {
-        Some(id) => restore_times(store, &root, &store.get_times(id)?, dst)?,
+        Some(id) => restore_times(store, &root, &store.get_times(id)?, dst, writer)?,
         None => 0,
     };
     Ok(CheckoutReport {
@@ -140,7 +173,13 @@ fn tree_paths(
 
 /// Set the recorded times: files and links first, then folders deepest first (a new entry
 /// changes the time of its folder).
-fn restore_times(store: &Store, root: &crate::tree::Tree, times: &crate::times::Times, dst: &Path) -> Result<u64> {
+fn restore_times(
+    store: &Store,
+    root: &crate::tree::Tree,
+    times: &crate::times::Times,
+    dst: &Path,
+    writer: &Writer<'_>,
+) -> Result<u64> {
     let mut paths = vec![(dst.to_path_buf(), 0, true)];
     tree_paths(store, root, dst, 0, &mut paths)?;
     if paths.len() != times.records.len() || paths.iter().zip(&times.records).any(|((_, _, dir), r)| *dir != r.below.is_some()) {
@@ -148,7 +187,7 @@ fn restore_times(store: &Store, root: &crate::tree::Tree, times: &crate::times::
     }
     let ns: Vec<i64> = times.records.iter().map(|r| r.ns).collect();
     let set = |(path, _, _): &(PathBuf, usize, bool), ns: &i64| -> Result<()> {
-        crate::times::set(path, *ns).with_context(|| format!("cannot set the time of {}", path.display()))
+        step(writer, || crate::times::set(path, *ns)).with_context(|| format!("cannot set the time of {}", path.display()))
     };
     paths.par_iter().zip(ns.par_iter()).filter(|((_, _, dir), _)| !dir).try_for_each(|(p, t)| set(p, t))?;
     let mut dirs: Vec<(&(PathBuf, usize, bool), &i64)> = paths.iter().zip(&ns).filter(|((_, _, dir), _)| *dir).collect();
@@ -166,27 +205,32 @@ impl Run<'_> {
             let child = if rel.is_empty() { e.name.clone() } else { [rel, b"/", &e.name].concat() };
             match &e.node {
                 Node::Dir { tree } => {
-                    fs::create_dir(&path).with_context(|| path.display().to_string())?;
+                    self.w(|| fs::create_dir(&path)).with_context(|| path.display().to_string())?;
                     let sub = self.store.get_tree(tree)?;
                     self.folder(&sub, &path, &child)?;
-                    fsx::set_xattrs(&path, &e.xattrs)?;
+                    self.w(|| fsx::set_xattrs(&path, &e.xattrs).map_err(std::io::Error::other))?;
                     self.modes.lock().expect("no panic holds the lock").push((path, e.mode));
                     self.dirs.fetch_add(1, Ordering::Relaxed);
                 }
                 Node::File { blob, size } => {
                     self.file(blob, *size, &path).with_context(|| format!("cannot write {}", path.display()))?;
-                    if !e.xattrs.is_empty() {
-                        // macOS sets no attribute on a file without the owner write bit.
-                        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-                        fsx::set_xattrs(&path, &e.xattrs)?;
-                    }
-                    fs::set_permissions(&path, fs::Permissions::from_mode(e.mode))?;
+                    self.w(|| {
+                        if !e.xattrs.is_empty() {
+                            // macOS sets no attribute on a file without the owner write bit.
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+                            fsx::set_xattrs(&path, &e.xattrs).map_err(std::io::Error::other)?;
+                        }
+                        fs::set_permissions(&path, fs::Permissions::from_mode(e.mode))
+                    })?;
                     self.files_made.lock().expect("no panic holds the lock").insert(child);
                     self.files.fetch_add(1, Ordering::Relaxed);
                 }
                 Node::Symlink { target } => {
-                    std::os::unix::fs::symlink(fsx::os(target), &path).with_context(|| path.display().to_string())?;
-                    fsx::set_xattrs(&path, &e.xattrs)?;
+                    self.w(|| {
+                        std::os::unix::fs::symlink(fsx::os(target), &path)?;
+                        fsx::set_xattrs(&path, &e.xattrs).map_err(std::io::Error::other)
+                    })
+                    .with_context(|| path.display().to_string())?;
                     self.symlinks.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -194,24 +238,29 @@ impl Run<'_> {
         })
     }
 
+    fn w<T>(&self, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+        step(self.writer, f)
+    }
+
     fn file(&self, blob: &Id, size: u64, path: &Path) -> Result<()> {
         if let Some(src) = self.store.hot_path(blob) {
-            let cloned = fsx::clone_or_copy(&src, path)?;
-            let counter = if cloned { &self.clones } else { &self.copies };
-            counter.fetch_add(1, Ordering::Relaxed);
-            // The caller sets the tree's mode next.
-            let len = fs::symlink_metadata(path)?.len();
+            // The store file opens with the store's rights; the new file is made by the writer.
+            let source = fs::File::open(&src)?;
+            let len = source.metadata()?.len();
             if len != size {
                 bail!("blob {blob} has {len} bytes, the tree says {size}");
             }
+            let cloned = self.w(|| fsx::clone_or_copy_from(&source, path))?;
+            let counter = if cloned { &self.clones } else { &self.copies };
+            counter.fetch_add(1, Ordering::Relaxed);
+            // The caller sets the tree's mode next.
             return Ok(());
         }
         let data = self.store.read_blob(blob)?;
         if data.len() as u64 != size {
             bail!("blob {blob} has {} bytes, the tree says {size}", data.len());
         }
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-        f.write_all(&data)?;
+        self.w(|| fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(&data))?;
         self.decoded.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
