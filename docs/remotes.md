@@ -107,6 +107,85 @@ A store whose `store.json` later names another mode is refused, so a writer of t
 project into a plain one.
 Use `--mode secret` when you clone a project that must stay encrypted.
 
+## Layr Cloud API v1 (Public and Private)
+
+A `layr+https://<host>/<project>` remote whose mode is `private` or `public` talks to the Layr Cloud
+API v1 (layr-cloud `docs/api.md`): base `https://<host>/api/v1/projects/<project>`.
+A remote with `--mode secret` keeps the encrypted store routes of the gateway.
+A `file://` or `s3://` store of any mode keeps the store layout above.
+
+```sh
+layr remote add cloud layr+https://cloud.layr.ws/app            # Private by default
+layr login cloud                                                # a person: sign in, register this machine
+LAYR_GATEWAY_TOKEN_FILE=/private/token layr push cloud          # a machine with an admin-issued token
+```
+
+- **Requests.** Each request sends `Authorization: Bearer <token>` (when there is one) and
+  `Layr-Client: <layr version>`. The token is the file in `LAYR_GATEWAY_TOKEN_FILE` (a machine or job
+  token, owner-only mode), else the person session that `layr login` saved in
+  `~/.config/layr/cloud/<host>.json`. A `426` answer stops the command with the minimum version
+  the server needs; there is no compatibility window. Errors name the `Layr-Server` version.
+- **Machine key.** Before the first record upload, the client registers the public key of this
+  machine: `PUT /api/v1/machines/<machine id>` `{"public_key":"<64 hex>"}`. The same key again is
+  `200`; another key for the same machine is `409`. The server checks each record segment of the
+  machine against this key.
+- **Person login.** `layr login <remote>`: `POST /api/v1/login` gives `{"code","link","expires"}`;
+  the person opens the link and signs in with a passkey; the client polls
+  `POST /api/v1/login/<code>` (`202` while waiting, then `{"login","token","expires"}`), saves the
+  session, and registers this machine's key with it.
+
+### Object ids
+
+The id scheme of docs/objects.md (#415) holds for remote objects too:
+
+```text
+id = lowercase hex SHA-256("<type> <decimal length>\0" || bytes)
+```
+
+`bytes` are the plain bytes of the object as the server stores them (never encrypted in these
+modes), so the server and every reader check an object against its id. Types in use:
+
+| Type | Bytes |
+|---|---|
+| `blob` | a whole file (docs/objects.md; equal to the Git SHA-256 blob id) |
+| `tree` | a canonical tree of docs/objects.md |
+| `part` | file frames of one push, one after the other (zstd frames: whole files or deltas) |
+| `state-tree` | the signed tree of one state: one JSON header line, then the zstd frame of the canonical tree JSON |
+| `chunk-pack` | a pack of content-defined chunks of a cache layer |
+| `git-pack` | a Git pack of imported commits |
+
+An upload names the type in the header `Layr-Object-Type: <type>`; the server computes the id
+from the type, the length and the body, and refuses a mismatch (`400 invalid`). A read checks the
+id with the type that the reference names (a tree link names a `part`, a state names a
+`state-tree`).
+
+### Trees, states and links
+
+- A state tree is the store tree format (`layr_store::format::Tree`) with one change: a file
+  frame link names its object by id instead of state, attempt and part:
+  `[<part id>, "", 0, <offset>, <length>, "full"|"delta"]`. Secret stores and bare folder or
+  bucket stores keep `[<state>, <attempt>, <part>, ...]`.
+- A state tree is always complete (no tree delta against a base), and its header names the
+  attempt `00000000`: the content names the object, so a retry gives the same id.
+- `PUT /states/<state>` `{"tree":"<state-tree id>"}` publishes the state after its parts and its
+  tree object. `GET /states/<state>` gives the tree id back.
+- Objects over 64 MiB go up in parts (`POST /objects/<id>/uploads`, then each part, then
+  `complete`). Before a large upload the client asks `POST /objects/missing`, so an object that the
+  project already holds is not sent again.
+
+### Records and refs
+
+- Record segments go up plain: `POST /records/<machine>/<first>-<last>`. A machine uploads only
+  its own segments (the token belongs to one machine). A fetch takes the records of every writer
+  that the server serves: the server access list, not local machine trust, decides who writes.
+- The server ref is the truth for the position of a line. After records and states, a push moves
+  each changed line with one `POST /refs/cas`: `name` `lines/<line id>`, `expect` the target this
+  machine last read from the server (null for a new line), `target` the local head, and `record`
+  the id of the newest record that moved the line. A `409 conflict` names the lines that moved on
+  the server: run `layr fetch <remote>` and push again. A fetch reads `GET /refs?prefix=lines/` and
+  keeps the targets as the next `expect`.
+- The client does not sweep: garbage collection is server-side.
+
 ## Push roles
 
 Each remote has a push role: `layr config remote.<name>.push required|optional|off`.
