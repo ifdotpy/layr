@@ -215,9 +215,11 @@ pub fn prepare(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let rest = changelog.strip_prefix("# Changelog\n\n").unwrap_or(&changelog);
     std::fs::write(root.join("CHANGELOG.md"), format!("# Changelog\n\n{text}{rest}"))?;
     let toml = std::fs::read_to_string(root.join("Cargo.toml"))?;
-    std::fs::write(root.join("Cargo.toml"), set_version(&toml, "[package]", &previous, &next)?)?;
+    // The workspace version is the version of layr and layr-api (`version.workspace = true`).
+    std::fs::write(root.join("Cargo.toml"), set_version(&toml, "[workspace.package]", &previous, &next)?)?;
     let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
-    std::fs::write(root.join("Cargo.lock"), set_version(&lock, "name = \"layr\"\n", &previous, &next)?)?;
+    let lock = set_version(&lock, "name = \"layr\"\n", &previous, &next)?;
+    std::fs::write(root.join("Cargo.lock"), set_version(&lock, "name = \"layr-api\"\n", &previous, &next)?)?;
     std::fs::write(root.join(".release-please-manifest.json"), format!("{{\n  \".\": \"{next}\"\n}}\n"))?;
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::json!({"previous": previous, "version": next, "tag": format!("v{next}")}));

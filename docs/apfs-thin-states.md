@@ -63,6 +63,12 @@ These paths read layers without a complete copy:
 - `status`, `add`, `save -m <message>`, `diff`, `restore`, `park` and `clean`.
 - Change lists (`changes::file_changes`), diffs, rename detection and ignore rules.
 - The git export. Git reads only the changed paths, from a small private copy.
+- A fast-forward `merge`: the update of the working folder, and the cache paths that its `save --caches` checks.
+  A line with overlays still reads complete trees.
+- `line new`: it clones the complete tree at the bottom of the layers into the new folder, then applies the layers.
+  Only the bottom clone and the entries that the layers add are made writable.
+- `merge`, `pick` and `replay` read the status of the working folder in place, as `status` does.
+  They make no copy of the folder for it.
 
 Other commands call `Repo::state_root`. It makes a view in `states/<id>`.
 `layr gc` removes views that no command used for `thin.view_seconds` (default 600).

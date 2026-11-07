@@ -3,9 +3,15 @@ members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/
 resolver = "2"
 
 [workspace.package]
+<<<<<<< head
 # The version of layr and layr-api: release-please updates this one place (layr-api must report
 # the version of the binary).
 version = "0.39.1"
+||||||| base
+=======
+# The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
+version = "0.40.1"
+>>>>>>> origin-https/main
 rust-version = "1.99.1"
 
 [workspace.metadata.layr-retest]
