@@ -148,7 +148,10 @@ impl Repo<'_> {
                 Some((store, refs)) => {
                     for tmp in &tmps {
                         crate::storage::create_subvolume(tmp)?;
-                        crate::objstore::checkout(&store, &refs, tmp)?;
+                        if rustix::process::geteuid().is_root() {
+                            std::os::unix::fs::chown(tmp, Some(ctx.caller.uid), Some(ctx.caller.gid))?;
+                        }
+                        crate::objstore::checkout(ctx, &store, &refs, tmp)?;
                     }
                 }
                 None => snapshots(&self.state_root(start)?, &tmps)?,

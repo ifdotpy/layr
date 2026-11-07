@@ -79,8 +79,11 @@ pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
 
 /// Make the folder `dst` (absent or empty) with the tree and times of a state: hot blobs become
 /// clones, other blobs are decoded.
-pub fn checkout(store: &Store, r: &StateRef, dst: &Path) -> Result<layr_objects::CheckoutReport> {
-    layr_objects::checkout_with(store, &r.tree, Some(&r.times), dst)
+pub fn checkout(ctx: &crate::ctx::Ctx, store: &Store, r: &StateRef, dst: &Path) -> Result<layr_objects::CheckoutReport> {
+    match crate::privs::CallerFs::of(ctx)? {
+        Some(caller) => layr_objects::checkout_as(store, &r.tree, Some(&r.times), dst, &|step| caller.run(step)),
+        None => layr_objects::checkout_with(store, &r.tree, Some(&r.times), dst),
+    }
 }
 
 /// The entry at `path` ("" is the root) of a tree, read from the objects (`layr show`).

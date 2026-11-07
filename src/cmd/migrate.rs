@@ -366,6 +366,13 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut map = serde_json::Map::new();
             for id in chunk {
                 let r = table.entries.get(id).expect("a verified state is in the table");
+                // A resumed run must not trust a journal whose objects were lost or changed.
+                if p.unrecorded.contains(id) {
+                    let (_, comparison, _, _) = super::objects::compare_checkout(&h, &store, id, r)?;
+                    if !comparison.differences.is_empty() {
+                        bail!("state {} no longer matches its migration journal: {}", ids::short(id), comparison.differences.join("; "));
+                    }
+                }
                 map.insert(id.clone(), serde_json::json!({"times": r.times.hex(), "tree": r.tree.hex()}));
             }
             let mut rec = Record::new(layr_model::validation::STATE_TREE_OP);
@@ -433,8 +440,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     record(&mut pending, &table)?;
     let imported = started.elapsed().as_secs_f64();
     let (e, packed, repack_s) = super::objects::repack_store(&h)?;
-    let _ = std::fs::remove_file(&marker);
-    let stat = store.stat()?;
+    let stat = crate::objstore::open(&repo.p)?.stat()?;
     outln!(
         ctx,
         "migrated {} state(s) ({} files, {} bytes read) in {:.1} s; repack {:.1} s ({} hot blobs turned cold, {} packs)",
@@ -456,7 +462,8 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         p.freed
     );
     outln!(ctx, "object store: {} ({} bytes)", human(stat.total_bytes()), stat.total_bytes());
-    delete_old(ctx, repo, a.has("--delete-old"), false)?;
+    delete_old(ctx, &h, a.has("--delete-old"), false)?;
+    std::fs::remove_file(&marker)?;
     Ok(0)
 }
 
@@ -486,7 +493,8 @@ fn deletable(repo: &Repo) -> Result<Vec<String>> {
 
 /// Remove the old snapshots of the verified states (`--delete-old`), or print what that frees.
 /// The records stay; a read makes a snapshot again from the object store (`objstore::build_state`).
-fn delete_old(ctx: &Ctx, repo: &Repo, delete: bool, dry: bool) -> Result<()> {
+fn delete_old(ctx: &Ctx, h: &Here, delete: bool, dry: bool) -> Result<()> {
+    let repo = &h.repo;
     if !crate::objstore::exists(&repo.p) {
         outln!(ctx, "old snapshots: nothing to delete (no state is migrated yet)");
         return Ok(());
@@ -506,6 +514,20 @@ fn delete_old(ctx: &Ctx, repo: &Repo, delete: bool, dry: bool) -> Result<()> {
     let left = plan(&candidates(repo, Some(&crate::objstore::open(&repo.p)?))?, &BTreeMap::new());
     if !left.todo.is_empty() {
         bail!("{} state(s) are not migrated yet: the old snapshots stay", left.todo.len());
+    }
+    // Verify every replacement before deleting any snapshot. Root objects alone do not prove
+    // that descendant times tables, blobs and delta bases are still present and readable.
+    let store = crate::objstore::open(&repo.p)?;
+    for id in &ids {
+        let state = repo.state(id)?;
+        let r = StateRef {
+            tree: Id::parse(state.tree.as_deref().context("missing migrated tree")?)?,
+            times: Id::parse(state.times.as_deref().context("missing migrated times")?)?,
+        };
+        let (_, comparison, _, _) = super::objects::compare_checkout(&h, &store, id, &r)?;
+        if !comparison.differences.is_empty() {
+            bail!("state {} cannot replace its old snapshot: {}", ids::short(id), comparison.differences.join("; "));
+        }
     }
     let gone = super::admin::drop_trees(repo, &ids)?;
     outln!(
@@ -572,7 +594,7 @@ fn dry_run(ctx: &Ctx, h: &Here, delete: bool) -> Result<i32> {
         human(super::admin::states_bytes(repo, &present)),
         present.len()
     );
-    delete_old(ctx, repo, delete, true)?;
+    delete_old(ctx, h, delete, true)?;
     Ok(0)
 }
 
