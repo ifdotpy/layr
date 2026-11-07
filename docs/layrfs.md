@@ -27,13 +27,21 @@ the real tool. Later calls are answered from the index. Build the index ahead of
 `layr fs warm [<dir>] [--wait]`. `layr fs status` lists the indexed trees and their size;
 `layr fs stop` stops the server.
 
-The server listens on `~/Library/Caches/layr/layrfs.sock` (macOS) or
-`$XDG_RUNTIME_DIR/layr/layrfs.sock` (Linux; `/tmp/layr-<uid>/` without it), mode 0600, and
-answers only its own user. Its log is `layrfs.log` next to the socket.
+Each layr version has its own server and socket, `layrfs-<version>.sock` in
+`~/Library/Caches/layr/` (macOS) or `$XDG_RUNTIME_DIR/layr/` (Linux; `/tmp/layr-<uid>/` without
+it), so two layr builds on one machine do not stop each other. The socket has mode 0600, and the
+server answers only its own user. The client talks only to its own user's server: the socket's
+folder must belong to the user and not be writable by others, and the uid of the process behind
+the socket (`getpeereid`, `SO_PEERCRED`) must be the user's. Otherwise another user could listen
+first in `/tmp/layr-<uid>/` and print anything into an agent's context; the client then runs the
+real tool. The server's log is `layrfs.log` next to the socket.
 
 ## What is served
 
-A tree is the git work tree around the working folder: the nearest folder with a `.git` entry.
+A tree is the layr line around the working folder (a folder `<store>/projects/<project>/lines/<line>`,
+or a line moved out of the store), or else the git work tree around it (the nearest folder with a
+`.git` entry). rg itself applies `.gitignore` files only inside a git repository; the index uses
+the same rules, so a line without `.git` is served the same way.
 
 | Tool | Served | Output |
 |---|---|---|
@@ -43,7 +51,7 @@ A tree is the git work tree around the working folder: the nearest folder with a
 The real tool runs (a fallback) when:
 
 - stdout is a terminal, or `LAYR_FS_OFF` is set;
-- the folder is not in a git work tree;
+- the folder is neither in a layr line nor in a git work tree;
 - a flag or expression is not in the table, for example `--hidden`, `-u`, a whitelist glob
   (`-g '*.rs'`, which overrides ignore rules), `-o` in `find`, `-exec`;
 - `rg` has no path and its standard input is a file, a pipe or a socket (rg searches stdin then);
@@ -58,17 +66,28 @@ PATH that is not the layr binary runs.
 
 ## How it stays current
 
-The server watches each indexed tree: FSEvents with file events on macOS, inotify with a watch per
-folder on Linux. Before it answers, it waits until every change made before the call is applied
-(`FSEventStreamFlushSync` on macOS; on Linux the kernel queues events when the change happens, and
-the server drains the queue). An agent that writes a file and then searches finds it.
+The server watches each indexed tree: FSEvents with file events on macOS, inotify on Linux. A
+creation, removal or rename refreshes that path. A changed `.gitignore`, `.ignore` or `.rgignore`
+refreshes its folder; a changed `.git/info/exclude` or lost events rebuild the tree. A rebuild
+walks the tree without holding the index, and queries use the old index until it is replaced.
 
-A creation, removal or rename refreshes that path. A changed `.gitignore`, `.ignore` or
-`.rgignore` refreshes its folder; a changed `.git/info/exclude` or lost events rebuild the tree.
-A file written below a folder that rg does not walk (`target/`) costs no visibility check.
+Events can arrive after a query: FSEvents passes through `fseventsd`, and
+`FSEventStreamFlushSync` does not wait for events that `fseventsd` has not received yet. So before
+it answers, the server compares the modification time of every folder in the query's scope (and
+of the ignore files that apply) with the index, in parallel, and applies what changed. A creation,
+removal or rename changes its folder's time inside the system call, so every call that returned
+before the query is seen, without writing anything into the tree (as the cookie files of other
+watchers do). A folder changed within the last two seconds is listed again on each query, because
+a coarse clock may give two changes the same time (git's rule for racy timestamps).
 
-On Linux, the number of folders is limited by `fs.inotify.max_user_watches`. A tree that needs
-more is not indexed, and its tools fall back.
+On Linux, inotify queues each event when the change happens, and the server drains the queue
+before a query. Only folders that rg enters are watched, so ignored folders (`target/`,
+`node_modules`, `.git`) do not count against `fs.inotify.max_user_watches`; `find`, which reaches
+them, compares folder times as on macOS. A tree that still needs more watches than the limit is
+not indexed, and its tools fall back.
+
+`tests/t197-layrfs-tools.sh` writes a file and searches for it at once 1,000 times while another
+process creates and removes files, with and without a watcher.
 
 ## Limits
 
@@ -78,8 +97,7 @@ more is not indexed, and its tools fall back.
 - `find` prints entries in sorted order, not in directory order.
 - The global git excludes file is read when the index is built; a later change of it needs
   `layr fs stop`.
-- A client and a server of different layr builds do not talk: the server exits, the client falls
-  back, and the next call starts the new server.
+- Each layr version starts its own server, which indexes the trees it is asked about.
 
 ## Measurements
 

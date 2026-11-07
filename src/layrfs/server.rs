@@ -5,7 +5,7 @@
 
 use super::index::Tree;
 use super::watch::{Sink, Watcher};
-use super::{find, read_frame, rg, version, write_frame, FrameWriter, Outcome};
+use super::{find, peer_uid, read_frame, rg, version, write_frame, FrameWriter, Outcome};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -37,19 +37,24 @@ struct LineSink(Weak<Line>);
 impl Sink for LineSink {
     fn changed(&self, paths: Vec<PathBuf>, rescan: bool) {
         let Some(line) = self.0.upgrade() else { return };
+        // A rebuild (lost events, a changed `.git/info/exclude`) walks the tree without holding
+        // the index; queries keep using the old one until the new one replaces it. Events that
+        // come meanwhile wait in the watcher's queue and are applied after.
+        let rebuild = rescan || paths.iter().any(|p| p.as_os_str().is_empty() || p == Path::new(".git/info/exclude"));
+        if rebuild && matches!(&*line.state.read().unwrap(), State::Ready(_)) {
+            let fresh = Tree::build(&line.root);
+            if let State::Ready(tree) = &mut *line.state.write().unwrap() {
+                *tree = fresh;
+            }
+            return;
+        }
         let mut st = line.state.write().unwrap();
         match &mut *st {
             State::Building { pending, rescan: r } => {
                 pending.extend(paths);
                 *r |= rescan;
             }
-            State::Ready(tree) => {
-                if rescan {
-                    *tree = Tree::build(&line.root);
-                } else {
-                    tree.refresh(&line.root, &paths);
-                }
-            }
+            State::Ready(tree) => tree.refresh(&line.root, &paths),
             State::Failed(_) => {}
         }
     }
@@ -60,8 +65,10 @@ impl Line {
         let started = Instant::now();
         let sink: Arc<dyn Sink> = Arc::new(LineSink(Arc::downgrade(self)));
         // The watcher starts before the walk, so that no change during the walk is lost.
-        match Watcher::start(&self.root, sink) {
-            Ok(w) => *self.watcher.lock().unwrap() = Some(Arc::new(w)),
+        // `LAYR_FS_NO_WATCH` leaves it out: every query then compares folder times (tests).
+        let watch = std::env::var_os("LAYR_FS_NO_WATCH").is_none_or(|v| v.is_empty());
+        match if watch { Watcher::start(&self.root, sink).map(Some) } else { Ok(None) } {
+            Ok(w) => *self.watcher.lock().unwrap() = w.map(Arc::new),
             Err(e) => {
                 *self.state.write().unwrap() = State::Failed(format!("{e:#}"));
                 self.mark_ready();
@@ -131,17 +138,6 @@ impl Server {
     }
 }
 
-fn peer_uid(sock: &UnixStream) -> Result<u32> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(crate::sys::peer_credentials(sock)?.0)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Ok(rustix::net::sockopt::socket_peercred(sock)?.uid.as_raw())
-    }
-}
-
 fn env_secs(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -156,8 +152,8 @@ pub fn serve(path: &Path) -> Result<()> {
         std::fs::set_permissions(dir, PermissionsExt::from_mode(0o700))?;
     }
     let meta = std::fs::metadata(dir).with_context(|| format!("cannot open {}", dir.display()))?;
-    if meta.uid() != me {
-        bail!("{} belongs to another user; set LAYR_FS_SOCKET", dir.display());
+    if meta.uid() != me || meta.mode() & 0o022 != 0 {
+        bail!("{} belongs to another user or others may write to it; set LAYR_FS_SOCKET", dir.display());
     }
     if UnixStream::connect(path).is_ok() {
         eprintln!("layrfs: a server already listens on {}", path.display());
@@ -225,11 +221,9 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
     }
     let req: serde_json::Value = serde_json::from_slice(&data)?;
     if req.get("version").and_then(|v| v.as_str()) != Some(version().as_str()) {
-        // A client of another build: it runs the real tool, and the next call starts a
-        // server of its own build.
-        reply(sock, serde_json::json!({"fallback": "the layrfs server runs another layr build; it exits"}))?;
-        let _ = std::fs::remove_file(socket);
-        std::process::exit(0);
+        // Each version has its own socket; a client reaches another version's server only
+        // through `LAYR_FS_SOCKET`. It runs the real tool, and this server keeps running.
+        return reply(sock, serde_json::json!({"fallback": "the layrfs server runs another layr build"}));
     }
     let root = |key: &str| -> Result<PathBuf> {
         let p = req.get(key).and_then(|v| v.as_str()).context("missing path")?;
@@ -241,25 +235,62 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
             let cwd = root_rel(&root, &root_cwd(&req)?)?;
             let line = server.line(&root);
             let watcher = line.watcher.lock().unwrap().clone();
-            if let Some(w) = watcher {
+            if let Some(w) = &watcher {
                 w.sync();
             }
-            let st = line.state.read().unwrap();
-            let tree = match &*st {
-                State::Ready(t) => t,
-                State::Building { .. } => return reply(sock, serde_json::json!({"fallback": "the index is being built"})),
-                State::Failed(e) => return reply(sock, serde_json::json!({"fallback": format!("no index: {e}")})),
-            };
             let args: Vec<String> = serde_json::from_value(req.get("args").cloned().unwrap_or_default())?;
             let stdin_readable = req.get("stdin_readable").and_then(|v| v.as_bool()).unwrap_or(true);
             let mut out = FrameWriter { sock, kind: b'o', buf: Vec::new() };
             let mut err = FrameWriter { sock, kind: b'e', buf: Vec::new() };
-            let outcome = match req.get("tool").and_then(|v| v.as_str()) {
-                Some("rg") => rg::run(&root, &cwd, stdin_readable, &args, tree, &mut out, &mut err),
-                Some("find") => find::run(&cwd, &args, tree, &mut out),
-                _ => Outcome::Fallback("unknown tool".into()),
+            // FSEvents can deliver a change after the flush, so on macOS a query compares folder
+            // times in its scope first. inotify queues events when the change happens, so its
+            // drain is exact; but folders that rg does not enter are not watched and `find`
+            // reaches them, and without a watcher every query compares.
+            let is_find = req.get("tool").and_then(|v| v.as_str()) == Some("find");
+            let verify = cfg!(target_os = "macos") || watcher.is_none() || is_find;
+            let scope = super::index::key(&cwd);
+            // The comparison and the reading of the index happen under one lock: a rebuild
+            // that replaces the tree in between would answer from a walk older than the change.
+            let plan = |tree: &Tree, out: &mut FrameWriter| -> (Outcome, Option<rg::Search>) {
+                match req.get("tool").and_then(|v| v.as_str()) {
+                    Some("rg") => match rg::plan(&root, &cwd, stdin_readable, &args, tree, out) {
+                        Ok(rg::Step::Done(code)) => (Outcome::Done(code), None),
+                        Ok(rg::Step::Search(s)) => (Outcome::Done(0), Some(s)),
+                        Err(why) => (Outcome::Fallback(why), None),
+                    },
+                    Some("find") => (find::run(&cwd, &args, tree, out), None),
+                    _ => (Outcome::Fallback("unknown tool".into()), None),
+                }
             };
-            drop(st);
+            let not_ready = |st: &State| match st {
+                State::Ready(_) => None,
+                State::Building { .. } => Some("the index is being built".to_string()),
+                State::Failed(e) => Some(format!("no index: {e}")),
+            };
+            let (outcome, search) = {
+                let st = line.state.read().unwrap();
+                if let Some(why) = not_ready(&st) {
+                    return reply(sock, serde_json::json!({"fallback": why}));
+                }
+                let State::Ready(tree) = &*st else { unreachable!() };
+                if !verify || tree.stale(&root, &scope).is_empty() {
+                    plan(tree, &mut out)
+                } else {
+                    drop(st);
+                    let mut st = line.state.write().unwrap();
+                    if let Some(why) = not_ready(&st) {
+                        return reply(sock, serde_json::json!({"fallback": why}));
+                    }
+                    let State::Ready(tree) = &mut *st else { unreachable!() };
+                    let stale = tree.stale(&root, &scope);
+                    tree.apply_stale(&root, stale);
+                    plan(tree, &mut out)
+                }
+            };
+            let outcome = match (outcome, search) {
+                (Outcome::Done(_), Some(s)) => Outcome::Done(s.run(&mut out, &mut err)),
+                (o, _) => o,
+            };
             match outcome {
                 Outcome::Fallback(why) => reply(sock, serde_json::json!({"fallback": why})),
                 Outcome::Done(code) => {

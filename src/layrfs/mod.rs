@@ -4,9 +4,9 @@
 //! The tools are substituted on the agent's PATH: `rg` and `find` link to the layr binary, which
 //! sends the arguments to the server (`layr tool rg ...` does the same). The server answers with
 //! the output of the real tool, or with a fallback, and then the client runs the real tool. A
-//! fallback is used for unsupported flags, a terminal on stdout, a folder outside a git work
-//! tree, a server that is not running yet (it is started then) and an index that is still being
-//! built. See `docs/layrfs.md`.
+//! fallback is used for unsupported flags, a terminal on stdout, a folder outside a layr line or
+//! git work tree, a server that is not running yet (it is started then) or not the user's own,
+//! and an index that is still being built. See `docs/layrfs.md`.
 
 pub mod find;
 pub mod index;
@@ -31,25 +31,61 @@ pub enum Outcome {
 /// The tools that can be substituted.
 pub const TOOLS: &[&str] = &["rg", "find"];
 
-/// The version a client and a server must share; a server with another version exits.
+/// The version a client and a server must share. Each version has its own socket, so two layr
+/// builds on one machine (Studio's and the one on PATH) run side by side.
 fn version() -> String {
     format!("{} {}", env!("CARGO_PKG_VERSION"), option_env!("LAYR_BUILD_ID").unwrap_or("dev"))
 }
 
-/// The socket of the server of this user: `LAYR_FS_SOCKET`, or a per-user path.
+/// The socket of this user's server of this layr version: `LAYR_FS_SOCKET`, or a per-user
+/// folder with one socket per version.
 pub fn socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("LAYR_FS_SOCKET") {
         return PathBuf::from(p);
     }
     let uid = rustix::process::getuid().as_raw();
+    let name: String = version().chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '-' }).collect();
+    let name = format!("layrfs-{name}.sock");
     if cfg!(target_os = "macos") {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Caches/layr/layrfs.sock");
+            return PathBuf::from(home).join("Library/Caches/layr").join(name);
         }
     } else if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(run).join("layr/layrfs.sock");
+        return PathBuf::from(run).join("layr").join(name);
     }
-    PathBuf::from(format!("/tmp/layr-{uid}/layrfs.sock"))
+    PathBuf::from(format!("/tmp/layr-{uid}")).join(name)
+}
+
+/// The uid of the process at the other end of a Unix socket.
+fn peer_uid(sock: &UnixStream) -> std::io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::sys::peer_credentials(sock)?.0)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(rustix::net::sockopt::socket_peercred(sock)?.uid.as_raw())
+    }
+}
+
+/// Connect to this user's server, and only to it: the socket's folder must belong to the user
+/// and not be writable by others, and the process that answers must run as the user. Another
+/// user could otherwise create `/tmp/layr-<uid>/` first and print anything into an agent's
+/// context.
+fn connect(path: &Path) -> Result<UnixStream, String> {
+    use std::os::unix::fs::MetadataExt;
+    let me = rustix::process::getuid().as_raw();
+    let dir = path.parent().ok_or("socket path without a folder")?;
+    let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if meta.uid() != me || meta.mode() & 0o022 != 0 {
+        return Err(format!("{} belongs to another user or others may write to it", dir.display()));
+    }
+    let sock = UnixStream::connect(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    match peer_uid(&sock) {
+        Ok(uid) if uid == me => Ok(sock),
+        Ok(uid) => Err(format!("the process behind {} runs as uid {uid}", path.display())),
+        Err(e) => Err(format!("cannot check the process behind {}: {e}", path.display())),
+    }
 }
 
 // Frames: one kind byte, a 4-byte big-endian length, then the data.
@@ -100,16 +136,28 @@ impl Write for FrameWriter<'_> {
     }
 }
 
-/// The git work tree that holds `dir`: the nearest folder with a `.git` entry.
-fn work_tree(dir: &Path) -> Option<PathBuf> {
-    let mut d = Some(dir);
-    while let Some(p) = d {
-        if p.join(".git").symlink_metadata().is_ok() {
+/// The tree that holds `dir`: its layr line (a folder `<store>/projects/<project>/lines/<line>`,
+/// or a line moved out of the store), or else the git work tree around it (the nearest folder
+/// with a `.git` entry).
+fn tree_root(dir: &Path) -> Option<PathBuf> {
+    for p in dir.ancestors() {
+        let lines = p.parent();
+        let projects = lines.and_then(Path::parent).and_then(Path::parent);
+        if lines.and_then(Path::file_name) == Some(std::ffi::OsStr::new("lines"))
+            && projects.and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects"))
+        {
             return Some(p.to_path_buf());
         }
-        d = p.parent();
     }
-    None
+    let moved = crate::linepaths::index(&crate::store::default_root())
+        .into_iter()
+        .filter_map(|e| e.path.canonicalize().ok())
+        .filter(|p| dir.starts_with(p))
+        .max_by_key(|p| p.components().count());
+    if moved.is_some() {
+        return moved;
+    }
+    dir.ancestors().find(|p| p.join(".git").symlink_metadata().is_ok()).map(Path::to_path_buf)
 }
 
 /// Standard input that `rg` would search: a file, a pipe or a socket.
@@ -213,12 +261,15 @@ fn serve_tool(tool: &str, args: &[String]) -> Result<i32, String> {
         return Err("RIPGREP_CONFIG_PATH adds arguments".into());
     }
     let cwd = std::env::current_dir().and_then(|d| d.canonicalize()).map_err(|e| format!("working folder: {e}"))?;
-    let root = work_tree(&cwd).ok_or("not in a git work tree")?;
-    let sock = match UnixStream::connect(socket_path()) {
+    let root = tree_root(&cwd).ok_or("not in a layr line or a git work tree")?;
+    let path = socket_path();
+    let sock = match connect(&path) {
         Ok(s) => s,
         Err(e) => {
-            spawn_server();
-            return Err(format!("the layrfs server is starting ({e})"));
+            if UnixStream::connect(&path).is_err() {
+                spawn_server(); // nothing listens yet; a foreign listener is never replaced here
+            }
+            return Err(format!("no layrfs server to use ({e})"));
         }
     };
     let req = serde_json::json!({
@@ -282,7 +333,7 @@ pub fn run_fs(args: &[String]) -> Result<i32> {
                 None => std::env::current_dir()?,
             };
             let dir = dir.canonicalize().with_context(|| format!("cannot open {}", dir.display()))?;
-            let root = work_tree(&dir).with_context(|| format!("{} is not in a git work tree", dir.display()))?;
+            let root = tree_root(&dir).with_context(|| format!("{} is not in a layr line or a git work tree", dir.display()))?;
             let v = request(serde_json::json!({"op": "warm", "root": root, "wait": wait}), true)?;
             println!("{}", v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown"));
             Ok(0)
@@ -321,14 +372,14 @@ pub fn run_fs(args: &[String]) -> Result<i32> {
 /// Send a control request; `start` starts the server when it is not running.
 fn request(req: serde_json::Value, start: bool) -> Result<serde_json::Value> {
     let path = socket_path();
-    let sock = match UnixStream::connect(&path) {
+    let sock = match connect(&path) {
         Ok(s) => s,
-        Err(e) if start => {
+        Err(e) if start && UnixStream::connect(&path).is_err() => {
             spawn_server();
             let mut tries = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                if let Ok(s) = UnixStream::connect(&path) {
+                if let Ok(s) = connect(&path) {
                     break s;
                 }
                 tries += 1;
@@ -337,7 +388,7 @@ fn request(req: serde_json::Value, start: bool) -> Result<serde_json::Value> {
                 }
             }
         }
-        Err(e) => bail!("the layrfs server is not running ({}: {e})", path.display()),
+        Err(e) => bail!("no layrfs server to use: {e}"),
     };
     let mut req = req;
     req["version"] = version().into();
