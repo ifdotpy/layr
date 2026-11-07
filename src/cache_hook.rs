@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 
 /// The soft limit of one hook: the adapter stops its processes at it and skips or restores the folder.
 pub const HOOK_LIMIT: Duration = Duration::from_secs(120);
-/// The soft limit of one build of the standard commands (`warm`): a build of a large project takes minutes.
-pub const WARM_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// The soft limit of one build of the standard commands (`warm`): a build of a large project on a loaded machine
+/// takes long, and no one waits for the background pass. A build stopped at the limit keeps the units it finished;
+/// the next pass goes on from them.
+pub const WARM_LIMIT: Duration = Duration::from_secs(120 * 60);
 /// The soft limit of a prune in the background follow pass: no one waits for it, and a loaded machine (tests of other
 /// lines) makes a prune of seconds take minutes. A prune cut at its limit keeps its garbage until the next pass.
 pub const BACKGROUND_PRUNE_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -409,6 +411,20 @@ fn kill_group(pid: u32) {
     let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
 }
 
+/// The worker and its processes (cargo, pnpm) stop when the layr process that started it goes (a daemon restart, a
+/// killed command): nobody waits for them any more, and they must not keep writing a cache folder that the next
+/// pass copies or builds. The worker leads its process group, so one kill of the group stops all of them.
+fn stop_when_orphaned() {
+    let parent = rustix::process::getppid();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if rustix::process::getppid() != parent {
+            kill_group(std::process::id());
+            std::process::exit(1);
+        }
+    });
+}
+
 /// The worker (`__cache-hook`): runs the mode and the adapter that its environment names, and prints the
 /// report. Exit code 0 when a report was printed.
 pub fn worker() -> i32 {
@@ -417,6 +433,7 @@ pub fn worker() -> i32 {
 
 /// The worker with the adapters given (tests use fake adapters).
 pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
+    stop_when_orphaned();
     let var = |k: &str| std::env::var(k).unwrap_or_default();
     let setting = var(ENV_SETTING);
     let setting = (setting != "-").then_some(setting);

@@ -43,6 +43,19 @@ pub fn line_deleted(id: &str) {
     }
 }
 
+/// Final states of deleted lines that get a complete tree after the command (`keyframe_later`).
+static FINALS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// The thin final state of a deleted line gets a complete tree in the background after this
+/// command (`layr __keyframe ... final`), not in the delete: its copy of the whole tree and the
+/// seal of every entry took seconds under the project lock. `layr gc` makes the ones that a stopped
+/// process left.
+pub fn keyframe_later(state: &str) {
+    if let Ok(mut finals) = FINALS.lock() {
+        finals.insert(state.to_string());
+    }
+}
+
 /// A record moved a line head to `state`.
 pub fn head_moved(state: &str) {
     if let Ok(mut moved) = MOVED.lock() {
@@ -74,9 +87,16 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
         if !moved.is_empty() {
             keyframe_heads(store, &name, &moved);
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(dir) = store.project_dir(&name) {
+            for id in finals.iter().filter(|id| dir.join("deltas").join(id).is_dir()) {
+                spawn_keyframe(&store.root, &name, id, true);
+            }
         }
         if !left.is_empty() || !deleted.is_empty() {
             if let Err(e) = drop_derived(store, &name, &left, &deleted) {
@@ -130,7 +150,7 @@ fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
         for id in moved.iter().filter(|id| p.delta_path(id).is_dir()) {
             if crate::thin::chain_len(&p, id) > max {
-                spawn_keyframe(&store.root, name, id);
+                spawn_keyframe(&store.root, name, id, false);
             }
         }
     }
@@ -138,12 +158,17 @@ fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
     let _ = (store, name, moved);
 }
 
-/// Start `layr __keyframe <store> <project> <state>` in the background; without it the next command tries again.
+/// Start `layr __keyframe <store> <project> <state> [final]` in the background; without it the next command (or
+/// `gc`, for a final state) tries again.
 #[cfg(target_os = "macos")]
-fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
+fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str, final_state: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
+    let mut args: Vec<&std::ffi::OsStr> = vec!["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()];
+    if final_state {
+        args.push("final".as_ref());
+    }
     let _ = std::process::Command::new(exe)
-        .args(["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -154,19 +179,21 @@ fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
 /// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
 /// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
 /// free step moves the bases that nothing uses now. One process per project makes complete trees at a time; another
-/// one finds the work done or leaves it to the next save.
+/// one finds the work done or leaves it to the next save. The final state of a deleted line (`final_state`) gets its
+/// complete tree whatever its chain, and waits for a process of another state.
 #[cfg(target_os = "macos")]
-pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
+pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_state: bool) -> Result<()> {
     let store = Store::open(root)?;
     let p = Project::open(&store, name)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("keyframe.lock"))?;
-    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+    let take = if final_state { rustix::fs::FlockOperation::LockExclusive } else { rustix::fs::FlockOperation::NonBlockingLockExclusive };
+    if rustix::fs::flock(&lock, take).is_err() {
         return Ok(());
     }
     {
         let _lock = p.lock()?;
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
-        if !p.delta_path(id).is_dir() || crate::thin::chain_len(&p, id) <= max {
+        if !p.delta_path(id).is_dir() || (!final_state && crate::thin::chain_len(&p, id) <= max) {
             return Ok(());
         }
         crate::thin::complete_tree(&p, id)?;

@@ -128,6 +128,7 @@ try:
     assert not list((root / 'store1').rglob('.layr-copy-*'))
     print(f'{checks} status comparisons passed', flush=True)
 finally:
+    subprocess.run(['/bin/chmod', '-R', '-N', str(root)], capture_output=True)
     subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=True)
     import shutil
     shutil.rmtree(root)

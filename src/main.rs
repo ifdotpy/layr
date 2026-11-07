@@ -102,9 +102,10 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
-    if argv.first().map(String::as_str) == Some("__keyframe") && argv.len() == 4 {
-        // A complete tree for a thin line head with a long chain, after the command that moved it (`free`).
-        if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3]) {
+    if argv.first().map(String::as_str) == Some("__keyframe") && (argv.len() == 4 || argv.len() == 5 && argv[4] == "final") {
+        // A complete tree for a thin line head with a long chain, after the command that moved it, or for the
+        // final state of a deleted line (`free`).
+        if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3], argv.len() == 5) {
             eprintln!("layr keyframe: {e:#}");
             std::process::exit(1);
         }

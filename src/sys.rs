@@ -1275,6 +1275,8 @@ pub struct BulkEntry {
     pub mtime: (i64, i64),
     pub ctime: (i64, i64),
     pub birth: (i64, i64),
+    /// `st_flags`: the immutable flag of a sealed entry of an older store (`apfs_seal_entry`).
+    pub flags: u32,
     pub data: ApfsDataIdentity,
 }
 
@@ -1296,6 +1298,7 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
             | libc::ATTR_CMN_OWNERID
             | libc::ATTR_CMN_GRPID
             | libc::ATTR_CMN_ACCESSMASK
+            | libc::ATTR_CMN_FLAGS
             | libc::ATTR_CMN_GEN_COUNT
             | libc::ATTR_CMN_FILEID,
         volattr: 0,
@@ -1358,6 +1361,8 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
             q += 4;
             let access = u32_at(q)?;
             q += 4;
+            let flags = u32_at(q)?;
+            q += 4;
             let generation = u32_at(q)?;
             q += 4;
             let ino = u64_at(q)?;
@@ -1386,6 +1391,7 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
                 mtime,
                 ctime,
                 birth,
+                flags,
                 data: ApfsDataIdentity {
                     generation: (cmn & libc::ATTR_CMN_GEN_COUNT != 0 && generation != 0).then_some(generation),
                     clone_id: (fork & libc::ATTR_CMNEXT_CLONEID != 0 && clone_id != 0).then_some(clone_id),
@@ -1432,19 +1438,366 @@ pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>)
     }
     read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
 }
+/// Set (`readonly`) or clear the immutable flag of the entry itself. Clearing also removes the
+/// seal entry of its ACL (`apfs_seal_entry`): a copy of a sealed entry can carry either seal, and
+/// every caller that opens an entry for a change opens both.
 #[cfg(target_os = "macos")]
 pub fn apfs_immutable(path: &std::path::Path, readonly: bool) -> io::Result<()> {
+    // Clear the flag before editing an ACL: an immutable entry refuses ACL writes.
+    apfs_flag(path, readonly)?;
+    if !readonly {
+        apfs_unseal_entry(path)?;
+    }
+    Ok(())
+}
+
+/// Set or clear only the immutable flag of the entry itself (no ACL read).
+#[cfg(target_os = "macos")]
+pub fn apfs_flag(path: &std::path::Path, readonly: bool) -> io::Result<()> {
     use std::os::macos::fs::MetadataExt;
     let flags = std::fs::symlink_metadata(path)?.st_flags();
-    let next = if readonly { flags | libc::UF_IMMUTABLE } else { flags & !libc::UF_IMMUTABLE };
+    apfs_set_flags(path, flags, if readonly { flags | libc::UF_IMMUTABLE } else { flags & !libc::UF_IMMUTABLE })
+}
+
+/// Change the flags of the entry itself from `flags` (known, from a scan) to `next`.
+#[cfg(target_os = "macos")]
+pub fn apfs_set_flags(path: &std::path::Path, flags: u32, next: u32) -> io::Result<()> {
     if next == flags {
         return Ok(());
     }
-    let flags = next;
     let path = cpath(path)?;
     // SAFETY: the path is valid; lchflags changes the entry itself, never the target of a link.
-    if unsafe { libc::lchflags(path.as_ptr(), flags) } != 0 {
+    if unsafe { libc::lchflags(path.as_ptr(), next) } != 0 {
         return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// ----- The seal of the entries of a state (docs/apfs.md, "Seals") -----
+//
+// An entry below the root of a sealed tree has one ACL entry first: everyone is denied writes of
+// its data, new or removed entries in it, and changes of its attributes, extended attributes, ACL
+// and owner. A folder clone (`clonefile`) does not copy the ACLs of the entries below its root, so
+// a writable copy of a sealed tree needs no pass over its entries. The root keeps the immutable
+// flag: its rename and its marker need no ACL change.
+
+/// The denied rights of the seal entry. `WRITE_DATA` is also `ADD_FILE` and `APPEND_DATA` is also
+/// `ADD_SUBDIRECTORY` for a folder; `DELETE` stays allowed, so a delete opens only the folders.
+#[cfg(target_os = "macos")]
+const SEAL_RIGHTS: u64 = (1 << 2) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 10) | (1 << 12) | (1 << 13);
+#[cfg(target_os = "macos")]
+const ACL_EXTENDED_DENY: libc::c_int = 2;
+/// The seal entry is marked inherited: copies (`clonefile` with `CLONE_ACL`, `copyfile` with
+/// `COPYFILE_ACL`) leave inherited entries out, so no copy of a sealed entry carries the seal, also
+/// a copy that an older layr makes. The kernel applies the entry like any other.
+#[cfg(target_os = "macos")]
+const ACL_ENTRY_INHERITED: libc::c_int = 1 << 4;
+#[cfg(target_os = "macos")]
+const ACL_FIRST_ENTRY: libc::c_int = 0;
+#[cfg(target_os = "macos")]
+const ACL_NEXT_ENTRY: libc::c_int = -1;
+/// The UUID of the group `everyone` (gid 12), which every user is a member of.
+#[cfg(target_os = "macos")]
+const EVERYONE: [u8; 16] = [0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0xAB, 0xCD, 0xEF, 0x00, 0x00, 0x00, 0x0C];
+
+// SAFETY: these declarations match the macOS ACL C ABI (sys/acl.h).
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(ptr: *mut libc::c_void) -> libc::c_int;
+    fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_link_np(path: *const libc::c_char, kind: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, kind: libc::c_int) -> libc::c_int;
+    fn acl_get_entry(acl: *mut libc::c_void, id: libc::c_int, entry: *mut *mut libc::c_void) -> libc::c_int;
+    fn acl_create_entry_np(acl: *mut *mut libc::c_void, entry: *mut *mut libc::c_void, index: libc::c_int) -> libc::c_int;
+    fn acl_delete_entry(acl: *mut libc::c_void, entry: *mut libc::c_void) -> libc::c_int;
+    fn acl_get_tag_type(entry: *mut libc::c_void, tag: *mut libc::c_int) -> libc::c_int;
+    fn acl_set_tag_type(entry: *mut libc::c_void, tag: libc::c_int) -> libc::c_int;
+    fn acl_get_qualifier(entry: *mut libc::c_void) -> *mut libc::c_void;
+    fn acl_set_qualifier(entry: *mut libc::c_void, qualifier: *const libc::c_void) -> libc::c_int;
+    fn acl_get_permset_mask_np(entry: *mut libc::c_void, mask: *mut u64) -> libc::c_int;
+    fn acl_set_permset_mask_np(entry: *mut libc::c_void, mask: u64) -> libc::c_int;
+    fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
+    fn acl_get_flagset_np(obj: *mut libc::c_void, flagset: *mut *mut libc::c_void) -> libc::c_int;
+    fn acl_set_flagset_np(obj: *mut libc::c_void, flagset: *mut libc::c_void) -> libc::c_int;
+    fn acl_add_flag_np(flagset: *mut libc::c_void, flag: libc::c_int) -> libc::c_int;
+    fn acl_get_flag_np(flagset: *mut libc::c_void, flag: libc::c_int) -> libc::c_int;
+}
+
+/// An ACL that libc allocated; freed once.
+#[cfg(target_os = "macos")]
+struct Acl(*mut libc::c_void);
+#[cfg(target_os = "macos")]
+impl Drop for Acl {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from acl_init or acl_get_*_np and is freed only here.
+        unsafe {
+            acl_free(self.0);
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl Acl {
+    /// The ACL that `get` returns; `None` when the entry has none.
+    fn read(get: impl FnOnce() -> *mut libc::c_void) -> io::Result<Option<Acl>> {
+        let acl = get();
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => Ok(None),
+                _ => Err(error),
+            };
+        }
+        Ok(Some(Acl(acl)))
+    }
+
+    fn of_path(path: &CStr) -> io::Result<Option<Acl>> {
+        // SAFETY: the path is a valid C string; the result is owned by the wrapper.
+        Acl::read(|| unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) })
+    }
+
+    fn of_fd(fd: libc::c_int) -> io::Result<Option<Acl>> {
+        // SAFETY: the descriptor is open; the result is owned by the wrapper.
+        Acl::read(|| unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) })
+    }
+
+    /// The entries in order.
+    fn entries(&self) -> Vec<*mut libc::c_void> {
+        let mut out = Vec::new();
+        let mut entry: *mut libc::c_void = std::ptr::null_mut();
+        let mut id = ACL_FIRST_ENTRY;
+        // SAFETY: the ACL is live; each entry pointer stays valid while the ACL is unchanged.
+        while unsafe { acl_get_entry(self.0, id, &mut entry) } == 0 {
+            out.push(entry);
+            id = ACL_NEXT_ENTRY;
+        }
+        out
+    }
+
+    /// Remove the seal entries. True when there was one.
+    fn remove_seal(&mut self) -> io::Result<bool> {
+        let mut removed = false;
+        // Deleting an entry can move the remaining entries. Obtain a new pointer each time.
+        while let Some(entry) = self.entries().into_iter().find(|e| is_seal_entry(*e)) {
+            // SAFETY: the entry belongs to this live, unchanged ACL.
+            if unsafe { acl_delete_entry(self.0, entry) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            removed = true;
+        }
+        Ok(removed)
+    }
+
+    /// Put the seal entry first.
+    fn add_seal(&mut self) -> io::Result<()> {
+        let mut entry: *mut libc::c_void = std::ptr::null_mut();
+        // SAFETY: the ACL is live and may be reallocated by acl_create_entry_np, which updates
+        // the pointer it owns; the qualifier is 16 bytes of a guid_t.
+        unsafe {
+            if acl_create_entry_np(&mut self.0, &mut entry, 0) != 0
+                || acl_set_tag_type(entry, ACL_EXTENDED_DENY) != 0
+                || acl_set_qualifier(entry, EVERYONE.as_ptr().cast()) != 0
+                || acl_set_permset_mask_np(entry, SEAL_RIGHTS) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let mut flags: *mut libc::c_void = std::ptr::null_mut();
+            if acl_get_flagset_np(entry, &mut flags) != 0
+                || acl_add_flag_np(flags, ACL_ENTRY_INHERITED) != 0
+                || acl_set_flagset_np(entry, flags) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries().is_empty()
+    }
+
+    fn set_path(&self, path: &CStr) -> io::Result<()> {
+        // SAFETY: the path is a valid C string; NOFOLLOW is the _link_ variant.
+        if unsafe { acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, self.0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn set_fd(&self, fd: libc::c_int) -> io::Result<()> {
+        // SAFETY: the descriptor is open and the ACL is live.
+        if unsafe { acl_set_fd_np(fd, self.0, ACL_TYPE_EXTENDED) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn new() -> io::Result<Acl> {
+        // SAFETY: acl_init allocates an empty ACL that the wrapper frees.
+        let acl = unsafe { acl_init(1) };
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Acl(acl))
+    }
+}
+
+/// True for the seal entry: an inherited deny entry of `everyone` with exactly the seal rights.
+#[cfg(target_os = "macos")]
+fn is_seal_entry(entry: *mut libc::c_void) -> bool {
+    let (mut tag, mut mask) = (0, 0u64);
+    let mut flags: *mut libc::c_void = std::ptr::null_mut();
+    // SAFETY: the entry is live; the flag set belongs to it; the qualifier is a guid_t that
+    // acl_get_qualifier allocates and that is freed once.
+    unsafe {
+        if acl_get_tag_type(entry, &mut tag) != 0 || tag != ACL_EXTENDED_DENY {
+            return false;
+        }
+        if acl_get_permset_mask_np(entry, &mut mask) != 0 || mask != SEAL_RIGHTS {
+            return false;
+        }
+        if acl_get_flagset_np(entry, &mut flags) != 0 || acl_get_flag_np(flags, ACL_ENTRY_INHERITED) != 1 {
+            return false;
+        }
+        let q = acl_get_qualifier(entry);
+        if q.is_null() {
+            return false;
+        }
+        let everyone = std::slice::from_raw_parts(q.cast::<u8>(), 16) == EVERYONE;
+        acl_free(q);
+        everyone
+    }
+}
+
+/// The ACL of the entry itself, read raw with one `getattrlist` call and no parse into a libc
+/// ACL: the number of its entries and of its seal entries. `None` without an ACL. The common
+/// cases (no ACL, the seal alone) need nothing more.
+#[cfg(target_os = "macos")]
+fn acl_counts(path: &CStr) -> io::Result<Option<(usize, usize)>> {
+    const MAGIC: u32 = 0x012c_c16d;
+    const KINDMASK: u32 = 0xf;
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_EXTENDED_SECURITY,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buf = vec![0u8; 4096];
+    loop {
+        // SAFETY: the path is a valid C string; attrs and buf are valid for their sizes.
+        let r = unsafe {
+            libc::getattrlist(path.as_ptr(), (&mut attrs as *mut libc::attrlist).cast(), buf.as_mut_ptr().cast(), buf.len(), libc::FSOPT_NOFOLLOW)
+        };
+        if r != 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => Ok(None),
+                _ => Err(error),
+            };
+        }
+        let u32_at = |off: usize| -> Option<u32> { buf.get(off..off + 4).map(|b| u32::from_ne_bytes(b.try_into().unwrap())) };
+        let bad = || io::Error::new(io::ErrorKind::InvalidData, "short ACL attribute");
+        // Layout: length, returned attributes (5 words), then the reference to the filesec.
+        if u32_at(4).ok_or_else(bad)? & libc::ATTR_CMN_EXTENDED_SECURITY == 0 {
+            return Ok(None);
+        }
+        let reference = 24;
+        let offset = u32_at(reference).ok_or_else(bad)? as i32 as isize;
+        let len = u32_at(reference + 4).ok_or_else(bad)? as usize;
+        if len == 0 {
+            return Ok(None);
+        }
+        let start = (reference as isize + offset) as usize;
+        if start + len > buf.len() {
+            buf.resize(start + len + 64, 0);
+            continue;
+        }
+        let sec = &buf[start..start + len];
+        let word = |off: usize| -> Option<[u8; 4]> { sec.get(off..off + 4).map(|b| b.try_into().unwrap()) };
+        let raw_magic = word(0).ok_or_else(bad)?;
+        let big = match (u32::from_ne_bytes(raw_magic), u32::from_be_bytes(raw_magic)) {
+            (MAGIC, _) => false,
+            (_, MAGIC) => true,
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown ACL attribute")),
+        };
+        let value = |off: usize| -> Option<u32> { word(off).map(|w| if big { u32::from_be_bytes(w) } else { u32::from_ne_bytes(w) }) };
+        // magic, owner and group GUIDs, then the ACL: entry count, flags, entries of 24 bytes.
+        let count = value(36).ok_or_else(bad)?;
+        if count == u32::MAX || count == 0 {
+            return Ok(None);
+        }
+        let mut seals = 0;
+        for i in 0..count as usize {
+            let at = 44 + i * 24;
+            let guid = sec.get(at..at + 16).ok_or_else(bad)?;
+            let (flags, rights) = (value(at + 16).ok_or_else(bad)?, value(at + 20).ok_or_else(bad)?);
+            if guid == EVERYONE
+                && flags & KINDMASK == ACL_EXTENDED_DENY as u32
+                && flags & ACL_ENTRY_INHERITED as u32 != 0
+                && u64::from(rights) == SEAL_RIGHTS
+            {
+                seals += 1;
+            }
+        }
+        return Ok(Some((count as usize, seals)));
+    }
+}
+
+/// Seal one entry below the root of a tree: the seal entry goes first in its ACL; other ACL
+/// entries stay. An entry that has it already is not written.
+#[cfg(target_os = "macos")]
+pub fn apfs_seal_entry(path: &std::path::Path) -> io::Result<()> {
+    let path = cpath(path)?;
+    if acl_counts(&path)?.is_none() {
+        let mut acl = Acl::new()?;
+        acl.add_seal()?;
+        return acl.set_path(&path);
+    }
+    let mut acl = match Acl::of_path(&path)? {
+        Some(acl) if acl.entries().first().is_some_and(|e| is_seal_entry(*e)) => return Ok(()),
+        Some(mut acl) => {
+            acl.remove_seal()?;
+            acl
+        }
+        None => Acl::new()?,
+    };
+    acl.add_seal()?;
+    acl.set_path(&path)
+}
+
+/// Remove the seal entry of one entry, if it has one. Other ACL entries stay.
+#[cfg(target_os = "macos")]
+pub fn apfs_unseal_entry(path: &std::path::Path) -> io::Result<()> {
+    let path = cpath(path)?;
+    if !acl_counts(&path)?.is_some_and(|(_, seals)| seals > 0) {
+        return Ok(());
+    }
+    if let Some(mut acl) = Acl::of_path(&path)? {
+        if acl.remove_seal()? {
+            acl.set_path(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// True when the entry has the seal entry in its ACL.
+#[cfg(target_os = "macos")]
+pub fn apfs_has_seal_entry(path: &std::path::Path) -> io::Result<bool> {
+    let path = cpath(path)?;
+    Ok(acl_counts(&path)?.is_some_and(|(_, seals)| seals > 0))
+}
+
+/// `apfs_unseal_entry` through an open descriptor.
+#[cfg(target_os = "macos")]
+fn unseal_entry_fd(fd: libc::c_int) -> io::Result<()> {
+    if let Some(mut acl) = Acl::of_fd(fd)? {
+        if acl.remove_seal()? {
+            acl.set_fd(fd)?;
+        }
     }
     Ok(())
 }
@@ -1490,6 +1843,7 @@ pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::Borr
     if unsafe { libc::fcopyfile(src.as_raw_fd(), dst.as_raw_fd(), std::ptr::null_mut(), libc::COPYFILE_ACL) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    // The seal of a state entry is inherited: the copy leaves it out.
     Ok(())
 }
 
@@ -1510,7 +1864,7 @@ pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    unseal_entry_fd(fd.as_raw_fd())
 }
 
 #[cfg(target_os = "macos")]
@@ -1594,8 +1948,8 @@ pub fn apfs_owners_enabled(path: &std::path::Path) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn apfs_has_acl(path: &std::path::Path) -> io::Result<bool> {
-    let path = cpath(path)?;
+pub fn apfs_has_acl(entry: &std::path::Path) -> io::Result<bool> {
+    let path = cpath(entry)?;
     // SAFETY: CHECK inspects only the live source string and does not use a destination.
     let result = unsafe {
         libc::copyfile(
@@ -1608,65 +1962,47 @@ pub fn apfs_has_acl(path: &std::path::Path) -> io::Result<bool> {
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(result as u32 & libc::COPYFILE_ACL != 0)
+    // The seal of a state entry is no ACL of its content.
+    Ok(result as u32 & libc::COPYFILE_ACL != 0 && apfs_acl_text(entry)?.is_some())
 }
-/// The ACL of `path` (the link itself) as text; `None` without an ACL.
+/// The ACL of `path` (the link itself) as text, without the seal entry of a state entry;
+/// `None` without another ACL entry.
 #[cfg(target_os = "macos")]
 pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
-    // SAFETY: these declarations match the macOS ACL C ABI.
-    unsafe extern "C" {
-        fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
-        fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
-        fn acl_free(ptr: *mut libc::c_void) -> libc::c_int;
-    }
     let path = cpath(path)?;
-    // SAFETY: the ACL and the text are owned by libc, copied, and freed once.
+    match acl_counts(&path) {
+        Ok(None) => return Ok(None),
+        Ok(Some((count, seals))) if count == seals => return Ok(None),
+        // A volume without ACLs, or another error: the libc read below decides.
+        _ => {}
+    }
+    let Some(mut acl) = Acl::of_path(&path)? else { return Ok(None) };
+    acl.remove_seal()?;
+    if acl.is_empty() {
+        return Ok(None);
+    }
+    let mut len: libc::ssize_t = 0;
+    // SAFETY: the ACL is live; the text is owned by libc, copied, and freed once.
     unsafe {
-        let acl = acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED);
-        if acl.is_null() {
-            let error = io::Error::last_os_error();
-            return match error.raw_os_error() {
-                Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) => Ok(None),
-                _ => Err(error),
-            };
-        }
-        let mut len: libc::ssize_t = 0;
-        let text = acl_to_text(acl, &mut len);
+        let text = acl_to_text(acl.0, &mut len);
         if text.is_null() {
-            let error = io::Error::last_os_error();
-            acl_free(acl);
-            return Err(error);
+            return Err(io::Error::last_os_error());
         }
         let out = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
         acl_free(text.cast());
-        acl_free(acl);
         Ok(Some(out))
     }
 }
 
 #[cfg(target_os = "macos")]
 pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
-    // SAFETY: these declarations match the macOS ACL C ABI.
-    unsafe extern "C" {
-        fn acl_init(count: libc::c_int) -> *mut libc::c_void;
-        fn acl_set_link_np(path: *const libc::c_char, kind: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
-        fn acl_free(ptr: *mut libc::c_void) -> libc::c_int;
-    }
     let path = cpath(path)?;
-    // SAFETY: an empty ACL is allocated, applied without following a link, and freed once.
-    unsafe {
-        let acl = acl_init(0);
-        if acl.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let result = acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, acl);
-        let error = io::Error::last_os_error();
-        acl_free(acl);
-        if result != 0 {
-            return Err(error);
-        }
+    // SAFETY: acl_init allocates an empty ACL that the wrapper frees.
+    let acl = Acl(unsafe { acl_init(0) });
+    if acl.0.is_null() {
+        return Err(io::Error::last_os_error());
     }
-    Ok(())
+    acl.set_path(&path)
 }
 
 // ----- OverlayFS mount and metadata operations -----

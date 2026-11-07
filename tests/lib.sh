@@ -89,7 +89,9 @@ cleanup() {
     fi
     cd /
     if [ "$(uname -s)" = Darwin ]; then
+        # Sealed entries carry the immutable flag (the root, an older store) or a deny ACL entry.
         chflags -R nouchg "$T" 2>/dev/null || true
+        /bin/chmod -R -N "$T" 2>/dev/null || true
         chmod -R u+w "$T" 2>/dev/null || true
         rm -rf "$T"
         return

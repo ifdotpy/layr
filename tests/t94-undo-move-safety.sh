@@ -33,6 +33,7 @@ drop_tree() {
         [ -e "$d" ] || continue
         if [ "$(uname -s)" = Darwin ]; then
             chflags -R nouchg "$d" 2>/dev/null || true
+            /bin/chmod -R -N "$d" 2>/dev/null || true
             rm -rf "$d"
         elif [ "$(stat -f -c %T "$d" 2>/dev/null)" = btrfs ]; then
             btrfs subvolume delete "$d" >/dev/null

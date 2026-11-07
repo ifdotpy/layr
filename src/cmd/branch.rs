@@ -288,13 +288,13 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     }
                 }
             };
-            // The final state stays in the `deleted` ring. As a thin layer it would keep every
-            // automatic state under it, so it gets a complete tree first (APFS): the line's
-            // automatic states go in this command (docs/ownership.md).
+            // The final state stays in the `deleted` ring. As a thin layer it keeps the states
+            // under it, so it gets a complete tree (APFS), in the background after this command
+            // (docs/ownership.md): the copy of the whole tree and its seal took seconds here.
             #[cfg(target_os = "macos")]
             if let Some(id) = &last {
                 if repo.p.delta_path(id).is_dir() {
-                    crate::thin::make_keyframe(&repo.p, id)?;
+                    crate::free::keyframe_later(id);
                 }
             }
             delete_recorded(ctx, repo, &l, last, made)?;

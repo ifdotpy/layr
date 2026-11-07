@@ -1526,7 +1526,18 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         {
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-            let done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            let mut done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            // Final states of deleted lines that are still thin: their background keyframe
+            // (`free::keyframe_later`) did not run.
+            let finals: Vec<String> = {
+                let mut q = repo.p.db.conn.prepare("SELECT DISTINCT state FROM owners WHERE kind='deleted'")?;
+                let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for id in finals.iter().filter(|id| repo.p.delta_path(id).is_dir()) {
+                crate::thin::make_keyframe(&repo.p, id)?;
+                done.keyframes += 1;
+            }
             // Saved statuses of lines that are gone.
             let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
             if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
