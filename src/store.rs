@@ -43,6 +43,16 @@ pub struct Store {
     _version_guard: Option<crate::store_version::Guard>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROJECT_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn project_open_count() -> usize {
+    PROJECT_OPEN_COUNT.with(std::cell::Cell::get)
+}
+
 pub fn default_root() -> PathBuf {
     std::env::var_os("LAYR_ROOT").map(PathBuf::from).unwrap_or_else(|| {
         #[cfg(target_os = "macos")]
@@ -1038,22 +1048,42 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
-        let _t = crate::trace::span("open project");
+        #[cfg(test)]
+        PROJECT_OPEN_COUNT.with(|count| count.set(count.get() + 1));
+        let _t = crate::trace::span(format!("open project {name}"));
         let dir = store.project_dir(name)?;
-        crate::rootcheck::check_project_folder(&dir)?;
+        {
+            let _t = crate::trace::span("project folder validation");
+            crate::rootcheck::check_project_folder(&dir)?;
+        }
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = Db::open(&db_file(&dir))?;
+        let db = {
+            let _t = crate::trace::span("project database open");
+            Db::open(&db_file(&dir))?
+        };
         let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        p.finish_schema_upgrade()?;
-        crate::rootcheck::check_project(&p)?;
-        p.id = p.project_id()?;
+        {
+            let _t = crate::trace::span("project schema upgrade");
+            p.finish_schema_upgrade()?;
+        }
+        {
+            let _t = crate::trace::span("project rollback validation");
+            crate::rootcheck::check_project(&p)?;
+        }
+        {
+            let _t = crate::trace::span("project identity");
+            p.id = p.project_id()?;
+        }
         crate::free::register(store, name);
         #[cfg(target_os = "macos")]
-        if crate::apfs_commit::pending(&p)? {
-            // Wait for a live commit, or recover the index after an interrupted one.
-            let _lock = p.lock()?;
+        {
+            let _t = crate::trace::span("project commit recovery");
+            if crate::apfs_commit::pending(&p)? {
+                // Wait for a live commit, or recover the index after an interrupted one.
+                let _lock = p.lock()?;
+            }
         }
         Ok(p)
     }

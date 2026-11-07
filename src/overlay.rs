@@ -259,6 +259,24 @@ pub struct Info {
     pub root: String,
 }
 
+/// Metadata and the local project opened for one overlay listing. Public overlays may have
+/// metadata without a local project; hidden overlays need their project to supply the metadata.
+pub(crate) struct ListedOverlay<'a> {
+    pub name: String,
+    pub info: Info,
+    pub project: Result<Project<'a>>,
+}
+
+impl ListedOverlay<'_> {
+    pub(crate) fn visible_to(&self, ctx: &Ctx) -> bool {
+        !self.info.hidden
+            || ctx.caller.is_root()
+            || self.project.as_ref().is_ok_and(|p| {
+                Policy::load(p).check(&Who::of(ctx.caller.uid, ctx.caller.gid), "read").is_ok()
+            })
+    }
+}
+
 /// The overlay line of the line `line_id` in a cache overlay: one per platform (`<os>-<arch>`), so a
 /// build on another platform does not replace the cache of this one (docs/cache-overlays.md, section 6).
 pub fn cache_line_name(line_id: &str) -> String {
@@ -624,19 +642,26 @@ impl<'a> Repo<'a> {
     // ----- overlays of the project -----
 
     pub fn overlay_info(&self, name: &str) -> Result<Option<Info>> {
+        self.open_overlay_info(name).map(|(info, _)| info)
+    }
+
+    /// Retain the project that supplied hidden metadata, so a read caller can use it again.
+    fn open_overlay_info(&self, name: &str) -> Result<(Option<Info>, Option<Project<'a>>)> {
         if crate::store::check_name("overlay", name).is_err() {
-            return Ok(None);
+            return Ok((None, None));
         }
         // A removed cache overlay (`layr overlay remove`) is gone, also from the history of its own
         // project, which would otherwise name it again.
         if self.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some() {
-            return Ok(None);
+            return Ok((None, None));
         }
         let cache_key = format!("overlay.{name}.cache");
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
         let mut cache = None;
+        let mut project = None;
         if value.is_none() {
-            if let Ok(op) = self.overlay_project(name) {
+            project = self.overlay_project(name).ok();
+            if let Some(op) = &project {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
                     cache = op.db.overlay_config(&cache_key)?;
@@ -647,15 +672,18 @@ impl<'a> Repo<'a> {
         }
         let v = match value {
             Some(v) if v.is_object() => v,
-            _ => return Ok(None),
+            _ => return Ok((None, project)),
         };
-        Ok(Some(Info {
-            hidden: v["hidden"].as_bool().unwrap_or(false),
-            cache: cache.and_then(|c| c.as_bool()).unwrap_or(false),
-            owner: v["owner"].as_u64().unwrap_or(0) as u32,
-            mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
-            root: v["root"].as_str().unwrap_or("").to_string(),
-        }))
+        Ok((
+            Some(Info {
+                hidden: v["hidden"].as_bool().unwrap_or(false),
+                cache: cache.and_then(|c| c.as_bool()).unwrap_or(false),
+                owner: v["owner"].as_u64().unwrap_or(0) as u32,
+                mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
+                root: v["root"].as_str().unwrap_or("").to_string(),
+            }),
+            project,
+        ))
     }
 
     pub fn need_overlay(&self, name: &str) -> Result<Info> {
@@ -712,6 +740,10 @@ impl<'a> Repo<'a> {
 
     /// Names of the overlays of this project on this machine.
     pub fn overlay_names(&self) -> Result<Vec<String>> {
+        Ok(self.overlay_candidates()?.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect())
+    }
+
+    fn overlay_candidates(&self) -> Result<Vec<String>> {
         if self.p.is_overlay() {
             return Ok(Vec::new());
         }
@@ -725,7 +757,32 @@ impl<'a> Repo<'a> {
         for entry in std::fs::read_dir(self.p.dir.join("meta/overlays")).into_iter().flatten().flatten() {
             names.insert(entry.file_name().to_string_lossy().into_owned());
         }
-        Ok(names.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect())
+        Ok(names.into_iter().collect())
+    }
+
+    /// Open each local overlay once for `overlay list`, before reading its metadata and policy.
+    /// No handle survives the command, and write paths continue to open at their own boundaries.
+    pub(crate) fn listed_overlays(&self) -> Result<Vec<ListedOverlay<'a>>> {
+        let mut overlays = Vec::new();
+        for name in self.overlay_candidates()? {
+            // As in overlay_names, unavailable or invalid metadata is left out.
+            let Ok((Some(info), project)) = self.open_overlay_info(&name) else { continue };
+            let project = project.map(Ok).unwrap_or_else(|| self.overlay_project(&name));
+            overlays.push(ListedOverlay { name, info, project });
+        }
+        Ok(overlays)
+    }
+
+    pub(crate) fn listed_layers(&self, line: &Line, overlays: &[ListedOverlay<'a>]) -> Result<Vec<Layer>> {
+        let hidden = overlays
+            .iter()
+            .filter(|o| o.info.hidden)
+            .map(|o| {
+                let project = o.project.as_ref().map_err(|error| anyhow!("{error:#}"))?;
+                Ok((o.name.as_str(), &o.info, project))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.layers_with(line, hidden)
     }
 
     pub fn visible_overlay_names(&self, ctx: &Ctx) -> Result<Vec<String>> {
@@ -818,13 +875,21 @@ impl<'a> Repo<'a> {
     /// The overlays a line shows, bottom first.
     pub fn layers(&self, line: &Line) -> Result<Vec<Layer>> {
         let hidden = self.hidden_overlays()?;
-        self.layers_with(line, &hidden)
+        self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))
     }
 
     /// The stacks of many lines (line id to layers). The overlays are read once, not once per line.
     pub fn stacks(&self, lines: &[Line]) -> Result<BTreeMap<String, Vec<Layer>>> {
         let hidden = self.hidden_overlays()?;
-        lines.iter().map(|l| Ok((l.id.clone(), self.layers_with(l, &hidden)?))).collect()
+        lines
+            .iter()
+            .map(|l| {
+                Ok((
+                    l.id.clone(),
+                    self.layers_with(l, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))?,
+                ))
+            })
+            .collect()
     }
 
     /// The hidden overlays of the project with their projects. Empty in an overlay project.
@@ -843,7 +908,14 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    fn layers_with(&self, line: &Line, hidden_overlays: &[(String, Info, Project<'a>)]) -> Result<Vec<Layer>> {
+    fn layers_with<'b>(
+        &self,
+        line: &Line,
+        hidden_overlays: impl IntoIterator<Item = (&'b str, &'b Info, &'b Project<'a>)>,
+    ) -> Result<Vec<Layer>>
+    where
+        'a: 'b,
+    {
         let key = stack_key(&line.id);
         let value = if line.machine == self.p.store.machine.id {
             self.p.config_value(&key)?
@@ -867,7 +939,7 @@ impl<'a> Repo<'a> {
                 }
                 if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(info, &line.id, line.owner))? {
                     let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
-                    hidden.push((position, Layer { overlay: name.clone(), state: ol.head }));
+                    hidden.push((position, Layer { overlay: name.to_string(), state: ol.head }));
                 }
             }
             hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));

@@ -454,16 +454,17 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut rows = Vec::new();
     let h = here(ctx)?;
     let repo = &h.repo;
+    let overlays = repo.listed_overlays()?;
     let shown: BTreeSet<String> = match &h.line {
-        Some(l) => repo.layers(l)?.into_iter().map(|x| x.overlay).collect(),
+        Some(l) => repo.listed_layers(l, &overlays)?.into_iter().map(|x| x.overlay).collect(),
         None => BTreeSet::new(),
     };
-    for name in repo.visible_overlay_names(ctx)? {
-        let info = match repo.overlay_info(&name)? {
-            Some(i) => i,
-            None => continue,
-        };
-        let op = repo.overlay_project(&name).ok();
+    for overlay in overlays {
+        if !overlay.visible_to(ctx) {
+            continue;
+        }
+        let crate::overlay::ListedOverlay { name, info, project } = overlay;
+        let op = project.ok();
         let readers = op.as_ref().map(reader_list).unwrap_or_default();
         let mark = if shown.contains(&name) { "* " } else { "  " };
         // Hidden settings live in the overlay; public settings live in the parent.
@@ -1257,6 +1258,107 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn listing_opens_each_overlay_once_and_preserves_visibility() -> Result<()> {
+        // Plain project folders keep this command regression independent of subvolume privileges.
+        let root = std::env::temp_dir().join(format!("layr-list-opens-{}", ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        let result = (|| -> Result<()> {
+            let store = crate::store::Store::open(&root.join("store"))?;
+            // Visibility exercises the ordinary reader policy even when the test runner is root.
+            let caller = crate::ctx::Caller {
+                uid: 1000,
+                gid: 1000,
+                user: "reader".into(),
+                home: root.join("home"),
+            };
+            let actor = crate::model::Actor { uid: caller.uid, name: caller.user.clone(), session: None };
+            let create = |name: &str, config: serde_json::Value| -> Result<Project<'_>> {
+                let dir = store.project_dir(name)?;
+                std::fs::create_dir_all(dir.join("meta/db"))?;
+                std::fs::create_dir_all(dir.join("states"))?;
+                std::fs::create_dir_all(dir.join("lines"))?;
+                let p = Project {
+                    store: &store,
+                    name: name.into(),
+                    db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+                    dir,
+                    id: ids::new_id(),
+                };
+                let mut record = Record::new("project");
+                record.data = json!({"id":p.id,"name":name,"config":config});
+                p.append(record, &actor)?;
+                Ok(p)
+            };
+            let access = json!({format!("user:{}", caller.uid): "admin"});
+            let info = |hidden| json!({"hidden":hidden,"owner":caller.uid,"mode":"follow","root":"empty"});
+            let parent = create("p", json!({"access":access,"overlay.public":info(false),"overlay.remote":info(false)}))?;
+            let line_id = ids::new_id();
+            let add_line = |p: &Project, name: &str| -> Result<()> {
+                p.db.conn.execute(
+                    "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,?2,?3,?4,'empty',0,'1')",
+                    (line_id.as_str(), name, caller.uid, store.machine.id.as_str()),
+                )?;
+                Ok(())
+            };
+            add_line(&parent, "main")?;
+            let cwd = parent.lines_dir().join("main");
+            std::fs::create_dir_all(&cwd)?;
+            std::fs::write(cwd.join("file"), "keep the working folder nonempty")?;
+            create("p%public", json!({"access":access}))?;
+            let hidden = create(
+                "p%private",
+                json!({
+                    "access":access,"overlay":{"project":parent.id,"name":"private"},
+                    "overlay.private":info(true),"overlay.private.quiet":true,"overlay.private.history":3
+                }),
+            )?;
+            add_line(&hidden, &format!("line-{line_id}"))?;
+            create(
+                "p%denied",
+                json!({
+                    "access":{},"overlay":{"project":parent.id,"name":"denied"},"overlay.denied":info(true)
+                }),
+            )?;
+            create(
+                "p%foreign",
+                json!({
+                    "access":access,"overlay":{"project":"another-project","name":"foreign"},"overlay.foreign":info(true)
+                }),
+            )?;
+            drop((hidden, parent));
+            let output = root.join("output");
+            let ctx = Ctx {
+                store,
+                caller,
+                cwd,
+                env: std::collections::HashMap::new(),
+                author: Default::default(),
+                out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
+            };
+            // Run twice: handles belong to a listing, never to a later command.
+            for _ in 0..2 {
+                let before = crate::store::project_open_count();
+                assert_eq!(super::super::run(&ctx, &["overlay".into(), "list".into(), "--json".into()])?, 0);
+                assert_eq!(crate::store::project_open_count() - before, 6, "parent and five overlay candidates");
+            }
+            let text = std::fs::read_to_string(output)?;
+            for line in text.lines() {
+                let rows: Vec<serde_json::Value> = serde_json::from_str(line)?;
+                let names: Vec<_> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+                assert_eq!(names, ["private", "public", "remote"]);
+                assert_eq!(rows[0]["hidden"], true);
+                assert_eq!(rows[0]["shown"], true);
+                assert_eq!(rows[0]["properties"]["quiet"], true);
+                assert_eq!(rows[0]["properties"]["history"], 3);
+                assert_eq!(rows[2]["readers"], json!([]), "public metadata survives an unavailable local project");
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(root);
+        result
+    }
 
     #[test]
     fn listing_only_walks_active_caches_when_size_is_requested() {
