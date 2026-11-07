@@ -120,7 +120,13 @@ pub(crate) fn wait_child(child: &mut Child, until: Option<Instant>) -> Result<(E
             return Ok((status, false));
         }
         if Instant::now() >= until {
+            // The child may share the worker's group (WorkerHost): its own processes (rustc under cargo) are found
+            // first and killed with it, so none keeps writing after the limit.
+            let tree = descendants(child.id());
             kill_group(child.id());
+            for pid in tree {
+                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stderr(Stdio::null()).status();
+            }
             return Ok((child.wait()?, true));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -154,6 +160,22 @@ pub fn retest_host() -> LocalHost {
     LocalHost::new(Duration::from_secs(secs))
 }
 
+/// The processes below `pid` (children, their children, ...), found with `pgrep -P`.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut todo = vec![pid];
+    while let Some(p) = todo.pop() {
+        let Ok(o) = Command::new("pgrep").args(["-P", &p.to_string()]).stderr(Stdio::null()).output() else { continue };
+        for child in String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            if !out.contains(&child) {
+                out.push(child);
+                todo.push(child);
+            }
+        }
+    }
+    out
+}
+
 /// Kills the process `pid` and the process group named by it (a child that is a group leader).
 pub(crate) fn kill_group(pid: u32) {
     // The group kill fails when the child is not a group leader; then the process alone is killed. A kill of a
@@ -161,5 +183,23 @@ pub(crate) fn kill_group(pid: u32) {
     let group = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stderr(Stdio::null()).status();
     if !group.is_ok_and(|s| s.success()) {
         let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stderr(Stdio::null()).status();
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// A command that is not a group leader (the worker's children) and runs a child of its own: at the limit both go.
+    #[test]
+    fn the_limit_stops_the_processes_below_the_command_too() {
+        let marker = format!("{}.{}", 61, std::process::id());
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &format!("sleep {marker} & wait")]);
+        let err = run(&mut cmd, Some(Instant::now() + Duration::from_millis(500))).unwrap_err();
+        assert!(format!("{err:#}").contains("time limit"), "{err:#}");
+        std::thread::sleep(Duration::from_millis(200));
+        let left = Command::new("pgrep").args(["-f", &format!("sleep {marker}")]).output().unwrap();
+        assert!(String::from_utf8_lossy(&left.stdout).trim().is_empty(), "a process below the command still runs");
     }
 }
