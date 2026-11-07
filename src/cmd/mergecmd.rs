@@ -1022,6 +1022,27 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
 /// queue entry stays pending.
 #[derive(Debug)]
 pub struct ChecksWaiting(pub String);
+
+/// The candidate that an earlier queue pass recorded (`merge.candidate`) for the same merge: `theirs` into `line` at
+/// `head`, the same squash choice and message, with its tree on this machine. None: the pass makes a new one.
+fn recorded_candidate(repo: &Repo, line: &Line, head: &str, theirs: &str, squash: bool, message: &str) -> Result<Option<String>> {
+    for rec in repo.p.db.records_with_op("merge.candidate")?.into_iter().rev() {
+        let d = &rec.data;
+        if d["line"].as_str() == Some(&line.id)
+            && d["theirs"].as_str() == Some(theirs)
+            && d["head"].as_str() == Some(head)
+            && d["squash"].as_bool() == Some(squash)
+            && d["message"].as_str() == Some(message)
+        {
+            if let Some(st) = rec.states.first() {
+                if st.parents.first().map(String::as_str) == Some(head) && repo.tree_available(&st.id) {
+                    return Ok(Some(st.id.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 impl std::fmt::Display for ChecksWaiting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -1324,6 +1345,31 @@ fn merge_rev_inner(
             return Err(exit(128, format!("fatal: refusing to merge unrelated histories ({rev})")));
         }
     };
+    // A queued merge that waits for its checks keeps its candidate: the next pass (also a fresh clone that fetched
+    // the record) takes the same state while the target head is the same, so the runners check one state.
+    if queue.is_some() && (!checks.is_empty() || run_probes) && !ovl.changed() {
+        if let Some(sid) = recorded_candidate(repo, line, &head, &theirs, a.has("--squash"), &message)? {
+            check_paths(ctx, repo, line, rule.as_ref(), &head, &sid)?;
+            check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
+            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
+            finish(
+                ctx,
+                repo,
+                line,
+                "merge",
+                &sid,
+                Vec::new(),
+                w,
+                &local,
+                serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": 0, "candidate": sid}),
+                Some(&ovl),
+                queue,
+                Some(&settled),
+            )?;
+            report(ctx);
+            return Ok(0);
+        }
+    }
     let parents = if a.has("--squash") { vec![head.clone()] } else { vec![head.clone(), theirs.clone()] };
     let (state, out) = merge_states(ctx, repo, line, &base, &head, &theirs, &label, parents, &message)?;
     let sid = state.id.clone();
@@ -1357,7 +1403,8 @@ fn merge_rev_inner(
         // that the line will take, and a failed result stays for inspection.
         let mut rec = Record::new("merge.candidate");
         rec.states = states.clone();
-        rec.data = serde_json::json!({"line": line.id, "theirs": theirs});
+        rec.data =
+            serde_json::json!({"line": line.id, "theirs": theirs, "head": head, "squash": a.has("--squash"), "message": message});
         if let Err(e) = repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
             crate::repo::discard_unrecorded(repo, &states);
             ovl.discard(repo);
