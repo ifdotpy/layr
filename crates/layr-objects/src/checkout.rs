@@ -4,6 +4,7 @@
 use crate::fsx;
 use crate::id::Id;
 use crate::store::Store;
+use crate::times::{Record, Times};
 use crate::tree::Node;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -150,52 +151,37 @@ fn run_checkout(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path, writer
     })
 }
 
-/// The paths of a tree in times order (`crate::times`): the root, then pre-order by name.
-fn tree_paths(
-    store: &Store,
-    tree: &crate::tree::Tree,
-    dir: &Path,
-    depth: usize,
-    out: &mut Vec<(PathBuf, usize, bool)>,
-) -> Result<()> {
-    for e in &tree.entries {
-        let path = dir.join(fsx::os(&e.name));
-        match &e.node {
-            Node::Dir { tree } => {
-                out.push((path.clone(), depth + 1, true));
-                tree_paths(store, &store.get_tree(tree)?, &path, depth + 1, out)?;
-            }
-            _ => out.push((path, depth + 1, false)),
-        }
+/// Set the recorded times of a folder and everything below it; the folder last, because a new
+/// entry changes the time of its folder. The number of times set.
+fn restore_times(store: &Store, tree: &crate::tree::Tree, times: &Times, dir: &Path, writer: &Writer<'_>) -> Result<u64> {
+    if tree.entries.len() != times.records.len() {
+        bail!("the times table does not match the tree ({} records, {} entries)", times.records.len(), tree.entries.len());
     }
-    Ok(())
-}
-
-/// Set the recorded times: files and links first, then folders deepest first (a new entry
-/// changes the time of its folder).
-fn restore_times(
-    store: &Store,
-    root: &crate::tree::Tree,
-    times: &crate::times::Times,
-    dst: &Path,
-    writer: &Writer<'_>,
-) -> Result<u64> {
-    let mut paths = vec![(dst.to_path_buf(), 0, true)];
-    tree_paths(store, root, dst, 0, &mut paths)?;
-    if paths.len() != times.records.len() || paths.iter().zip(&times.records).any(|((_, _, dir), r)| *dir != r.below.is_some()) {
-        bail!("the times table does not match the tree ({} records, {} entries)", times.records.len(), paths.len());
-    }
-    let ns: Vec<i64> = times.records.iter().map(|r| r.ns).collect();
-    let set = |(path, _, _): &(PathBuf, usize, bool), ns: &i64| -> Result<()> {
-        step(writer, || crate::times::set(path, *ns)).with_context(|| format!("cannot set the time of {}", path.display()))
+    let set = |path: &Path, ns: i64| -> Result<()> {
+        step(writer, || crate::times::set(path, ns)).with_context(|| format!("cannot set the time of {}", path.display()))
     };
-    paths.par_iter().zip(ns.par_iter()).filter(|((_, _, dir), _)| !dir).try_for_each(|(p, t)| set(p, t))?;
-    let mut dirs: Vec<(&(PathBuf, usize, bool), &i64)> = paths.iter().zip(&ns).filter(|((_, _, dir), _)| *dir).collect();
-    dirs.sort_by_key(|((_, depth, _), _)| std::cmp::Reverse(*depth));
-    for (p, t) in dirs {
-        set(p, t)?;
-    }
-    Ok(paths.len() as u64)
+    let below = tree
+        .entries
+        .par_iter()
+        .zip(times.records.par_iter())
+        .map(|(e, r)| -> Result<u64> {
+            let path = dir.join(fsx::os(&e.name));
+            match (&e.node, r) {
+                (Node::Dir { tree }, Record::Folder(id)) => {
+                    restore_times(store, &store.get_tree(tree)?, &store.get_times(id)?, &path, writer)
+                }
+                (Node::Dir { .. }, _) | (_, Record::Folder(_)) => {
+                    bail!("the times table does not match the tree at {}", path.display())
+                }
+                (_, Record::Time(ns)) => {
+                    set(&path, *ns)?;
+                    Ok(1)
+                }
+            }
+        })
+        .try_reduce(|| 0, |a, b| Ok(a + b))?;
+    set(dir, times.own)?;
+    Ok(below + 1)
 }
 
 impl Run<'_> {

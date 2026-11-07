@@ -129,6 +129,77 @@ impl Index {
     }
 }
 
+/// A pack index for reading: the bytes of the index file, searched in place. Opening a store with
+/// many objects does not decode them, and a lookup is a binary search. `parse` checks the layout
+/// only: an object read through it is still checked against its id, and `Index::decode` (a received
+/// pack) checks everything.
+pub struct LazyIndex {
+    bytes: Vec<u8>,
+    pub blocks: Vec<Block>,
+    entries_at: usize,
+    pub count: usize,
+}
+
+impl LazyIndex {
+    pub fn parse(bytes: Vec<u8>, pack: &Id, data_len: u64) -> Result<LazyIndex> {
+        ensure!(bytes.len() >= 4 + 32 + 4 + 4 + 32, "a pack index is too short");
+        ensure!(&bytes[..4] == INDEX_MAGIC, "not a pack index");
+        ensure!(&bytes[4..36] == pack.0.as_slice(), "the pack index names another pack");
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        let nblocks = u32_at(36) as usize;
+        let mut at = 40;
+        ensure!(bytes.len() >= at + nblocks * BLOCK_LEN + 4 + 32, "a pack index is cut short");
+        let mut blocks = Vec::with_capacity(nblocks);
+        for _ in 0..nblocks {
+            let offset = u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
+            let block = Block { offset, compressed: u32_at(at + 8), plain: u32_at(at + 12) };
+            ensure!(block.offset + u64::from(block.compressed) <= data_len, "a pack block leaves the data file");
+            blocks.push(block);
+            at += BLOCK_LEN;
+        }
+        let count = u32_at(at) as usize;
+        at += 4;
+        ensure!(bytes.len() == at + count * ENTRY_LEN + 32, "a pack index has the wrong length");
+        Ok(LazyIndex { bytes, blocks, entries_at: at, count })
+    }
+
+    fn id_at(&self, i: usize) -> &[u8] {
+        let at = self.entries_at + i * ENTRY_LEN;
+        &self.bytes[at..at + 32]
+    }
+
+    /// The entry at sorted position `i`, checked against the blocks.
+    pub fn entry(&self, i: usize) -> Result<Entry> {
+        let at = self.entries_at + i * ENTRY_LEN;
+        let u32_at = |at: usize| u32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("4 bytes"));
+        let e = Entry {
+            id: Id(self.id_at(i).try_into().expect("32 bytes")),
+            kind: Kind::from_byte(self.bytes[at + 32])?,
+            form: self.bytes[at + 33],
+            block: u32_at(at + 34),
+            offset: u32_at(at + 38),
+            length: u32_at(at + 42),
+        };
+        ensure!(matches!(e.form, RAW | DELTA | CHUNKED), "unknown pack entry form");
+        let block = self.blocks.get(e.block as usize).ok_or_else(|| anyhow::anyhow!("a pack entry names a missing block"))?;
+        ensure!(u64::from(e.offset) + u64::from(e.length) <= u64::from(block.plain), "a pack entry leaves its block");
+        Ok(e)
+    }
+
+    pub fn find(&self, id: &Id) -> Result<Option<Entry>> {
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.id_at(mid).cmp(id.0.as_slice()) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return self.entry(mid).map(Some),
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Collects payloads into blocks of about `block_size` plain bytes.
 pub struct Builder {
     block_size: usize,
@@ -199,6 +270,25 @@ mod tests {
         let mut gap = sample();
         gap.blocks[1].offset = 12;
         assert!(Index::decode(&gap.encode(), 15).is_err());
+    }
+
+    #[test]
+    fn a_lazy_index_finds_what_the_full_index_holds() {
+        let index = sample();
+        let data_len = index.blocks.iter().map(|b| u64::from(b.compressed)).sum::<u64>() + 4;
+        let lazy = LazyIndex::parse(index.encode(), &index.pack, data_len).unwrap();
+        assert_eq!(lazy.count, index.entries.len());
+        assert_eq!(lazy.blocks, index.blocks);
+        for (i, e) in index.entries.iter().enumerate() {
+            assert_eq!(lazy.find(&e.id).unwrap(), Some(*e));
+            assert_eq!(lazy.entry(i).unwrap(), *e);
+        }
+        assert_eq!(lazy.find(&Id([0xee; 32])).unwrap(), None);
+        assert!(LazyIndex::parse(index.encode(), &Id([0xee; 32]), data_len).is_err(), "another pack");
+        assert!(LazyIndex::parse(index.encode(), &index.pack, data_len - 1).is_err(), "a short data file");
+        let mut cut = index.encode();
+        cut.truncate(cut.len() - 1);
+        assert!(LazyIndex::parse(cut, &index.pack, data_len).is_err(), "a cut index");
     }
 
     #[test]

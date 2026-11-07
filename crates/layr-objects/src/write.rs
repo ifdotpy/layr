@@ -4,7 +4,7 @@
 use crate::fsx;
 use crate::id::Id;
 use crate::store::{Store, Temperature};
-use crate::times::Record;
+use crate::times::{ns_of, Record, Times};
 use crate::tree::{Entry, Node, Tree, MODE_BITS};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -196,16 +196,13 @@ fn write(store: &Store, root: &Path, options: &WriteOptions, base: Option<(&Base
         None => walk.folder(root, b"", options.previous)?,
         Some((base, plan)) => {
             let base_tree = store.get_tree(&base.tree)?;
-            let records = store.get_times(&base.times)?.records;
+            let base_times = store.get_times(&base.times)?;
             let touched =
                 |p: &Vec<u8>| plan.changed.iter().any(|c| p == c || (p.starts_with(c) && p.get(c.len()) == Some(&b'/')));
             kept_groups = base_tree.links.iter().filter(|g| !g.iter().any(touched)).cloned().collect();
-            walk.folder_changed(root, b"", &base_tree, &records, 0, plan)?
+            walk.folder_changed(root, b"", &base_tree, &base_times, plan)?
         }
     };
-    let mut records = Vec::with_capacity(below.len() + 1);
-    records.push(Record { ns: crate::times::ns_of(&meta), below: Some(below.len() as u64) });
-    records.extend(below);
     let mut groups: Vec<Vec<Vec<u8>>> =
         walk.inodes.into_inner().expect("no panic holds the lock").into_values().filter(|g| g.len() > 1).collect();
     groups.extend(kept_groups);
@@ -213,7 +210,7 @@ fn write(store: &Store, root: &Path, options: &WriteOptions, base: Option<(&Base
     tree.links = groups;
     tree.normalize();
     let id = store.put_tree(&tree)?;
-    let times = store.put_times(&crate::times::Times { records })?;
+    let times = store.put_times(&Times { own: ns_of(&meta), records: below })?;
     Ok(WriteReport {
         tree: Some(id),
         times: Some(times),
@@ -251,47 +248,39 @@ fn join(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 
 impl Walk<'_> {
     /// A folder read again from `base`: entries that did not change keep their base entry and
-    /// times records; folders on the way to a change are read the same way; the rest is new.
-    /// `at` is the index of this folder's own record in `records`.
-    fn folder_changed(
-        &self,
-        dir: &Path,
-        rel: &[u8],
-        base: &Tree,
-        records: &[Record],
-        at: usize,
-        plan: &Plan,
-    ) -> Result<(Tree, Vec<Record>)> {
-        let mut base_at: HashMap<&[u8], (usize, &Entry)> = HashMap::new();
-        let mut pos = at + 1;
-        for e in &base.entries {
-            let r = records.get(pos).ok_or_else(|| anyhow::anyhow!("the base times do not match the base tree"))?;
-            if r.below.is_some() != matches!(e.node, Node::Dir { .. }) {
+    /// times record; folders on the way to a change are read the same way; the rest is new.
+    fn folder_changed(&self, dir: &Path, rel: &[u8], base: &Tree, times: &Times, plan: &Plan) -> Result<(Tree, Vec<Record>)> {
+        if base.entries.len() != times.records.len() {
+            bail!("the base times do not match the base tree");
+        }
+        let mut base_at: HashMap<&[u8], (&Entry, &Record)> = HashMap::new();
+        for (e, r) in base.entries.iter().zip(&times.records) {
+            if matches!(r, Record::Folder(_)) != matches!(e.node, Node::Dir { .. }) {
                 bail!("the base times do not match the base tree");
             }
-            base_at.insert(&e.name, (pos, e));
-            pos += 1 + r.below.unwrap_or(0) as usize;
+            base_at.insert(&e.name, (e, r));
         }
         let before: HashMap<Vec<u8>, Node> = base.entries.iter().map(|e| (e.name.clone(), e.node.clone())).collect();
         let names = list(dir, rel, self.options)?;
         let done = names
             .into_par_iter()
-            .map(|(name, meta)| -> Result<(Entry, Vec<Record>)> {
+            .map(|(name, meta)| -> Result<(Entry, Record)> {
                 let child = join(rel, &name);
                 match base_at.get(name.as_slice()) {
-                    Some(&(p, e)) if !plan.changed.contains(&child) && !plan.dirty.contains(&child) => {
-                        let n = 1 + records[p].below.unwrap_or(0) as usize;
-                        Ok((e.clone(), records[p..p + n].to_vec()))
-                    }
-                    Some(&(p, e)) if !plan.changed.contains(&child) && meta.is_dir() && matches!(e.node, Node::Dir { .. }) => {
-                        let Node::Dir { tree } = &e.node else { unreachable!() };
+                    Some(&(e, r)) if !plan.changed.contains(&child) && !plan.dirty.contains(&child) => Ok((e.clone(), *r)),
+                    Some(&(e, r)) if !plan.changed.contains(&child) && meta.is_dir() && matches!(e.node, Node::Dir { .. }) => {
+                        let (Node::Dir { tree }, Record::Folder(sub_times)) = (&e.node, r) else { unreachable!() };
                         let path = dir.join(fsx::os(&name));
-                        let (mut sub, below) =
-                            self.folder_changed(&path, &child, &self.store.get_tree(tree)?, records, p, plan)?;
+                        let (mut sub, below) = self.folder_changed(
+                            &path,
+                            &child,
+                            &self.store.get_tree(tree)?,
+                            &self.store.get_times(sub_times)?,
+                            plan,
+                        )?;
                         sub.normalize();
                         let xattrs = fsx::xattrs(&path)?;
-                        let mut times = vec![Record { ns: crate::times::ns_of(&meta), below: Some(below.len() as u64) }];
-                        times.extend(below);
+                        let record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
                         self.dirs.fetch_add(1, Ordering::Relaxed);
                         let entry = Entry {
                             name,
@@ -299,23 +288,18 @@ impl Walk<'_> {
                             node: Node::Dir { tree: self.store.put_tree(&sub)? },
                             xattrs,
                         };
-                        Ok((entry, times))
+                        Ok((entry, record))
                     }
                     _ => self.entry(dir, rel, name, meta, &before),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut entries = Vec::with_capacity(done.len());
-        let mut times = Vec::new();
-        for (e, t) in done {
-            entries.push(e);
-            times.extend(t);
-        }
-        Ok((Tree { entries, links: Vec::new() }, times))
+        let (entries, records) = done.into_iter().unzip();
+        Ok((Tree { entries, links: Vec::new() }, records))
     }
 
-    /// The tree of one folder, without hard link groups (the root gets them), and the times of
-    /// everything below the folder in tree order.
+    /// The tree of one folder, without hard link groups (the root gets them), and the times
+    /// records of its entries, in the tree's order.
     fn folder(&self, dir: &Path, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
         let names = list(dir, rel, self.options)?;
         let before: HashMap<Vec<u8>, Node> = match previous {
@@ -325,14 +309,9 @@ impl Walk<'_> {
         let done = names
             .into_par_iter()
             .map(|(name, meta)| self.entry(dir, rel, name, meta, &before))
-            .collect::<Result<Vec<(Entry, Vec<Record>)>>>()?;
-        let mut entries = Vec::with_capacity(done.len());
-        let mut times = Vec::new();
-        for (e, t) in done {
-            entries.push(e);
-            times.extend(t);
-        }
-        Ok((Tree { entries, links: Vec::new() }, times))
+            .collect::<Result<Vec<(Entry, Record)>>>()?;
+        let (entries, records) = done.into_iter().unzip();
+        Ok((Tree { entries, links: Vec::new() }, records))
     }
 
     fn entry(
@@ -342,21 +321,20 @@ impl Walk<'_> {
         name: Vec<u8>,
         meta: fs::Metadata,
         before: &HashMap<Vec<u8>, Node>,
-    ) -> Result<(Entry, Vec<Record>)> {
+    ) -> Result<(Entry, Record)> {
         let path = dir.join(fsx::os(&name));
         let ft = meta.file_type();
         let xattrs = fsx::xattrs(&path).with_context(|| format!("cannot read the attributes of {}", path.display()))?;
         let mode = meta.mode() & MODE_BITS;
         let child = join(rel, &name);
-        let mut times = vec![Record { ns: crate::times::ns_of(&meta), below: None }];
+        let mut record = Record::Time(ns_of(&meta));
         let node = if ft.is_dir() {
             let previous = match before.get(&name) {
                 Some(Node::Dir { tree }) => Some(*tree),
                 _ => None,
             };
             let (mut sub, below) = self.folder(&path, &child, previous)?;
-            times[0].below = Some(below.len() as u64);
-            times.extend(below);
+            record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
             sub.normalize();
             self.dirs.fetch_add(1, Ordering::Relaxed);
             Node::Dir { tree: self.store.put_tree(&sub)? }
@@ -379,7 +357,7 @@ impl Walk<'_> {
         } else if ft.is_symlink() {
             let target = fs::read_link(&path)?.as_os_str().as_bytes().to_vec();
             self.symlinks.fetch_add(1, Ordering::Relaxed);
-            return Ok((Entry { name, mode: 0, node: Node::Symlink { target }, xattrs }, times));
+            return Ok((Entry { name, mode: 0, node: Node::Symlink { target }, xattrs }, record));
         } else {
             let kind = if ft.is_fifo() {
                 "a FIFO"
@@ -390,6 +368,6 @@ impl Walk<'_> {
             };
             bail!("{} is {kind}; a tree holds files, folders and symbolic links", path.display());
         };
-        Ok((Entry { name, mode, node, xattrs }, times))
+        Ok((Entry { name, mode, node, xattrs }, record))
     }
 }

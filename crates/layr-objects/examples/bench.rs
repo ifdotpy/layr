@@ -1,7 +1,7 @@
 //! Measure the object store on plain folders (docs/objects.md, "Measurements").
 //!
 //! ```text
-//! objects-bench <store> import <folder> hot|cold [--previous <tree>] [--similar] [--exclude a,b]
+//! objects-bench <store> import <folder> hot|cold [--previous <tree>] [--similar] [--exclude a,b] [--state <name>]
 //! objects-bench <store> changed <folder> <tree> <times> <path>... [--exclude a,b]
 //! objects-bench <store> checkout <tree> <folder> [--times <id>]
 //! objects-bench <store> verify <original> <copy> [--times]
@@ -51,6 +51,10 @@ fn main() -> Result<()> {
                 .map_or(vec![b".git".to_vec()], |x| x.split(',').map(|s| s.as_bytes().to_vec()).collect());
             let opts = WriteOptions { temperature, previous, exclude, similar: flag(rest, "--similar") };
             let r = write_tree(&store, Path::new(&rest[0]), &opts)?;
+            // A named state gives the objects their place in a pack (path order).
+            if let Some(state) = value(rest, "--state") {
+                store.set_state(state, &layr_objects::store::StateRef { tree: r.tree.unwrap(), times: r.times.unwrap() })?;
+            }
             println!(
                 "tree {} times {} files {} dirs {} bytes {} new objects {} new bytes {} clones {} in {:.3}s",
                 r.tree.unwrap(),
