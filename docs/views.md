@@ -84,4 +84,29 @@ Run `line show` and `line delete` outside the line's folder.
 
 ## Measurements
 
-See [benchmarks/views-20261107](../benchmarks/views-20261107/README.md).
+Chromium `src` (515,999 files), median of 3 runs, seconds. The Mac was under other load (load average 30 to 75).
+Details: [benchmarks/views-20261107](../benchmarks/views-20261107/README.md).
+
+| Step | Folder line | Virtual line |
+| --- | ---: | ---: |
+| `line new` | 65.8 | 0.29 |
+| `status` after 10 edits | 18.1 | 0.34 |
+| `save` of the 10 edits | 35.5 | 0.38 |
+| `line delete` | 81.5 | 0.39 |
+| `rg -l TODO` (warm) | 21.7 | 254.8 |
+| `find . -type f` (warm) | 7.3 | 17.3 |
+
+The states that both lines saved are equal. Line operations no longer depend on the size of the tree.
+Bulk reads of file content through the mount are slow: `rg` over the whole tree took 12 times as long.
+
+## Open items
+
+- Read path: a read of a file whose descriptor is not cached opens it again (one `openat` per read), and the
+  extension used less than one core during `rg`. The kernel data cache (`datacache=writeback`) did not help
+  (253 s cold, 435 s warm). Candidates: a descriptor cache with eviction, fewer calls per read, and FSKit kernel
+  offloaded I/O.
+- A thin lower tree (the layers of a state) instead of one complete tree, so that a virtual line of a thin state
+  costs no clone.
+- Cache overlays as native folders, linked from the view.
+- More commands: `git push`, `restore`, `reset`, `merge`.
+- A change of the lower tree under a mounted line (a rebase) without a new mount.

@@ -143,7 +143,7 @@ protocol FileOpener: AnyObject {
 extension Backend: FileOpener {}
 
 /// The merged view of an upper folder over a lower tree. Every path is relative ("." is the root).
-/// One recursive lock serializes the changes; reads take it only to check the in-memory sets.
+/// A reader-writer lock: changes run one at a time, reads in parallel.
 final class Overlay: FileOpener {
     static let removedAttr = "com.layr.removed"
     static let hiddenAttrPrefix = "com.layr."
@@ -160,7 +160,20 @@ final class Overlay: FileOpener {
     /// The virtual root ID: the inode of the lower root.
     let rootIno: UInt64
 
-    private let mu = NSRecursiveLock()
+    /// Reads share the lock; changes take it alone. A *Locked helper runs with the lock held.
+    private let mu: UnsafeMutablePointer<pthread_rwlock_t> = {
+        let l = UnsafeMutablePointer<pthread_rwlock_t>.allocate(capacity: 1)
+        pthread_rwlock_init(l, nil)
+        return l
+    }()
+    @inline(__always) private func rlock() { pthread_rwlock_rdlock(mu) }
+    @inline(__always) private func wlock() { pthread_rwlock_wrlock(mu) }
+    @inline(__always) private func unlock() { pthread_rwlock_unlock(mu) }
+
+    deinit {
+        pthread_rwlock_destroy(mu)
+        mu.deallocate()
+    }
     private var upperTypes: [String: VType] = [:]       // folded path -> type of each upper entry
     private var removed: [String: String] = [:]         // folded path -> stored path (whiteouts)
     private var alias: [UInt64: UInt64] = [:]           // upper inode -> virtual inode
@@ -235,21 +248,21 @@ final class Overlay: FileOpener {
         return e
     }
 
-    var generation: UInt64 { mu.lock(); defer { mu.unlock() }; return mutations }
+    var generation: UInt64 { rlock(); defer { unlock() }; return mutations }
 
-    func inUpper(_ path: String) -> Bool { mu.lock(); defer { mu.unlock() }; return upperTypeLocked(path) != nil }
+    func inUpper(_ path: String) -> Bool { rlock(); defer { unlock() }; return upperTypeLocked(path) != nil }
 
     /// The whiteouts, as stored paths.
-    var whiteouts: [String] { mu.lock(); defer { mu.unlock() }; return removed.values.sorted() }
+    var whiteouts: [String] { rlock(); defer { unlock() }; return removed.values.sorted() }
 
-    var upperCount: Int { mu.lock(); defer { mu.unlock() }; return upperTypes.count }
+    var upperCount: Int { rlock(); defer { unlock() }; return upperTypes.count }
 
     // MARK: reads
 
     /// Attributes of the merged entry at `path`, with the virtual ID.
     func stat(_ path: String) throws -> Entry {
-        mu.lock()
-        defer { mu.unlock() }
+        rlock()
+        defer { unlock() }
         return try statLocked(path)
     }
 
@@ -275,8 +288,8 @@ final class Overlay: FileOpener {
 
     /// The merged listing of the directory at `path`, sorted by name.
     func list(_ path: String) throws -> [Entry] {
-        mu.lock()
-        defer { mu.unlock() }
+        rlock()
+        defer { unlock() }
         return try listLocked(path)
     }
 
@@ -306,10 +319,10 @@ final class Overlay: FileOpener {
     }
 
     func readlink(_ path: String) throws -> [UInt8] {
-        mu.lock()
+        rlock()
         let up = upperTypeLocked(path) != nil
         let low = up ? nil : lowerEntryLocked(path)
-        mu.unlock()
+        unlock()
         if up { return try upper.readlink(path) }
         guard low != nil else { throw PosixError(code: ENOENT, op: "overlay readlink \(path)") }
         return try lowerIndex.readlink(path)
@@ -321,10 +334,10 @@ final class Overlay: FileOpener {
             try copyUp(rel)
             return try upper.openFile(rel, flags: flags, mode: mode)
         }
-        mu.lock()
+        rlock()
         let up = upperTypeLocked(rel) != nil
         let low = up ? nil : lowerEntryLocked(rel)
-        mu.unlock()
+        unlock()
         if up { return try upper.openFile(rel, flags: flags, mode: mode) }
         guard low != nil else { throw PosixError(code: ENOENT, op: "overlay open \(rel)") }
         return try lower.openFile(rel, flags: flags, mode: mode)
@@ -385,8 +398,8 @@ final class Overlay: FileOpener {
     /// folder with the lower mode for a folder). Returns true when it copied.
     @discardableResult
     func copyUp(_ path: String) throws -> Bool {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         return try copyUpLocked(path)
     }
 
@@ -446,8 +459,8 @@ final class Overlay: FileOpener {
     }
 
     func createFile(_ path: String, mode: mode_t) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         try prepareNewLocked(path)
         try upper.createFile(path, mode: mode)
         dequarantineLocked(path)
@@ -456,8 +469,8 @@ final class Overlay: FileOpener {
     }
 
     func mkdir(_ path: String, mode: mode_t) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         try prepareNewLocked(path)
         try upper.mkdir(path, mode: mode)
         dequarantineLocked(path)
@@ -466,8 +479,8 @@ final class Overlay: FileOpener {
     }
 
     func symlink(_ path: String, target: String) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         try prepareNewLocked(path)
         try upper.symlink(path, target: target)
         dequarantineLocked(path)
@@ -476,8 +489,8 @@ final class Overlay: FileOpener {
     }
 
     func link(from src: String, to dst: String) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         guard existsLocked(src) else { throw PosixError(code: ENOENT, op: "overlay link \(src)") }
         try prepareNewLocked(dst)
         _ = try copyUpLocked(src)
@@ -488,8 +501,8 @@ final class Overlay: FileOpener {
 
     /// Removes the merged entry at `path`. A folder must be empty in the merged view.
     func unlink(_ path: String, isDir: Bool) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         try unlinkLocked(path, isDir: isDir)
     }
 
@@ -515,8 +528,8 @@ final class Overlay: FileOpener {
     /// Renames within the merged view. A folder that the lower tree has fails with EXDEV: callers
     /// such as mv(1) then copy and remove.
     func rename(_ src: String, _ dst: String) throws {
-        mu.lock()
-        defer { mu.unlock() }
+        wlock()
+        defer { unlock() }
         if src == dst { return }
         let sut = upperTypeLocked(src)
         let sl = lowerEntryLocked(src)
@@ -565,8 +578,8 @@ final class Overlay: FileOpener {
     }
 
     var json: [String: Any] {
-        mu.lock()
-        defer { mu.unlock() }
+        rlock()
+        defer { unlock() }
         return ["lower": lower.rootPath, "upper": upper.rootPath, "upper_entries": upperTypes.count,
                 "whiteouts": removed.count, "copy_ups": copyUps, "quarantine_kept": quarantineKept, "case_sensitive": keys.caseSensitive,
                 "lower_index": lowerIndex.countsJSON]
