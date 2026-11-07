@@ -187,6 +187,12 @@ impl Tree {
             for _ in 0..n {
                 let name = r.bytes()?.to_vec();
                 ensure!(!name.is_empty() && !name.contains(&0), "invalid extended attribute name");
+                // Only names the writer keeps: a tree cannot carry `security.capability` or `trusted.`.
+                ensure!(
+                    crate::fsx::keep_xattr(&name),
+                    "a tree does not keep extended attribute {}",
+                    String::from_utf8_lossy(&name)
+                );
                 if let Some((last, _)) = xattrs.last() {
                     ensure!(*last < name, "extended attributes are not sorted or not unique");
                 }
@@ -296,7 +302,9 @@ mod tests {
         lonely.links = vec![vec![b"run.sh".to_vec()]];
         let mut bad_link = good.clone();
         bad_link.links = vec![vec![b"a//b".to_vec(), b"c".to_vec()]];
-        for bad in [unsorted, duplicate, slash, dot, mode, lonely, bad_link] {
+        let mut capability = good.clone();
+        capability.entries[0].xattrs = vec![(b"security.capability".to_vec(), vec![1])];
+        for bad in [unsorted, duplicate, slash, dot, mode, lonely, bad_link, capability] {
             assert!(Tree::decode(&bad.encode()).is_err(), "{bad:?}");
         }
         let mut trailing = good.encode();

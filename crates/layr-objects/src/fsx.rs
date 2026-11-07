@@ -75,14 +75,16 @@ pub fn clear_xattrs(path: &Path) -> io::Result<()> {
         Err(e) if unsupported(&e) => return Ok(()),
         Err(e) => return Err(e),
     };
-    if names.iter().all(|b| *b == 0) {
+    if !names.split(|b| *b == 0).any(|n| !n.is_empty() && keep_xattr(n)) {
         return Ok(());
     }
     // macOS removes no attribute of a read-only file, even for its owner.
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::symlink_metadata(path)?.permissions().mode();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode((mode & 0o7777) | 0o200))?;
-    for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+    // Only the attributes that a tree keeps: a security label (SELinux) belongs to the file system,
+    // and removing it is refused.
+    for name in names.split(|b| *b == 0).filter(|n| !n.is_empty() && keep_xattr(n)) {
         let cname = CString::new(name)?;
         match rustix::fs::lremovexattr(path, cname.as_c_str()) {
             Ok(()) => {}

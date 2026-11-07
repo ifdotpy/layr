@@ -73,13 +73,16 @@ type    = 1 file, 2 folder, 3 symbolic link
 - `mode` is `st_mode & 0o7777`: permission bits with setuid, setgid and sticky. A symbolic link
   has mode 0 (Linux ignores it, and macOS gives it the umask).
 - An empty folder is a folder entry that names the empty tree (`01 00 00`).
-- Extended attributes are sorted by name and kept with their exact bytes. Left out:
+- Extended attributes are sorted by name and kept with their exact bytes. The decoder refuses a
+  name that the writer leaves out, so a tree cannot carry file capabilities. Left out:
   `com.apple.provenance` (the system stamps it on files), layr's own markers (`com.layr.`), and
   the classes `trusted.`, `security.` and `system.` (overlayfs internals, SELinux labels, POSIX ACLs:
   they need privileges or belong to the machine).
 - **Hard links:** the root tree of a write lists groups. Each group holds the paths (relative to
   the root, sorted) of one inode that has more than one name in the folder. Only the root has
   groups, so every tree below it is pure content and is shared between states.
+- Not kept: the mode and attributes of the root folder itself (a tree describes the entries of
+  a folder; the parent entry holds a folder's mode).
 - Not kept: owners and times. A checkout gives every entry to the caller (layr sets line
   owners), and times are the time of the checkout. Including them would give two equal folders
   different ids and stop dedup between lines.
@@ -106,9 +109,10 @@ form 'c' chunked:  count:varint  (chunk-id:32  length:varint)*
 - **Whole:** `layr_store::zst::compress`, zstd level 3.
 - **Delta:** a new version of a path is stored against the blob at the same path in the previous
   tree, as `zstd --patch-from` makes it (`layr_store::zst::compress` with a base: the window covers
-  both inputs and long-distance matching is on). Both versions must be at most 64 MiB. A chain is
-  at most 16 deltas deep; the next version is stored whole (a key frame), so a read decodes at
-  most 16 deltas.
+  both inputs and long-distance matching is on). Both versions must be at most 64 MiB (a base
+  whose size the store knows, hot or chunked, is checked before it is read). The writer keeps a
+  chain at most 16 deltas deep and stores the next version whole (a key frame), so a read of the
+  store's own objects decodes at most 16 deltas; a reader refuses a chain deeper than 255.
 - **Chunked:** a cold file of 1 MiB or more without a delta base is cut with the FastCDC chunker
   of the cache remote (`layr_store::chunks`: 16 KiB minimum, 64 KiB average, 256 KiB maximum).
   Each chunk is a `chunk` object, compressed, so equal parts of large files (build output, a
@@ -116,6 +120,10 @@ form 'c' chunked:  count:varint  (chunk-id:32  length:varint)*
   whole.
 - **Packs** (next step): many small objects in one file, as `layr_store::chunks::Builder` packs
   cache chunks. They are needed: on APFS a loose object takes at least one 4 KiB block (section 8).
+
+A hot blob is a clone without extended attributes (they belong to entries, not to bytes; a
+security label such as SELinux stays). Its mode is the mode of the clone; a checkout sets the
+mode of the tree entry.
 
 Every read checks the content against the id (a blob after the delta or chunk decode, each chunk,
 each tree). A checkout clones hot blobs without a read; `layr objects verify` compares the bytes.
@@ -149,8 +157,10 @@ gives its files the immutable flag, which a clone keeps; layr clears it on the c
   lists extended attributes of each entry, stores files and subfolders in parallel, and writes each
   tree bottom up. A file that the store holds is hashed and skipped.
 - **Checkout** (`layr_objects::checkout`): makes folders, then files and links in parallel: a hot
-  blob is cloned, another blob is decoded and written. Then the hard link groups, then the folder
-  modes deepest first (a read-only folder must be full before it closes).
+  blob is cloned, another blob is decoded and written. Then the hard link groups (each path must
+  be a regular file that the checkout made, in one group only, so a link never goes through a
+  symbolic link), then the folder modes deepest first (a read-only folder must be full before it
+  closes).
 - **Compare** (`layr_objects::compare`): an independent walk of two folders that compares names,
   types, modes, bytes, link targets, kept extended attributes and hard link groups. It shares no
   code with the writer, so a writer fault shows as a difference.
@@ -164,6 +174,8 @@ layr objects stat [--json]
 layr objects checkout <tree or rev> <folder>
 ```
 
+- `import` and `verify` need the admin role in this slice (they write into the project's store).
+  `stat` needs read access.
 - `import` writes the tree of a state (read through `Repo::state_root`, as `layr export` reads
   it) and records it in `states/`. It prints the tree id first. `--cold` stores new blobs
   compressed, as deltas against the tree of the state's first parent when that state was

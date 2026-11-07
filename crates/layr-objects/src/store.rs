@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <root>/config.json         format version and id hash
-//! <root>/blobs/ab/cdef...    hot blobs: the exact file bytes, read-only, so a checkout clones them
+//! <root>/blobs/ab/cdef...    hot blobs: the exact file bytes, so a checkout clones them
 //! <root>/objects/ab/cdef...  encoded objects: trees, cold blobs (zstd, delta, chunk list), chunks
 //! <root>/states/<state>      the tree id of an imported state
 //! <root>/tmp/                files being written
@@ -322,6 +322,26 @@ impl Store {
         Ok((id, len))
     }
 
+    /// The size of a blob where the store knows it without a decode: a hot blob, a chunk list.
+    /// The other forms are smaller than `delta_max` by the write rules.
+    fn known_size(&self, id: &Id) -> Option<u64> {
+        if let Some(p) = self.hot_path(id) {
+            return fs::metadata(p).ok().map(|m| m.len());
+        }
+        let (kind, form, body) = self.read_object(id).ok()?;
+        if kind != Kind::Blob || form != CHUNKED {
+            return None;
+        }
+        let mut r = Reader::new(&body);
+        let n = r.varint().ok()?;
+        let mut total = 0u64;
+        for _ in 0..n {
+            r.id().ok()?;
+            total = total.saturating_add(r.varint().ok()?);
+        }
+        Some(total)
+    }
+
     /// The delta depth of a stored blob: 0 for any form that decodes alone.
     fn depth(&self, id: &Id) -> Result<u8> {
         Ok(match self.form(id)? {
@@ -345,7 +365,7 @@ impl Store {
             }
             _ => None,
         };
-        if let Some((base_id, depth)) = base {
+        if let Some((base_id, depth)) = base.filter(|(p, _)| self.known_size(p).is_none_or(|n| n <= self.options.delta_max)) {
             let base = self.read_blob(&base_id)?;
             if base.len() as u64 <= self.options.delta_max {
                 let frame = layr_store::zst::compress(data, Some(&base))?;

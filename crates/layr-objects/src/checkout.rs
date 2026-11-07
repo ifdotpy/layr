@@ -7,6 +7,7 @@ use crate::store::Store;
 use crate::tree::Node;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -35,6 +36,8 @@ struct Run<'a> {
     symlinks: AtomicU64,
     /// Folder modes, set after the folder is full (a read-only folder takes no new entries).
     modes: Mutex<Vec<(PathBuf, u32)>>,
+    /// The paths of the regular files made (relative to the root): hard link groups may name only these.
+    files_made: Mutex<HashSet<Vec<u8>>>,
 }
 
 /// Make the folder `dst` (absent, or an empty folder) with the content of `tree`. The owner of
@@ -60,10 +63,20 @@ pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> 
         dirs: AtomicU64::new(0),
         symlinks: AtomicU64::new(0),
         modes: Mutex::new(Vec::new()),
+        files_made: Mutex::new(HashSet::new()),
     };
     let root = store.get_tree(tree)?;
-    run.folder(&root, dst)?;
-    // Hard links: the first path of a group stays, the others become its names.
+    run.folder(&root, dst, b"")?;
+    // Hard links: the first path of a group stays, the others become its names. Each path must be
+    // a regular file of this tree, in one group only: a path through a symbolic link or into a
+    // folder would make the link step write outside `dst`.
+    let made = run.files_made.into_inner().expect("no panic holds the lock");
+    let mut seen = HashSet::new();
+    for path in root.links.iter().flatten() {
+        if !made.contains(path) || !seen.insert(path) {
+            bail!("hard link path {} is not one regular file of the tree", String::from_utf8_lossy(path));
+        }
+    }
     let mut hard_links = 0;
     for group in &root.links {
         let first = dst.join(fsx::os(&group[0]));
@@ -92,14 +105,15 @@ pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> 
 }
 
 impl Run<'_> {
-    fn folder(&self, tree: &crate::tree::Tree, dir: &Path) -> Result<()> {
+    fn folder(&self, tree: &crate::tree::Tree, dir: &Path, rel: &[u8]) -> Result<()> {
         tree.entries.par_iter().try_for_each(|e| -> Result<()> {
             let path = dir.join(fsx::os(&e.name));
+            let child = if rel.is_empty() { e.name.clone() } else { [rel, b"/", &e.name].concat() };
             match &e.node {
                 Node::Dir { tree } => {
                     fs::create_dir(&path).with_context(|| path.display().to_string())?;
                     let sub = self.store.get_tree(tree)?;
-                    self.folder(&sub, &path)?;
+                    self.folder(&sub, &path, &child)?;
                     fsx::set_xattrs(&path, &e.xattrs)?;
                     self.modes.lock().expect("no panic holds the lock").push((path, e.mode));
                     self.dirs.fetch_add(1, Ordering::Relaxed);
@@ -107,11 +121,12 @@ impl Run<'_> {
                 Node::File { blob, size } => {
                     self.file(blob, *size, &path).with_context(|| format!("cannot write {}", path.display()))?;
                     if !e.xattrs.is_empty() {
-                        // A clone of a store file is read-only, and macOS sets no attribute on it.
+                        // macOS sets no attribute on a file without the owner write bit.
                         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
                         fsx::set_xattrs(&path, &e.xattrs)?;
                     }
                     fs::set_permissions(&path, fs::Permissions::from_mode(e.mode))?;
+                    self.files_made.lock().expect("no panic holds the lock").insert(child);
                     self.files.fetch_add(1, Ordering::Relaxed);
                 }
                 Node::Symlink { target } => {
@@ -129,7 +144,7 @@ impl Run<'_> {
             let cloned = fsx::clone_or_copy(&src, path)?;
             let counter = if cloned { &self.clones } else { &self.copies };
             counter.fetch_add(1, Ordering::Relaxed);
-            // The store file is read-only; the caller sets the tree's mode next.
+            // The caller sets the tree's mode next.
             let len = fs::symlink_metadata(path)?.len();
             if len != size {
                 bail!("blob {blob} has {len} bytes, the tree says {size}");

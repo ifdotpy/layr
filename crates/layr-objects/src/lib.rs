@@ -225,6 +225,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_link_group_cannot_leave_the_folder() {
+        let dir = scratch("hostile-links");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("x"), "victim").unwrap();
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let (blob, size) = store.put_cold_bytes(b"x", None).unwrap();
+        let target = outside.as_os_str().as_encoded_bytes().to_vec();
+        let mut tree = Tree {
+            entries: vec![
+                Entry { name: b"a".to_vec(), mode: 0o644, node: Node::File { size, blob }, xattrs: vec![] },
+                Entry { name: b"l".to_vec(), mode: 0, node: Node::Symlink { target }, xattrs: vec![] },
+            ],
+            links: vec![vec![b"a".to_vec(), b"l/x".to_vec()]],
+        };
+        tree.normalize();
+        let id = store.put_tree(&tree).unwrap();
+        assert!(checkout(&store, &id, &dir.join("out")).is_err());
+        assert_eq!(fs::read_to_string(outside.join("x")).unwrap(), "victim", "nothing was written through the link");
+    }
+
+    #[test]
     fn secret_ids_differ_from_plain_ids() {
         let dir = scratch("secret");
         let src = dir.join("src");

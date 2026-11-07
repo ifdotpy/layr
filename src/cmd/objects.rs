@@ -94,12 +94,22 @@ fn imported_json(store: &Store, i: &Imported) -> serde_json::Value {
     })
 }
 
+/// Import and verify write into the store of the project (all of a state on a file system
+/// without clones): the experimental commands are for admins.
+fn require_admin(ctx: &Ctx, h: &Here) -> Result<()> {
+    if !h.repo.is_admin(ctx) {
+        bail!("permission denied: layr objects import and verify are experimental and need the admin role");
+    }
+    Ok(())
+}
+
 fn import(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--cold").flag("--json").value("--parent"), args)?;
     if a.pos.len() != 1 {
         return Err(exit(128, USAGE));
     }
     let h = here(ctx)?;
+    require_admin(ctx, &h)?;
     let store = open(&h)?;
     let parent = a.get("--parent").map(Id::parse).transpose()?;
     let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), parent)?;
@@ -132,6 +142,7 @@ fn verify(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, USAGE));
     }
     let h = here(ctx)?;
+    require_admin(ctx, &h)?;
     let store = open(&h)?;
     let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), None)?;
     let started = Instant::now();
@@ -198,6 +209,7 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, USAGE));
     }
     let h = here(ctx)?;
+    h.repo.can_read(ctx)?;
     let s = open(&h)?.stat()?;
     if a.has("--json") {
         outln!(
