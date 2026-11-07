@@ -189,7 +189,7 @@ try:
  people['ann@example.com']['inbox']=[{'id':'1-test','data':base64.b64encode((root/'invite.age').read_bytes()).decode()}]
  run(['person','accept','--site',site,'--invite','1-test'],ann)
  check(stats['index']==1 and stats['inbox']==1 and stats['slots']==1,'gateway invite acceptance authenticates person slot, index update and inbox deletion')
- run(['remote','add','web','layr+'+site+'/project'],actor)
+ run(['remote','add','web','layr+'+site+'/project','--mode','secret'],actor)
  before=stats['requests'];faults['reject_request_session']=True
  request=json.loads(run(['request','approve','head','--person','--remote','web','--json'],actor).stdout)
  check(stats['requests']==before+1 and stats['request_attempts']==2 and request['request']['v']==2,'real person request uploads an encrypted v2 envelope with a session bearer')
@@ -210,7 +210,7 @@ try:
  check(stats['epoch_claims']==1,'repeating the session-authenticated executor creates no duplicate epoch claim')
  project_requests.clear();before=stats['session']
  machine_only=dict(base,LAYR_GATEWAY_TOKEN_FILE=str(token),LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
- run(['clone','layr+'+site+'/project','machine-epoch-copy','-q'],machine_only)
+ run(['clone','layr+'+site+'/project','machine-epoch-copy','--mode','secret','-q'],machine_only)
  clone=pathlib.Path(base['LAYR_ROOT'])/'projects/machine-epoch-copy/lines/main'
  check((clone/'hello.txt').read_text()=='session request test\n','machine-only gateway clone restores files after project rotation')
  own=(pathlib.Path(base['LAYR_ROOT'])/'machine/id').read_text().strip()

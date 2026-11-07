@@ -22,6 +22,7 @@ no "no object is age encrypted" grep -rlq "age-encryption.org" "$T/plain"
 # The clone is another machine: its own store.
 FIRST=$LAYR_ROOT
 export LAYR_ROOT=$T/second
+new_fs "$LAYR_ROOT" 2G
 cd "$T"
 no "a clone that asks for Secret refuses the Private store" l clone "file://$T/plain" wrong --mode secret
 ok "clone the Private store" l clone "file://$T/plain" copy -q

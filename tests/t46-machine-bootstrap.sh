@@ -114,7 +114,7 @@ thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 site='https://localhost:'+str(server.server_port);url='layr+'+site+'/project'
 valid=dict(executor,LAYR_GATEWAY_CA_FILE=str(root/'ca.pem'),LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-p'),LAYR_PAPER_KEY_FILE=str(root/'paper'))
 try:
- p=run(['clone',url,'copy','-q'],valid)
+ p=run(['clone',url,'copy','--mode','secret','-q'],valid)
  restored=pathlib.Path(valid['LAYR_ROOT'])/'projects/copy/lines/main/hello.txt'
  check(restored.read_text()=='private machine bootstrap\n','machine with the project grant clones and restores a hidden project')
  check(any(path=='/v1/p/project/'+own_slot and kind=='P-grant' for _,path,kind in requests),'machine fetches only its own slot directly with the scoped grant')
@@ -130,10 +130,10 @@ try:
  check(any(path=='/v1/p/project/challenge' for _,path,_ in push_requests) and all(kind=='read' for method,path,kind in push_requests if method=='GET' and path.startswith('/v1/p/project/objects?') and not discovery(method,path)),'a separate private push obtains its read proof before listing data')
  check(any(method=='PUT' and '/objects/records/' in path and kind=='P-grant' for method,path,kind in requests),'the machine pushes its signed records after cloning the private project')
  wrong=dict(valid,LAYR_GATEWAY_TOKEN_FILE=str(root/'grant-q'))
- p=run(['clone',url,'wrong','-q'],wrong,False)
+ p=run(['clone',url,'wrong','--mode','secret','-q'],wrong,False)
  check(p.returncode!=0 and '404' in p.stderr and 'missing or wrong' in p.stderr,'a grant for another project is refused with a plain grant hint')
  missing=dict(valid);missing.pop('LAYR_GATEWAY_TOKEN_FILE')
- p=run(['clone',url,'missing','-q'],missing,False)
+ p=run(['clone',url,'missing','--mode','secret','-q'],missing,False)
  check(p.returncode!=0 and '404' in p.stderr and 'missing or wrong' in p.stderr,'a missing grant is refused with a plain grant hint')
  check(not any(path=='/v1/p/project/slots' for _,path,_ in requests),'machine bootstrap never calls the aggregate slots route')
  allowed={'/v1/p/project/store.json','/v1/p/project/'+own_slot,'/v1/p/project/challenge','/v1/p/project/token'}

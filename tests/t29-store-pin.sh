@@ -88,8 +88,8 @@ thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 env=os.environ.copy();env['LAYR_GATEWAY_CA_FILE']=str(root/'tls.crt')
 url=f'layr+https://localhost:{server.server_port}/project'
 try:
- run(['remote','add','gateway',url],env)
- for command,swap in [(['push','gateway','-q'],4),(['fetch','gateway','-q'],3),(['clone',url,'gateway-copy','-q'],4)]:
+ run(['remote','add','gateway',url,'--mode','secret'],env)
+ for command,swap in [(['push','gateway','-q'],4),(['fetch','gateway','-q'],3),(['clone',url,'gateway-copy','--mode','secret','-q'],4)]:
   Gateway.count=0;Gateway.swap=swap;Gateway.uploads=[];Gateway.other=[]
   refused(command,[good['recipient'],bad['recipient']],env)
   check(not Gateway.uploads and not Gateway.other,'changed gateway answer causes no upload, slot request or read proof')

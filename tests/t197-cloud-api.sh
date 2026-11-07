@@ -55,6 +55,7 @@ ok "a second push sends nothing new" l push cloud -q
 # Another machine clones the project.
 FIRST=$LAYR_ROOT
 export LAYR_ROOT=$T/second
+new_fs "$LAYR_ROOT" 2G
 cd "$T"
 ok "clone from Layr Cloud" l clone "$URL" copy -q
 
