@@ -1,6 +1,6 @@
 [package]
 name = "layr-api"
-version = "0.37.0"
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Typed command and JSON contracts for Layr consumers"

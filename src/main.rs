@@ -32,6 +32,7 @@ mod gitbridge;
 mod ids;
 use layr_store::http;
 mod ignore_rules;
+mod layrfs;
 mod lineops;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_scan;
@@ -75,6 +76,8 @@ mod stream;
 mod sys;
 #[cfg(target_os = "macos")]
 mod thin;
+#[cfg(target_os = "macos")]
+mod views;
 mod trace;
 mod tree;
 mod usage;
@@ -85,6 +88,14 @@ use std::collections::HashMap;
 mod cache_hook;
 
 fn main() {
+    // Started as `rg` or `find` (a link on an agent's PATH): LayrFS answers from its index.
+    let argv0 = std::env::args_os().next().map(std::path::PathBuf::from);
+    if let Some(tool) = argv0.as_deref().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        if layrfs::TOOLS.contains(&tool) {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            std::process::exit(layrfs::run_tool(tool, &args));
+        }
+    }
     // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
     cache_hook::register(layr_cache::adapters());
     if std::env::args().nth(1).as_deref() == Some(cache_hook::WORKER_ARG) {
@@ -110,6 +121,21 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // `layr tool <rg|find> <args>`: before the global options and help, because the tool's own
+    // arguments (`rg -h`, `find -C`) belong to the tool.
+    if argv.first().map(String::as_str) == Some("tool") {
+        match argv.get(1).map(String::as_str) {
+            Some(tool) if layrfs::TOOLS.contains(&tool) => std::process::exit(layrfs::run_tool(tool, &argv[2..])),
+            Some("--help" | "-h") => {
+                print!("{}", cmd::HELP);
+                return;
+            }
+            _ => {
+                eprintln!("usage: layr tool <{}> [<args>]", layrfs::TOOLS.join("|"));
+                std::process::exit(2);
+            }
+        }
     }
     if let Some(code) = project_copy::hidden(&argv) {
         std::process::exit(code);
@@ -235,6 +261,15 @@ fn main() {
             Ok(code) => std::process::exit(early(&argv, code)),
             Err(error) => {
                 eprintln!("layr person: {error:#}");
+                std::process::exit(early(&argv, 1));
+            }
+        }
+    }
+    if argv.first().map(String::as_str) == Some("fs") {
+        match layrfs::run_fs(&argv[1..]) {
+            Ok(code) => std::process::exit(early(&argv, code)),
+            Err(error) => {
+                eprintln!("layr fs: {error:#}");
                 std::process::exit(early(&argv, 1));
             }
         }

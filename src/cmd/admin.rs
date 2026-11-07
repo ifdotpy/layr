@@ -107,11 +107,17 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let repo = &h.repo;
+    // Virtual lines save their upper layer; cache overlays still require folder lines.
+    #[cfg(target_os = "macos")]
+    let virtual_line = |l: &Line| crate::views::of(repo, l).is_some();
+    #[cfg(not(target_os = "macos"))]
+    let virtual_line = |_: &Line| false;
     let lines: Vec<Line> = if a.has("--all-lines") {
         repo.require(ctx, "line.manage")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
-        vec![h.line()?.clone()]
+        let l = h.line()?.clone();
+        vec![l]
     };
     let msg = a.get("--note").unwrap_or("").to_string();
     // `--cache <path>` (repeatable) saves only the named cache paths. A big cache (build output)
@@ -124,6 +130,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        if virtual_line(&l) && a.has("--caches") {
+            return Err(exit(2, "cache overlays require a folder line (docs/views.md)"));
+        }
         let mut prepared = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
@@ -159,7 +168,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         };
         let l = repo.line(&l.id)?;
-        crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        if !virtual_line(&l) {
+            crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        }
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         if !only.is_empty() {
             if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
