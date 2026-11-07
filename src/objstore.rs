@@ -235,6 +235,12 @@ pub fn write_base(
     }
     let _pin = repo.pin(&[parent_state])?;
     let parent = repo.state_src(parent_state)?;
+    // Portable readers can supply ordinary folders. A btrfs send stream requires both
+    // roots to be subvolumes; keep ioctl failures visible when those prerequisites hold.
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    if !crate::storage::is_subvolume(&parent) || !crate::storage::is_subvolume(source) {
+        return Ok(None);
+    }
     #[cfg(target_os = "macos")]
     let changes = crate::storage::with_stored_compare(|| crate::changes::candidates(&parent, source))?;
     #[cfg(not(target_os = "macos"))]
