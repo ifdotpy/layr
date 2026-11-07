@@ -209,7 +209,9 @@ out; `objects-bench` example of the crate):
 | hot import again (all objects present) | 33 s | 0 new objects |
 | checkout with clones | 78 s | 516,265 clones |
 | compare checkout with source | 37 s | 563,317 entries equal |
-| cold import, empty store | 233 s | CHROMIUM_COLD |
+| cold import, empty store | 233 s | 1.62 GB (36 % of the file bytes): 1.22 GB whole zstd blobs, 0.37 GB in 10,159 chunks of 306 files of 1 MiB or more, 26 MB of trees; 3.1 GiB allocated (536,154 loose files) |
+| checkout from the cold store (decode) | 167 s | 516,265 files written |
+| compare that checkout with source | 67 s | 563,317 entries equal |
 | `cp -cR` of the same folder (APFS clones, one thread, with `.git`) | 288 s | for reference |
 
 ## 9. Migration and next steps

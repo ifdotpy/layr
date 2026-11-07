@@ -14,7 +14,7 @@ hmac = "0.12"
 layr-hashers = { path = "../layr-hashers" }
 layr-store = { path = "../layr-store" }
 rayon = "1"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 sha2 = "0.10"
 
 [[example]]

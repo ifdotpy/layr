@@ -78,6 +78,8 @@ mod tests {
         fs::write(root.join("same-too.txt"), "same\n").unwrap();
         fs::write(root.join("empty-file"), "").unwrap();
         fs::write(root.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        // Same bytes as run.sh without its attribute: one blob, two attribute sets.
+        fs::write(root.join("run-copy.sh"), "#!/bin/sh\necho hi\n").unwrap();
         chmod(&root.join("run.sh"), 0o755);
         fs::write(root.join("locked/readonly"), "r\n").unwrap();
         chmod(&root.join("locked/readonly"), 0o444);

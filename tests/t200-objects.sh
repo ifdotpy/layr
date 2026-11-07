@@ -19,6 +19,13 @@ chmod 755 $T/src/bin/run.sh
 ln -s ../notes.txt $T/src/bin/notes-link
 ln -s missing/target $T/src/dangling
 python3 -I -c 'import random,sys; random.seed(7); sys.stdout.buffer.write(random.randbytes(3 << 20))' > $T/src/big.bin
+ln $T/src/notes.txt $T/src/notes-hard.txt
+# An extended attribute, where the file system and the tools allow one (verify compares them).
+if [ "$(uname -s)" = Darwin ]; then
+    xattr -w user.layr-test value $T/src/bin/run.sh
+else
+    python3 -I -c 'import os,sys; os.setxattr(sys.argv[1], "user.layr-test", b"value")' $T/src/bin/run.sh 2>/dev/null || true
+fi
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/objects

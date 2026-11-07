@@ -135,6 +135,7 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         }
+        remove_orphans(&root.join("tmp"));
         Ok(Store { root: root.to_path_buf(), keying, options: Options::default(), added: Added::default(), clone_hook: None })
     }
 
@@ -299,6 +300,8 @@ impl Store {
                 use std::os::fd::AsFd;
                 hook(File::open(&tmp)?.as_fd())?;
             }
+            // A clone takes the attributes of its source; the tree keeps them per entry.
+            fsx::clear_xattrs(&tmp)?;
             let (id, len) = self.hash_file(&tmp)?;
             Ok((id, len, cloned))
         })();
@@ -523,15 +526,41 @@ impl Store {
         Ok(out)
     }
 
-    /// Count the objects by form and add their file sizes.
+    /// Count the objects by form and add their file sizes (the fan-out folders in parallel).
     pub fn stat(&self) -> Result<Stat> {
+        use rayon::prelude::*;
+        let parts = |area: &str| -> Result<Vec<Stat>> {
+            fan_folders(&self.root.join(area))?.par_iter().map(|dir| self.stat_folder(area == "blobs", dir)).collect()
+        };
         let mut s = Stat::default();
-        for path in files_in(&self.root.join("blobs"))? {
-            s.hot_blobs += 1;
-            s.hot_bytes += fs::symlink_metadata(&path)?.len();
+        for p in parts("blobs")?.into_iter().chain(parts("objects")?) {
+            s.hot_blobs += p.hot_blobs;
+            s.hot_bytes += p.hot_bytes;
+            s.trees += p.trees;
+            s.tree_bytes += p.tree_bytes;
+            s.whole_blobs += p.whole_blobs;
+            s.whole_bytes += p.whole_bytes;
+            s.delta_blobs += p.delta_blobs;
+            s.delta_bytes += p.delta_bytes;
+            s.chunked_blobs += p.chunked_blobs;
+            s.chunked_bytes += p.chunked_bytes;
+            s.chunks += p.chunks;
+            s.chunk_bytes += p.chunk_bytes;
         }
-        for path in files_in(&self.root.join("objects"))? {
+        s.states = fs::read_dir(self.root.join("states"))?.count() as u64;
+        Ok(s)
+    }
+
+    fn stat_folder(&self, hot: bool, dir: &Path) -> Result<Stat> {
+        let mut s = Stat::default();
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
             let len = fs::symlink_metadata(&path)?.len();
+            if hot {
+                s.hot_blobs += 1;
+                s.hot_bytes += len;
+                continue;
+            }
             let mut head = [0u8; 6];
             let n = read_up_to(&mut File::open(&path)?, &mut head)?;
             ensure!(n == 6 && &head[..4] == MAGIC, "{} has no valid header", path.display());
@@ -545,8 +574,27 @@ impl Store {
             *count += 1;
             *bytes += len;
         }
-        s.states = fs::read_dir(self.root.join("states"))?.count() as u64;
         Ok(s)
+    }
+}
+
+/// Remove the temporary files of writers that are gone (a crash or a kill). A name starts with the
+/// writer's process id.
+fn remove_orphans(tmp: &Path) {
+    let Ok(entries) = fs::read_dir(tmp) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let pid = name.trim_start_matches("config-").split('-').next().and_then(|p| p.parse::<i32>().ok());
+        let alive = match pid.and_then(rustix::process::Pid::from_raw) {
+            Some(pid) => match rustix::process::test_kill_process(pid) {
+                Ok(()) => true,
+                Err(e) => e != rustix::io::Errno::SRCH,
+            },
+            None => true,
+        };
+        if !alive {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -578,15 +626,13 @@ fn read_up_to(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n)
 }
 
-/// The files two levels down (the fan-out folders).
-fn files_in(dir: &Path) -> Result<Vec<PathBuf>> {
+/// The fan-out folders of an area.
+fn fan_folders(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for fan in fs::read_dir(dir)? {
         let fan = fan?;
         if fan.file_type()?.is_dir() {
-            for f in fs::read_dir(fan.path())? {
-                out.push(f?.path());
-            }
+            out.push(fan.path());
         }
     }
     Ok(out)
@@ -615,6 +661,12 @@ mod tests {
         assert_eq!(a, c, "a cold write of a hot blob adds nothing");
         assert_eq!(store.added.objects.load(Ordering::Relaxed), first);
         assert!(fs::read_dir(dir.join("store/tmp")).unwrap().next().is_none(), "no temporary file is left");
+        // A writer that is gone left a temporary file: the next open removes it.
+        fs::write(dir.join("store/tmp/999999999-0"), b"partial").unwrap();
+        fs::write(dir.join(format!("store/tmp/{}-77", std::process::id())), b"in progress").unwrap();
+        Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        assert!(!dir.join("store/tmp/999999999-0").exists());
+        assert!(dir.join(format!("store/tmp/{}-77", std::process::id())).exists());
         // The format is fixed for a store.
         assert!(Store::open(&dir.join("store"), Keying::Keyed([7; 32])).is_err());
     }

@@ -67,6 +67,32 @@ pub fn xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
     Ok(out)
 }
 
+/// Remove every extended attribute of the file `path` (a store copy of a file must not carry the
+/// attributes of the one source it was cloned from). The file gets the owner write bit.
+pub fn clear_xattrs(path: &Path) -> io::Result<()> {
+    let names = match read_buffer(|buf| rustix::fs::llistxattr(path, buf)) {
+        Ok(names) => names,
+        Err(e) if unsupported(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if names.iter().all(|b| *b == 0) {
+        return Ok(());
+    }
+    // macOS removes no attribute of a read-only file, even for its owner.
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(path)?.permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode((mode & 0o7777) | 0o200))?;
+    for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        let cname = CString::new(name)?;
+        match rustix::fs::lremovexattr(path, cname.as_c_str()) {
+            Ok(()) => {}
+            Err(e) if e == missing_attribute() => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 pub fn set_xattrs(path: &Path, attrs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
     for (name, value) in attrs {
         let cname = CString::new(name.clone())?;

@@ -58,7 +58,10 @@ fn main() -> Result<()> {
                 println!("  {d}");
             }
         }
-        Some("stat") => println!("{:#?}\ntotal bytes {}", store.stat()?, store.stat()?.total_bytes()),
+        Some("stat") => {
+            let s = store.stat()?;
+            println!("{s:#?}\ntotal bytes {} in {:.2}s", s.total_bytes(), started.elapsed().as_secs_f64());
+        }
         _ => bail!("usage: objects-bench <store> import|checkout|verify|stat ..."),
     }
     Ok(())
