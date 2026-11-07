@@ -239,6 +239,16 @@ impl Project {
         for (index, rec) in records.iter().enumerate() {
             p.derive(index, rec)?;
         }
+        // Apply mappings after all source states exist. Their own record order decides the
+        // winner even when clock skew sorts a migration before the source record.
+        for rec in records.iter().filter(|rec| rec.op == validation::STATE_TREE_OP) {
+            for (id, tree, times) in validation::state_trees(&rec.data)? {
+                if let Some(state) = p.states.get_mut(&id) {
+                    state.state.tree = Some(tree);
+                    state.state.times = Some(times);
+                }
+            }
+        }
         p.records = records;
         Ok(p)
     }

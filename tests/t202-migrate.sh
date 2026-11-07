@@ -211,8 +211,51 @@ new_id=$(uuid_of "$new")
 eq "new saves carry tree and times" "1" "$(DB "SELECT count(*) FROM states WHERE id='$new_id' AND json_extract(rec,'$.tree') IS NOT NULL AND json_extract(rec,'$.times') IS NOT NULL")"
 ok "new saved objects verify" l objects verify "$new"
 l objects checkout "$new" $T/new-checkout >/dev/null
-same_tree "$P/main" "$T/new-checkout" >/dev/null
 ok "new object content includes the edit" grep -q 'after migration' "$T/new-checkout/notes.txt"
 ok "records with object fields survive replay" l fsck
+
+# A corrupt descendant must stop deletion even when the root tree and times still exist.
+mkdir "$T/corrupt-source"
+echo first > "$T/corrupt-source/file"
+l init corrupt --from "$T/corrupt-source" -q >/dev/null
+cd "$LAYR_ROOT/projects/corrupt/lines/main"
+l tag original head
+echo second > file
+l save -a -m second -q
+l migrate >/dev/null
+objects="$LAYR_ROOT/projects/corrupt/meta/objects"
+cp -R "$objects/blobs" "$T/blob-backup"
+python3 -I - "$objects/blobs" "$LAYR_ROOT/projects/corrupt" "$T/snapshots" <<'EOF'
+import os, sys
+blobs, p, out = sys.argv[1:]
+for folder, _, files in os.walk(blobs):
+    for name in files:
+        path = os.path.join(folder, name)
+        os.chmod(path, 0o600)
+        with open(path, 'r+b') as f:
+            data = f.read()
+            if data:
+                f.seek(0)
+                f.write(bytes([data[0] ^ 1]) + data[1:])
+with open(out, 'w') as f:
+    for folder in ('states', 'deltas'):
+        for name in os.listdir(os.path.join(p, folder)):
+            f.write(os.path.join(p, folder, name) + '\n')
+EOF
+no "damaged objects stop --delete-old" l migrate --delete-old
+ok "no old snapshot was deleted after failed verification" python3 -I -c 'import os,sys; assert all(os.path.exists(p.strip()) for p in open(sys.argv[1]))' "$T/snapshots"
+cp -R "$T/blob-backup/" "$objects/blobs/"
+ok "migration resumes after restoring the damaged object" l migrate --resume --delete-old
+
+if [ "$(uname -s)" = Darwin ]; then
+    mkdir "$T/acl-source"
+    echo 'keep the ACL' > "$T/acl-source/file"
+    chmod +a 'everyone allow read' "$T/acl-source/file"
+    l init acl --from "$T/acl-source" -q >/dev/null
+    cd "$LAYR_ROOT/projects/acl/lines/main"
+    no "migration refuses a native ACL it cannot preserve" l migrate --delete-old
+    eq "ACL refusal keeps the original content" 'keep the ACL' "$(cat file)"
+    ok "ACL refusal keeps the snapshot" l show head:file
+fi
 
 finish

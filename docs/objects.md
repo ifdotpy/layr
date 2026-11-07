@@ -110,7 +110,9 @@ Rules (a decoder checks each one and refuses the tree otherwise):
 - Extended attributes are sorted by name bytes, names unique, not empty, no zero byte. A tree keeps
   every attribute except `com.apple.provenance`, names that start with `com.layr.`, and the classes
   `trusted.`, `security.` and `system.` (SELinux labels, file capabilities, POSIX ACLs and overlayfs
-  internals belong to the machine). A decoder refuses those names too.
+  internals belong to the machine). A decoder refuses those names too. A write refuses POSIX
+  ACLs and file capabilities instead of silently dropping them. Migration also refuses native
+  macOS ACLs; Layr's own snapshot seal is not a user ACL.
 - **Hard links:** each group lists the paths (relative to this tree, `/`-separated, sorted, at
   least two, each component a valid name) of one file with more than one name in the folder.
   Groups are sorted by their first path. Only the root tree of a write has groups, so trees below

@@ -289,6 +289,37 @@ impl Layered {
             for l in self.layers.iter().rev().skip(1) {
                 apply(l, dst, &mut cloned)?;
             }
+            let mut linked_upper = false;
+            for layer in self.layers.iter().take(self.layers.len().saturating_sub(1)) {
+                if apfs::scan_shared(&layer.root, false)?.values().any(|e| e.meta.is_file() && e.nlink > 1) {
+                    linked_upper = true;
+                    break;
+                }
+            }
+            if linked_upper {
+                // Applying upper entries one by one copies their bytes. Restore groups from the
+                // merged inode identities, including links in different upper folders.
+                let mut groups = BTreeMap::<(u64, u64), Vec<String>>::new();
+                for (rel, entry) in self.scan(false)? {
+                    if entry.meta.is_file() && entry.nlink > 1 {
+                        groups.entry((entry.fingerprint.0, entry.fingerprint.1)).or_default().push(rel);
+                    }
+                }
+                let tree = crate::tree::Tree::open(dst)?;
+                let mut parents = BTreeSet::new();
+                for group in groups.values().filter(|g| g.len() > 1) {
+                    crate::sys::apfs_immutable(&dst.join(&group[0]), false)?;
+                    for rel in &group[1..] {
+                        open_parent(dst, rel)?;
+                        parents.insert(parent_of(rel).to_string());
+                        tree.remove(rel)?;
+                        tree.hard_link(&group[0], rel)?;
+                    }
+                }
+                for rel in parents {
+                    copy_dir_meta(&self.path(&rel)?, &dst.join(&rel), rel.is_empty())?;
+                }
+            }
             // The clone of the bottom is writable already, and `apply` opens each folder it
             // changes: only the entries cloned from the sealed layers keep their flags. A pass
             // over the whole tree cost one call per entry.
@@ -369,7 +400,12 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
         crate::sys::apfs_mtime(to, m.mtime(), m.mtime_nsec())?;
         return Ok(true);
     }
-    clone_from_source(from, to)?;
+    if m.is_dir() {
+        let entries = apfs::scan_with_data(from, false)?;
+        apfs::clone_complete(from, to, &entries, false)?;
+    } else {
+        clone_from_source(from, to)?;
+    }
     Ok(true)
 }
 
@@ -666,7 +702,7 @@ pub fn add_entries<'a>(
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
-                clone_from_source(&from, &to)?;
+                clone_entry(&from, &to, &m)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
                 let complete = write

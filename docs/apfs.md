@@ -77,7 +77,10 @@ A sealed tree (a state, a layer, a view) cannot change through an ordinary write
   `inherited`. Reads stay allowed.
 - A folder clone does not copy the ACLs of the entries below its root, and a copy of one file
   (`clonefile` with `CLONE_ACL`, `copyfile` with `COPYFILE_ACL`) leaves inherited entries out.
-  So a new line is one clone of the tree: no entry needs a change. A copy never carries the seal.
+  A sealed tree records the paths with native ACLs in `com.layr.user-acls`. A new line restores
+  those ACLs after the clone. With no native ACLs, no pass over the entries is needed. Writable
+  trees and old snapshots without this index are checked before copying their native ACLs.
+  A copy never carries the seal.
 - Up to layr 0.40, every entry had the immutable flag, and a clone copies flags: a writable copy cleared the flag
   on each entry. Layr reads both formats. A writable copy clears the flag only on the entries that have it
   (the scan of the source reads the flags). Old states keep their format; new states use the ACL entry.

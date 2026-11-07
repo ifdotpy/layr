@@ -53,6 +53,12 @@ pub fn xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         Err(e) if unsupported(&e) => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
+    for name in names.split(|b| *b == 0) {
+        if matches!(name, b"system.posix_acl_access" | b"system.posix_acl_default" | b"security.capability") {
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                format!("{} has {}: the object format cannot preserve it", path.display(), String::from_utf8_lossy(name))));
+        }
+    }
     let mut out = Vec::new();
     for name in names.split(|b| *b == 0).filter(|n| !n.is_empty() && keep_xattr(n)) {
         let cname = CString::new(name)?;

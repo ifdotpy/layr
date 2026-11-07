@@ -250,10 +250,11 @@ against its snapshot. A missing or damaged object stops the deletion.
 
 ## Remotes
 
-- This version moves only the store on your machine.
+- Migration changes the local store. It does not rewrite an existing remote.
 - Git remotes (`layr git push`) do not change.
-- Layr remotes (`layr push <remote>`) keep the old format (store format v2). Pushes and fetches
-  work as before.
+- Store format v2 remotes keep their snapshot protocol. Pushes and fetches work as before.
+- Layr Cloud API v1 remotes transfer trees, times tables and packs. A migrated project can push
+  history even after `--delete-old` removed its local snapshots.
 - The new remote format (store format v3) comes later. The plan: you push the migrated project to a
   new, empty remote in the new format, then you remove the old remote. An old remote is not changed
   in place.

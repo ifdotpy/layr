@@ -844,11 +844,24 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         levels.push(sub);
     }
     let acl = acl_seal();
-    let apply = || -> Result<()> {
-        each_parallel(&files, |f| seal_entry(f, acl))?;
-        for level in levels.iter().skip(1).rev() {
-            each_parallel(level, |d| seal_entry(d, acl))?;
+    let user_acls = std::sync::Mutex::new(Vec::<String>::new());
+    let seal_one = |entry: &PathBuf| -> Result<()> {
+        if crate::sys::apfs_has_acl(entry)? {
+            user_acls.lock().unwrap().push(entry.strip_prefix(path)?.to_str().context("ACL path is not UTF-8")?.to_string());
         }
+        seal_entry(entry, acl)
+    };
+    let apply = || -> Result<()> {
+        each_parallel(&files, seal_one)?;
+        for level in levels.iter().skip(1).rev() {
+            each_parallel(level, seal_one)?;
+        }
+        // The root is immutable only after the ACL index is durable. Writable trees never use
+        // this index, because their ACLs can change without a Layr command.
+        crate::sys::apfs_immutable(path, false)?;
+        let mut paths = user_acls.lock().unwrap();
+        paths.sort();
+        crate::sys::apfs_attribute(path, c"com.layr.user-acls", Some(&serde_json::to_vec(&*paths)?))?;
         Ok(crate::sys::apfs_flag(path, true)?)
     };
     if files.len() >= PARALLEL_FROM || levels.iter().any(|level| level.len() >= PARALLEL_FROM) {
@@ -984,6 +997,21 @@ fn clone_complete_with(
         let _t = crate::trace::span("APFS unseal copy");
         seal(dst, false, false)?;
     }
+    if crate::sys::apfs_has_acl(src)? {
+        crate::sys::apfs_copy_user_acl(src, dst)?;
+    }
+    let user_acls: Vec<String> = if entries.get("").is_some_and(|e| e.flags & libc::UF_IMMUTABLE != 0) {
+        match crate::sys::apfs_attribute(src, c"com.layr.user-acls", None) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.raw_os_error() == Some(libc::ENOATTR) => user_acl_paths(src, entries)?,
+            Err(e) => return Err(e.into()),
+        }
+    } else { user_acl_paths(src, entries)? };
+    for rel in user_acls {
+        let from = crate::fsutil::safe_join(src, &rel)?;
+        let to = crate::fsutil::safe_join(dst, &rel)?;
+        if to.symlink_metadata().is_ok() { crate::sys::apfs_copy_user_acl(&from, &to)?; }
+    }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
     // They get the times of the source, from its scan.
     let dirs: Vec<(&String, &ScanEntry)> = entries.iter().filter(|(_, e)| e.meta.is_dir()).collect();
@@ -1012,6 +1040,21 @@ fn clone_complete_with(
         crate::sys::apfs_immutable(&p, true)?;
         Ok(())
     })
+}
+
+fn user_acl_paths(src: &Path, entries: &BTreeMap<String, ScanEntry>) -> Result<Vec<String>> {
+    let paths = std::sync::Mutex::new(Vec::new());
+    let names: Vec<&String> = entries.keys().filter(|p| !p.is_empty()).collect();
+    each_parallel(&names, |rel| {
+        match crate::sys::apfs_has_acl(&src.join(rel)) {
+            Ok(true) => paths.lock().unwrap().push((*rel).clone()),
+            Ok(false) => {},
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    })?;
+    Ok(paths.into_inner().unwrap())
 }
 
 /// True when the folder clone `dst` of `src` kept the seal entries of the entries below its root.

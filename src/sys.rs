@@ -2154,6 +2154,15 @@ pub fn apfs_has_acl(entry: &std::path::Path) -> io::Result<bool> {
     // The seal of a state entry is no ACL of its content.
     Ok(result as u32 & libc::COPYFILE_ACL != 0 && apfs_acl_text(entry)?.is_some())
 }
+/// Copy native ACL entries exactly, excluding only Layr's seal.
+#[cfg(target_os = "macos")]
+pub fn apfs_copy_user_acl(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    let Some(mut acl) = Acl::of_path(&cpath(src)?)? else { return Ok(()) };
+    acl.remove_seal()?;
+    apfs_immutable(dst, false)?;
+    acl.set_path(&cpath(dst)?)
+}
+
 /// The ACL of `path` (the link itself) as text, without the seal entry of a state entry;
 /// `None` without another ACL entry.
 #[cfg(target_os = "macos")]

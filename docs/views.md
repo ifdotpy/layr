@@ -53,6 +53,9 @@ Run `line show` and `line delete` outside the line's folder.
 - **Save.** `layr save -m` writes a thin layer over the head with the changed entries, cloned from the upper folder,
   and the removed paths. The line keeps its mount and its lower tree: after the save the upper folder equals the
   new head, so `status` is clean. All changes are saved: a virtual line has no index.
+  `layr save` without a message records an automatic state and keeps the named head. An unchanged
+  folder reuses its previous automatic state. If hard links require a complete state, save writes
+  that state instead of a thin layer.
 - **Delete.** Unsaved changes become the final automatic state, a thin layer over the head. Then the mount, the
   line folder and the upper folder go.
 - **Folder.** `line show --folder` clones the lower tree, applies the upper folder (`Layered::materialize`),
@@ -60,7 +63,7 @@ Run `line show` and `line delete` outside the line's folder.
 
 ## Limits
 
-- Only these commands run on a virtual line: `status`, `diff` (`-R` is not available), `save -m` (`-F` and `-q`
+- Only these commands run on a virtual line: `status`, `diff` (`-R` is not available), `save`, `save -m` (`-F` and `-q`
   too, no `--amend`), `log`, `show`, `rev-parse`, `merge-base`, `line new/list/delete/show`, `gc`, `config`.
   `layr du` leaves virtual lines out (their cost is the upper folder).
   The others (`add`, `restore`, `reset`, `merge`, `git push`, `undo`, and so on) refuse with a message that names

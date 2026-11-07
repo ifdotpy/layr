@@ -207,4 +207,17 @@ no "the mount is gone" bash -c "mount | grep -q '$P/lines/v2 (layrfs'"
 ok "the line folder is gone" test ! -e "$P/lines/v2"
 ok "the view folder is gone" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"
 
+# A complete fallback preserves upper hard links and excludes ignored build output.
+ok "a virtual line for hard links" l line new linked --view virtual
+L="$P/lines/linked"
+echo 'linked bytes' > "$L/one"
+ok "hard link through the mount" ln "$L/one" "$L/two"
+mkdir -p "$L/target"
+echo 'ignored bytes' > "$L/target/output"
+ok "save upper hard links" bash -c "cd '$L' && '$LAYR' save -m links"
+no "complete save excludes ignored output" l show linked:target/output
+ok "checkout the complete virtual state" l line new linked-copy linked
+eq "saved hard links remain linked" "$(stat_field inode "$P/lines/linked-copy/one")" "$(stat_field inode "$P/lines/linked-copy/two")"
+ok "delete the virtual hard-link line" l line delete -D linked
+
 finish

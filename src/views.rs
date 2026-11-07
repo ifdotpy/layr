@@ -393,7 +393,7 @@ fn write_state(
     // A reverted entry can live only in the lower tree. Hard links also need a complete
     // snapshot so their identity survives. Ordinary edits still write only the upper layer.
     let missing_upper = d.write.iter().any(|p| std::fs::symlink_metadata(t.upper.join(p)).is_err());
-    let complete = if missing_upper {
+    let complete = if missing_upper || thin::any_linked(&t.upper, &d.write) {
         true
     } else {
         match thin::write_layer(&t.upper, &dst, &d, &line.head, false, None) {
@@ -406,6 +406,20 @@ fn write_state(
         let path = repo.p.state_path(&id);
         let made = (|| -> Result<()> {
             t.merged.materialize(&path, false)?;
+            // A complete fallback obeys the same exclusions as the thin write. In particular,
+            // ignored build output and untracked secrets must not enter a named state.
+            let mut excluded = Vec::new();
+            fsutil::walk(path.as_path(), "", &mut |rel, meta| {
+                if skip_path(rel) || system_path(rel)
+                    || (rules.ignored(rel, meta.is_dir()) && fsutil::lmeta(&t.head, rel).is_none()) {
+                    excluded.push(rel.to_string());
+                    return Ok(false);
+                }
+                Ok(true)
+            })?;
+            for rel in excluded {
+                crate::storage::delete_tree(&path.join(rel))?;
+            }
             crate::storage::write_info(
                 &path,
                 &crate::storage::SubvolInfo {

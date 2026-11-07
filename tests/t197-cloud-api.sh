@@ -28,6 +28,14 @@ l overlay create private -q
 l overlay create shared --readers '*' -q
 ok "remote add of a Layr Cloud project" l remote add cloud "$URL"
 eq "the mode is Private" private "$(l config --get cloud.remote.cloud.mode)"
+l tag before-objects head
+mkdir -p portable/deep
+printf 'portable history\n' > portable/deep/file
+l add portable
+l save -m 'portable history' -q
+migration=$(l migrate --delete-old 2>&1); migration_rc=$?
+eq "migrate before a cloud push" 0 "$migration_rc"
+[ "$migration_rc" -eq 0 ] || echo "$migration"
 PUSHED=$(l push cloud 2>&1)
 eq "push to Layr Cloud" 0 $?
 has "an overlay with limited readers stays here" "overlay private: its readers are limited" "$PUSHED"
@@ -46,6 +54,9 @@ ok "clone from Layr Cloud" l clone "$URL" copy -q
 
 eq "the clone reads the files" "$(cat "$T/src/notes.txt")" "$(cat "$LAYR_ROOT/projects/copy/lines/main/notes.txt")"
 cd "$LAYR_ROOT/projects/copy/lines/main"
+eq "cloud clone includes nested migrated content" "portable history" "$(cat portable/deep/file)"
+eq "cloud clone retains migrated history" "$(cat "$T/src/notes.txt")" "$(l show before-objects:notes.txt)"
+ok "nested modification times survive cloud transfer" python3 -I -c 'import os,sys; assert os.stat(sys.argv[1]).st_mtime_ns == os.stat(sys.argv[2]).st_mtime_ns' "$FIRST/projects/p/lines/main/portable/deep/file" portable/deep/file
 echo second >> notes.txt
 ok "save in the clone" l save -a -m second -q
 ok "push from the clone moves the shared line" l push origin -q
