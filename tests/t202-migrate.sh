@@ -244,13 +244,13 @@ with open(out, 'w') as f:
 EOF
 no "damaged objects stop --delete-old" l migrate --delete-old
 ok "no old snapshot was deleted after failed verification" python3 -I -c 'import os,sys; assert all(os.path.exists(p.strip()) for p in open(sys.argv[1]))' "$T/snapshots"
-cp -R "$T/blob-backup/" "$objects/blobs/"
+cp -R "$T/blob-backup/." "$objects/blobs/"
 ok "migration resumes after restoring the damaged object" l migrate --resume --delete-old
 
 if [ "$(uname -s)" = Darwin ]; then
     mkdir "$T/acl-source"
     echo 'keep the ACL' > "$T/acl-source/file"
-    chmod +a 'everyone allow read' "$T/acl-source/file"
+    /bin/chmod +a 'everyone allow read' "$T/acl-source/file" || exit 1
     l init acl --from "$T/acl-source" -q >/dev/null
     cd "$LAYR_ROOT/projects/acl/lines/main"
     no "migration refuses a native ACL it cannot preserve" l migrate --delete-old

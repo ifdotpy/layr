@@ -9,7 +9,7 @@ printf 'read only\n' > "$T/src/readonly.txt"
 chmod 444 "$T/src/readonly.txt"
 mkdir -p "$T/src/acl/sub"
 echo 'native ACL' > "$T/src/acl/sub/file"
-chmod +a 'everyone allow read' "$T/src/acl/sub/file"
+/bin/chmod +a 'everyone allow read' "$T/src/acl/sub/file" || exit 1
 l init local --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/local/lines
 cd "$P/main" || exit 1
