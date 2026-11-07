@@ -48,5 +48,11 @@ if [ "$(uname -s)" = Darwin ]; then
     err=$(l checks run --state topic 2>&1 >/dev/null)
     has "a job that waits says so" "unit of " "$err"
     has "and why" "only a state of main or a state that a maintainer approved runs here" "$err"
+    # A line that checks.lines still names after it was deleted is skipped; the other lines still plan.
+    cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
+    l line delete -D -q topic >/dev/null 2>&1
+    err=$(l checks watch --once --json 2>&1 >/dev/null); rc=$?
+    eq "a deleted line in checks.lines does not stop the watcher" "0" "$rc"
+    has "it is named as skipped" "names line 'topic', which does not exist" "$err"
 fi
 finish
