@@ -1522,7 +1522,7 @@ version = "0.1.0"
 
 [[package]]
 name = "layr-api"
-version = "0.37.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
