@@ -660,6 +660,9 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     // store has runner settings. A user daemon runs it as its user; it restarts after 10 s.
     let mut runner_child: Option<i32> = None;
     let mut runner_start = std::time::Instant::now();
+    // The restart delay: 10 s, doubled after each run shorter than a minute, at most 60 s.
+    let mut runner_delay = 10u64;
+    let mut runner_started = std::time::Instant::now();
     let (max_total, max_per_user) =
         (limit("LAYR_MAX_REQUESTS", DEFAULT_MAX_REQUESTS), limit("LAYR_MAX_REQUESTS_PER_USER", DEFAULT_MAX_REQUESTS_PER_USER));
     loop {
@@ -699,11 +702,15 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             }
             if runner_child == Some(pid) {
                 runner_child = None;
+                runner_delay =
+                    if runner_started.elapsed() < std::time::Duration::from_secs(60) { (runner_delay * 2).min(60) } else { 10 };
+                runner_start = std::time::Instant::now() + std::time::Duration::from_secs(runner_delay);
             }
         }
         if user_mode && runner_child.is_none() && std::time::Instant::now() >= runner_start {
             runner_start = std::time::Instant::now() + std::time::Duration::from_secs(10);
             if root.join(crate::runner::DIR).join("config.json").exists() {
+                runner_started = std::time::Instant::now();
                 match crate::sys::fork() {
                     Ok(crate::sys::Fork::Child) => {
                         drop(listener);

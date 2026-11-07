@@ -114,8 +114,13 @@ macos-aarch64). A gateway administrator makes a one-time join code on the site (
 On the Mac, as the user who runs the checks:
 
 ```sh
-layr checks join https://cloud.layr.ws --code <code>
+layr checks join https://cloud.layr.ws --code <code> --project <a,b>
 ```
+
+`--project` is required: the person at the Mac chooses the projects. `join` sends the list with
+the request and refuses a gateway reply that names any other project; the runner refuses work of
+a project that is not in its list. A change of projects needs a new join (remove
+`<store>/runner` first); a gateway message never changes it.
 
 `join` registers the machine key of the store with the gateway, keeps the runner token in
 `<store>/runner/token` (0600) and the settings in `<store>/runner/config.json`, and installs the
@@ -136,6 +141,14 @@ and the project that it still checks, so the gateway resumes without losing work
 or HTTP 401 renews the token with a signature of the machine key; 4003 or HTTP 403 means the
 runner was removed. The gateway gives a project to one runner of a platform at a time, so two
 cloud runners do not run the same check at once. The local flock still covers one machine.
+
+Jobs run as the joining user, inside sandbox-exec, with the macOS watcher rules (only main heads
+and exact states that a maintainer approved). The residual risk is that of
+[laptop-runner.md](laptop-runner.md): the process limit covers all processes of that user. A
+dedicated runner account (a LaunchDaemon with its own `UserName`) is the next step.
+
+The daemon restarts a runner child that ended after 10 s, and doubles the delay up to 60 s while
+each run lasts less than a minute (for example, an invalid `config.json`).
 
 To leave: remove the runner on the site, then remove `<store>/runner`.
 

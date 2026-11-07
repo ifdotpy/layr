@@ -130,11 +130,39 @@ pub fn renew(root: &Path, config: &Config, key: &ed25519_dalek::SigningKey, forc
     write_private(&dir(root).join("token"), format!("{token}\n").as_bytes())
 }
 
-const JOIN_USAGE: &str = "usage: layr checks join <gateway url> --code <join code> [--name <runner name>] [--json]";
+const JOIN_USAGE: &str =
+    "usage: layr checks join <gateway url> --code <join code> --project <a,b> [--name <runner name>] [--json]";
+
+/// The projects that the person at this Mac chose: `--project a,b` (required).
+fn chosen_projects(value: Option<&str>) -> Result<Vec<String>> {
+    let mut projects: Vec<String> =
+        value.unwrap_or("").split(',').map(str::trim).filter(|p| !p.is_empty()).map(str::to_owned).collect();
+    projects.sort();
+    projects.dedup();
+    if projects.is_empty() {
+        return Err(crate::cmd::exit(128, JOIN_USAGE));
+    }
+    for project in &projects {
+        crate::store::check_name("project", project)?;
+    }
+    Ok(projects)
+}
+
+/// The gateway's reply may name only projects that this Mac chose.
+fn accept_projects(chosen: &[String], reply: &[String]) -> Result<()> {
+    if let Some(other) = reply.iter().find(|p| !chosen.contains(p)) {
+        bail!("the gateway named project {other}, which this Mac did not choose (--project); nothing was saved");
+    }
+    if reply.is_empty() {
+        bail!("the gateway named no project; nothing was saved");
+    }
+    Ok(())
+}
 
 /// `layr checks join <url> --code <code>`.
 pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = crate::args::parse(&crate::args::Spec::new().value("--code").value("--name").flag("--json"), args)?;
+    let a =
+        crate::args::parse(&crate::args::Spec::new().value("--code").value("--project").value("--name").flag("--json"), args)?;
     let (Some(url), Some(code), 1) = (a.pos.first(), a.get("--code"), a.pos.len()) else {
         return Err(crate::cmd::exit(128, JOIN_USAGE));
     };
@@ -145,6 +173,7 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("a join code binds {PLATFORM}; this machine is {}", crate::cmd::checks::platform());
     }
     let url = gateway_url(url)?;
+    let chosen = chosen_projects(a.get("--project"))?;
     let root = ctx.store.root.clone();
     let folder = dir(&root);
     if let Some(existing) = config(&root)? {
@@ -173,11 +202,13 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
             "public_key": hex::encode(machine.key.verifying_key().to_bytes()),
             "name": name,
             "platform": PLATFORM,
+            "projects": chosen,
         }),
     )?;
     let runner = reply["runner"].as_str().context("the gateway sent no runner id")?;
     let token = reply["grant"].as_str().filter(|t| token_ok(t)).context("the gateway sent no runner token")?;
     let projects: Vec<String> = serde_json::from_value(reply["projects"].clone()).context("the gateway sent no projects")?;
+    accept_projects(&chosen, &projects)?;
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&folder)?;
@@ -531,6 +562,14 @@ mod tests {
         assert_eq!(ws_url("http://127.0.0.1:9"), "ws://127.0.0.1:9/v1/runners/connect");
         assert_eq!(token_expiry(&format!("run1.{}.1794000000000.{}.ab", "a".repeat(32), "b".repeat(32))), Some(1794000000000));
         assert!(!token_ok("run1 x"));
+        assert_eq!(chosen_projects(Some("b, a,a")).unwrap(), ["a", "b"]);
+        assert!(chosen_projects(None).is_err());
+        assert!(chosen_projects(Some(",")).is_err());
+        assert!(chosen_projects(Some("../x")).is_err());
+        let chosen = vec!["a".to_string(), "b".to_string()];
+        assert!(accept_projects(&chosen, &["a".into()]).is_ok());
+        assert!(accept_projects(&chosen, &["a".into(), "c".into()]).is_err(), "a project the Mac did not choose");
+        assert!(accept_projects(&chosen, &[]).is_err());
     }
 
     /// A fake gateway: each accepted connection runs `script` with the socket and the hello.
