@@ -7,11 +7,11 @@
 # The LayrFS tool server (`layr tool rg|find`) serves a virtual line from its lower tree and upper
 # folder, not through the mount; its output must equal the real tools on the mount and on a folder line.
 if [ "$(uname -s)" != Darwin ]; then
-    echo "skip: virtual lines need macOS"
+    echo "t199-virtual-lines.sh (needs macOS): 0 passed, 0 failed"
     exit 0
 fi
 if ! pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q dev.layr.fshost.fs; then
-    echo "skip: the LayrFS file system extension is not installed (tools/layrfs/README.md)"
+    echo "t199-virtual-lines.sh (needs the extension from tools/layrfs/README.md): 0 passed, 0 failed"
     exit 0
 fi
 . "$(dirname "$0")/lib.sh"

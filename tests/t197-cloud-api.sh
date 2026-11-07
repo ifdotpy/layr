@@ -6,13 +6,20 @@
 # missing object fails a clone, and a server that needs a newer client stops the command with the version.
 . "$(dirname "$0")/lib.sh"
 
-# Keep the trust anchor separate from the server certificate: TLS implementations differ
-# in whether they accept a self-signed end-entity certificate as a root.
+# Use a private config: LibreSSL can duplicate extensions from the system config and -addext.
+# Keep the trust anchor separate from the server certificate.
+cat > "$T/tls-req.cnf" <<'EOF'
+[req]
+distinguished_name=dn
+[dn]
+[ca]
+basicConstraints=critical,CA:TRUE
+keyUsage=critical,keyCertSign,cRLSign
+EOF
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/tls-ca-key.pem" -out "$T/tls-ca.pem" -days 1 \
-    -subj '/CN=Layr test CA' -addext basicConstraints=critical,CA:TRUE \
-    -addext keyUsage=critical,keyCertSign,cRLSign >/dev/null 2>&1 || exit 1
+    -config "$T/tls-req.cnf" -extensions ca -subj '/CN=Layr test CA' >/dev/null 2>&1 || exit 1
 openssl req -new -newkey rsa:2048 -nodes -keyout "$T/tls-key.pem" -out "$T/tls.csr" \
-    -subj /CN=localhost >/dev/null 2>&1 || exit 1
+    -config "$T/tls-req.cnf" -subj /CN=localhost >/dev/null 2>&1 || exit 1
 cat > "$T/tls-ext.cnf" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
