@@ -119,7 +119,7 @@ no "invalid count fails" l line new invalid head --count nope
 no "batch refuses an existing destination" l line new trial head --count 4
 no "batch conflict creates no later line" test -e "$P/trial-4"
 
-# A database failure after the first record keeps only that complete line.
+# A database failure in the batch records none of it (one transaction, docs/commands.md) and removes its folders.
 DB=$LAYR_ROOT/projects/cloud-merge/meta/db/layr.sqlite
 python3 - "$DB" <<'PYDB'
 import sqlite3, sys
@@ -128,9 +128,9 @@ with sqlite3.connect(sys.argv[1]) as db:
 PYDB
 out=$(l line new partial head --count 3 2>&1); rc=$?
 eq "batch stops on a record failure" 128 "$rc"
-has "batch reports completed lines after failure" 'created lines: partial-1' "$out"
-ok "completed line still has a snapshot" test -f "$P/partial-1/input"
-ok "completed line still has a record" l rev-parse partial-1
+has "batch names the failure" 'injected record failure' "$out"
+no "the first line has no folder" test -e "$P/partial-1"
+no "the first line has no record" l rev-parse partial-1
 no "failed line has no folder" test -e "$P/partial-2"
 no "unrecorded line has no folder" test -e "$P/partial-3"
 no "failed line has no record" l rev-parse partial-2
