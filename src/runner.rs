@@ -598,7 +598,9 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
         }
     }
 
-    /// One WebTransport connection to the direct endpoint `url`.
+    /// One WebTransport connection to the direct endpoint `url` (tests; the daemon uses
+    /// [`Self::connect_preferred`]).
+    #[cfg(test)]
     pub async fn connect_webtransport(&mut self, url: &str, token: &str, version: &str) -> End {
         match open_webtransport(url, token).await {
             Ok(link) => self.run(link, version).await,
