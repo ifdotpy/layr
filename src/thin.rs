@@ -103,7 +103,7 @@ pub(crate) fn read_source<T>(r: std::io::Result<T>, path: &Path) -> Result<T> {
 /// Clone the source entry `from` to `to`. The clone fails with NotFound for a missing source or
 /// a missing destination folder. The destination folder exists here (the layer makes it first),
 /// so a NotFound with an existing destination folder is the source.
-fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
     crate::sys::apfs_clone(from, to)
         .map_err(|e| {
             if not_found(&e) && to.parent().is_some_and(|p| p.is_dir()) {
@@ -289,6 +289,37 @@ impl Layered {
             for l in self.layers.iter().rev().skip(1) {
                 apply(l, dst, &mut cloned)?;
             }
+            let mut linked_upper = false;
+            for layer in self.layers.iter().take(self.layers.len().saturating_sub(1)) {
+                if apfs::scan_shared(&layer.root, false)?.values().any(|e| e.meta.is_file() && e.nlink > 1) {
+                    linked_upper = true;
+                    break;
+                }
+            }
+            if linked_upper {
+                // Applying upper entries one by one copies their bytes. Restore groups from the
+                // merged inode identities, including links in different upper folders.
+                let mut groups = BTreeMap::<(u64, u64), Vec<String>>::new();
+                for (rel, entry) in self.scan(false)? {
+                    if entry.meta.is_file() && entry.nlink > 1 {
+                        groups.entry((entry.fingerprint.0, entry.fingerprint.1)).or_default().push(rel);
+                    }
+                }
+                let tree = crate::tree::Tree::open(dst)?;
+                let mut parents = BTreeSet::new();
+                for group in groups.values().filter(|g| g.len() > 1) {
+                    crate::sys::apfs_immutable(&dst.join(&group[0]), false)?;
+                    for rel in &group[1..] {
+                        open_parent(dst, rel)?;
+                        parents.insert(parent_of(rel).to_string());
+                        tree.remove(rel)?;
+                        tree.hard_link(&group[0], rel)?;
+                    }
+                }
+                for rel in parents {
+                    copy_dir_meta(&self.path(&rel)?, &dst.join(&rel), rel.is_empty())?;
+                }
+            }
             // The clone of the bottom is writable already, and `apply` opens each folder it
             // changes: only the entries cloned from the sealed layers keep their flags. A pass
             // over the whole tree cost one call per entry.
@@ -369,7 +400,12 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
         crate::sys::apfs_mtime(to, m.mtime(), m.mtime_nsec())?;
         return Ok(true);
     }
-    clone_from_source(from, to)?;
+    if m.is_dir() {
+        let entries = apfs::scan_with_data(from, false)?;
+        apfs::clone_complete(from, to, &entries, false)?;
+    } else {
+        clone_from_source(from, to)?;
+    }
     Ok(true)
 }
 
@@ -666,7 +702,7 @@ pub fn add_entries<'a>(
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
-                clone_from_source(&from, &to)?;
+                clone_entry(&from, &to, &m)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
                 let complete = write
@@ -1231,6 +1267,7 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     let max = p.config_u64("thin.views", VIEWS) as usize;
     let in_use = p.config_u64("thin.view_seconds", VIEW_IN_USE_SECONDS);
     let dir = p.meta_dir().join("views");
+    let protected = crate::views::protected_states(p);
     let mut stamps: Vec<(std::time::SystemTime, String)> = fs::read_dir(&dir)?
         .flatten()
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().to_string_lossy().into_owned())))
@@ -1240,7 +1277,7 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     }
     stamps.sort_by(|a, b| b.0.cmp(&a.0));
     for (time, id) in stamps.into_iter().skip(max) {
-        if id == made || !crate::model::is_uuid(&id) || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use {
+        if id == made || protected.contains(&id) || !crate::model::is_uuid(&id) || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use {
             continue;
         }
         if !p.delta_path(&id).is_dir() {
@@ -1364,10 +1401,12 @@ pub fn delete_now(p: &Project, id: &str) -> Result<()> {
 /// Remove the views that no command used within `thin.view_seconds`. Returns their count.
 pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
     let limit = p.config_u64("thin.view_seconds", VIEW_SECONDS);
+    // The lower tree of a virtual line is mounted: it stays (docs/views.md).
+    let protected = crate::views::protected_states(p);
     let mut n = 0;
     for id in bases(p)?.into_keys() {
         let full = p.state_path(&id);
-        if keep.contains(&id) || !full.is_dir() {
+        if keep.contains(&id) || protected.contains(&id) || !full.is_dir() {
             continue;
         }
         let age = fs::metadata(view_stamp(p, &id))
@@ -1435,9 +1474,10 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             None => p.delta_path(id).is_dir() && old_layer(&p.delta_path(id)) && !crate::apfs_commit::preserves(p, id)?,
         })
     };
+    let protected = crate::views::protected_states(p);
     let mut queue: Vec<&str> = Vec::new();
     for id in &ids {
-        if crate::model::is_uuid(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
+        if crate::model::is_uuid(id) && !protected.contains(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
             queue.push(id);
         }
     }
@@ -1452,7 +1492,7 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             *n = n.saturating_sub(1);
             if *n == 0 {
                 if let Some(b) = ids.get(b.as_str()) {
-                    if crate::model::is_uuid(b) && gone_record(b)? {
+                    if crate::model::is_uuid(b) && !protected.contains(b) && gone_record(b)? {
                         queue.push(b);
                     }
                 }
@@ -1726,6 +1766,21 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn a_folder_removed_after_its_scan_is_a_source_change() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        fs::create_dir(&src)?;
+        fs::write(src.join("x"), b"content")?;
+        let entries = apfs::scan_with_data(&src, false)?;
+        fs::remove_dir_all(&src)?;
+        let err = apfs::clone_complete(&src, &s.0.join("copy"), &entries, false)
+            .expect_err("the source disappeared after its scan");
+        assert!(vanished(&err), "a missing source must trigger another scan: {err:?}");
         Ok(())
     }
 

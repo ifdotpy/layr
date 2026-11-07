@@ -1,0 +1,41 @@
+--- block 56 MiB
+free 40 GiB, load 13.37 29.62 34.86
+PackReport { packs: 73, objects: 536155, removed: 536155, loose_bytes: 1620048122, pack_bytes: 1155233429 } in 398.30s
+480076 distinct blobs; 100 cold reads, 724229 bytes; forms {"Whole": 100}
+open the store: median 76.35 ms, p90 93.36 ms, p99 104.01 ms, max 108.37 ms
+read one blob: median 36.12 ms, p90 52.79 ms, p99 67.30 ms, max 67.45 ms
+save of 1 files, ms: 142.87 94.93 93.41 92.58 92.85
+save of 10 files, ms: 197.30 109.34 109.01 112.42 122.13
+get root tree: 42.25 ms (95 entries)
+read and decode times: 47.90 ms (563318 records)
+copy all records once: 1.29 ms
+encode times: 2.51 ms (2295519 bytes)
+hash, compress, write times: 19.71 ms
+--- block 4 MiB
+free 37 GiB, load 40.99 38.39 35.88
+PackReport { packs: 73, objects: 536155, removed: 536155, loose_bytes: 1620048122, pack_bytes: 1203893968 } in 361.38s
+480076 distinct blobs; 100 cold reads, 724229 bytes; forms {"Whole": 100}
+open the store: median 74.10 ms, p90 111.29 ms, p99 125.94 ms, max 126.42 ms
+read one blob: median 2.71 ms, p90 3.78 ms, p99 4.76 ms, max 5.24 ms
+save of 1 files, ms: 84.78 38.00 37.74 37.95 38.09
+save of 10 files, ms: 172.58 65.26 64.63 70.72 74.24
+get root tree: 3.95 ms (95 entries)
+read and decode times: 17.04 ms (563318 records)
+copy all records once: 1.56 ms
+encode times: 3.31 ms (2295519 bytes)
+hash, compress, write times: 23.75 ms
+--- block 1 MiB
+free 35 GiB, load 69.83 53.44 43.68
+PackReport { packs: 73, objects: 536155, removed: 536155, loose_bytes: 1620048122, pack_bytes: 1253485248 } in 365.71s
+480076 distinct blobs; 100 cold reads, 724229 bytes; forms {"Whole": 100}
+open the store: median 80.32 ms, p90 91.15 ms, p99 96.80 ms, max 97.72 ms
+read one blob: median 0.82 ms, p90 1.02 ms, p99 1.30 ms, max 1.31 ms
+save of 1 files, ms: 88.34 34.60 34.69 36.39 37.38
+save of 10 files, ms: 196.09 60.22 63.70 66.56 70.46
+get root tree: 0.98 ms (95 entries)
+read and decode times: 16.02 ms (563318 records)
+copy all records once: 1.82 ms
+encode times: 3.42 ms (2295519 bytes)
+hash, compress, write times: 25.49 ms
+free 33 GiB, load 52.62 43.06 40.83
+done

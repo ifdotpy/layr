@@ -51,7 +51,7 @@ The store and signed record formats remain compatible with the Linux backend.
   Move detection first matches a file by the clone that it shares with the other tree, then by its creation time,
   which APFS clones, writes and renames keep. A move needs an identity that is unique in both trees, and a creation
   time that is not a whole second.
-- Immutable flags prevent ordinary writes to states. The store owner can remove these flags.
+- Seals prevent ordinary writes to states. See [Seals](#seals).
   Use the root service for separate users and root-owned state storage.
 - Overlays and peer sync are available.
 - APFS sends btrfs version 1 streams. A peer that has the parent state gets only the differences; a tree with hard
@@ -66,6 +66,35 @@ The store and signed record formats remain compatible with the Linux backend.
   A transfer refuses macOS access control lists and Linux security attributes instead of silently losing their effects.
 - Device nodes, sockets and named pipes are not supported by the APFS backend.
 - APFS copies directory metadata, including access control lists and extended attributes.
+
+## Seals
+
+A sealed tree (a state, a layer, a view) cannot change through an ordinary write.
+
+- The root of the tree has the immutable flag (`UF_IMMUTABLE`).
+- Every other entry has one ACL entry first: `everyone` is denied writes of the data, new and removed entries
+  in a folder, and changes of attributes, extended attributes, the ACL and the owner. The entry is marked
+  `inherited`. Reads stay allowed.
+- A folder clone does not copy the ACLs of the entries below its root, and a copy of one file
+  (`clonefile` with `CLONE_ACL`, `copyfile` with `COPYFILE_ACL`) leaves inherited entries out.
+  A sealed tree records the paths with native ACLs in `com.layr.user-acls`. A new line restores
+  those ACLs after the clone. With no native ACLs, no pass over the entries is needed. Writable
+  trees and old snapshots without this index are checked before copying their native ACLs.
+  A copy never carries the seal.
+- Up to layr 0.40, every entry had the immutable flag, and a clone copies flags: a writable copy cleared the flag
+  on each entry. Layr reads both formats. A writable copy clears the flag only on the entries that have it
+  (the scan of the source reads the flags). Old states keep their format; new states use the ACL entry.
+- The root user (the root service) seals with the flag on each entry, as before: ACLs do not stop the root
+  user. `LAYR_APFS_FLAG_SEAL=1` forces the flag for any user.
+- Some volumes keep no ACL on a symbolic link. Such a link keeps the flag.
+- The ACL entry does not stop the owner from `chmod` and from removing the entry. The immutable flag did
+  not stop the owner from `chflags nouchg` either.
+- ACL comparisons, transfers and `layr push` ignore the seal entry: it is not content of the tree.
+- To delete a store by hand: `chflags -R nouchg <store>`, then `/bin/chmod -R -N <store>`, then `rm -rf`.
+  The GNU `chmod` has no `-N`.
+- A layr of 0.40 or older reads the new states and makes lines from them. It cannot delete their folders
+  (its trash keeps them until a newer layr empties it), it refuses to send them to a peer, and its saves
+  compare every entry again. Upgrade all binaries and daemons that use a store together.
 
 Use a separate test store, for example in your home folder:
 

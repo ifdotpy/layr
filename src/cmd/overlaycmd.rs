@@ -201,6 +201,8 @@ pub(crate) fn make_overlay(
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         };
         let mut rec = Record::new("commit");

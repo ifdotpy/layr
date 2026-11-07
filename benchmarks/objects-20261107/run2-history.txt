@@ -1,0 +1,28 @@
+free 48 GiB, load 29.27 25.65 35.87
+--- history, with-deltas
+import 60 states: 13.73 s
+total bytes 3240029 in 0.02s
+PackReport { packs: 1, objects: 1260, removed: 1260, loose_bytes: 3240029, pack_bytes: 1803616 } in 3.91s
+repack 3.93 s
+total bytes 1918304 in 0.00s
+checkout of 60 states from packs: total 7.23 s, worst 0.15 s
+entries 704 bytes 8713492 differences 0 in 0.02s
+890 distinct blobs; read 300 (5921848 bytes): median 0.011 ms, p90 0.122 ms, p99 0.502 ms, max 0.734 ms; forms {"Delta": 83, "Whole": 217}
+decoded 649 blobs, 8713492 bytes in 0.01 s: 1725 MB/s
+--- history, no-deltas
+import 60 states: 22.37 s
+total bytes 5839574 in 0.06s
+PackReport { packs: 1, objects: 1260, removed: 1260, loose_bytes: 5839574, pack_bytes: 1772064 } in 6.28s
+repack 6.32 s
+total bytes 1886752 in 0.01s
+checkout of 60 states from packs: total 10.67 s, worst 0.36 s
+entries 704 bytes 8713492 differences 0 in 0.02s
+890 distinct blobs; read 300 (5921848 bytes): median 0.011 ms, p90 0.046 ms, p99 0.107 ms, max 0.157 ms; forms {"Whole": 300}
+decoded 649 blobs, 8713492 bytes in 0.00 s: 3083 MB/s
+--- Chromium, block-56m
+free 48 GiB, load 17.52 22.70 33.77
+cold write 134.20 s
+PackReport { packs: 73, objects: 536155, removed: 536155, loose_bytes: 1620165002, pack_bytes: 1155355187 } in 729.91s
+repack 729.98 s
+free 19 GiB, load 79.81 87.25 63.89
+STOP: under 25 GiB

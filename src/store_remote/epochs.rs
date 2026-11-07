@@ -181,7 +181,7 @@ fn opener(store: &Store, backend: &Backend, descriptor: &Descriptor) -> Result<(
 }
 pub(super) fn connect(store: &mut Store) -> Result<()> { connect_before_pending(store, None) }
 fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Result<()> {
-    if store.layer.is_some() {
+    if store.layer.is_some() || store.is_api() {
         return Ok(());
     }
     if store.backend.get("store.json")?.is_none() {return Ok(());}
@@ -603,7 +603,7 @@ impl Store {
 }
 
 pub(super) fn check_current(store: &Store) -> Result<()> {
-    if store.layer.is_some() || store.publishing_epoch {
+    if store.layer.is_some() || store.publishing_epoch || store.is_api() {
         return Ok(());
     }
     let root = store.backend.root();

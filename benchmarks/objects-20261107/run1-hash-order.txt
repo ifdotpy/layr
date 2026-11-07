@@ -1,0 +1,28 @@
+### History: last 60 commits of layr, load 125.89 111.83 121.79
+import done: e1a80a7df245a200371d0c360c43b5ae87509b6567b6cc2ab8a27e14c95e3447
+total bytes 5839574 in 0.02s
+PackReport { packs: 1, objects: 1260, removed: 1260, loose_bytes: 5839574, pack_bytes: 1845757 } in 9.43s
+repack 9.5 s
+total bytes 1960445 in 0.02s
+checkout of 60 states from packs: total 13.18 s, worst 0.577 s
+entries 704 bytes 8713492 differences 0 in 0.07s
+890 distinct blobs; read 300 (5921848 bytes): median 0.015 ms, p90 0.061 ms, p99 0.427 ms, max 0.693 ms; forms {"Whole": 300}
+decoded 649 blobs, 8713492 bytes in 0.03 s: 267 MB/s
+
+### Chromium src, load 135.76 123.68 125.59
+cold write: 191 s; tree e40851e863902b0637d78df3297f7bf922281ec2a7521fa31f86822f0f3895d6 times 330aa8765741a95b23ab0d2c1a919bf626aaff9867c55420d75d178cf93810b4 files 516265 dirs 47031 bytes 4472453602
+PackReport { packs: 73, objects: 536155, removed: 536155, loose_bytes: 1620165002, pack_bytes: 1350471186 } in 816.02s
+repack 816 s
+total bytes 1350585874 in 0.11s
+/dev/disk3s5   1.8Ti   1.7Ti    46Gi    98%     25M  481M    5%   /System/Volumes/Data
+CheckoutReport { files: 516265, clones: 0, copies: 0, decoded: 516265, dirs: 47031, symlinks: 21, hard_links: 0, times: 563318 } in 6453.25s
+checkout from packs: 6453 s
+  only in the original: .git
+verify 16 s
+$TMPDIR/ob-run.sh:34: no space left on device: $TMPDIR/ob/ctrees
+Error: No such file or directory (os error 2)
+decoded 516265 blobs, 4472453602 bytes in 2643.01 s: 2 MB/s
+save of 1 changed files: runs (ms): 184.94 185.86 173.58 178.59 183.29
+save of 10 changed files: runs (ms): 909.96 855.91 770.06 712.68 721.38
+load 23.44 58.14 76.95
+1.3G

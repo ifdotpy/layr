@@ -107,11 +107,17 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let repo = &h.repo;
+    // Virtual lines save their upper layer; cache overlays still require folder lines.
+    #[cfg(target_os = "macos")]
+    let virtual_line = |l: &Line| crate::views::of(repo, l).is_some();
+    #[cfg(not(target_os = "macos"))]
+    let virtual_line = |_: &Line| false;
     let lines: Vec<Line> = if a.has("--all-lines") {
         repo.require(ctx, "line.manage")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
-        vec![h.line()?.clone()]
+        let l = h.line()?.clone();
+        vec![l]
     };
     let msg = a.get("--note").unwrap_or("").to_string();
     // `--cache <path>` (repeatable) saves only the named cache paths. A big cache (build output)
@@ -124,6 +130,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        if virtual_line(&l) && a.has("--caches") {
+            return Err(exit(2, "cache overlays require a folder line (docs/views.md)"));
+        }
         let mut prepared = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
@@ -159,7 +168,9 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         };
         let l = repo.line(&l.id)?;
-        crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        if !virtual_line(&l) {
+            crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        }
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         if !only.is_empty() {
             if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
@@ -1258,7 +1269,7 @@ fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owne
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
 /// other states or lines share are not counted, so the number is what freeing them gives back
 /// (blocks shared only among these states are left out, so it is a lower bound).
-fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
+pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
     states
         .iter()
         .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
@@ -1326,19 +1337,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
         return Ok(vec![]);
     }
     let db = &repo.p.db;
-    // A cache overlay names project states through its heads and records: they stay.
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for name in repo.overlay_names()? {
-        let overlay = repo.overlay_repo(&name)?;
-        for line in overlay.p.db.lines()? {
-            named.insert(line.head);
-        }
-        for raw in overlay.p.db.all_lines()? {
-            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                named.insert(token.to_string());
-            }
-        }
-    }
+    let named = overlay_named_states(repo)?;
     let mut st = db.conn.prepare(
         "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
          AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
@@ -1360,12 +1359,30 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     drop_trees(repo, &evict)
 }
 
+/// The project states that a cache overlay names through its heads and records: eviction and
+/// `layr migrate --delete-old` keep their trees.
+pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for name in repo.overlay_names()? {
+        let overlay = repo.overlay_repo(&name)?;
+        for line in overlay.p.db.lines()? {
+            named.insert(line.head);
+        }
+        for raw in overlay.p.db.all_lines()? {
+            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
+                named.insert(token.to_string());
+            }
+        }
+    }
+    Ok(named)
+}
+
 /// Remove the trees of states whose records stay (eviction, imports that git builds again) and
 /// mark them absent. The states are reserved first, in one transaction with the check for pins
 /// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
 /// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
 /// the states whose trees went.
-fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
+pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
     let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
         if !crate::free::holder_alive(&holder) {
@@ -1520,7 +1537,18 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         {
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-            let done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            let mut done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            // Final states of deleted lines that are still thin: their background keyframe
+            // (`free::keyframe_later`) did not run.
+            let finals: Vec<String> = {
+                let mut q = repo.p.db.conn.prepare("SELECT DISTINCT state FROM owners WHERE kind='deleted'")?;
+                let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for id in finals.iter().filter(|id| repo.p.delta_path(id).is_dir()) {
+                crate::thin::make_keyframe(&repo.p, id)?;
+                done.keyframes += 1;
+            }
             // Saved statuses of lines that are gone.
             let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
             if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
@@ -1740,6 +1768,14 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
+    // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
+    // without one is not touched.
+    if !a.has("-n") && h.repo.p.meta_dir().join("objects").is_dir() {
+        let (e, p, seconds) = super::objects::repack_store(&h)?;
+        if !a.has("-q") {
+            outln!(ctx, "objects: {} hot blobs turned cold, {} objects into {} packs in {:.1} s", e.blobs, p.objects, p.packs, seconds);
+        }
+    }
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {

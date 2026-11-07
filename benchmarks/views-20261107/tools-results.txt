@@ -1,0 +1,23 @@
+load 44.50 79.64 63.95
+index build tnat: 2.4 s
+index build tvirt: 2.5 s
+same: no such file or directory: /Users/igor/Projects/layr-store/projects/layr/lines/fs-views/target/release/layr tool rg -l TODO
+same: command not found: rg --sort path -l TODO
+virtual rg -l: tool vs rg on the mount: same
+virtual find: tool vs find on the mount (sorted): same
+call                            seconds
+rg-folder-real                  285.164
+rg-folder-tool                   40.056
+rg-virtual-tool                  34.285
+rg-virtual-after-edit            32.265
+find-folder-real                 26.569
+find-folder-tool                  0.709
+find-virtual-tool                 0.262
+raw:
+  find-folder-real:  26.569 30.421 21.044
+  find-folder-tool:  0.709 0.841 0.284
+  find-virtual-tool:  0.281 0.262 0.233
+  rg-folder-real:  341.136 285.164 227.391
+  rg-folder-tool:  43.053 40.056 28.438
+  rg-virtual-after-edit:  50.666 30.950 32.265
+  rg-virtual-tool:  34.285 35.646 29.328

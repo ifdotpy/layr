@@ -420,6 +420,11 @@ impl<'a> Repo<'a> {
         if self.p.has_state(id) {
             return Ok(());
         }
+        // A migrated state comes back from the object store with its exact times
+        // (docs/objects.md, section 13). A freed state has no owner: it stays freed.
+        if !matches!(self.p.db.state_flags(id)?, Some((_, true))) && crate::objstore::build_state(self, id)? {
+            return Ok(());
+        }
         // An imported state is built from git (docs/ownership.md, "States imported from Git"). A
         // copy on a store remote is the fallback when git cannot give the objects.
         if crate::gitbridge::buildable(self, id) {
@@ -684,6 +689,8 @@ impl<'a> Repo<'a> {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         }
     }
@@ -793,6 +800,8 @@ impl<'a> Repo<'a> {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         })
     }
@@ -1121,6 +1130,10 @@ impl<'a> Repo<'a> {
     /// The reads of a save before its lock: the head and the save base are pinned for the rest of
     /// the command (`hold`), then the automatic state is written (APFS).
     pub fn prepare_save(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if crate::views::of(self, line).is_some() {
+            return Ok(());
+        }
         let prev = self.save_base(line)?;
         self.hold(self.pin(&[&line.head, &prev])?);
         // One scan of the working folder serves the candidates and the save layer below (macOS).
@@ -1219,6 +1232,10 @@ impl<'a> Repo<'a> {
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+        #[cfg(target_os = "macos")]
+        if let Some(view) = crate::views::of(self, line) {
+            return crate::views::save_working(ctx, self, line, &view, message);
+        }
         let st = self.save_working(ctx, line, message, running, force)?;
         // A cache folder that has no cache overlay state on this line yet gets its first one
         // (the cache of the line, as `save --caches` makes it). A failure keeps the state.
@@ -4313,6 +4330,8 @@ mod cache_platform_tests {
                 cache_shared: false,
                 cache_platform: None,
                 cache_of: None,
+                tree: None,
+                times: None,
                 cache_key_parts: Default::default(),
             });
             p.append(rec, &ctx.actor()).unwrap();
@@ -4497,6 +4516,8 @@ mod commit_record_tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));

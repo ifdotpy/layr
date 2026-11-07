@@ -441,6 +441,14 @@ impl Db {
                 present as i64,
                 rec.machine
             ])?;
+            // A migration record can arrive first, or sort before its source due to clock skew.
+            let mappings: Vec<String> = tx.prepare_cached(
+                "SELECT raw FROM records WHERE op='state.tree' AND json_type(raw, '$.r.data.states.' || ?1)='object'"
+            )?.query_map(params![s.id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            for raw in mappings {
+                let envelope: serde_json::Value = serde_json::from_str(&raw)?;
+                self.apply_state_trees(&serde_json::from_value(envelope["r"].clone())?)?;
+            }
             for p in &s.parents {
                 if self.state(p)?.map(|p| p.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("source history cannot have a cache or derived parent");
@@ -712,6 +720,7 @@ impl Db {
             "stash.drop" => {
                 tx.prepare_cached("UPDATE states SET dropped=1 WHERE id=?1")?.execute(params![s("state")])?;
             }
+            layr_model::validation::STATE_TREE_OP => self.apply_state_trees(rec)?,
             _ => {}
         }
         // The overlays a line shows (`stack.<line id>`), from any record that changes them.
@@ -744,6 +753,22 @@ impl Db {
             .prepare_cached("SELECT public_key FROM trusted WHERE machine=?1")?
             .query_row(params![machine], |r| r.get(0))
             .optional()?)
+    }
+
+    fn apply_state_trees(&self, rec: &Record) -> Result<()> {
+        let ord = crate::owners::record_ord(rec);
+        for (state, tree, times) in layr_model::validation::state_trees(&rec.data)? {
+            let raw: Option<String> = self.conn.prepare_cached("SELECT rec FROM states WHERE id=?1")?
+                .query_row(params![state], |row| row.get(0)).optional()?;
+            let Some(raw) = raw else { continue };
+            let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+            if value.get("tree_ord").and_then(|o| o.as_str()).is_some_and(|o| o >= ord.as_str()) { continue; }
+            value["tree"] = serde_json::json!(tree);
+            value["times"] = serde_json::json!(times);
+            value["tree_ord"] = serde_json::json!(ord);
+            self.conn.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![state, value.to_string()])?;
+        }
+        Ok(())
     }
 
     pub fn state(&self, id: &str) -> Result<Option<StateRec>> {
@@ -1867,6 +1892,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         r
@@ -1995,6 +2022,32 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         Db { conn, stale: false }
+    }
+
+    #[test]
+    fn migration_mappings_survive_early_arrival_and_clock_skew() -> Result<()> {
+        let state = "01a12290-0000-7000-8000-00000000c0c0";
+        let source = state_record(10, state, vec![]);
+        let mapping = |seq, digit: &str| {
+            let mut record = state_record(seq, state, vec![]);
+            record.states.clear();
+            record.op = "state.tree".into();
+            record.data = serde_json::json!({"states": {state: {"tree": digit.repeat(64), "times": "a".repeat(64)}}});
+            record
+        };
+        let newer = mapping(3, "3");
+        let older = mapping(2, "2");
+        for records in [vec![newer.clone(), older.clone(), source.clone()], vec![source.clone(), newer.clone(), older.clone()]] {
+            let db = memory();
+            for record in &records {
+                db.insert_record(record, &serde_json::json!({"r": record}).to_string())?;
+                db.derive(record, &|_| true, &source.machine)?;
+            }
+            assert_eq!(db.state(state)?.unwrap().tree, Some("3".repeat(64)));
+            let model = layr_model::Project::from_records("", records, &source.machine)?;
+            assert_eq!(model.states[state].state.tree, Some("3".repeat(64)));
+        }
+        Ok(())
     }
 
     #[test]

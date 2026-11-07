@@ -26,10 +26,13 @@ eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # A live move with warm build output. The first sync sends the state without caches; the next
 # sync with --caches must still send them.
 new_fs $T/b 4G
+echo 'target regenerable' > .layrattributes; l add .layrattributes; l save -q -m "target is a cache"
 head -c 1000000 /dev/urandom > target/warm.bin
 l save -q --caches
+b_id=$(env LAYR_ROOT=$T/b/store $LAYR remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 peer_exchange sync g -q --auto -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
 peer_exchange sync g -q --auto --caches -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
+has "the sync adds the trusted target to the cache readers" "machine:$b_id" "$(l overlay readers cache.target)"
 env LAYR_ROOT=$T/b/store $LAYR --project g adopt w >/dev/null
 eq "the moved line has the build output" "$(md5sum < target/warm.bin)" "$(md5sum < $T/b/store/projects/g/lines/w/target/warm.bin)"
 ok "and it is a cache there" sh -c "btrfs subvolume show $T/b/store/projects/g/lines/w/target >/dev/null"

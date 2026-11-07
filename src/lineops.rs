@@ -96,6 +96,15 @@ impl Repo<'_> {
         self.commit_prepared_lines(ctx, prepared)
     }
 
+    /// The object store and tree of `start` when the state has no snapshot here and `layr migrate`
+    /// recorded its tree (docs/objects.md, section 13).
+    fn objects_start(&self, start: &str) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {
+        if self.p.has_state(start) {
+            return Ok(None);
+        }
+        crate::objstore::verified(&self.p, start)
+    }
+
     fn check_names_free(&self, names: &[String]) -> Result<()> {
         for name in names {
             crate::store::check_name("line", name)?;
@@ -136,14 +145,27 @@ impl Repo<'_> {
             .collect();
         let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(crate::store::temp_name())).collect();
         let result = (|| -> Result<Vec<Record>> {
-            // On APFS each folder is made from the layers of the state: a complete view of a thin
-            // state first, and a copy of the view after it, cloned the whole tree twice.
-            #[cfg(target_os = "macos")]
-            for tmp in &tmps {
-                self.snapshot_state(start, tmp, false)?;
+            match self.objects_start(start)? {
+                // A migrated state without a snapshot here: each folder is a checkout of its tree
+                // with its times (hot blobs are clones), no snapshot is built first.
+                Some((store, refs)) => {
+                    for tmp in &tmps {
+                        crate::storage::create_subvolume(tmp)?;
+                        if rustix::process::geteuid().is_root() {
+                            std::os::unix::fs::chown(tmp, Some(ctx.caller.uid), Some(ctx.caller.gid))?;
+                        }
+                        crate::objstore::checkout(ctx, &store, &refs, tmp)?;
+                    }
+                }
+                None => {
+                    #[cfg(target_os = "macos")]
+                    for tmp in &tmps {
+                        self.snapshot_state(start, tmp, false)?;
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    snapshots(&self.state_root(start)?, &tmps)?;
+                }
             }
-            #[cfg(not(target_os = "macos"))]
-            snapshots(&self.state_root(start)?, &tmps)?;
             let mut recs = Vec::new();
             for (line, tmp) in lines.iter().zip(&tmps) {
                 let layers = if let Some(view) = view {

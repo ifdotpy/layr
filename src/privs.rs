@@ -46,6 +46,49 @@ pub fn as_user_fs<T>(uid: u32, gid: u32, f: impl FnOnce() -> Result<T>) -> Resul
     r
 }
 
+/// The file identity of a caller for many short steps (an objects checkout): the user's groups are
+/// read once. On Linux the ids and groups belong to the thread; on macOS the effective ids belong to
+/// the process, so the steps must run on one thread (`layr_objects::checkout_as` does).
+pub struct CallerFs {
+    uid: u32,
+    gid: u32,
+    groups: Vec<u32>,
+}
+
+impl CallerFs {
+    /// `None` when this process is not root or the caller is root: steps then run as they are.
+    pub fn of(ctx: &Ctx) -> Result<Option<CallerFs>> {
+        if !root() || ctx.caller.uid == 0 {
+            return Ok(None);
+        }
+        let mut groups = user(ctx.caller.uid)?.groups;
+        if !groups.contains(&ctx.caller.gid) {
+            groups.push(ctx.caller.gid);
+        }
+        Ok(Some(CallerFs { uid: ctx.caller.uid, gid: ctx.caller.gid, groups }))
+    }
+
+    /// Run one step with the caller's file identity, then take root's back.
+    pub fn run(&self, step: &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+        let old_groups = sys::groups()?;
+        sys::set_groups(&self.groups)?;
+        let (old_uid, old_gid) = match sys::set_fs_ids(self.uid, self.gid) {
+            Ok(ids) => ids,
+            Err(e) => {
+                let _ = sys::set_groups(&old_groups);
+                return Err(std::io::Error::other(e));
+            }
+        };
+        let result = step();
+        let ids_ok = sys::set_fs_ids(old_uid, old_gid).is_ok();
+        let groups_ok = sys::set_groups(&old_groups).is_ok();
+        if !ids_ok || !groups_ok {
+            return Err(std::io::Error::other("cannot restore file system credentials"));
+        }
+        result
+    }
+}
+
 /// Check that the caller can write into `dir` (it exists and is writable for the caller).
 pub fn check_caller_writable(ctx: &Ctx, dir: &std::path::Path) -> Result<()> {
     as_caller_fs(ctx, || {
