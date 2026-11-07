@@ -236,24 +236,53 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// Install and start the daemon LaunchAgent (`ws.layr.daemon`) of this user when it is missing.
+/// The LaunchAgent of the daemon for `root`. `socket`: a separate daemon of a runner store, beside
+/// a daemon of another store of the same user (label `ws.layr.runner`, its own socket and log).
+fn plist_text(root: &Path, socket: Option<&Path>, exe: &Path) -> String {
+    let escape = |p: &Path| p.to_string_lossy().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let template = include_str!("../packaging/launchd/ws.layr.daemon.plist");
+    let root_value = format!("<string>{}</string>", escape(root));
+    let text = template.replace("<string>/Users/you/Library/Application Support/layr</string>", &root_value);
+    match socket {
+        None => text,
+        Some(socket) => text
+            .replace("<string>ws.layr.daemon</string>", "<string>ws.layr.runner</string>")
+            .replace("layr-daemon.log", "layr-runner.log")
+            // The runner store's own program: another store may keep another layr version.
+            .replace("\"$HOME/.local/bin/layr\"", &format!("\"{}\"", escape(exe)))
+            .replace(
+                &root_value,
+                &format!("{root_value}\n        <key>LAYR_SOCKET</key>\n        <string>{}</string>", escape(socket)),
+            ),
+    }
+}
+
+/// Install and start the daemon LaunchAgent of this store when it is missing. A daemon of another
+/// store of this user stays as it is: the runner store gets its own agent, `ws.layr.runner`.
 fn install_daemon(root: &Path) -> Result<String> {
     if !cfg!(target_os = "macos") {
         return Ok("start `layr daemon` as the store user".into());
     }
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let plist = home.join("Library/LaunchAgents/ws.layr.daemon.plist");
-    if plist.exists() {
-        let text = std::fs::read_to_string(&plist)?;
-        if !text.contains(&*root.to_string_lossy()) {
-            return Ok(format!("{} uses another store; set its LAYR_ROOT to {}", plist.display(), root.display()));
+    let agents = home.join("Library/LaunchAgents");
+    let serves =
+        |path: &Path| std::fs::read_to_string(path).is_ok_and(|t| t.contains(&format!("<string>{}</string>", root.display())));
+    let main = agents.join("ws.layr.daemon.plist");
+    let runner = agents.join("ws.layr.runner.plist");
+    for plist in [&main, &runner] {
+        if serves(plist) {
+            return Ok(format!("{} runs; it starts the runner within a minute", plist.display()));
         }
-        return Ok(format!("{} runs; it starts the runner within a minute", plist.display()));
     }
-    let template = include_str!("../packaging/launchd/ws.layr.daemon.plist");
-    let escaped = root.to_string_lossy().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let text = template.replace("/Users/you/Library/Application Support/layr", &escaped);
-    std::fs::create_dir_all(plist.parent().expect("LaunchAgents folder"))?;
+    let (plist, text) = if main.exists() {
+        (runner, plist_text(root, Some(&dir(root).join("layr.sock")), &std::env::current_exe()?))
+    } else {
+        (main, plist_text(root, None, Path::new("")))
+    };
+    if plist.exists() {
+        bail!("{} serves another store; remove it or join from that store", plist.display());
+    }
+    std::fs::create_dir_all(&agents)?;
     std::fs::create_dir_all(home.join("Library/Logs"))?;
     std::fs::write(&plist, text)?;
     let uid = rustix::process::getuid().as_raw();
@@ -265,7 +294,7 @@ fn install_daemon(root: &Path) -> Result<String> {
     if !status.success() {
         bail!("launchctl bootstrap {} failed; start it by hand", plist.display());
     }
-    Ok(format!("installed {} (log ~/Library/Logs/layr-daemon.log)", plist.display()))
+    Ok(format!("installed {}", plist.display()))
 }
 
 /// The work of one project: clone once, fetch, run the pending checks, push the results.
@@ -280,11 +309,13 @@ pub fn run_project(root: &Path, config: &Config, project: &str) -> Value {
 fn layr(root: &Path, args: &[&str]) -> Result<(i32, String)> {
     let exe = std::env::current_exe()?;
     let home = std::env::var("HOME").unwrap_or_default();
+    let bin = exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
     let output = std::process::Command::new(exe)
         .args(args)
         .env_clear()
         .env("HOME", &home)
-        .env("PATH", format!("{home}/.cargo/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"))
+        // This program's folder first: another layr on PATH may be another version.
+        .env("PATH", format!("{bin}:{home}/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"))
         .env("LAYR_ROOT", root)
         .env("LAYR_GATEWAY_TOKEN_FILE", dir(root).join("token"))
         .stdin(std::process::Stdio::null())
@@ -551,6 +582,22 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn a_runner_store_beside_another_daemon_gets_its_own_agent_and_socket() {
+        let root = Path::new("/Users/a/runner store");
+        let exe = Path::new("/Users/a/.local/share/layr-runner/bin/layr");
+        let own = plist_text(root, None, exe);
+        assert!(own.contains("<string>ws.layr.daemon</string>") && own.contains("<string>/Users/a/runner store</string>"));
+        assert!(!own.contains("LAYR_SOCKET"));
+        let beside = plist_text(root, Some(&root.join("runner/layr.sock")), exe);
+        assert!(
+            beside.contains("exec \"/Users/a/.local/share/layr-runner/bin/layr\" daemon") && !beside.contains(".local/bin/layr")
+        );
+        assert!(beside.contains("<string>ws.layr.runner</string>") && !beside.contains("<string>ws.layr.daemon</string>"));
+        assert!(beside.contains("<key>LAYR_SOCKET</key>\n        <string>/Users/a/runner store/runner/layr.sock</string>"));
+        assert!(beside.contains("layr-runner.log") && !beside.contains("layr-daemon.log"));
+    }
 
     #[test]
     fn urls_and_tokens() {
