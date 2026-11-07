@@ -223,18 +223,21 @@ pub enum Listed {
 
 /// The process that holds the lock file `lock`, named by pid and command. `except` is the pid of the waiting
 /// cargo, which also has the file open. `lsof` finds the holder on macOS and Linux, and `/proc/locks` on Linux.
-/// The text says `unknown` when neither finds a process.
+/// Diagnostics have a two-second budget. The text says `unknown` when neither finds a process.
 pub fn lock_holder(lock: &Path, except: u32) -> String {
     let mut pids: std::collections::BTreeSet<u32> = Default::default();
-    if let Ok(o) = Command::new("lsof").arg("-t").arg(lock).stderr(Stdio::null()).output() {
-        pids.extend(String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut command = Command::new("lsof");
+    command.args(["-n", "-P", "-t"]).arg(lock).process_group(0);
+    if let Ok(out) = run(&mut command, Some(until)) {
+        pids.extend(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
     }
     pids.extend(proc_locks(lock));
     pids.remove(&except);
     if pids.is_empty() {
         return format!("unknown (lsof and /proc/locks name no process for {})", lock.display());
     }
-    let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p))).collect();
+    let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p, until))).collect();
     named.join(", ")
 }
 
@@ -256,9 +259,15 @@ fn proc_locks(lock: &Path) -> Vec<u32> {
 }
 
 /// The command name of `pid`, or `?`.
-fn command_name(pid: u32) -> String {
-    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into())
+fn command_name(pid: u32, until: std::time::Instant) -> String {
+    if std::time::Instant::now() >= until {
+        return "?".into();
+    }
+    let mut command = Command::new("ps");
+    command.args(["-o", "comm=", "-p", &pid.to_string()]).process_group(0);
+    run(&mut command, Some(until)).ok()
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+        .filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into())
 }
 
 /// The cargo home of a command: the last `CARGO_HOME` of its env, else the env of this process, else `~/.cargo`.
@@ -303,7 +312,7 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     let pid = child.id();
     let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
     let stop: Arc<Mutex<Option<Listed>>> = Arc::default();
-    let waited: Arc<Mutex<Option<String>>> = Arc::default();
+    let waited: Arc<Mutex<Option<(String, Option<PathBuf>)>>> = Arc::default();
     let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Vec<String>>();
     let (errs_tx, errs_rx) = std::sync::mpsc::channel::<()>();
     {
@@ -323,22 +332,16 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     }
     {
         let (stop, waited) = (stop.clone(), waited.clone());
-        let lock_dir = target.join(profile_of(args));
         let home = cargo_home(env);
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let t = line.trim_start();
                 if t.starts_with("Blocking ") && t.contains("directory") {
-                    let holder = lock_holder(&lock_dir.join(".cargo-lock"), pid);
-                    halt(&stop, pid, Listed::Busy(holder));
+                    // Stop cargo before doing potentially slow process diagnostics.
+                    halt(&stop, pid, Listed::Busy(String::new()));
                 } else if t.starts_with("Blocking ") {
-                    let holder = if t.contains("package cache") {
-                        lock_holder(&home.join(".package-cache"), pid)
-                    } else {
-                        "unknown (layr does not know this lock)".to_string()
-                    };
-                    eprintln!("layr-retest: cargo waits: {t}; holder: {holder}");
-                    *waited.lock().unwrap() = Some(format!("{t}; holder: {holder}"));
+                    let lock = t.contains("package cache").then(|| home.join(".package-cache"));
+                    *waited.lock().unwrap() = Some((t.to_string(), lock));
                 } else if ["Dirty ", "Compiling ", "Running "].iter().any(|p| t.starts_with(p)) {
                     halt(&stop, pid, Listed::NotFresh(t.to_string()));
                 }
@@ -348,18 +351,25 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     }
     let (status, late) = wait_child(&mut child, Some(host.deadline())).with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?;
     let _ = std::fs::remove_dir_all(profile_scratch(target));
+    let describe = |stopped| match stopped {
+        Listed::Busy(_) => Listed::Busy(lock_holder(&target.join(profile_of(args)).join(".cargo-lock"), pid)),
+        other => other,
+    };
     if let Some(stopped) = stop.lock().unwrap().take() {
-        return Ok(stopped);
+        return Ok(describe(stopped));
     }
     if late {
-        let why = waited.lock().unwrap().take().unwrap_or_default();
+        let why = waited.lock().unwrap().take().map(|(message, lock)| {
+            let holder = lock.map(|p| lock_holder(&p, pid)).unwrap_or_else(|| "unknown (layr does not know this lock)".into());
+            format!("{message}; holder: {holder}")
+        }).unwrap_or_default();
         bail!("the cargo listing of {} reached its time limit while it waited: {why}", args.join(" "));
     }
     // The readers finish before the stop is final: a line that was read after the exit can still stop the listing.
     let lines = lines_rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
     let errs_done = errs_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
     if let Some(stopped) = stop.lock().unwrap().take() {
-        return Ok(stopped);
+        return Ok(describe(stopped));
     }
     let (Some(lines), true) = (lines, errs_done) else {
         bail!("the cargo listing of {} kept its output open; a process outside its group holds it", args.join(" "));
