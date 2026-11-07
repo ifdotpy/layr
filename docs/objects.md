@@ -399,69 +399,78 @@ and stable ids across pushes; this file does not recommend it.
 ## 15. Measurements
 
 macOS 27.2, M5 Max (18 cores), APFS, release build of `examples/objects-bench` (the crate's bench;
-`--help` in its source). Other agents used the machine at the same time, so times are upper bounds.
-Bytes are file sizes; "allocated" counts 4 KiB blocks (`du`).
+its usage is at the top of its source). Other agents used the machine at the same time, so times
+are upper bounds. Bytes are file sizes; "allocated" counts 4 KiB blocks (`du`).
 
-### Choices and the rule that made them
+### Choices
+
+The compression choices come from two measurements: the standalone bench of the Layr session
+(`benchmarks/compression-20261107/`: program and `results-20261107.txt`; files one by one and as
+one stream, on layr, layr-studio and a Chromium sample) and this crate's bench on the real objects
+of the stores below.
 
 | question | measured | choice |
 | --- | --- | --- |
-| level of pack blocks | Chromium at 4 MiB blocks: level 19 is 10 % smaller than level 3 and 4 % smaller than 9; the repack took 681 s | level 19 |
-| long-distance matching | +0.01 % at 4 MiB blocks (the level-19 window already covers a block) | off |
-| block size | history at level 19: 1 MiB 2.34 MB, 4 MiB 2.06 MB, 8 MiB 1.94 MB, 32 MiB 1.86 MB | 4 MiB (a read decodes at most 4 MiB) |
-| dictionary (keep at 10 % or more) | small source files: 12.7 % (level 3) and 19.8 % (level 19) saved one file per frame, 0.4 % and 0.5 % *lost* in 1 MiB blocks; Chromium and history blocks: larger with it | none |
-| delta base by similarity (keep at 5 % or more) | history with 14 renames: 3,268,130 bytes against 3,269,765 (0.05 %) | same path only |
-| save level | a save of 1 or 10 files takes milliseconds (below) | level 3 |
+| save level | level 3 costs 0.03 ms per 5 KiB file, level 19 about 1 ms (benchmark); a save of 1 or 10 files takes milliseconds (below) | level 3 |
+| dictionary for files one by one | 11 to 13 % smaller at level 3, 16 to 20 % at level 19, on files below 64 KiB (benchmark); 9.0 % on the whole blobs of the history below | loose small blobs use the store dictionary |
+| dictionary in packs | 0.4 to 0.5 % larger in 1 MiB blocks of small sources; larger in 1, 4 and 8 MiB blocks of the history and in 4 MiB blocks of Chromium (this crate's matrix, below) | none in packs |
+| delta against the previous version | 32 times smaller than a whole level-19 frame on 213 changed files (benchmark) | saves write deltas |
+| delta base by similarity (keep at 5 % or more) | 0.04 % on the history below (14 renames) | same path only |
+| pack compression | one stream is 18.7 to 27.6 % of raw against 26.5 to 31.2 % file by file at level 19 (benchmark); on Chromium one stream per pack is 4.0 % smaller than 4 MiB blocks | one level-19 stream per pack |
+| long-distance matching | 0 to 3 % on large streams (benchmark); nothing below the 8 MiB window | on above 8 MiB |
+| level 9 | slow and a small gain | not used |
 
 ### History of this repository
 
-The last 60 first-parent commits of main (up to 5999b77), each written cold against the tree of
-the one before, from `git archive` folders. A state is about 652 files, 8.6 MiB.
+The last 60 first-parent commits of main (adb4a7c2 to 6ada771), each written cold against the tree
+of the one before, from `git archive` folders. A state is about 652 files, 8.6 MiB.
 
 | store | bytes | allocated |
 | --- | --- | --- |
-| loose, after the saves (zstd 3, deltas against the same path) | 3,269,765 | 6.5 MiB (1,241 files) |
-| of which 672 whole blobs (the first tree, renamed and new files) | 2,625,809 | |
-| of which 219 later versions as deltas | 103,881 | |
-| of which trees and times tables | 540,075 | |
-| packed (`repack`: 1 pack, 2.3 s) | 2,113,274 | 2.0 MiB |
+| loose after the saves, without a dictionary | 3,282,180 | 6.5 MiB (1,235 files) |
+| of which 674 whole blobs (the first tree, renamed and new files) | 2,637,818 | |
+| of which 217 later versions as deltas | 93,613 | |
+| of which trees / times tables | 537,605 / 13,144 | |
+| loose after the saves, with the store dictionary | 3,044,131 (whole blobs 2,399,769) | 6.4 MiB |
+| loose with delta bases by similarity | 3,280,708 | 6.5 MiB |
+| after `repack`: one pack (one stream, 12.7 s) and the dictionary | 1,918,764 + 114,688 | 2.0 MiB |
 
-All 60 states check out from the pack with their times and compare equal (entries, bytes and
-times) to their folders.
+All 60 states check out from the pack, and from the store with the dictionary, with their times,
+and compare equal (entries, bytes and times) to their folders.
 
-Compression of the same 1,241 objects (9.6 MB of plain payload), 4 MiB blocks:
+This crate's matrix in 4 MiB blocks, on the earlier 60-commit window (ba25720 to e900d3f, 1,241
+objects, 9.6 MB of plain payload; bytes include the 112 KiB dictionary):
 
-| level | dictionary | bytes | ratio |
-| --- | --- | --- | --- |
-| 3 | no | 2,591,227 | 0.269 |
-| 3 | yes | 2,747,662 | 0.285 |
-| 9 | no | 2,262,497 | 0.235 |
-| 9 | yes | 2,541,875 | 0.264 |
-| 19 | no | 2,056,060 | 0.214 |
-| 19 | yes | 2,280,991 | 0.237 |
-| 19+long | no | 2,055,748 | 0.214 |
-| 19+long | yes | 2,253,802 | 0.234 |
+| level | no dictionary | dictionary |
+| --- | --- | --- |
+| 3 | 2,591,227 | 2,747,662 |
+| 9 | 2,262,497 | 2,541,875 |
+| 19 | 2,056,060 | 2,280,991 |
+| 19+long | 2,055,748 | 2,253,802 |
 
-(Speeds on 9.6 MB in three blocks say little; see Chromium.)
+At level 19 without a dictionary, block sizes gave 1 MiB 2.34 MB, 4 MiB 2.06 MB, 8 MiB 1.94 MB,
+one stream 1.86 MB (the same earlier window).
 
 ### Chromium
 
 `src` at efd35c5: 516,265 files, 47,031 folders, 4.47 GB of file bytes (`.git` left out).
 
-The first three rows are from the first round of this slice (before times tables and packs).
-
 | step | time | store |
 | --- | --- | --- |
-| hot write (clones) | 149 s | blobs are clones: no data blocks copied |
-| hot write again | 33 s | 0 new objects |
-| checkout with clones | 78 s | 516,265 clones |
-| cold write (save form) | 435 s (233 s on a quieter machine) | 1.62 GB loose, 3.1 GiB allocated (536,155 files) |
-| repack (level 19, 4 MiB blocks) | 681 s | 73 packs, 1.407 GB, 1.31 GiB allocated |
+| hot write (clones) * | 149 s | blobs are clones: no data blocks copied |
+| hot write again * | 33 s | 0 new objects |
+| checkout with clones * | 78 s | 516,265 clones, compare equal |
+| cold write (save form, no dictionary yet) | 171 s | 1.62 GB loose, 3.1 GiB allocated (536,155 files) |
+| repack, 4 MiB blocks (first try) | 681 s | 73 packs, 1.407 GB |
+| repack, one stream per pack (the format) | 683 s | 73 packs, 1.350 GB and a 112 KiB dictionary, 1.26 GiB allocated |
 
-The disk of the machine fell below its limit during this run, so a checkout from the packs of
-Chromium was not measured; the history above and the unit tests check reads from packs.
+\* From the first round of this slice (before times tables and packs). The disk of the machine fell
+below its 25 GiB limit during this run, so a checkout from the packs of Chromium, the cold write
+with the dictionary and the save cost on Chromium were not measured; the history above and the
+unit tests check those paths.
 
-Compression of the 536,155 objects (4.28 GB of plain payload, 1,038 blocks of 4 MiB, 18 threads):
+This crate's matrix on the 536,155 objects (4.28 GB of plain payload, 1,038 blocks of 4 MiB, 18
+threads):
 
 | level | dictionary | bytes | ratio | compress MB/s | decompress MB/s |
 | --- | --- | --- | --- | --- | --- |
@@ -476,13 +485,13 @@ Compression of the 536,155 objects (4.28 GB of plain payload, 1,038 blocks of 4 
 
 ### Save cost
 
-An incremental write (`write_changed`) of this repository's working folder (687 files), whole
-process with store open, five runs each: 1 changed file 2.2 to 28 ms (median 11 ms), 10 changed
-files 2.6 to 43 ms (median 3.6 ms). A full write of the same folder takes 290 to 460 ms.
+An incremental write (`write_changed`) of this repository's working folder (687 files, hot), as a
+whole process with store open, five runs each: 1 changed file 2.2 to 28 ms (median 11 ms), 10
+changed files 2.6 to 43 ms (median 3.6 ms). A full write of the same folder takes 290 to 460 ms.
 
 ### Times and cargo
 
-This repository's working folder (built), written cold, checked out to a new folder, with the
+This repository's working folder (built), written cold, checked out to a new folder, with its
 `target/debug` folder cloned next to it, then `cargo build`:
 
 ```text
