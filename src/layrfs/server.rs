@@ -147,19 +147,33 @@ fn env_secs(name: &str, default: u64) -> u64 {
 }
 
 pub fn serve(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let dir = path.parent().context("socket path without a folder")?;
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let me = rustix::process::getuid().as_raw();
+    // A folder made here is private. An existing folder is not changed; it must be ours.
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, PermissionsExt::from_mode(0o700))?;
+    }
+    let meta = std::fs::metadata(dir).with_context(|| format!("cannot open {}", dir.display()))?;
+    if meta.uid() != me {
+        bail!("{} belongs to another user; set LAYR_FS_SOCKET", dir.display());
+    }
     if UnixStream::connect(path).is_ok() {
         eprintln!("layrfs: a server already listens on {}", path.display());
         return Ok(());
     }
-    let _ = std::fs::remove_file(path);
+    // Only a stale socket is removed, never another kind of file.
+    if let Ok(old) = std::fs::symlink_metadata(path) {
+        if !old.file_type().is_socket() {
+            bail!("{} exists and is not a socket", path.display());
+        }
+        std::fs::remove_file(path)?;
+    }
     let listener = UnixListener::bind(path).with_context(|| format!("cannot listen on {}", path.display()))?;
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    std::fs::set_permissions(path, PermissionsExt::from_mode(0o600))?;
     eprintln!("layrfs: {} listening on {} (pid {})", version(), path.display(), std::process::id());
     let server = Arc::new(Server { lines: Mutex::new(HashMap::new()), used: AtomicU64::new(now_s()) });
-    let me = rustix::process::getuid().as_raw();
 
     let s = server.clone();
     let socket = path.to_path_buf();
