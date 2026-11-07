@@ -390,7 +390,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         }
         Ok(())
     };
+    // Layr Cloud API v1: the token belongs to this machine, so only its own segments go up, signed by the key
+    // that the server knows for it.
+    let api = store.backend.api();
+    if let Some(api) = api {
+        register_machine(store, api)?;
+    }
     for machine in repo.p.db.record_machines()? {
+        if api.is_some() && machine != store.machine {
+            continue;
+        }
         let mut last = 0;
         let mut last_key = None;
         for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
@@ -438,6 +447,11 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         }
     }
     drop(stage);
+    // Layr Cloud keeps states as trees, times tables and packs (docs/objects.md), not as store v2 trees.
+    if store.is_api() {
+        super::cloud_objects::push_states(store, ctx, repo, opts, &mut report)?;
+        return Ok(report);
+    }
     let stage = crate::trace::span("store load index");
     let mut index = load_index(&store.dir)?;
     let mut journal = super::push_journal::Journal::open(&store.dir)?;
@@ -1106,6 +1120,19 @@ fn push_failpoint(point: &str, state: &str) {
         std::process::Command::new("kill").args(["-KILL", &std::process::id().to_string()]).status().unwrap();
     }
     let _ = (point, state);
+}
+
+/// Registers this machine's signing key with Layr Cloud once per key (docs/remotes.md, "Machine key"). The
+/// `machine-key` file of the remote folder remembers the key that the server took.
+fn register_machine(store: &Store, api: &super::api::Api) -> Result<()> {
+    let public = hex::encode(store.key.verifying_key().to_bytes());
+    let marker = store.dir.join("machine-key");
+    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == public) {
+        return Ok(());
+    }
+    api.register_machine(&store.machine, &store.key.verifying_key())?;
+    std::fs::write(marker, &public)?;
+    Ok(())
 }
 
 fn put_part(
@@ -1997,7 +2024,7 @@ mod tests {
         let (_, _, tree) = reader.tree(&id, &pushed.attempt).unwrap();
         assert_eq!(reader.read(&tree.files["a"]).unwrap(), content.as_bytes());
         // A remote added as Secret refuses this plain store, and a Private remote refuses a Secret store.
-        store.require_mode(Some(format::Mode::Secret));
+        store.require_mode(Some(format::Mode::Secret)).unwrap();
         assert!(store.descriptor().err().unwrap().to_string().contains("store mode differs"));
         std::fs::remove_dir_all(root).unwrap();
     }

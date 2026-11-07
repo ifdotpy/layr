@@ -107,6 +107,91 @@ A store whose `store.json` later names another mode is refused, so a writer of t
 project into a plain one.
 Use `--mode secret` when you clone a project that must stay encrypted.
 
+## Layr Cloud API v1 (Public and Private)
+
+A `layr+https://<host>/<project>` remote whose mode is `private` or `public` talks to the Layr Cloud
+API v1 (layr-cloud `docs/api.md`): base `https://<host>/api/v1/projects/<project>`.
+A remote with `--mode secret` keeps the encrypted store routes of the gateway.
+A `file://` or `s3://` store of any mode keeps the store layout above.
+
+```sh
+layr remote add cloud layr+https://cloud.layr.ws/app            # Private by default
+layr login cloud                                                # a person: sign in, register this machine
+LAYR_GATEWAY_TOKEN_FILE=/private/token layr push cloud          # a machine with an admin-issued token
+```
+
+- **Requests.** Each request sends `Authorization: Bearer <token>` (when there is one) and
+  `Layr-Client: <layr version>`. The token is the file in `LAYR_GATEWAY_TOKEN_FILE` (a machine or job
+  token, owner-only mode), else the person session that `layr login` saved in
+  `~/.config/layr/cloud/<host>.json`. A `426` answer stops the command with the minimum version
+  the server needs; there is no compatibility window. Errors name the `Layr-Server` version.
+- **Machine key.** Before the first record upload, the client registers the public key of this
+  machine: `PUT /api/v1/machines/<machine id>` `{"public_key":"<64 hex>"}`. The same key again is
+  `200`; another key for the same machine is `409`. The server checks each record segment of the
+  machine against this key.
+- **Person login.** `layr login <remote>`: `POST /api/v1/login` gives `{"code","link","expires"}`;
+  the person opens the link and signs in with a passkey; the client polls
+  `POST /api/v1/login/<code>` (`202` while waiting, then `{"login","token","expires"}`), saves the
+  session, and registers this machine's key with it.
+
+### Objects, packs and states
+
+States use the object format of docs/objects.md: a state is a tree and a times table, files are
+blobs, and objects travel in packs. The ids are the typed ids of docs/objects.md section 2 (a blob
+id equals the Git SHA-256 blob id); the server checks every plain id.
+
+- A push writes each state into the project's object store (`meta/objects`, the store of
+  `layr objects`): only the paths that changed since the first parent when the parent is there,
+  new blobs cold (a delta against the parent's blob, else a zstd frame).
+- It asks `POST /objects/missing` with the ids of the times tables, trees and blobs that the states
+  reach, and sends the missing ones in transfer packs (docs/objects.md section 6; raw entries
+  only, so the server checks each entry without another object): the data file as an `opaque`
+  object (`PUT /objects/<pack id>` with `Layr-Object-Type: opaque`, in parts over 64 MiB), then
+  its index (`PUT /packs/<pack id>`). A pack holds about 56 MiB of plain bytes.
+- Then `PUT /states/<state>` `{"times":"<id>","tree":"<id>"}` publishes each state;
+  `GET /states/<state>` gives the body back.
+- A fetch reads the state bodies, asks `POST /objects/locate` `{"ids":[...]}` (answer
+  `{"packs":{"<object id>":"<pack id>"}}`) for the missing trees and times tables, then for the
+  missing blobs, downloads those packs (`GET /objects/<pack id>`, `GET /packs/<pack id>`), adds
+  each to the object store after its checks (index, pack id, every entry against its id), and
+  checks each state out with its times.
+- Secret stores and bare folder or bucket stores keep the store v2 trees.
+- `POST /states/missing` `{"ids":[...]}` (at most 1000) gives `{"missing":[...]}`. A push asks
+  once for the tips and every state that may go up, and a fetch once for the states it lacks, so
+  neither sends a request per state.
+- Objects over 64 MiB go up in parts (`POST /objects/<id>/uploads`, then each part, then
+  `complete`). Before a large upload the client asks `POST /objects/missing`, so an object that the
+  project already holds is not sent again.
+
+### Records and refs
+
+- Record segments go up plain: `POST /records/<machine>/<first>-<last>`. A machine uploads only
+  its own segments (the token belongs to one machine). A fetch takes the records of every writer
+  that the server serves: the server access list, not local machine trust, decides who writes
+  there. It does not widen local trust: a machine that this project does not trust yet cannot
+  change trust here (its `machine.trust`, `machine.untrust` and `trust.delegate` records have no
+  effect), so peer sync, cache readers and other remotes keep the local trusted set. The key of
+  each writer is pinned per remote on first sight (`writer-keys.json` of the remote folder): a
+  later key for the same machine stops the fetch. A clone trusts the project's own trust chain
+  only: the creator and the machines that a member trusts by a signed `machine.trust` record.
+- The server ref is the truth for the position of a line. After records and states, a push moves
+  each changed line with one `POST /refs/cas`: `name` `lines/<line id>`, `expect` the target this
+  machine last read from the server (null for a new line), `target` the local head, and `record`
+  the id of the newest record of this machine that moved the line. Only lines that this machine
+  moved go up. A head that does not contain the `expect` state is refused before the request, as
+  a Git push without force: merge what the server has first. A `409 conflict` names the lines that
+  moved on the server: run `layr fetch <remote>` and push again. A fetch reads
+  `GET /refs?prefix=lines/`, keeps the targets in `refs.json` of the remote folder as the next
+  `expect`, and names each line whose head here differs from the server.
+- Overlays: an overlay whose policy lets everyone (`*`) read it goes to `/overlays/<name>/`
+  (records, states, refs) as plain objects in the project's object store: no overlay keys, slots
+  or epochs. Any other overlay (a cache, whose readers are the trusted machines; a reader list; a
+  hidden overlay) stays on this machine and the push names it, because the server serves a plain
+  layer to every reader of the project until it keeps per-overlay readers.
+- The client does not sweep, and `layr remote gc` and `verify` refuse: garbage collection is
+  server-side, and the server checks each object against its id on upload. Git packs of imported
+  commits do not go up: the server mirrors these projects to GitHub.
+
 ## Push roles
 
 Each remote has a push role: `layr config remote.<name>.push required|optional|off`.

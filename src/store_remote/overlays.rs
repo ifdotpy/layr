@@ -855,9 +855,134 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     Ok(())
 }
 
+/// A plain overlay layer of a Layr Cloud project: the routes under `overlays/<name>/`, the project's object
+/// store, no keys, slots or epochs (docs/cloud-rfc.md 7.0).
+fn api_layer(store: &Store, name: &str, project: &str) -> Result<Store> {
+    Ok(Store {
+        backend: store.backend.scoped(&format!("overlays/{name}"))?,
+        url: store.url.clone(),
+        project: project.into(),
+        machine: store.machine.clone(),
+        key: store.key.clone(),
+        dir: store.dir.join("overlays").join(name),
+        paper_key_text: None,
+        person: None,
+        pin: None,
+        aws_profile: None,
+        force_public: false,
+        public_clone: false,
+        public_reader: std::sync::atomic::AtomicBool::new(false),
+        mode: None,
+        epoch: None,
+        epoch_public: false,
+        publishing_epoch: false,
+        layer: None,
+    })
+}
+
+/// Pushes each overlay that this caller sees to its plain layer on Layr Cloud, then moves its line refs.
+/// A hidden overlay stays here: Layr Cloud has no Secret overlay layer yet.
+pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    for name in repo.visible_overlay_names(ctx)? {
+        let info = repo.need_overlay(&name)?;
+        if info.hidden {
+            report.omitted.push(format!("overlay {name}: hidden overlays wait for Secret layers on Layr Cloud"));
+            continue;
+        }
+        if info.cache {
+            repo.sync_cache_readers(ctx, &name);
+        }
+        let Ok(orepo) = repo.overlay_repo(&name) else {
+            report.omitted.push(format!("overlay {name}: not on this machine"));
+            continue;
+        };
+        // The server serves a plain layer to every reader of the project (a Public project: everyone) until it
+        // keeps per-overlay readers (docs/cloud-rfc.md 7.0). A cache (readers: trusted machines) or another
+        // overlay with a reader list stays here.
+        if !readable_by_all(&orepo.policy().access) {
+            report.omitted.push(format!(
+                "overlay {name}: its readers are limited, and Layr Cloud would serve it to every reader of the project"
+            ));
+            continue;
+        }
+        let scoped = api_layer(store, &name, &orepo.p.id)?;
+        scoped.private_dir()?;
+        let _push = writer::push_folder_lock(&scoped.dir)?;
+        let mut pushed = writer::push_locked(&scoped, ctx, &orepo, opts)?;
+        super::push_refs(&scoped, &orepo, &mut pushed)?;
+        merge(report, pushed, &name, "push");
+    }
+    Ok(())
+}
+
+/// Whether an overlay's policy lets everyone (`*`) read it: only such an overlay goes to Layr Cloud as a plain
+/// layer.
+fn readable_by_all(access: &BTreeMap<String, crate::access::Role>) -> bool {
+    access.get("*").is_some_and(|role| *role >= crate::access::Role::Reader)
+}
+
+/// Fetches each overlay that the project records name from its plain layer on Layr Cloud.
+pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    for name in repo.overlay_names()? {
+        let Some(info) = repo.overlay_info(&name)? else { continue };
+        if info.hidden {
+            continue;
+        }
+        let mut one = || -> Result<()> {
+            let scope = format!("overlays/{name}/");
+            let pname = format!("{}%{name}", repo.p.name);
+            let op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
+                Project::open_partial(&ctx.store, &pname)?
+            } else {
+                Project::create_empty_overlay(&ctx.store, &pname)?
+            };
+            // A new copy takes the overlay id from the first record of the layer; the records check it after.
+            let project = if op.id.is_empty() {
+                let segments = api.segments(&scope)?;
+                let Some(first) = segments.iter().min_by_key(|s| s.first) else { return Ok(()) };
+                let body =
+                    api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
+                let line = String::from_utf8(body)?.lines().next().map(str::to_owned).context("empty overlay segment")?;
+                oplog::parse_line(&line, None)?.record.project
+            } else {
+                op.id.clone()
+            };
+            let mut orepo = Repo { p: op, ctx: None };
+            let mut scoped = api_layer(store, &name, &project)?;
+            scoped.private_dir()?;
+            let mut opts = opts.clone();
+            if info.cache && !opts.caches_of.is_empty() && !orepo.p.id.is_empty() {
+                opts.only_caches = Some(caches_of_lines(repo, &orepo, &opts.caches_of)?);
+            }
+            let mut fetched = reader::fetch(&mut scoped, ctx, &mut orepo, &opts)?;
+            super::fetch_refs(&scoped, &orepo, &mut fetched)?;
+            merge(report, fetched, &name, "fetch");
+            repo.after_overlay_move(ctx, &name);
+            Ok(())
+        };
+        match one() {
+            Err(e) if info.cache => report.omitted.push(format!("overlay {name}: {e:#}")),
+            r => r?,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_overlay_that_everyone_reads_goes_to_layr_cloud_plain() {
+        use crate::access::Role;
+        let cache = BTreeMap::from([("machine:01a12290-0000-7000-8000-000000000001".to_string(), Role::Reader)]);
+        assert!(!readable_by_all(&cache), "a cache overlay (trusted machines) stays here");
+        assert!(!readable_by_all(&BTreeMap::from([("user:501".to_string(), Role::Admin)])));
+        assert!(!readable_by_all(&BTreeMap::new()));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Reader)])));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Writer)])));
+    }
 
     #[test]
     fn a_signer_not_trusted_yet_waits_and_another_key_fails() {

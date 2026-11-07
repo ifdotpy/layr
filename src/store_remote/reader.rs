@@ -364,6 +364,64 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The machines that a project's own signed history trusts: the creator (the signer of the `project` record), then
+/// each machine that a member trusts with a `machine.trust` record naming the key it really has. A machine that a
+/// server serves but nobody in this chain vouched for is not in it.
+pub(super) fn project_trust_chain(lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeSet<String>> {
+    let records: Vec<Record> = lines.iter().map(|line| Ok(oplog::parse_line(line, None)?.record)).collect::<Result<_>>()?;
+    let mut chain: BTreeSet<String> = records.iter().filter(|r| r.op == "project").map(|r| r.machine.clone()).take(1).collect();
+    loop {
+        let vouched: Vec<String> = records
+            .iter()
+            .filter(|r| r.op == "machine.trust" && chain.contains(&r.machine))
+            .filter_map(|r| {
+                let (machine, key) = (r.data["machine"].as_str()?, r.data["public_key"].as_str()?);
+                keys.get(machine).is_some_and(|k| hex::encode(k.to_bytes()) == key).then(|| machine.to_string())
+            })
+            .filter(|machine| !chain.contains(machine))
+            .collect();
+        if vouched.is_empty() {
+            return Ok(chain);
+        }
+        chain.extend(vouched);
+    }
+}
+
+/// The writer keys that a Layr Cloud remote served before (`writer-keys.json` of the remote folder): a server
+/// cannot give a machine another key later.
+pub(super) fn pin_writer_keys(dir: &Path, keys: &BTreeMap<String, VerifyingKey>) -> Result<()> {
+    let path = dir.join("writer-keys.json");
+    let mut pinned: BTreeMap<String, String> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("invalid writer-keys.json")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let before = pinned.len();
+    for (machine, key) in keys {
+        let key = hex::encode(key.to_bytes());
+        match pinned.get(machine) {
+            Some(old) if old != &key => {
+                bail!("Layr Cloud serves machine {machine} with another key than before; nothing is taken")
+            }
+            Some(_) => {}
+            None => {
+                pinned.insert(machine.clone(), key);
+            }
+        }
+    }
+    if pinned.len() != before {
+        std::fs::create_dir_all(dir)?;
+        crate::fsutil::atomic_write(&path, &serde_json::to_vec(&pinned)?, 0o600)?;
+    }
+    Ok(())
+}
+
+/// The states of the project for a read from the Layr Cloud API, which has no state listing: every state that
+/// the records name. `fetch` asks the server which of them it holds, in one batch.
+fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
+    Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, String::new())).collect())
+}
+
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
     let mut states = BTreeMap::new();
     for object in backend.list("states/")? {
@@ -478,30 +536,8 @@ fn restore_one(
     }
     let result = (|| -> Result<usize> {
         let n = reader.restore_over(&tree, base.as_ref(), &stage)?;
-        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
-        let destination = repo.p.state_path(&id);
-        if destination.exists() {
-            repo.p.db.set_present(&id, true)?;
-            return Ok(0);
-        }
-        // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
-        crate::fsutil::rename_tree(&stage, &destination)?;
-        let publish = (|| -> Result<()> {
-            // Every backend gives the restored tree the identity of its signed state (a send names it).
-            let transid = header.btrfs.as_ref().map_or(0, |i| i.transid);
-            // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
-            // fresh one here, since no record names its snapshot.
-            let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
-            crate::storage::mark_received(&destination, &received, transid)?;
-            crate::storage::set_readonly(&destination)?;
-            repo.p.db.set_present(&id, true)?;
-            Ok(())
-        })();
-        if publish.is_err() {
-            let _ = crate::storage::delete_tree(&destination);
-        }
-        publish?;
-        Ok(n)
+        let published = publish_restored(repo, state, &stage, header.btrfs.as_ref().map_or(0, |i| i.transid))?;
+        Ok(if published { n } else { 0 })
     })();
     if stage.exists() {
         let _ = crate::storage::delete_tree(&stage);
@@ -509,9 +545,47 @@ fn restore_one(
     result
 }
 
+/// Make the restored folder `stage` the state `state`: renamed into place and sealed under the project
+/// lock, with the identity of its signed state (`transid` names the btrfs send it came from, else 0). False
+/// when the state was there already (`stage` stays for the caller to delete).
+pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stage: &Path, transid: u64) -> Result<bool> {
+    let id = &state.id;
+    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let destination = repo.p.state_path(id);
+    if destination.exists() {
+        repo.p.db.set_present(id, true)?;
+        return Ok(false);
+    }
+    // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
+    crate::fsutil::rename_tree(stage, &destination)?;
+    let publish = (|| -> Result<()> {
+        // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
+        // fresh one here, since no record names its snapshot.
+        let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
+        crate::storage::mark_received(&destination, &received, transid)?;
+        crate::storage::set_readonly(&destination)?;
+        repo.p.db.set_present(id, true)?;
+        Ok(())
+    })();
+    if publish.is_err() {
+        let _ = crate::storage::delete_tree(&destination);
+    }
+    publish?;
+    Ok(true)
+}
+
 /// Restore the listed states that are not on this machine, from the store's own trees. The
 /// machine keys come from this project's trusted records, so no record segment is read.
 pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Result<usize> {
+    if store.is_api() {
+        let mut states = Vec::new();
+        for id in ids.iter().filter(|id| !repo.p.has_state(id)) {
+            states.push(repo.state(id)?);
+        }
+        let mut report = Report::default();
+        super::cloud_objects::fetch_states(store, repo, states, &mut report)?;
+        return Ok(report.files);
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let mut keys = BTreeMap::new();
@@ -553,8 +627,20 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let count;
     {
         let _lock = repo.p.lock()?;
-        count =
-            repo.p.import_lines(&records.lines, if bootstrap { crate::store::Trust::All } else { crate::store::Trust::Known })?;
+        // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
+        // the key that the writer registered; local machine trust is not asked and does not grow
+        // (docs/cloud-rfc.md 7.0). Each writer key is pinned per remote on first sight.
+        if store.is_api() {
+            pin_writer_keys(&store.dir, &records.keys)?;
+        }
+        let trust = if store.is_api() {
+            crate::store::Trust::Server
+        } else if bootstrap {
+            crate::store::Trust::All
+        } else {
+            crate::store::Trust::Known
+        };
+        count = repo.p.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -579,9 +665,11 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         Ok(keep)
     }).transpose()?;
     let mut left = Vec::new();
-    let states = attempts(&store.backend)?;
+    let api = store.backend.api();
+    let states = if api.is_some() { api_states(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
+    let mut asked = Vec::new();
     for id in states.keys() {
         // A tree whose record this fetch did not read: a push published both after this fetch read the records
         // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
@@ -632,9 +720,26 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
+        } else if api.is_some() {
+            // One `POST /states/missing` after the loop tells which of these the server holds.
+            asked.push(state);
         } else {
             missing.push(state);
         }
+    }
+    if let Some(api) = api {
+        // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
+        let scope = store.api_scope();
+        api.learn_states(&scope, &asked.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
+        for state in asked {
+            if api.state_held(&scope, &state.id)? {
+                missing.push(state);
+            } else if heads.is_none() {
+                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
+            }
+        }
+        // The states come as trees, times tables and packs (docs/objects.md) through the local object store.
+        super::cloud_objects::fetch_states(store, repo, std::mem::take(&mut missing), &mut report)?;
     }
     if !left.is_empty() {
         // A read of such a state restores it from this remote (`restore_state`).
@@ -693,9 +798,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
         crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
     }
-    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
+    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does. A Layr Cloud clone
+    // trusts only the project's own trust chain (`project_trust_chain`): the server access list is not local trust.
     if bootstrap {
+        let chain = if store.is_api() { Some(project_trust_chain(&records.lines, &records.keys)?) } else { None };
         for (machine, key) in &records.keys {
+            if chain.as_ref().is_some_and(|chain| !chain.contains(machine)) {
+                continue;
+            }
             if repo.p.db.trusted(machine)?.is_none() {
                 let mut record = Record::new("machine.trust");
                 record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
@@ -728,6 +838,9 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
 }
 
 pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
+    if store.is_api() {
+        bail!("Layr Cloud checks each object against its id on upload; verify is for store folders and buckets");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let records = records(&store.backend, &identity, &descriptor.project)?;
@@ -773,6 +886,9 @@ pub(super) fn log(store: &Store) -> Result<Vec<String>> {
 }
 
 pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
+    if store.is_api() {
+        bail!("Layr Cloud collects garbage on the server; a client does not sweep");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     store.require_private_access()?;

@@ -151,6 +151,7 @@ pub fn clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
     }
 }
 
+<<<<<<< head
 /// Make `dst` (absent) a clone of the open file `source`, or a byte copy where the file system
 /// cannot clone. True for a clone. The source was opened by the caller, so the step that makes
 /// `dst` needs no right to the source's folder.
@@ -176,6 +177,9 @@ pub fn clone_or_copy_from(source: &File, dst: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+||||||| base
+=======
+>>>>>>> cloud-v1-client
 /// `clone_file`, or a byte copy where the file system cannot clone. True for a clone.
 pub fn clone_or_copy(src: &Path, dst: &Path) -> io::Result<bool> {
     if clone_file(src, dst)? {
