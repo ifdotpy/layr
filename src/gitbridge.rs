@@ -2857,6 +2857,8 @@ mod export_tests {
             assert!(raw.starts_with(&format!("tree {tree}\nparent {first}\nparent {second}\n")));
             git_out(&root, &["config", "commit.gpgsign", "true"])?;
             git_out(&root, &["config", "gpg.program", "/nonexistent/layr-signing-test"])?;
+            // A user gpg.format of ssh signs with ssh-keygen, not gpg.program: the fallback needs openpgp here.
+            git_out(&root, &["config", "gpg.format", "openpgp"])?;
             let signing = ExportContext::load(root.clone());
             assert!(signing.signs(&state.author.email));
             assert!(!signing.signs("other@example.test"));
