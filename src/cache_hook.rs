@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 
 /// The soft limit of one hook: the adapter stops its processes at it and skips or restores the folder.
 pub const HOOK_LIMIT: Duration = Duration::from_secs(120);
-/// The soft limit of one build of the standard commands (`warm`): a build of a large project takes minutes.
-pub const WARM_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// The soft limit of one build of the standard commands (`warm`): a build of a large project on a loaded machine
+/// takes long, and no one waits for the background pass. A build stopped at the limit keeps the units it finished;
+/// the next pass goes on from them.
+pub const WARM_LIMIT: Duration = Duration::from_secs(120 * 60);
 /// The soft limit of a prune in the background follow pass: no one waits for it, and a loaded machine (tests of other
 /// lines) makes a prune of seconds take minutes. A prune cut at its limit keeps its garbage until the next pass.
 pub const BACKGROUND_PRUNE_LIMIT: Duration = Duration::from_secs(10 * 60);
