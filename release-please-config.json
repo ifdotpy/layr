@@ -68,6 +68,11 @@
         },
         {
           "type": "toml",
+          "path": "crates/layr-api/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
           "path": "Cargo.lock",
           "jsonpath": "$.package[?(@.name.value=='layr-api')].version"
         }
