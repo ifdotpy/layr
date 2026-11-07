@@ -135,9 +135,12 @@ settings; the gateway never sends a command. A job reports pass, fail, error or 
 project does not open yet: a private project opens after the creator trusts the machine with
 `layr remote trust`).
 
-Two transports carry the same messages. When the gateway names a WebTransport endpoint in its
-welcome (for example `https://rt.layr.ws/v1/runners/connect`, HTTP/3 over QUIC on UDP 443, one
-bidirectional stream of JSON lines), the runner tries it first on the next connect; a failed
+Two transports carry the same messages. The join reply may name a WebTransport endpoint (for
+example `https://rt.layr.ws/v1/runners/connect`, HTTP/3 over QUIC on UDP 443, one bidirectional
+stream of JSON lines). `join` keeps it in `config.json` only when it is https, has the runner
+path, and its host is the join gateway's host or a host of the same domain (the last two labels).
+A welcome only switches it on or off; it never names where the token goes. When it is on, the
+runner tries it first on the next connect; a failed
 attempt (for example a network that blocks UDP) falls back to the WebSocket at once and skips
 WebTransport for 10 minutes. The connection pings every 20 seconds (a WebSocket ping frame, or a
 `{"type":"ping"}` line) and reconnects with backoff (1 to 60 seconds). On each

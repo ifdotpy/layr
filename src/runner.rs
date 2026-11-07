@@ -37,6 +37,9 @@ pub struct Config {
     pub runner: String,
     pub projects: Vec<String>,
     pub platform: String,
+    /// The gateway's WebTransport endpoint from the join reply, checked by [`direct_endpoint`].
+    #[serde(default)]
+    pub webtransport: Option<String>,
 }
 
 /// The resume point of the connection: the gateway epoch and the last event sequence.
@@ -44,9 +47,30 @@ pub struct Config {
 pub struct Cursor {
     pub epoch: String,
     pub seq: u64,
-    /// The gateway's WebTransport endpoint, from its welcome; tried first on the next connect.
+    /// The last welcome offered WebTransport. It only switches the endpoint of the join on or
+    /// off; a welcome never names where the token goes.
     #[serde(default)]
-    pub webtransport: Option<String>,
+    pub webtransport: bool,
+}
+
+/// The direct endpoint of a join reply, when it is safe to send the runner token there:
+/// `https://<host>[:port]/v1/runners/connect` with the join gateway's host or a host of the same
+/// registered domain (its last two labels), such as rt.layr.ws for cloud.layr.ws.
+fn direct_endpoint(gateway: &str, offered: Option<&str>) -> Option<String> {
+    let join = reqwest::Url::parse(gateway).ok()?;
+    let url = reqwest::Url::parse(offered?).ok()?;
+    let ok_url = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.path() == "/v1/runners/connect";
+    let (Some(host), Some(join_host)) = (url.host_str(), join.host_str()) else {
+        return None;
+    };
+    let named = |h: &str| h.contains('.') && h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_err();
+    let domain = |h: &str| h.rsplitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+    let same = host == join_host || (named(host) && named(join_host) && domain(host) == domain(join_host));
+    (ok_url && same).then(|| url.to_string())
 }
 
 pub fn dir(root: &Path) -> PathBuf {
@@ -217,7 +241,14 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
         std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&folder)?;
     }
     write_private(&folder.join("token"), format!("{token}\n").as_bytes())?;
-    let config = Config { url: url.clone(), runner: runner.to_string(), projects: projects.clone(), platform: PLATFORM.into() };
+    let webtransport = direct_endpoint(&url, reply["webtransport"].as_str());
+    let config = Config {
+        url: url.clone(),
+        runner: runner.to_string(),
+        projects: projects.clone(),
+        platform: PLATFORM.into(),
+        webtransport,
+    };
     write_private(&folder.join("config.json"), &serde_json::to_vec_pretty(&config)?)?;
     let daemon = install_daemon(&root)?;
     if a.has("--json") {
@@ -558,11 +589,13 @@ pub struct Session<F> {
     /// Runs the work of one project (blocking). Tests replace it.
     pub work: F,
     pub stop: fn() -> bool,
+    /// The WebTransport endpoint of the join, if any (never taken from a welcome).
+    pub direct: Option<String>,
 }
 
 impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
     pub fn new(work: F, stop: fn() -> bool) -> Self {
-        Session { cursor: Cursor::default(), job: None, work, stop }
+        Session { cursor: Cursor::default(), job: None, work, stop, direct: None }
     }
 
     /// One WebSocket connection through the edge.
@@ -583,7 +616,7 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
         quic_retry: &mut Option<std::time::Instant>,
     ) -> End {
         let now = std::time::Instant::now();
-        let direct = self.cursor.webtransport.clone().filter(|_| quic_retry.is_none_or(|at| now >= at));
+        let direct = self.direct.clone().filter(|_| self.cursor.webtransport && quic_retry.is_none_or(|at| now >= at));
         let Some(direct) = direct else {
             return self.connect(url, token, version).await;
         };
@@ -641,7 +674,7 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
                     match message["type"].as_str() {
                         Some("welcome") => {
                             self.cursor.epoch = message["epoch"].as_str().unwrap_or("").to_string();
-                            self.cursor.webtransport = message["webtransport"].as_str().map(str::to_string);
+                            self.cursor.webtransport = message["webtransport"].as_str().is_some();
                         }
                         Some("work") => {
                             let project = message["project"].as_str().unwrap_or("").to_string();
@@ -698,6 +731,7 @@ pub fn serve(root: &Path) -> Result<()> {
     let work_config = config.clone();
     let work = move |project: &str| run_project(&work_root, &work_config, project);
     let mut session = Session::new(work, crate::sys::terminate_requested);
+    session.direct = config.webtransport.clone();
     let cursor_path = dir(root).join("cursor.json");
     if let Ok(data) = std::fs::read(&cursor_path) {
         session.cursor = serde_json::from_slice(&data).unwrap_or_default();
@@ -868,7 +902,7 @@ mod tests {
         let done = seen.lock().unwrap()[0].clone();
         assert_eq!(done["project"], "p");
         assert_eq!(done["report"]["summary"], "p");
-        assert_eq!(session.cursor, Cursor { epoch: "e1".into(), seq: 5, webtransport: None });
+        assert_eq!(session.cursor, Cursor { epoch: "e1".into(), seq: 5, webtransport: false });
     }
 
     #[tokio::test]
@@ -990,13 +1024,60 @@ mod tests {
         let mut session = Session::new(|_: &str| json!({}), never);
         // Nothing answers UDP on this port, as when a network blocks QUIC.
         let blocked = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        session.cursor.webtransport =
-            Some(format!("https://127.0.0.1:{}/v1/runners/connect", blocked.local_addr().unwrap().port()));
+        session.direct = Some(format!("https://127.0.0.1:{}/v1/runners/connect", blocked.local_addr().unwrap().port()));
+        session.cursor.webtransport = true;
         let mut retry = None;
         let end = session.connect_preferred(&url, "t", "test", &mut retry).await;
         assert_eq!(end, End::Lost("closed 4100".into()), "the WebSocket served the session");
         assert!(retry.is_some(), "WebTransport waits 10 minutes before the next try");
         assert_eq!(session.connect_preferred(&url, "t", "test", &mut retry).await, End::Lost("closed 4100".into()));
+    }
+
+    #[test]
+    fn the_direct_endpoint_must_share_the_join_gateway_domain() {
+        let ok = |gateway: &str, offered: &str| direct_endpoint(gateway, Some(offered)).is_some();
+        assert!(ok("https://cloud.layr.ws", "https://rt.layr.ws/v1/runners/connect"));
+        assert!(ok("https://cloud.layr.ws", "https://cloud.layr.ws:8443/v1/runners/connect"));
+        assert!(ok("http://127.0.0.1:9", "https://127.0.0.1:4433/v1/runners/connect"));
+        assert!(!ok("https://cloud.layr.ws", "https://rt.evil.example/v1/runners/connect"));
+        assert!(!ok("https://cloud.layr.ws", "https://layr.ws.evil.example/v1/runners/connect"));
+        assert!(!ok("https://cloud.layr.ws", "http://rt.layr.ws/v1/runners/connect"), "https only");
+        assert!(!ok("https://cloud.layr.ws", "https://rt.layr.ws/other"), "the runner path only");
+        assert!(!ok("https://cloud.layr.ws", "https://x@rt.layr.ws/v1/runners/connect"));
+        assert!(!ok("http://127.0.0.1:9", "https://10.0.0.1/v1/runners/connect"));
+        assert!(direct_endpoint("https://cloud.layr.ws", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_welcome_naming_another_host_gets_no_webtransport_connection() {
+        // The welcome names a WebTransport server; the join gave none, so nothing connects there.
+        let wt_sessions = Arc::new(Mutex::new(0usize));
+        let count = wt_sessions.clone();
+        let wt = fake_webtransport(move |_, _, _, _| {
+            let count = count.clone();
+            async move {
+                *count.lock().unwrap() += 1;
+            }
+        })
+        .await;
+        let (url, _server) = fake(move |n, mut ws, _| {
+            let wt = wt.clone();
+            async move {
+                if n == 0 {
+                    let welcome = json!({"type": "welcome", "epoch": "e1", "seq": 0, "webtransport": wt});
+                    ws.send(Message::text(welcome.to_string())).await.unwrap();
+                }
+                let _ = ws.close(Some(CloseFrame { code: CloseCode::Library(4100), reason: "test".into() })).await;
+            }
+        })
+        .await;
+        let mut session = Session::new(|_: &str| json!({}), never);
+        let mut retry = None;
+        assert_eq!(session.connect_preferred(&url, "t", "test", &mut retry).await, End::Lost("closed 4100".into()));
+        assert!(session.cursor.webtransport, "the welcome switched WebTransport on");
+        assert_eq!(session.connect_preferred(&url, "t", "test", &mut retry).await, End::Lost("closed 4100".into()));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(*wt_sessions.lock().unwrap(), 0, "the token never went to the welcome's URL");
     }
 
     #[tokio::test]
