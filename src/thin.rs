@@ -103,7 +103,7 @@ pub(crate) fn read_source<T>(r: std::io::Result<T>, path: &Path) -> Result<T> {
 /// Clone the source entry `from` to `to`. The clone fails with NotFound for a missing source or
 /// a missing destination folder. The destination folder exists here (the layer makes it first),
 /// so a NotFound with an existing destination folder is the source.
-fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
     crate::sys::apfs_clone(from, to)
         .map_err(|e| {
             if not_found(&e) && to.parent().is_some_and(|p| p.is_dir()) {
@@ -1766,6 +1766,21 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn a_folder_removed_after_its_scan_is_a_source_change() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        fs::create_dir(&src)?;
+        fs::write(src.join("x"), b"content")?;
+        let entries = apfs::scan_with_data(&src, false)?;
+        fs::remove_dir_all(&src)?;
+        let err = apfs::clone_complete(&src, &s.0.join("copy"), &entries, false)
+            .expect_err("the source disappeared after its scan");
+        assert!(vanished(&err), "a missing source must trigger another scan: {err:?}");
         Ok(())
     }
 

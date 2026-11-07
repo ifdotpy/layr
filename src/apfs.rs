@@ -962,7 +962,7 @@ fn clone_complete_with(
     let linked: BTreeSet<&str> = if keep_links { hard_linked(entries) } else { BTreeSet::new() };
     if nested.is_empty() && linked.is_empty() {
         let _t = crate::trace::span("APFS clone root");
-        crate::sys::apfs_clone(src, dst)?;
+        crate::thin::clone_from_source(src, dst)?;
     } else {
         let _t =
             crate::trace::span(format!("APFS clone around {} nested layers and {} linked files", nested.len(), linked.len()));
@@ -1002,7 +1002,7 @@ fn clone_complete_with(
         let _t = crate::trace::span("APFS unseal copy");
         seal(dst, false, false)?;
     }
-    if crate::sys::apfs_has_acl(src)? {
+    if crate::thin::read_source(crate::sys::apfs_has_acl(src), src)? {
         crate::sys::apfs_copy_user_acl(src, dst)?;
     }
     let user_acls: Vec<String> = if entries.get("").is_some_and(|e| e.flags & libc::UF_IMMUTABLE != 0) {
