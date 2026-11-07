@@ -209,7 +209,7 @@ fn authorize_evidence(
             repo.p.config_value(&format!("check.{check}"))?.and_then(|v| v.as_str().map(String::from)).ok_or_else(|| {
                 anyhow::anyhow!("check '{check}' of ref '{name}' is not defined (layr config check.{check} '<command>')")
             })?;
-        if !super::attest::check_passed(repo, &target.target, &command)? {
+        if !super::attest::check_passed(repo, &target.target, check, &command)? {
             bail!(
                 "ref '{name}' needs a passing check '{check}' for exactly state {} and command '{command}'; run 'layr try {} --check {check}' first",
                 ids::short(&target.target),

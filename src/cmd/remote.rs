@@ -596,7 +596,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--expires")
             .value("--role")
             .value("--overlays")
-            .value("--name"),
+            .value("--name")
+            .value("--server-key")
+            .flag("--unset"),
         args,
     )?;
     let sub = a.pos.first().map(String::as_str).unwrap_or("list");
@@ -688,6 +690,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("--paper-key-tty requires a store remote");
             }
             crate::store::check_name("remote", name)?;
+            if let Some(server_key) = a.get("--server-key") {
+                crate::server_checks::parse_key(server_key)?;
+            }
             repo.require(ctx, "remote")?;
             let _lock = repo.p.lock()?;
             let key = format!("cloud.remote.{name}.url");
@@ -720,11 +725,30 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 None
             };
             set_config(ctx, repo, &key, json!(url))?;
+            if let Some(server_key) = a.get("--server-key") {
+                crate::server_checks::set_local_pin(repo, ctx.caller.uid, name, Some(server_key))?;
+            }
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"name": name, "url": url, "recovery_key_file": recovery_key_file}));
             } else if let Some(path) = recovery_key_file {
                 outln!(ctx, "paper key file: {path}");
             }
+        }
+        // The Layr Cloud key whose signed check results protection takes (docs/checks.md); machine-local.
+        "server-key" if (2..=3).contains(&a.pos.len()) => {
+            let name = &a.pos[1];
+            if a.pos.len() == 2 && !a.has("--unset") {
+                match crate::server_checks::local_pins(repo)?.get(name) {
+                    Some(key) => outln!(ctx, "{key}"),
+                    None => return Ok(1),
+                }
+                return Ok(0);
+            }
+            if repo.p.config_value(&format!("cloud.remote.{name}.url"))?.is_none() {
+                return Err(exit(1, format!("no remote {name}")));
+            }
+            let _lock = repo.p.lock()?;
+            crate::server_checks::set_local_pin(repo, ctx.caller.uid, name, if a.has("--unset") { None } else { a.pos.get(2).map(String::as_str) })?;
         }
         "remove" if a.pos.len() == 2 => {
             repo.require(ctx, "remote")?;
@@ -733,6 +757,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             set_config(ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
             set_config(ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
             set_config(ctx, repo, &format!("cloud.remote.{}.mode", a.pos[1]), serde_json::Value::Null)?;
+            if crate::server_checks::local_pins(repo)?.contains_key(&a.pos[1]) {
+                crate::server_checks::set_local_pin(repo, ctx.caller.uid, &a.pos[1], None)?;
+            }
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
@@ -889,7 +916,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] [--server-key <hex>] | server-key <name> [<hex> | --unset] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
