@@ -32,15 +32,31 @@ pub(crate) mod testutil {
             .collect()
     }
 
-    /// A new empty folder under the temporary folder, removed by the next run of the same test.
-    pub fn scratch(name: &str) -> PathBuf {
+    /// A new empty folder under the temporary folder, removed when the test ends.
+    pub struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            make_writable(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("layr-objects-test-{}-{name}", std::process::id()));
         if dir.exists() {
             make_writable(&dir);
             std::fs::remove_dir_all(&dir).unwrap();
         }
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     pub fn make_writable(dir: &std::path::Path) {
