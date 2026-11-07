@@ -1,0 +1,22 @@
+[package]
+name = "layr-objects"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "Content-addressed object store of layr: Merkle trees, blobs, deltas and chunks (experimental)"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+hex = "0.4"
+hmac = "0.12"
+layr-hashers = { path = "../layr-hashers" }
+layr-store = { path = "../layr-store" }
+rayon = "1"
+rustix = { version = "1", features = ["fs"] }
+sha2 = "0.10"
+
+[[example]]
+name = "objects-bench"
+path = "examples/bench.rs"
