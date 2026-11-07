@@ -56,16 +56,33 @@ fn detects_with(tool: &Tool, folder: &Path) -> bool {
     folder.file_name().is_some_and(|n| n == "node_modules") && folder.parent().is_some_and(|r| r.join(tool.lockfile).is_file())
 }
 
-fn recover_with(folder: &Path) -> Result<bool, String> {
+/// Where the copy and the moved-aside folder of `root/node_modules` live: in the host's scratch folder when it is on
+/// the same volume as the folder (renames stay cheap, and nothing shows in the line's work tree), else next to it.
+fn places(host: &dyn Host, root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::MetadataExt;
+    if let Some(dir) = host.scratch() {
+        let device = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+        if std::fs::create_dir_all(&dir).is_ok() && device(&dir).is_some() && device(&dir) == device(root) {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            root.hash(&mut h);
+            let key = format!("{:016x}", h.finish());
+            return (dir.join(format!("{key}.layr-prune")), dir.join(format!("{key}.layr-broken")));
+        }
+    }
+    (root.join("node_modules.layr-prune"), root.join("node_modules.layr-broken"))
+}
+
+fn recover_with(host: &dyn Host, folder: &Path) -> Result<bool, String> {
     let Some(root) = folder.parent() else { return Err("no project folder".into()) };
-    let copy_path = root.join("node_modules.layr-prune");
-    leftovers(root);
+    let (copy_path, broken) = places(host, root);
+    leftovers(host, root);
     // A copy that a stop cut short is no copy: only a finished copy has the final name.
     let _ = std::fs::remove_dir_all(part_of(&copy_path));
     if !copy_path.exists() {
         return Ok(false);
     }
-    restore(folder, &copy_path).map(|_| true).map_err(|e| format!("{e:#}"))
+    restore(folder, &copy_path, &broken).map(|_| true).map_err(|e| format!("{e:#}"))
 }
 
 /// Installs every package of the lockfile again from the local store, over the files that are there (a folder
@@ -98,8 +115,8 @@ impl CacheAdapter for Pnpm {
         warm_with(&PNPM, host, folder).map_err(|e| format!("{e:#}"))
     }
 
-    fn recover(&self, folder: &Path) -> Result<bool, String> {
-        recover_with(folder)
+    fn recover(&self, host: &dyn Host, folder: &Path) -> Result<bool, String> {
+        recover_with(host, folder)
     }
 
     fn repair(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
@@ -125,8 +142,8 @@ impl CacheAdapter for Npm {
         warm_with(&NPM, host, folder).map_err(|e| format!("{e:#}"))
     }
 
-    fn recover(&self, folder: &Path) -> Result<bool, String> {
-        recover_with(folder)
+    fn recover(&self, host: &dyn Host, folder: &Path) -> Result<bool, String> {
+        recover_with(host, folder)
     }
 
     fn repair(&self, host: &dyn Host, folder: &Path) -> Result<(), String> {
@@ -161,10 +178,10 @@ fn warm_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
     let Some(root) = folder.parent().filter(|r| named && r.join(tool.lockfile).is_file()) else {
         anyhow::bail!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile);
     };
-    let copy_path = root.join("node_modules.layr-prune");
-    leftovers(root);
+    let (copy_path, broken) = places(host, root);
+    leftovers(host, root);
     if copy_path.exists() {
-        restore(folder, &copy_path).context("cannot restore node_modules from its copy")?;
+        restore(folder, &copy_path, &broken).context("cannot restore node_modules from its copy")?;
     }
     if folder.exists() {
         copy(host, folder, &copy_path).context("cannot copy node_modules")?;
@@ -172,7 +189,7 @@ fn warm_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Result<()> {
     if let Err(e) = exec(host, tool.program, |c| c.args(tool.warm).current_dir(root)) {
         let what = format!("{} {}", tool.program, tool.warm[0]);
         if copy_path.exists() {
-            restore(folder, &copy_path).with_context(|| format!("{what}: {e:#}; restoring node_modules failed"))?;
+            restore(folder, &copy_path, &broken).with_context(|| format!("{what}: {e:#}; restoring node_modules failed"))?;
         }
         return Err(e.context(what));
     }
@@ -230,11 +247,11 @@ fn prune_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
     let Some(root) = folder.parent().filter(|r| named && r.join(tool.lockfile).is_file()) else {
         return skip(format!("{} needs a folder named node_modules next to {}", tool.program, tool.lockfile));
     };
-    let copy_path = root.join("node_modules.layr-prune");
-    leftovers(root);
+    let (copy_path, broken) = places(host, root);
+    leftovers(host, root);
     // A copy that an interrupted prune left: put it back first, so the folder is the state before that prune.
     if copy_path.exists() {
-        if let Err(e) = restore(folder, &copy_path) {
+        if let Err(e) = restore(folder, &copy_path, &broken) {
             return skip(format!("cannot restore node_modules from its copy: {e:#}"));
         }
     }
@@ -244,7 +261,7 @@ fn prune_files_kept(tool: &Tool, host: &dyn Host, folder: &Path) -> Outcome {
     }
     for args in tool.prune {
         if let Err(e) = exec(host, tool.program, |c| c.args(*args).current_dir(root)) {
-            return match restore(folder, &copy_path) {
+            return match restore(folder, &copy_path, &broken) {
                 Ok(()) => skip(format!("{} {}: {e:#}; node_modules unchanged", tool.program, args[0])),
                 Err(r) => skip(format!(
                     "{} {}: {e:#}; restoring node_modules failed, the copy is at {}: {r:#}",
@@ -271,9 +288,12 @@ fn part_of(dst: &Path) -> std::path::PathBuf {
 
 /// Removes what an interrupted step left next to `node_modules`: a changed folder that a restore moved aside
 /// (`node_modules.layr-broken`, deleted last and slowly) and a copy cut short (`.part`). Neither is ever put back.
-fn leftovers(root: &Path) {
+fn leftovers(host: &dyn Host, root: &Path) {
     let _ = std::fs::remove_dir_all(root.join("node_modules.layr-broken"));
     let _ = std::fs::remove_dir_all(part_of(&root.join("node_modules.layr-prune")));
+    let (copy, broken) = places(host, root);
+    let _ = std::fs::remove_dir_all(broken);
+    let _ = std::fs::remove_dir_all(part_of(&copy));
 }
 
 /// A copy-on-write copy of `src` at `dst`, with its times and modes. A failed copy leaves nothing behind.
@@ -304,14 +324,13 @@ fn copy(host: &dyn Host, src: &Path, dst: &Path) -> Result<()> {
 
 /// Puts the copy of `folder` back in place of the changed `folder`. Two renames, then the slow delete: a stop at
 /// any point leaves either the copy or the restored folder whole (the changed folder waits in `.layr-broken`).
-fn restore(folder: &Path, copy_path: &Path) -> Result<()> {
-    let broken = folder.with_file_name("node_modules.layr-broken");
-    let _ = std::fs::remove_dir_all(&broken);
+fn restore(folder: &Path, copy_path: &Path, broken: &Path) -> Result<()> {
+    let _ = std::fs::remove_dir_all(broken);
     if folder.exists() {
-        std::fs::rename(folder, &broken).context("cannot move the changed folder aside")?;
+        std::fs::rename(folder, broken).context("cannot move the changed folder aside")?;
     }
     std::fs::rename(copy_path, folder).context("cannot move the copy back")?;
-    let _ = std::fs::remove_dir_all(&broken);
+    let _ = std::fs::remove_dir_all(broken);
     Ok(())
 }
 
@@ -337,6 +356,17 @@ mod tests {
         assert!(copy(&CheckProgram, Path::new(""), Path::new("")).is_err());
     }
 
+    /// A host without processes or scratch folder: the recovery runs none.
+    struct NoHost;
+    impl Host for NoHost {
+        fn command(&self, _program: &str) -> std::io::Result<std::process::Command> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn deadline(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+    }
+
     fn project(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-pnpm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -350,7 +380,7 @@ mod tests {
         // A stop in the middle of the copy leaves only the part: the folder stays as it is.
         let root = project("part");
         std::fs::create_dir_all(root.join("node_modules.layr-prune.part/pkg")).unwrap();
-        assert_eq!(recover_with(&root.join("node_modules")), Ok(false));
+        assert_eq!(recover_with(&NoHost, &root.join("node_modules")), Ok(false));
         assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "whole");
         assert!(!root.join("node_modules.layr-prune.part").exists());
         let _ = std::fs::remove_dir_all(root);
@@ -360,7 +390,7 @@ mod tests {
     fn a_folder_that_an_interrupted_restore_moved_aside_goes_at_the_next_recovery() {
         let root = project("leftover");
         std::fs::create_dir_all(root.join("node_modules.layr-broken/pkg")).unwrap();
-        assert_eq!(recover_with(&root.join("node_modules")), Ok(false));
+        assert_eq!(recover_with(&NoHost, &root.join("node_modules")), Ok(false));
         assert!(!root.join("node_modules.layr-broken").exists());
         assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "whole");
         let _ = std::fs::remove_dir_all(root);
@@ -372,7 +402,7 @@ mod tests {
         std::fs::create_dir_all(root.join("node_modules.layr-prune/pkg")).unwrap();
         std::fs::write(root.join("node_modules.layr-prune/pkg/index.js"), "copy").unwrap();
         std::fs::remove_file(root.join("node_modules/pkg/index.js")).unwrap();
-        assert_eq!(recover_with(&root.join("node_modules")), Ok(true));
+        assert_eq!(recover_with(&NoHost, &root.join("node_modules")), Ok(true));
         assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "copy");
         let mut left: Vec<String> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
         left.sort();

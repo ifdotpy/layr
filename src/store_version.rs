@@ -5,7 +5,7 @@
 //! at this format: no migration.
 use anyhow::{bail, Context, Result};
 pub use layr_api::Version;
-use layr_api::{Peer, SchemaVersion, StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR, RELEASE};
+use layr_api::{Peer, SchemaVersion, StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR};
 use std::fs::{self, File, OpenOptions};
 use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
@@ -16,7 +16,8 @@ pub const MARKER: &str = "store-version.json";
 const LOCK: &str = ".layr-version.lock";
 
 pub fn binary() -> Version {
-    Version { format: FORMAT, version: RELEASE.into(), build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into() }
+    // The version of this binary (the layr package), not of the layr-api crate, which `release prepare` does not bump.
+    Version { format: FORMAT, version: env!("CARGO_PKG_VERSION").into(), build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into() }
 }
 
 /// Advertise the binary's database schema without changing the store marker contract.

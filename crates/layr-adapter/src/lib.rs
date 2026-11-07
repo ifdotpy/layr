@@ -19,6 +19,11 @@ pub trait Host {
         let _ = (src, dst);
         Ok(false)
     }
+    /// A folder of core on the store's volume for an adapter's temporary copies, outside the line's work tree.
+    /// None: the adapter keeps them next to the folder.
+    fn scratch(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The command that names a toolchain (`CacheAdapter::toolchain_command`).
@@ -61,8 +66,8 @@ pub trait CacheAdapter: Send + Sync {
     /// Puts `folder` back in the state before an interrupted `prune` (its processes were stopped at the hard
     /// limit). Ok(true): it restored a copy. Ok(false): there is nothing to restore. Err: the folder may be
     /// changed and is not restored. Runs no process, so it needs no host.
-    fn recover(&self, folder: &Path) -> Result<bool, String> {
-        let _ = folder;
+    fn recover(&self, host: &dyn Host, folder: &Path) -> Result<bool, String> {
+        let _ = (host, folder);
         Ok(false)
     }
     /// `folder` came from another path (the cache of a new line, or of a merge), and it is used at `at` from now on.

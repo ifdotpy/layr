@@ -234,10 +234,10 @@ fn recover_puts_the_copy_back_after_a_hard_kill() {
     std::fs::remove_dir_all(nm.join(".pnpm")).unwrap();
     assert!(!nm.join("pkg-a").exists());
 
-    assert_eq!(layr_cache::pnpm::Pnpm.recover(&nm), Ok(true));
+    assert_eq!(layr_cache::pnpm::Pnpm.recover(&host(), &nm), Ok(true));
     assert!(tree(&nm) == before, "node_modules is not the copy");
     assert!(!dir.join("node_modules.layr-prune").exists());
-    assert_eq!(layr_cache::pnpm::Pnpm.recover(&nm), Ok(false), "nothing left to restore");
+    assert_eq!(layr_cache::pnpm::Pnpm.recover(&host(), &nm), Ok(false), "nothing left to restore");
 }
 
 #[test]
