@@ -815,8 +815,8 @@ removes the units that no sweep command lists.
 
 - A call is listed with its unit arguments. `test`, `bench` and `cargo nextest run|list|archive` become a
   `--no-run` test build with the same package, target, feature and profile options (nextest's `--cargo-profile`
-  is cargo's `--profile`; its own `--profile`, filters and runner options go). `test --doc` becomes a library
-  build, `run` a build. Job, color, message format and verbosity options go. A call that builds nothing (`fetch`,
+  is cargo's `--profile`; its own `--profile`, filters and runner options go). `test --doc` becomes the
+  library's test build (doctests link with the features of a test build), `run` a build. Job, color, message format and verbosity options go. A call that builds nothing (`fetch`,
   `metadata`, `fmt`, a help or version call) is left out.
 - The target folder is `--target-dir`, else the call's `CARGO_TARGET_DIR`, else `target` of the project. A call
   into `target` is compared with the `sweep` commands, one into `target/<dir>` with the `sweep` entries whose
@@ -826,9 +826,20 @@ removes the units that no sweep command lists.
   needs when the call had another value), or an object with `target_dir`, `args` and `env` for a folder below it.
   A call that selects packages with `-p` gets a note: cargo resolves the features of those packages only, so
   their dependencies get other units than a `--workspace` build.
+- Each `sweep` command is listed on its own. A command that is not fresh after the gate (the gate did not run it,
+  or one of its units is stale in every new line) does not hide the others: a call whose units are all in the
+  fresh commands is covered; a call with other units in a profile folder where a command was not fresh is not
+  checked, and the stale command is named.
 - Not checked, with the reason: a failed command, a call whose folder is gone (a test copy in a temp folder), a
-  call whose units or sweep commands are not fresh after the gate, a busy build lock, more than 40 distinct calls.
-- The result goes to `.layr-retest/gate-coverage.json`; `layr retest doctor` prints it.
+  call whose units are not fresh after the gate, a busy build lock, more than 40 distinct calls.
+- The result goes to `.layr-retest/gate-coverage.json` with a key of what decides the units: the calls (a folder out
+  of the project as `<outside>`, so a temp copy with a new name is the same call), the `sweep` settings, every
+  manifest of the workspace (from `cargo metadata --no-deps`), `Cargo.lock`, the cargo config, the toolchain files
+  and `rustc -vV`. The source of a workspace crate is not in a unit hash, so a source change keeps the key. The next
+  gate with the same key and a result without a "not checked" that it can lift prints the saved findings and lists
+  nothing. The gate prints the time of the check (`sweep coverage took`); a Studio gate with 9 calls took 13 s at
+  load 95 when it listed them.
+- `layr retest doctor` prints the result.
 
 ### Record format
 

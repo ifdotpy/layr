@@ -182,6 +182,22 @@ const TOOL_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "clippy.toml", ".clip
 /// at another path builds it again, and a new line keeps it warm only when the file there has the same bytes.
 /// Paths in `target` and the files of `TOOL_FILES` are left out. Each (unit, path) once.
 pub fn outside_sources(target: &Path, root: &Path) -> Vec<(String, String)> {
+    // Cargo writes the path that it was given: the root as named, or its canonical form (`/tmp` is `/private/tmp`).
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for root in if canonical == root { vec![root.to_path_buf()] } else { vec![root.to_path_buf(), canonical] } {
+        for item in sources_below(target, &root) {
+            if !out.contains(&item) {
+                out.push(item);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `outside_sources` for one spelling of the root.
+fn sources_below(target: &Path, root: &Path) -> Vec<(String, String)> {
     let root_bytes = root.as_os_str().as_encoded_bytes();
     let mut out: Vec<(String, String)> = Vec::new();
     for profile in profiles(target).unwrap_or_default() {

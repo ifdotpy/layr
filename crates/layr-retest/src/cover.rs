@@ -58,13 +58,30 @@ fn executable(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// A new folder in the temp folder that only this user can read and write, with a random part in its name. It is
+/// created in one step and never taken over: another user cannot put a `cargo` there before the gate does.
+fn private_dir() -> Result<PathBuf> {
+    use std::io::Read;
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..16 {
+        let mut random = [0u8; 8];
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random)).context("read /dev/urandom")?;
+        let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("layr-retest-cargo-{}-{hex}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("cannot create {}", dir.display())),
+        }
+    }
+    anyhow::bail!("cannot create a new folder for the cargo script in {}", std::env::temp_dir().display())
+}
+
 /// The script folder for a gate. `None` without a `cargo` on PATH: then nothing is recorded.
 pub fn shim() -> Result<Option<Shim>> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let Some(real) = std::env::split_paths(&path).map(|d| d.join("cargo")).find(|p| executable(p)) else { return Ok(None) };
-    let dir = std::env::temp_dir().join(format!("layr-retest-cargo-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let dir = private_dir()?;
     let script = dir.join("cargo");
     std::fs::write(&script, SCRIPT)?;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
@@ -232,7 +249,7 @@ fn unit_options(own: &[String], nextest: bool) -> Vec<String> {
 
 /// The cargo arguments that list the units of a recorded call, or `None` for a call that builds nothing (`fetch`,
 /// `metadata`, `fmt`, a help or version call). `test`, `bench` and `nextest` become a `--no-run` test build with the
-/// same unit options; `run` becomes a build; `test --doc` becomes a library build. Output and job options go.
+/// same unit options; `run` becomes a build; `test --doc` becomes the library's test build. Output and job options go.
 pub fn listing_args(args: &[String]) -> Option<Vec<String>> {
     let (toolchain, rest) = match args.first() {
         Some(t) if t.starts_with('+') => (vec![t.clone()], &args[1..]),
@@ -267,9 +284,12 @@ pub fn listing_args(args: &[String]) -> Option<Vec<String>> {
         "test" | "t" | "bench" => {
             let own = split(after).0;
             if own.iter().any(|a| a == "--doc") {
-                out.push("build".into());
-                out.push("--lib".into());
+                // Doctests link the library with the features of a test build (dev-dependencies count), so the
+                // listing is the library's test build: the same dependency units.
+                out.push("test".into());
                 out.extend(unit_options(&own, false).into_iter().filter(|a| !matches!(a.as_str(), "--tests" | "--all-targets")));
+                out.push("--lib".into());
+                out.push("--no-run".into());
             } else {
                 out.push(if sub == "bench" { "bench".into() } else { "test".into() });
                 out.extend(unit_options(&own, false));
@@ -323,7 +343,9 @@ pub enum Verdict {
     Cold { units: Vec<String>, entry: Value, env: BTreeMap<String, String> },
     /// The call builds into a folder out of the cache folder `target`: no line takes those units warm.
     Outside(PathBuf),
-    /// Not checked, and why.
+    /// Not checked: the call ran in a folder that is gone (a copy in a temp folder). Nothing can list it again.
+    Gone(PathBuf),
+    /// Not checked, and why. The next gate checks it again.
     Unchecked(String),
 }
 
@@ -369,26 +391,52 @@ fn sweep_of(settings: &Settings, sub: &str) -> (Vec<Vec<String>>, Vec<(String, S
     (commands, env)
 }
 
-/// The live units of the `sweep` commands of one folder, by profile folder. A profile whose commands are not fresh
-/// is `Err` with the reason.
-type SweepLive = BTreeMap<PathBuf, std::result::Result<layr_cache::sweep::Live, String>>;
+/// The units of the `sweep` commands of one folder. Each command is listed on its own: a command that is not fresh
+/// after the gate (the gate did not run it, or a unit of it is stale in every new line) does not hide the others.
+#[derive(Default)]
+struct SweepLive {
+    /// The unit hashes of the fresh commands, by profile folder.
+    live: BTreeMap<PathBuf, BTreeSet<String>>,
+    /// The commands that were not fresh, by the profile folder that they build into, with the reason.
+    stale: BTreeMap<PathBuf, Vec<String>>,
+}
+
+/// The profile folder of a cargo command: `target/<triple>/<profile>` with `--target <triple>`, else `target/<profile>`.
+fn profile_dir(target: &Path, args: &[String]) -> PathBuf {
+    let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    let triple = own
+        .iter()
+        .position(|a| a == "--target")
+        .and_then(|i| own.get(i + 1))
+        .cloned()
+        .or_else(|| own.iter().find_map(|a| a.strip_prefix("--target=")).map(String::from));
+    let base = triple.map_or_else(|| target.to_path_buf(), |t| target.join(t));
+    base.join(cargo::profile_of(args))
+}
+
+/// A reason of cargo for a listing that stopped, cut to one short line.
+fn short(why: &str) -> String {
+    let line = why.lines().next().unwrap_or_default();
+    if line.chars().count() > 120 {
+        format!("{}...", line.chars().take(120).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
 
 fn sweep_live(root: &Path, target: &Path, commands: &[Vec<String>], env: &[(String, String)]) -> Result<SweepLive> {
-    let mut out = SweepLive::new();
-    for (profile, _, listed) in cargo::live_by_profile(&crate::retest_host(), root, target, env, commands)? {
-        let dir = target.join(&profile);
-        match listed {
+    let mut out = SweepLive::default();
+    for args in commands {
+        match cargo::list_units(&crate::retest_host(), root, target, env, args)? {
             Listed::Fresh(plans) => {
                 for (p, live) in plans {
-                    out.insert(p, Ok(live));
+                    out.live.entry(p).or_default().extend(live.hashes);
                 }
             }
             Listed::NotFresh(why) => {
-                out.insert(dir, Err(format!("a sweep command of this profile is not fresh after the gate ({why})")));
+                out.stale.entry(profile_dir(target, args)).or_default().push(format!("`{}` ({})", args.join(" "), short(&why)));
             }
-            Listed::Busy(holder) => {
-                out.insert(dir, Err(format!("another cargo holds the build lock: {holder}")));
-            }
+            Listed::Busy(holder) => anyhow::bail!("another cargo holds the build lock: {holder}"),
         }
     }
     Ok(out)
@@ -408,15 +456,20 @@ fn unit_names(profile: &Path, hashes: &BTreeSet<String>) -> Vec<String> {
 }
 
 /// The units of `call` that are not in `sweep`, as `<profile>/<name>-<hash>`. Empty when every unit is covered.
+/// A unit that only a stale sweep command could build is not a finding: `Err` says why the call is not checked.
 fn cold_units(call: &Plans, sweep: &SweepLive, target: &Path) -> std::result::Result<Vec<String>, String> {
     let mut cold = Vec::new();
+    let none = BTreeSet::new();
     for (profile, live) in call {
-        let have = match sweep.get(profile) {
-            Some(Ok(l)) => l.hashes.clone(),
-            Some(Err(why)) => return Err(why.clone()),
-            None => BTreeSet::new(),
-        };
-        let missing: BTreeSet<String> = live.hashes.difference(&have).cloned().collect();
+        let have = sweep.live.get(profile).unwrap_or(&none);
+        let missing: BTreeSet<String> = live.hashes.difference(have).cloned().collect();
+        if let (false, Some(stale)) = (missing.is_empty(), sweep.stale.get(profile)) {
+            return Err(format!(
+                "{} of its units are not in the fresh sweep commands, and {} is not fresh after the gate, so it may build them",
+                missing.len(),
+                stale.join(", ")
+            ));
+        }
         if !missing.is_empty() {
             let rel = profile.strip_prefix(target).unwrap_or(profile);
             cold.extend(unit_names(profile, &missing).into_iter().map(|n| format!("{}/{n}", rel.display())));
@@ -476,7 +529,7 @@ pub fn check(root: &Path, settings: &Settings, calls: &[Call]) -> Vec<Finding> {
             };
             let Ok(rel) = target.strip_prefix(&cache) else { return Verdict::Outside(target) };
             if !call.cwd.is_dir() {
-                return Verdict::Unchecked(format!("its folder {} is gone", call.cwd.display()));
+                return Verdict::Gone(call.cwd.clone());
             }
             let sub = rel.to_string_lossy().into_owned();
             let (commands, sweep_env) = sweep_of(settings, &sub);
@@ -545,12 +598,82 @@ pub fn describe(f: &Finding, root: &Path) -> (bool, String) {
                 dir.display()
             ),
         ),
+        Verdict::Gone(dir) => (false, format!("{shown}{place}: not checked: its folder {} is gone", dir.display())),
         Verdict::Unchecked(why) => (false, format!("{shown}{place}: not checked: {why}")),
     }
 }
 
-/// Prints the findings of a gate and saves them in the records folder for `layr retest doctor`.
-pub fn report(root: &Path, findings: &[Finding]) {
+/// FNV-1a: a stable 64-bit hash of the inputs of `key`.
+fn fnv(parts: &[&[u8]]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for b in part.iter().chain(&[0xff]) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
+/// The key of what decides the units of the calls and of the `sweep` commands: the calls (a folder out of the project
+/// as `<outside>`, so a temp copy with a new name is the same call), the `sweep` settings, every manifest of the
+/// workspace, `Cargo.lock`, the cargo config, the toolchain files and `rustc -vV`. The source of a workspace crate is
+/// not in a unit hash, so a source change keeps the key.
+pub fn key(root: &Path, settings: &Settings, calls: &[Call]) -> String {
+    let root = canonical(root);
+    let place = |p: &Path| match canonical(p).strip_prefix(&root) {
+        Ok(r) => r.display().to_string(),
+        Err(_) => "<outside>".to_string(),
+    };
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for call in calls {
+        let Some(listing) = listing_args(&call.args) else { continue };
+        let target = target_of(call, &root).map_or_else(|| "-".to_string(), |t| place(&t));
+        parts.push(format!("{}|{target}|{:?}|{:?}", place(&call.cwd), call.env, listing).into_bytes());
+    }
+    parts.push(format!("{:?}|{:?}|{:?}", settings.commands, settings.env, settings.other_dirs).into_bytes());
+    let mut files: Vec<PathBuf> =
+        ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", ".cargo/config", "rust-toolchain", "rust-toolchain.toml"]
+            .iter()
+            .map(|f| root.join(f))
+            .collect();
+    if let Ok(meta) = cargo::metadata(&crate::retest_host(), &root) {
+        files.extend(
+            meta["packages"].as_array().into_iter().flatten().filter_map(|p| p["manifest_path"].as_str()).map(PathBuf::from),
+        );
+    }
+    files.sort();
+    files.dedup();
+    for f in files {
+        parts.push(f.display().to_string().into_bytes());
+        parts.push(std::fs::read(&f).unwrap_or_default());
+    }
+    parts.push(Command::new("rustc").arg("-vV").current_dir(&root).output().map(|o| o.stdout).unwrap_or_default());
+    fnv(&parts.iter().map(Vec::as_slice).collect::<Vec<_>>())
+}
+
+/// Prints the saved findings of the last gate when its key is `key` and it checked every call that can be checked:
+/// nothing that decides the units changed, so the check would find the same. Returns whether it did.
+pub fn reuse(root: &Path, key: &str) -> bool {
+    let path = root.join(crate::record::RECORD_DIR).join(REPORT_FILE);
+    let Some(doc) = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return false };
+    if doc["key"].as_str() != Some(key) || doc["complete"].as_bool() != Some(true) {
+        return false;
+    }
+    for f in doc["findings"].as_array().into_iter().flatten() {
+        eprintln!("layr-retest gate: {}", f["text"].as_str().unwrap_or_default());
+    }
+    eprintln!(
+        "layr-retest gate: sweep coverage unchanged (same calls, sweep, manifests, Cargo.lock and toolchain): {} of {} cargo calls covered",
+        doc["covered"].as_u64().unwrap_or(0),
+        doc["calls"].as_u64().unwrap_or(0)
+    );
+    true
+}
+
+/// Prints the findings of a gate and saves them with `key` in the records folder for `layr retest doctor` and the next
+/// gate. `complete` is false when a call was not checked for a reason that the next gate can lift.
+pub fn report(root: &Path, findings: &[Finding], key: &str) {
     let mut saved = Vec::new();
     let covered = findings.iter().filter(|f| f.verdict == Verdict::Covered).count();
     for f in findings.iter().filter(|f| f.verdict != Verdict::Covered) {
@@ -563,8 +686,11 @@ pub fn report(root: &Path, findings: &[Finding]) {
     } else if covered == findings.len() {
         eprintln!("layr-retest gate: sweep covers the units of all {covered} cargo calls of this gate");
     }
+    let complete = !findings.iter().any(|f| matches!(f.verdict, Verdict::Unchecked(_)));
     let doc = json!({
         "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+        "key": key,
+        "complete": complete,
         "calls": findings.len(),
         "covered": covered,
         "findings": saved,
@@ -623,7 +749,7 @@ mod tests {
         );
         assert_eq!(
             listing_args(&v(&["test", "--locked", "-p", "a", "--doc", "Filter"])),
-            Some(v(&["build", "--lib", "--locked", "-p", "a"]))
+            Some(v(&["test", "--locked", "-p", "a", "--lib", "--no-run"]))
         );
     }
 
@@ -662,6 +788,20 @@ mod tests {
             entry_of(&v(&["check", "-p", "a"]), "other", &call_env, &project),
             (json!({"target_dir": "other", "args": ["check", "-p", "a"], "env": {"CLIPPY_CONF_DIR": "c"}}), BTreeMap::new())
         );
+    }
+
+    #[test]
+    fn the_hash_is_stable_and_separates_parts() {
+        assert_eq!(fnv(&[b"ab", b"c"]), fnv(&[b"ab", b"c"]));
+        assert_ne!(fnv(&[b"ab", b"c"]), fnv(&[b"a", b"bc"]));
+    }
+
+    #[test]
+    fn the_script_folder_is_new_and_private() {
+        let (a, b) = (private_dir().unwrap(), private_dir().unwrap());
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        let _ = (std::fs::remove_dir(&a), std::fs::remove_dir(&b));
     }
 
     #[test]

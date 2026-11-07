@@ -679,6 +679,12 @@ fn gate_names_the_cargo_calls_that_sweep_does_not_cover() {
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(err.contains("sweep covers the units of all 2 cargo calls of this gate"), "{err}");
 
+    // Nothing that decides the units changed: the gate reuses the result instead of listing again.
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep coverage unchanged (same calls, sweep, manifests, Cargo.lock and toolchain): 2 of 2"), "{err}");
+
     // A failing gate is not checked.
     let out = finish(gate_child(&dir, &lock, &["--", "sh", "-c", "cargo build --locked -q && exit 3"]), LIMIT);
     let err = String::from_utf8_lossy(&out.stderr);

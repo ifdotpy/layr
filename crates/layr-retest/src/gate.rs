@@ -272,7 +272,15 @@ pub fn run(args: &[String]) -> Result<i32> {
         } else {
             // Before the sweep: the sweep removes the units that no sweep command lists, the ones this check names.
             match layr_cache::cargo::settings(&crate::retest_host(), &root) {
-                Ok(settings) => crate::cover::report(&root, &crate::cover::check(&root, &settings, &crate::cover::read_calls(&s.log))),
+                Ok(settings) => {
+                    let started = Instant::now();
+                    let calls = crate::cover::read_calls(&s.log);
+                    let key = crate::cover::key(&root, &settings, &calls);
+                    if !crate::cover::reuse(&root, &key) {
+                        crate::cover::report(&root, &crate::cover::check(&root, &settings, &calls), &key);
+                    }
+                    eprintln!("layr-retest gate: sweep coverage took {:.2}s", started.elapsed().as_secs_f64());
+                }
                 Err(e) => eprintln!("layr-retest gate: sweep coverage not checked: {e:#}"),
             }
         }
