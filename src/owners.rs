@@ -726,28 +726,31 @@ impl Db {
         })
     }
 
-    /// Pin a state for a command that reads it outside the store lock (`free.rs`). Returns false
-    /// when the state has no owner: nothing frees it, so there is nothing to keep. A state that is
-    /// queued for freeing is refused: the reader must fail, not read a state that goes.
-    pub fn pin_add(&self, state: &str, holder: &str) -> Result<bool> {
+    /// Pin states for a command in one durable transaction (`free.rs`). States without an
+    /// owner need no pin. A refused state rolls back the whole batch before the caller reads.
+    pub fn pins_add(&self, states: &[&str], holder: &str) -> Result<Vec<String>> {
         self.with_tx(|| {
-            let dropping: bool =
-                self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind='drop')", params![state], |r| r.get(0))?;
-            anyhow::ensure!(!dropping, "layr gc is removing the tree of state {} from this machine; read it again", ids_short(state));
-            if !self.owners_live(state)? {
-                let queued: bool =
-                    self.one("SELECT EXISTS(SELECT 1 FROM free_queue WHERE state=?1)", params![state], |r| r.get(0))?;
-                anyhow::ensure!(!queued, "state {} was freed by another layr command; read it again", ids_short(state));
-                return Ok(false);
+            let mut pinned = Vec::new();
+            for state in states {
+                let dropping: bool =
+                    self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind='drop')", params![state], |r| r.get(0))?;
+                anyhow::ensure!(!dropping, "layr gc is removing the tree of state {} from this machine; read it again", ids_short(state));
+                if !self.owners_live(state)? {
+                    let queued: bool =
+                        self.one("SELECT EXISTS(SELECT 1 FROM free_queue WHERE state=?1)", params![state], |r| r.get(0))?;
+                    anyhow::ensure!(!queued, "state {} was freed by another layr command; read it again", ids_short(state));
+                    continue;
+                }
+                self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,'pin',?2)", params![state, holder])?;
+                pinned.push((*state).to_string());
             }
-            self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,'pin',?2)", params![state, holder])?;
-            Ok(true)
+            Ok(pinned)
         })
     }
 
     /// Reserve the trees of `states` for removal by `holder`, while their records stay (eviction to a
     /// store remote, imports that git builds again): a row `drop` each. A state that a reader pinned
-    /// is left out; a pin after the reservation is refused (`pin_add`) until `release_trees`. So a
+    /// is left out; a pin after the reservation is refused (`pins_add`) until `release_trees`. So a
     /// reader never reads a tree that goes. Returns the reserved states.
     pub fn reserve_trees(&self, states: &[String], holder: &str) -> Result<Vec<String>> {
         self.with_tx(|| {
@@ -775,9 +778,11 @@ impl Db {
         })
     }
 
-    /// Release a pin. A state that loses its last owner is dead (the next free step frees it).
-    pub fn pin_remove(&self, state: &str, holder: &str) -> Result<()> {
-        self.with_tx(|| self.remove_rows(vec![(state.to_string(), "pin".into(), holder.to_string())]))
+    /// Release pins in one transaction. States that lose their last owner become dead.
+    pub fn pins_remove(&self, states: &[String], holder: &str) -> Result<()> {
+        self.with_tx(|| {
+            self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect())
+        })
     }
 
     /// Holders of pins (`pid:start`), for the check of dead processes.
@@ -1067,19 +1072,80 @@ mod tests {
     }
 
     #[test]
+    fn pin_batches_roll_back_on_a_refused_state() {
+        let db = memory();
+        let (a, b) = (id(1), id(2));
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", params![a]).unwrap();
+        // A late refusal must undo pins acquired earlier in this batch, for either reason.
+        for refusal in ["INSERT INTO owners(state, kind, holder) VALUES(?1,'drop','gc')",
+                        "INSERT INTO free_queue(state) VALUES(?1)"] {
+            db.conn.execute(refusal, params![b]).unwrap();
+            let before = db.owner_rows().unwrap();
+            assert!(db.pins_add(&[&a, &b], "reader").unwrap_err().to_string().contains("read it again"));
+            assert_eq!(db.owner_rows().unwrap(), before);
+            assert!(!db.is_pinned(&a).unwrap());
+            db.conn.execute("DELETE FROM owners WHERE kind='drop'", []).unwrap();
+            db.conn.execute("DELETE FROM free_queue", []).unwrap();
+        }
+    }
+
+    #[test]
+    fn pin_release_batches_roll_back_on_failure() {
+        let db = memory();
+        let (a, b) = (id(1), id(2));
+        for s in [&a, &b] {
+            db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", params![s]).unwrap();
+        }
+        let pinned = db.pins_add(&[&a, &b], "reader").unwrap();
+        let before = db.owner_rows().unwrap();
+        // remove_rows visits the last state first: fail after it has already removed b.
+        db.conn.execute_batch(&format!(
+            "CREATE TRIGGER refuse_pin_release BEFORE DELETE ON owners WHEN OLD.state='{a}' AND OLD.kind='pin'
+             BEGIN SELECT RAISE(ABORT, 'test release failure'); END;"
+        )).unwrap();
+        assert!(db.pins_remove(&pinned, "reader").is_err());
+        assert_eq!(db.owner_rows().unwrap(), before);
+        db.conn.execute_batch("DROP TRIGGER refuse_pin_release").unwrap();
+        db.pins_remove(&pinned, "reader").unwrap();
+        assert!(!db.is_pinned(&a).unwrap());
+        assert!(!db.is_pinned(&b).unwrap());
+    }
+
+    #[test]
+    fn pin_batches_keep_duplicates_safe_and_release_last_owners() {
+        let db = memory();
+        let (a, b, unowned) = (id(1), id(2), id(3));
+        for s in [&a, &b] {
+            db.conn.execute("INSERT INTO states(id) VALUES(?1)", params![s]).unwrap();
+            db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", params![s]).unwrap();
+        }
+        let pinned = db.pins_add(&[&a, &b, &a, &unowned], "reader").unwrap();
+        assert_eq!(pinned, vec![a.clone(), b.clone(), a.clone()]);
+        assert_eq!(db.owner_rows().unwrap().iter().filter(|row| row.1 == "pin").count(), 2);
+        assert!(db.reserve_trees(&[a.clone(), b.clone()], "gc").unwrap().is_empty());
+        db.conn.execute("DELETE FROM owners WHERE state=?1 AND kind='head'", params![a]).unwrap();
+        db.pins_remove(&pinned, "reader").unwrap();
+        assert!(!db.is_pinned(&a).unwrap());
+        assert!(!db.is_pinned(&b).unwrap());
+        assert!(!db.is_owned(&a).unwrap());
+        assert!(db.is_owned(&b).unwrap());
+        assert_eq!(db.queued_frees().unwrap(), vec![a]);
+    }
+
+    #[test]
     fn a_reserved_tree_refuses_pins_and_a_pinned_tree_is_not_reserved() {
         let db = memory();
         let (a, b) = (id(1), id(2));
         for s in [&a, &b] {
             db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", params![s]).unwrap();
         }
-        assert!(db.pin_add(&a, "1:reader").unwrap());
+        assert_eq!(db.pins_add(&[&a], "1:reader").unwrap(), vec![a.clone()]);
         // A pinned state stays; the other is reserved and refuses a pin until the release.
         assert_eq!(db.reserve_trees(&[a.clone(), b.clone()], "2:gc").unwrap(), vec![b.clone()]);
-        let refused = db.pin_add(&b, "1:reader").unwrap_err().to_string();
+        let refused = db.pins_add(&[&b], "1:reader").unwrap_err().to_string();
         assert!(refused.contains("read it again"), "{refused}");
         db.release_trees(&[b.clone()], &[b.clone()], "2:gc").unwrap();
-        assert!(db.pin_add(&b, "1:reader").unwrap(), "after the release the absent state is pinned (fetched on demand)");
+        assert_eq!(db.pins_add(&[&b], "1:reader").unwrap(), vec![b], "after the release the absent state is pinned (fetched on demand)");
         assert!(db.owner_rows().unwrap().iter().all(|r| r.1 != "drop"));
     }
 }

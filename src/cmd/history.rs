@@ -179,6 +179,22 @@ fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
 /// command, so a free step of another command cannot remove them while the read runs. A name that
 /// does not resolve is left to the read's own error.
 fn pin_revs(repo: &Repo, line: Option<&Line>, names: &[String]) -> Result<crate::free::Pin> {
+    let ids = revs_to_pin(repo, line, names);
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    repo.pin(&refs)
+}
+
+fn pin_revs_borrowed<'a>(
+    repo: &'a Repo<'_>,
+    line: Option<&Line>,
+    names: &[String],
+) -> Result<crate::free::Pin<&'a crate::db::Db>> {
+    let ids = revs_to_pin(repo, line, names);
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    crate::free::pin_borrowed(&repo.p, &refs)
+}
+
+fn revs_to_pin(repo: &Repo, line: Option<&Line>, names: &[String]) -> Vec<String> {
     let mut ids: Vec<String> = line.map(|l| vec![l.head.clone()]).unwrap_or_default();
     for name in names {
         let rev = name.split_once(':').map_or(name.as_str(), |(r, _)| r);
@@ -190,8 +206,7 @@ fn pin_revs(repo: &Repo, line: Option<&Line>, names: &[String]) -> Result<crate:
             }
         }
     }
-    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    repo.pin(&refs)
+    ids
 }
 
 pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -200,7 +215,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let line = h.line.clone();
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
-    repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
+    let _pin = pin_revs_borrowed(repo, line.as_ref(), &revs_v)?;
     for rev in &revs_v {
         for part in rev.split("...").flat_map(|s| s.split("..")) {
             let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "head" } else { part })?;

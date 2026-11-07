@@ -446,26 +446,47 @@ fn format_start(start: u64) -> Option<String> {
     chrono::Local.timestamp_opt(start as i64, 0).single().map(|t| t.format("%a %b %e %T %Y").to_string())
 }
 
-/// Pins of states that a command reads outside the store lock, or under it while another process
-/// may free them (docs/ownership.md, "Pins"). A guard owns the database path, so a command can
-/// hold its pins (`hold`) until its end. Released when the guard goes.
-pub struct Pin {
-    db: PathBuf,
+/// Where a guard releases its pins: a deferred read owns only a path; a scoped read
+/// borrows the database so its pins leave before that connection closes.
+pub(crate) trait ReleasePins {
+    fn release(&self, states: &[String], holder: &str) -> Result<()>;
+}
+
+impl ReleasePins for PathBuf {
+    fn release(&self, states: &[String], holder: &str) -> Result<()> {
+        crate::db::Db::open(self)?.pins_remove(states, holder)
+    }
+}
+
+impl ReleasePins for &crate::db::Db {
+    fn release(&self, states: &[String], holder: &str) -> Result<()> {
+        self.pins_remove(states, holder)
+    }
+}
+
+/// Pins of states that a command reads outside the store lock, or under it while another
+/// process may free them (docs/ownership.md, "Pins"). Released when the guard goes.
+pub(crate) struct Pin<D: ReleasePins = PathBuf> {
+    db: D,
     holder: String,
     states: Vec<String>,
 }
 
-/// Pin states for this process. A state with no owner needs no pin (nothing frees it). A state
-/// that another command already freed makes the call fail: the reader must read it again.
+/// Pin states until the command ends. Held guards keep paths, never database connections.
 pub fn pin(p: &Project, states: &[&str]) -> Result<Pin> {
+    pin_using(&p.db, crate::store::db_file(&p.dir), states)
+}
+
+/// Pin a scoped read. The borrow keeps the reader's database open through release, avoiding
+/// a checkpoint between the read and unpinning. An early error releases through the same guard.
+pub fn pin_borrowed<'a>(p: &'a Project<'_>, states: &[&str]) -> Result<Pin<&'a crate::db::Db>> {
+    pin_using(&p.db, &p.db, states)
+}
+
+fn pin_using<D: ReleasePins>(db: &crate::db::Db, release: D, states: &[&str]) -> Result<Pin<D>> {
     let holder = self_holder();
-    let mut guard = Pin { db: crate::store::db_file(&p.dir), holder: holder.clone(), states: Vec::new() };
-    for state in states {
-        // On a refusal the guard built so far is dropped, which releases its pins.
-        if p.db.pin_add(state, &holder)? {
-            guard.states.push(state.to_string());
-        }
-    }
+    let pinned = db.pins_add(states, &holder)?;
+    let guard = Pin { db: release, holder, states: pinned };
     hold_for_tests();
     Ok(guard)
 }
@@ -496,21 +517,78 @@ fn hold_for_tests() {
     HELD_ONCE.call_once(|| std::thread::sleep(std::time::Duration::from_millis(ms)));
 }
 
-impl Drop for Pin {
+impl<D: ReleasePins> Drop for Pin<D> {
     fn drop(&mut self) {
         if self.states.is_empty() {
             return;
         }
-        let released = crate::db::Db::open(&self.db).and_then(|db| {
-            for state in &self.states {
-                db.pin_remove(state, &self.holder)?;
-            }
-            Ok(())
-        });
+        let released = self.db.release(&self.states, &self.holder);
         if let Err(e) = released {
             eprintln!("layr: cannot release the pins of this command: {e:#}");
         }
     }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn pins_survive_the_reader_connection_and_release_at_command_end() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-pin-guard-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let path = crate::store::db_file(&dir);
+        let db = crate::db::Db::open(&path)?;
+        let state = crate::ids::new_id();
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", [&state])?;
+        let project = Project { store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
+        let guard = pin(&project, &[&state, &state])?;
+        // Compile-time check: a deferred guard owns a path, not a connection per batch.
+        let _: &PathBuf = &guard.db;
+        drop(project);
+        let observer = crate::db::Db::open(&path)?;
+        assert!(observer.is_pinned(&state)?);
+        hold(guard);
+        assert!(observer.reserve_trees(&[state.clone()], "gc")?.is_empty());
+        release_held();
+        assert!(!observer.is_pinned(&state)?);
+        assert_eq!(observer.reserve_trees(&[state], "gc")?.len(), 1);
+        drop(observer);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_pins_release_through_the_reader_database_on_early_error() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-pin-borrow-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let path = crate::store::db_file(&dir);
+        let db = crate::db::Db::open(&path)?;
+        let state = crate::ids::new_id();
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
+        let project = Project { store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
+        let observer = crate::db::Db::open(&path)?;
+        let read = || -> Result<()> {
+            let guard = pin_borrowed(&project, &[&state])?;
+            assert!(std::ptr::eq(guard.db, &project.db));
+            assert!(observer.is_pinned(&state)?);
+            anyhow::bail!("test read failed");
+        };
+        assert_eq!(read().unwrap_err().to_string(), "test read failed");
+        assert!(!observer.is_pinned(&state)?);
+        assert!(observer.is_owned(&state)?);
+        drop(observer);
+        drop(project);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]
