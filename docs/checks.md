@@ -135,7 +135,12 @@ settings; the gateway never sends a command. A job reports pass, fail, error or 
 project does not open yet: a private project opens after the creator trusts the machine with
 `layr remote trust`).
 
-The connection pings every 20 seconds and reconnects with backoff (1 to 60 seconds). On each
+Two transports carry the same messages. When the gateway names a WebTransport endpoint in its
+welcome (for example `https://rt.layr.ws/v1/runners/connect`, HTTP/3 over QUIC on UDP 443, one
+bidirectional stream of JSON lines), the runner tries it first on the next connect; a failed
+attempt (for example a network that blocks UDP) falls back to the WebSocket at once and skips
+WebTransport for 10 minutes. The connection pings every 20 seconds (a WebSocket ping frame, or a
+`{"type":"ping"}` line) and reconnects with backoff (1 to 60 seconds). On each
 connect it sends its cursor (gateway epoch and last sequence, kept in `<store>/runner/cursor.json`)
 and the project that it still checks, so the gateway resumes without losing work. Close code 4001
 or HTTP 401 renews the token with a signature of the machine key; 4003 or HTTP 403 means the

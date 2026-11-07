@@ -44,6 +44,9 @@ pub struct Config {
 pub struct Cursor {
     pub epoch: String,
     pub seq: u64,
+    /// The gateway's WebTransport endpoint, from its welcome; tried first on the next connect.
+    #[serde(default)]
+    pub webtransport: Option<String>,
 }
 
 pub fn dir(root: &Path) -> PathBuf {
@@ -397,6 +400,156 @@ pub enum End {
     Stop,
 }
 
+/// A message to the gateway, on either transport.
+enum Up {
+    Text(String),
+    Ping,
+    Close,
+}
+
+/// A message from the gateway, on either transport.
+enum Down {
+    Text(String),
+    /// The gateway closed with this code (WebSocket close code or WebTransport application code).
+    Closed(u16),
+    Failed(String),
+}
+
+type Link = (tokio::sync::mpsc::Receiver<Down>, tokio::sync::mpsc::UnboundedSender<Up>);
+
+/// The WebSocket through the edge (`wss://<host>/v1/runners/connect`).
+async fn open_websocket(url: &str, token: &str) -> std::result::Result<Link, End> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    let mut request = ws_url(url).into_client_request().map_err(|e| End::Lost(format!("{e}")))?;
+    request.headers_mut().insert("authorization", format!("Bearer {token}").parse().expect("token is ASCII"));
+    let socket = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async(request)).await;
+    let ws = match socket {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
+            return Err(match response.status().as_u16() {
+                401 => End::Renew,
+                403 => End::Removed,
+                status => End::Lost(format!("HTTP {status}")),
+            });
+        }
+        Ok(Err(e)) => return Err(End::Lost(format!("{e}"))),
+        Err(_) => return Err(End::Lost("connect timed out".into())),
+    };
+    let (mut sink, mut stream) = ws.split();
+    let (down_tx, down_rx) = tokio::sync::mpsc::channel(16);
+    let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let down = match stream.next().await {
+                Some(Ok(Message::Text(text))) => Down::Text(text.as_str().to_string()),
+                Some(Ok(Message::Close(frame))) => Down::Closed(frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1005)),
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => Down::Failed(format!("{e}")),
+                None => Down::Failed("connection ended".into()),
+            };
+            let last = !matches!(down, Down::Text(_));
+            if down_tx.send(down).await.is_err() || last {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(up) = up_rx.recv().await {
+            let sent = match up {
+                Up::Text(text) => sink.send(Message::text(text)).await,
+                Up::Ping => sink.send(Message::Ping(Vec::new().into())).await,
+                Up::Close => {
+                    let _ = sink.close().await;
+                    break;
+                }
+            };
+            if sent.is_err() {
+                break;
+            }
+        }
+    });
+    Ok((down_rx, up_tx))
+}
+
+fn webtransport_client() -> Result<wtransport::ClientConfig> {
+    #[cfg(test)]
+    let config = wtransport::ClientConfig::builder().with_bind_default().with_no_cert_validation();
+    #[cfg(not(test))]
+    let config = wtransport::ClientConfig::builder().with_bind_default().with_native_certs();
+    Ok(config.keep_alive_interval(Some(Duration::from_secs(15))).max_idle_timeout(Some(Duration::from_secs(60)))?.build())
+}
+
+/// WebTransport (HTTP/3, QUIC) on the gateway's direct endpoint, such as
+/// `https://rt.layr.ws/v1/runners/connect`: one bidirectional stream of JSON lines.
+async fn open_webtransport(url: &str, token: &str) -> std::result::Result<Link, End> {
+    use tokio::io::AsyncBufReadExt;
+    let endpoint = wtransport::Endpoint::client(webtransport_client().map_err(|e| End::Lost(format!("{e:#}")))?)
+        .map_err(|e| End::Lost(format!("{e}")))?;
+    let options =
+        wtransport::endpoint::ConnectOptions::builder(url).add_header("authorization", format!("Bearer {token}")).build();
+    let connection = match tokio::time::timeout(Duration::from_secs(5), endpoint.connect(options)).await {
+        Ok(Ok(connection)) => connection,
+        // A refused session: an expired or unknown token. Renew once; the WebSocket says more.
+        Ok(Err(wtransport::error::ConnectingError::SessionRejected)) => return Err(End::Renew),
+        Ok(Err(e)) => return Err(End::Lost(format!("WebTransport: {e}"))),
+        Err(_) => return Err(End::Lost("WebTransport: connect timed out".into())),
+    };
+    let opened = tokio::time::timeout(Duration::from_secs(5), async {
+        connection.open_bi().await.map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+    })
+    .await;
+    let Ok(Ok((mut send, recv))) = opened else {
+        return Err(End::Lost("WebTransport: no stream".into()));
+    };
+    let (down_tx, down_rx) = tokio::sync::mpsc::channel(16);
+    let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel();
+    let watcher = connection.clone();
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(recv).lines();
+        loop {
+            let down = tokio::select! {
+                line = lines.next_line() => match line {
+                    Ok(Some(line)) if line.len() <= 64 * 1024 => Down::Text(line),
+                    Ok(Some(_)) => Down::Failed("message too large".into()),
+                    _ => match watcher.closed().await {
+                        wtransport::error::ConnectionError::ApplicationClosed(close) => {
+                            Down::Closed(u16::try_from(close.code().into_inner()).unwrap_or(1005))
+                        }
+                        other => Down::Failed(format!("{other}")),
+                    },
+                },
+                closed = watcher.closed() => match closed {
+                    wtransport::error::ConnectionError::ApplicationClosed(close) => {
+                        Down::Closed(u16::try_from(close.code().into_inner()).unwrap_or(1005))
+                    }
+                    other => Down::Failed(format!("{other}")),
+                },
+            };
+            let last = !matches!(down, Down::Text(_));
+            if down_tx.send(down).await.is_err() || last {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(up) = up_rx.recv().await {
+            let line = match up {
+                Up::Text(text) => text,
+                Up::Ping => r#"{"type":"ping"}"#.to_string(),
+                Up::Close => {
+                    connection.close(wtransport::VarInt::from_u32(1000), b"bye");
+                    break;
+                }
+            };
+            if send.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok((down_rx, up_tx))
+}
+
 /// The state that outlives one connection.
 pub struct Session<F> {
     pub cursor: Cursor,
@@ -412,35 +565,56 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
         Session { cursor: Cursor::default(), job: None, work, stop }
     }
 
-    /// One connection: hello, then work, done reports and pings until it ends.
+    /// One WebSocket connection through the edge.
     pub async fn connect(&mut self, url: &str, token: &str, version: &str) -> End {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
-        let mut request = match ws_url(url).into_client_request() {
-            Ok(r) => r,
-            Err(e) => return End::Lost(format!("{e}")),
+        match open_websocket(url, token).await {
+            Ok(link) => self.run(link, version).await,
+            Err(end) => end,
+        }
+    }
+
+    /// WebTransport first when the gateway named an endpoint and it worked lately. A failed
+    /// attempt falls back to the WebSocket at once and skips WebTransport for 10 minutes.
+    pub async fn connect_preferred(
+        &mut self,
+        url: &str,
+        token: &str,
+        version: &str,
+        quic_retry: &mut Option<std::time::Instant>,
+    ) -> End {
+        let now = std::time::Instant::now();
+        let direct = self.cursor.webtransport.clone().filter(|_| quic_retry.is_none_or(|at| now >= at));
+        let Some(direct) = direct else {
+            return self.connect(url, token, version).await;
         };
-        request.headers_mut().insert("authorization", format!("Bearer {token}").parse().expect("token is ASCII"));
-        let socket = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async(request)).await;
-        let mut ws = match socket {
-            Ok(Ok((ws, _))) => ws,
-            Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
-                return match response.status().as_u16() {
-                    401 => End::Renew,
-                    403 => End::Removed,
-                    status => End::Lost(format!("HTTP {status}")),
-                };
+        match open_webtransport(&direct, token).await {
+            Ok(link) => self.run(link, version).await,
+            Err(End::Lost(reason)) => {
+                eprintln!("layr runner: {reason}; using the WebSocket");
+                *quic_retry = Some(now + Duration::from_secs(600));
+                self.connect(url, token, version).await
             }
-            Ok(Err(e)) => return End::Lost(format!("{e}")),
-            Err(_) => return End::Lost("connect timed out".into()),
-        };
+            Err(end) => end,
+        }
+    }
+
+    /// One WebTransport connection to the direct endpoint `url`.
+    pub async fn connect_webtransport(&mut self, url: &str, token: &str, version: &str) -> End {
+        match open_webtransport(url, token).await {
+            Ok(link) => self.run(link, version).await,
+            Err(end) => end,
+        }
+    }
+
+    /// The protocol on an open link: hello, then work, done reports and pings until it ends.
+    async fn run(&mut self, (mut down, up): Link, version: &str) -> End {
         let hello = json!({
             "type": "hello",
-            "cursor": self.cursor,
+            "cursor": {"epoch": self.cursor.epoch, "seq": self.cursor.seq},
             "busy": self.job.as_ref().map(|(p, _, _)| p.clone()),
             "version": version,
         });
-        if ws.send(Message::text(hello.to_string())).await.is_err() {
+        if up.send(Up::Text(hello.to_string())).is_err() {
             return End::Lost("hello failed".into());
         }
         let mut ping = tokio::time::interval(PING);
@@ -448,31 +622,30 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
         let mut stop = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
-                frame = ws.next() => {
-                    let text = match frame {
-                        Some(Ok(Message::Text(text))) => text,
-                        Some(Ok(Message::Close(frame))) => {
-                            let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1005);
+                message = down.recv() => {
+                    let text = match message {
+                        Some(Down::Text(text)) => text,
+                        Some(Down::Closed(code)) => {
                             return match code {
                                 4001 => End::Renew,
                                 4003 => End::Removed,
                                 _ => End::Lost(format!("closed {code}")),
                             };
                         }
-                        Some(Ok(_)) => continue,
-                        Some(Err(e)) => return End::Lost(format!("{e}")),
+                        Some(Down::Failed(reason)) => return End::Lost(reason),
                         None => return End::Lost("connection ended".into()),
                     };
-                    let Ok(message) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                    let Ok(message) = serde_json::from_str::<Value>(&text) else { continue };
                     match message["type"].as_str() {
                         Some("welcome") => {
                             self.cursor.epoch = message["epoch"].as_str().unwrap_or("").to_string();
+                            self.cursor.webtransport = message["webtransport"].as_str().map(str::to_string);
                         }
                         Some("work") => {
                             let project = message["project"].as_str().unwrap_or("").to_string();
                             let seq = message["seq"].as_u64().unwrap_or(0);
                             let ack = json!({"type": "ack", "seq": seq, "project": project});
-                            if ws.send(Message::text(ack.to_string())).await.is_err() {
+                            if up.send(Up::Text(ack.to_string())).is_err() {
                                 return End::Lost("ack failed".into());
                             }
                             if self.job.is_none() && !project.is_empty() {
@@ -489,19 +662,19 @@ impl<F: Fn(&str) -> Value + Send + Sync + Clone + 'static> Session<F> {
                     let (project, seq, _) = self.job.take().expect("job");
                     let report = report.unwrap_or_else(|e| json!({"status": "error", "summary": format!("{e}")}));
                     let done = json!({"type": "done", "project": project, "seq": seq, "report": report});
-                    if ws.send(Message::text(done.to_string())).await.is_err() {
+                    if up.send(Up::Text(done.to_string())).is_err() {
                         return End::Lost("done failed".into());
                     }
                     self.cursor.seq = self.cursor.seq.max(seq);
                 }
                 _ = ping.tick() => {
-                    if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if up.send(Up::Ping).is_err() {
                         return End::Lost("ping failed".into());
                     }
                 }
                 _ = stop.tick() => {
                     if (self.stop)() {
-                        let _ = ws.close(None).await;
+                        let _ = up.send(Up::Close);
                         return End::Stop;
                     }
                 }
@@ -528,6 +701,7 @@ pub fn serve(root: &Path) -> Result<()> {
         session.cursor = serde_json::from_slice(&data).unwrap_or_default();
     }
     let mut backoff = 1u64;
+    let mut quic_retry: Option<std::time::Instant> = None;
     loop {
         if crate::sys::terminate_requested() {
             return Ok(());
@@ -537,7 +711,7 @@ pub fn serve(root: &Path) -> Result<()> {
         }
         let token = read_token(root)?;
         let started = std::time::Instant::now();
-        let end = runtime.block_on(session.connect(&config.url, &token, &version));
+        let end = runtime.block_on(session.connect_preferred(&config.url, &token, &version, &mut quic_retry));
         let _ = write_private(&cursor_path, &serde_json::to_vec(&session.cursor)?);
         match end {
             End::Stop => return Ok(()),
@@ -692,7 +866,7 @@ mod tests {
         let done = seen.lock().unwrap()[0].clone();
         assert_eq!(done["project"], "p");
         assert_eq!(done["report"]["summary"], "p");
-        assert_eq!(session.cursor, Cursor { epoch: "e1".into(), seq: 5 });
+        assert_eq!(session.cursor, Cursor { epoch: "e1".into(), seq: 5, webtransport: None });
     }
 
     #[tokio::test]
@@ -730,6 +904,97 @@ mod tests {
         let hellos = hellos.lock().unwrap();
         assert_eq!(hellos[1]["busy"], "p", "the reconnect says which scan still runs");
         assert_eq!(hellos[1]["cursor"]["epoch"], "e1", "the reconnect resumes from its cursor");
+    }
+
+    /// A fake WebTransport gateway: each session runs `script` with its stream.
+    async fn fake_webtransport<S, Fut>(script: S) -> String
+    where
+        S: Fn(
+                usize,
+                wtransport::Connection,
+                wtransport::SendStream,
+                tokio::io::Lines<tokio::io::BufReader<wtransport::RecvStream>>,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        use tokio::io::AsyncBufReadExt;
+        let config = wtransport::ServerConfig::builder()
+            .with_bind_address("127.0.0.1:0".parse().unwrap())
+            .with_identity(wtransport::Identity::self_signed(["localhost"]).unwrap())
+            .build();
+        let endpoint = wtransport::Endpoint::server(config).unwrap();
+        let url = format!("https://127.0.0.1:{}/v1/runners/connect", endpoint.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            for n in 0..usize::MAX {
+                let Ok(request) = endpoint.accept().await.await else { continue };
+                if request.headers().get("authorization").map(String::as_str) == Some("Bearer expired") {
+                    request.forbidden().await;
+                    continue;
+                }
+                let Ok(connection) = request.accept().await else { continue };
+                let Ok((send, recv)) = connection.accept_bi().await else { continue };
+                script(n, connection, send, tokio::io::BufReader::new(recv).lines()).await;
+            }
+        });
+        url
+    }
+
+    async fn next_line(lines: &mut tokio::io::Lines<tokio::io::BufReader<wtransport::RecvStream>>) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await.unwrap().unwrap().unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn webtransport_carries_the_same_protocol_and_close_codes() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let url = fake_webtransport(move |n, connection, mut send, mut lines| {
+            let log = log.clone();
+            async move {
+                let hello = next_line(&mut lines).await;
+                log.lock().unwrap().push(hello);
+                if n == 0 {
+                    send.write_all(b"{\"type\":\"welcome\",\"epoch\":\"e1\",\"seq\":1}\n").await.unwrap();
+                    send.write_all(b"{\"type\":\"work\",\"project\":\"p\",\"seq\":2}\n").await.unwrap();
+                    assert_eq!(next_line(&mut lines).await["type"], "ack");
+                    let done = next_line(&mut lines).await;
+                    log.lock().unwrap().push(done);
+                    connection.close(wtransport::VarInt::from_u32(4003), b"runner removed");
+                } else {
+                    connection.close(wtransport::VarInt::from_u32(4001), b"runner token expired");
+                }
+                // Keep the connection until the client sees the close.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        })
+        .await;
+        let mut session = Session::new(|project: &str| json!({"status": "pass", "summary": project}), never);
+        assert_eq!(session.connect_webtransport(&url, "t", "test").await, End::Removed);
+        assert_eq!(session.cursor.seq, 2);
+        assert_eq!(seen.lock().unwrap()[1]["report"]["summary"], "p");
+        assert_eq!(session.connect_webtransport(&url, "t", "test").await, End::Renew, "close 4001");
+        assert_eq!(session.connect_webtransport(&url, "expired", "test").await, End::Renew, "a refused session");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_webtransport_endpoint_falls_back_to_the_websocket() {
+        let (url, _server) = fake(|_, mut ws, hello| async move {
+            assert_eq!(hello["type"], "hello");
+            let _ = ws.close(Some(CloseFrame { code: CloseCode::Library(4100), reason: "test".into() })).await;
+        })
+        .await;
+        let mut session = Session::new(|_: &str| json!({}), never);
+        // Nothing answers UDP on this port, as when a network blocks QUIC.
+        let blocked = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        session.cursor.webtransport =
+            Some(format!("https://127.0.0.1:{}/v1/runners/connect", blocked.local_addr().unwrap().port()));
+        let mut retry = None;
+        let end = session.connect_preferred(&url, "t", "test", &mut retry).await;
+        assert_eq!(end, End::Lost("closed 4100".into()), "the WebSocket served the session");
+        assert!(retry.is_some(), "WebTransport waits 10 minutes before the next try");
+        assert_eq!(session.connect_preferred(&url, "t", "test", &mut retry).await, End::Lost("closed 4100".into()));
     }
 
     #[tokio::test]

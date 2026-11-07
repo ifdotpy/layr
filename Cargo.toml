@@ -66,6 +66,11 @@ zerocopy = { version = "0.8.63", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+wtransport = { version = "0.7", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+# The runner tests: a self-signed WebTransport server and a client that skips its certificate.
+wtransport = { version = "0.7", default-features = false, features = ["ring", "self-signed", "dangerous-configuration"] }
 
 [profile.release]
 debug = 1
