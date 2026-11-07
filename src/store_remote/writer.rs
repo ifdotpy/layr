@@ -1337,7 +1337,16 @@ mod tests {
             for n in 0..4 {
                 let id = crate::ids::new_id();
                 std::fs::create_dir(project.state_path(&id)).unwrap();
-                std::fs::write(project.state_path(&id).join("payload"), format!("version {}\n", if n == 3 { 1 } else { n }))
+                let version = if n == 3 { 1 } else { n };
+                let payload = project.state_path(&id).join("payload");
+                std::fs::write(&payload, format!("version {version}\n")).unwrap();
+                // Model each content version's mtime explicitly: consecutive writes can share
+                // a filesystem clock tick, causing the manifest to reuse an equal-size entry.
+                std::fs::File::options()
+                    .write(true)
+                    .open(&payload)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(version))
                     .unwrap();
                 std::fs::write(project.state_path(&id).join("stable"), b"unchanged parent content\n").unwrap();
                 let state: StateRec = serde_json::from_value(serde_json::json!({"id":id,"kind":"commit",
