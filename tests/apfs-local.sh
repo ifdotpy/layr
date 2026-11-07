@@ -17,7 +17,7 @@ eq "import preserves a read-only file" "read only" "$(cat readonly.txt)"
 no "main remains protected" l save --allow-empty -qm forbidden
 l line new -q topic
 cd "$P/topic" || exit 1
-has "recursive clones preserve native ACLs" 'group:everyone allow read' "$(ls -le acl/sub/file)"
+has "recursive clones preserve native ACLs" 'group:everyone allow read' "$(/bin/ls -le acl/sub/file)"
 printf 'node_modules/\n' >> .gitignore
 printf 'node_modules regenerable\n' > .layrattributes
 l add -A && l save -qm attributes
