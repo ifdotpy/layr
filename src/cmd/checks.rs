@@ -175,9 +175,13 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks run --state <rev> [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> --code <join code> [--name <runner name>] [--json]\n       layr checks run --state <rev> [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    // `join`: make this store a check runner of a Layr Cloud gateway (src/runner.rs).
+    if args.first().is_some_and(|a| a == "join") {
+        return crate::runner::join(ctx, &args[1..]);
+    }
     let a = parse(
         &Spec::new().flag("--once").flag("--json").flag("--privileged-only").value("--interval").value("--state").value("--platform"),
         args,
