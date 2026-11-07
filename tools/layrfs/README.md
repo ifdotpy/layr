@@ -1,7 +1,11 @@
-# LayrFS: FSKit passthrough prototype
+# LayrFS: FSKit file system for virtual lines
 
-LayrFS mounts a directory at a mount point and forwards every operation to the directory with POSIX calls.
-Its purpose is to measure FSKit cost for a future "virtual agent branch" in layr.
+LayrFS mounts a directory at a mount point. It has two modes:
+
+- Passthrough: it forwards every operation to the directory with POSIX calls (the first prototype, for FSKit cost).
+- Overlay: a directory with a `layrfs-view.conf` file mounts an upper folder over a read-only lower tree.
+  Layr uses this mode for virtual lines (`layr line new <name> --view virtual`, see [docs/views.md](../../docs/views.md)).
+
 It uses the macOS 27 (FSKit V3) handler protocols and records every operation.
 
 Requirements: macOS 27.0 or later, Xcode 27.2, a paid Apple Developer team.
@@ -14,10 +18,12 @@ Requirements: macOS 27.0 or later, Xcode 27.2, a paid Apple Developer team.
 | `LayrFSHost/` | Host app (`dev.layr.fshost`). It only carries the extension and opens the settings pane. |
 | `LayrFS/` | FSKit extension (`dev.layr.fshost.fs`, short name `layrfs`). |
 | `LayrFS/Posix.swift` | Backend: `getattrlistat`, `getattrlistbulk`, `openat`, `pread`/`pwrite`, `renameat`, and so on. |
+| `LayrFS/Overlay.swift` | Overlay core without FSKit: merge, whiteouts, copy-up, lazy index of the lower tree. |
+| `LayrFS/OverlayVolume.swift` | `FSVolume` of the overlay mode. |
 | `LayrFS/LayrItem.swift` | `FSItem` subclass and the inode table. |
 | `LayrFS/LayrVolume.swift` | `FSVolume` with the V3 handlers. |
 | `LayrFS/Stats.swift` | Counters, latency histogram, open log, JSON dump, and config. |
-| `selftest/` | Runs the backend and the item table against a temp tree. It needs no mount and no signing. |
+| `selftest/` | Runs the backend, the item table and the overlay against temp trees. It needs no mount and no signing. |
 | `tools/fsevents-watch.swift` | FSEvents probe that `bench.sh` uses. |
 | `bench.sh` | Benchmark: mount, find, stat, rg, cargo build, FSEvents, unmount. |
 
@@ -67,6 +73,8 @@ selftest/run.sh
 
 It compares the `getattrlist` parser with `lstat(2)` and checks directory listing, descriptor leaks, and mutations.
 It also checks the parent pinning and the path update after a directory rename.
+`selftest/overlay/main.swift` runs each overlay change on the overlay and on a plain mirror folder and compares the
+merged view with the mirror: content, modes, links, IDs, whiteouts, and a reload from disk.
 
 ## Install and enable
 
@@ -77,6 +85,11 @@ It also checks the parent pinning and the path update after a directory rename.
 5. Turn on LayrFS.
 
 An app update stops the extension and so all its mounts. Unmount before you replace the app.
+
+Update an installed and enabled app only in place: `./reinstall-inplace.sh` builds, signs, and copies over the
+installed app with `ditto`. Do not delete the installed app, do not unregister it (`lsregister -u`), and do not
+change its bundle IDs: the system then turns the extension off, and only a person can turn it on again in
+System Settings. The script unregisters only the copy in the build folder.
 
 ## Mount and unmount
 
@@ -123,6 +136,30 @@ For hard-linked files, parent ID and added time come from one of the links.
 - `datacache=off`: the volume tells FSKit to skip `FSVolume.DataCacheHandler` (`isDataCacheInhibited`). FSKit then uses `FSVolume.OpenCloseHandler`, and the kernel caches data as it decides.
 - The other values grant this coherency type in `DataCacheHandler.open` and `upgrade`. FSKit cannot reduce the attribute cache or the name cache: no API controls them.
 - The extension also accepts task options in the form `layrfs.datacache=read`. FSKit may not pass `mount -o` values to the module; the stats JSON records the options that arrived (`load_task_options`, `activate_task_options`, `mount_task_options`).
+
+## Overlay mode
+
+A resource directory that holds a `layrfs-view.conf` file mounts in overlay mode:
+
+```
+lower=/path/to/read-only/tree    # required
+upper=/path/to/upper             # default: <resource>/upper
+openclose=off                    # the other keys of layrfs.conf apply too
+prefetch=1                       # optional: read every lower folder in the background after the mount
+```
+
+- The upper folder is a Layr thin layer (docs/apfs-thin-states.md): an upper entry replaces the lower entry at its
+  path, and upper and lower folders merge. The removed paths (whiteouts) are a sorted JSON array in the attribute
+  `com.layr.removed` of the upper root. A whiteout on a folder that the upper folder has again makes it opaque.
+- The lower tree is read on demand, one `getattrlistbulk` call per folder, and kept in memory.
+- A write, truncate, `chmod`, `chown`, `utimes`, `chflags` or `setxattr` of a lower entry first copies it up:
+  a clone (`clonefileat`) for a file or a link, a new folder with the lower mode for a folder.
+- Item IDs: an upper entry over a lower entry keeps the lower inode number. Both trees must be on one volume.
+- The immutable flags of a sealed Layr state are not shown, so the kernel allows changes of lower entries.
+- A rename of a folder that the lower tree has fails with `EXDEV`; `mv` then copies and removes.
+- The root refuses `.fseventsd`, `.Spotlight-V100`, `.Trashes`, `.TemporaryItems` and `.DocumentRevisions-V100`.
+- The sandbox marks each file that the extension makes with `com.apple.quarantine` (agent `LayrFS`), and the
+  extension cannot remove the mark. The mount hides this mark; Layr removes it before it saves or converts a line.
 
 ## Statistics
 
@@ -175,3 +212,4 @@ By default the script creates `<source>/.metadata_never_index` for the run, to k
 - Hard links: an item keeps the last name that a lookup used. After you remove that name, the item fails with `ESTALE` until a lookup through another link.
 - Item IDs are backing inode numbers. Do not put other mount points inside the source directory.
 - No `clonefile`, `ioctl`, `fsctl`, byte-range locks to the module, ACLs, preallocate, or `SEEK_HOLE`.
+- Overlay: a hard link of the lower tree that one name copies up shows two IDs; the other names keep the lower file.
