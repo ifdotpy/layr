@@ -123,7 +123,11 @@ The record data:
 `sig` is the Ed25519 signature of the server key over `layr/check.server/v1\0` followed by the
 canonical JSON of the other fields. A result counts when all of these hold:
 
-- the key is pinned for a remote of the project: `layr config cloud.remote.<name>.server-key <64 hex>`;
+- this machine pins the key for a remote of the project: `layr remote add <name> <url> --server-key <64 hex>`
+  or `layr remote server-key <name> <64 hex>` (`--unset` removes it, `remote remove` too). The pin lives in
+  `meta/server-keys.json` of the project (mode 0600, owned by the owner of the project) and is never
+  replicated: a writer could append a config record, so `layr config cloud.remote.<name>.server-key` is refused
+  and such a record is ignored;
 - the signature verifies with that key;
 - `state` is exactly the state that the rule checks, and `check` is the name of the required check;
 - `exit` is 0, and for a check with `checks.platforms` the platform meets the entry.

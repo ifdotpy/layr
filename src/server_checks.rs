@@ -3,11 +3,11 @@
 //! On Public and Private projects the server runs CI jobs. A job reports its result with its short-lived job
 //! token (`POST /checks`); the server writes a `check.server` record whose data the server key signs. Line
 //! protection and the merge queue take such a result when the key is the one pinned for a remote of the
-//! project (`cloud.remote.<name>.server-key`), so a CI job needs no long-lived machine identity that this
-//! project trusts.
+//! project on this machine (`layr remote add --server-key`, `layr remote server-key`; never replicated config),
+//! so a CI job needs no long-lived machine identity that this project trusts.
 
 use crate::repo::Repo;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 #[cfg(test)]
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
@@ -52,12 +52,13 @@ impl ServerCheck {
     }
 }
 
-/// Whether `key` is a config key of a pinned server key: `cloud.remote.<name>.server-key`.
+/// The replicated config key that once held the pin: `cloud.remote.<name>.server-key`. `layr config`
+/// refuses it, and nothing reads it: the pin is machine-local.
 pub fn is_key_setting(key: &str) -> bool {
     key.strip_prefix("cloud.remote.").and_then(|rest| rest.strip_suffix(".server-key")).is_some_and(|name| !name.is_empty())
 }
 
-/// A server key as the config keeps it: 64 lowercase hex digits of an Ed25519 public key.
+/// A server key as the pin keeps it: 64 lowercase hex digits of an Ed25519 public key.
 pub fn parse_key(text: &str) -> Result<VerifyingKey> {
     if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         bail!("a server key is 64 lowercase hex digits (an Ed25519 public key)");
@@ -66,18 +67,59 @@ pub fn parse_key(text: &str) -> Result<VerifyingKey> {
     Ok(VerifyingKey::from_bytes(&bytes)?)
 }
 
-/// The server keys that the remotes of this project pin.
-pub fn pinned_keys(repo: &Repo) -> Result<Vec<VerifyingKey>> {
-    let mut keys = Vec::new();
-    for (key, _) in repo.p.db.config_all()? {
-        if !is_key_setting(&key) {
-            continue;
+/// The machine-local pins (`meta/server-keys.json` of the project, never replicated): remote name to key.
+fn pins_file(repo: &Repo) -> std::path::PathBuf {
+    repo.p.meta_dir().join("server-keys.json")
+}
+
+/// The owner that the pin file must have: the owner of the project's meta folder (the machine
+/// administrator on Linux, the store user on macOS).
+fn pins_owner(repo: &Repo) -> Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata(repo.p.meta_dir())?.uid())
+}
+
+pub fn local_pins(repo: &Repo) -> Result<std::collections::BTreeMap<String, String>> {
+    use std::os::unix::fs::MetadataExt;
+    let path = pins_file(repo);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() || meta.uid() != pins_owner(repo)? || meta.mode() & 0o077 != 0 || meta.len() > 65536 {
+        bail!("{} must be a private regular file owned by the owner of the project", path.display());
+    }
+    let pins: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&path)?).context("invalid server-keys.json")?;
+    for key in pins.values() {
+        parse_key(key)?;
+    }
+    Ok(pins)
+}
+
+/// Pins the server key of remote `name` on this machine (`layr remote add --server-key`, `layr remote server-key`),
+/// or removes the pin. The caller holds the project lock.
+pub fn set_local_pin(repo: &Repo, uid: u32, name: &str, key: Option<&str>) -> Result<()> {
+    if uid != pins_owner(repo)? {
+        bail!("only the owner of the project pins a server key");
+    }
+    let mut pins = local_pins(repo)?;
+    match key {
+        Some(key) => {
+            parse_key(key)?;
+            pins.insert(name.into(), key.into());
         }
-        if let Some(text) = repo.p.config_value(&key)?.and_then(|v| v.as_str().map(str::to_owned)) {
-            keys.push(parse_key(&text)?);
+        None => {
+            pins.remove(name);
         }
     }
-    Ok(keys)
+    crate::fsutil::atomic_write(&pins_file(repo), &serde_json::to_vec(&pins)?, 0o600)
+}
+
+/// The server keys that this machine pins for the remotes of the project. Replicated config never pins a key.
+pub fn pinned_keys(repo: &Repo) -> Result<Vec<VerifyingKey>> {
+    local_pins(repo)?.values().map(|key| parse_key(key)).collect()
 }
 
 /// Whether a server check result signed by a pinned server key says that check `check` passed (exit 0) on
@@ -186,7 +228,10 @@ mod tests {
         assert!(!crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap(), "no pinned key");
 
         let pin = hex::encode(server.verifying_key().to_bytes());
+        // A key in replicated config pins nothing: any writer can append a config record.
         append(&repo, &ctx, "config", serde_json::json!({"config":{"cloud.remote.cloud.server-key":pin}}));
+        assert!(!crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap(), "replicated config is ignored");
+        set_local_pin(&repo, ctx.caller.uid, "cloud", Some(&pin)).unwrap();
         assert!(crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap(), "a valid server result passes");
         // The platform of a check with platforms must meet the result's platform.
         assert!(passed(&repo, &state, "test", Some("linux")).unwrap());
@@ -216,7 +261,10 @@ mod tests {
         let forger = SigningKey::from_bytes(&[9; 32]);
         let command = "cargo test";
         let pin = hex::encode(server.verifying_key().to_bytes());
-        append(&repo, &ctx, "config", serde_json::json!({"config":{"check.test":command,"cloud.remote.cloud.server-key":pin}}));
+        append(&repo, &ctx, "config", serde_json::json!({"config":{"check.test":command}}));
+        set_local_pin(&repo, ctx.caller.uid, "cloud", Some(&pin)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(pins_file(&repo)).unwrap().permissions().mode() & 0o777, 0o600);
 
         let mut forged = result(&state, 0);
         forged.sign(&forger).unwrap();
@@ -235,8 +283,16 @@ mod tests {
         append(&repo, &ctx, OP, serde_json::to_value(&failed).unwrap());
         assert!(!crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap());
         assert!(!forged.verify(&server.verifying_key()) && !result(&state, 0).verify(&server.verifying_key()));
-        // A server key in the config is checked: a bad value is refused.
+        // A bad key is refused, another user cannot pin, and a removed pin ends the trust.
         assert!(parse_key("00").is_err() && parse_key(&"Z".repeat(64)).is_err());
+        assert!(set_local_pin(&repo, ctx.caller.uid, "other", Some("00")).is_err());
+        assert!(set_local_pin(&repo, ctx.caller.uid + 1, "other", Some(&pin)).is_err());
+        let mut good = result(&state, 0);
+        good.sign(&server).unwrap();
+        append(&repo, &ctx, OP, serde_json::to_value(&good).unwrap());
+        assert!(crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap());
+        set_local_pin(&repo, ctx.caller.uid, "cloud", None).unwrap();
+        assert!(!crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap());
         assert!(is_key_setting("cloud.remote.cloud.server-key") && !is_key_setting("cloud.remote..server-key"));
         drop(repo);
         std::fs::remove_dir_all(&root).unwrap();
