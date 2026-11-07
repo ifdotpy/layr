@@ -133,5 +133,6 @@ try:
     assert 'd1/sub1/f16' in run(work, 'status', '--porcelain').stdout
     print(f'{checks} status comparisons passed', flush=True)
 finally:
+    subprocess.run(['/bin/chmod', '-R', '-N', str(work_root)], capture_output=True)
     subprocess.run(['chflags', '-R', 'nouchg', str(work_root)], check=False)
     shutil.rmtree(work_root, ignore_errors=True)

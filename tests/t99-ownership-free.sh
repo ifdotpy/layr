@@ -38,6 +38,9 @@ ok "the oldest automatic state has storage" on_disk "$oldest"
 cd $M/main || exit 1
 l line delete -D w >/dev/null
 eq "the line delete leaves only its final state present" 1 "$(present_of_id "$wid")"
+# On APFS the thin final state keeps the layers under it until its complete tree, which a background process
+# makes after the delete (docs/ownership.md); gc --repair makes it at once.
+l gc --repair >/dev/null 2>&1
 no "the oldest automatic state of the deleted line has no storage" on_disk "$oldest"
 eq "the freed state keeps its record as dead" 1 "$(q "select count(*) from states where id='$oldest' and present=0 and deleted=1")"
 eq "the free queue is empty after the command" 0 "$(queue)"
@@ -89,6 +92,8 @@ LAYR_TEST_EXIT_AFTER_COMMIT=1 "$LAYR" line delete -D c >/dev/null 2>&1
 eq "the crash exits with status 86" 86 "$?"
 ok "the crash leaves states in the queue" test "$(queue)" -gt 0
 l status >/dev/null 2>&1
+# On APFS the states under the thin final state wait in the queue for its complete tree (background, or gc --repair).
+l gc --repair >/dev/null 2>&1
 eq "the next command empties the queue" 0 "$(queue)"
 no "the next command frees the states of the crashed command" on_disk "$c_old"
 

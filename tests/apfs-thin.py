@@ -199,5 +199,6 @@ try:
     run(work, 'fsck')
     print('PASS a merge of thin states matches the line, and fsck passes', flush=True)
 finally:
+    subprocess.run(['/bin/chmod', '-R', '-N', str(root)], capture_output=True)
     subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=True)
     shutil.rmtree(root)

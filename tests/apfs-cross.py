@@ -67,6 +67,7 @@ try:
     print('PASS APFS sends to Linux and receives a native incremental stream', flush=True)
 finally:
     os.chdir('/')
+    subprocess.run(['/bin/chmod', '-R', '-N', str(root)], capture_output=True)
     subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=False)
     subprocess.run(['chmod', '-R', 'u+rwX', str(root)], check=False)
     subprocess.run(['rm', '-rf', str(root)], check=True)

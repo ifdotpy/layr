@@ -250,6 +250,7 @@ finally:
     for m in mounts:
         subprocess.run(['hdiutil', 'detach', '-force', str(m)], capture_output=True)
     for folder in folders:
+        subprocess.run(['/bin/chmod', '-R', '-N', str(folder)], capture_output=True)
         subprocess.run(['chflags', '-R', 'nouchg', str(folder)], capture_output=True)
         subprocess.run(['chmod', '-R', 'u+w', str(folder)], capture_output=True)
         shutil.rmtree(folder, ignore_errors=True)

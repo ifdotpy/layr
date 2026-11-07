@@ -1,7 +1,8 @@
 #!/bin/bash
 # APFS: a dead state that is the base of a live thin layer keeps its storage (docs/ownership.md,
-# "Storage that a live state needs"). It goes when the layer goes: here the line delete gives the
-# live state a complete tree, and the base goes with the delete.
+# "Storage that a live state needs"). It goes when the layer goes: here the final state of a line
+# delete gets a complete tree (in the background after the delete, or at once by gc --repair), and the base
+# goes with it.
 . "$(dirname "$0")/lib.sh"
 [ "$(uname -s)" = Darwin ] || { echo "$(basename "$0"): skipped (APFS only)"; exit 0; }
 
@@ -32,6 +33,7 @@ ok "the dead base keeps its storage while the live layer uses it" on_disk "$A"
 ok "the live state is a thin layer over the dead base" test -d "$P/deltas/$B"
 cd $P/lines/main || exit 1
 l line delete -D w >/dev/null
+l gc --repair >/dev/null 2>&1
 no "the base goes when the live layer goes" on_disk "$A"
 eq "the final state keeps its record as present" 1 "$(present "$b")"
 eq "fsck is clean" "0 problem(s)" "$(l fsck | tail -1)"

@@ -5,7 +5,7 @@ test "$(uname -s)" = Darwin
 test "$(id -u)" != 0
 L=${LAYR:?set LAYR to the binary under test}
 base=$(cd "$(mktemp -d)" && pwd -P)
-trap 'chflags -R nouchg "$base" 2>/dev/null || true; chmod -R u+w "$base" 2>/dev/null || true; rm -rf "$base"' EXIT
+trap 'chflags -R nouchg "$base" 2>/dev/null || true; /bin/chmod -R -N "$base" 2>/dev/null || true; chmod -R u+w "$base" 2>/dev/null || true; rm -rf "$base"' EXIT
 unset LAYR_SOCKET LAYR_PROJECT LAYR_LINE
 export LAYR_ROOT="$base/runner"
 "$L" remote self --json > "$base/runner.json"
