@@ -107,6 +107,31 @@ records that fact. Timeout records exit 124. Signals record 128 plus the signal.
 A crash before the signed result commits can rerun that job: execution is at least
 once, and completed results are deduplicated. Check commands must tolerate retries.
 
+## Server check results (Layr Cloud)
+
+On Public and Private projects, Layr Cloud runs CI jobs. A job reports its result with its job
+token (`POST /checks`, layr-cloud `docs/api.md`), and the server writes a `check.server` record.
+Line protection and the merge queue take that result, so a CI job needs no long-lived machine
+identity that the project trusts.
+
+The record data:
+
+```json
+{"state":"<state id>","check":"<check name>","platform":"<os>-<arch>","exit":0,"job":"<job id>","sig":"<hex>"}
+```
+
+`sig` is the Ed25519 signature of the server key over `layr/check.server/v1\0` followed by the
+canonical JSON of the other fields. A result counts when all of these hold:
+
+- the key is pinned for a remote of the project: `layr config cloud.remote.<name>.server-key <64 hex>`;
+- the signature verifies with that key;
+- `state` is exactly the state that the rule checks, and `check` is the name of the required check;
+- `exit` is 0, and for a check with `checks.platforms` the platform meets the entry.
+
+A result without a signature, with the signature of another key, or with any field changed after
+signing counts for nothing. Who appended the record does not matter: only the server key makes it
+count. A check attestation of a trusted machine (`layr try --check`) still counts as before.
+
 ## Service and sandbox
 
 Install Linux `bubblewrap` and run the watcher as a dedicated non-root account
