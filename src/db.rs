@@ -1108,7 +1108,6 @@ impl Db {
         Ok(v)
     }
 
-    /// Match command arguments, not their display text. With no requested exit, use the newest result.
     /// The data of the `check.server` records of `state` (`server_checks`), newest first.
     pub fn server_checks(&self, state: &str) -> Result<Vec<serde_json::Value>> {
         let mut statement = self.conn.prepare_cached(
@@ -1121,6 +1120,7 @@ impl Db {
         rows.into_iter().flatten().map(|data| Ok(serde_json::from_str(&data)?)).collect()
     }
 
+    /// Match command arguments, not their display text. With no requested exit, use the newest result.
     pub fn check_exit(&self, state: &str, argv: &[String], wanted_exit: Option<i64>) -> Result<Option<i64>> {
         let mut statement=self.conn.prepare_cached("SELECT json_extract(r.raw,'$.r.data.check'),
             json_extract(r.raw,'$.r.data')

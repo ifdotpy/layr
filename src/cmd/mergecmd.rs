@@ -769,7 +769,7 @@ fn run_line_checks(
         if !wants.is_empty() {
             let here = super::checks::platform();
             for want in &wants {
-                if passed_on(repo, candidate, &argv, want)? || crate::server_checks::passed(repo, candidate, name, Some(want))? {
+                if passed_on(repo, candidate, &argv, want)? || crate::server_checks::passed(repo, candidate, name, command, Some(want))? {
                     continue;
                 }
                 if !super::checks::meets(want, &here) {

@@ -21,8 +21,13 @@ const DOMAIN: &[u8] = b"layr/check.server/v1\0";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerCheck {
+    /// The project id: a result of a fork or a copy with the same state ids counts only in its own project.
+    pub project: String,
     pub state: String,
     pub check: String,
+    /// The command that ran, split as `check_argv` splits it: a result counts only for the command that the
+    /// rule reads now.
+    pub argv: Vec<String>,
     pub platform: String,
     pub exit: i64,
     pub job: String,
@@ -122,16 +127,21 @@ pub fn pinned_keys(repo: &Repo) -> Result<Vec<VerifyingKey>> {
     local_pins(repo)?.values().map(|key| parse_key(key)).collect()
 }
 
-/// Whether a server check result signed by a pinned server key says that check `check` passed (exit 0) on
-/// exactly `state`, on a platform that meets `platform` when one is asked.
-pub fn passed(repo: &Repo, state: &str, check: &str, platform: Option<&str>) -> Result<bool> {
+/// Whether a server check result signed by a pinned server key says that check `check` with `command` passed
+/// (exit 0) on exactly `state` of this project, on a platform that meets `platform` when one is asked.
+pub fn passed(repo: &Repo, state: &str, check: &str, command: &str, platform: Option<&str>) -> Result<bool> {
     let keys = pinned_keys(repo)?;
     if keys.is_empty() {
         return Ok(false);
     }
     for data in repo.p.db.server_checks(state)? {
         let Ok(result) = serde_json::from_value::<ServerCheck>(data) else { continue };
-        if result.state != state || result.check != check || result.exit != 0 {
+        if result.project != repo.p.id
+            || result.state != state
+            || result.check != check
+            || result.argv != layr_model::protection::check_argv(command)
+            || result.exit != 0
+        {
             continue;
         }
         if platform.is_some_and(|want| !crate::cmd::checks::meets(want, &result.platform)) {
@@ -202,8 +212,10 @@ mod tests {
 
     fn result(state: &str, exit: i64) -> ServerCheck {
         ServerCheck {
+            project: PROJECT.into(),
             state: state.into(),
             check: "test".into(),
+            argv: layr_model::protection::check_argv("cargo test"),
             platform: "linux-aarch64".into(),
             exit,
             job: "i-0123456789abcdef0".into(),
@@ -234,8 +246,8 @@ mod tests {
         set_local_pin(&repo, ctx.caller.uid, "cloud", Some(&pin)).unwrap();
         assert!(crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap(), "a valid server result passes");
         // The platform of a check with platforms must meet the result's platform.
-        assert!(passed(&repo, &state, "test", Some("linux")).unwrap());
-        assert!(!passed(&repo, &state, "test", Some("macos")).unwrap());
+        assert!(passed(&repo, &state, "test", command, Some("linux")).unwrap());
+        assert!(!passed(&repo, &state, "test", command, Some("macos")).unwrap());
         // Another check name does not pass.
         assert!(!crate::cmd::attest::check_passed(&repo, &state, "lint", command).unwrap());
         // A result for another state does not pass that state.
@@ -281,6 +293,21 @@ mod tests {
         // A signed failure changed to exit 0.
         failed.exit = 0;
         append(&repo, &ctx, OP, serde_json::to_value(&failed).unwrap());
+        // A valid signature for the same state in another project (a fork on the same server whose `test` is
+        // `true`), and for another command.
+        let mut fork = result(&state, 0);
+        fork.project = "01a12290-0000-7000-8000-0000000000f0".into();
+        fork.argv = layr_model::protection::check_argv("true");
+        fork.sign(&server).unwrap();
+        append(&repo, &ctx, OP, serde_json::to_value(&fork).unwrap());
+        let mut other_project = result(&state, 0);
+        other_project.project = fork.project.clone();
+        other_project.sign(&server).unwrap();
+        append(&repo, &ctx, OP, serde_json::to_value(&other_project).unwrap());
+        let mut other_command = result(&state, 0);
+        other_command.argv = layr_model::protection::check_argv("true");
+        other_command.sign(&server).unwrap();
+        append(&repo, &ctx, OP, serde_json::to_value(&other_command).unwrap());
         assert!(!crate::cmd::attest::check_passed(&repo, &state, "test", command).unwrap());
         assert!(!forged.verify(&server.verifying_key()) && !result(&state, 0).verify(&server.verifying_key()));
         // A bad key is refused, another user cannot pin, and a removed pin ends the trust.

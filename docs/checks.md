@@ -117,11 +117,13 @@ identity that the project trusts.
 The record data:
 
 ```json
-{"state":"<state id>","check":"<check name>","platform":"<os>-<arch>","exit":0,"job":"<job id>","sig":"<hex>"}
+{"project":"<project id>","state":"<state id>","check":"<check name>","argv":["<command>","<split>"],
+ "platform":"<os>-<arch>","exit":0,"job":"<job id>","sig":"<hex>"}
 ```
 
 `sig` is the Ed25519 signature of the server key over `layr/check.server/v1\0` followed by the
-canonical JSON of the other fields. A result counts when all of these hold:
+canonical JSON of the other fields. A key pinned for one remote counts for the whole project. A result counts
+when all of these hold:
 
 - this machine pins the key for a remote of the project: `layr remote add <name> <url> --server-key <64 hex>`
   or `layr remote server-key <name> <64 hex>` (`--unset` removes it, `remote remove` too). The pin lives in
@@ -129,7 +131,9 @@ canonical JSON of the other fields. A result counts when all of these hold:
   replicated: a writer could append a config record, so `layr config cloud.remote.<name>.server-key` is refused
   and such a record is ignored;
 - the signature verifies with that key;
-- `state` is exactly the state that the rule checks, and `check` is the name of the required check;
+- `project` is this project's id, `state` is exactly the state that the rule checks, `check` is the name of the
+  required check, and `argv` is the command that `check.<name>` holds now, split as for attestations (so a fork
+  on the same server, which shares state ids, cannot make a result for this project with its own command);
 - `exit` is 0, and for a check with `checks.platforms` the platform meets the entry.
 
 A result without a signature, with the signature of another key, or with any field changed after

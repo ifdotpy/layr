@@ -25,7 +25,7 @@ pub(crate) fn check_passed(repo: &Repo, state: &str, name: &str, command: &str) 
     if repo.p.db.check_exit(state, &layr_model::protection::check_argv(command), Some(0))?.is_some() {
         return Ok(true);
     }
-    crate::server_checks::passed(repo, state, name, None)
+    crate::server_checks::passed(repo, state, name, command, None)
 }
 
 fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {
