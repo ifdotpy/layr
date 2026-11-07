@@ -92,6 +92,8 @@ pub struct Api {
     segments: Arc<Mutex<std::collections::BTreeMap<String, Vec<Segment>>>>,
     /// The project as this command first read it.
     info: Arc<Mutex<Option<ProjectInfo>>>,
+    /// Whether the server holds a state (`<scope><state>`), as this command learned it.
+    held: Arc<Mutex<std::collections::BTreeMap<String, bool>>>,
     single_put_limit: usize,
 }
 
@@ -106,6 +108,7 @@ impl Clone for Api {
             server: self.server.clone(),
             segments: self.segments.clone(),
             info: self.info.clone(),
+            held: self.held.clone(),
             single_put_limit: self.single_put_limit,
         }
     }
@@ -174,6 +177,7 @@ impl Api {
             server: Arc::new(Mutex::new(None)),
             segments: Arc::new(Mutex::new(Default::default())),
             info: Arc::new(Mutex::new(None)),
+            held: Arc::new(Mutex::new(Default::default())),
             single_put_limit: SINGLE_PUT_LIMIT,
         })
     }
@@ -503,15 +507,61 @@ impl Api {
         }
     }
 
+    /// The states of `ids` that the server lacks: `POST /states/missing` (at most 1000 per request).
+    pub(crate) fn states_missing(&self, scope: &str, ids: &[String]) -> Result<Vec<String>> {
+        let mut missing = Vec::new();
+        for batch in ids.chunks(1000) {
+            let url = self.project_url(&format!("{scope}states/missing"))?;
+            let body = serde_json::json!({ "ids": batch });
+            let response = self.send(true, || self.request(Method::POST, url.clone()).json(&body))?;
+            #[derive(Deserialize)]
+            struct Missing {
+                missing: Vec<String>,
+            }
+            missing.extend(self.json::<Missing>("states/missing", response)?.missing);
+        }
+        Ok(missing)
+    }
+
+    /// Learns with one batch call which of `ids` the server holds, so the reads after ask nothing per state.
+    pub(crate) fn learn_states(&self, scope: &str, ids: &[String]) -> Result<()> {
+        let unknown: Vec<String> = {
+            let held = self.held.lock().map_err(|_| anyhow!("api state lock"))?;
+            ids.iter().filter(|id| !held.contains_key(&format!("{scope}{id}"))).cloned().collect()
+        };
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let missing: std::collections::BTreeSet<String> = self.states_missing(scope, &unknown)?.into_iter().collect();
+        let mut held = self.held.lock().map_err(|_| anyhow!("api state lock"))?;
+        for id in unknown {
+            let has = !missing.contains(&id);
+            held.insert(format!("{scope}{id}"), has);
+        }
+        Ok(())
+    }
+
+    /// Whether the server holds a state: from `learn_states`, else one `GET /states/<state>`.
+    pub(crate) fn state_held(&self, scope: &str, state: &str) -> Result<bool> {
+        if let Some(has) = self.held.lock().map_err(|_| anyhow!("api state lock"))?.get(&format!("{scope}{state}")) {
+            return Ok(*has);
+        }
+        let has = self.get_state(scope, state)?.is_some();
+        self.held.lock().map_err(|_| anyhow!("api state lock"))?.insert(format!("{scope}{state}"), has);
+        Ok(has)
+    }
+
     pub(crate) fn put_state(&self, scope: &str, state: &str, tree: &str) -> Result<bool> {
         let url = self.project_url(&format!("{scope}states/{state}"))?;
         let body = serde_json::json!({ "tree": tree });
         let response = self.send(true, || self.request(Method::PUT, url.clone()).json(&body))?;
-        match response.status().as_u16() {
-            200 | 201 => Ok(true),
-            409 => Ok(false),
-            _ => Err(self.failure(&format!("state {state}"), response)),
-        }
+        let done = match response.status().as_u16() {
+            200 | 201 => true,
+            409 => false,
+            _ => return Err(self.failure(&format!("state {state}"), response)),
+        };
+        self.held.lock().map_err(|_| anyhow!("api state lock"))?.insert(format!("{scope}{state}"), true);
+        Ok(done)
     }
 
     pub(crate) fn get_state(&self, scope: &str, state: &str) -> Result<Option<String>> {
@@ -665,11 +715,10 @@ impl Api {
                 .collect());
         }
         if let Some(state) = rest.strip_prefix("states/").and_then(|s| s.strip_suffix('/')).filter(|s| crate::model::is_uuid(s)) {
-            return Ok(match self.get_state(&scope, state)? {
-                Some(_) => {
-                    vec![Object { key: format!("{scope}{}", format::tree_name(state, format::CONTENT_ATTEMPT)), modified: 0 }]
-                }
-                None => Vec::new(),
+            return Ok(if self.state_held(&scope, state)? {
+                vec![Object { key: format!("{scope}{}", format::tree_name(state, format::CONTENT_ATTEMPT)), modified: 0 }]
+            } else {
+                Vec::new()
             });
         }
         if rest.is_empty() || rest == "states/" || rest == "objects/" {

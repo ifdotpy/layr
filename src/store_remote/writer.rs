@@ -467,6 +467,14 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     // Completed immutable trees are never collected. Cache metadata is written only after
     // publication, so a regular push need not enumerate every historical remote object.
     index.retain(|id, entry| valid_cached(id, entry));
+    // Layr Cloud: one `POST /states/missing` for the tips and every state that may go up, so the checks below
+    // ask nothing per state.
+    if let Some(api) = store.backend.api() {
+        let mut ids: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
+        ids.extend(repo.p.db.refs("", crate::ids::now_ms())?.into_iter().map(|reference| reference.target));
+        ids.extend(repo.p.db.present_states()?.into_iter().filter(|(_, deleted)| !deleted).map(|(id, _)| id));
+        api.learn_states(&store.api_scope(), &ids.into_iter().collect::<Vec<_>>())?;
+    }
     if !blind_layer {
         // A completed upload can be missing from a partial replica. Recheck advertised tips
         // without scanning historical states, so a later push can complete that replica.

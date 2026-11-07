@@ -252,6 +252,16 @@ impl Fake {
                     }
                 }
             }
+            ("POST", ["states", "missing"]) => {
+                let missing: Vec<&str> = body["ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|id| !s.states.contains_key(&(scope.clone(), id.to_string())))
+                    .collect();
+                (200, json(serde_json::json!({ "missing": missing })), Vec::new())
+            }
             ("GET", ["states", state]) => match s.states.get(&(scope, state.to_string())) {
                 Some(tree) => (200, json(serde_json::json!({ "tree": tree })), Vec::new()),
                 None => (404, Vec::new(), Vec::new()),
@@ -515,13 +525,19 @@ fn a_push_sends_typed_objects_states_records_and_one_ref_move_and_a_reader_gets_
             assert_eq!(source.read_file(&tree, "dir/large").unwrap(), std::fs::read(local.join("dir/large")).unwrap());
         }
     }
-    // A second push sends no object, no state and no ref move.
+    // A second push sends no object, no state and no ref move, and asks for the states in one batch.
+    let gets = fake.count("GET /api/v1/projects/p/states/");
+    let batches = fake.count("POST /api/v1/projects/p/states/missing");
     let puts = fake.count("PUT ");
     let cas = fake.count("POST /api/v1/projects/p/refs/cas");
+    // A new command: a new client that knows nothing about the server yet.
+    let store = api_store(&root, &ctx, &fake);
     let again = push(&store, &ctx, &repo).unwrap();
     assert_eq!((again.states, again.records), (0, 0));
     assert_eq!(fake.count("PUT "), puts);
     assert_eq!(fake.count("POST /api/v1/projects/p/refs/cas"), cas);
+    assert_eq!(fake.count("GET /api/v1/projects/p/states/"), gets, "no request per state");
+    assert_eq!(fake.count("POST /api/v1/projects/p/states/missing"), batches + 1);
     drop(repo);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -611,5 +627,48 @@ fn login_polls_until_the_person_signs_in_then_saves_the_session_and_registers_th
     let mut api = Api::for_test(&fake.origin, "p", None);
     api.connect(&ctx, PROJECT).unwrap();
     api.put_object("part", b"with the session").unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekeyed_writer_is_refused() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let (repo, _, _) = project(&ctx);
+    // A machine that only the server vouches for: its records come in, its trust of a third machine has no effect.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+    let third = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
+    let machine = "01a12290-0000-7000-8000-0000000000c1";
+    let other = "01a12290-0000-7000-8000-0000000000c2";
+    let sign = |seq: u64, op: &str, data: serde_json::Value| {
+        let mut record = Record::new(op);
+        record.id = format!("01a12290-0000-7000-8000-{:012x}", 0xd00 + seq);
+        record.machine = machine.into();
+        record.project = PROJECT.into();
+        record.seq = seq;
+        record.time = crate::ids::now_ms();
+        record.data = data;
+        crate::oplog::sign_line(&record, &key).unwrap()
+    };
+    let lines = vec![
+        sign(1, "machine", serde_json::json!({"name":"server-writer","public_key":hex::encode(key.verifying_key().to_bytes())})),
+        sign(2, "tag", serde_json::json!({"name":"from-server","state":null,"message":"m"})),
+        sign(3, "machine.trust", serde_json::json!({"machine":other,"public_key":hex::encode(third.verifying_key().to_bytes())})),
+    ];
+    // `Trust::Known` refuses this batch; `Trust::Server` takes it.
+    assert!(repo.p.import_lines(&lines, crate::store::Trust::Known).is_err());
+    assert_eq!(repo.p.import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
+    assert!(repo.p.db.record_line(machine, 3).unwrap().is_some(), "every record is stored");
+    assert_eq!(repo.p.db.trusted(machine).unwrap(), None, "the server's writer is not trusted here");
+    assert_eq!(repo.p.db.trusted(other).unwrap(), None, "its trust record has no effect");
+    // The writer key is pinned per remote on first sight; another key for the same machine is refused.
+    let dir = root.join("remote");
+    let id = machine.to_string();
+    super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id.clone(), key.verifying_key())])).unwrap();
+    super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id.clone(), key.verifying_key())])).unwrap();
+    let error = super::reader::pin_writer_keys(&dir, &BTreeMap::from([(id, third.verifying_key())])).unwrap_err().to_string();
+    assert!(error.contains("another key"), "{error}");
+    drop(repo);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -169,6 +169,9 @@ id with the type that the reference names (a tree link names a `part`, a state n
   attempt `00000000`: the content names the object, so a retry gives the same id.
 - `PUT /states/<state>` `{"tree":"<state-tree id>"}` publishes the state after its parts and its
   tree object. `GET /states/<state>` gives the tree id back.
+- `POST /states/missing` `{"ids":[...]}` (at most 1000) gives `{"missing":[...]}`. A push asks
+  once for the tips and every state that may go up, and a fetch once for the states it lacks, so
+  neither sends a request per state.
 - Objects over 64 MiB go up in parts (`POST /objects/<id>/uploads`, then each part, then
   `complete`). Before a large upload the client asks `POST /objects/missing`, so an object that the
   project already holds is not sent again.
@@ -177,7 +180,13 @@ id with the type that the reference names (a tree link names a `part`, a state n
 
 - Record segments go up plain: `POST /records/<machine>/<first>-<last>`. A machine uploads only
   its own segments (the token belongs to one machine). A fetch takes the records of every writer
-  that the server serves: the server access list, not local machine trust, decides who writes.
+  that the server serves: the server access list, not local machine trust, decides who writes
+  there. It does not widen local trust: a machine that this project does not trust yet cannot
+  change trust here (its `machine.trust`, `machine.untrust` and `trust.delegate` records have no
+  effect), so peer sync, cache readers and other remotes keep the local trusted set. The key of
+  each writer is pinned per remote on first sight (`writer-keys.json` of the remote folder): a
+  later key for the same machine stops the fetch. A clone trusts the project's own trust chain
+  only: the creator and the machines that a member trusts by a signed `machine.trust` record.
 - The server ref is the truth for the position of a line. After records and states, a push moves
   each changed line with one `POST /refs/cas`: `name` `lines/<line id>`, `expect` the target this
   machine last read from the server (null for a new line), `target` the local head, and `record`
@@ -187,9 +196,11 @@ id with the type that the reference names (a tree link names a `part`, a state n
   moved on the server: run `layr fetch <remote>` and push again. A fetch reads
   `GET /refs?prefix=lines/`, keeps the targets in `refs.json` of the remote folder as the next
   `expect`, and names each line whose head here differs from the server.
-- Overlays: each overlay that the caller sees goes to `/overlays/<name>/` (records, states, refs)
-  as plain objects in the project's object store: no overlay keys, slots or epochs. A hidden
-  overlay stays on this machine until Layr Cloud has Secret overlay layers.
+- Overlays: an overlay whose policy lets everyone (`*`) read it goes to `/overlays/<name>/`
+  (records, states, refs) as plain objects in the project's object store: no overlay keys, slots
+  or epochs. Any other overlay (a cache, whose readers are the trusted machines; a reader list; a
+  hidden overlay) stays on this machine and the push names it, because the server serves a plain
+  layer to every reader of the project until it keeps per-overlay readers.
 - The client does not sweep, and `layr remote gc` and `verify` refuse: garbage collection is
   server-side, and the server checks each object against its id on upload. Git packs of imported
   commits do not go up: the server mirrors these projects to GitHub.

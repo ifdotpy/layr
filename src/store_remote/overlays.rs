@@ -896,6 +896,15 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
             report.omitted.push(format!("overlay {name}: not on this machine"));
             continue;
         };
+        // The server serves a plain layer to every reader of the project (a Public project: everyone) until it
+        // keeps per-overlay readers (docs/cloud-rfc.md 7.0). A cache (readers: trusted machines) or another
+        // overlay with a reader list stays here.
+        if !readable_by_all(&orepo.policy().access) {
+            report.omitted.push(format!(
+                "overlay {name}: its readers are limited, and Layr Cloud would serve it to every reader of the project"
+            ));
+            continue;
+        }
         let scoped = api_layer(store, &name, &orepo.p.id)?;
         scoped.private_dir()?;
         let _push = writer::push_folder_lock(&scoped.dir)?;
@@ -904,6 +913,12 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
         merge(report, pushed, &name, "push");
     }
     Ok(())
+}
+
+/// Whether an overlay's policy lets everyone (`*`) read it: only such an overlay goes to Layr Cloud as a plain
+/// layer.
+fn readable_by_all(access: &BTreeMap<String, crate::access::Role>) -> bool {
+    access.get("*").is_some_and(|role| *role >= crate::access::Role::Reader)
 }
 
 /// Fetches each overlay that the project records name from its plain layer on Layr Cloud.
@@ -957,6 +972,17 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_overlay_that_everyone_reads_goes_to_layr_cloud_plain() {
+        use crate::access::Role;
+        let cache = BTreeMap::from([("machine:01a12290-0000-7000-8000-000000000001".to_string(), Role::Reader)]);
+        assert!(!readable_by_all(&cache), "a cache overlay (trusted machines) stays here");
+        assert!(!readable_by_all(&BTreeMap::from([("user:501".to_string(), Role::Admin)])));
+        assert!(!readable_by_all(&BTreeMap::new()));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Reader)])));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Writer)])));
+    }
 
     #[test]
     fn a_signer_not_trusted_yet_waits_and_another_key_fails() {

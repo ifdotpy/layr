@@ -364,6 +364,58 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The machines that a project's own signed history trusts: the creator (the signer of the `project` record), then
+/// each machine that a member trusts with a `machine.trust` record naming the key it really has. A machine that a
+/// server serves but nobody in this chain vouched for is not in it.
+pub(super) fn project_trust_chain(lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeSet<String>> {
+    let records: Vec<Record> = lines.iter().map(|line| Ok(oplog::parse_line(line, None)?.record)).collect::<Result<_>>()?;
+    let mut chain: BTreeSet<String> = records.iter().filter(|r| r.op == "project").map(|r| r.machine.clone()).take(1).collect();
+    loop {
+        let vouched: Vec<String> = records
+            .iter()
+            .filter(|r| r.op == "machine.trust" && chain.contains(&r.machine))
+            .filter_map(|r| {
+                let (machine, key) = (r.data["machine"].as_str()?, r.data["public_key"].as_str()?);
+                keys.get(machine).is_some_and(|k| hex::encode(k.to_bytes()) == key).then(|| machine.to_string())
+            })
+            .filter(|machine| !chain.contains(machine))
+            .collect();
+        if vouched.is_empty() {
+            return Ok(chain);
+        }
+        chain.extend(vouched);
+    }
+}
+
+/// The writer keys that a Layr Cloud remote served before (`writer-keys.json` of the remote folder): a server
+/// cannot give a machine another key later.
+pub(super) fn pin_writer_keys(dir: &Path, keys: &BTreeMap<String, VerifyingKey>) -> Result<()> {
+    let path = dir.join("writer-keys.json");
+    let mut pinned: BTreeMap<String, String> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("invalid writer-keys.json")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let before = pinned.len();
+    for (machine, key) in keys {
+        let key = hex::encode(key.to_bytes());
+        match pinned.get(machine) {
+            Some(old) if old != &key => {
+                bail!("Layr Cloud serves machine {machine} with another key than before; nothing is taken")
+            }
+            Some(_) => {}
+            None => {
+                pinned.insert(machine.clone(), key);
+            }
+        }
+    }
+    if pinned.len() != before {
+        std::fs::create_dir_all(dir)?;
+        crate::fsutil::atomic_write(&path, &serde_json::to_vec(&pinned)?, 0o600)?;
+    }
+    Ok(())
+}
+
 /// The states of the project for a read from the Layr Cloud API, which has no state listing: every state that
 /// the records name, with the one attempt of that API. A state that the server lacks fails its own read.
 fn api_attempts(repo: &Repo) -> Result<BTreeMap<String, String>> {
@@ -560,8 +612,18 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     {
         let _lock = repo.p.lock()?;
         // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
-        // the key that the writer registered; local machine trust is not asked (docs/cloud-rfc.md 7.0).
-        let trust = if bootstrap || store.is_api() { crate::store::Trust::All } else { crate::store::Trust::Known };
+        // the key that the writer registered; local machine trust is not asked and does not grow
+        // (docs/cloud-rfc.md 7.0). Each writer key is pinned per remote on first sight.
+        if store.is_api() {
+            pin_writer_keys(&store.dir, &records.keys)?;
+        }
+        let trust = if store.is_api() {
+            crate::store::Trust::Server
+        } else if bootstrap {
+            crate::store::Trust::All
+        } else {
+            crate::store::Trust::Known
+        };
         count = repo.p.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
@@ -591,6 +653,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let states = if api.is_some() { api_attempts(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
+    let mut asked = Vec::new();
     for id in states.keys() {
         // A tree whose record this fetch did not read: a push published both after this fetch read the records
         // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
@@ -641,15 +704,23 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
-        } else if let Some(api) = api {
-            // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
-            if api.get_state(&store.api_scope(), id)?.is_some() {
-                missing.push(state);
-            } else if heads.is_none() {
-                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(id)));
-            }
+        } else if api.is_some() {
+            // One `POST /states/missing` after the loop tells which of these the server holds.
+            asked.push(state);
         } else {
             missing.push(state);
+        }
+    }
+    if let Some(api) = api {
+        // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
+        let scope = store.api_scope();
+        api.learn_states(&scope, &asked.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
+        for state in asked {
+            if api.state_held(&scope, &state.id)? {
+                missing.push(state);
+            } else if heads.is_none() {
+                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
+            }
         }
     }
     if !left.is_empty() {
@@ -709,9 +780,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
         crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
     }
-    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
+    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does. A Layr Cloud clone
+    // trusts only the project's own trust chain (`project_trust_chain`): the server access list is not local trust.
     if bootstrap {
+        let chain = if store.is_api() { Some(project_trust_chain(&records.lines, &records.keys)?) } else { None };
         for (machine, key) in &records.keys {
+            if chain.as_ref().is_some_and(|chain| !chain.contains(machine)) {
+                continue;
+            }
             if repo.p.db.trusted(machine)?.is_none() {
                 let mut record = Record::new("machine.trust");
                 record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});

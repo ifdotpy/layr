@@ -24,9 +24,14 @@ admin() { curl -s --cacert "$T/tls-cert.pem" -X POST -d "$2" "https://localhost:
 sample "$T/src"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
+l overlay create private -q
+l overlay create shared --readers '*' -q
 ok "remote add of a Layr Cloud project" l remote add cloud "$URL"
 eq "the mode is Private" private "$(l config --get cloud.remote.cloud.mode)"
-ok "push to Layr Cloud" l push cloud -q
+PUSHED=$(l push cloud 2>&1)
+eq "push to Layr Cloud" 0 $?
+has "an overlay with limited readers stays here" "overlay private: its readers are limited" "$PUSHED"
+has "an overlay that everyone reads goes up" "overlay shared:" "$PUSHED"
 eq "the server took states" yes "$(stats | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin)["states"] > 0 else "no")')"
 eq "the machine key is registered" 1 "$(stats | python3 -c 'import json,sys; print(json.load(sys.stdin)["machines"])')"
 read -r MAIN_ID HEAD < <(l line list --json | python3 -c 'import json,sys; l=next(l for l in json.load(sys.stdin) if l["name"]=="main"); print(l["id"], l["head"])')
@@ -38,6 +43,7 @@ FIRST=$LAYR_ROOT
 export LAYR_ROOT=$T/second
 cd "$T"
 ok "clone from Layr Cloud" l clone "$URL" copy -q
+
 eq "the clone reads the files" "$(cat "$T/src/notes.txt")" "$(cat "$LAYR_ROOT/projects/copy/lines/main/notes.txt")"
 cd "$LAYR_ROOT/projects/copy/lines/main"
 echo second >> notes.txt

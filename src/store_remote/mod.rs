@@ -1495,7 +1495,7 @@ fn push_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
         }
         // A state that this push left out (an automatic state without --auto) cannot be a ref target.
         if let Some(target) = &head {
-            if !report.state_ids.contains(target) && api.get_state(&scope, target)?.is_none() {
+            if !report.state_ids.contains(target) && !api.state_held(&scope, target)? {
                 report.omitted.push(format!("line {line}: head {} is not on Layr Cloud", crate::ids::short(target)));
                 continue;
             }

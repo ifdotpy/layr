@@ -118,6 +118,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # The first record names the project.
                 db['id'] = json.loads(raw.split(b'\n')[0])['r']['project']
             return self.reply(201)
+        if m == 'POST' and parts == ['states', 'missing']:
+            return self.reply(200, {'missing': [i for i in body['ids'] if (scope, i) not in db['states']]})
         if parts[0] == 'states':
             key = (scope, parts[1])
             if m == 'PUT':
