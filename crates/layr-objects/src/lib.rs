@@ -320,6 +320,10 @@ mod tests {
         fs::create_dir_all(src.join("c/d")).unwrap();
         fs::write(src.join("a/b/f"), "one\n").unwrap();
         fs::write(src.join("c/d/g"), "two\n").unwrap();
+        // Equal timestamps can make different folders share a times table.
+        for path in ["a/b/f", "c/d/g", "a/b", "c/d", "a", "c", ""] {
+            times::set(&src.join(path), 1_000_000_000).unwrap();
+        }
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
         let opts = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
         let first = write_tree(&store, &src, &opts).unwrap();
@@ -329,7 +333,11 @@ mod tests {
         let next = write::write_changed(&store, &src, &base, &[b"a/b/f".to_vec()], &opts).unwrap();
         let before: std::collections::HashSet<Id> = store.times_ids(&base.times).unwrap().into_iter().collect();
         let after = store.times_ids(&next.times.unwrap()).unwrap();
-        assert_eq!(after.len(), before.len(), "the same folders");
+        assert_eq!(before.len(), 3, "a and c share tables, as do a/b and c/d");
+        let old_root = store.get_times(&base.times).unwrap();
+        let new_root = store.get_times(&next.times.unwrap()).unwrap();
+        assert_ne!(new_root.records[0], old_root.records[0], "a has a new times table");
+        assert_eq!(new_root.records[1], old_root.records[1], "c and its descendants keep their times tables");
         let new = after.iter().filter(|id| !before.contains(id)).count();
         assert_eq!(new, 3, "the root, a and a/b are new; c and c/d are shared");
         // The new state checks out with its times, the old one with its own.
