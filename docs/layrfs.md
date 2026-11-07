@@ -83,16 +83,18 @@ more is not indexed, and its tools fall back.
 
 ## Measurements
 
-Prototype of this design on this Mac (M5 Max, a loaded host), median of three runs; raw data and
-scripts are in `benchmarks/vfs-20261107/` of the line `vfs-bench`.
+Release build on a Mac (M5 Max, a loaded host: load average 47 to 106), Chromium `src` with
+516,265 files, median of five runs. The native runs had a warm page cache. The index was built in
+2.3 s; the server used 156 MB.
 
-| Tree | Tool | Native folder | Index |
-|---|---|---|---|
-| layr-studio, 43,191 files | `rg -c fn` | 0.233 s | 0.160 s |
-| | `rg --files` | 0.051 s | 0.033 s |
-| | `find . -type f` | 2.535 s | 0.066 s |
-| Chromium `src`, 516,265 files | `find . -type f` | 15.1 s | 0.40 s |
-| | `rg --files` | 1.75 s | 0.17 s |
-| | `rg -c TODO` | 22.9 s | 13.5 s |
+| Command | Native folder | LayrFS |
+|---|---|---|
+| `find . -type f` | 1.31 s | 0.23 s |
+| `find . -name '*.py'` | 1.97 s | 0.22 s |
+| `rg --files` | 1.86 s | 0.45 s |
+| `rg --files -t py` | 1.49 s | 0.13 s |
+| `rg -n TODO base` | 0.19 s | 0.15 s |
+| `rg -l kMaxLength` | 22.8 s | 16.5 s |
 
-Content search is bound by reading the files, so it gains least.
+The output of `rg -l` and `rg --files` was byte-identical to `rg --sort path`. Content search is
+bound by reading the files, so it gains least. With a cold page cache, the native `find` took 15 s.
