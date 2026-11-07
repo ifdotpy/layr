@@ -10,6 +10,7 @@ pub mod id;
 pub mod pack;
 pub mod store;
 pub mod times;
+pub mod transfer;
 pub mod tree;
 pub mod write;
 pub mod zstdx;
