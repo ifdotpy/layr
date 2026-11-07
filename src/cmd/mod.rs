@@ -224,6 +224,9 @@ Remotes:
    remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone
    index write [<remote>] [--json]; push <remote> --index
    mount <remote> [--listen 127.0.0.1:8095]
+LayrFS (tree tools of agents from an in-memory index):
+   fs serve, fs warm [<dir>] [--wait], fs status, fs stop
+   tool rg|find [<args>]; or a link named rg or find to layr
 Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
@@ -250,7 +253,7 @@ pub const COMMANDS: &[&str] = &[
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
-    "usage",
+    "usage", "fs", "tool",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
