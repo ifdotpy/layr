@@ -335,7 +335,8 @@ pub fn diff_input(repo: &Repo, line: &Line, v: &View) -> Result<(Layered, Layere
 fn topmost(paths: BTreeSet<String>) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for p in paths {
-        if !out.iter().any(|o| p.starts_with(&format!("{o}/"))) {
+        let covered = p.match_indices('/').any(|(i, _)| out.contains(&p[..i]));
+        if !covered {
             out.insert(p);
         }
     }
@@ -628,4 +629,24 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.p.trash(&dir(&repo.p, &l.id))?;
     outln!(ctx, "Line {} has a folder at {}", l.name, dst.display());
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topmost_keeps_only_the_highest_removed_paths() {
+        let set: BTreeSet<String> = ["a", "a/b", "a/b/c", "ab", "d/e", "d/e/f", "g/h"].iter().map(|s| s.to_string()).collect();
+        let want: BTreeSet<String> = ["a", "ab", "d/e", "g/h"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(topmost(set), want);
+    }
+
+    #[test]
+    fn system_folders_are_only_root_names() {
+        assert!(system_path(".fseventsd"));
+        assert!(system_path(".fseventsd/fseventsd-uuid"));
+        assert!(!system_path("src/.fseventsd"));
+        assert!(!system_path("notes.txt"));
+    }
 }

@@ -219,6 +219,7 @@ Layr talks to it as an ordinary remote.
 [Remotes](docs/remotes.md) ·
 [Containers](docs/oci.md) ·
 [Overlays](docs/overlays.md) ·
+[Virtual lines (experimental)](docs/views.md) ·
 [Security](docs/security.md) ·
 [Performance](docs/performance.md) ·
 [Design](docs/design.md)
