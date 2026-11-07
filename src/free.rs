@@ -83,14 +83,20 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
                 eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
             }
         }
+        let Ok(dir) = store.project_dir(&name) else { continue };
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            crate::store::db_file(&dir),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else { continue };
+        // Each inspection finishes its autocommit read before expiration can write owners.
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
-        if expired_refs(store, &name) {
+        if expired_refs(&conn) {
             if let Err(e) = expire_refs(ctx, &name) {
                 eprintln!("layr: expired refs of {name} stay until the next command: {e:#}");
             }
         }
         // A project without pending work is not opened: an open prints its trace (LAYR_TRACE).
-        if !pending(store, &name) || unchanged_queue(store, &name) {
+        if !pending(&conn) || unchanged_queue(store, &name, &conn) {
             continue;
         }
         let Ok(p) = Project::open(store, &name) else { continue };
@@ -208,10 +214,7 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
 }
 
 /// True when a ref of project `name` has expired (a read-only query; no project open).
-fn expired_refs(store: &Store, name: &str) -> bool {
-    let Ok(dir) = store.project_dir(name) else { return false };
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+fn expired_refs(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM refs WHERE deleted=0 AND expires_at IS NOT NULL AND expires_at<=?1)",
         [crate::ids::now_ms()],
@@ -233,10 +236,7 @@ fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
 }
 
 /// True when a project has queued states or pins to release. Reads the database directly.
-fn pending(store: &Store, name: &str) -> bool {
-    let Ok(dir) = store.project_dir(name) else { return false };
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
+fn pending(conn: &rusqlite::Connection) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')",
         [],
@@ -247,13 +247,10 @@ fn pending(store: &Store, name: &str) -> bool {
 
 /// True when a free pass of this process left the queue of project `name` as it is now and no pin is held: a new
 /// pass would find the same waiting bases.
-fn unchanged_queue(store: &Store, name: &str) -> bool {
+fn unchanged_queue(store: &Store, name: &str, conn: &rusqlite::Connection) -> bool {
     let Some(left) = LEFT_QUEUED.lock().ok().and_then(|m| m.get(&(store.root.clone(), name.to_string())).cloned()) else {
         return false;
     };
-    let Ok(dir) = store.project_dir(name) else { return false };
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), flags) else { return false };
     let pins = conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| r.get::<_, bool>(0)).unwrap_or(true);
     let Ok(mut st) = conn.prepare("SELECT state FROM free_queue ORDER BY state") else { return false };
     let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return false };
@@ -526,6 +523,44 @@ impl<D: ReleasePins> Drop for Pin<D> {
         if let Err(e) = released {
             eprintln!("layr: cannot release the pins of this command: {e:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+
+    #[test]
+    fn inspections_see_expiration_and_queue_writes_without_a_snapshot() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-inspection-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let path = crate::store::db_file(&dir);
+        let db = crate::db::Db::open(&path)?;
+        let conn = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.conn.execute("INSERT INTO refs(name, target, expires_at) VALUES('old','dead',0)", [])?;
+        assert!(expired_refs(&conn));
+        assert!(!pending(&conn));
+        // Expiration on another connection can release owners and queue states between inspections.
+        db.conn.execute_batch("BEGIN; UPDATE refs SET deleted=1 WHERE name='old'; INSERT INTO free_queue(state) VALUES('dead'); COMMIT;")?;
+        assert!(!expired_refs(&conn));
+        assert!(pending(&conn));
+        LEFT_QUEUED.lock().unwrap().insert((store.root.clone(), "p".into()), vec!["dead".into()]);
+        assert!(unchanged_queue(&store, "p", &conn));
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES('dead','pin','reader')", [])?;
+        assert!(!unchanged_queue(&store, "p", &conn));
+        db.conn.execute("DELETE FROM owners", [])?;
+        db.conn.execute("DELETE FROM free_queue", [])?;
+        assert!(!pending(&conn));
+        assert!(!unchanged_queue(&store, "p", &conn));
+        assert!(conn.is_autocommit());
+        LEFT_QUEUED.lock().unwrap().remove(&(store.root.clone(), "p".into()));
+        drop(conn);
+        drop(db);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
 

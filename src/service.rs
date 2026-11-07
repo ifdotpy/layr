@@ -9,7 +9,7 @@
 use crate::ctx::{Caller, Ctx};
 use crate::store::Store;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -42,6 +42,37 @@ struct Request {
     #[serde(default)]
     hello: bool,
     registry: Option<serde_json::Value>,
+}
+
+/// Fields follow the sorted JSON object order used by the original Value encoding.
+#[derive(serde::Serialize)]
+struct CommandRequest<'a> {
+    argv: &'a [String],
+    cwd: &'a Path,
+    env: &'a BTreeMap<String, String>,
+    version: CommandPeer<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct CommandPeer<'a> {
+    build: &'a str,
+    format: u32,
+    schema: layr_api::SchemaVersion,
+    version: &'a str,
+}
+
+impl<'a> From<&'a layr_api::Peer> for CommandPeer<'a> {
+    fn from(peer: &'a layr_api::Peer) -> Self {
+        Self { build: &peer.version.build, format: peer.version.format, schema: peer.schema, version: &peer.version.version }
+    }
+}
+
+fn command_frame(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, peer: &layr_api::Peer) -> Result<Vec<u8>> {
+    let mut data = vec![0; std::mem::size_of::<u32>()];
+    serde_json::to_writer(&mut data, &CommandRequest { argv, cwd, env, version: peer.into() })?;
+    let len = (data.len() - std::mem::size_of::<u32>()) as u32;
+    data[..std::mem::size_of::<u32>()].copy_from_slice(&len.to_be_bytes());
+    Ok(data)
 }
 
 /// Keep a missing/invalid schema diagnostic on the caller's stderr through typed decoding.
@@ -105,13 +136,9 @@ pub fn forward(argv: &[String]) -> Result<i32> {
     let sock = UnixStream::connect(&path).map_err(|e| connect_error(&path, &e))?;
     negotiate(&sock).context("cannot send the request to the layr service")?;
     let cwd = std::env::current_dir()?;
-    let env: HashMap<String, String> = std::env::vars().collect();
-    let req = serde_json::to_vec(
-        &serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": crate::store_version::peer()?}),
-    )?;
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let data = command_frame(argv, &cwd, &env, &crate::store_version::peer()?)?;
     let dir = std::fs::File::open(&cwd)?;
-    let mut data = (req.len() as u32).to_be_bytes().to_vec();
-    data.extend_from_slice(&req);
     // The service answers "B" at once when it is busy, or "R" and the exit code at the end. A
     // busy service may close the connection before it reads the request, so the answer is read
     // even when sending failed; without an answer, the send error is the reason.
@@ -270,9 +297,9 @@ fn limit(var: &str, default: usize) -> usize {
 
 /// Read one request. `None`: the client closed the connection without sending a byte, which is a
 /// normal end of the connection, not a bad request.
-fn read_request(sock: &UnixStream) -> Result<Option<(Vec<u8>, Vec<OwnedFd>)>> {
-    let mut buffer = vec![0u8; REQUEST_BUFFER_BYTES];
-    let (mut filled, mut fds) = recv_with_fds(sock, &mut buffer)?;
+fn read_request(sock: &UnixStream, buffer: &mut Vec<u8>) -> Result<Option<Vec<OwnedFd>>> {
+    buffer.resize(REQUEST_BUFFER_BYTES, 0);
+    let (mut filled, mut fds) = recv_with_fds(sock, buffer)?;
     if filled == 0 {
         return Ok(None);
     }
@@ -300,11 +327,10 @@ fn read_request(sock: &UnixStream) -> Result<Option<(Vec<u8>, Vec<OwnedFd>)>> {
         }
         filled += n;
     }
-    Ok(Some((buffer, fds)))
+    Ok(Some(fds))
 }
 
-fn decode_request(frame: (Vec<u8>, Vec<OwnedFd>)) -> Result<(Request, Vec<OwnedFd>)> {
-    let (bytes, fds) = frame;
+fn decode_request(bytes: &[u8], fds: Vec<OwnedFd>) -> Result<(Request, Vec<OwnedFd>)> {
     // Decode errors belong on the caller's stderr, too. This runs only in the request child.
     if fds.len() == 4 {
         rustix::stdio::dup2_stdin(&fds[0])?;
@@ -321,10 +347,11 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
         let (uid, _gid, _pid) = peer_uid(&sock)?;
         // A client that does not send its request in time does not hold a process.
         sock.set_read_timeout(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS)))?;
-        let Some(frame) = read_request(&sock)? else {
+        let mut buffer = Vec::new();
+        let Some(fds) = read_request(&sock, &mut buffer)? else {
             return Ok(0);
         };
-        let (v, fds) = decode_request(frame)?;
+        let (v, fds) = decode_request(&buffer, fds)?;
         let (v, fds) = if v.hello {
             if !fds.is_empty() {
                 bail!("the version request must not contain descriptors");
@@ -338,10 +365,10 @@ fn handle(sock: UnixStream, root: &Path, registry_uids: &[u32]) -> i32 {
             packet.extend_from_slice(&bytes);
             (&sock).write_all(&packet)?;
             // A client that reads the version and closes sends no command: that is not an error.
-            let Some(next) = read_request(&sock)? else {
+            let Some(fds) = read_request(&sock, &mut buffer)? else {
                 return Ok(0);
             };
-            decode_request(next)?
+            decode_request(&buffer, fds)?
         } else {
             (v, fds)
         };
@@ -912,6 +939,43 @@ mod connect_tests {
 mod request_tests {
     use super::*;
 
+    fn read_request(sock: &UnixStream) -> Result<Option<(Vec<u8>, Vec<OwnedFd>)>> {
+        let mut bytes = Vec::new();
+        Ok(super::read_request(sock, &mut bytes)?.map(|fds| (bytes, fds)))
+    }
+
+    #[test]
+    fn typed_command_frames_match_value_encoding() -> Result<()> {
+        let peer = crate::store_version::peer()?;
+        for argv in [vec![], vec!["rev-parse".into(), "head".into()], vec!["line".into(), "list".into(), "\"\n\\é".into()]] {
+            for env in [BTreeMap::new(), BTreeMap::from([("Z".into(), "last".into()), ("A".into(), "\n\"é".into())])] {
+                let cwd = Path::new("/tmp/space and é");
+                let legacy = serde_json::to_vec(&serde_json::json!({"argv": argv, "cwd": cwd, "env": env, "version": peer}))?;
+                let mut expected = (legacy.len() as u32).to_be_bytes().to_vec();
+                expected.extend_from_slice(&legacy);
+                assert_eq!(command_frame(&argv, cwd, &env, &peer)?, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hello_and_command_reuse_frame_storage() -> Result<()> {
+        let (mut client, server) = UnixStream::pair()?;
+        let mut bytes = Vec::new();
+        for payload in [br#"{"hello":true}"#.as_slice(), br#"{"argv":["line","list"]}"#.as_slice()] {
+            client.write_all(&(payload.len() as u32).to_be_bytes())?;
+            client.write_all(payload)?;
+            let capacity = bytes.capacity();
+            assert!(super::read_request(&server, &mut bytes)?.unwrap().is_empty());
+            assert_eq!(&bytes[4..], payload);
+            if capacity != 0 {
+                assert_eq!(bytes.capacity(), capacity);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn fragmented_headers_and_payloads_are_accepted() -> Result<()> {
         let (mut client, server) = UnixStream::pair()?;
@@ -1150,7 +1214,8 @@ mod version_tests {
         ] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (_, fds) = read_request(&server)?.context("no hello")?;
+                let mut hello = Vec::new();
+                let fds = read_request(&server, &mut hello)?.context("no hello")?;
                 assert!(fds.is_empty());
                 let mut version = serde_json::to_value(crate::store_version::binary())?;
                 if let Some(schema) = schema {
@@ -1189,7 +1254,8 @@ mod version_tests {
         for format in [crate::store_version::FORMAT, crate::store_version::FORMAT + 1] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?.context("no request")?;
+                let mut hello = Vec::new();
+                let fds = read_request(&server, &mut hello)?.context("no request")?;
                 assert_eq!(serde_json::from_slice::<serde_json::Value>(&hello[4..])?, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 let mut version = crate::store_version::peer()?;
@@ -1224,7 +1290,8 @@ mod version_tests {
         for answer in [b'R', b'B'] {
             let (client, server) = UnixStream::pair()?;
             let thread = std::thread::spawn(move || -> Result<()> {
-                let (hello, fds) = read_request(&server)?.context("no request")?;
+                let mut hello = Vec::new();
+                let fds = read_request(&server, &mut hello)?.context("no request")?;
                 assert_eq!(serde_json::from_slice::<serde_json::Value>(&hello[4..])?, serde_json::json!({"hello": true}));
                 assert!(fds.is_empty());
                 (&server).write_all(&[answer])?;
