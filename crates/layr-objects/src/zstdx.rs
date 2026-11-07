@@ -8,11 +8,15 @@ fn error(code: usize) -> anyhow::Error {
     anyhow!("zstd: {}", zstd_safe::get_error_name(code))
 }
 
+/// Inputs above this size use long-distance matching when a codec asks for it.
+pub const LONG_FROM: usize = 8 << 20;
+
 /// How a block is compressed.
 #[derive(Clone, Debug, Default)]
 pub struct Codec {
     pub level: i32,
-    /// Long-distance matching with a window that covers the input (at most 128 MiB).
+    /// Long-distance matching with a window that covers the input (at most 128 MiB), for an input
+    /// above the 8 MiB window of level 19; a smaller input gains nothing from it.
     pub long: bool,
     pub dict: Option<Vec<u8>>,
 }
@@ -21,7 +25,7 @@ pub fn compress(data: &[u8], codec: &Codec) -> Result<Vec<u8>> {
     let mut cctx = CCtx::create();
     cctx.set_parameter(CParameter::CompressionLevel(codec.level)).map_err(error)?;
     cctx.set_parameter(CParameter::ContentSizeFlag(true)).map_err(error)?;
-    if codec.long {
+    if codec.long && data.len() > LONG_FROM {
         let window_log = (u64::BITS - (data.len() as u64).leading_zeros() + 1).clamp(10, 27);
         cctx.set_parameter(CParameter::WindowLog(window_log)).map_err(error)?;
         cctx.set_parameter(CParameter::EnableLongDistanceMatching(true)).map_err(error)?;

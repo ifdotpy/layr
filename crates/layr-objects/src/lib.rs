@@ -352,6 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn a_repack_trains_a_dictionary_for_small_loose_blobs() {
+        let dir = scratch("dict");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let file = |i: usize| {
+            format!("// module {i}\nuse std::collections::HashMap;\n\npub fn handler_{i}(map: &HashMap<String, u64>) -> u64 {{\n    map.values().sum::<u64>() * {i}\n}}\n")
+        };
+        for i in 0..200 {
+            store.put_cold_bytes(file(i).as_bytes(), None).unwrap();
+        }
+        assert!(store.stat().unwrap().whole_blobs == 200);
+        store.pack().unwrap();
+        assert_eq!(fs::read_dir(dir.join("store/dicts")).unwrap().count(), 1, "the repack trained one dictionary");
+        let plain = layr_store::zst::compress(file(1000).as_bytes(), None).unwrap().len();
+        let (id, _) = store.put_cold_bytes(file(1000).as_bytes(), None).unwrap();
+        let hex = id.hex();
+        let loose = fs::read(dir.join("store/objects").join(&hex[..2]).join(&hex[2..])).unwrap();
+        assert_eq!(&loose[..6], b"LOB1by", "a small blob uses the dictionary");
+        assert!(loose.len() - 38 < plain, "and is smaller: {} against {plain}", loose.len() - 38);
+        // Another store object reads it (it loads the dictionary), and the next repack packs it raw.
+        let other = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        assert_eq!(other.read_blob(&id).unwrap(), file(1000).as_bytes());
+        store.pack().unwrap();
+        assert_eq!(Store::open(&dir.join("store"), Keying::Plain).unwrap().read_blob(&id).unwrap(), file(1000).as_bytes());
+        assert_eq!(fs::read_dir(dir.join("store/dicts")).unwrap().count(), 1, "the dictionary stays");
+    }
+
+    #[test]
     fn hot_blobs_outside_the_kept_trees_turn_cold() {
         let dir = scratch("evict");
         let src = dir.join("src");

@@ -5,7 +5,7 @@
 //! objects-bench <store> changed <folder> <tree> <times> <path>... [--exclude a,b]
 //! objects-bench <store> checkout <tree> <folder> [--times <id>]
 //! objects-bench <store> verify <original> <copy> [--times]
-//! objects-bench <store> repack [--level N] [--long] [--block BYTES]
+//! objects-bench <store> repack [--level N] [--no-long] [--no-dict] [--block BYTES]
 //! objects-bench <store> matrix [--block BYTES]
 //! objects-bench <store> stat
 //! objects-bench - dictgain <folder>...
@@ -101,7 +101,8 @@ fn main() -> Result<()> {
         }
         Some("repack") => {
             store.options.pack_level = value(rest, "--level").map_or(Ok(19), str::parse)?;
-            store.options.pack_long = flag(rest, "--long");
+            store.options.pack_long = !flag(rest, "--no-long");
+            store.options.train_dict = !flag(rest, "--no-dict");
             if let Some(b) = value(rest, "--block") {
                 store.options.block_size = b.parse()?;
             }

@@ -159,6 +159,7 @@ Type bytes: `b` blob, `t` tree, `m` times, `c` chunk, `o` opaque. Loose bodies:
 
 ```text
 form 'z' whole:    one zstd frame with its content size (zstd level 3)
+form 'y' whole:    dict-id:32   one zstd frame (level 3, content size) made with the store dictionary
 form 'd' delta:    depth:u8   base-id:32   zstd frame that decodes with the base content as a raw prefix
 form 'c' chunked:  count:varint   (chunk-id:32   length:varint)*count
 ```
@@ -171,12 +172,17 @@ form 'c' chunked:  count:varint   (chunk-id:32   length:varint)*count
 - **Chunked:** a cold file of 1 MiB or more without a delta base is cut with the FastCDC chunker of
   the cache remote (`layr_store::chunks`: 16 KiB minimum, 64 KiB average, 256 KiB maximum, fixed
   gear table). Each part is a `chunk` object, so equal parts of large files are stored once.
+- **Dictionary:** a whole blob of at most 64 KiB is written in form `y` once the store has a
+  dictionary. The first repack trains it (zstd's trainer, 112 KiB, from up to 16 MiB of whole blobs
+  of at most 64 KiB in pack order) and stores it as `dicts/<id>`, where the id is the `opaque` id of
+  the dictionary bytes. A store keeps its first dictionary. A reader of a `y` object needs that
+  dictionary; a pack never needs it (packs hold raw content).
 - Delta bases by similarity (a renamed file against a blob with the same name or extension and a
   near size, `WriteOptions::similar`) were measured and are off: they saved 0.05 % (section 15).
 
 ## 6. Packs
 
-A pack holds many objects in zstd blocks. **The same pack format is used locally and on remotes**
+A pack holds many objects in zstd blocks; the writer makes one block per pack (one stream). **The same pack format is used locally and on remotes**
 (S3 stores and Layr Cloud): a repack writes packs, and a push sends them as they are.
 
 ```text
@@ -194,16 +200,17 @@ A pack holds many objects in zstd blocks. **The same pack format is used locally
 - Entries are sorted by id, ids are unique, and each entry lies inside its block's plain bytes.
   `type` is a type byte (section 5). `form` is `r` (raw: the content of a tree, times table, chunk
   or whole blob), `d` (a delta body as in section 5) or `c` (a chunk list).
-- Blocks hold about 4 MiB of plain bytes (an entry larger than a block has a block of its own), at
-  zstd level 19 (section 15 shows why). A read decodes one block; a checkout reads in path order and
-  keeps the last 64 blocks.
+- The writer puts every entry of a pack into one block (one zstd stream) at level 19, with
+  long-distance matching when the block is larger than the 8 MiB window of level 19 (section 15).
+  A reader accepts any number of blocks. A read decodes the block of its entry; a store keeps up to
+  512 MiB of decoded blocks, and a checkout reads in path order, so it decodes each pack about once.
 - A pack holds about 56 MiB of plain bytes, so a compressed pack stays below 64 MiB, the largest
-  single upload of Layr Cloud.
+  single upload of Layr Cloud. A repack compresses one pack per thread.
 - Order inside a pack: the trees and times of the imported states first (they hold ids, which do
   not compress), then blobs and chunks in path order (files of one folder share blocks), then other
   objects.
-- No dictionary: a zstd dictionary trained on small files saves 13 to 20 % on files compressed one
-  by one, but nothing in 4 MiB blocks (section 15).
+- Packs use no dictionary: in a stream of many files it saves nothing (section 15); the store
+  dictionary serves loose frames, which compress one file at a time.
 - **Secret overlays:** the data file and the index are each encrypted with age to the recipient of
   the overlay's key epoch before they leave the machine, and the server names each encrypted file by
   the `opaque` id of its encrypted bytes. The entries inside keep their keyed ids.
@@ -218,6 +225,7 @@ that the pack holds. A crash leaves at most a loose copy too many, which the nex
 <project>/meta/objects/
   config.json             {"ids":"sha256","v":1}   (or "hmac-sha256")
   blobs/ab/cdef...        hot blobs
+  dicts/<id>              the store dictionary (section 5)
   objects/ab/cdef...      loose objects
   packs/<id>.pack .idx    packs
   states/<state id>       {"times":"<id>","tree":"<id>"}
@@ -252,10 +260,12 @@ Two steps, as Git does with loose objects and `git gc`:
 
 1. **Save:** an incremental write reads only the paths that changed since the parent state
    (`write_changed`) and copies everything else from the parent's tree and times table. New blobs
-   are hot (clones) or cold loose objects at zstd level 3. A save of a few files takes milliseconds
+   are hot (clones) or cold loose objects at zstd level 3: a delta against the blob at the same path
+   when there is one, else a frame with the store dictionary for a small file. A save of a few files takes milliseconds
    (section 15).
 2. **Repack** (`layr objects repack`, also run by `layr gc` when a project has an object store):
-   hot blobs outside the hot set turn cold, then every loose object goes into packs at level 19.
+   hot blobs outside the hot set turn cold, the first repack trains the store dictionary, then every
+   loose object goes into packs (one stream per pack, level 19).
 
 ## 11. Large folders (next step)
 

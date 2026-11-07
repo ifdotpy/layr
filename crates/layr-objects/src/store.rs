@@ -31,6 +31,8 @@ const MAGIC: &[u8; 4] = b"LOB1";
 const WHOLE: u8 = b'z';
 const DELTA: u8 = b'd';
 const CHUNKED: u8 = b'c';
+/// A whole small blob compressed with the store dictionary: dict-id:32, then the frame.
+const WHOLE_DICT: u8 = b'y';
 const CONFIG_VERSION: u64 = 1;
 
 /// Size rules of cold writes.
@@ -50,8 +52,10 @@ pub struct Options {
     pub pack_plain_max: usize,
     /// The zstd level of pack blocks: packs are written once and read many times.
     pub pack_level: i32,
-    /// Long-distance matching in pack blocks.
+    /// Long-distance matching in pack blocks (on for a block above the level-19 window of 8 MiB).
     pub pack_long: bool,
+    /// A repack trains the store dictionary for small loose blobs when the store has none.
+    pub train_dict: bool,
 }
 
 /// Whole blobs up to this size are dictionary samples in measurements (`small_blobs`).
@@ -63,10 +67,12 @@ impl Default for Options {
             chunk_min_file: 1 << 20,
             delta_max: 64 << 20,
             max_depth: 16,
-            block_size: 4 << 20,
+            // One zstd stream per pack (docs/objects.md section 15).
+            block_size: 56 << 20,
             pack_plain_max: 56 << 20,
             pack_level: 19,
-            pack_long: false,
+            pack_long: true,
+            train_dict: true,
         }
     }
 }
@@ -105,6 +111,8 @@ pub struct Stat {
     pub packed_objects: u64,
     pub packed_plain_bytes: u64,
     pub pack_bytes: u64,
+    /// The store dictionary (`dicts/`), if a repack trained one.
+    pub dict_bytes: u64,
 }
 
 impl Stat {
@@ -113,7 +121,7 @@ impl Stat {
         self.tree_bytes + self.whole_bytes + self.delta_bytes + self.chunked_bytes + self.chunk_bytes + self.times_bytes
     }
     pub fn total_bytes(&self) -> u64 {
-        self.hot_bytes + self.loose_bytes() + self.pack_bytes
+        self.hot_bytes + self.loose_bytes() + self.pack_bytes + self.dict_bytes
     }
 }
 
@@ -169,9 +177,17 @@ struct PackSet {
 struct BlockCache {
     blocks: HashMap<(Id, u32), Arc<Vec<u8>>>,
     order: VecDeque<(Id, u32)>,
+    bytes: usize,
 }
 
-const CACHED_BLOCKS: usize = 64;
+/// The decoded blocks a store keeps (a pack of one stream is one block of up to 56 MiB).
+const CACHED_BYTES: usize = 512 << 20;
+
+/// Whole blobs up to this size use the store dictionary in their loose frame.
+pub const DICT_FILE_MAX: usize = 64 << 10;
+/// The size of the store dictionary and the sample bytes it learns from.
+pub const DICT_SIZE: usize = 112 << 10;
+const DICT_SAMPLES_BYTES: usize = 16 << 20;
 
 /// What writes added (new objects only: an object that was there counts nowhere).
 #[derive(Debug, Default)]
@@ -194,6 +210,8 @@ pub struct Store {
     pub clone_hook: Option<CloneHook>,
     packs: RwLock<Arc<PackSet>>,
     cache: Mutex<BlockCache>,
+    /// The store dictionary for small whole blobs (`dicts/<id>`), once a repack trained one.
+    dict: RwLock<Option<(Id, Arc<Vec<u8>>)>>,
 }
 
 /// One stored form of a blob, read from the header of its object file.
@@ -208,7 +226,7 @@ pub enum Form {
 impl Store {
     /// Open the store at `root`, made if absent. The id hash of an existing store must match.
     pub fn open(root: &Path, keying: Keying) -> Result<Store> {
-        for dir in ["blobs", "objects", "packs", "states", "tmp"] {
+        for dir in ["blobs", "dicts", "objects", "packs", "states", "tmp"] {
             fs::create_dir_all(root.join(dir)).with_context(|| format!("cannot make {}", root.join(dir).display()))?;
         }
         let config = root.join("config.json");
@@ -238,8 +256,10 @@ impl Store {
             clone_hook: None,
             packs: RwLock::new(Arc::new(PackSet::default())),
             cache: Mutex::new(BlockCache::default()),
+            dict: RwLock::new(None),
         };
         store.reload_packs()?;
+        store.load_dict()?;
         Ok(store)
     }
 
@@ -332,9 +352,11 @@ impl Store {
         let mut cache = self.cache.lock().expect("no panic holds the lock");
         if cache.blocks.insert(key, plain.clone()).is_none() {
             cache.order.push_back(key);
-            if cache.order.len() > CACHED_BLOCKS {
-                if let Some(old) = cache.order.pop_front() {
-                    cache.blocks.remove(&old);
+            cache.bytes += plain.len();
+            while cache.bytes > CACHED_BYTES && cache.order.len() > 1 {
+                let Some(old) = cache.order.pop_front() else { break };
+                if let Some(b) = cache.blocks.remove(&old) {
+                    cache.bytes -= b.len();
                 }
             }
         }
@@ -349,6 +371,18 @@ impl Store {
                 let kind = Kind::from_byte(data[4])?;
                 return Ok(match data[5] {
                     WHOLE => Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? },
+                    WHOLE_DICT => {
+                        ensure!(data.len() > 6 + 32, "object {id} is cut short");
+                        let dict_id = Id(data[6..38].try_into().expect("32 bytes"));
+                        let dict = self.dict_bytes(&dict_id)?;
+                        let frame = &data[38..];
+                        let size = zstd_safe::get_frame_content_size(frame)
+                            .ok()
+                            .flatten()
+                            .ok_or_else(|| anyhow::anyhow!("object {id} has a frame without its size"))?;
+                        ensure!(size <= DICT_FILE_MAX as u64, "object {id} is too large for a dictionary frame");
+                        Payload { kind, form: pack::RAW, bytes: crate::zstdx::decompress(frame, Some(&dict), size as usize)? }
+                    }
                     DELTA => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
                     CHUNKED => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
                     other => bail!("object {id} has unknown form {other:#x}"),
@@ -597,18 +631,88 @@ impl Store {
                 }
             }
         }
-        let whole = (best.is_none() || judge).then(|| layr_store::zst::compress(data, None)).transpose()?;
+        let whole = (best.is_none() || judge).then(|| self.whole_frame(data)).transpose()?;
         match (best, whole) {
-            (Some((frame, base_id, depth)), w) if w.as_ref().is_none_or(|w| frame.len() < w.len()) => {
+            (Some((frame, base_id, depth)), w)
+                if w.as_ref().is_none_or(|(_, prefix, w)| frame.len() < prefix.len() + w.len()) =>
+            {
                 self.write_object(&id, Kind::Blob, DELTA, &[&[depth + 1], &base_id.0, &frame])?;
             }
             _ if len >= self.options.chunk_min_file => self.put_chunked_bytes(id, data)?,
-            (_, Some(w)) => {
-                self.write_object(&id, Kind::Blob, WHOLE, &[&w])?;
+            (_, Some((form, prefix, w))) => {
+                self.write_object(&id, Kind::Blob, form, &[&prefix, &w])?;
             }
             (_, None) => unreachable!("a whole frame exists when no delta wins"),
         }
         Ok((id, len))
+    }
+
+    /// The loose whole frame of a blob: with the store dictionary for a small blob once a repack
+    /// trained one (form `y`, the dictionary id first), else plain (form `z`).
+    fn whole_frame(&self, data: &[u8]) -> Result<(u8, Vec<u8>, Vec<u8>)> {
+        if data.len() <= DICT_FILE_MAX {
+            if let Some((dict_id, dict)) = self.dict.read().expect("no panic holds the lock").clone() {
+                let codec = crate::zstdx::Codec { level: layr_store::zst::LEVEL, long: false, dict: Some(dict.to_vec()) };
+                return Ok((WHOLE_DICT, dict_id.0.to_vec(), crate::zstdx::compress(data, &codec)?));
+            }
+        }
+        Ok((WHOLE, Vec::new(), layr_store::zst::compress(data, None)?))
+    }
+
+    fn load_dict(&self) -> Result<()> {
+        let mut names: Vec<String> = Vec::new();
+        for entry in fs::read_dir(self.root.join("dicts"))? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        // One dictionary per store; the first one written stays.
+        if let Some(name) = names.first() {
+            let id = Id::parse(name)?;
+            let bytes = self.dict_bytes(&id)?;
+            *self.dict.write().expect("no panic holds the lock") = Some((id, bytes));
+        }
+        Ok(())
+    }
+
+    fn dict_bytes(&self, id: &Id) -> Result<Arc<Vec<u8>>> {
+        if let Some((have, bytes)) = self.dict.read().expect("no panic holds the lock").as_ref() {
+            if have == id {
+                return Ok(bytes.clone());
+            }
+        }
+        let bytes = fs::read(self.root.join("dicts").join(id.hex())).with_context(|| format!("dictionary {id} is missing"))?;
+        ensure!(self.keying.id(Kind::Opaque, &bytes) == *id, "dictionary {id} does not match its id");
+        Ok(Arc::new(bytes))
+    }
+
+    /// Train the store dictionary on small whole blobs of `order`, unless the store has one.
+    fn train_dict(&self, order: &[Id]) -> Result<Option<Id>> {
+        if let Some((id, _)) = self.dict.read().expect("no panic holds the lock").as_ref() {
+            return Ok(Some(*id));
+        }
+        let mut samples = Vec::new();
+        let mut total = 0;
+        for id in order {
+            let p = self.payload(id)?;
+            if p.kind == Kind::Blob && p.form == pack::RAW && !p.bytes.is_empty() && p.bytes.len() <= DICT_FILE_MAX {
+                total += p.bytes.len();
+                samples.push(p.bytes);
+                if total >= DICT_SAMPLES_BYTES {
+                    break;
+                }
+            }
+        }
+        if samples.len() < 64 {
+            return Ok(None);
+        }
+        let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+        let dict = crate::zstdx::train(&refs, DICT_SIZE)?;
+        let id = self.keying.id(Kind::Opaque, &dict);
+        let tmp = self.temp();
+        fs::write(&tmp, &dict)?;
+        self.publish(&tmp, &self.root.join("dicts").join(id.hex()))?;
+        self.load_dict()?;
+        Ok(Some(id))
     }
 
     fn put_chunk(&self, chunk: &[u8]) -> Result<Id> {
@@ -782,7 +886,8 @@ impl Store {
                     } else {
                         let data = fs::read(path)?;
                         ensure!(self.keying.id(Kind::Blob, &data) == *id, "hot blob {id} does not match its id");
-                        self.write_object(id, Kind::Blob, WHOLE, &[&layr_store::zst::compress(&data, None)?])?;
+                        let (form, prefix, frame) = self.whole_frame(&data)?;
+                        self.write_object(id, Kind::Blob, form, &[&prefix, &frame])?;
                     }
                 }
                 let cold = self.read_blob_unchecked(id, 0, false)?;
@@ -865,6 +970,9 @@ impl Store {
             s.times_bytes += p.times_bytes;
         }
         s.states = fs::read_dir(self.root.join("states"))?.count() as u64;
+        for entry in fs::read_dir(self.root.join("dicts"))? {
+            s.dict_bytes += entry?.metadata()?.len();
+        }
         for p in &self.reload_packs()?.packs {
             s.packs += 1;
             s.packed_objects += p.index.entries.len() as u64;
@@ -899,21 +1007,43 @@ impl Store {
         }
         report.loose_bytes = loose.values().sum();
         let order = self.pack_order(&loose)?;
+        if self.options.train_dict {
+            self.train_dict(&order)?;
+        }
         let codec = crate::zstdx::Codec { level: self.options.pack_level, long: self.options.pack_long, dict: None };
+        // Full packs wait until there is one for each thread, then compress side by side: a pack of
+        // one stream compresses on one thread.
         let mut builder = Builder::new(self.options.block_size);
+        let mut full: Vec<Builder> = Vec::new();
+        let flush = |full: &mut Vec<Builder>, report: &mut PackReport| -> Result<()> {
+            let done =
+                std::mem::take(full).into_par_iter().map(|b| self.write_pack(b, &codec)).collect::<Result<Vec<PackReport>>>()?;
+            for d in done {
+                report.packs += d.packs;
+                report.objects += d.objects;
+                report.removed += d.removed;
+                report.pack_bytes += d.pack_bytes;
+            }
+            Ok(())
+        };
         for batch in order.chunks(4096) {
             let payloads = batch.par_iter().map(|id| self.payload(id)).collect::<Result<Vec<Payload>>>()?;
             for (id, p) in batch.iter().zip(payloads) {
                 builder.add(*id, p.kind, p.form, &p.bytes);
                 if builder.plain_len() >= self.options.pack_plain_max {
-                    let full = std::mem::replace(&mut builder, Builder::new(self.options.block_size));
-                    self.write_pack(full, &codec, &mut report)?;
+                    full.push(std::mem::replace(&mut builder, Builder::new(self.options.block_size)));
+                    if full.len() >= rayon::current_num_threads() {
+                        flush(&mut full, &mut report)?;
+                    }
                 }
             }
         }
         if !builder.entries.is_empty() {
-            self.write_pack(builder, &codec, &mut report)?;
+            full.push(builder);
         }
+        flush(&mut full, &mut report)?;
+        // Packs written side by side may have read the pack folder before each other's packs.
+        self.reload_packs()?;
         Ok(report)
     }
 
@@ -1020,7 +1150,8 @@ impl Store {
         Ok(())
     }
 
-    fn write_pack(&self, builder: Builder, codec: &crate::zstdx::Codec, report: &mut PackReport) -> Result<()> {
+    fn write_pack(&self, builder: Builder, codec: &crate::zstdx::Codec) -> Result<PackReport> {
+        let mut report = PackReport::default();
         use rayon::prelude::*;
         let Builder { plain, mut entries, .. } = builder;
         let frames = plain.par_iter().map(|b| crate::zstdx::compress(b, codec)).collect::<Result<Vec<_>>>()?;
@@ -1072,7 +1203,7 @@ impl Store {
         report.packs += 1;
         report.objects += index.entries.len() as u64;
         report.pack_bytes += (data.len() + index_bytes.len()) as u64;
-        Ok(())
+        Ok(report)
     }
 
     fn stat_folder(&self, hot: bool, dir: &Path) -> Result<Stat> {
@@ -1091,7 +1222,7 @@ impl Store {
             let (count, bytes) = match (Kind::from_byte(head[4])?, head[5]) {
                 (Kind::Tree, _) => (&mut s.trees, &mut s.tree_bytes),
                 (Kind::Chunk, _) => (&mut s.chunks, &mut s.chunk_bytes),
-                (Kind::Blob, WHOLE) => (&mut s.whole_blobs, &mut s.whole_bytes),
+                (Kind::Blob, WHOLE | WHOLE_DICT) => (&mut s.whole_blobs, &mut s.whole_bytes),
                 (Kind::Blob, DELTA) => (&mut s.delta_blobs, &mut s.delta_bytes),
                 (Kind::Blob, _) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
                 (Kind::Times, _) => (&mut s.times, &mut s.times_bytes),
