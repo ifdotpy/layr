@@ -263,12 +263,19 @@ against its snapshot. A missing or damaged object stops the deletion.
 
 ## How long it takes
 
-Measured on a MacBook Pro (M5 Max, APFS) with other work on the machine at the same time:
+Measured locally on macOS/APFS with a debug build and other tests running (2026-11-07):
 
-| project | states | migration (import and check) | repack | old snapshots | object store |
+| fixture | states | import and verification | repack | total wall time | object store |
 | --- | --- | --- | --- | --- | --- |
-| 10,000 files, 60 states | 60 | MEASURE | MEASURE | MEASURE | MEASURE |
-| the layr repository, last 60 commits | 60 | MEASURE | MEASURE | MEASURE | MEASURE |
+| 10,000 text files, one file changed per save | 60 | 207.4 s | 6.7 s | 231.3 s | 1,002,295 bytes |
+
+The first state read 10,000 files. Each later state read one changed file. Verification still
+checked out and compared every state. These numbers describe this fixture and a debug build;
+they do not predict release-build performance or compression of arbitrary repositories.
+
+Run `benchmarks/migrate-20261107/run.py --binary <layr>` to repeat the measurement. It creates
+its own store under `$TMPDIR` and removes that store afterward. Full output is in
+[`benchmarks/migrate-20261107/result.txt`](../benchmarks/migrate-20261107/result.txt).
 
 The time grows with the number of states and the number of files per state: each state is checked
 out and compared once. A project with large build output in its history takes longer.
