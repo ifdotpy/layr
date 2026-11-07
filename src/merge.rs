@@ -1152,6 +1152,7 @@ mod merge_sides_tests {
             let theirs = root.join("theirs");
             let result = root.join("result");
             let attrs = ".gitattributes merge=binary\nz merge=binary\n";
+            let uid = rustix::process::geteuid().as_raw();
             for (dir, label) in [(&base, "base"), (&ours, "ours"), (&theirs, "theirs")] {
                 std::fs::write(dir.join(".gitattributes"), label)?;
                 std::fs::write(dir.join(".layrattributes"), attrs)?;
@@ -1202,15 +1203,21 @@ mod merge_sides_tests {
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &config,
-                run_as: Some((rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())),
-                allow_root: false,
+                run_as: Some((uid, rustix::process::getegid().as_raw())),
+                // The Linux CI runs the unit tests as root: the derive command runs only when root may run it.
+                allow_root: uid == 0,
             };
             let out = merge_sides(&i, &sides)?;
             assert_eq!(std::fs::read(result.join(".gitattributes"))?, b"ours");
             assert_eq!(std::fs::read(result.join(".layrattributes"))?, std::fs::read(theirs.join(".layrattributes"))?);
             assert_eq!(std::fs::read(result.join("moved"))?, b"moved");
             assert_eq!(std::fs::read(result.join("z"))?, b"ours");
-            assert_eq!(std::fs::read(result.join("source"))?, b"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n");
+            // git merge-file adds a base part with the user's merge.conflictStyle diff3 or zdiff3.
+            let source = std::fs::read_to_string(result.join("source"))?;
+            assert!(
+                source.starts_with("<<<<<<< ours\nours\n") && source.ends_with("=======\ntheirs\n>>>>>>> theirs\n"),
+                "{source}"
+            );
             assert_eq!(std::fs::read(result.join("generated"))?, std::fs::read(result.join("source"))?);
             assert_eq!(
                 out.conflicts.iter().map(|c| (c.path.as_str(), c.kind.as_str())).collect::<Vec<_>>(),
