@@ -29,7 +29,18 @@ eq "save --caches preserves rebuilt output" rebuilt "$(cat target/output)"
 printf '\nnew build input\n' >> notes.txt
 l save -qam "new build input"
 l save -q --caches
+# The machine-local regenerable setting does not reach the peer; track the rule.
+echo 'target regenerable' > .layrattributes
+l add .layrattributes
+l save -q -m "target is a cache"
+l save -q --caches
 new_fs "$T/peer" 2G
+# Saved caches go only to machines that the project trusts.
+peer_self=$(env LAYR_ROOT="$T/peer/store" "$LAYR" remote self --json)
+peer_id=$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+peer_key=$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
+l remote add test-peer ssh://test/cachetest >/dev/null
+ok "trust the peer" l remote trust test-peer "$peer_id" --public-key "$peer_key"
 ok "sync transfers saved caches" peer_exchange sync cachetest -q --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
 env LAYR_ROOT="$T/peer/store" "$LAYR" --project cachetest adopt main >/dev/null
 eq "the peer restores the saved cache" rebuilt "$(cat "$T/peer/store/projects/cachetest/lines/main/target/output")"

@@ -659,6 +659,11 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut moved = l.clone();
     moved.machine = repo.p.store.machine.id.clone();
     repo.materialize(&moved, &start, &w)?;
+    // A live move sends the line's saved caches with sync --caches. A cache that cannot
+    // be taken leaves its folder cold; the source line can still be adopted.
+    if let Err(e) = repo.take_caches(ctx, &moved, &start, Some(&l), &w) {
+        eprintln!("warning: caches of line '{name}' not taken: {e:#}");
+    }
     crate::gitbridge::sync_store_access(repo)?;
     let mut rec = Record::new("line.adopt");
     rec.lines.insert(
