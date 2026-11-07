@@ -6,7 +6,7 @@ Usage: fake-cloud-api.py <folder> <token>. It serves HTTPS on 127.0.0.1 with the
 Test routes under /test/: POST /test/ref {"name","target"}, POST /test/delete {"id"},
 POST /test/minimum {"minimum"}, GET /test/stats.
 """
-import hashlib, http.server, json, os, ssl, sys, threading, urllib.parse
+import faulthandler, hashlib, http.server, json, os, socketserver, ssl, sys, threading, urllib.parse
 
 folder, token = sys.argv[1], sys.argv[2]
 lock = threading.Lock()
@@ -187,11 +187,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.reply(404, {'error': {'code': 'not_found'}})
 
 
-server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+class LocalServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer resolves its address through DNS here. The fixture uses only loopback.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
+
+
+# If startup stalls, the shell test receives a stack trace before its ten-second deadline.
+faulthandler.dump_traceback_later(8)
+server = LocalServer(('127.0.0.1', 0), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(os.path.join(folder, 'tls-cert.pem'), os.path.join(folder, 'tls-key.pem'))
 server.socket = context.wrap_socket(server.socket, server_side=True)
 with open(os.path.join(folder, 'port.tmp'), 'w') as f:
     f.write(str(server.server_address[1]))
 os.rename(os.path.join(folder, 'port.tmp'), os.path.join(folder, 'port'))
+faulthandler.cancel_dump_traceback_later()
 server.serve_forever()
