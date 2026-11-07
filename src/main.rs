@@ -75,6 +75,8 @@ mod stream;
 mod sys;
 #[cfg(target_os = "macos")]
 mod thin;
+#[cfg(target_os = "macos")]
+mod views;
 mod trace;
 mod tree;
 mod usage;

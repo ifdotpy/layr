@@ -1224,6 +1224,7 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     let max = p.config_u64("thin.views", VIEWS) as usize;
     let in_use = p.config_u64("thin.view_seconds", VIEW_IN_USE_SECONDS);
     let dir = p.meta_dir().join("views");
+    let protected = crate::views::protected_states(p);
     let mut stamps: Vec<(std::time::SystemTime, String)> = fs::read_dir(&dir)?
         .flatten()
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().to_string_lossy().into_owned())))
@@ -1233,7 +1234,7 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     }
     stamps.sort_by(|a, b| b.0.cmp(&a.0));
     for (time, id) in stamps.into_iter().skip(max) {
-        if id == made || !crate::model::is_uuid(&id) || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use {
+        if id == made || protected.contains(&id) || !crate::model::is_uuid(&id) || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use {
             continue;
         }
         if !p.delta_path(&id).is_dir() {
@@ -1357,10 +1358,12 @@ pub fn delete_now(p: &Project, id: &str) -> Result<()> {
 /// Remove the views that no command used within `thin.view_seconds`. Returns their count.
 pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
     let limit = p.config_u64("thin.view_seconds", VIEW_SECONDS);
+    // The lower tree of a virtual line is mounted: it stays (docs/views.md).
+    let protected = crate::views::protected_states(p);
     let mut n = 0;
     for id in bases(p)?.into_keys() {
         let full = p.state_path(&id);
-        if keep.contains(&id) || !full.is_dir() {
+        if keep.contains(&id) || protected.contains(&id) || !full.is_dir() {
             continue;
         }
         let age = fs::metadata(view_stamp(p, &id))
@@ -1428,9 +1431,10 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             None => p.delta_path(id).is_dir() && old_layer(&p.delta_path(id)) && !crate::apfs_commit::preserves(p, id)?,
         })
     };
+    let protected = crate::views::protected_states(p);
     let mut queue: Vec<&str> = Vec::new();
     for id in &ids {
-        if crate::model::is_uuid(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
+        if crate::model::is_uuid(id) && !protected.contains(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
             queue.push(id);
         }
     }
@@ -1445,7 +1449,7 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             *n = n.saturating_sub(1);
             if *n == 0 {
                 if let Some(b) = ids.get(b.as_str()) {
-                    if crate::model::is_uuid(b) && gone_record(b)? {
+                    if crate::model::is_uuid(b) && !protected.contains(b) && gone_record(b)? {
                         queue.push(b);
                     }
                 }

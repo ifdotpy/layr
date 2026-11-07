@@ -227,6 +227,39 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
     let resolve_id = |r: &str| revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r });
+    // A virtual line (docs/views.md): its working content is the merged view of its upper folder.
+    #[cfg(target_os = "macos")]
+    if let Some((l, v)) = line.as_ref().and_then(|l| crate::views::of(repo, l).map(|v| (l, v))) {
+        if revs_v.len() <= 1 && !revs_v.iter().any(|r| r.contains("..")) {
+            if a.has("-R") {
+                return Err(super::exit(2, "diff -R is not available in a virtual line yet"));
+            }
+            let (head, merged, list) = crate::views::diff_input(repo, l, &v)?;
+            let (old, list) = match revs_v.first().map(|r| resolve_id(r)).transpose()? {
+                Some(id) if id != l.head => {
+                    let o = repo.state_src(&id)?;
+                    let list = changes::file_changes(&o, &merged)?;
+                    (o, list)
+                }
+                _ => (head, list),
+            };
+            let list: Vec<Change> = list
+                .into_iter()
+                .filter(|c| {
+                    !skip_path(&c.path)
+                        && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+                })
+                .collect();
+            let list = if a.has("--no-renames") { list } else { changes::with_renames(&old, &merged, list) };
+            let fds = diff::file_diffs(&old, &merged, &list)?;
+            let quiet = a.has("--quiet");
+            let problems = if quiet { false } else { print_diffs(ctx, &fds, &opts) };
+            if opts.check && problems {
+                return Ok(2);
+            }
+            return Ok(if (a.has("--exit-code") || quiet) && !fds.is_empty() { 1 } else { 0 });
+        }
+    }
     // (old root, new root, new side is the working content, index for tracked check)
     let mut index_root: Option<Snap> = None;
     let needs_working_view = revs_v.is_empty() || (revs_v.len() == 1 && !revs_v[0].contains(".."));

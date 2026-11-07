@@ -273,6 +273,9 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
             return Err(exit(1, format!("layr {cmd} is not available in an overlay; see 'layr overlay'")));
         }
     }
+    // A virtual line (docs/views.md) takes only the commands that support it.
+    #[cfg(target_os = "macos")]
+    crate::views::guard(ctx, cmd)?;
     match cmd {
         "help" | "--help" | "-h" => {
             ctx.print(HELP);
