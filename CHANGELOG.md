@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.39.0](https://github.com/ifdotpy/layr/compare/v0.38.1...v0.39.0) (2026-11-07)
+
+
+### Features
+
+* **remote:** Private and Public store modes keep plain objects without keys ([#395](https://github.com/ifdotpy/layr/issues/395)) ([32580f1](https://github.com/ifdotpy/layr/commit/32580f101ebd62831bcf2fc9b6a8366cb3e5f730))
+
+
+### Bug Fixes
+
+* **caches:** the copy of a node prune lives outside the work tree; store-version names the layr version ([#411](https://github.com/ifdotpy/layr/issues/411)) ([eb31df9](https://github.com/ifdotpy/layr/commit/eb31df94c552aa34eb1f5fe6837799f2a77846fd))
+* **caches:** a union of two caches takes each cargo unit whole from one side ([#408](https://github.com/ifdotpy/layr/issues/408)) ([106b071](https://github.com/ifdotpy/layr/commit/106b071a9b9d6472fc829add95f5683242803d77))
+* **caches:** a node prune, warm or recovery removes node_modules.layr-broken left by an interrupted restore ([#407](https://github.com/ifdotpy/layr/issues/407)) ([a677418](https://github.com/ifdotpy/layr/commit/a6774185ad57dad4a1b7c362b0aa8f9f39c6fee4))
+* **checks:** a line that checks.lines names after its delete is skipped, not fatal ([#412](https://github.com/ifdotpy/layr/issues/412)) ([e36eb06](https://github.com/ifdotpy/layr/commit/e36eb066820cfbdce7d15ef3f6aabdcd243375b8))
+* **remote:** hash every visited file on push instead of trusting size and mtime ([f6b0c0c](https://github.com/ifdotpy/layr/commit/f6b0c0c67e7529b382db506fa69faf22f3d31d24))
+* **remote:** end the heads index publish loop through its condition ([0d03dc8](https://github.com/ifdotpy/layr/commit/0d03dc8674e3a7df129ae6267280cc7b182ca7bf))
+
+
+### Performance
+
+* **cli:** one epilogue database connection and fewer request allocations ([44b1d42](https://github.com/ifdotpy/layr/commit/44b1d42ee9e9fbd9f46db8010e6539979bbc7f11))
+* **core:** one allocation per output line and a schema check query built once ([35e8c1a](https://github.com/ifdotpy/layr/commit/35e8c1a9195f0e9c9ea280246b29282bd7320ce6))
+* **diff:** batch pin bookkeeping and release diff pins on the open database ([6b5fa95](https://github.com/ifdotpy/layr/commit/6b5fa953f63d6c3cda57c4da1f8c2133edfa1a39))
+* **free:** confirm live pin holders with one batched process lookup ([8437920](https://github.com/ifdotpy/layr/commit/8437920ec4adb781668c740e53bfd99d1076e476))
+* **history:** select imported changes by path before loading blobs ([69cbedf](https://github.com/ifdotpy/layr/commit/69cbedfc21a026f1e6265a38fc80ec89fd75312f))
+* **history:** linear grep, borrowed diff rendering, single-load history walk and shared edit operations ([66234a5](https://github.com/ifdotpy/layr/commit/66234a56f79f3736aaefe8959f3a40fe6e6eb0c6))
+* **line:** record a line batch in one transaction and resolve the author once ([b25a660](https://github.com/ifdotpy/layr/commit/b25a660838475eec0da515ce5304b37a5811aff2))
+* **merge,git:** compute merge sides once, prepare git export once, stream loose objects ([c4b4311](https://github.com/ifdotpy/layr/commit/c4b431111472ee01de70bcdefc67d5d81c103956))
+* **overlay:** open each overlay project once per read helper ([e261cf2](https://github.com/ifdotpy/layr/commit/e261cf29a9aaa65e8d0e72dacbadd314c113bfe3))
+* **overlay:** open each overlay project once per listing ([a0ae614](https://github.com/ifdotpy/layr/commit/a0ae614223866465a1b9d6379dc5b0e24fb56d9d))
+* **radar:** write rebuildable overlap caches without fsync ([85cb425](https://github.com/ifdotpy/layr/commit/85cb4259e39731c4234a852a57efe2a2ae5bd082))
+* **radar:** skip overlap compares when the base is the head or the states match ([05760b1](https://github.com/ifdotpy/layr/commit/05760b1407415601d242d5191da760408c830f55))
+
 ## [0.38.1](https://github.com/ifdotpy/layr/compare/v0.38.0...v0.38.1) (2026-11-06)
 
 
