@@ -373,6 +373,69 @@ fn rerun_checks(root: &Path, f: &mut Vec<Finding>) {
     }
 }
 
+/// The coverage of the last `layr retest gate` (`cover`): its saved findings, with their age.
+fn gate_coverage_findings(root: &Path) -> Vec<Finding> {
+    let path = root.join(crate::record::RECORD_DIR).join(crate::cover::REPORT_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return vec![ok("no gate checked the sweep yet: `layr retest gate -- <gate command>` checks that sweep builds every unit of the gate")];
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return vec![warn(format!("{} is not JSON; the next gate writes it again", path.display()))];
+    };
+    let age = doc["at"].as_u64().map(|at| fmt_age(now_secs().saturating_sub(at))).unwrap_or_else(|| "?".into());
+    let mut out: Vec<Finding> = doc["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| {
+            let text = format!("last gate ({age} ago): {}", x["text"].as_str().unwrap_or_default());
+            if x["warn"].as_bool().unwrap_or(false) { warn(text) } else { ok(text) }
+        })
+        .collect();
+    if !out.iter().any(|f| f.warn) {
+        let (calls, covered) = (doc["calls"].as_u64().unwrap_or(0), doc["covered"].as_u64().unwrap_or(0));
+        out.push(ok(format!("last gate ({age} ago): sweep covers {covered} of its {calls} cargo calls")));
+    }
+    out
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Units that name a source of another folder of the workspace by its absolute path (`relocate::outside_sources`).
+/// One finding per package, with the number of such files and the first ones.
+fn outside_source_findings(root: &Path) -> Vec<Finding> {
+    let target = root.join("target");
+    if !target.is_dir() {
+        return Vec::new();
+    }
+    let mut by_package: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+    for (unit, path) in layr_cache::relocate::outside_sources(&target, root) {
+        // The lib, test and clippy units of a package name the same files.
+        let package = unit.rsplit_once('-').map_or(unit.as_str(), |(p, _)| p).to_string();
+        by_package.entry(package).or_default().insert(path);
+    }
+    if by_package.is_empty() {
+        return vec![ok("no unit names a file of another workspace folder by an absolute path")];
+    }
+    by_package
+        .into_iter()
+        .map(|(package, files)| {
+            let first: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+            let more = if files.len() > 3 { format!(" and {} more", files.len() - 3) } else { String::new() };
+            warn(format!(
+                "{package}: includes {} file(s) out of its package ({}{more}), which cargo names by an absolute path; \
+                 a copy of the workspace at another path builds it again, and a new line keeps it warm only when each file \
+                 has the same bytes there. Move a shared file into the package, or copy it to OUT_DIR in build.rs (watch it \
+                 with a relative rerun-if-changed path) and include it from env!(\"OUT_DIR\")",
+                files.len(),
+                first.join(", ")
+            ))
+        })
+        .collect()
+}
+
 pub fn check(root: &Path) -> Vec<Finding> {
     let mut f = Vec::new();
     if !root.join("Cargo.toml").is_file() {
@@ -489,6 +552,8 @@ pub fn check(root: &Path) -> Vec<Finding> {
         ok(text)
     });
     rerun_checks(root, &mut f);
+    f.extend(outside_source_findings(root));
+    f.extend(gate_coverage_findings(root));
     f
 }
 

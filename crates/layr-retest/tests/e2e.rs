@@ -638,6 +638,90 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A project whose `sweep` builds only the library.
+const COVER_TOML: &str = "[package]\nname = \"covp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--locked\"]]\n";
+const COVER_LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n";
+
+#[test]
+fn gate_names_the_cargo_calls_that_sweep_does_not_cover() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-gate-cover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("project");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), COVER_TOML).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), COVER_LIB).unwrap();
+    cargo(&dir, &["generate-lockfile"]);
+    let lock = tmp.join("gate.lock");
+    // The gate command calls cargo by name, as a justfile or a script does. `-j 2` and `-q` change no unit.
+    let gate = ["--", "sh", "-c", "cargo build --locked -q && cargo test --locked --no-run -q -j 2"];
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("cargo test --locked --no-run -q -j 2: "), "{err}");
+    assert!(err.contains("units that no sweep command builds (first: debug/covp-"), "{err}");
+    assert!(err.contains(r#"Add to sweep in [workspace.metadata.layr-retest]: ["test","--locked","--no-run"]"#), "{err}");
+    // The build call is covered, so it is not named.
+    assert!(!err.contains("cargo build --locked -q:"), "{err}");
+    let report = std::fs::read_to_string(dir.join(".layr-retest/gate-coverage.json")).unwrap();
+    assert!(report.contains("\"calls\": 2"), "{report}");
+    let doctor = run_limited(Command::new("layr").args(["retest", "doctor"]).current_dir(&dir).env("LAYR_ROOT", dir.join("unused-store")));
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    assert!(text.contains("warn: last gate (") && text.contains("units that no sweep command builds"), "{text}");
+
+    // With the entry that the gate printed, sweep covers both calls.
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        COVER_TOML.replace(r#"sweep = [["build", "--locked"]]"#, r#"sweep = [["build", "--locked"], ["test", "--locked", "--no-run"]]"#),
+    )
+    .unwrap();
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep covers the units of all 2 cargo calls of this gate"), "{err}");
+
+    // Nothing that decides the units changed: the gate reuses the result instead of listing again.
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep coverage unchanged (same calls, sweep, manifests, Cargo.lock and toolchain): 2 of 2"), "{err}");
+
+    // A failing gate is not checked.
+    let out = finish(gate_child(&dir, &lock, &["--", "sh", "-c", "cargo build --locked -q && exit 3"]), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("the command failed, so the sweep coverage of its cargo calls is not checked"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn doctor_names_an_include_of_another_workspace_folder() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-doctor-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("project");
+    let files = [
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n"),
+        ("crates/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        // A file of the package itself is named relative to it: not a finding.
+        ("crates/a/src/lib.rs", "pub const OWN: &str = include_str!(\"own.txt\");\npub const OTHER: &str = include_str!(\"../../b/data.txt\");\n"),
+        ("crates/a/src/own.txt", "own"),
+        ("crates/b/Cargo.toml", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("crates/b/src/lib.rs", ""),
+        ("crates/b/data.txt", "data"),
+    ];
+    for (path, text) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    cargo(&dir, &["generate-lockfile"]);
+    cargo(&dir, &["build", "--workspace"]);
+    let out = run_limited(Command::new("layr").args(["retest", "doctor"]).current_dir(&dir).env("LAYR_ROOT", dir.join("unused-store")));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("warn: a: includes 1 file(s) out of its package (crates/b/data.txt)"), "{text}");
+    assert!(!text.contains("own.txt"), "{text}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Stdout of a tool run, for linkage checks.
 fn sh_out(prog: &str, args: &[&str]) -> String {
     let o = run_limited(Command::new(prog).args(args));
