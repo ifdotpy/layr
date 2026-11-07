@@ -2,6 +2,7 @@
 name = "layr-api"
 <<<<<<< head
 <<<<<<< head
+<<<<<<< head
 version.workspace = true
 ||||||| base
 version = "0.37.0"
@@ -13,6 +14,11 @@ version = "0.38.1"
 =======
 version = "0.37.0"
 >>>>>>> ddfca69
+||||||| base
+version = "0.37.0"
+=======
+version.workspace = true
+>>>>>>> dbe40cb
 edition = "2021"
 rust-version.workspace = true
 description = "Typed command and JSON contracts for Layr consumers"
