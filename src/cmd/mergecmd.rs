@@ -1371,7 +1371,7 @@ fn merge_rev_inner(
         if let Some(sid) = recorded_candidate(repo, line, &head, &theirs, a.has("--squash"), &message)? {
             check_paths(ctx, repo, line, rule.as_ref(), &head, &sid)?;
             check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
-            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
+            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, queue, &mut held)?;
             finish(
                 ctx,
                 repo,
