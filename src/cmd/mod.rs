@@ -12,6 +12,7 @@ pub mod followcmd;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
+pub mod objects;
 pub mod oci;
 pub mod overlaycmd;
 pub mod park;
@@ -250,7 +251,7 @@ pub const COMMANDS: &[&str] = &[
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
-    "usage",
+    "usage", "objects",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -344,6 +345,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "clone" => remote::clone(ctx, rest),
         "login" => remote::login(ctx, rest),
         "overlay" => overlaycmd::overlay(ctx, rest),
+        "objects" => objects::objects(ctx, rest),
         "export" => transfer::export(ctx, rest),
         "sync" => remote::sync(ctx, rest),
         "serve-peer" => replicate::serve(ctx, rest),

@@ -1740,6 +1740,14 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
+    // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
+    // without one is not touched.
+    if !a.has("-n") && h.repo.p.meta_dir().join("objects").is_dir() {
+        let (e, p, seconds) = super::objects::repack_store(&h)?;
+        if !a.has("-q") {
+            outln!(ctx, "objects: {} hot blobs turned cold, {} objects into {} packs in {:.1} s", e.blobs, p.objects, p.packs, seconds);
+        }
+    }
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
