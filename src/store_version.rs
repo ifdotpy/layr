@@ -236,11 +236,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<i32> {
         crate::service::Hello::Running { version: Some(v), .. } => Some(serde_json::to_value(v)?),
     };
     if options.has("--json") {
-        let mut out = serde_json::to_value(&report)?;
-        if let Some(d) = &daemon {
-            out["daemon"] = d.clone();
-        }
-        println!("{out}");
+        let typed = daemon.clone().and_then(|d| serde_json::from_value::<layr_api::Daemon>(d).ok());
+        println!("{}", serde_json::to_string(&report.clone().with_daemon(typed))?);
     } else {
         let state = serde_json::to_value(report.state())?;
         let state = state.as_str().context("store state must serialize as a string")?;
