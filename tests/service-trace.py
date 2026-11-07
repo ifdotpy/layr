@@ -11,7 +11,6 @@ import tempfile
 
 binary = str(Path(sys.argv[1]).resolve())
 root = Path(sys.argv[2]).resolve()
-version = json.loads(subprocess.check_output([binary, "store-version", "--json"]))["binary"]
 
 
 def exact(sock, size):
@@ -31,10 +30,12 @@ def request(environment):
         sock.sendall(struct.pack("!I", len(hello)) + hello)
         assert exact(sock, 1) == b"V"
         size = struct.unpack("!I", exact(sock, 4))[0]
-        json.loads(exact(sock, size))
+        # The daemon's own identity (format, version, build and database schema) is the peer the client sends.
+        peer = json.loads(exact(sock, size))
+        peer.pop("root", None)
         payload = json.dumps({
             "argv": ["volume", "list", "--json"], "cwd": str(root),
-            "env": environment, "version": version,
+            "env": environment, "version": peer,
         }).encode()
         with open(os.devnull) as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             directory = os.open(root, os.O_RDONLY)

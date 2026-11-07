@@ -118,6 +118,15 @@ impl StoreState {
     }
 }
 
+/// The daemon of the caller in a store-version report: its binary, busy, or too old to name its version.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Daemon {
+    Running(Version),
+    Busy { busy: bool },
+    Old { version: Option<String> },
+}
+
 /// A metadata upgrade available on the next writable open.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +145,7 @@ pub struct StoreVersionReport {
     state: StoreState,
     upgrade: Option<Upgrade>,
     api: u32,
+    daemon: Option<Daemon>,
 }
 
 /// A report whose state, stored format, or upgrade contradicts its other fields.
@@ -174,7 +184,18 @@ impl StoreVersionReport {
         if !valid_store || !valid_upgrade {
             return Err(InvalidReport);
         }
-        Ok(Self { binary, store, state, upgrade, api })
+        Ok(Self { binary, store, state, upgrade, api, daemon: None })
+    }
+
+    /// The report with the daemon of the caller: its version (`format`, `version`, `build`), `{"busy": true}`, or
+    /// `{"version": null}` for a daemon too old to name it. None: no daemon answers.
+    pub fn with_daemon(mut self, daemon: Option<Daemon>) -> Self {
+        self.daemon = daemon;
+        self
+    }
+
+    pub fn daemon(&self) -> Option<&Daemon> {
+        self.daemon.as_ref()
     }
 
     pub fn binary(&self) -> &Version {
@@ -212,6 +233,8 @@ struct WireReport {
     state: StoreState,
     upgrade: Option<Upgrade>,
     api: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon: Option<Daemon>,
 }
 
 impl TryFrom<WireReport> for StoreVersionReport {
@@ -221,7 +244,7 @@ impl TryFrom<WireReport> for StoreVersionReport {
         if wire.compatible != wire.state.compatible() {
             return Err(InvalidReport);
         }
-        Self::new(wire.binary, wire.store, wire.state, wire.upgrade, wire.api)
+        Ok(Self::new(wire.binary, wire.store, wire.state, wire.upgrade, wire.api)?.with_daemon(wire.daemon))
     }
 }
 
@@ -234,6 +257,7 @@ impl From<StoreVersionReport> for WireReport {
             state: report.state,
             upgrade: report.upgrade,
             api: report.api,
+            daemon: report.daemon,
         }
     }
 }

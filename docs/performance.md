@@ -112,4 +112,32 @@ Raw data: [1,000 files](../benchmarks/results/apfs-complete-1000.json)
 and [10,000 files](../benchmarks/results/apfs-complete-10000.json).
 
 
+### APFS fast-forward merge and `line new` (2026-11-07)
+
+A fast-forward `merge` of 1 to 10 changed files cost seconds for 10,000 files. The time went to whole-tree work:
+
+- A copy of the whole working folder for the status, its seal, and a delete of the copy after the merge.
+  The delete ran after the store lock and had no trace span.
+- A complete view of the thin new head for the update of the working folder, and again for the cache paths of
+  the `save --caches` after the merge.
+- `line new` from a thin head made a complete view first and then copied the view.
+
+Now `merge`, `pick` and `replay` read the status in place, as `status` does. A fast-forward reads the layers of
+both heads. `line new` clones the bottom of the layers and applies the layers to the new folder.
+The cost of a fast-forward follows the changed paths and one metadata scan of the working folder.
+
+Median of trials on one host, 10,000 files of 4 KiB, on the internal SSD. Other agents ran builds and tests,
+with a one-minute load average from 44 to 112. The base is `e36eb06`. The binaries alternate in each round.
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| `merge`, fast-forward of 10 files (`benchmarks/backends.py`, 3 rounds) | 6.97 s | 1.06 s |
+| `merge`, fast-forward of 1 file (`benchmarks/apfs-thin-head.py`, 6 trials) | 3.25 s | 0.71 s |
+| `line new` from a thin head without a view (`benchmarks/apfs-thin-head.py`, 6 trials) | 1.62 s | 0.73 s |
+| `line new` from a complete state (`benchmarks/backends.py`, 3 rounds) | 3.22 s | 3.46 s |
+
+`line new` from a complete state did not change: it is one clone of the tree and one flag change per entry.
+States keep the immutable flag on each entry, and a clone copies it, so the new folder needs that pass.
+Raw data: [fast-forward merge and line new](../benchmarks/results/apfs-ff-merge-line-new-10000.json).
+
 For purpose-specific hashing, see [layr-hashers](../crates/layr-hashers/README.md).

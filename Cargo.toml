@@ -3,6 +3,8 @@ members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/
 resolver = "2"
 
 [workspace.package]
+# The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
+version = "0.40.0"
 rust-version = "1.99.1"
 
 [workspace.metadata.layr-retest]
@@ -16,7 +18,7 @@ env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
 
 [package]
 name = "layr"
-version = "0.38.1"
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Local version control on btrfs, APFS and OverlayFS"

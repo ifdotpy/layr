@@ -126,15 +126,14 @@ thread_local! {
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     let _t = crate::trace::span("prepare merge");
     repo.prepare_save(line)?;
-    repo.prepare_status(line)?;
+    repo.prepare_status_report(line)?;
     let theirs = revs::resolve(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
         return Ok(());
     }
     if repo.is_ancestor(head, &theirs)? {
-        // A fast-forward reads the tree of the new head.
-        repo.state_root(&theirs)?;
+        // A fast-forward reads the layers of the new head (`finish`): it needs no complete tree.
         return Ok(());
     }
     let Some(base) = repo.merge_base(head, &theirs)? else { return Ok(()) };
@@ -217,7 +216,7 @@ fn prepare_steps(
 #[cfg(target_os = "macos")]
 fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
     let _t = crate::trace::span("prepare replay");
-    repo.prepare_status(line)?;
+    repo.prepare_status_report(line)?;
     if repo.merge_base(&line.head, upstream)?.is_none() {
         return Ok(Vec::new());
     }
@@ -479,6 +478,7 @@ fn finish(
     let mut pending = Pending { repo, write: None, states, ovl, done: false };
     repo.check_move(ctx, line, new_head)?;
     if op == "merge" && new_head != line.head {
+        let _t = crate::trace::span("finish: secrets check");
         crate::secrets::check_between(ctx, repo, &repo.state_src(&line.head)?, &repo.state_src(new_head)?, &line.head)?;
     }
     // A line with overlays: the full trees of the old and the new head, with the overlays in
@@ -487,15 +487,20 @@ fn finish(
         Some(o) if o.changed() => o.layers.clone(),
         _ => repo.layers(line)?,
     };
+    let trees = crate::trace::span("finish: trees");
+    // Without overlays both trees are read in their layers: a complete view of a thin state
+    // cost one clone of the whole tree, also for a fast-forward that changes one file.
     let view = if layers.is_empty() { None } else { Some(repo.assemble(line, new_head, &layers)?) };
-    let old_root = repo.head_tree(line)?;
+    let old_root = repo.head_src_to_write(line)?;
     let new_root = match &view {
-        Some(v) => v.path.clone(),
-        None => repo.state_root(new_head)?,
+        Some(v) => crate::repo::snap(&v.path),
+        None => repo.state_src_to_write(new_head)?,
     };
+    drop(trees);
     let wdir = repo.working(line);
     let own = repo.own(line);
     let applied = repo.apply_delta(&old_root, &new_root, &wdir, own, local, false)?;
+    let record = crate::trace::span("finish: head record");
     pending.write = Some(crate::repo::WorkingWrite::new(repo, wdir, own, old_root, new_root, view));
     let mut data = data;
     if let Some(o) = ovl.filter(|o| o.changed()) {
@@ -510,6 +515,7 @@ fn finish(
     let mut rec = repo.head_record(ctx, op, line, new_head, pending.states.clone(), working_before, data)?;
     // The states of the record include the snapshot of the working folder after the move.
     pending.states = rec.states.clone();
+    drop(record);
     let view = repo.commit_line(line, &line.head, |now| {
         if let Some(q) = queue {
             rec.data =
@@ -532,6 +538,7 @@ fn finish(
         return Err(e);
     }
     pending.done = true;
+    let _t = crate::trace::span("finish: after commit");
     let view = pending.write.take().and_then(|w| w.commit());
     if let Some(v) = view {
         repo.install_base(line, v, new_head, &layers)?;
@@ -1024,6 +1031,27 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
 /// queue entry stays pending.
 #[derive(Debug)]
 pub struct ChecksWaiting(pub String);
+
+/// The candidate that an earlier queue pass recorded (`merge.candidate`) for the same merge: `theirs` into `line` at
+/// `head`, the same squash choice and message, with its tree on this machine. None: the pass makes a new one.
+fn recorded_candidate(repo: &Repo, line: &Line, head: &str, theirs: &str, squash: bool, message: &str) -> Result<Option<String>> {
+    for rec in repo.p.db.records_with_op("merge.candidate")?.into_iter().rev() {
+        let d = &rec.data;
+        if d["line"].as_str() == Some(&line.id)
+            && d["theirs"].as_str() == Some(theirs)
+            && d["head"].as_str() == Some(head)
+            && d["squash"].as_bool() == Some(squash)
+            && d["message"].as_str() == Some(message)
+        {
+            if let Some(st) = rec.states.first() {
+                if st.parents.first().map(String::as_str) == Some(head) && repo.tree_available(&st.id) {
+                    return Ok(Some(st.id.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 impl std::fmt::Display for ChecksWaiting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -1234,7 +1262,10 @@ fn merge_rev_inner(
         }
         return Ok(0);
     }
-    let st = repo.locked_status(line)?.0;
+    let st = {
+        let _t = crate::trace::span("merge: locked status");
+        repo.locked_status_report(line)?
+    };
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
@@ -1334,6 +1365,31 @@ fn merge_rev_inner(
             return Err(exit(128, format!("fatal: refusing to merge unrelated histories ({rev})")));
         }
     };
+    // A queued merge that waits for its checks keeps its candidate: the next pass (also a fresh clone that fetched
+    // the record) takes the same state while the target head is the same, so the runners check one state.
+    if queue.is_some() && (!checks.is_empty() || run_probes) && !ovl.changed() {
+        if let Some(sid) = recorded_candidate(repo, line, &head, &theirs, a.has("--squash"), &message)? {
+            check_paths(ctx, repo, line, rule.as_ref(), &head, &sid)?;
+            check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
+            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
+            finish(
+                ctx,
+                repo,
+                line,
+                "merge",
+                &sid,
+                Vec::new(),
+                w,
+                &local,
+                serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": 0, "candidate": sid}),
+                Some(&ovl),
+                queue,
+                Some(&settled),
+            )?;
+            report(ctx);
+            return Ok(0);
+        }
+    }
     let parents = if a.has("--squash") { vec![head.clone()] } else { vec![head.clone(), theirs.clone()] };
     let (state, out) = merge_states(ctx, repo, line, &base, &head, &theirs, &label, parents, &message)?;
     let sid = state.id.clone();
@@ -1367,7 +1423,8 @@ fn merge_rev_inner(
         // that the line will take, and a failed result stays for inspection.
         let mut rec = Record::new("merge.candidate");
         rec.states = states.clone();
-        rec.data = serde_json::json!({"line": line.id, "theirs": theirs});
+        rec.data =
+            serde_json::json!({"line": line.id, "theirs": theirs, "head": head, "squash": a.has("--squash"), "message": message});
         if let Err(e) = repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
             crate::repo::discard_unrecorded(repo, &states);
             ovl.discard(repo);
@@ -1479,7 +1536,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     #[cfg(target_os = "macos")]
     let prepared = (|| -> Result<Vec<PreparedStep>> {
         let _t = crate::trace::span("prepare pick");
-        repo.prepare_status(&line)?;
+        repo.prepare_status_report(&line)?;
         let chain = picks.iter().map(|p| pair(p).map(|(b, t)| (b, t, ids::short(p)))).collect::<Result<Vec<_>>>()?;
         prepare_steps(ctx, repo, &line, &line.head, chain)
     })()
@@ -1492,7 +1549,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         let mut line = repo.line(&line.id)?;
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
         let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
-        let st = repo.locked_status(&line)?.0;
+        let st = repo.locked_status_report(&line)?;
         if !st.staged.is_empty() {
             return Err(exit(1, "error: you have staged changes; save or park them first."));
         }
@@ -1822,7 +1879,7 @@ fn replay_locked(
     // The merges prepared before the lock hold when the line did not move.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
     let mut steps: Steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
-    let st = repo.locked_status(&line)?.0;
+    let st = repo.locked_status_report(&line)?;
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }

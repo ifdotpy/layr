@@ -111,9 +111,25 @@ try:
     run(work, 'save', '-qm', 'remove one file of a folder')
     assert run(work, 'show', 'head:d7/f701').stdout == 'file 701\n'
 
-    # A line made from a thin head has the complete content.
+    # A line made from a thin head has the complete content. It is made from the layers: a complete view
+    # of the head first would clone the whole tree twice.
+    def drop_view(state):
+        """Delete the complete view of a thin state, as gc does for an unused one."""
+        view = project / 'states' / state
+        assert (project / 'deltas' / state).is_dir()
+        if view.exists():
+            subprocess.run(['chflags', '-R', 'nouchg', str(view)])
+            shutil.rmtree(view, ignore_errors=True)
+        assert not view.exists(), view
+    drop_view(head(work))
+    views = set(os.listdir(project / 'states'))
     run(work, 'line', 'new', '-q', 'second')
     assert tree(main.parent / 'second') == tree(work)
+    assert set(os.listdir(project / 'states')) == views, 'line new made a view'
+    for dirpath, dirs, files in os.walk(main.parent / 'second'):
+        dirs[:] = [d for d in dirs if d != '.git']
+        for name in dirs + files:
+            assert not os.lstat(os.path.join(dirpath, name)).st_flags & stat.UF_IMMUTABLE, os.path.join(dirpath, name)
     print('PASS a line made from a thin head has the complete content', flush=True)
 
     # Automatic states are thin too; an unchanged folder makes none.
@@ -192,9 +208,13 @@ try:
     run(work, 'save', '-qm', 'after writes')
     print('PASS copies succeed while files change', flush=True)
 
-    # A merge reads thin states and its result matches the line.
+    # A merge reads thin states and its result matches the line. A fast-forward reads the layers of the new
+    # head: it makes no complete view of it.
+    drop_view(head(work))
+    views = set(os.listdir(project / 'states'))
     run(main, 'merge', '-q', 'topic')
     assert tree(main) == tree(work)
+    assert set(os.listdir(project / 'states')) == views, 'a fast-forward made a view'
     run(main, 'fsck')
     run(work, 'fsck')
     print('PASS a merge of thin states matches the line, and fsck passes', flush=True)
