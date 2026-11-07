@@ -345,7 +345,11 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             bail!("automatic line '{line}' must be protected");
         }
         let checks = names("checks.lines", checks)?;
-        let line = repo.line(line)?;
+        // A line that the setting names but that is gone (deleted) plans nothing; the other lines still run.
+        let Some(line) = repo.p.db.line_by_name(line)? else {
+            eprintln!("layr checks: checks.lines names line '{line}', which does not exist; it is skipped");
+            continue;
+        };
         for (_, head) in repo.p.db.line_heads(&line.id)? {
             for name in &checks {
                 jobs.insert((head.clone(), name.clone()));
