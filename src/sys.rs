@@ -117,6 +117,195 @@ pub fn inherit_background(cmd: &mut Command) {
 #[cfg(not(target_os = "macos"))]
 pub fn inherit_background(_cmd: &mut Command) {}
 
+/// Start the child in a new session, so that it outlives the caller's session and process group
+/// (the LayrFS server that a tool call starts).
+pub fn new_session(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe and uses no memory of the parent.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+/// A minimal FSEvents stream: file-level events of one folder on a private dispatch queue, with
+/// a synchronous flush (`FSEventStreamFlushSync`) as the barrier for queries.
+#[cfg(target_os = "macos")]
+pub mod fsevents {
+    use std::ffi::{c_char, c_void, CStr};
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    type CFRef = *const c_void;
+
+    #[repr(C)]
+    struct Context {
+        version: isize,
+        info: *mut c_void,
+        retain: *const c_void,
+        release: *const c_void,
+        copy_description: *const c_void,
+    }
+
+    type Callback = extern "C" fn(*const c_void, *mut c_void, usize, *mut c_void, *const u32, *const u64);
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithBytes(alloc: CFRef, bytes: *const u8, len: isize, encoding: u32, external: u8) -> CFRef;
+        fn CFArrayCreate(alloc: CFRef, values: *const CFRef, count: isize, callbacks: *const c_void) -> CFRef;
+        fn CFRelease(r: CFRef);
+        static kCFTypeArrayCallBacks: c_void;
+    }
+
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        fn FSEventStreamCreate(
+            alloc: CFRef,
+            callback: Callback,
+            context: *const Context,
+            paths: CFRef,
+            since: u64,
+            latency: f64,
+            flags: u32,
+        ) -> *mut c_void;
+        fn FSEventStreamSetDispatchQueue(stream: *mut c_void, queue: *mut c_void);
+        fn FSEventStreamStart(stream: *mut c_void) -> u8;
+        fn FSEventStreamFlushSync(stream: *mut c_void);
+        fn FSEventStreamStop(stream: *mut c_void);
+        fn FSEventStreamInvalidate(stream: *mut c_void);
+        fn FSEventStreamRelease(stream: *mut c_void);
+    }
+
+    extern "C" {
+        fn dispatch_queue_create(label: *const c_char, attr: *const c_void) -> *mut c_void;
+        fn dispatch_release(object: *mut c_void);
+    }
+
+    const UTF8: u32 = 0x0800_0100;
+    const SINCE_NOW: u64 = u64::MAX;
+    const NO_DEFER: u32 = 0x02;
+    const WATCH_ROOT: u32 = 0x04;
+    const FILE_EVENTS: u32 = 0x10;
+
+    pub const MUST_SCAN_SUBDIRS: u32 = 0x01;
+    pub const USER_DROPPED: u32 = 0x02;
+    pub const KERNEL_DROPPED: u32 = 0x04;
+    pub const ROOT_CHANGED: u32 = 0x20;
+    pub const ITEM_CREATED: u32 = 0x100;
+    pub const ITEM_REMOVED: u32 = 0x200;
+    pub const ITEM_RENAMED: u32 = 0x800;
+    pub const ITEM_IS_DIR: u32 = 0x2_0000;
+    pub const ITEM_IS_SYMLINK: u32 = 0x4_0000;
+
+    /// Receives each batch of (absolute path, event flags).
+    pub type Handler = Box<dyn Fn(Vec<(PathBuf, u32)>) + Send + Sync>;
+
+    pub struct Stream {
+        stream: *mut c_void,
+        queue: *mut c_void,
+        handler: *mut Handler,
+    }
+
+    // SAFETY: FSEvents streams and dispatch queues may be used from any thread; the handler box
+    // is read only by the callback on the stream's queue and freed after invalidation.
+    unsafe impl Send for Stream {}
+    unsafe impl Sync for Stream {}
+
+    extern "C" fn callback(
+        _stream: *const c_void,
+        info: *mut c_void,
+        count: usize,
+        paths: *mut c_void,
+        flags: *const u32,
+        _ids: *const u64,
+    ) {
+        // SAFETY: FSEvents passes the context's info pointer (a live `Handler` box) and `count`
+        // C strings and flags that are valid during the call.
+        let handler = unsafe { &*(info as *const Handler) };
+        let paths = paths as *const *const c_char;
+        let mut batch = Vec::with_capacity(count);
+        for i in 0..count {
+            // SAFETY: see above; `i < count`.
+            let (path, flag) = unsafe { (CStr::from_ptr(*paths.add(i)), *flags.add(i)) };
+            batch.push((PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())), flag));
+        }
+        handler(batch);
+    }
+
+    impl Stream {
+        /// Watch `root` (a canonical path) from now on.
+        pub fn start(root: &Path, handler: Handler) -> io::Result<Stream> {
+            let bytes = root.as_os_str().as_bytes();
+            let handler = Box::into_raw(Box::new(handler));
+            let context = Context {
+                version: 0,
+                info: handler as *mut c_void,
+                retain: std::ptr::null(),
+                release: std::ptr::null(),
+                copy_description: std::ptr::null(),
+            };
+            // SAFETY: CoreFoundation and FSEvents calls with live arguments; each created object
+            // is released here or in `Drop`, and the handler box is freed on every error path.
+            unsafe {
+                let s = CFStringCreateWithBytes(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0);
+                if s.is_null() {
+                    drop(Box::from_raw(handler));
+                    return Err(io::Error::other("the path is not UTF-8"));
+                }
+                let values = [s];
+                let array = CFArrayCreate(std::ptr::null(), values.as_ptr(), 1, &kCFTypeArrayCallBacks as *const c_void);
+                CFRelease(s);
+                let stream = FSEventStreamCreate(
+                    std::ptr::null(),
+                    callback,
+                    &context,
+                    array,
+                    SINCE_NOW,
+                    0.0,
+                    NO_DEFER | WATCH_ROOT | FILE_EVENTS,
+                );
+                CFRelease(array);
+                if stream.is_null() {
+                    drop(Box::from_raw(handler));
+                    return Err(io::Error::other("FSEventStreamCreate failed"));
+                }
+                let queue = dispatch_queue_create(c"ws.layr.fs.events".as_ptr(), std::ptr::null());
+                FSEventStreamSetDispatchQueue(stream, queue);
+                if FSEventStreamStart(stream) == 0 {
+                    FSEventStreamInvalidate(stream);
+                    FSEventStreamRelease(stream);
+                    dispatch_release(queue);
+                    drop(Box::from_raw(handler));
+                    return Err(io::Error::other("FSEventStreamStart failed"));
+                }
+                Ok(Stream { stream, queue, handler })
+            }
+        }
+
+        /// Deliver every event that happened before this call to the handler, and wait for it.
+        pub fn flush(&self) {
+            // SAFETY: the stream is started and not yet invalidated.
+            unsafe { FSEventStreamFlushSync(self.stream) }
+        }
+    }
+
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            // SAFETY: after stop and invalidate no callback runs, so the handler can be freed.
+            unsafe {
+                FSEventStreamStop(self.stream);
+                FSEventStreamInvalidate(self.stream);
+                FSEventStreamRelease(self.stream);
+                dispatch_release(self.queue);
+                drop(Box::from_raw(self.handler));
+            }
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod priority_tests {
     use super::{IOPRIO_BE_LOWEST, IOPRIO_CLASS_BE, IOPRIO_CLASS_SHIFT, IOPRIO_WHO_PROCESS, NICE_LOWEST};

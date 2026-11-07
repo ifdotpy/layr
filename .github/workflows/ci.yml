@@ -29,7 +29,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq btrfs-progs zstd git python3 docker-registry skopeo apache2-utils bubblewrap attr
+          sudo apt-get install -y -qq btrfs-progs zstd git python3 docker-registry skopeo apache2-utils bubblewrap attr ripgrep
           # t30-oci also uses helm, which the runner image has.
           command -v helm
       # t36-aws-profile uses MinIO. Its project stopped publishing binaries and images, so CI
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: brew install coreutils gnu-sed zstd
+        run: brew install coreutils gnu-sed zstd ripgrep
       - name: Set up Node.js for npm adapter tests
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
