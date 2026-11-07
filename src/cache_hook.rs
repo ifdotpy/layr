@@ -411,6 +411,20 @@ fn kill_group(pid: u32) {
     let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
 }
 
+/// The worker and its processes (cargo, pnpm) stop when the layr process that started it goes (a daemon restart, a
+/// killed command): nobody waits for them any more, and they must not keep writing a cache folder that the next
+/// pass copies or builds. The worker leads its process group, so one kill of the group stops all of them.
+fn stop_when_orphaned() {
+    let parent = rustix::process::getppid();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if rustix::process::getppid() != parent {
+            kill_group(std::process::id());
+            std::process::exit(1);
+        }
+    });
+}
+
 /// The worker (`__cache-hook`): runs the mode and the adapter that its environment names, and prints the
 /// report. Exit code 0 when a report was printed.
 pub fn worker() -> i32 {
@@ -419,6 +433,7 @@ pub fn worker() -> i32 {
 
 /// The worker with the adapters given (tests use fake adapters).
 pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
+    stop_when_orphaned();
     let var = |k: &str| std::env::var(k).unwrap_or_default();
     let setting = var(ENV_SETTING);
     let setting = (setting != "-").then_some(setting);
