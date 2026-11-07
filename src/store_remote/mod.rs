@@ -196,7 +196,7 @@ impl Store {
         let mut api = self.backend.api().context("layr login is for Layr Cloud remotes (layr+https, Public or Private)")?.clone();
         api.set_token(None);
         let start = api.login_start()?;
-        show(&start.link);
+        show(api.login_link(&start.link)?.as_str());
         let deadline = if start.expires > 0 { start.expires } else { crate::ids::now_ms() + 600_000 };
         let session = loop {
             if let Some(session) = api.login_poll(&start.code)? {

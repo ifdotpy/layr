@@ -642,6 +642,20 @@ impl Api {
         }
     }
 
+    /// The sign-in link to show: a relative link joins the remote origin; an absolute one must name the same origin
+    /// over HTTPS, so a server answer cannot send the person to another site.
+    pub(crate) fn login_link(&self, link: &str) -> Result<reqwest::Url> {
+        let url = self.origin.join(link).map_err(|_| anyhow!("Layr Cloud gave an invalid sign-in link"))?;
+        let https = url.scheme() == "https" || (cfg!(test) && url.scheme() == self.origin.scheme());
+        if !https
+            || url.host_str() != self.origin.host_str()
+            || url.port_or_known_default() != self.origin.port_or_known_default()
+        {
+            bail!("Layr Cloud gave a sign-in link outside {}; nothing is shown", self.origin);
+        }
+        Ok(url)
+    }
+
     pub(crate) fn login_start(&self) -> Result<LoginStart> {
         let url = self.origin.join("api/v1/login")?;
         let response = self.send(false, || self.request(Method::POST, url.clone()))?;

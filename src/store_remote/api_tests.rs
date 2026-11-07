@@ -129,11 +129,7 @@ impl Fake {
         let write = request.method != "GET";
         if request.path.starts_with("/api/v1/login") {
             if request.path == "/api/v1/login" {
-                return (
-                    200,
-                    json(serde_json::json!({"code":"c1","link":"https://cloud.test/login/c1","expires":0})),
-                    Vec::new(),
-                );
+                return (200, json(serde_json::json!({"code":"c1","link":"/#/login?code=c1","expires":0})), Vec::new());
             }
             s.login_polls += 1;
             if s.login_polls < 2 {
@@ -618,7 +614,14 @@ fn login_polls_until_the_person_signs_in_then_saves_the_session_and_registers_th
     let shown = std::cell::RefCell::new(String::new());
     let login = store.login(&ctx, |link| *shown.borrow_mut() = link.into()).unwrap();
     assert_eq!(login, "ann@example.com");
-    assert_eq!(*shown.borrow(), "https://cloud.test/login/c1");
+    // The relative link joins the remote origin.
+    assert_eq!(*shown.borrow(), format!("{}#/login?code=c1", fake.origin));
+    // A link to another host or with another scheme is refused.
+    let api = fake.api();
+    for bad in ["https://evil.test/#/login?code=c1", "javascript:alert(1)", "//evil.test/login", "file:///etc/passwd"] {
+        assert!(api.login_link(bad).is_err(), "{bad}");
+    }
+    assert_eq!(api.login_link("login/c2").unwrap().as_str(), format!("{}login/c2", fake.origin));
     assert!(fake.state.lock().unwrap().machines.contains_key(&store.machine));
     let path = super::api::session_file(&ctx.caller.home, "127.0.0.1");
     use std::os::unix::fs::PermissionsExt;
