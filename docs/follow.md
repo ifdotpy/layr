@@ -49,10 +49,13 @@
    - The tracked files get the source times that the taken caches recorded (`.layr-times`,
      docs/cache-overlays.md section 20).
    - The build: the adapter of each folder overlay builds the project's standard commands into the
-     folder (`warm`, as the line owner, limit 30 min; cargo: the `sweep` list with the project env; pnpm:
+     folder (`warm`, as the line owner, limit 120 min; cargo: the `sweep` list with the project env; pnpm:
      `pnpm install --frozen-lockfile`, online, from a copy that a failure puts back). A
      change that came without a cache (a branch that no line here pushed) is built once here, so the
      lines from this line start warm. A failed or stopped build is one log line; the save still runs.
+     A save in the line during the build (another agent commits) moves the head, so the output fits
+     neither head: the build runs again for the new head, at most 3 times. A head that still moves
+     leaves the unbuilt mark, and the next pass builds again.
    - `layr save --caches` for the line: it prunes each folder first (the adapter's `prune`).
 6. Record the result in the project meta folder (`follow.json`, this machine only): time, ok, text.
 

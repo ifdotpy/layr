@@ -157,6 +157,30 @@ pub fn last_result(repo: &Repo, line: &Line) -> Result<Option<Last>> {
 /// Unsaved work: a change or a conflict in the working folder. Untracked files are not unsaved work: the
 /// merge keeps them and refuses a state that writes one of their paths. Ignored files (build output and
 /// caches) are not unsaved work either.
+/// The tries of the follow build while the line head moves under it.
+const BUILD_TRIES: usize = 3;
+
+/// Runs `build` until the head that `head` reads is the same before and after it (a save in the line during the build
+/// changes the sources, so the output fits neither head), at most `BUILD_TRIES` times. True when the last build
+/// succeeded and the head stayed: false leaves the line unbuilt, and its next pass builds again.
+fn build_while_head_moves(
+    head: impl Fn() -> Result<String>,
+    mut build: impl FnMut() -> bool,
+    mut moved: impl FnMut(&str),
+) -> Result<bool> {
+    let mut before = head()?;
+    for _ in 0..BUILD_TRIES {
+        let built = build();
+        let after = head()?;
+        if after == before {
+            return Ok(built);
+        }
+        moved(&after);
+        before = after;
+    }
+    Ok(false)
+}
+
 fn has_unsaved(st: &Status) -> bool {
     !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicts.is_empty())
 }
@@ -318,9 +342,11 @@ impl<'a> Repo<'a> {
         // build runs once here, so the lines from this line start warm (docs/follow.md).
         let mut built = true;
         if warm {
-            for folder in &folders {
-                built &= self.warm_cache_folder(line, folder);
-            }
+            built = build_while_head_moves(
+                || Ok(self.line(&line.id)?.head),
+                || folders.iter().fold(true, |all, folder| self.warm_cache_folder(line, folder) & all),
+                |head| eprintln!("layr: line {} moved to {head} during the cache build; building again", line.name),
+            )?;
         }
         // Prunes each taken folder, then saves the caches of the line.
         // The follow pass runs in the background, so its prune may take long on a loaded machine.
@@ -471,9 +497,60 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
 
 #[cfg(test)]
 mod tests {
-    use super::repo_key;
+    use super::{build_while_head_moves, repo_key, BUILD_TRIES};
     use crate::repo::Repo;
     use std::time::Duration;
+
+    #[test]
+    fn a_head_move_during_the_build_builds_again_for_the_new_head() {
+        use std::cell::{Cell, RefCell};
+        // The head moves during the first build only: the second build is for the new head, and it counts.
+        let heads = RefCell::new(vec!["h1", "h2", "h2"].into_iter());
+        let builds = Cell::new(0);
+        let mut moves = Vec::new();
+        let built = build_while_head_moves(
+            || Ok(heads.borrow_mut().next().unwrap().to_string()),
+            || {
+                builds.set(builds.get() + 1);
+                true
+            },
+            |h| moves.push(h.to_string()),
+        )
+        .unwrap();
+        assert!(built);
+        assert_eq!(builds.get(), 2);
+        assert_eq!(moves, ["h2"]);
+        // A head that moves in every build stops after the tries, not built: the next pass builds again.
+        let n = Cell::new(0);
+        let builds = Cell::new(0);
+        let built = build_while_head_moves(
+            || {
+                n.set(n.get() + 1);
+                Ok(format!("h{}", n.get()))
+            },
+            || {
+                builds.set(builds.get() + 1);
+                true
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(!built);
+        assert_eq!(builds.get(), BUILD_TRIES);
+        // A head that stays: one build, and its result.
+        let builds = Cell::new(0);
+        let built = build_while_head_moves(
+            || Ok("h".to_string()),
+            || {
+                builds.set(builds.get() + 1);
+                false
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(!built);
+        assert_eq!(builds.get(), 1);
+    }
 
     #[test]
     fn the_background_prune_limit_holds_inside_and_is_restored_after() {
