@@ -1258,7 +1258,7 @@ fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owne
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
 /// other states or lines share are not counted, so the number is what freeing them gives back
 /// (blocks shared only among these states are left out, so it is a lower bound).
-fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
+pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
     states
         .iter()
         .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
@@ -1326,19 +1326,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
         return Ok(vec![]);
     }
     let db = &repo.p.db;
-    // A cache overlay names project states through its heads and records: they stay.
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for name in repo.overlay_names()? {
-        let overlay = repo.overlay_repo(&name)?;
-        for line in overlay.p.db.lines()? {
-            named.insert(line.head);
-        }
-        for raw in overlay.p.db.all_lines()? {
-            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                named.insert(token.to_string());
-            }
-        }
-    }
+    let named = overlay_named_states(repo)?;
     let mut st = db.conn.prepare(
         "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
          AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
@@ -1360,12 +1348,30 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     drop_trees(repo, &evict)
 }
 
+/// The project states that a cache overlay names through its heads and records: eviction and
+/// `layr migrate --delete-old` keep their trees.
+pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for name in repo.overlay_names()? {
+        let overlay = repo.overlay_repo(&name)?;
+        for line in overlay.p.db.lines()? {
+            named.insert(line.head);
+        }
+        for raw in overlay.p.db.all_lines()? {
+            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
+                named.insert(token.to_string());
+            }
+        }
+    }
+    Ok(named)
+}
+
 /// Remove the trees of states whose records stay (eviction, imports that git builds again) and
 /// mark them absent. The states are reserved first, in one transaction with the check for pins
 /// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
 /// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
 /// the states whose trees went.
-fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
+pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
     let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
         if !crate::free::holder_alive(&holder) {

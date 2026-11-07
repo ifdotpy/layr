@@ -7,7 +7,7 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
 use anyhow::{bail, Result};
-use layr_objects::{Id, Keying, StateRef, Store, Temperature, WriteOptions, WriteReport};
+use layr_objects::{Id, StateRef, Store, Temperature, WriteOptions, WriteReport};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -35,33 +35,24 @@ pub fn objects(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 fn open(h: &Here) -> Result<Store> {
-    // Plain ids for every project in this slice; Secret projects get keyed ids when the project
-    // key is available here (docs/objects.md, "Secret projects").
-    #[allow(unused_mut)]
-    let mut store = Store::open(&h.repo.p.meta_dir().join("objects"), Keying::Plain)?;
-    // A sealed APFS state has immutable files, and a clone keeps the flag.
-    #[cfg(target_os = "macos")]
-    {
-        store.clone_hook = Some(crate::sys::apfs_unseal_fd);
-    }
-    Ok(store)
+    crate::objstore::open(&h.repo.p)
 }
 
-struct Imported {
-    state: String,
-    tree: Id,
-    times: Id,
-    report: WriteReport,
-    previous: Option<Id>,
+pub(crate) struct Imported {
+    pub state: String,
+    pub tree: Id,
+    pub times: Id,
+    pub report: WriteReport,
+    pub previous: Option<Id>,
     /// The paths read again from the first parent's tree (`None`: a full write).
-    changed: Option<usize>,
-    seconds: f64,
+    pub changed: Option<usize>,
+    pub seconds: f64,
 }
 
 /// Write the tree of the state `rev`. When the state's first parent was imported, only the paths
 /// that changed since are read (`write_changed`; `--full` reads all). A cold write takes the
 /// parent's tree as the delta base (`--parent` names another).
-fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full: bool, parent: Option<Id>) -> Result<Imported> {
+pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full: bool, parent: Option<Id>) -> Result<Imported> {
     let started = Instant::now();
     let id = crate::revs::resolve(&h.repo, h.line.as_ref(), rev)?;
     let state = h.repo.source_state(&id)?;
@@ -179,19 +170,8 @@ fn verify(ctx: &Ctx, args: &[String]) -> Result<i32> {
     require_admin(ctx, &h)?;
     let store = open(&h)?;
     let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), a.has("--full"), None)?;
-    let started = Instant::now();
-    let work = h.repo.p.work_dir();
-    std::fs::create_dir_all(&work)?;
-    let tmp = crate::repo::Temp { path: work.join(crate::store::temp_name()) };
-    let made = layr_objects::checkout_with(&store, &i.tree, Some(&i.times), &tmp.path)?;
-    let checkout_seconds = started.elapsed().as_secs_f64();
-    let pin = h.repo.pin(&[&i.state])?;
-    let cmp = layr_objects::compare_with(&h.repo.state_root(&i.state)?, &tmp.path, true)?;
-    drop(pin);
-    let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
-    // Read-only folders of the copy must open again before the copy goes.
-    make_writable(&tmp.path);
-    drop(tmp);
+    let (made, cmp, checkout_seconds, compare_seconds) =
+        compare_checkout(&h, &store, &i.state, &StateRef { tree: i.tree, times: i.times })?;
     if a.has("--json") {
         let mut v = imported_json(&store, &i);
         v["checkout"] = json!({"files": made.files, "clones": made.clones, "copies": made.copies,
@@ -225,6 +205,32 @@ fn verify(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     Ok(if cmp.differences.is_empty() { 0 } else { 1 })
+}
+
+/// Check out the tree and times of `state` into a new folder of the project's work folder and
+/// compare every entry, byte, mode, extended attribute, hard link group and time with the
+/// snapshot of the state. The copy is removed. Returns the checkout, the comparison and the
+/// seconds of each step.
+pub(crate) fn compare_checkout(
+    h: &Here,
+    store: &Store,
+    state: &str,
+    r: &StateRef,
+) -> Result<(layr_objects::CheckoutReport, layr_objects::Comparison, f64, f64)> {
+    let started = Instant::now();
+    let work = h.repo.p.work_dir();
+    std::fs::create_dir_all(&work)?;
+    let tmp = crate::repo::Temp { path: work.join(crate::store::temp_name()) };
+    let made = layr_objects::checkout_with(store, &r.tree, Some(&r.times), &tmp.path)?;
+    let checkout_seconds = started.elapsed().as_secs_f64();
+    let pin = h.repo.pin(&[state])?;
+    let cmp = layr_objects::compare_with(&h.repo.state_root(state)?, &tmp.path, true);
+    drop(pin);
+    let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
+    // Read-only folders of the copy must open again before the copy goes.
+    make_writable(&tmp.path);
+    drop(tmp);
+    Ok((made, cmp?, checkout_seconds, compare_seconds))
 }
 
 fn make_writable(dir: &std::path::Path) {
@@ -290,17 +296,25 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// parent chain, `objects.hot-states` in all (default 5, the size of the undo ring).
 pub const HOT_STATES_DEFAULT: u64 = 5;
 
-fn hot_trees(h: &Here, store: &Store) -> Result<Vec<Id>> {
+pub(crate) fn hot_states(h: &Here) -> Result<std::collections::BTreeSet<String>> {
     let n = h.repo.p.config_u64("objects.hot-states", HOT_STATES_DEFAULT);
-    let mut out = Vec::new();
+    let mut out = std::collections::BTreeSet::new();
     for line in h.repo.lines()? {
         let mut state = Some(line.head.clone());
         for _ in 0..n {
             let Some(id) = state else { break };
-            if let Some(tree) = store.state_tree(&id)? {
-                out.push(tree);
-            }
             state = h.repo.p.db.state(&id)?.and_then(|s| s.parents.first().cloned());
+            out.insert(id);
+        }
+    }
+    Ok(out)
+}
+
+fn hot_trees(h: &Here, store: &Store) -> Result<Vec<Id>> {
+    let mut out = Vec::new();
+    for id in hot_states(h)? {
+        if let Some(tree) = store.state_tree(&id)? {
+            out.push(tree);
         }
     }
     out.sort();

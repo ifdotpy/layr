@@ -5,8 +5,10 @@ encodings and packs. The crate `crates/layr-objects`, the command `layr objects`
 server (`docs/api.md` in ifdotpy/layr-cloud) and the V1 client use it. A change to a byte layout
 here changes the format: the test vectors (section 12) and the unit tests that pin them change too.
 
-No other layr command reads objects yet: states, lines, merges and remotes still use file system
-snapshots and store format v2 (`docs/remote-format.md`). Section 13 is the plan to move.
+`layr migrate` moves a project to the object store (section 13, user guide `docs/migrate.md`).
+After it, `layr show <rev>:<path>` and `layr line new` read trees, and every other reader gets a
+snapshot made again from the objects. Saves, merges and remotes still write file system snapshots
+and store format v2 (`docs/remote-format.md`).
 
 ## 1. Model
 
@@ -367,14 +369,85 @@ layr objects checkout <tree or rev> <folder>
   writes into the caller's folder (`tests/t201-objects-service.sh`).
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
-Migration: import each state oldest first (`--cold` for history, hot for line heads), verify
-each by a checkout and compare, then repack. A state record gets a `tree` and a `times` field;
-reads move to trees; snapshots stop being the truth. Store format v3 on remotes is the layout of
-section 7 without `blobs/`: `objects/<id>` for single objects, `packs/<id>.pack` and `.idx`,
-`states/<id>`, and the v2 records and slots for keys.
-
 Open questions: sharded trees (section 11); a repack that merges small packs; garbage collection of
 objects that no state names.
+
+### Migration
+
+```text
+layr migrate [<project>] [--dry-run] [--resume] [--delete-old]
+```
+
+The steps for users are in `docs/migrate.md`. Code: `src/cmd/migrate.rs`, `src/objstore.rs`.
+
+1. **Refusal.** The run stops with exit 1 while a command holds the project lock or a line lock
+   (a running command or agent), and on macOS while the user daemon serves the store (its follow
+   passes, syncs and gc write). On Linux only the locks count: the service socket there can be the
+   service that runs the command. A run that did not finish (`meta/migrate/running`) is continued
+   only with `--resume`.
+2. **Unsaved work.** Each line folder of this machine is saved as an automatic state, as any layr
+   command that saves the working folder first (`Repo::working_state`, message "before layr
+   migrate").
+3. **Evicted states.** A state whose snapshot retention removed (`gc.evict`) is read back from a
+   store remote before the run takes the lock. A state that no remote gives stops the run with a
+   list; nothing is changed then. A state imported from Git without a tree is built from Git, as
+   any read builds it.
+4. **Import.** Under the project lock (other commands wait), every source state, parents first and
+   older first, is imported as `layr objects import` does: incremental against the first parent
+   when the parent has a snapshot and a tree, else a full read. The heads of the lines and the
+   states before them on the first-parent chain (`objects.hot-states`, default 5: the head and 4)
+   are hot; every other state is cold, as deltas against the first parent's tree. Cache and derived
+   states stay snapshots. Freed states have no tree to move.
+5. **Verify.** Each state is checked out with its times into the work folder and compared with its
+   snapshot (`compare_with`: names, types, permission bits, bytes, link targets, kept extended
+   attributes, hard link groups, modification times). The first difference stops the run with exit
+   1; nothing is deleted.
+6. **Mapping table.** A verified state is appended to `meta/migrate/map` (a header line
+   `layr-migrate-map 1`, then `<state id> <tree> <times>` per line, synced). `--resume` skips the
+   states in it. A last line without a newline is a write that a crash cut: it is ignored and
+   removed by the next append.
+7. **Records.** Every 64 verified states, and at the end, one signed record with the operation
+   `state.tree` gives them their fields:
+
+   ```json
+   {"states": {"<state id>": {"times": "<id>", "tree": "<id>"}}}
+   ```
+
+   The state keeps its id and its signed save record; the derived row and `StateRec` get `tree` and
+   `times`. A later record of the same state replaces both (order key: time, machine, sequence).
+   Line heads, refs, tags, parks, queue entries, changes, attestations, approvals and the Git
+   mapping name state ids and stay as they are. A save does not write a tree yet: a second
+   `layr migrate` moves the states made since.
+8. **Repack** (`layr objects repack`): hot blobs outside the hot set turn cold, loose objects go
+   into packs.
+9. **Old storage.** Without `--delete-old` the snapshots stay and the run prints what
+   `--delete-old` frees. With it, after every source state is recorded, the snapshots of the
+   recorded states go (`drop_trees`: reserved against pins, moved to the trash, marked absent),
+   except line heads (status and save read them on every command), states with cache snapshots,
+   states that a cache overlay names, and on APFS thin layers that a kept layer builds on.
+
+Reads after the migration:
+
+| reader | source |
+| --- | --- |
+| `layr show <rev>:<path>` | the trees and blobs (`objstore::entry`); no snapshot is read or made |
+| `layr line new <name> <rev>` of a state without a snapshot | a checkout of the tree with its times (hot blobs are clones) |
+| every other reader of a state without a snapshot (`diff`, `log -p`, `merge`, `try`, `export`, `restore`, `undo`, `park pop`, remote pushes) | `Repo::check_state` makes the snapshot again from the objects (`objstore::build_state`), before Git and before a store remote |
+| readers of a state with a snapshot | the snapshot, as before |
+
+The tree of a state counts only when the local object store holds the tree and the times table: a
+`state.tree` record from another machine without its objects changes no read. A rollback before
+`--delete-old` removes `meta/objects` and `meta/migrate`: every reader then uses the snapshots, and
+a later run moves every state again.
+
+**Remotes.** This version moves only the local store. A store remote keeps format v2 and its
+snapshots; a push sends v2 as before, and the `state.tree` records go with the other records
+(older layr versions ignore the operation). Store format v3 on remotes is the layout of section 7
+without `blobs/`: `objects/<id>` for single objects, `packs/<id>.pack` and `.idx`, `states/<id>`,
+and the v2 records and slots for keys. The path: a v3 remote is a new remote that a migrated
+project pushes fresh (packs as they are, then the state records); an existing v2 remote is not
+rewritten in place, and is removed after the v3 copy is complete. Layr Cloud V1 moves to the same
+state body (section 14).
 
 ## 14. The two tree formats
 

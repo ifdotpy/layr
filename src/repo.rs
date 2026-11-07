@@ -419,6 +419,11 @@ impl<'a> Repo<'a> {
         if self.p.has_state(id) {
             return Ok(());
         }
+        // A migrated state comes back from the object store with its exact times
+        // (docs/objects.md, section 13). A freed state has no owner: it stays freed.
+        if !matches!(self.p.db.state_flags(id)?, Some((_, true))) && crate::objstore::build_state(self, id)? {
+            return Ok(());
+        }
         // An imported state is built from git (docs/ownership.md, "States imported from Git"). A
         // copy on a store remote is the fallback when git cannot give the objects.
         if crate::gitbridge::buildable(self, id) {
@@ -654,6 +659,8 @@ impl<'a> Repo<'a> {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         }
     }
@@ -763,6 +770,8 @@ impl<'a> Repo<'a> {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         })
     }
@@ -4214,6 +4223,8 @@ mod cache_platform_tests {
                 cache_shared: false,
                 cache_platform: None,
                 cache_of: None,
+                tree: None,
+                times: None,
                 cache_key_parts: Default::default(),
             });
             p.append(rec, &ctx.actor()).unwrap();
@@ -4397,6 +4408,8 @@ mod commit_record_tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));

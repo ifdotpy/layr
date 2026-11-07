@@ -376,6 +376,15 @@ impl Project {
                     s.dropped = true;
                 }
             }
+            validation::STATE_TREE_OP => {
+                // Records are replayed in order: a later record of a state replaces its tree.
+                for (id, tree, times) in validation::state_trees(d)? {
+                    if let Some(s) = self.states.get_mut(&id) {
+                        s.state.tree = Some(tree);
+                        s.state.times = Some(times);
+                    }
+                }
+            }
             "save.caches" | "save.layers" => {
                 if let Some(s) = self.states.get_mut(&str_at("state")) {
                     if s.machine == r.machine {

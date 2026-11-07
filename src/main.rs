@@ -38,6 +38,7 @@ mod btrfs_scan;
 mod linepaths;
 mod merge;
 mod model;
+mod objstore;
 mod oci;
 mod oplog;
 mod overlay;

@@ -712,6 +712,28 @@ impl Db {
             "stash.drop" => {
                 tx.prepare_cached("UPDATE states SET dropped=1 WHERE id=?1")?.execute(params![s("state")])?;
             }
+            layr_model::validation::STATE_TREE_OP => {
+                // The tree and times table of states in the object store (`layr migrate`). The state
+                // keeps its id and its signed save record; the row gets the two fields. The record
+                // with the larger order key wins (`tree_ord` in the row), so the arrival order does
+                // not matter. A record that arrives before the record of its state has no effect
+                // until `layr reindex` replays both.
+                for (st, tree, times) in layr_model::validation::state_trees(d)? {
+                    let raw: Option<String> = tx
+                        .prepare_cached("SELECT rec FROM states WHERE id=?1")?
+                        .query_row(params![st], |r| r.get(0))
+                        .optional()?;
+                    let Some(raw) = raw else { continue };
+                    let mut v: serde_json::Value = serde_json::from_str(&raw)?;
+                    if v.get("tree_ord").and_then(|o| o.as_str()).is_some_and(|o| o >= ord.as_str()) {
+                        continue;
+                    }
+                    v["tree"] = serde_json::json!(tree);
+                    v["times"] = serde_json::json!(times);
+                    v["tree_ord"] = serde_json::json!(ord);
+                    tx.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![st, v.to_string()])?;
+                }
+            }
             _ => {}
         }
         // The overlays a line shows (`stack.<line id>`), from any record that changes them.
@@ -1867,6 +1889,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         r

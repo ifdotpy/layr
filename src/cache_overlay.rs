@@ -525,6 +525,8 @@ impl<'a> Repo<'a> {
                     cache_platform: Some(key),
                     cache_key_parts: parts,
                     cache_of: Some(project_state.to_string()),
+                    tree: None,
+                    times: None,
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);

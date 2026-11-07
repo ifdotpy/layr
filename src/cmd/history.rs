@@ -666,9 +666,14 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
 
 /// `layr show <rev>:<path>` of an imported state that is not on disk: the entry is read from git.
 fn show_git_entry(repo: &Repo, ctx: &Ctx, commit: &str, r: &str, rv: &str, p: &str) -> Result<()> {
+    print_entry(ctx, crate::gitbridge::entry(repo, commit, p)?, r, rv, p)
+}
+
+/// Print one entry of `show <rev>:<path>` read without a snapshot (Git objects, the object store).
+fn print_entry(ctx: &Ctx, entry: crate::gitbridge::Entry, r: &str, rv: &str, p: &str) -> Result<()> {
     use crate::gitbridge::Entry;
     use std::io::Write;
-    match crate::gitbridge::entry(repo, commit, p)? {
+    match entry {
         Entry::Missing => Err(exit(128, format!("fatal: path '{p}' does not exist in '{rv}'"))),
         Entry::Dir(names) => {
             outln!(ctx, "tree {r}\n");
@@ -799,6 +804,19 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         path.trim_start_matches('/').to_string()
                     };
                     show_git_entry(repo, ctx, &commit, &r, rv, &p)?;
+                    first = false;
+                    continue;
+                }
+                // A migrated state: its entry is read from the object store (docs/objects.md,
+                // section 13), no snapshot is read or built.
+                if let Some((store, refs)) = crate::objstore::verified(&repo.p, &id)? {
+                    let p = if path.starts_with("./") || path.starts_with("../") {
+                        super::normalize(&h.loc.sub, path)?
+                    } else {
+                        path.trim_start_matches('/').to_string()
+                    };
+                    let entry = crate::objstore::entry(&store, &refs.tree, &p)?;
+                    print_entry(ctx, entry, &r, rv, &p)?;
                     first = false;
                     continue;
                 }
