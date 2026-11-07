@@ -483,18 +483,89 @@ fn tell_pending(state: &str, name: &str, why: &str) {
     }
 }
 
+fn limits_of(policy: &layr_model::Project) -> Result<Limits> {
+    Ok(Limits {
+        timeout: setting(policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
+        memory: setting(policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
+        processes: setting(policy, "checks.processes", json!(if cfg!(target_os = "macos") { 4096 } else { 256 }))?
+            .as_u64()
+            .context("invalid checks.processes")?,
+        log_bytes: setting(policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
+    })
+}
+
+/// Runs the check `name` (`command`, `argv`) on `state` in the check sandbox (`execute`) and records its signed
+/// result with its log, as the watcher does. `back`: the line whose caches a passing run saves back. Returns the
+/// result.
+#[allow(clippy::too_many_arguments)]
+fn run_job(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    name: &str,
+    command: &str,
+    argv: &[String],
+    is_privileged: bool,
+    limits: &Limits,
+    back: Option<&str>,
+) -> Result<Value> {
+    let here = platform();
+    super::admin::with_try_copy(ctx, repo, state, &[], false, true, |dir| {
+        let started = std::time::Instant::now();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let (code, log, truncated) = execute(ctx, repo, dir, state, argv, is_privileged, limits, back)?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let (code, log, truncated): (i32, Vec<u8>, bool) = {
+            let _ = (back, is_privileged, limits);
+            bail!("automatic checks require Linux");
+        };
+        let work = repo.p.work_dir().join(crate::store::temp_name());
+        crate::storage::create_subvolume(&work)?;
+        let cleanup = crate::repo::Temp { path: work.clone() };
+        std::fs::write(work.join("check.log"), &log)?;
+        let _lock = repo.p.lock()?;
+        let mut output = repo.new_state(ctx, &work, StateKind::Derived, vec![state.to_string()], &format!("check {name} log"), None)?;
+        output.derived_from = Some(state.to_string());
+        output.context = Some("check-v1".into());
+        let log_ref = format!("derived/check-v1/{}", output.id);
+        let result = json!({"name":name,"state":state,"command":command,"argv":argv,"exit":code,
+            "privileged":is_privileged,"executor":true,"platform":here,"log_ref":log_ref,"output_state":output.id,"truncated":truncated,
+            "duration_ms":started.elapsed().as_millis() as u64,"limits":{"timeout":limits.timeout,"memory":limits.memory,
+                "processes":limits.processes,"log_bytes":limits.log_bytes}});
+        let mut record = super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?;
+        record.states.push(output.clone());
+        record.data["check"] = result.clone();
+        record.data["ref_change"] = serde_json::to_value(RefChange {
+            name: log_ref.clone(),
+            before: None,
+            after: Some(RefState { name: log_ref, target: output.id, expires_at: None }),
+        })?;
+        repo.commit_record(ctx, record)?;
+        drop(cleanup);
+        Ok(result)
+    })
+}
+
+/// A required check that a merge or a queue pass needs on `state`, run in the check sandbox like the watcher, never as
+/// the caller's own process: Ok(Some(exit)). Ok(None) when this process may not run it: root never runs a check that
+/// is not privileged (it would run untrusted code as root), and a privileged check runs only on a machine that is a
+/// privileged runner. A runner then makes the result (`layr checks watch`).
+pub(crate) fn run_for_merge(ctx: &Ctx, repo: &Repo, state: &str, name: &str, command: &str, argv: &[String]) -> Result<Option<i32>> {
+    let Plan { policy, privileged, .. } = plan(repo, Some(state))?;
+    let is_privileged = privileged.contains(name);
+    let local = local_settings(repo)?;
+    if (ctx.caller.is_root() && !is_privileged) || (is_privileged && !(local.runner && local.privileged)) {
+        return Ok(None);
+    }
+    let result = run_job(ctx, repo, state, name, command, argv, is_privileged, &limits_of(&policy)?, None)?;
+    Ok(Some(result["exit"].as_i64().unwrap_or(-1) as i32))
+}
+
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
 fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
     let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
     let here = platform();
-    let limits = Limits {
-        timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
-        memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
-        processes: setting(&policy, "checks.processes", json!(if cfg!(target_os = "macos") { 4096 } else { 256 }))?
-            .as_u64()
-            .context("invalid checks.processes")?,
-        log_bytes: setting(&policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
-    };
+    let limits = limits_of(&policy)?;
     let local = local_settings(repo)?;
     if privileged_only && !(local.runner && local.privileged) {
         bail!("privileged watcher requires local checks.runner and checks.privileged-runner true");
@@ -552,41 +623,11 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
             tell_pending(&state, &name, &why);
             continue;
         }
-        let result = super::admin::with_try_copy(ctx, repo, &state, &[], false, true, |dir| {
-            let started = std::time::Instant::now();
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let back = heads.get(&state).map(String::as_str);
-            let (code, log, truncated) = execute(ctx, repo, dir, &state, &argv, is_privileged, &limits, back)?;
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            let (code, log, truncated): (i32, Vec<u8>, bool) = {
-                bail!("automatic checks require Linux");
-            };
-            let work = repo.p.work_dir().join(crate::store::temp_name());
-            crate::storage::create_subvolume(&work)?;
-            let cleanup = crate::repo::Temp { path: work.clone() };
-            std::fs::write(work.join("check.log"), &log)?;
-            let _lock = repo.p.lock()?;
-            let mut output =
-                repo.new_state(ctx, &work, StateKind::Derived, vec![state.clone()], &format!("check {name} log"), None)?;
-            output.derived_from = Some(state.clone());
-            output.context = Some("check-v1".into());
-            let log_ref = format!("derived/check-v1/{}", output.id);
-            let result = json!({"name":name,"state":state,"command":command,"argv":argv,"exit":code,
-                "privileged":is_privileged,"executor":true,"platform":here,"log_ref":log_ref,"output_state":output.id,"truncated":truncated,
-                "duration_ms":started.elapsed().as_millis() as u64,"limits":{"timeout":limits.timeout,"memory":limits.memory,
-                    "processes":limits.processes,"log_bytes":limits.log_bytes}});
-            let mut record = super::attest::record(repo, &state, "check", &serde_json::to_vec(&result)?)?;
-            record.states.push(output.clone());
-            record.data["check"] = result.clone();
-            record.data["ref_change"] = serde_json::to_value(RefChange {
-                name: log_ref.clone(),
-                before: None,
-                after: Some(RefState { name: log_ref, target: output.id, expires_at: None }),
-            })?;
-            repo.commit_record(ctx, record)?;
-            drop(cleanup);
-            Ok(result)
-        })?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let back = heads.get(&state).map(String::as_str);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let back = None;
+        let result = run_job(ctx, repo, &state, &name, command, &argv, is_privileged, &limits, back)?;
         results.push(result);
     }
     Ok(Scan { checks: results, pending, pending_privileged })
