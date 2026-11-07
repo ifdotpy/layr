@@ -221,7 +221,7 @@ Lines and states:
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    person keys, show, accept
-   remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone
+   remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone; login
    index write [<remote>] [--json]; push <remote> --index
    mount <remote> [--listen 127.0.0.1:8095]
 Git bridge:
@@ -248,7 +248,7 @@ pub const COMMANDS: &[&str] = &[
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
-    "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
+    "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
     "usage",
 ];
@@ -342,6 +342,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "push" => remote::push(ctx, rest),
         "git" => remote::git::run(ctx, rest),
         "clone" => remote::clone(ctx, rest),
+        "login" => remote::login(ctx, rest),
         "overlay" => overlaycmd::overlay(ctx, rest),
         "export" => transfer::export(ctx, rest),
         "sync" => remote::sync(ctx, rest),

@@ -98,7 +98,7 @@ fn send_busy(send: impl FnMut() -> Result<Response>) -> Result<Response> {
 /// `send_busy` for a request that a repeat cannot harm (GET, HEAD, a create-only PUT that answers 412 when the first
 /// one landed): it is sent again also on 502 and 504 and when the connection fails, as when the gateway restarts
 /// for a release or a project change (about 2 s).
-fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
+pub(super) fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
     let mut wait = std::time::Duration::from_millis(500);
     let mut attempt = 1;
     loop {

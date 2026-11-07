@@ -126,9 +126,67 @@ pub struct BtrfsIdentity {
 pub struct Link(pub String, pub String, pub u32, pub u64, pub u64, pub String);
 
 impl Link {
+    /// The store key of the frame's object: `objects/<id>` for a link that names its part by id (Layr Cloud API
+    /// v1), else the state, attempt and part name of the store layout.
     pub fn object(&self) -> String {
+        if self.is_content() {
+            return object_name(&self.0);
+        }
         data_name(&self.0, &self.1, self.2)
     }
+    /// A link of the Layr Cloud API v1: `[<part id>, "", 0, offset, length, kind]` (docs/remotes.md).
+    pub fn is_content(&self) -> bool {
+        valid_object_id(&self.0) && self.1.is_empty() && self.2 == 0
+    }
+}
+
+/// The attempt of every state tree on the Layr Cloud API v1: the content names the object, so a retry of
+/// the same tree gives the same id.
+pub const CONTENT_ATTEMPT: &str = "00000000";
+
+/// Object types of the Layr Cloud API v1 (docs/remotes.md, "Object ids").
+pub const OBJECT_PART: &str = "part";
+pub const OBJECT_STATE_TREE: &str = "state-tree";
+
+/// The typed id of an object: lowercase hex SHA-256 of `"<type> <length>\0"` and the bytes (docs/objects.md,
+/// the scheme of Git's SHA-256 objects).
+pub fn object_id(kind: &str, bytes: &[u8]) -> String {
+    let mut hasher = ObjectHasher::new(kind, bytes.len() as u64);
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+/// [`object_id`] over bytes that arrive in pieces.
+pub struct ObjectHasher(sha2::Sha256);
+
+impl ObjectHasher {
+    pub fn new(kind: &str, length: u64) -> Self {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(format!("{kind} {length}\0").as_bytes());
+        Self(hasher)
+    }
+    pub fn update(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.0.update(bytes);
+    }
+    pub fn finish(self) -> String {
+        use sha2::Digest;
+        hex::encode(self.0.finalize())
+    }
+}
+
+pub fn valid_object_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The key of an object of the Layr Cloud API v1 in the store key space of a backend.
+pub fn object_name(id: &str) -> String {
+    format!("objects/{id}")
+}
+
+pub fn parse_object_name(key: &str) -> Option<&str> {
+    key.strip_prefix("objects/").filter(|id| valid_object_id(id))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,7 +315,8 @@ impl Tree {
                 bail!("invalid file chain length");
             }
             for (i, link) in entry.3.iter().enumerate() {
-                if !is_uuid(&link.0) || !valid_attempt(&link.1) || link.2 >= MAX_PARTS || link.4 == 0 {
+                let address = link.is_content() || (is_uuid(&link.0) && valid_attempt(&link.1) && link.2 < MAX_PARTS);
+                if !address || link.4 == 0 {
                     bail!("invalid frame address");
                 }
                 let expected = if i + 1 == entry.3.len() { "full" } else { "delta" };

@@ -1,5 +1,8 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
+pub(crate) mod api;
+#[cfg(test)]
+mod api_tests;
 pub(crate) mod backend;
 pub(crate) mod browse;
 pub(crate) mod chunked;
@@ -90,7 +93,8 @@ impl StorePin {
         if self.project != descriptor.project {
             bail!("store project changed: pinned {}, store.json {}", self.project, descriptor.project);
         }
-        if self.mode != descriptor.mode {
+        // Public and Private differ only in the server access list; a change between Secret and plain is refused.
+        if self.mode.is_secret() != descriptor.mode.is_secret() {
             bail!("store mode changed: pinned {}, store.json {}", self.mode.name(), descriptor.mode.name());
         }
         if self.recipient != descriptor.recipient {
@@ -150,6 +154,7 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
                 repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
             store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
             store.mode = configured_mode(repo, name)?;
+            store.choose_transport(store.mode)?;
             break;
         }
     }
@@ -167,8 +172,59 @@ pub(crate) fn configured_mode(repo: &Repo, name: &str) -> Result<Option<Mode>> {
 
 impl Store {
     /// Require this project mode in store.json (`remote add --mode`).
-    pub fn require_mode(&mut self, mode: Option<Mode>) {
+    pub fn require_mode(&mut self, mode: Option<Mode>) -> Result<()> {
         self.mode = mode;
+        self.choose_transport(mode)
+    }
+
+    /// A `layr+https://` remote talks to the Layr Cloud API v1 unless it is Secret: a Secret project keeps the
+    /// encrypted store routes of the gateway. No mode is Private, the default of a new store.
+    pub fn choose_transport(&mut self, mode: Option<Mode>) -> Result<()> {
+        if !self.url.starts_with("layr+https://") {
+            return Ok(());
+        }
+        let api = !mode.is_some_and(|m| m.is_secret());
+        if api != matches!(self.backend.root(), Backend::Api(_)) {
+            self.backend = if api { Backend::Api(api::Api::open(&self.url)?) } else { Backend::open(&self.url)? };
+        }
+        Ok(())
+    }
+
+    /// `layr login`: the device sign-in of a person (docs/remotes.md, "Person login"). The session goes to the
+    /// caller's `~/.config/layr/cloud/<host>.json`, and this machine's key is registered with it.
+    pub fn login(&self, ctx: &Ctx, show: impl Fn(&str)) -> Result<String> {
+        let mut api = self.backend.api().context("layr login is for Layr Cloud remotes (layr+https, Public or Private)")?.clone();
+        api.set_token(None);
+        let start = api.login_start()?;
+        show(&start.link);
+        let deadline = if start.expires > 0 { start.expires } else { crate::ids::now_ms() + 600_000 };
+        let session = loop {
+            if let Some(session) = api.login_poll(&start.code)? {
+                break session;
+            }
+            if crate::ids::now_ms() >= deadline {
+                bail!("the sign-in was not finished in time; run layr login again");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(if cfg!(test) { 10 } else { 2000 }));
+        };
+        let path = api::session_file(&ctx.caller.home, api.host());
+        crate::privs::as_caller_fs(ctx, || api::save_session(&path, &session))?;
+        api.set_token(Some(session.token.clone()));
+        api.register_machine(&self.machine, &self.key.verifying_key())?;
+        Ok(session.login)
+    }
+
+    /// True for a remote of the Layr Cloud API v1.
+    pub fn is_api(&self) -> bool {
+        self.backend.api().is_some()
+    }
+
+    /// The route scope of this store on the Layr Cloud API: `overlays/<name>/` for a plain overlay layer.
+    pub(crate) fn api_scope(&self) -> String {
+        match &self.backend {
+            Backend::Prefix(_, scope) => scope.clone(),
+            _ => String::new(),
+        }
     }
 }
 
@@ -182,6 +238,7 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
         .context("invalid store pin")?;
     let mut store = open_with_pin(&url, repo, pin)?;
     store.mode = configured_mode(repo, name)?;
+    store.choose_transport(store.mode)?;
     store.aws_profile = repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
     store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
     Ok(store)
@@ -327,7 +384,7 @@ pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
 }
 
 fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
-    Ok(Store {
+    let mut store = Store {
         backend: Backend::open(url)?,
         url: url.to_string(),
         project: repo.p.id.clone(),
@@ -346,7 +403,9 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         public_clone: false,
         public_reader: std::sync::atomic::AtomicBool::new(false),
         mode: None,
-    })
+    };
+    store.choose_transport(None)?;
+    Ok(store)
 }
 
 impl Store {
@@ -367,6 +426,13 @@ impl Store {
         self.epoch = None;
         self.epoch_public = false;
         self.backend.as_caller(ctx);
+        // Layr Cloud API v1: a token and the server access list; no person keys, slots or paper key.
+        if let Backend::Api(api) = &mut self.backend {
+            api.connect(ctx, &self.project)?;
+            self.person = None;
+            self.paper_key_text = None;
+            return Ok(());
+        }
         if let Backend::Gateway(gateway) = &mut self.backend {
             if self.force_public
                 || (self.public_clone
@@ -484,6 +550,9 @@ impl Store {
             }
             self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
+        }
+        if self.is_api() {
+            bail!("Layr Cloud has no project at {}, or this token cannot read it; create the project on the site first", self.url);
         }
         if self.project.is_empty() {
             bail!("the remote store is empty");
@@ -617,6 +686,10 @@ impl Store {
         if let Some(layer) = &self.layer {
             return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone(), mode: Default::default() });
         }
+        // A plain overlay layer of a Layr Cloud project (`overlays/<name>/`): no keys, the project's object store.
+        if matches!(self.backend, Backend::Prefix(..)) && self.is_api() {
+            return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: keys::PLAIN.into(), mode: Mode::Private });
+        }
         let data = self
             .backend
             .get("store.json")?
@@ -651,7 +724,7 @@ impl Store {
     /// must not turn a Secret project into a plain one, nor the reverse.
     fn check_mode(&self, descriptor: &Descriptor) -> Result<()> {
         if let Some(mode) = self.mode {
-            if mode != descriptor.mode {
+            if mode.is_secret() != descriptor.mode.is_secret() || (!self.is_api() && mode != descriptor.mode) {
                 bail!("store mode differs: this remote is {}, store.json says {}", mode.name(), descriptor.mode.name());
             }
         }
@@ -796,6 +869,13 @@ impl Store {
                 }
             }
         }
+        if self.is_api() {
+            self.private_dir()?;
+            let mut report = writer::push(self, ctx, repo, opts)?;
+            push_refs(self, repo, &mut report)?;
+            overlays::api_push(self, ctx, repo, opts, &mut report)?;
+            return Ok(report);
+        }
         let mut report = writer::push(self, ctx, repo, opts)?;
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)
@@ -810,7 +890,13 @@ impl Store {
         }
         self.connect(ctx)?;
         let mut report = reader::fetch(self, ctx, repo, opts)?;
-        overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        if self.is_api() {
+            self.private_dir()?;
+            fetch_refs(self, repo, &mut report)?;
+            overlays::api_fetch(self, ctx, repo, opts, &mut report)?;
+        } else {
+            overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        }
         let pending = self.dir.join("pending-lines.json");
         if pending.exists() {
             let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
@@ -826,7 +912,13 @@ impl Store {
             bail!("clone needs an empty project");
         }
         let mut report = reader::fetch(self, ctx, repo, opts)?;
-        overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        if self.is_api() {
+            self.private_dir()?;
+            fetch_refs(self, repo, &mut report)?;
+            overlays::api_fetch(self, ctx, repo, opts, &mut report)?;
+        } else {
+            overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        }
         report.missing_lines = self.materialize_clone_lines(ctx, repo, None)?;
         Ok(report)
     }
@@ -1344,4 +1436,139 @@ mod restore_tests {
         assert!(err.contains("first: offline first") && err.contains("second: offline second"), "{err}");
         assert!(err.contains("not on this machine"), "{err}");
     }
+}
+
+/// The line refs that this machine last read from Layr Cloud (`refs.json` of the remote folder): the `expect` of
+/// the next compare and swap.
+fn tracked_refs(dir: &std::path::Path) -> Result<std::collections::BTreeMap<String, String>> {
+    match std::fs::read(dir.join("refs.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("invalid refs.json")?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_tracked_refs(dir: &std::path::Path, refs: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    crate::fsutil::atomic_write(&dir.join("refs.json"), &serde_json::to_vec(refs)?, 0o600)
+}
+
+/// The newest record of this machine that moved each line: line id to the record id and the head after it
+/// (None for a deleted line).
+fn own_line_moves(repo: &Repo, machine: &str) -> Result<std::collections::BTreeMap<String, (String, Option<String>)>> {
+    /// The order of a record (time, sequence), its id and the head after it.
+    type Move = ((i64, u64), String, Option<String>);
+    let mut moves: std::collections::BTreeMap<String, Move> = Default::default();
+    for line in repo.p.export_jsonl()?.lines() {
+        let record = crate::oplog::parse_line(line, None)?.record;
+        if record.machine != machine {
+            continue;
+        }
+        for (id, change) in &record.lines {
+            let order = (record.time, record.seq);
+            if moves.get(id).is_none_or(|(newest, ..)| order >= *newest) {
+                moves.insert(id.clone(), (order, record.id.clone(), change.after.as_ref().map(|after| after.head.clone())));
+            }
+        }
+    }
+    Ok(moves.into_iter().map(|(id, (_, record, head))| (id, (record, head))).collect())
+}
+
+/// Moves the line refs on Layr Cloud to this machine's line heads with one compare and swap
+/// (docs/remotes.md, "Records and refs"). A line that another writer moved on the server since this machine
+/// read it fails the push: fetch, then push again.
+fn push_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    let scope = store.api_scope();
+    let mut tracked = tracked_refs(&store.dir)?;
+    let present: std::collections::BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.id).collect();
+    let mut updates = Vec::new();
+    for (line, (record, head)) in own_line_moves(repo, &store.machine)? {
+        // A line that exists now must point where the database says; the newest record names its head.
+        let head = if present.contains(&line) { head } else { None };
+        let name = format!("lines/{line}");
+        let expect = tracked.get(&name).cloned();
+        if expect == head {
+            continue;
+        }
+        // A state that this push left out (an automatic state without --auto) cannot be a ref target.
+        if let Some(target) = &head {
+            if !report.state_ids.contains(target) && api.get_state(&scope, target)?.is_none() {
+                report.omitted.push(format!("line {line}: head {} is not on Layr Cloud", crate::ids::short(target)));
+                continue;
+            }
+        }
+        updates.push(api::RefUpdate { name, expect, target: head, record });
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    for _ in 0..2 {
+        match api.cas(&scope, &updates, &format!("layr push from machine {}", store.machine))? {
+            api::Cas::Done(refs) => {
+                for update in &updates {
+                    match &update.target {
+                        Some(target) => tracked.insert(update.name.clone(), target.clone()),
+                        None => tracked.remove(&update.name),
+                    };
+                }
+                for reference in refs {
+                    match reference.target {
+                        Some(target) => tracked.insert(reference.name, target),
+                        None => tracked.remove(&reference.name),
+                    };
+                }
+                save_tracked_refs(&store.dir, &tracked)?;
+                return Ok(());
+            }
+            api::Cas::Conflict(conflicts) => {
+                // A ref that is already at its target (an earlier push moved it, but this machine did not keep the
+                // answer) is no conflict: keep it and send the rest again.
+                let (done, moved): (Vec<_>, Vec<_>) = conflicts
+                    .into_iter()
+                    .partition(|(name, actual)| updates.iter().any(|u| &u.name == name && &u.target == actual));
+                if !moved.is_empty() || done.is_empty() {
+                    let names: Vec<String> = moved.iter().map(|(name, _)| name.clone()).collect();
+                    save_tracked_refs(&store.dir, &tracked)?;
+                    bail!(
+                        "Layr Cloud: {} moved on the server since this machine read it; run layr fetch, then push again",
+                        if names.is_empty() { "a line".to_string() } else { names.join(", ") }
+                    );
+                }
+                for (name, actual) in done {
+                    if let Some(target) = actual {
+                        tracked.insert(name.clone(), target);
+                    }
+                    updates.retain(|u| u.name != name);
+                }
+                if updates.is_empty() {
+                    save_tracked_refs(&store.dir, &tracked)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    bail!("Layr Cloud: the refs changed again during the push; push again")
+}
+
+/// Reads the line refs of Layr Cloud: they are the `expect` of the next push. A line whose head here differs
+/// from the server is named in the report: the server ref is the truth for its position.
+fn fetch_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    let refs = api.refs(&store.api_scope(), "lines/")?;
+    let mut tracked = std::collections::BTreeMap::new();
+    let lines: std::collections::BTreeMap<String, String> = repo.p.db.lines()?.into_iter().map(|line| (line.id, line.head)).collect();
+    for reference in refs {
+        let Some(target) = reference.target else { continue };
+        if let Some(line) = reference.name.strip_prefix("lines/") {
+            if lines.get(line).is_some_and(|head| head != &target) {
+                report.omitted.push(format!(
+                    "line {line}: Layr Cloud has {}, the records here {}",
+                    crate::ids::short(&target),
+                    crate::ids::short(&lines[line])
+                ));
+            }
+        }
+        tracked.insert(reference.name, target);
+    }
+    save_tracked_refs(&store.dir, &tracked)
 }

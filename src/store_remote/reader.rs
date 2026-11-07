@@ -364,6 +364,12 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The states of the project for a read from the Layr Cloud API, which has no state listing: every state that
+/// the records name, with the one attempt of that API. A state that the server lacks fails its own read.
+fn api_attempts(repo: &Repo) -> Result<BTreeMap<String, String>> {
+    Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, format::CONTENT_ATTEMPT.to_string())).collect())
+}
+
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
     let mut states = BTreeMap::new();
     for object in backend.list("states/")? {
@@ -520,7 +526,7 @@ pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Resu
             hex::decode(&hex_key)?.try_into().map_err(|_| anyhow::anyhow!("trusted key of {machine} is not 32 bytes"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }
-    let states = attempts(&store.backend)?;
+    let states = if store.is_api() { api_attempts(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &keys);
     let mut files = 0;
     for id in ids {
@@ -553,8 +559,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let count;
     {
         let _lock = repo.p.lock()?;
-        count =
-            repo.p.import_lines(&records.lines, if bootstrap { crate::store::Trust::All } else { crate::store::Trust::Known })?;
+        // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
+        // the key that the writer registered; local machine trust is not asked (docs/cloud-rfc.md 7.0).
+        let trust = if bootstrap || store.is_api() { crate::store::Trust::All } else { crate::store::Trust::Known };
+        count = repo.p.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -579,7 +587,8 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         Ok(keep)
     }).transpose()?;
     let mut left = Vec::new();
-    let states = attempts(&store.backend)?;
+    let api = store.backend.api();
+    let states = if api.is_some() { api_attempts(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     for id in states.keys() {
@@ -632,6 +641,13 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
+        } else if let Some(api) = api {
+            // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
+            if api.get_state(&store.api_scope(), id)?.is_some() {
+                missing.push(state);
+            } else if heads.is_none() {
+                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(id)));
+            }
         } else {
             missing.push(state);
         }
@@ -728,6 +744,9 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
 }
 
 pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
+    if store.is_api() {
+        bail!("Layr Cloud checks each object against its id on upload; verify is for store folders and buckets");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let records = records(&store.backend, &identity, &descriptor.project)?;
@@ -773,6 +792,9 @@ pub(super) fn log(store: &Store) -> Result<Vec<String>> {
 }
 
 pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
+    if store.is_api() {
+        bail!("Layr Cloud collects garbage on the server; a client does not sweep");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     store.require_private_access()?;

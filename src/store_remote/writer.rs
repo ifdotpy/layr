@@ -390,7 +390,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         }
         Ok(())
     };
+    // Layr Cloud API v1: the token belongs to this machine, so only its own segments go up, signed by the key
+    // that the server knows for it.
+    let api = store.backend.api();
+    if let Some(api) = api {
+        register_machine(store, api)?;
+    }
     for machine in repo.p.db.record_machines()? {
+        if api.is_some() && machine != store.machine {
+            continue;
+        }
         let mut last = 0;
         let mut last_key = None;
         for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
@@ -823,9 +832,11 @@ fn upload_state_journal(
 ) -> Result<(Pushed, usize, u64)> {
     let started = std::time::Instant::now();
     let started_at = push_now();
+    // On the Layr Cloud API the content names every object: one attempt, complete trees, parts by id.
+    let by_content = store.is_api();
     let mut random = [0u8; 4];
     rand::rngs::OsRng.fill_bytes(&mut random);
-    let attempt = hex::encode(random);
+    let attempt = if by_content { format::CONTENT_ATTEMPT.to_string() } else { hex::encode(random) };
     #[cfg(test)]
     let attempt = if PUSH_DETERMINISTIC.with(|enabled| enabled.get()) {
         hex::encode(ContentAddress::digest(state.as_bytes()))[..8].to_string()
@@ -847,6 +858,7 @@ fn upload_state_journal(
         None => None,
     };
     let mut current = Vec::new();
+    let mut part_ids: Vec<String> = Vec::new();
     let mut part_entries = Vec::new();
     let mut part = 0;
     let mut frames = 0;
@@ -945,10 +957,10 @@ fn upload_state_journal(
             }
         }
         if !current.is_empty() && current.len() + frame.len() > format::PART_LIMIT {
-            if let Some(journal) = journal.as_deref_mut() {
+            if let (false, Some(journal)) = (by_content, journal.as_deref_mut()) {
                 journal.prepare_part(state, &attempt, part, &part_entries)?;
             }
-            put_part(store, descriptor, state, &attempt, part, std::mem::take(&mut current), &part_entries)?;
+            part_ids.push(put_part(store, descriptor, state, &attempt, part, std::mem::take(&mut current), &part_entries)?);
             part_entries.clear();
             part += 1;
         }
@@ -989,11 +1001,32 @@ fn upload_state_journal(
         eprintln!("trace {:>8.1} ms  store walk sha256", walk_time.1.as_secs_f64() * 1000.0);
     }
     if !current.is_empty() {
-        if let Some(journal) = journal.as_deref_mut() {
+        if let (false, Some(journal)) = (by_content, journal) {
             journal.prepare_part(state, &attempt, part, &part_entries)?;
         }
-        put_part(store, descriptor, state, &attempt, part, current, &part_entries)?;
+        part_ids.push(put_part(store, descriptor, state, &attempt, part, current, &part_entries)?);
         part += 1;
+    }
+    if by_content {
+        // The frames of this state name their part by id (docs/remotes.md, "Trees, states and links").
+        let by_id = |link: &mut Link| -> Result<()> {
+            if link.0 == state && link.1 == attempt {
+                let id = part_ids.get(link.2 as usize).context("frame of a part that did not go up")?;
+                *link = Link(id.clone(), String::new(), 0, link.3, link.4, std::mem::take(&mut link.5));
+            }
+            Ok(())
+        };
+        for entry in files.values_mut() {
+            entry.3.iter_mut().try_for_each(by_id)?;
+        }
+        let touched: Vec<String> = hashes.dirty.keys().cloned().collect();
+        for sha in touched {
+            for map in [&mut hashes.dirty, &mut hashes.entries] {
+                if let Some(links) = map.get_mut(&sha) {
+                    links.iter_mut().try_for_each(by_id)?;
+                }
+            }
+        }
     }
     if let Some(mut chunker) = chunker {
         chunker.finish(root, &chunks, &|root: &Path, path: &str| content(root, path, &files[path].0))?;
@@ -1005,7 +1038,7 @@ fn upload_state_journal(
     let stage = crate::trace::span("store tree encode");
     let tree = Tree { files, times, chunks };
     let canonical_tree = tree.canonical()?;
-    let delta_base = base.filter(|(_, p)| p.depth + 1 < format::FULL_TREE_EVERY);
+    let delta_base = base.filter(|(_, p)| !by_content && p.depth + 1 < format::FULL_TREE_EVERY);
     let encoded_base;
     let base_bytes = if let Some((_, parent)) = delta_base {
         if parent.canonical.is_empty() {
@@ -1046,7 +1079,8 @@ fn upload_state_journal(
     }
     drop(stage);
     let _publish = crate::trace::span("store tree publish");
-    if !store.backend.put_new(&format::tree_name(state, &attempt), keys::encrypt(&descriptor.recipient, &object)?)? {
+    // On the Layr Cloud API an existing state keeps its tree: the links of this one name objects that went up.
+    if !store.backend.put_new(&format::tree_name(state, &attempt), keys::encrypt(&descriptor.recipient, &object)?)? && !by_content {
         bail!("state attempt already exists; retry with a new attempt");
     }
     push_failpoint("after_publish", state);
@@ -1108,6 +1142,7 @@ fn push_failpoint(point: &str, state: &str) {
     let _ = (point, state);
 }
 
+/// Publishes one part and returns its object id on the Layr Cloud API (empty for the store layout).
 fn put_part(
     store: &Store,
     descriptor: &Descriptor,
@@ -1116,11 +1151,18 @@ fn put_part(
     part: u32,
     data: Vec<u8>,
     entries: &[Entry],
-) -> Result<()> {
+) -> Result<String> {
     push_failpoint("before_part", state);
     let _publish = crate::trace::span("store part publish");
     if part >= format::MAX_PARTS {
         bail!("state exceeds 10000 data parts");
+    }
+    if store.is_api() {
+        // A part that the project holds already is the same bytes: its id names them.
+        let id = format::object_id(format::OBJECT_PART, &data);
+        store.backend.put_new(&format::object_name(&id), data)?;
+        push_failpoint("after_part", state);
+        return Ok(id);
     }
     if !store.backend.put_new(&format::data_name(state, attempt, part), keys::encrypt(&descriptor.recipient, &data)?)? {
         bail!("state attempt has an existing part; retry with a new attempt");
@@ -1134,6 +1176,19 @@ fn put_part(
     }
     let _ = entries;
     push_failpoint("after_part", state);
+    Ok(String::new())
+}
+
+/// Registers this machine's signing key with Layr Cloud once per key (docs/remotes.md, "Machine key"). The
+/// `machine-key` file of the remote folder remembers the key that the server took.
+fn register_machine(store: &Store, api: &super::api::Api) -> Result<()> {
+    let public = hex::encode(store.key.verifying_key().to_bytes());
+    let marker = store.dir.join("machine-key");
+    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == public) {
+        return Ok(());
+    }
+    api.register_machine(&store.machine, &store.key.verifying_key())?;
+    std::fs::write(marker, &public)?;
     Ok(())
 }
 
@@ -1997,7 +2052,7 @@ mod tests {
         let (_, _, tree) = reader.tree(&id, &pushed.attempt).unwrap();
         assert_eq!(reader.read(&tree.files["a"]).unwrap(), content.as_bytes());
         // A remote added as Secret refuses this plain store, and a Private remote refuses a Secret store.
-        store.require_mode(Some(format::Mode::Secret));
+        store.require_mode(Some(format::Mode::Secret)).unwrap();
         assert!(store.descriptor().err().unwrap().to_string().contains("store mode differs"));
         std::fs::remove_dir_all(root).unwrap();
     }
