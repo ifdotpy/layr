@@ -4,6 +4,7 @@
 //! <root>/config.json         format version and id hash
 //! <root>/blobs/ab/cdef...    hot blobs: the exact file bytes, so a checkout clones them
 //! <root>/objects/ab/cdef...  encoded objects: trees, cold blobs (zstd, delta, chunk list), chunks
+//! <root>/packs/<id>.pack     packed objects in zstd blocks, and <id>.idx (`crate::pack`)
 //! <root>/states/<state>      the tree id of an imported state
 //! <root>/tmp/                files being written
 //! ```
@@ -14,13 +15,17 @@
 
 use crate::fsx;
 use crate::id::{Id, Keying, Kind};
+use crate::pack::{self, Builder, Index};
 use crate::tree::{varint_into, Reader, Tree};
 use anyhow::{bail, ensure, Context, Result};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::FileExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 const MAGIC: &[u8; 4] = b"LOB1";
 const WHOLE: u8 = b'z';
@@ -38,11 +43,31 @@ pub struct Options {
     /// The longest delta chain. A version past it is stored whole (a key frame), so a read decodes
     /// at most this many deltas.
     pub max_depth: u8,
+    /// A pack block holds about this many plain bytes: a read decodes one block.
+    pub block_size: usize,
+    /// A pack holds about this many plain bytes (so a compressed pack stays under 64 MiB, the
+    /// largest single upload of Layr Cloud).
+    pub pack_plain_max: usize,
+    /// The zstd level of pack blocks: packs are written once and read many times.
+    pub pack_level: i32,
+    /// Long-distance matching in pack blocks.
+    pub pack_long: bool,
 }
+
+/// Whole blobs up to this size are dictionary samples in measurements (`small_blobs`).
+pub const DICT_SAMPLE_MAX: usize = 16 << 10;
 
 impl Default for Options {
     fn default() -> Self {
-        Options { chunk_min_file: 1 << 20, delta_max: 64 << 20, max_depth: 16 }
+        Options {
+            chunk_min_file: 1 << 20,
+            delta_max: 64 << 20,
+            max_depth: 16,
+            block_size: 4 << 20,
+            pack_plain_max: 56 << 20,
+            pack_level: 19,
+            pack_long: false,
+        }
     }
 }
 
@@ -72,14 +97,81 @@ pub struct Stat {
     pub chunked_bytes: u64,
     pub chunks: u64,
     pub chunk_bytes: u64,
+    pub times: u64,
+    pub times_bytes: u64,
     pub states: u64,
+    /// Packs: their count, objects, plain payload bytes, and file bytes (data and index).
+    pub packs: u64,
+    pub packed_objects: u64,
+    pub packed_plain_bytes: u64,
+    pub pack_bytes: u64,
 }
 
 impl Stat {
+    /// The bytes of loose objects (counts and bytes above count loose files only).
+    pub fn loose_bytes(&self) -> u64 {
+        self.tree_bytes + self.whole_bytes + self.delta_bytes + self.chunked_bytes + self.chunk_bytes + self.times_bytes
+    }
     pub fn total_bytes(&self) -> u64 {
-        self.hot_bytes + self.tree_bytes + self.whole_bytes + self.delta_bytes + self.chunked_bytes + self.chunk_bytes
+        self.hot_bytes + self.loose_bytes() + self.pack_bytes
     }
 }
+
+/// What an imported state names: its tree and its times table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateRef {
+    pub tree: Id,
+    pub times: Id,
+}
+
+/// What `Store::evict_hot` did.
+#[derive(Debug, Default)]
+pub struct EvictReport {
+    pub blobs: u64,
+    pub bytes: u64,
+}
+
+/// What `Store::pack` did.
+#[derive(Debug, Default)]
+pub struct PackReport {
+    pub packs: u64,
+    pub objects: u64,
+    /// Loose files removed (packed now, or copies of packed objects).
+    pub removed: u64,
+    pub loose_bytes: u64,
+    pub pack_bytes: u64,
+}
+
+/// An object as the store reads it, from a loose file or from a pack.
+struct Payload {
+    kind: Kind,
+    /// `pack::RAW` (decoded content), `pack::DELTA` (delta body) or `pack::CHUNKED` (chunk list).
+    form: u8,
+    bytes: Vec<u8>,
+}
+
+struct LoadedPack {
+    index: Index,
+    data: File,
+}
+
+/// The packs of a store, read once and again when a lookup misses (another process packed).
+#[derive(Default)]
+struct PackSet {
+    packs: Vec<LoadedPack>,
+    names: HashSet<Id>,
+    /// Object id to (pack, entry).
+    map: HashMap<Id, (u32, u32)>,
+}
+
+/// Recently decoded blocks: a checkout reads objects in path order, so neighbors share blocks.
+#[derive(Default)]
+struct BlockCache {
+    blocks: HashMap<(Id, u32), Arc<Vec<u8>>>,
+    order: VecDeque<(Id, u32)>,
+}
+
+const CACHED_BLOCKS: usize = 64;
 
 /// What writes added (new objects only: an object that was there counts nowhere).
 #[derive(Debug, Default)]
@@ -100,6 +192,8 @@ pub struct Store {
     pub options: Options,
     pub added: Added,
     pub clone_hook: Option<CloneHook>,
+    packs: RwLock<Arc<PackSet>>,
+    cache: Mutex<BlockCache>,
 }
 
 /// One stored form of a blob, read from the header of its object file.
@@ -114,7 +208,7 @@ pub enum Form {
 impl Store {
     /// Open the store at `root`, made if absent. The id hash of an existing store must match.
     pub fn open(root: &Path, keying: Keying) -> Result<Store> {
-        for dir in ["blobs", "objects", "states", "tmp"] {
+        for dir in ["blobs", "objects", "packs", "states", "tmp"] {
             fs::create_dir_all(root.join(dir)).with_context(|| format!("cannot make {}", root.join(dir).display()))?;
         }
         let config = root.join("config.json");
@@ -136,7 +230,17 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         remove_orphans(&root.join("tmp"));
-        Ok(Store { root: root.to_path_buf(), keying, options: Options::default(), added: Added::default(), clone_hook: None })
+        let store = Store {
+            root: root.to_path_buf(),
+            keying,
+            options: Options::default(),
+            added: Added::default(),
+            clone_hook: None,
+            packs: RwLock::new(Arc::new(PackSet::default())),
+            cache: Mutex::new(BlockCache::default()),
+        };
+        store.reload_packs()?;
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -163,7 +267,105 @@ impl Store {
     }
 
     pub fn has(&self, id: &Id) -> bool {
-        self.fan("blobs", id).exists() || self.object_path(id).exists()
+        self.fan("blobs", id).exists() || self.has_object(id)
+    }
+
+    /// A loose or packed object (not a hot blob).
+    fn has_object(&self, id: &Id) -> bool {
+        self.object_path(id).exists() || self.pack_set().map.contains_key(id)
+    }
+
+    fn pack_set(&self) -> Arc<PackSet> {
+        self.packs.read().expect("no panic holds the lock").clone()
+    }
+
+    /// Read the pack indexes again; packs already open stay open.
+    fn reload_packs(&self) -> Result<Arc<PackSet>> {
+        let old = self.pack_set();
+        let mut set = PackSet::default();
+        let mut names: Vec<String> = Vec::new();
+        for entry in fs::read_dir(self.root.join("packs"))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".idx") {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        for name in names {
+            let id = Id::parse(&name)?;
+            let data_path = self.root.join("packs").join(format!("{name}.pack"));
+            let data = File::open(&data_path).with_context(|| format!("pack {name} has an index but no data"))?;
+            let index = match old.packs.iter().find(|p| p.index.pack == id) {
+                Some(p) => p.index.clone(),
+                None => {
+                    let bytes = fs::read(self.root.join("packs").join(format!("{name}.idx")))?;
+                    let index = Index::decode(&bytes, data.metadata()?.len()).with_context(|| format!("pack {name}"))?;
+                    ensure!(index.pack == id, "pack index {name} names pack {}", index.pack);
+                    index
+                }
+            };
+            let n = set.packs.len() as u32;
+            for (i, e) in index.entries.iter().enumerate() {
+                set.map.entry(e.id).or_insert((n, i as u32));
+            }
+            set.names.insert(id);
+            set.packs.push(LoadedPack { index, data });
+        }
+        let set = Arc::new(set);
+        *self.packs.write().expect("no panic holds the lock") = set.clone();
+        Ok(set)
+    }
+
+    /// The plain bytes of one block of a pack, checked against the index sizes.
+    fn block(&self, set: &PackSet, pack: u32, block: u32) -> Result<Arc<Vec<u8>>> {
+        let p = &set.packs[pack as usize];
+        let key = (p.index.pack, block);
+        if let Some(b) = self.cache.lock().expect("no panic holds the lock").blocks.get(&key) {
+            return Ok(b.clone());
+        }
+        let b = p.index.blocks[block as usize];
+        let mut frame = vec![0u8; b.compressed as usize];
+        p.data.read_exact_at(&mut frame, b.offset)?;
+        let plain = crate::zstdx::decompress(&frame, None, b.plain as usize)
+            .with_context(|| format!("block {block} of pack {}", p.index.pack))?;
+        let plain = Arc::new(plain);
+        let mut cache = self.cache.lock().expect("no panic holds the lock");
+        if cache.blocks.insert(key, plain.clone()).is_none() {
+            cache.order.push_back(key);
+            if cache.order.len() > CACHED_BLOCKS {
+                if let Some(old) = cache.order.pop_front() {
+                    cache.blocks.remove(&old);
+                }
+            }
+        }
+        Ok(plain)
+    }
+
+    /// An object from its loose file, else from a pack (the packs are read again once on a miss).
+    fn payload(&self, id: &Id) -> Result<Payload> {
+        match fs::read(self.object_path(id)) {
+            Ok(data) => {
+                ensure!(data.len() >= 6 && &data[..4] == MAGIC, "object {id} has no valid header");
+                let kind = Kind::from_byte(data[4])?;
+                return Ok(match data[5] {
+                    WHOLE => Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? },
+                    DELTA => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
+                    CHUNKED => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
+                    other => bail!("object {id} has unknown form {other:#x}"),
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("cannot read object {id}")),
+        }
+        let mut set = self.pack_set();
+        if !set.map.contains_key(id) {
+            set = self.reload_packs()?;
+        }
+        let Some(&(pack, entry)) = set.map.get(id) else { bail!("object {id} is missing") };
+        let e = set.packs[pack as usize].index.entries[entry as usize];
+        let block = self.block(&set, pack, e.block)?;
+        let bytes = block[e.offset as usize..(e.offset + e.length) as usize].to_vec();
+        Ok(Payload { kind: e.kind, form: e.form, bytes })
     }
 
     /// A unique temporary path in `tmp/`.
@@ -197,7 +399,7 @@ impl Store {
 
     fn write_object(&self, id: &Id, kind: Kind, form: u8, body: &[&[u8]]) -> Result<bool> {
         let dst = self.object_path(id);
-        if dst.exists() {
+        if self.has_object(id) {
             return Ok(false);
         }
         let tmp = self.temp();
@@ -227,29 +429,38 @@ impl Store {
         Ok(added)
     }
 
-    fn read_object(&self, id: &Id) -> Result<(Kind, u8, Vec<u8>)> {
-        let path = self.object_path(id);
-        let data = fs::read(&path).with_context(|| format!("object {id} is missing"))?;
-        ensure!(data.len() >= 6 && &data[..4] == MAGIC, "object {id} has no valid header");
-        Ok((Kind::from_byte(data[4])?, data[5], data[6..].to_vec()))
-    }
-
     pub fn put_tree(&self, tree: &Tree) -> Result<Id> {
         let bytes = tree.encode();
         let id = self.keying.id(Kind::Tree, &bytes);
-        if !self.object_path(&id).exists() {
+        if !self.has_object(&id) {
             let frame = layr_store::zst::compress(&bytes, None)?;
             self.write_object(&id, Kind::Tree, WHOLE, &[&frame])?;
         }
         Ok(id)
     }
 
+    pub fn put_times(&self, times: &crate::times::Times) -> Result<Id> {
+        let bytes = times.encode();
+        let id = self.keying.id(Kind::Times, &bytes);
+        if !self.has_object(&id) {
+            let frame = layr_store::zst::compress(&bytes, None)?;
+            self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
+        }
+        Ok(id)
+    }
+
+    pub fn get_times(&self, id: &Id) -> Result<crate::times::Times> {
+        let p = self.payload(id)?;
+        ensure!(p.kind == Kind::Times && p.form == pack::RAW, "object {id} is not a times table");
+        ensure!(self.keying.id(Kind::Times, &p.bytes) == *id, "times {id} do not match their id");
+        crate::times::Times::decode(&p.bytes)
+    }
+
     pub fn get_tree(&self, id: &Id) -> Result<Tree> {
-        let (kind, form, body) = self.read_object(id)?;
-        ensure!(kind == Kind::Tree && form == WHOLE, "object {id} is not a tree");
-        let bytes = layr_store::zst::decompress(&body, None)?;
-        ensure!(self.keying.id(Kind::Tree, &bytes) == *id, "tree {id} does not match its id");
-        Tree::decode(&bytes)
+        let p = self.payload(id)?;
+        ensure!(p.kind == Kind::Tree && p.form == pack::RAW, "object {id} is not a tree");
+        ensure!(self.keying.id(Kind::Tree, &p.bytes) == *id, "tree {id} does not match its id");
+        Tree::decode(&p.bytes)
     }
 
     /// The id of the file at `path`, read once.
@@ -271,20 +482,21 @@ impl Store {
     /// Store the file at `path` and return its id. `previous` is the blob of the same path in the
     /// previous tree (a delta base for a cold write).
     pub fn put_file(&self, path: &Path, temperature: Temperature, previous: Option<Id>) -> Result<(Id, u64)> {
+        self.put_file_with(path, temperature, previous.as_slice(), false)
+    }
+
+    /// `put_file` with delta base candidates (`put_cold_with`).
+    pub fn put_file_with(&self, path: &Path, temperature: Temperature, bases: &[Id], judge: bool) -> Result<(Id, u64)> {
         let (id, len) = self.hash_file(path)?;
         match temperature {
             Temperature::Hot if self.fan("blobs", &id).exists() => Ok((id, len)),
             Temperature::Hot => self.put_hot(path),
             Temperature::Cold if self.has(&id) => Ok((id, len)),
             Temperature::Cold => {
-                let data = if len < self.options.chunk_min_file || (previous.is_some() && len <= self.options.delta_max) {
-                    Some(fs::read(path)?)
+                if len < self.options.chunk_min_file || (!bases.is_empty() && len <= self.options.delta_max) {
+                    self.put_cold_with(&fs::read(path)?, bases, judge)
                 } else {
-                    None
-                };
-                match data {
-                    Some(data) => self.put_cold_bytes(&data, previous),
-                    None => self.put_chunked_file(path),
+                    self.put_chunked_file(path)
                 }
             }
         }
@@ -328,11 +540,11 @@ impl Store {
         if let Some(p) = self.hot_path(id) {
             return fs::metadata(p).ok().map(|m| m.len());
         }
-        let (kind, form, body) = self.read_object(id).ok()?;
-        if kind != Kind::Blob || form != CHUNKED {
+        let p = self.payload(id).ok()?;
+        if p.kind != Kind::Blob || p.form != pack::CHUNKED {
             return None;
         }
-        let mut r = Reader::new(&body);
+        let mut r = Reader::new(&p.bytes);
         let n = r.varint().ok()?;
         let mut total = 0u64;
         for _ in 0..n {
@@ -351,40 +563,57 @@ impl Store {
     }
 
     /// Store `data` cold: a delta against `previous` when it is stored, within the size and depth
-    /// limits, and smaller than a whole frame would likely be; else one zstd frame.
+    /// limits; else one zstd frame (chunks for a large one).
     pub fn put_cold_bytes(&self, data: &[u8], previous: Option<Id>) -> Result<(Id, u64)> {
+        self.put_cold_with(data, previous.as_slice(), false)
+    }
+
+    /// Store `data` cold against the best of `bases`: each usable base (stored, within the size
+    /// and depth limits) gives a delta and the smallest wins. With `judge`, a whole frame competes
+    /// too (bases found by similarity may not be similar).
+    pub fn put_cold_with(&self, data: &[u8], bases: &[Id], judge: bool) -> Result<(Id, u64)> {
         let id = self.keying.id(Kind::Blob, data);
         let len = data.len() as u64;
         if self.has(&id) {
             return Ok((id, len));
         }
-        let base = match previous.filter(|p| *p != id && self.has(p)) {
-            Some(p) if len <= self.options.delta_max => {
-                let depth = self.depth(&p)?;
-                (depth < self.options.max_depth).then_some((p, depth))
-            }
-            _ => None,
-        };
-        if let Some((base_id, depth)) = base.filter(|(p, _)| self.known_size(p).is_none_or(|n| n <= self.options.delta_max)) {
-            let base = self.read_blob(&base_id)?;
-            if base.len() as u64 <= self.options.delta_max {
+        let mut best: Option<(Vec<u8>, Id, u8)> = None;
+        if len <= self.options.delta_max {
+            for base_id in bases.iter().filter(|p| **p != id && self.has(p)) {
+                if self.known_size(base_id).is_some_and(|n| n > self.options.delta_max) {
+                    continue;
+                }
+                let depth = self.depth(base_id)?;
+                if depth >= self.options.max_depth {
+                    continue;
+                }
+                let base = self.read_blob(base_id)?;
+                if base.len() as u64 > self.options.delta_max {
+                    continue;
+                }
                 let frame = layr_store::zst::compress(data, Some(&base))?;
-                self.write_object(&id, Kind::Blob, DELTA, &[&[depth + 1], &base_id.0, &frame])?;
-                return Ok((id, len));
+                if best.as_ref().is_none_or(|(b, _, _)| frame.len() < b.len()) {
+                    best = Some((frame, *base_id, depth));
+                }
             }
         }
-        if len >= self.options.chunk_min_file {
-            self.put_chunked_bytes(id, data)?;
-        } else {
-            let frame = layr_store::zst::compress(data, None)?;
-            self.write_object(&id, Kind::Blob, WHOLE, &[&frame])?;
+        let whole = (best.is_none() || judge).then(|| layr_store::zst::compress(data, None)).transpose()?;
+        match (best, whole) {
+            (Some((frame, base_id, depth)), w) if w.as_ref().is_none_or(|w| frame.len() < w.len()) => {
+                self.write_object(&id, Kind::Blob, DELTA, &[&[depth + 1], &base_id.0, &frame])?;
+            }
+            _ if len >= self.options.chunk_min_file => self.put_chunked_bytes(id, data)?,
+            (_, Some(w)) => {
+                self.write_object(&id, Kind::Blob, WHOLE, &[&w])?;
+            }
+            (_, None) => unreachable!("a whole frame exists when no delta wins"),
         }
         Ok((id, len))
     }
 
     fn put_chunk(&self, chunk: &[u8]) -> Result<Id> {
         let id = self.keying.id(Kind::Chunk, chunk);
-        if !self.object_path(&id).exists() {
+        if !self.has_object(&id) {
             let frame = layr_store::zst::compress(chunk, None)?;
             self.write_object(&id, Kind::Chunk, WHOLE, &[&frame])?;
         }
@@ -437,7 +666,7 @@ impl Store {
             buf.drain(..used);
         }
         let id = h.finish().with_context(|| path.display().to_string())?;
-        if !self.has(&id) {
+        if !self.has_object(&id) {
             let mut list = Vec::new();
             varint_into(&mut list, ids.len() as u64);
             for (chunk, n) in &ids {
@@ -454,53 +683,50 @@ impl Store {
         if self.fan("blobs", id).exists() {
             return Ok(Form::Hot);
         }
-        let mut head = [0u8; 6 + 1 + 32];
-        let mut f = File::open(self.object_path(id)).with_context(|| format!("object {id} is missing"))?;
-        let n = read_up_to(&mut f, &mut head)?;
-        ensure!(n >= 6 && &head[..4] == MAGIC, "object {id} has no valid header");
-        Ok(match head[5] {
-            WHOLE => Form::Whole,
-            CHUNKED => Form::Chunked,
-            DELTA => {
-                ensure!(n == head.len(), "delta object {id} is cut short");
-                Form::Delta { depth: head[6], base: Id(head[7..39].try_into().expect("32 bytes")) }
+        let p = self.payload(id)?;
+        ensure!(p.kind == Kind::Blob, "object {id} is a {}, not a blob", p.kind.name());
+        Ok(match p.form {
+            pack::RAW => Form::Whole,
+            pack::CHUNKED => Form::Chunked,
+            _ => {
+                ensure!(p.bytes.len() > 33, "delta object {id} is cut short");
+                Form::Delta { depth: p.bytes[0], base: Id(p.bytes[1..33].try_into().expect("32 bytes")) }
             }
-            other => bail!("object {id} has unknown form {other:#x}"),
         })
     }
 
     /// The content of a blob, checked against its id.
     pub fn read_blob(&self, id: &Id) -> Result<Vec<u8>> {
-        let data = self.read_blob_unchecked(id, 0)?;
+        let data = self.read_blob_unchecked(id, 0, true)?;
         ensure!(self.keying.id(Kind::Blob, &data) == *id, "blob {id} does not match its id");
         Ok(data)
     }
 
-    fn read_blob_unchecked(&self, id: &Id, depth: u32) -> Result<Vec<u8>> {
+    fn read_blob_unchecked(&self, id: &Id, depth: u32, hot: bool) -> Result<Vec<u8>> {
         ensure!(depth <= 255, "delta chain of {id} is too long");
-        if let Some(p) = self.hot_path(id) {
+        if let Some(p) = self.hot_path(id).filter(|_| hot) {
             return Ok(fs::read(p)?);
         }
-        let (kind, form, body) = self.read_object(id)?;
+        let Payload { kind, form, bytes: body } = self.payload(id)?;
         ensure!(kind == Kind::Blob, "object {id} is a {}, not a blob", kind.name());
         match form {
-            WHOLE => layr_store::zst::decompress(&body, None),
-            DELTA => {
+            pack::RAW => Ok(body),
+            pack::DELTA => {
                 ensure!(body.len() > 33, "delta object {id} is cut short");
                 let base_id = Id(body[1..33].try_into().expect("32 bytes"));
-                let base = self.read_blob_unchecked(&base_id, depth + 1)?;
+                let base = self.read_blob_unchecked(&base_id, depth + 1, true)?;
                 layr_store::zst::decompress(&body[33..], Some(&base))
             }
-            CHUNKED => {
+            _ => {
                 let mut r = Reader::new(&body);
                 let n = r.varint()?;
                 let mut out = Vec::new();
                 for _ in 0..n {
                     let chunk_id = r.id()?;
                     let len = r.varint()?;
-                    let (kind, form, frame) = self.read_object(&chunk_id)?;
-                    ensure!(kind == Kind::Chunk && form == WHOLE, "object {chunk_id} is not a chunk");
-                    let chunk = layr_store::zst::decompress(&frame, None)?;
+                    let p = self.payload(&chunk_id)?;
+                    ensure!(p.kind == Kind::Chunk && p.form == pack::RAW, "object {chunk_id} is not a chunk");
+                    let chunk = p.bytes;
                     ensure!(chunk.len() as u64 == len, "chunk {chunk_id} has the wrong length");
                     ensure!(self.keying.id(Kind::Chunk, &chunk) == chunk_id, "chunk {chunk_id} does not match its id");
                     out.extend_from_slice(&chunk);
@@ -508,28 +734,97 @@ impl Store {
                 ensure!(r.done(), "bytes after the chunk list of {id}");
                 Ok(out)
             }
-            other => bail!("object {id} has unknown form {other:#x}"),
         }
     }
 
-    /// Record the tree of an imported state.
-    pub fn set_state(&self, state: &str, tree: &Id) -> Result<()> {
+    /// Turn the hot blobs that no tree of `keep` names into cold objects (a zstd frame, or chunks
+    /// for a large one) and remove their files. A hot file goes only after its cold form reads
+    /// back to the same id.
+    pub fn evict_hot(&self, keep: &[Id]) -> Result<EvictReport> {
+        use rayon::prelude::*;
+        let mut hot = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut stack: Vec<Id> = keep.to_vec();
+        while let Some(t) = stack.pop() {
+            if !seen.insert(t) {
+                continue;
+            }
+            for e in self.get_tree(&t)?.entries {
+                match e.node {
+                    crate::tree::Node::Dir { tree } => stack.push(tree),
+                    crate::tree::Node::File { blob, .. } => {
+                        hot.insert(blob);
+                    }
+                    crate::tree::Node::Symlink { .. } => {}
+                }
+            }
+        }
+        let mut files = Vec::new();
+        for dir in fan_folders(&self.root.join("blobs"))? {
+            let fan = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) {
+                    if !hot.contains(&id) {
+                        files.push((id, entry.path()));
+                    }
+                }
+            }
+        }
+        let done = files
+            .par_iter()
+            .map(|(id, path)| -> Result<u64> {
+                let len = fs::metadata(path)?.len();
+                if !self.has_object(id) {
+                    if len >= self.options.chunk_min_file {
+                        let (got, _) = self.put_chunked_file(path)?;
+                        ensure!(got == *id, "hot blob {id} does not match its id");
+                    } else {
+                        let data = fs::read(path)?;
+                        ensure!(self.keying.id(Kind::Blob, &data) == *id, "hot blob {id} does not match its id");
+                        self.write_object(id, Kind::Blob, WHOLE, &[&layr_store::zst::compress(&data, None)?])?;
+                    }
+                }
+                let cold = self.read_blob_unchecked(id, 0, false)?;
+                ensure!(self.keying.id(Kind::Blob, &cold) == *id, "the cold form of {id} does not match its id");
+                fs::remove_file(path)?;
+                Ok(len)
+            })
+            .collect::<Result<Vec<u64>>>()?;
+        Ok(EvictReport { blobs: done.len() as u64, bytes: done.iter().sum() })
+    }
+
+    /// Record the tree and the times table of an imported state:
+    /// `{"times":"<id>","tree":"<id>"}` (docs/objects.md, "States").
+    pub fn set_state(&self, state: &str, r: &StateRef) -> Result<()> {
         ensure!(!state.is_empty() && state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "invalid state id {state}");
         let tmp = self.temp();
-        fs::write(&tmp, format!("{tree}\n"))?;
+        fs::write(&tmp, format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree))?;
         fs::rename(&tmp, self.root.join("states").join(state))?;
         Ok(())
     }
 
-    pub fn state_tree(&self, state: &str) -> Result<Option<Id>> {
+    pub fn state_ref(&self, state: &str) -> Result<Option<StateRef>> {
         if state.is_empty() || !state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Ok(None);
         }
-        match fs::read_to_string(self.root.join("states").join(state)) {
-            Ok(text) => Ok(Some(Id::parse(text.trim())?)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        let text = match fs::read_to_string(self.root.join("states").join(state)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let field = |name: &str| -> Result<Id> {
+            let key = format!("\"{name}\":\"");
+            let at = text.find(&key).ok_or_else(|| anyhow::anyhow!("state {state} has no {name}"))? + key.len();
+            Id::parse(text.get(at..at + 64).unwrap_or(""))
+        };
+        let r = StateRef { tree: field("tree")?, times: field("times")? };
+        ensure!(text == format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree), "state {state} is not canonical");
+        Ok(Some(r))
+    }
+
+    pub fn state_tree(&self, state: &str) -> Result<Option<Id>> {
+        Ok(self.state_ref(state)?.map(|r| r.tree))
     }
 
     /// The imported states whose tree is `tree`.
@@ -566,9 +861,218 @@ impl Store {
             s.chunked_bytes += p.chunked_bytes;
             s.chunks += p.chunks;
             s.chunk_bytes += p.chunk_bytes;
+            s.times += p.times;
+            s.times_bytes += p.times_bytes;
         }
         s.states = fs::read_dir(self.root.join("states"))?.count() as u64;
+        for p in &self.reload_packs()?.packs {
+            s.packs += 1;
+            s.packed_objects += p.index.entries.len() as u64;
+            s.packed_plain_bytes += p.index.entries.iter().map(|e| u64::from(e.length)).sum::<u64>();
+            s.pack_bytes += p.data.metadata()?.len();
+            s.pack_bytes += fs::metadata(self.root.join("packs").join(format!("{}.idx", p.index.pack)))?.len();
+        }
         Ok(s)
+    }
+
+    /// Move the loose objects into packs; hot blobs stay files for clones. A loose copy of an
+    /// object that a pack holds goes. A run with no loose object changes nothing. A pack is
+    /// complete on disk (its data checked against its id, its index written) before any loose
+    /// file of it goes, so a crash leaves at most a loose copy too many.
+    pub fn pack(&self) -> Result<PackReport> {
+        use rayon::prelude::*;
+        let set = self.reload_packs()?;
+        let mut report = PackReport::default();
+        let mut loose: HashMap<Id, u64> = HashMap::new();
+        for dir in fan_folders(&self.root.join("objects"))? {
+            let fan = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) else { continue };
+                if set.map.contains_key(&id) {
+                    fs::remove_file(entry.path())?;
+                    report.removed += 1;
+                    continue;
+                }
+                loose.insert(id, entry.metadata()?.len());
+            }
+        }
+        report.loose_bytes = loose.values().sum();
+        let order = self.pack_order(&loose)?;
+        let codec = crate::zstdx::Codec { level: self.options.pack_level, long: self.options.pack_long, dict: None };
+        let mut builder = Builder::new(self.options.block_size);
+        for batch in order.chunks(4096) {
+            let payloads = batch.par_iter().map(|id| self.payload(id)).collect::<Result<Vec<Payload>>>()?;
+            for (id, p) in batch.iter().zip(payloads) {
+                builder.add(*id, p.kind, p.form, &p.bytes);
+                if builder.plain_len() >= self.options.pack_plain_max {
+                    let full = std::mem::replace(&mut builder, Builder::new(self.options.block_size));
+                    self.write_pack(full, &codec, &mut report)?;
+                }
+            }
+        }
+        if !builder.entries.is_empty() {
+            self.write_pack(builder, &codec, &mut report)?;
+        }
+        Ok(report)
+    }
+
+    /// Whole blobs of at most `DICT_SAMPLE_MAX` bytes from `order`, up to `budget` bytes.
+    #[doc(hidden)]
+    pub fn small_blobs(&self, order: &[Id], budget: usize) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        let mut total = 0;
+        for id in order {
+            let p = self.payload(id)?;
+            if p.kind == Kind::Blob && p.form == pack::RAW && !p.bytes.is_empty() && p.bytes.len() <= DICT_SAMPLE_MAX {
+                total += p.bytes.len();
+                out.push(p.bytes);
+                if total >= budget {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The loose objects in pack order and their payloads in plain blocks of `block_size`, as a
+    /// repack would make them (for measurements).
+    #[doc(hidden)]
+    pub fn plain_blocks(&self, block_size: usize) -> Result<(Vec<Id>, Vec<Vec<u8>>)> {
+        use rayon::prelude::*;
+        let mut loose: HashMap<Id, u64> = HashMap::new();
+        for dir in fan_folders(&self.root.join("objects"))? {
+            let fan = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) {
+                    loose.insert(id, entry.metadata()?.len());
+                }
+            }
+        }
+        let order = self.pack_order(&loose)?;
+        let mut builder = Builder::new(block_size);
+        for batch in order.chunks(4096) {
+            let payloads = batch.par_iter().map(|id| self.payload(id)).collect::<Result<Vec<Payload>>>()?;
+            for (id, p) in batch.iter().zip(payloads) {
+                builder.add(*id, p.kind, p.form, &p.bytes);
+            }
+        }
+        Ok((order, builder.plain))
+    }
+
+    /// Pack order: the trees of the imported states first (they hold ids, which do not compress),
+    /// then their blobs and chunks in path order, so files of one folder share blocks; then the
+    /// loose objects that no imported state names.
+    fn pack_order(&self, loose: &HashMap<Id, u64>) -> Result<Vec<Id>> {
+        let mut states: Vec<String> = fs::read_dir(self.root.join("states"))?
+            .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_>>()?;
+        states.sort();
+        let mut seen = HashSet::new();
+        let (mut trees, mut others) = (Vec::new(), Vec::new());
+        for state in states {
+            if let Some(tree) = self.state_tree(&state)? {
+                self.order_tree(&tree, loose, &mut seen, &mut trees, &mut others)?;
+            }
+        }
+        let mut rest: Vec<Id> = loose.keys().filter(|id| !seen.contains(*id)).copied().collect();
+        rest.sort();
+        trees.extend(others);
+        trees.extend(rest);
+        Ok(trees)
+    }
+
+    fn order_tree(
+        &self,
+        id: &Id,
+        loose: &HashMap<Id, u64>,
+        seen: &mut HashSet<Id>,
+        trees: &mut Vec<Id>,
+        others: &mut Vec<Id>,
+    ) -> Result<()> {
+        if !seen.insert(*id) {
+            return Ok(());
+        }
+        if loose.contains_key(id) {
+            trees.push(*id);
+        }
+        for e in self.get_tree(id)?.entries {
+            match e.node {
+                crate::tree::Node::Dir { tree } => self.order_tree(&tree, loose, seen, trees, others)?,
+                crate::tree::Node::File { blob, .. } if loose.contains_key(&blob) && seen.insert(blob) => {
+                    others.push(blob);
+                    let p = self.payload(&blob)?;
+                    if p.form == pack::CHUNKED {
+                        let mut r = Reader::new(&p.bytes);
+                        for _ in 0..r.varint()? {
+                            let chunk = r.id()?;
+                            r.varint()?;
+                            if loose.contains_key(&chunk) && seen.insert(chunk) {
+                                others.push(chunk);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn write_pack(&self, builder: Builder, codec: &crate::zstdx::Codec, report: &mut PackReport) -> Result<()> {
+        use rayon::prelude::*;
+        let Builder { plain, mut entries, .. } = builder;
+        let frames = plain.par_iter().map(|b| crate::zstdx::compress(b, codec)).collect::<Result<Vec<_>>>()?;
+        // Each frame decodes to its block before anything is written.
+        frames.par_iter().zip(plain.par_iter()).try_for_each(|(f, p)| -> Result<()> {
+            ensure!(crate::zstdx::decompress(f, None, p.len())? == *p, "a pack block does not decode to its input");
+            Ok(())
+        })?;
+        let mut data = Vec::with_capacity(frames.iter().map(Vec::len).sum::<usize>() + 4);
+        data.extend_from_slice(pack::DATA_MAGIC);
+        let mut blocks = Vec::with_capacity(frames.len());
+        for (f, p) in frames.iter().zip(&plain) {
+            blocks.push(pack::Block { offset: data.len() as u64, compressed: f.len() as u32, plain: p.len() as u32 });
+            data.extend_from_slice(f);
+        }
+        let id = self.keying.id(Kind::Opaque, &data);
+        entries.sort_by_key(|e| e.id);
+        let index = Index { pack: id, blocks, entries };
+        let index_bytes = index.encode();
+        let dir = self.root.join("packs");
+        for (bytes, name) in [(&data, format!("{id}.pack")), (&index_bytes, format!("{id}.idx"))] {
+            let tmp = self.temp();
+            let written = (|| -> Result<()> {
+                let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o444).open(&tmp)?;
+                f.write_all(bytes)?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = written {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+            // An existing pack with this id holds the same bytes.
+            self.publish(&tmp, &dir.join(name))?;
+        }
+        File::open(&dir)?.sync_all()?;
+        // The data on disk is the data the index describes.
+        let mut on_disk = Vec::new();
+        File::open(dir.join(format!("{id}.pack")))?.read_to_end(&mut on_disk)?;
+        ensure!(self.keying.id(Kind::Opaque, &on_disk) == id, "pack {id} on disk does not match its id");
+        self.reload_packs()?;
+        for e in &index.entries {
+            match fs::remove_file(self.object_path(&e.id)) {
+                Ok(()) => report.removed += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        report.packs += 1;
+        report.objects += index.entries.len() as u64;
+        report.pack_bytes += (data.len() + index_bytes.len()) as u64;
+        Ok(())
     }
 
     fn stat_folder(&self, hot: bool, dir: &Path) -> Result<Stat> {
@@ -590,6 +1094,8 @@ impl Store {
                 (Kind::Blob, WHOLE) => (&mut s.whole_blobs, &mut s.whole_bytes),
                 (Kind::Blob, DELTA) => (&mut s.delta_blobs, &mut s.delta_bytes),
                 (Kind::Blob, _) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
+                (Kind::Times, _) => (&mut s.times, &mut s.times_bytes),
+                (Kind::Opaque, _) => bail!("{} is an opaque object, which is never loose", path.display()),
             };
             *count += 1;
             *bytes += len;

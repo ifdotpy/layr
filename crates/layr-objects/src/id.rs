@@ -47,6 +47,11 @@ pub enum Kind {
     Blob,
     Tree,
     Chunk,
+    /// Bytes whose structure the id does not describe: a pack, a Git pack, a stored (encoded or
+    /// encrypted) form. Anyone can check the id of an opaque object from its bytes alone.
+    Opaque,
+    /// The times table of a state (`crate::times`): referenced by the state, not by a tree.
+    Times,
 }
 
 impl Kind {
@@ -55,6 +60,8 @@ impl Kind {
             Kind::Blob => "blob",
             Kind::Tree => "tree",
             Kind::Chunk => "chunk",
+            Kind::Opaque => "opaque",
+            Kind::Times => "times",
         }
     }
 
@@ -63,6 +70,8 @@ impl Kind {
             Kind::Blob => b'b',
             Kind::Tree => b't',
             Kind::Chunk => b'c',
+            Kind::Opaque => b'o',
+            Kind::Times => b'm',
         }
     }
 
@@ -71,6 +80,8 @@ impl Kind {
             b'b' => Kind::Blob,
             b't' => Kind::Tree,
             b'c' => Kind::Chunk,
+            b'o' => Kind::Opaque,
+            b'm' => Kind::Times,
             _ => bail!("unknown object kind byte {byte:#x}"),
         })
     }
@@ -110,14 +121,15 @@ impl Keying {
     }
 }
 
-/// The id key of a Secret project: HKDF-SHA256 (RFC 5869) with the project identity as the input
-/// key, the project id as the salt and a fixed label, as `layr_store::chunks::key` makes chunk keys.
-pub fn project_key(identity: &str, project: &str) -> [u8; 32] {
-    let mut extract = Hmac::<sha2::Sha256>::new_from_slice(project.as_bytes()).expect("any key length");
+/// The id key of a Secret overlay in one key epoch: HKDF-SHA256 (RFC 5869) with the epoch's age
+/// identity (its text form) as the input key, the epoch id as the salt and the info
+/// `layr-objects-id-v1` (docs/objects.md, "Secret overlays"). A new epoch gives new ids.
+pub fn epoch_key(identity: &str, epoch: &str) -> [u8; 32] {
+    let mut extract = Hmac::<sha2::Sha256>::new_from_slice(epoch.as_bytes()).expect("any key length");
     extract.update(identity.as_bytes());
     let prk = extract.finalize().into_bytes();
     let mut expand = Hmac::<sha2::Sha256>::new_from_slice(&prk).expect("any key length");
-    expand.update(b"layr object id key v1");
+    expand.update(b"layr-objects-id-v1");
     expand.update(&[1]);
     expand.finalize().into_bytes().into()
 }
@@ -180,8 +192,8 @@ mod tests {
         let blob = Keying::Plain.id(Kind::Blob, b"x");
         assert_ne!(blob, Keying::Plain.id(Kind::Tree, b"x"));
         assert_ne!(blob, Keying::Plain.id(Kind::Chunk, b"x"));
-        let a = Keying::Keyed(project_key("AGE-SECRET-KEY-1A", "project-1"));
-        let b = Keying::Keyed(project_key("AGE-SECRET-KEY-1A", "project-2"));
+        let a = Keying::Keyed(epoch_key("AGE-SECRET-KEY-1A", "project-1"));
+        let b = Keying::Keyed(epoch_key("AGE-SECRET-KEY-1A", "project-2"));
         assert_ne!(a.id(Kind::Blob, b"x"), blob);
         assert_ne!(a.id(Kind::Blob, b"x"), b.id(Kind::Blob, b"x"));
         assert_eq!(a.id(Kind::Blob, b"x"), a.id(Kind::Blob, b"x"));

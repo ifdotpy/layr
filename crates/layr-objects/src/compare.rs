@@ -26,6 +26,7 @@ type Inodes = BTreeMap<(u64, u64), BTreeSet<Vec<u8>>>;
 
 #[derive(Default)]
 struct Acc {
+    times: bool,
     entries: u64,
     bytes: u64,
     differences: Vec<String>,
@@ -37,7 +38,15 @@ struct Acc {
 /// symbolic links), file bytes, link targets, kept extended attributes, and hard link groups.
 /// Owners and times are not compared (a tree does not keep them).
 pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
-    let acc = Mutex::new(Acc::default());
+    compare_with(a, b, false)
+}
+
+/// `compare`, and with `times` the modification times of every entry too (the root included).
+pub fn compare_with(a: &Path, b: &Path, times: bool) -> Result<Comparison> {
+    let acc = Mutex::new(Acc { times, ..Acc::default() });
+    if times && crate::times::ns_of(&fs::symlink_metadata(a)?) != crate::times::ns_of(&fs::symlink_metadata(b)?) {
+        acc.lock().expect("no panic holds the lock").differences.push("time differs: the root folder".into());
+    }
     walk(a, b, b"", &acc)?;
     let mut acc = acc.into_inner().expect("no panic holds the lock");
     let groups = |m: &Inodes| -> BTreeSet<BTreeSet<Vec<u8>>> { m.values().filter(|g| g.len() > 1).cloned().collect() };
@@ -137,6 +146,10 @@ fn walk(a: &Path, b: &Path, rel: &[u8], acc: &Mutex<Acc>) -> Result<()> {
                     diffs.push(format!("content differs: {}", show(name)));
                 }
             }
+        }
+        let check_times = acc.lock().expect("no panic holds the lock").times;
+        if check_times && crate::times::ns_of(&ma) != crate::times::ns_of(&mb) {
+            diffs.push(format!("time differs: {}", show(name)));
         }
         {
             let mut acc = acc.lock().expect("no panic holds the lock");

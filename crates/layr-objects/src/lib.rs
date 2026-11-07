@@ -7,14 +7,17 @@ pub mod checkout;
 pub mod compare;
 pub mod fsx;
 pub mod id;
+pub mod pack;
 pub mod store;
+pub mod times;
 pub mod tree;
 pub mod write;
+pub mod zstdx;
 
-pub use checkout::{checkout, CheckoutReport};
-pub use compare::{compare, Comparison};
+pub use checkout::{checkout, checkout_with, CheckoutReport};
+pub use compare::{compare, compare_with, Comparison};
 pub use id::{Id, Keying, Kind};
-pub use store::{Form, Stat, Store, Temperature};
+pub use store::{Form, Stat, StateRef, Store, Temperature};
 pub use tree::{Entry, Node, Tree};
 pub use write::{write_tree, WriteOptions, WriteReport};
 
@@ -104,6 +107,7 @@ mod tests {
         std::os::unix::fs::symlink("missing/target", root.join("dangling")).unwrap();
         fs::hard_link(root.join("src/main.rs"), root.join("hard")).unwrap();
         fs::hard_link(root.join("src/main.rs"), root.join("src/deep/hard2")).unwrap();
+        times::set(&root.join("notes-old"), 0).ok();
         chmod(&root.join("locked"), 0o555);
         // A user attribute: on a file system without them the test still checks the rest.
         let xattr = fsx::set_xattrs(&root.join("run.sh"), &[(b"user.layr-test".to_vec(), b"v\0\xff".to_vec())]).is_ok();
@@ -117,7 +121,7 @@ mod tests {
         let src = dir.join("src");
         let xattr = sample(&src);
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
-        let opts = WriteOptions { temperature, previous: None, exclude: vec![] };
+        let opts = WriteOptions { temperature, previous: None, exclude: vec![], similar: false };
         let report = write_tree(&store, &src, &opts).unwrap();
         let tree = report.tree.unwrap();
         assert_eq!(report.hard_link_groups, 1);
@@ -149,6 +153,20 @@ mod tests {
         assert_eq!(write_tree(&store, &out, &opts).unwrap().tree.unwrap(), tree);
         // A checkout into a folder with files is refused.
         assert!(checkout(&store, &tree, &src).is_err());
+
+        // Times: a checkout with the times table restores every modification time (folders and
+        // links included); one without it does not. The times are not part of the tree id.
+        let report_times = report.times.unwrap();
+        let timed = dir.join("timed");
+        let co = checkout_with(&store, &tree, Some(&report_times), &timed).unwrap();
+        assert!(co.times > 10);
+        let cmp = compare_with(&src, &timed, true).unwrap();
+        assert!(cmp.differences.is_empty(), "{:#?}", cmp.differences);
+        assert!(!compare_with(&src, &out, true).unwrap().differences.is_empty(), "the plain checkout has new times");
+        times::set(&src.join("src/main.rs"), 1_000_000_000_123_456_789).unwrap();
+        let moved = write_tree(&store, &src, &opts).unwrap();
+        assert_eq!(moved.tree.unwrap(), tree, "a new time keeps the tree id");
+        assert_ne!(moved.times.unwrap(), report_times, "and changes the times table");
         make_writable(&dir);
     }
 
@@ -168,10 +186,14 @@ mod tests {
         let a = dir.join("a");
         sample(&a);
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
-        let tree = write_tree(&store, &a, &WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![] })
-            .unwrap()
-            .tree
-            .unwrap();
+        let tree = write_tree(
+            &store,
+            &a,
+            &WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false },
+        )
+        .unwrap()
+        .tree
+        .unwrap();
         type Change = (&'static str, Box<dyn Fn(&Path)>);
         let change: Vec<Change> = vec![
             (
@@ -225,7 +247,7 @@ mod tests {
         for version in 0..5 {
             text.push_str(&format!("version {version}\n"));
             fs::write(src.join("file.txt"), &text).unwrap();
-            let opts = WriteOptions { temperature: Temperature::Cold, previous, exclude: vec![] };
+            let opts = WriteOptions { temperature: Temperature::Cold, previous, exclude: vec![], similar: false };
             let tree = write_tree(&store, &src, &opts).unwrap().tree.unwrap();
             trees.push((tree, text.clone()));
             previous = Some(tree);
@@ -239,6 +261,189 @@ mod tests {
             assert_eq!(fs::read_to_string(out.join("file.txt")).unwrap(), *text);
         }
     }
+
+    #[test]
+    fn an_incremental_write_equals_a_full_write() {
+        let dir = scratch("incremental");
+        let src = dir.join("src");
+        sample(&src);
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let first = write_tree(&store, &src, &opts).unwrap();
+        let base = write::Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        // Changes: new content, a new folder with a file, a removed file, a mode, a new time.
+        fs::write(src.join("src/deep/er/same.txt"), "changed\n").unwrap();
+        fs::create_dir_all(src.join("new/inner")).unwrap();
+        fs::write(src.join("new/inner/file"), "new\n").unwrap();
+        fs::remove_file(src.join("empty-file")).unwrap();
+        chmod(&src.join("run-copy.sh"), 0o700);
+        times::set(&src.join("same-too.txt"), 5_000_000_000).unwrap();
+        let changed: Vec<Vec<u8>> = ["src/deep/er/same.txt", "new", "empty-file", "run-copy.sh", "same-too.txt"]
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect();
+        let full = write_tree(&store, &src, &opts).unwrap();
+        let inc = write::write_changed(&store, &src, &base, &changed, &opts).unwrap();
+        assert_eq!(inc.tree, full.tree, "the incremental tree equals the full tree");
+        assert_eq!(inc.times, full.times, "and so do the times");
+        assert!(inc.files < full.files, "it read only the changed files ({} of {})", inc.files, full.files);
+    }
+
+    #[test]
+    fn a_packed_store_round_trips() {
+        let dir = scratch("packed");
+        let src = dir.join("src");
+        sample(&src);
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let tree = write_tree(&store, &src, &opts).unwrap().tree.unwrap();
+        let times = write_tree(&store, &src, &opts).unwrap().times.unwrap();
+        store.set_state("s1", &store::StateRef { tree, times }).unwrap();
+        let before = store.stat().unwrap();
+        assert!(before.loose_bytes() > 0 && before.packs == 0);
+        // A second store object (another process) reads the packs the first one writes.
+        let other = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let report = store.pack().unwrap();
+        assert_eq!(report.packs, 1);
+        assert_eq!(
+            report.objects,
+            before.trees + before.whole_blobs + before.delta_blobs + before.chunked_blobs + before.chunks + before.times
+        );
+        let after = store.stat().unwrap();
+        assert_eq!(after.loose_bytes(), 0, "no loose object is left");
+        assert_eq!(after.packed_objects, report.objects);
+        let out = dir.join("out");
+        checkout(&other, &tree, &out).unwrap();
+        let cmp = compare(&src, &out).unwrap();
+        assert!(cmp.differences.is_empty(), "{:#?}", cmp.differences);
+        // Writing the same folder again adds nothing: packed objects count as present.
+        let added = store.added.objects.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(write_tree(&store, &src, &opts).unwrap().tree.unwrap(), tree);
+        assert_eq!(store.added.objects.load(std::sync::atomic::Ordering::Relaxed), added);
+        // A second pack run changes nothing.
+        let again = store.pack().unwrap();
+        assert_eq!((again.packs, again.objects, again.removed), (0, 0, 0));
+        // A loose copy of a packed object goes at the next run.
+        let (blob, _) = store.put_cold_bytes(b"fn main() {}\n", None).unwrap();
+        assert!(store.has(&blob));
+        let copy = Store::open(&dir.join("store2"), Keying::Plain).unwrap();
+        copy.put_cold_bytes(b"fn main() {}\n", None).unwrap();
+        let hex = blob.hex();
+        let loose = dir.join("store/objects").join(&hex[..2]).join(&hex[2..]);
+        fs::create_dir_all(loose.parent().unwrap()).unwrap();
+        fs::copy(dir.join("store2/objects").join(&hex[..2]).join(&hex[2..]), &loose).unwrap();
+        assert_eq!(store.pack().unwrap().removed, 1);
+        assert!(!loose.exists());
+        // A changed byte in a pack block is found on read.
+        let pack = fs::read_dir(dir.join("store/packs"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|x| x == "pack"))
+            .unwrap();
+        let mut bytes = fs::read(&pack).unwrap();
+        let at = bytes.len() / 2;
+        bytes[at] ^= 0x55;
+        chmod(&pack, 0o644);
+        fs::write(&pack, bytes).unwrap();
+        let fresh = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let broken = dir.join("broken");
+        let read = checkout(&fresh, &tree, &broken).map(|_| compare(&src, &broken).unwrap().differences);
+        assert!(!matches!(read, Ok(ref d) if d.is_empty()), "a corrupted pack must not check out cleanly");
+    }
+
+    #[test]
+    fn hot_blobs_outside_the_kept_trees_turn_cold() {
+        let dir = scratch("evict");
+        let src = dir.join("src");
+        sample(&src);
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false };
+        let old = write_tree(&store, &src, &opts).unwrap().tree.unwrap();
+        fs::write(src.join("notes-new.txt"), "only in the new tree\n").unwrap();
+        fs::remove_file(src.join("big.bin")).unwrap();
+        let new = write_tree(&store, &src, &opts).unwrap().tree.unwrap();
+        let hot_before = store.stat().unwrap().hot_blobs;
+        // Keep the new tree hot: big.bin (only in the old tree) turns cold, as chunks.
+        let r = store.evict_hot(&[new]).unwrap();
+        assert_eq!(r.blobs, 1);
+        let s = store.stat().unwrap();
+        assert_eq!(s.hot_blobs, hot_before - 1);
+        assert!(s.chunked_blobs == 1 && s.chunks > 0);
+        // Both trees still check out; the old one decodes the evicted blob.
+        let out = dir.join("old");
+        let co = checkout(&store, &old, &out).unwrap();
+        assert_eq!(co.decoded, 1);
+        assert_eq!(fs::read(out.join("big.bin")).unwrap(), noise(3 << 20, 5));
+        // Nothing is kept: every hot blob turns cold, and the store still checks out after a pack.
+        store.evict_hot(&[]).unwrap();
+        assert_eq!(store.stat().unwrap().hot_blobs, 0);
+        store.pack().unwrap();
+        let again = dir.join("again");
+        checkout(&store, &new, &again).unwrap();
+        assert!(compare(&src, &again).unwrap().differences.is_empty());
+    }
+
+    /// The test vectors of docs/objects.md, section "Test vectors". A change here changes the format.
+    #[test]
+    fn format_test_vectors() {
+        let k = Keying::Plain;
+        let hello = k.id(Kind::Blob, b"hello\n");
+        let empty_tree = Tree::default();
+        let mut tree = Tree {
+            entries: vec![
+                Entry {
+                    name: b"a.txt".to_vec(),
+                    mode: 0o644,
+                    node: Node::File { size: 6, blob: hello },
+                    xattrs: vec![(b"user.k".to_vec(), b"v".to_vec())],
+                },
+                Entry {
+                    name: b"bin".to_vec(),
+                    mode: 0o755,
+                    node: Node::Dir { tree: k.id(Kind::Tree, &empty_tree.encode()) },
+                    xattrs: vec![],
+                },
+                Entry { name: b"link".to_vec(), mode: 0, node: Node::Symlink { target: b"a.txt".to_vec() }, xattrs: vec![] },
+            ],
+            links: vec![],
+        };
+        tree.normalize();
+        let t = 1_700_000_000_000_000_000i64;
+        let times = times::Times {
+            records: vec![
+                times::Record { ns: t, below: Some(3) },
+                times::Record { ns: t, below: None },
+                times::Record { ns: t + 1, below: Some(0) },
+                times::Record { ns: t, below: None },
+            ],
+        };
+        let key = id::epoch_key("AGE-SECRET-KEY-1EXAMPLE", "epoch-1");
+        let lines = [
+            format!("blob \"\" {}", k.id(Kind::Blob, b"")),
+            format!("blob \"hello\\n\" {hello}"),
+            format!("chunk \"abc\" {}", k.id(Kind::Chunk, b"abc")),
+            format!("opaque \"\" {}", k.id(Kind::Opaque, b"")),
+            format!("empty tree {} {}", hex::encode(empty_tree.encode()), k.id(Kind::Tree, &empty_tree.encode())),
+            format!("tree {} {}", hex::encode(tree.encode()), k.id(Kind::Tree, &tree.encode())),
+            format!("times {} {}", hex::encode(times.encode()), k.id(Kind::Times, &times.encode())),
+            format!("epoch key {}", hex::encode(key)),
+            format!("keyed blob \"hello\\n\" {}", Keying::Keyed(key).id(Kind::Blob, b"hello\n")),
+        ];
+        let got = lines.join("\n");
+        println!("{got}");
+        assert_eq!(got, VECTORS.trim());
+    }
+
+    const VECTORS: &str = "\
+blob \"\" 473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813
+blob \"hello\\n\" 2cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb4
+chunk \"abc\" ada203fc3bdbffd43c38aae4e8af47e642b35cf6d7985e81a29483c746db3309
+opaque \"\" 2b528cd00f2cb0427c1a0f8b5cc0c511032d28d1383fa0639ce3b13225c78132
+empty tree 010000 463e15cd99aa5c788c292f8d1c5e510ac9c2b9f79817c06c2457f0dcf3931242
+tree 010305612e74787401a403062cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb40106757365722e6b01760362696e02ed03463e15cd99aa5c788c292f8d1c5e510ac9c2b9f79817c06c2457f0dcf393124200046c696e6b030005612e7478740000 9e1e4e5228345fd99d1edcd9c3c6f946dcc323909dcdfbee7c6166869e1e41ae
+times 01048080d0e2c6bfce972f04000002010100 d933f571ed05c330c18ca8485491c62926e2262ac10999989d09002347ecd042
+epoch key 975c2d8e41c44ccf4aea50a2294bdd7b95ad5fab019182e8d24193e2951c398b
+keyed blob \"hello\\n\" ed428789bac0bafb394f8234a3fce8cc1069cf68a7dede6d0338ef3033971447";
 
     #[test]
     fn a_hard_link_group_cannot_leave_the_folder() {
@@ -268,9 +473,9 @@ mod tests {
         let src = dir.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("f"), "x").unwrap();
-        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![] };
+        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false };
         let plain = Store::open(&dir.join("plain"), Keying::Plain).unwrap();
-        let secret = Store::open(&dir.join("secret"), Keying::Keyed(id::project_key("AGE-SECRET-KEY-1X", "p"))).unwrap();
+        let secret = Store::open(&dir.join("secret"), Keying::Keyed(id::epoch_key("AGE-SECRET-KEY-1X", "p"))).unwrap();
         let a = write_tree(&plain, &src, &opts).unwrap().tree.unwrap();
         let b = write_tree(&secret, &src, &opts).unwrap().tree.unwrap();
         assert_ne!(a, b);

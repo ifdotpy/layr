@@ -7,13 +7,14 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
 use anyhow::{bail, Result};
-use layr_objects::{Id, Keying, Store, Temperature, WriteOptions, WriteReport};
+use layr_objects::{Id, Keying, StateRef, Store, Temperature, WriteOptions, WriteReport};
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-const USAGE: &str = "usage: layr objects import <rev> [--cold] [--parent <tree>] [--json]
-       layr objects verify <rev> [--cold] [--json]
+const USAGE: &str = "usage: layr objects import <rev> [--cold] [--full] [--parent <tree>] [--json]
+       layr objects verify <rev> [--cold] [--full] [--json]
+       layr objects repack [--json]
        layr objects stat [--json]
        layr objects checkout <tree or rev> <folder>
 Experimental: a content-addressed store of trees, blobs, deltas and chunks (docs/objects.md).";
@@ -28,6 +29,7 @@ pub fn objects(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "verify" => verify(ctx, rest),
         "stat" => stat(ctx, rest),
         "checkout" => checkout(ctx, rest),
+        "repack" | "pack" => repack(ctx, rest),
         _ => Err(exit(128, USAGE)),
     }
 }
@@ -48,40 +50,71 @@ fn open(h: &Here) -> Result<Store> {
 struct Imported {
     state: String,
     tree: Id,
+    times: Id,
     report: WriteReport,
     previous: Option<Id>,
+    /// The paths read again from the first parent's tree (`None`: a full write).
+    changed: Option<usize>,
     seconds: f64,
 }
 
-/// Write the tree of the state `rev`. A cold write takes the tree of the state's first parent,
-/// when it was imported, as the delta base (`--parent` names another).
-fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, parent: Option<Id>) -> Result<Imported> {
+/// Write the tree of the state `rev`. When the state's first parent was imported, only the paths
+/// that changed since are read (`write_changed`; `--full` reads all). A cold write takes the
+/// parent's tree as the delta base (`--parent` names another).
+fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full: bool, parent: Option<Id>) -> Result<Imported> {
     let started = Instant::now();
     let id = crate::revs::resolve(&h.repo, h.line.as_ref(), rev)?;
     let state = h.repo.source_state(&id)?;
+    let first = state.parents.first().cloned();
+    let base = match &first {
+        Some(p) if !full => store.state_ref(p)?.map(|r| (p.clone(), r)),
+        _ => None,
+    };
     let pin = h.repo.pin(&[&id])?;
     let root = h.repo.state_root(&id)?;
     let previous = match parent {
         Some(tree) => Some(tree),
-        None if cold => match state.parents.first() {
+        None if cold => base.as_ref().map(|(_, r)| r.tree).or(match &first {
             Some(p) => store.state_tree(p)?,
             None => None,
-        },
+        }),
         None => None,
     };
     let temperature = if cold { Temperature::Cold } else { Temperature::Hot };
-    let report = layr_objects::write_tree(store, &root, &WriteOptions { temperature, previous, exclude: Vec::new() })?;
+    let options = WriteOptions { temperature, previous, exclude: Vec::new(), similar: false };
+    let (report, changed) = match base {
+        Some((parent_state, r)) => {
+            let _parent_pin = h.repo.pin(&[&parent_state])?;
+            let changes = crate::changes::candidates(&h.repo.state_src(&parent_state)?, &h.repo.state_src(&id)?)?;
+            let mut paths: Vec<Vec<u8>> = Vec::new();
+            for c in changes {
+                paths.push(c.path.into_bytes());
+                if let Some(old) = c.old_path {
+                    paths.push(old.into_bytes());
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            let base = layr_objects::write::Base { tree: r.tree, times: r.times };
+            let n = paths.len();
+            (layr_objects::write::write_changed(store, &root, &base, &paths, &options)?, Some(n))
+        }
+        None => (layr_objects::write_tree(store, &root, &options)?, None),
+    };
     drop(pin);
     let tree = report.tree.expect("a write gives a tree");
-    store.set_state(&id, &tree)?;
-    Ok(Imported { state: id, tree, report, previous, seconds: started.elapsed().as_secs_f64() })
+    let times = report.times.expect("a write gives times");
+    store.set_state(&id, &StateRef { tree, times })?;
+    Ok(Imported { state: id, tree, times, report, previous, changed, seconds: started.elapsed().as_secs_f64() })
 }
 
 fn imported_json(store: &Store, i: &Imported) -> serde_json::Value {
     json!({
         "state": i.state,
         "tree": i.tree.hex(),
+        "times": i.times.hex(),
         "previous": i.previous.map(|p| p.hex()),
+        "changed_paths": i.changed,
         "files": i.report.files,
         "folders": i.report.dirs,
         "symlinks": i.report.symlinks,
@@ -104,7 +137,7 @@ fn require_admin(ctx: &Ctx, h: &Here) -> Result<()> {
 }
 
 fn import(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--cold").flag("--json").value("--parent"), args)?;
+    let a = parse(&Spec::new().flag("--cold").flag("--full").flag("--json").value("--parent"), args)?;
     if a.pos.len() != 1 {
         return Err(exit(128, USAGE));
     }
@@ -112,15 +145,16 @@ fn import(ctx: &Ctx, args: &[String]) -> Result<i32> {
     require_admin(ctx, &h)?;
     let store = open(&h)?;
     let parent = a.get("--parent").map(Id::parse).transpose()?;
-    let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), parent)?;
+    let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), a.has("--full"), parent)?;
     if a.has("--json") {
         outln!(ctx, "{}", imported_json(&store, &i));
     } else {
         outln!(ctx, "{}", i.tree);
         outln!(
             ctx,
-            "state {}: {} files, {} folders, {} links, {} bytes; {} new objects ({} bytes, {} clones) in {:.2} s",
+            "state {}{}: {} files read, {} folders, {} links, {} bytes; {} new objects ({} bytes, {} clones) in {:.3} s",
             ids::short(&i.state),
+            i.changed.map(|n| format!(" ({n} changed paths since the parent)")).unwrap_or_default(),
             i.report.files,
             i.report.dirs,
             i.report.symlinks,
@@ -137,22 +171,22 @@ fn import(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// Import a state, make a folder from its tree next to the store, and compare every entry and
 /// byte of that folder with the state.
 fn verify(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("--cold").flag("--json"), args)?;
+    let a = parse(&Spec::new().flag("--cold").flag("--full").flag("--json"), args)?;
     if a.pos.len() != 1 {
         return Err(exit(128, USAGE));
     }
     let h = here(ctx)?;
     require_admin(ctx, &h)?;
     let store = open(&h)?;
-    let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), None)?;
+    let i = import_state(&h, &store, &a.pos[0], a.has("--cold"), a.has("--full"), None)?;
     let started = Instant::now();
     let work = h.repo.p.work_dir();
     std::fs::create_dir_all(&work)?;
     let tmp = crate::repo::Temp { path: work.join(crate::store::temp_name()) };
-    let made = layr_objects::checkout(&store, &i.tree, &tmp.path)?;
+    let made = layr_objects::checkout_with(&store, &i.tree, Some(&i.times), &tmp.path)?;
     let checkout_seconds = started.elapsed().as_secs_f64();
     let pin = h.repo.pin(&[&i.state])?;
-    let cmp = layr_objects::compare(&h.repo.state_root(&i.state)?, &tmp.path)?;
+    let cmp = layr_objects::compare_with(&h.repo.state_root(&i.state)?, &tmp.path, true)?;
     drop(pin);
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
     // Read-only folders of the copy must open again before the copy goes.
@@ -183,7 +217,11 @@ fn verify(ctx: &Ctx, args: &[String]) -> Result<i32> {
             outln!(ctx, "\t{d}");
         }
         if cmp.differences.is_empty() {
-            outln!(ctx, "verified: the tree gives state {} entry for entry and byte for byte", ids::short(&i.state));
+            outln!(
+                ctx,
+                "verified: the tree and times give state {} entry for entry, byte for byte and time for time",
+                ids::short(&i.state)
+            );
         }
     }
     Ok(if cmp.differences.is_empty() { 0 } else { 1 })
@@ -221,7 +259,9 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 "whole_blobs": s.whole_blobs, "whole_bytes": s.whole_bytes,
                 "delta_blobs": s.delta_blobs, "delta_bytes": s.delta_bytes,
                 "chunked_blobs": s.chunked_blobs, "chunked_bytes": s.chunked_bytes,
-                "chunks": s.chunks, "chunk_bytes": s.chunk_bytes, "total_bytes": s.total_bytes(),
+                "chunks": s.chunks, "chunk_bytes": s.chunk_bytes, "times": s.times, "times_bytes": s.times_bytes,
+                "packs": s.packs, "pack_bytes": s.pack_bytes, "packed_objects": s.packed_objects,
+                "packed_plain_bytes": s.packed_plain_bytes, "loose_bytes": s.loose_bytes(), "total_bytes": s.total_bytes(),
             })
         );
     } else {
@@ -232,7 +272,79 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "delta blobs    {:>10} {:>14} bytes", s.delta_blobs, s.delta_bytes);
         outln!(ctx, "chunked blobs  {:>10} {:>14} bytes (chunk lists)", s.chunked_blobs, s.chunked_bytes);
         outln!(ctx, "chunks         {:>10} {:>14} bytes", s.chunks, s.chunk_bytes);
+        outln!(ctx, "times tables   {:>10} {:>14} bytes", s.times, s.times_bytes);
+        outln!(
+            ctx,
+            "packs          {:>10} {:>14} bytes ({} objects, {} plain bytes)",
+            s.packs,
+            s.pack_bytes,
+            s.packed_objects,
+            s.packed_plain_bytes
+        );
         outln!(ctx, "total                     {:>14} bytes", s.total_bytes());
+    }
+    Ok(0)
+}
+
+/// The states whose blobs stay hot: the head of each line and the states before it on its first
+/// parent chain, `objects.hot-states` in all (default 5, the size of the undo ring).
+pub const HOT_STATES_DEFAULT: u64 = 5;
+
+fn hot_trees(h: &Here, store: &Store) -> Result<Vec<Id>> {
+    let n = h.repo.p.config_u64("objects.hot-states", HOT_STATES_DEFAULT);
+    let mut out = Vec::new();
+    for line in h.repo.lines()? {
+        let mut state = Some(line.head.clone());
+        for _ in 0..n {
+            let Some(id) = state else { break };
+            if let Some(tree) = store.state_tree(&id)? {
+                out.push(tree);
+            }
+            state = h.repo.p.db.state(&id)?.and_then(|s| s.parents.first().cloned());
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Turn hot blobs that no hot state names into cold objects, then pack every loose object
+/// (`Store::pack`: zstd blocks, docs/objects.md "Packs"). `layr gc` runs it too.
+pub fn repack_store(h: &Here) -> Result<(layr_objects::store::EvictReport, layr_objects::store::PackReport, f64)> {
+    let started = Instant::now();
+    let store = open(h)?;
+    let evicted = store.evict_hot(&hot_trees(h, &store)?)?;
+    let packed = store.pack()?;
+    Ok((evicted, packed, started.elapsed().as_secs_f64()))
+}
+
+fn repack(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json"), args)?;
+    if !a.pos.is_empty() {
+        return Err(exit(128, USAGE));
+    }
+    let h = here(ctx)?;
+    require_admin(ctx, &h)?;
+    let (e, p, seconds) = repack_store(&h)?;
+    if a.has("--json") {
+        outln!(
+            ctx,
+            "{}",
+            json!({"evicted_blobs": e.blobs, "evicted_bytes": e.bytes, "packs": p.packs, "packed_objects": p.objects,
+                "removed_loose": p.removed, "loose_bytes": p.loose_bytes, "pack_bytes": p.pack_bytes, "seconds": seconds})
+        );
+    } else {
+        outln!(
+            ctx,
+            "repacked: {} hot blobs turned cold ({} bytes); {} objects ({} loose bytes) into {} packs of {} bytes in {:.2} s",
+            e.blobs,
+            e.bytes,
+            p.objects,
+            p.loose_bytes,
+            p.packs,
+            p.pack_bytes,
+            seconds
+        );
     }
     Ok(0)
 }
@@ -250,24 +362,25 @@ fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("layr objects checkout is experimental and writes only for root on a root service");
     }
     let store = open(&h)?;
-    let (tree, state) = match Id::parse(&a.pos[0]) {
+    let (refs, state) = match Id::parse(&a.pos[0]) {
         Ok(tree) => match store.states_of(&tree)?.into_iter().next() {
-            Some(state) => (tree, state),
+            Some(state) => (store.state_ref(&state)?.expect("a listed state"), state),
             None => bail!("tree {tree} is not the tree of an imported state"),
         },
         Err(_) => {
             let state = crate::revs::resolve(&h.repo, h.line.as_ref(), &a.pos[0])?;
-            match store.state_tree(&state)? {
-                Some(tree) => (tree, state),
+            match store.state_ref(&state)? {
+                Some(r) => (r, state),
                 None => bail!("state {} is not imported: run layr objects import {}", ids::short(&state), a.pos[0]),
             }
         }
     };
+    let tree = refs.tree;
     // The same rule as `layr export`: a folder outside the store gets no secret file.
     crate::secrets::check_contents(ctx, &h.repo, &state)?;
     let dst = if a.pos[1].starts_with('/') { std::path::PathBuf::from(&a.pos[1]) } else { ctx.cwd.join(&a.pos[1]) };
     let started = Instant::now();
-    let r = layr_objects::checkout(&store, &tree, &dst)?;
+    let r = layr_objects::checkout_with(&store, &tree, Some(&refs.times), &dst)?;
     outln!(
         ctx,
         "checked out tree {} to {}: {} files ({} clones, {} copies, {} decoded), {} folders, {} links in {:.2} s",

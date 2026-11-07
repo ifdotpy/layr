@@ -24,6 +24,8 @@ pub struct CheckoutReport {
     pub dirs: u64,
     pub symlinks: u64,
     pub hard_links: u64,
+    /// Entries whose modification time came from the times table.
+    pub times: u64,
 }
 
 struct Run<'a> {
@@ -43,6 +45,12 @@ struct Run<'a> {
 /// Make the folder `dst` (absent, or an empty folder) with the content of `tree`. The owner of
 /// every entry is the caller; times are the time of the checkout.
 pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> {
+    checkout_with(store, tree, None, dst)
+}
+
+/// `checkout`, and with `times` (the times table of the state) every entry gets its recorded
+/// modification time, so build tools that compare times see an unchanged tree.
+pub fn checkout_with(store: &Store, tree: &Id, times: Option<&Id>, dst: &Path) -> Result<CheckoutReport> {
     match fs::read_dir(dst) {
         Ok(mut entries) => {
             if entries.next().is_some() {
@@ -93,6 +101,10 @@ pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> 
     for (path, mode) in modes {
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
     }
+    let restored = match times {
+        Some(id) => restore_times(store, &root, &store.get_times(id)?, dst)?,
+        None => 0,
+    };
     Ok(CheckoutReport {
         files: run.files.into_inner(),
         clones: run.clones.into_inner(),
@@ -101,7 +113,50 @@ pub fn checkout(store: &Store, tree: &Id, dst: &Path) -> Result<CheckoutReport> 
         dirs: run.dirs.into_inner(),
         symlinks: run.symlinks.into_inner(),
         hard_links,
+        times: restored,
     })
+}
+
+/// The paths of a tree in times order (`crate::times`): the root, then pre-order by name.
+fn tree_paths(
+    store: &Store,
+    tree: &crate::tree::Tree,
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<(PathBuf, usize, bool)>,
+) -> Result<()> {
+    for e in &tree.entries {
+        let path = dir.join(fsx::os(&e.name));
+        match &e.node {
+            Node::Dir { tree } => {
+                out.push((path.clone(), depth + 1, true));
+                tree_paths(store, &store.get_tree(tree)?, &path, depth + 1, out)?;
+            }
+            _ => out.push((path, depth + 1, false)),
+        }
+    }
+    Ok(())
+}
+
+/// Set the recorded times: files and links first, then folders deepest first (a new entry
+/// changes the time of its folder).
+fn restore_times(store: &Store, root: &crate::tree::Tree, times: &crate::times::Times, dst: &Path) -> Result<u64> {
+    let mut paths = vec![(dst.to_path_buf(), 0, true)];
+    tree_paths(store, root, dst, 0, &mut paths)?;
+    if paths.len() != times.records.len() || paths.iter().zip(&times.records).any(|((_, _, dir), r)| *dir != r.below.is_some()) {
+        bail!("the times table does not match the tree ({} records, {} entries)", times.records.len(), paths.len());
+    }
+    let ns: Vec<i64> = times.records.iter().map(|r| r.ns).collect();
+    let set = |(path, _, _): &(PathBuf, usize, bool), ns: &i64| -> Result<()> {
+        crate::times::set(path, *ns).with_context(|| format!("cannot set the time of {}", path.display()))
+    };
+    paths.par_iter().zip(ns.par_iter()).filter(|((_, _, dir), _)| !dir).try_for_each(|(p, t)| set(p, t))?;
+    let mut dirs: Vec<(&(PathBuf, usize, bool), &i64)> = paths.iter().zip(&ns).filter(|((_, _, dir), _)| *dir).collect();
+    dirs.sort_by_key(|((_, depth, _), _)| std::cmp::Reverse(*depth));
+    for (p, t) in dirs {
+        set(p, t)?;
+    }
+    Ok(paths.len() as u64)
 }
 
 impl Run<'_> {
