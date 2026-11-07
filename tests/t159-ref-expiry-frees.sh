@@ -15,11 +15,14 @@ echo one > one.txt; l add one.txt >/dev/null; l save -qm one
 kept=$(l rev-parse head)
 kept_id=$(l log --json -n 1 2>/dev/null | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["id"])')
 ref_owners() { sqlite3 "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" "select count(*) from owners where state='$kept_id' and kind='ref'"; }
-l ref set holds/short "$kept" --ttl 1s >/dev/null
+# 5 s: the reset and the save below must finish while the ref lives, also on a loaded machine.
+set_at=$(date +%s)
+l ref set holds/short "$kept" --ttl 5s >/dev/null
 l reset --hard "$base" -q >/dev/null 2>&1
 echo two > two.txt; l add two.txt >/dev/null; l save -qm two
 eq "the ref keeps the state while it lives" 1 "$(ref_owners)"
-sleep 2
+left=$((set_at + 6 - $(date +%s)))
+[ "$left" -gt 0 ] && sleep "$left"
 l status >/dev/null 2>&1
 no "the next command after its time expires the ref" grep -q holds/short <<<"$(l ref list 2>&1)"
 eq "and releases the state it kept, so the free step can free it" 0 "$(ref_owners)"
