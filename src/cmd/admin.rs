@@ -107,11 +107,20 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let repo = &h.repo;
+    // A virtual line has no automatic states yet (docs/views.md): `save --all-lines` passes it.
+    #[cfg(target_os = "macos")]
+    let virtual_line = |l: &Line| crate::views::of(repo, l).is_some();
+    #[cfg(not(target_os = "macos"))]
+    let virtual_line = |_: &Line| false;
     let lines: Vec<Line> = if a.has("--all-lines") {
         repo.require(ctx, "line.manage")?;
-        repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
+        repo.lines()?.into_iter().filter(|l| repo.working(l).exists() && !virtual_line(l)).collect()
     } else {
-        vec![h.line()?.clone()]
+        let l = h.line()?.clone();
+        if virtual_line(&l) {
+            return Err(exit(2, "a virtual line saves with 'layr save -m <message>' only (docs/views.md)"));
+        }
+        vec![l]
     };
     let msg = a.get("--note").unwrap_or("").to_string();
     // `--cache <path>` (repeatable) saves only the named cache paths. A big cache (build output)

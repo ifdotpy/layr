@@ -1,0 +1,26 @@
+project chromium: 515999 files; load 74.39 73.04 79.82
+rg -l TODO: folder 31535 files, virtual 31535 files
+find -type f: folder 515999, virtual 515999
+states equal: yes
+virtual line on a thin state: first 31.601 s (makes the complete tree), second 0.168 s
+step                         folder    virtual
+line new                     65.838      0.289
+line status                  18.065      0.337
+line save                    35.539      0.378
+line delete                  81.532      0.388
+rg -l TODO                   21.720    254.752
+find -type f                  7.291     17.329
+raw:
+  delete-folder: 44.189 97.142 81.532
+  delete-virtual: 0.388 0.361 0.608
+  find-nat: 7.378 5.938 7.291
+  find-virt: 14.235 31.244 17.329
+  new-folder: 84.568 65.838 63.535
+  new-virtual: 0.368 0.198 0.289
+  rg-nat: 21.720 17.673 28.088
+  rg-virt: 189.591 254.752 308.143
+  save-nat: 38.134 33.967 35.539
+  save-virt: 0.287 0.414 0.378
+  status-nat: 19.932 18.065 17.776
+  status-virt: 0.264 0.365 0.337
+load 32.56 31.68 34.84
