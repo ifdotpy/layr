@@ -67,6 +67,11 @@ no "checkout of an unknown tree" l objects checkout "$(printf 'ab%.0s' $(seq 32)
 
 # 4. History: the next version of a file is a delta against the tree of the parent state.
 first=$(l rev-parse head)
+# A changed hard-link group deliberately falls back to a full write. Measure incremental
+# reads from a base without linked files, after testing their initial import and checkout.
+rm main-hard.rs
+l save -a -m "independent files" -q
+tree=$(l objects import head --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["tree"])')
 seq 1 400 | sed 's/^/more notes /' >> notes.txt
 l save -a -m "more notes" -q
 cold=$(l objects import head --cold --json 2>&1)

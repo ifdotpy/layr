@@ -247,6 +247,26 @@ pub fn write_base(
     let changes = crate::changes::candidates(&parent, source)?;
     let mut paths = std::collections::BTreeSet::new();
     for change in changes {
+        // OverlayFS can report unchanged entries after a complete snapshot copy. Do not
+        // turn those candidates into full subtree reads. Linked files remain candidates:
+        // equal bytes and link counts alone do not prove equal hard-link groups.
+        #[cfg(feature = "overlayfs")]
+        if change.old_path.is_none() && change.old.is_some() && change.new.is_some() {
+            use std::os::unix::fs::MetadataExt;
+            let a = parent.join(&change.path);
+            let b = source.join(&change.path);
+            let am = std::fs::symlink_metadata(&a)?;
+            let bm = std::fs::symlink_metadata(&b)?;
+            let same_data = (am.is_dir() && bm.is_dir())
+                || (am.is_file() && bm.is_file() && am.nlink() == 1 && bm.nlink() == 1
+                    && change.ranges.as_ref().is_some_and(|r| r.is_empty()));
+            if same_data && am.mode() == bm.mode()
+                && (am.mtime(), am.mtime_nsec()) == (bm.mtime(), bm.mtime_nsec())
+                && layr_objects::fsx::xattrs(&a)? == layr_objects::fsx::xattrs(&b)?
+            {
+                continue;
+            }
+        }
         paths.insert(change.path);
         paths.extend(change.old_path);
     }

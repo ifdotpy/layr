@@ -7,7 +7,8 @@
 . "$(dirname "$0")/lib.sh"
 
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/tls-key.pem" -out "$T/tls-cert.pem" -days 1 \
-    -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 >/dev/null 2>&1
+    -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
+    -addext basicConstraints=critical,CA:FALSE >/dev/null 2>&1 || exit 1
 umask 077
 echo test.machine.token > "$T/token"
 python3 "$(dirname "$0")/fake-cloud-api.py" "$T" test.machine.token &
@@ -26,7 +27,12 @@ l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
 l overlay create private -q
 l overlay create shared --readers '*' -q
-ok "remote add of a Layr Cloud project" l remote add cloud "$URL"
+remote_added=$(l remote add cloud "$URL" 2>&1); remote_rc=$?
+eq "remote add of a Layr Cloud project" 0 "$remote_rc"
+if [ "$remote_rc" -ne 0 ]; then
+    echo "$remote_added"
+    exit 1
+fi
 eq "the mode is Private" private "$(l config --get cloud.remote.cloud.mode)"
 l tag before-objects head
 mkdir -p portable/deep

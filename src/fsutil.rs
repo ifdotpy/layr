@@ -589,6 +589,8 @@ pub fn copy_open_file(src: &File, dst_root: &Path, dst_rel: &str) -> Result<()> 
         }
     };
     d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    #[cfg(target_os = "linux")]
+    copy_user_xattrs(src, &d)?;
     set_mtime(&d, m.mtime(), m.mtime_nsec())
 }
 
@@ -1522,6 +1524,22 @@ mod write_tests {
     use super::{atomic_write, cache_write, copy_entry};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn importing_an_open_file_preserves_user_xattrs() {
+        let dir = std::env::temp_dir().join(format!("layr-import-xattr-{}", crate::ids::new_id()));
+        fs::create_dir_all(dir.join("out")).unwrap();
+        fs::write(dir.join("source"), b"content").unwrap();
+        let src = fs::File::open(dir.join("source")).unwrap();
+        rustix::fs::fsetxattr(&src, "user.layr-test", b"value", rustix::fs::XattrFlags::empty()).unwrap();
+        super::copy_open_file(&src, &dir.join("out"), "copy").unwrap();
+        let dst = fs::File::open(dir.join("out/copy")).unwrap();
+        let mut value = [0; 5];
+        assert_eq!(rustix::fs::fgetxattr(&dst, "user.layr-test", &mut value[..]).unwrap(), 5);
+        assert_eq!(&value, b"value");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A copy over a file with a second link (cargo hard-links an uplifted library to its deps
     /// file) must leave the other link as it was: the copied file is a new inode.
