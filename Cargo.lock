@@ -1610,12 +1610,18 @@ version = "0.1.0"
 [[package]]
 name = "layr-api"
 <<<<<<< head
+<<<<<<< head
 version = "0.40.0"
 ||||||| base
 version = "0.37.0"
 =======
 version = "0.38.1"
 >>>>>>> 3501c1a
+||||||| base
+version = "0.38.1"
+=======
+version = "0.37.0"
+>>>>>>> ddfca69
 dependencies = [
  "serde",
  "serde_json",
