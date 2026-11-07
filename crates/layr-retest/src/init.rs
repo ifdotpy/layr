@@ -336,6 +336,7 @@ fn follow_main(code: &mut i32) -> Result<()> {
     print!("{out}");
     if ok {
         println!("follow: main follows origin/main");
+        println!("follow: each pass builds the sweep commands in main and saves its caches; a line's caches go back to main after `layr git push` of the line or a local `layr merge`");
     } else {
         println!("follow: origin/main not set: {}", err.trim());
         *code = 1;

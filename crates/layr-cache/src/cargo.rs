@@ -113,7 +113,7 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 
 /// The environment variables that change cargo's unit hashes or the code that rustc and build scripts make
 /// (docs/cache-overlays.md, section 6).
-const KEY_ENV: &[&str] = &[
+pub const KEY_ENV: &[&str] = &[
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
     "RUSTDOCFLAGS",

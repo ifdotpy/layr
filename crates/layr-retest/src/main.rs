@@ -1,6 +1,7 @@
 //! layr-retest: run only the tests that a change can affect. See docs/retest.md.
 //! Uses the public `layr` CLI, `cargo nextest` and the LLVM tools. No internal crate of layr.
 
+mod cover;
 mod deps;
 mod doctor;
 mod gate;
@@ -61,6 +62,8 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("doctor") => doctor::run(&args[1..]),
         Some("sweep") => sweep_cmd(&args[1..]),
         Some("prune") => prune_cmd(&args[1..]),
+        // The cargo script of a gate (`cover`): records a call, then runs the real cargo.
+        Some("record-cargo") => cover::record(&args[1..]),
         _ => {
             eprintln!(
                 "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest prune <folder> [--adapter cargo|pnpm|none]\n       layr retest wrap -- <test binary> <args>"

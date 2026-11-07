@@ -171,6 +171,61 @@ fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: 
     Ok(())
 }
 
+/// Files that cargo or clippy name by an absolute path in every unit of a workspace (the workspace manifest, the
+/// clippy config). A project cannot change that, and `relocate` moves such a unit when the file has the same bytes.
+const TOOL_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "clippy.toml", ".clippy.toml"];
+
+/// The sources below `root` that a unit of the cargo `target` folder names by an absolute path, as (unit, path
+/// relative to `root`). Cargo names a source of the unit's own package relative to the package, and a source in the
+/// target folder relative to that folder; any other source by its absolute path. So a unit that includes a file of
+/// another folder of the workspace (`include_str!("../../other/x.json")`) names this place: a copy of the workspace
+/// at another path builds it again, and a new line keeps it warm only when the file there has the same bytes.
+/// Paths in `target` and the files of `TOOL_FILES` are left out. Each (unit, path) once.
+pub fn outside_sources(target: &Path, root: &Path) -> Vec<(String, String)> {
+    let root_bytes = root.as_os_str().as_encoded_bytes();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for profile in profiles(target).unwrap_or_default() {
+        for unit in fs::read_dir(profile.join(".fingerprint")).into_iter().flatten().flatten() {
+            let Some(name) = unit.file_name().to_str().map(String::from) else { continue };
+            for file in fs::read_dir(unit.path()).into_iter().flatten().flatten() {
+                if !file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(file.path()) else { continue };
+                for path in encoded_paths(&bytes, root_bytes) {
+                    // rustc names an include as written: `<package>/src/../../other/x.json`.
+                    let rel = lexical(Path::new(&path)).strip_prefix(root).map(Path::to_path_buf).unwrap_or_default();
+                    let tool = rel.file_name().and_then(|n| n.to_str()).is_some_and(|n| TOOL_FILES.contains(&n));
+                    if rel.as_os_str().is_empty() || rel.starts_with("target") || tool {
+                        continue;
+                    }
+                    let item = (name.clone(), rel.display().to_string());
+                    if !out.contains(&item) {
+                        out.push(item);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `path` without `.` parts, and with each `..` part taken back with the part before it. Reads no file.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The binary dep-info files of the unit `stem` (`<name>-<hash>`): `.fingerprint/<package>-<hash>/dep-*`.
 fn unit_dep_files(profile: &Path, stem: &str) -> Result<Vec<PathBuf>> {
     let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(Vec::new()) };
@@ -285,6 +340,14 @@ fn remove_fingerprint(profile: &Path, stem: &str) -> Result<usize> {
         }
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod lexical_tests {
+    #[test]
+    fn parent_parts_take_back_the_part_before() {
+        assert_eq!(super::lexical(std::path::Path::new("/w/crates/a/src/../../b/./x.json")), std::path::PathBuf::from("/w/crates/b/x.json"));
+    }
 }
 
 #[cfg(test)]
