@@ -694,18 +694,27 @@ impl<'a> Repo<'a> {
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
     /// in the overlay's own records.
     pub fn overlay_setting(&self, name: &str, suffix: &str) -> Result<Option<serde_json::Value>> {
-        let key = format!("overlay.{name}.{suffix}");
-        if self.need_overlay(name)?.hidden {
-            return self.overlay_project(name)?.db.overlay_config(&key);
+        let project = self.hidden_settings_project(name)?;
+        project.as_ref().unwrap_or(&self.p).db.overlay_config(&format!("overlay.{name}.{suffix}"))
+    }
+
+    /// Keep the project that supplied hidden metadata while reading its settings.
+    fn hidden_settings_project(&self, name: &str) -> Result<Option<Project<'a>>> {
+        let (info, project) = self.open_overlay_info(name)?;
+        let info = info.ok_or_else(|| crate::cmd::exit(1, format!("error: no overlay '{name}' in project {}", self.p.name)))?;
+        if info.hidden {
+            return project.map(Ok).unwrap_or_else(|| self.overlay_project(name)).map(Some);
         }
-        self.p.db.overlay_config(&key)
+        Ok(None)
     }
 
     /// The properties of an overlay (docs/cache-overlays.md, section 2).
     pub fn overlay_props(&self, name: &str) -> Result<Props> {
+        let project = self.hidden_settings_project(name)?;
+        let db = &project.as_ref().unwrap_or(&self.p).db;
         let mut values = BTreeMap::new();
         for prop in PROPS {
-            if let Some(v) = self.overlay_setting(name, prop)? {
+            if let Some(v) = db.overlay_config(&format!("overlay.{name}.{prop}"))? {
                 values.insert(*prop, v);
             }
         }
@@ -898,10 +907,11 @@ impl<'a> Repo<'a> {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for name in self.overlay_names()? {
-            let info = self.need_overlay(&name)?;
+        for name in self.overlay_candidates()? {
+            // Match overlay_names: unavailable or invalid metadata is left out.
+            let Ok((Some(info), project)) = self.open_overlay_info(&name) else { continue };
             if info.hidden {
-                let op = self.overlay_project(&name)?;
+                let op = project.map(Ok).unwrap_or_else(|| self.overlay_project(&name))?;
                 out.push((name, info, op));
             }
         }
@@ -1077,14 +1087,25 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(out);
         }
-        for l in self.layers(line)? {
-            let op = match self.overlay_project(&l.overlay) {
-                Ok(p) => p,
-                Err(_) => continue,
+        let hidden = self.hidden_overlays()?;
+        let layers = self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))?;
+        for l in layers {
+            let project;
+            let public_info;
+            let (op, info) = match hidden.iter().find(|(name, _, _)| name == &l.overlay) {
+                Some((_, info, op)) => (op, Some(info)),
+                None => {
+                    project = match self.overlay_project(&l.overlay) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    public_info = self.overlay_info(&l.overlay)?;
+                    (&project, public_info.as_ref())
+                }
             };
             let mut states = vec![l.state.clone()];
-            if let Some(info) = self.overlay_info(&l.overlay)? {
-                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(&info, &line.id, line.owner))? {
+            if let Some(info) = info {
+                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(info, &line.id, line.owner))? {
                     states.push(ol.head);
                 }
             }
@@ -1937,5 +1958,144 @@ mod view_tests {
         assert!(!is_view_id(&"A".repeat(64)));
         assert!(!is_view_id("abc"));
         assert!(is_view_id(&"a".repeat(64)));
+    }
+}
+
+#[cfg(test)]
+mod read_open_tests {
+    use super::*;
+    use crate::ctx::Caller;
+    use crate::store::Store;
+    use serde_json::json;
+
+    struct Fixture {
+        ctx: Ctx,
+        head: String,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Self> {
+            let root = std::env::temp_dir().join(format!("layr-read-opens-{}", ids::new_id()));
+            let store = Store::open(&root.join("store"))?;
+            let caller = Caller { uid: 1000, gid: 1000, user: "reader".into(), home: root.join("home") };
+            let actor = crate::model::Actor { uid: caller.uid, name: caller.user.clone(), session: None };
+            let create = |name: &str, config: serde_json::Value| -> Result<Project<'_>> {
+                let dir = store.project_dir(name)?;
+                for folder in ["meta/db", "meta/scan", "states", "lines"] {
+                    std::fs::create_dir_all(dir.join(folder))?;
+                }
+                let p = Project {
+                    store: &store,
+                    name: name.into(),
+                    db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+                    dir,
+                    id: ids::new_id(),
+                };
+                let mut record = Record::new("project");
+                record.data = json!({"id":p.id,"name":name,"config":config});
+                p.append(record, &actor)?;
+                Ok(p)
+            };
+            let access = json!({format!("user:{}", caller.uid):"admin"});
+            let parent = create("p", json!({"access":access}))?;
+            let head = ids::new_id();
+            let line_id = ids::new_id();
+            parent.db.conn.execute(
+                "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,'main',?2,?3,?4,0,'1')",
+                (&line_id, caller.uid, &store.machine.id, &head),
+            )?;
+            let cwd = parent.lines_dir().join("main");
+            std::fs::create_dir_all(&cwd)?;
+            std::fs::create_dir(parent.state_path(&head))?;
+            std::fs::write(parent.state_path(&head).join("tracked"), "content")?;
+            std::fs::write(cwd.join("tracked"), "content")?;
+            create(
+                "p%private",
+                json!({
+                    "access":access,"overlay":{"project":parent.id,"name":"private"},
+                    "overlay.private":{"hidden":true,"owner":caller.uid,"mode":"follow","root":head},
+                    "overlay.private.quiet":true,"overlay.private.history":3
+                }),
+            )?;
+            drop(parent);
+            Ok(Self {
+                ctx: Ctx {
+                    store,
+                    caller,
+                    cwd,
+                    env: Default::default(),
+                    author: Default::default(),
+                    out: std::cell::RefCell::new(Box::new(std::io::sink())),
+                },
+                head,
+            })
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.ctx.store.root.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn ls_files_opens_hidden_overlay_once() -> Result<()> {
+        let fixture = Fixture::new()?;
+        for _ in 0..2 {
+            let before = crate::store::project_open_count();
+            assert_eq!(crate::cmd::run(&fixture.ctx, &["ls-files".into()])?, 0);
+            assert_eq!(crate::store::project_open_count() - before, 2, "parent plus one hidden overlay");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_settings_and_private_paths_reuse_their_project() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let repo = Repo::open(&fixture.ctx, "p")?;
+        let line = repo.line("main")?;
+        let overlay = repo.overlay_project("private")?;
+        overlay.db.conn.execute(
+            "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,?2,?3,?4,?5,0,'1')",
+            (ids::new_id(), format!("line-{}", line.id), fixture.ctx.caller.uid, &fixture.ctx.store.machine.id, &fixture.head),
+        )?;
+        std::fs::create_dir(overlay.state_path(&fixture.head))?;
+        std::fs::write(overlay.state_path(&fixture.head).join("private"), "private content")?;
+        for _ in 0..2 {
+            let before = crate::store::project_open_count();
+            let layers = repo.layers(&line)?;
+            assert_eq!(layers.len(), 1);
+            assert_eq!(layers[0].overlay, "private");
+            assert_eq!(layers[0].state, fixture.head);
+            assert_eq!(crate::store::project_open_count() - before, 1);
+            let before = crate::store::project_open_count();
+            assert_eq!(repo.overlay_setting("private", "history")?, Some(json!(3)));
+            assert_eq!(crate::store::project_open_count() - before, 1);
+            let before = crate::store::project_open_count();
+            let props = repo.overlay_props("private")?;
+            assert!(props.quiet);
+            assert_eq!(props.history, Some(3));
+            assert_eq!(crate::store::project_open_count() - before, 1);
+            let before = crate::store::project_open_count();
+            assert_eq!(repo.private_paths(&line)?, BTreeSet::from(["private".into()]));
+            assert_eq!(crate::store::project_open_count() - before, 1);
+        }
+        // Public metadata remains readable without a local overlay project; hidden settings
+        // and stack discovery still propagate an explicitly declared hidden project's open error.
+        let mut record = Record::new("config");
+        record.data = json!({"config":{
+            "overlay.remote":{"hidden":false},"overlay.remote.quiet":true,
+            "overlay.unavailable":{"hidden":true}
+        }});
+        repo.p.append(record, &fixture.ctx.actor())?;
+        assert!(repo.overlay_props("remote")?.quiet);
+        for error in [
+            repo.overlay_props("unavailable").unwrap_err(),
+            repo.layers(&line).unwrap_err(),
+            repo.private_paths(&line).unwrap_err(),
+        ] {
+            assert!(format!("{error:#}").contains("project 'p%unavailable' not found"));
+        }
+        Ok(())
     }
 }
