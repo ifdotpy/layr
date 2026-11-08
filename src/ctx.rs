@@ -69,7 +69,8 @@ impl Ctx {
         let f = self.caller.home.join(".gitconfig");
         let mut command = std::process::Command::new("git");
         command.args(["config", "--file"]).arg(&f).arg(key);
-        crate::privs::command_as(&mut command, self.caller.uid, &[]).ok()?;
+        let env = [("HOME".into(), self.caller.home.to_string_lossy().into_owned())];
+        crate::privs::command_as(&mut command, self.caller.uid, &env).ok()?;
         #[cfg(test)]
         GIT_CONFIG_READS.with(|reads| reads.set(reads.get() + 1));
         let out = command.output().ok()?;

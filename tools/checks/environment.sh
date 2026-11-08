@@ -37,6 +37,9 @@ if [ "$(id -u)" = 0 ]; then
     # A privileged check copy lives at /var/tmp/layr-check-<id>: below it the Unix sockets of the
     # tests get paths longer than SUN_LEN.
     TMPDIR=$(mktemp -d /var/tmp/layr-root-tmp.XXXXXX)
+elif [ "$(uname -s)" = Darwin ] && [ -n "${LAYR_CHECK_TMPDIR:-}" ]; then
+    TMPDIR="$LAYR_CHECK_TMPDIR"
+    mkdir -p "$TMPDIR"
 else
     TMPDIR="$PWD/.check-tmp"
     mkdir -p "$TMPDIR"

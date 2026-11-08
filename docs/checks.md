@@ -221,6 +221,8 @@ On macOS the creator's platform map selects `apfs`, the nonprivileged APFS workf
 equivalent. Its watcher uses sandbox-exec and requires a current maintainer's
 exact-state approval for change versions; main heads can run without it. Its
 machine-local opt-in belongs to the user who owns the project's metadata.
+The sandbox permits Unix sockets inside the private check copy. It denies TCP and Unix sockets
+outside that copy, including paths through symlinks.
 Privileged execution remains unavailable on macOS. The separate root-only service
 test is an operator check. See [laptop-runner.md](laptop-runner.md) for machine
 provisioning, volume setup, services, verification and residual host risk.

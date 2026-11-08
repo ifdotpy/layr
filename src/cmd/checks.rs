@@ -850,6 +850,8 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow file-write*
     (subpath {work}) (literal "/dev/null")
     (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
+(allow network-bind (local unix-socket (subpath {work})))
+(allow network-outbound (remote unix-socket (subpath {work})))
 "#,
         work = quote(work)?,
         seed = quote(seed)?
@@ -868,6 +870,12 @@ fn execute(
     back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
     use std::os::unix::fs::DirBuilderExt;
+    struct TempLink(std::path::PathBuf);
+    impl Drop for TempLink {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
     if privileged {
         bail!("privileged automatic checks are unavailable on macOS");
     }
@@ -892,12 +900,18 @@ fn execute(
     relocate_copy(repo, ctx.caller.uid, &dir, &dir)?;
     let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
     std::fs::DirBuilder::new().mode(0o700).create(&home)?;
+    let scratch = home.join("tmp");
+    std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    let link = std::path::Path::new("/tmp").join(format!("lct-{:016x}", rand::random::<u64>()));
+    std::os::unix::fs::symlink(&scratch, &link)?;
+    let _link = TempLink(link);
     let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
     let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
     command.args(["-p", &macos_profile(&dir, &seed)?, "--"]).args(argv).current_dir(&dir);
     crate::privs::command_as(&mut command, ctx.caller.uid, &[
         ("HOME".into(), home.display().to_string()),
-        ("TMPDIR".into(), home.display().to_string()),
+        ("TMPDIR".into(), _link.0.display().to_string()),
+        ("LAYR_CHECK_TMPDIR".into(), _link.0.display().to_string()),
         ("LAYR_TRY_STATE".into(), state.into()),
         ("LAYR_CHECK_SEED".into(), seed.display().to_string()),
         ("PATH".into(), "/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
@@ -975,6 +989,53 @@ fn run_check(mut command: std::process::Command, limits: &Limits) -> Result<(i32
 mod macos_tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn sandbox_allows_only_unix_sockets_inside_work() -> Result<()> {
+        use std::os::unix::net::UnixListener;
+        let root = std::path::Path::new("/private/var/tmp").join(format!("lsc-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&root)?;
+        let cleanup = crate::repo::Temp { path: root.clone() };
+        let work = root.join("work");
+        std::fs::create_dir(&work)?;
+        let profile = macos_profile(&work, &work)?;
+        let inside = work.join("inside.sock");
+        let outside = root.join("outside.sock");
+        let _inside = UnixListener::bind(&inside)?;
+        let _outside = UnixListener::bind(&outside)?;
+        let escape = work.join("escape.sock");
+        std::os::unix::fs::symlink(&outside, &escape)?;
+        let run = |script: &str, path: &std::path::Path| -> Result<bool> {
+            Ok(Command::new("/usr/bin/sandbox-exec")
+                .env_clear()
+                .env("HOME", &work)
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(&work)
+                .args(["-p", &profile, "--", "/usr/bin/ruby", "--disable-gems", "-rsocket", "-e", script])
+                .arg(path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?
+                .success())
+        };
+        let connect = "UNIXSocket.new(ARGV.fetch(0)).close";
+        assert!(run(connect, &inside)?);
+        assert!(!run(connect, &outside)?);
+        assert!(!run(connect, &escape)?);
+        let bind = "UNIXServer.new(ARGV.fetch(0)).close";
+        let local = work.join("created.sock");
+        assert!(run(bind, &local)?);
+        assert!(local.exists());
+        assert!(!run(bind, &root.join("forbidden.sock"))?);
+        let external = root.join("external");
+        std::fs::create_dir(&external)?;
+        let linked = work.join("linked");
+        std::os::unix::fs::symlink(&external, &linked)?;
+        assert!(!run(bind, &linked.join("forbidden.sock"))?);
+        assert!(!external.join("forbidden.sock").exists());
+        drop(cleanup);
+        Ok(())
+    }
 
     #[test]
     fn sandbox_refuses_network_and_writes_outside_work() -> Result<()> {
