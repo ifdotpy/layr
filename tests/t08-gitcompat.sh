@@ -40,14 +40,6 @@ cmp_out "diff --name-status" diff --name-status
 cmp_out "diff --name-only" diff --name-only
 cmp_out "diff --shortstat" diff --shortstat
 cmp_out "diff -U1" diff -U1 a.txt
-<<<<<<< head
-g_err=$(cd $G && git diff nosuch 2>&1); g_rc=$?
-w_err=$(cd $Lw && l diff nosuch 2>&1); w_rc=$?
-eq "diff of an unknown revision fails like git" "${g_err//\'git /\'layr } $g_rc" "$w_err $w_rc"
-w_err=$(cd $Lw && l diff nosuch -- a.txt 2>&1); w_rc=$?
-eq "a revision before -- must exist, as in git" "fatal: bad revision 'nosuch' 128" "$w_err $w_rc"
-ok "a path names a file of the line, also from outside it" sh -c "cd $T && \"$LAYR\" --project c --line main diff --quiet a.txt; test \$? -le 1"
-=======
 # cmp_nul <description> <args...>: as cmp_out, for output with NUL separators (shown as |).
 cmp_nul() {
     local d=$1; shift
@@ -55,7 +47,12 @@ cmp_nul() {
 }
 cmp_nul "diff --numstat -z" diff --numstat -z
 cmp_nul "diff --name-only -z" diff --name-only -z
->>>>>>> agent-checkpoints
+g_err=$(cd $G && git diff nosuch 2>&1); g_rc=$?
+w_err=$(cd $Lw && l diff nosuch 2>&1); w_rc=$?
+eq "diff of an unknown revision fails like git" "${g_err//\'git /\'layr } $g_rc" "$w_err $w_rc"
+w_err=$(cd $Lw && l diff nosuch -- a.txt 2>&1); w_rc=$?
+eq "a revision before -- must exist, as in git" "fatal: bad revision 'nosuch' 128" "$w_err $w_rc"
+ok "a path names a file of the line, also from outside it" sh -c "cd $T && \"$LAYR\" --project c --line main diff --quiet a.txt; test \$? -le 1"
 cmp_out "status --porcelain" status --porcelain
 cmp_out "status -s" status -s
 

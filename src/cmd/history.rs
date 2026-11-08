@@ -147,17 +147,6 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
     problems
 }
 
-<<<<<<< head
-/// Split diff arguments into revisions and paths, as git does. Before `--` every argument is a
-/// revision; without `--`, an argument that is neither a revision nor a path in the folder is an
-/// error, not an empty path filter.
-fn split_revs(
-    repo: &Repo,
-    line: Option<&Line>,
-    cwd: &std::path::Path,
-    a: &crate::args::Parsed,
-) -> Result<(Vec<String>, Vec<String>)> {
-=======
 /// The tree that git would call tracked for a state: an automatic state's line head (its first
 /// parent), a named state itself (`diff --exclude-standard`).
 fn tracked_root(repo: &Repo, id: &str) -> Result<Snap> {
@@ -168,9 +157,15 @@ fn tracked_root(repo: &Repo, id: &str) -> Result<Snap> {
     }
 }
 
-/// Split diff arguments into revisions and paths, as git does without `--`.
-fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> Result<(Vec<String>, Vec<String>)> {
->>>>>>> agent-checkpoints
+/// Split diff arguments into revisions and paths, as git does. Before `--` every argument is a
+/// revision; without `--`, an argument that is neither a revision nor a path in the folder is an
+/// error, not an empty path filter.
+fn split_revs(
+    repo: &Repo,
+    line: Option<&Line>,
+    cwd: &std::path::Path,
+    a: &crate::args::Parsed,
+) -> Result<(Vec<String>, Vec<String>)> {
     let mut revs = Vec::new();
     let mut paths = a.paths.clone();
     let mut in_paths = false;
