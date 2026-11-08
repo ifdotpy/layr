@@ -19,7 +19,8 @@ if [ "$(uname -s)" = Darwin ]; then
         for mp in $MOUNTED; do hdiutil detach "$mp" -force >/dev/null 2>&1 || true; done
     }
     trap 'detach_images; cleanup' EXIT
-    hdiutil create -size 1g -fs APFS -volname "LayrCopy$$" -type SPARSE -o "$T/dst" >/dev/null 2>&1 || exit 1
+    hdiutil create -size 1g -fs APFS -volname "LayrCopy$$" -type SPARSE -o "$T/dst" >/dev/null 2>&1 ||
+        { skip_in_check_sandbox "it creates and attaches a disk image"; exit 1; }
     D=$(attach_image "$T/dst.sparseimage") || exit 1
     MOUNTED="$D"
 elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
