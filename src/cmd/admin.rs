@@ -90,9 +90,16 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--cache")
         .flag("--all-lines")
         .value("--save-back")
+        .value("--keep")
         .flag("--json")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if let Some(name) = a.get("--keep") {
+        valid_keep_name(name)?;
+        if a.has("--all-lines") || a.has("--caches") || a.has("-m") || a.has("-F") || a.has("--amend") {
+            return Err(exit(2, "--keep names one automatic state: use it without -m, --amend, --all-lines and --caches"));
+        }
+    }
     if let Some(target) = a.get("--save-back") {
         return save_back(ctx, &a, target);
     }
@@ -214,6 +221,14 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
         };
+        if let Some(name) = a.get("--keep") {
+            // An unchanged folder makes no state: the keep then holds the state equal to the folder.
+            let kept = match &st {
+                Some(s) => s.id.clone(),
+                None => repo.save_base(&l)?,
+            };
+            repo.p.db.keep_set(&l.id, name, &kept)?;
+        }
         match st {
             Some(s) => {
                 if a.has("--caches") {
@@ -1243,11 +1258,12 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
     Ok(OwnersCheck { missing, extra, stale, freed })
 }
 
-/// The owner rows that a repair keeps: the replay plus the pins and tree reservations of live
-/// processes.
+/// The owner rows that a repair keeps: the replay (keeps included) plus the pins and tree
+/// reservations of live processes.
 fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
     let mut rows = want.to_vec();
-    for (state, kind, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "pin" || r.1 == "drop") {
+    let local = repo.p.db.owner_rows()?.into_iter().filter(|r| crate::owners::LOCAL_OWNERS.contains(&r.1.as_str()));
+    for (state, kind, holder) in local {
         if crate::free::holder_alive(&holder) {
             rows.push((state, kind, holder));
         }
@@ -1343,7 +1359,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
         "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
          AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
          AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
-            AND o.kind IN ('head','auto','undo','deleted','park','overlay','pin'))",
+            AND o.kind IN ('head','auto','undo','deleted','park','overlay','pin','keep'))",
     )?;
     let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     drop(st);
@@ -3245,6 +3261,63 @@ pub(crate) fn human_size(n: u64) -> String {
     }
 }
 
+
+/// A keep name: printable, without whitespace, at most 255 bytes (a tool's own refs fit).
+fn valid_keep_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 255 || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(exit(2, format!("error: invalid keep name '{name}': 1 to 255 bytes, no spaces or control characters")));
+    }
+    Ok(())
+}
+
+/// `layr keep list [--json]`, `layr keep drop <name>... | --all`: the local keeps of the current
+/// line (`save --keep`). A keep holds one state on this machine only; no record makes it, so it
+/// never reaches a remote, `layr undo` never reverses it, and the line's delete releases it.
+pub fn keep(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let (sub, rest) = match args.split_first() {
+        Some((s, r)) if !s.starts_with('-') => (s.as_str(), r),
+        _ => ("list", args),
+    };
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    let line = h.line()?.clone();
+    match sub {
+        "list" => {
+            let a = parse(&Spec::new().flag("--json"), rest)?;
+            let keeps = repo.p.db.keeps(&line.id)?;
+            if a.has("--json") {
+                let v: Vec<_> = keeps.iter().map(|(name, state)| serde_json::json!({"name": name, "state": state})).collect();
+                outln!(ctx, "{}", serde_json::Value::Array(v));
+            } else {
+                for (name, state) in &keeps {
+                    outln!(ctx, "{} {name}", ids::display(state));
+                }
+            }
+            Ok(0)
+        }
+        "drop" => {
+            let a = parse(&Spec::new().flag("--all").flag("-q|--quiet"), rest)?;
+            repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
+            let names: Vec<String> =
+                if a.has("--all") { repo.p.db.keeps(&line.id)?.into_iter().map(|(n, _)| n).collect() } else { a.pos.clone() };
+            if names.is_empty() && !a.has("--all") {
+                return Err(exit(2, "usage: layr keep drop <name>... | --all"));
+            }
+            let _lock = repo.p.lock()?;
+            let mut missing = Vec::new();
+            for name in &names {
+                if !repo.p.db.keep_drop(&line.id, name)? {
+                    missing.push(name.as_str());
+                }
+            }
+            if !missing.is_empty() && !a.has("-q") {
+                eprintln!("layr: no keep {}", missing.join(", "));
+            }
+            Ok(if missing.is_empty() { 0 } else { 1 })
+        }
+        _ => Err(exit(2, "usage: layr keep [list [--json] | drop <name>... | drop --all]")),
+    }
+}
 
 #[cfg(test)]
 mod move_folder_tests {

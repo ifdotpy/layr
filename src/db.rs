@@ -74,6 +74,7 @@ CREATE INDEX IF NOT EXISTS records_trust ON records(op) WHERE op IN ('project','
 CREATE TABLE IF NOT EXISTS owners (state TEXT, kind TEXT, holder TEXT, PRIMARY KEY(state, kind, holder));
 CREATE INDEX IF NOT EXISTS owners_kind_holder ON owners(kind, holder);
 CREATE TABLE IF NOT EXISTS free_queue (state TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS keeps (line TEXT NOT NULL, name TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(line, name));
 CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 "#;
 
@@ -245,7 +246,11 @@ impl Db {
                 INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, rowid, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
             "#)?;
             // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
-            crate::owners::fill_only(|| replay(self))?;
+            // Keeps come from no record: their table outlives the rebuild, and their owners return after the replay.
+            crate::owners::fill_only(|| -> Result<()> {
+                replay(self)?;
+                self.restore_keeps(self)
+            })?;
             // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
             if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                 eprintln!("test: rebuild held for {ms} ms");

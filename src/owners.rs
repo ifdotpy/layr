@@ -12,13 +12,18 @@
 
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state needs"). `parent`,
 /// `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record. `conflict` needs the trees of its sides.
-pub const TREE_OWNERS: [&str; 8] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict"];
+pub const TREE_OWNERS: [&str; 9] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict", "keep"];
 
 use crate::db::{kind_str, Db, SCHEMA};
 use crate::model::{Record, StateKind};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Owner kinds of live processes that no record makes: pins and tree reservations (`drop`). A replay
+/// never gives them, so the owners check leaves them out. Keeps (`keep`) come from no record either,
+/// but from the `keeps` table, which every replay applies (`restore_keeps`).
+pub const LOCAL_OWNERS: [&str; 2] = ["pin", "drop"];
 
 /// Ring sizes of the owners model. Each default is defined here and nowhere else.
 pub const AUTO_RING_DEFAULT: usize = 10;
@@ -183,7 +188,7 @@ impl Db {
     /// Whether a tree owner (`TREE_OWNERS`) keeps the tree of `state`.
     pub fn has_tree_owner(&self, state: &str) -> Result<bool> {
         const SQL: &str = "SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind IN \
-            ('head','auto','undo','deleted','park','overlay','pin','conflict'))";
+            ('head','auto','undo','deleted','park','overlay','pin','conflict','keep'))";
         Ok(self.one(SQL, params![state], |r| r.get(0))?)
     }
 
@@ -305,6 +310,13 @@ impl Db {
             vec![]
         };
         self.set_owners("park", line, &parks)?;
+        if !alive {
+            self.exec("DELETE FROM keeps WHERE line=?1", params![line])?;
+            let (lo, hi) = span(line, '/');
+            for holder in self.holders("keep", &lo, &hi)? {
+                self.set_owners("keep", &holder, &[])?;
+            }
+        }
         self.sync_overlays(line, alive)
     }
 
@@ -602,16 +614,16 @@ impl Db {
                     mem.derive(&rec, &|_| true, local)?;
                 }
             }
-            Ok(())
+            mem.restore_keeps(self)
         })?;
         mem.owner_rows()
     }
 
-    /// The rows missing from and extra in the stored table, against a recomputation. Pins and
-    /// tree reservations (`drop`) are local (no record makes them), so they are not compared.
+    /// The rows missing from and extra in the stored table, against a recomputation. Local owners
+    /// (`LOCAL_OWNERS`) come from no record, so they are not compared.
     pub fn owners_diff(&self, want: &[Row]) -> Result<(Vec<Row>, Vec<Row>)> {
         let want: BTreeSet<Row> = want.iter().cloned().collect();
-        let have: BTreeSet<Row> = self.owner_rows()?.into_iter().filter(|r| r.1 != "pin" && r.1 != "drop").collect();
+        let have: BTreeSet<Row> = self.owner_rows()?.into_iter().filter(|r| !LOCAL_OWNERS.contains(&r.1.as_str())).collect();
         Ok((want.difference(&have).cloned().collect(), have.difference(&want).cloned().collect()))
     }
 
@@ -783,6 +795,48 @@ impl Db {
         self.with_tx(|| {
             self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect())
         })
+    }
+
+    /// Keep `state` under `name` in `line` (`layr save --keep`), in place of the state it kept before.
+    /// The `keeps` table is the source; the `keep` owner `{line}/{name}` follows it.
+    pub fn keep_set(&self, line: &str, name: &str, state: &str) -> Result<()> {
+        self.with_tx(|| {
+            self.exec("INSERT OR REPLACE INTO keeps(line, name, state) VALUES(?1,?2,?3)", params![line, name, state])?;
+            self.set_owners("keep", &format!("{line}/{name}"), &[state.to_string()])
+        })
+    }
+
+    /// Release the keep `name` of `line`. False: there was none.
+    pub fn keep_drop(&self, line: &str, name: &str) -> Result<bool> {
+        let removed = self.with_tx(|| {
+            let n = self.exec("DELETE FROM keeps WHERE line=?1 AND name=?2", params![line, name])?;
+            self.set_owners("keep", &format!("{line}/{name}"), &[])?;
+            Ok(n)
+        })?;
+        Ok(removed > 0)
+    }
+
+    /// The keeps of `line`: (name, state), by name.
+    pub fn keeps(&self, line: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.cached("SELECT name, state FROM keeps WHERE line=?1 ORDER BY name")?;
+        let rows = st.query_map(params![line], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Give the keeps of `from` (the project database) their owners here, after a replay into this
+    /// database (a rebuild, or the replay of the owners check): a replay makes no keep, and a kept
+    /// state the ring dropped holds its parents again. A keep of a deleted line is left out.
+    pub fn restore_keeps(&self, from: &Db) -> Result<()> {
+        let mut st = from.cached("SELECT line, name, state FROM keeps")?;
+        let keeps =
+            st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        drop(st);
+        for (line, name, state) in keeps {
+            if self.line_alive(&line)? {
+                self.set_owners("keep", &format!("{line}/{name}"), &[state])?;
+            }
+        }
+        Ok(())
     }
 
     /// Holders of pins (`pid:start`), for the check of dead processes.

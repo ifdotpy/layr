@@ -6,7 +6,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 | Group         | Commands                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------- |
-| work          | `status [--json] [--no-overlaps] [--no-ignored]`, `diff`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `restore`, `reset`, `park`, `clean` |
+| work          | `status [--json] [--no-overlaps] [--no-ignored]`, `diff [-z] [--exclude-standard]`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `save [--note <text>] [--keep <name>]`, `keep [list [--json] \| drop <name>... \| drop --all]`, `restore [--clean]`, `reset`, `park`, `clean` |
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
@@ -353,6 +353,31 @@ folder. A path that the exported commit does not have fails with exit 128.
 
 The design and the reasons for it, including what layr leaves to programs built on it, are in
 `docs/design.md`.
+
+## Checkpoints for tools
+
+A program that drives agents (an editor, an agent app) keeps a state of the folder per step
+without moving the line head:
+
+```sh
+layr save --note "turn 12" --keep app/thread-7/12   # an automatic state, kept under that name
+layr keep list --json                               # [{"name": "app/thread-7/12", "state": "<id>"}]
+layr diff --numstat -z --exclude-standard <a> <b>   # the step's changes, ignored files left out
+layr restore --source <a> --clean -- .              # the folder as it was, in one operation
+layr keep drop app/thread-7/12                      # release it (the line delete releases all)
+```
+
+- A keep holds its state on this machine only (docs/ownership.md, `keep`): no record makes it, so it
+  never reaches a remote, `layr undo` never reverses it, and the `retention.auto` ring never drops
+  it. An unchanged folder makes no new state; the keep then names the state equal to the folder.
+- An automatic state holds the whole folder, ignored files too. In a diff of two states,
+  `diff --exclude-standard` leaves out a file that the ignore rules of its side ignore (the new
+  side, or the old one for a deletion) and that side's tracked tree lacks: an automatic state's
+  line head, or a named state itself. A tracked file that an ignore rule matches stays, as in git.
+- `restore --clean` removes the new files that the source does not have, as `clean -fd` (ignored
+  files stay), in the same operation as the restore. The index is not changed; `layr reset -q -- .`
+  puts it back to the head.
+- Run these with your own `LAYR_SESSION`, so the user's `layr undo` takes the user's operations only.
 
 ## Reading and testing other states
 

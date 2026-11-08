@@ -213,7 +213,8 @@ Read history:
 Lines and states:
    line new <name> [<rev>] [--count N], line list, line delete, line rename, line move <line> [<path>]
    save -m <message> [-a] [--amend]
-   save [--note <text>] [--all-lines] [--running] [--force] [--caches [--cache <path>]]
+   save [--note <text>] [--all-lines] [--running] [--force] [--caches [--cache <path>]] [--keep <name>]
+   keep [list [--json] | drop <name>... | drop --all]
    park [list/show/pop/apply/drop/clear]
    retest run [--full] [--save] [-- <nextest args>], retest init [--yes], retest doctor
    tag, merge, pick, invert, replay, undo, op, try, bisect run, adopt
@@ -251,6 +252,7 @@ pub const COMMANDS: &[&str] = &[
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
     "usage",
+    "keep",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -305,6 +307,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "invert" => mergecmd::revert(ctx, rest),
         "replay" => mergecmd::rebase(ctx, rest),
         "save" => admin::save(ctx, rest),
+        "keep" => admin::keep(ctx, rest),
         "undo" => admin::undo(ctx, rest),
         "op" => admin::op(ctx, rest),
         "try" => admin::try_cmd(ctx, rest),

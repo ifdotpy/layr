@@ -216,6 +216,45 @@ pub fn name_only_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     files.iter().map(|f| format!("{}\n", f.path())).collect()
 }
 
+/// The `-z` forms, as git prints them: paths end with NUL and are never quoted; a rename gives
+/// its old and new path as two fields (`numstat`: `<a>\t<d>\t\0<old>\0<new>\0`).
+pub fn numstat_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
+    let mut s = String::new();
+    for f in files {
+        let counts = if f.is_binary() {
+            "-\t-".to_string()
+        } else {
+            let (a, d) = f.counts();
+            format!("{a}\t{d}")
+        };
+        match f.status() {
+            'R' => s.push_str(&format!("{counts}\t\0{}\0{}\0", f.old.as_ref().unwrap().path, f.new.as_ref().unwrap().path)),
+            _ => s.push_str(&format!("{counts}\t{}\0", f.path())),
+        }
+    }
+    s
+}
+
+pub fn name_status_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
+    let mut s = String::new();
+    for f in files {
+        match f.status() {
+            'R' => s.push_str(&format!(
+                "R{:03}\0{}\0{}\0",
+                f.similarity(),
+                f.old.as_ref().unwrap().path,
+                f.new.as_ref().unwrap().path
+            )),
+            c => s.push_str(&format!("{c}\0{}\0", f.path())),
+        }
+    }
+    s
+}
+
+pub fn name_only_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
+    files.iter().map(|f| format!("{}\0", f.path())).collect()
+}
+
 /// Whitespace errors and conflict markers in added lines (`--check`).
 pub fn check_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     let mut s = String::new();

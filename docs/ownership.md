@@ -44,6 +44,7 @@ operation that drops its last owner. No walk decides what lives; `gc` only check
 | `overlay` | overlay name + line | a project state that a cache overlay head or record names | overlay save | overlay head moves, overlay line delete |
 | `store` | store remote name | a state that a successful push to a store remote sent | push | never while eviction is off (the store keeps every state it receives) |
 | `pin` | `<pid>:<process start>` | a state that a command reads outside the store lock (a check or `try` copy) | pin start (only when the state has another owner) | pin end; a dead process is released by the next free step and by `gc --repair` |
+| `keep` | line id + `/` + name | the state of `layr save --keep <name>` on this machine | `save --keep` (a new state for the name replaces the old one) | `keep drop`, line delete |
 
 Rules:
 
@@ -58,7 +59,13 @@ Rules:
    the line, both go, and the final state is freed when no other owner holds it. A ring change
    (`resync_rings`), the replay (`layr reindex`, the first open of a database) and a line delete apply
    the same rule (`owners::undo_allowed`). `undo` of the delete works while both owners exist.
-5. Pins are owners that no record makes. The owners check does not compare them.
+5. Pins are owners that no record makes (`owners::LOCAL_OWNERS`): the owners check does not
+   compare them, and `gc --repair` keeps the pins of live processes. Keeps come from no record
+   either, but from the `keeps` table, which no rebuild drops: every replay (`layr reindex`, a
+   schema upgrade, the replay of `layr gc`) gives them their owners again (`restore_keeps`), so
+   the check compares them like any owner. A keep never replicates and `layr undo` never reverses
+   it: a tool's checkpoints (an agent's turn states) stay on the machine that made them, past the
+   `retention.auto` ring.
 
 ## When a state is freed
 
@@ -147,7 +154,7 @@ base it is the full tree of the commit. The built state is present; the normal r
 
 Owners and freeing:
 
-- Tree owners keep the tree: `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin`, and
+- Tree owners keep the tree: `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin`, `keep`, and
   `conflict` (a conflict needs the trees of its base, ours and theirs). The base of a present
   thin layer keeps its tree too.
 - Record owners keep only the record: `parent`, `derived`, `ref`, `tag`, `remote-ref` and
