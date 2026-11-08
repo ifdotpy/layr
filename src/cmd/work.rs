@@ -1570,7 +1570,8 @@ pub fn restore(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--theirs")
         .flag("-q|--quiet")
         .flag("--overlay")
-        .flag("--no-overlay");
+        .flag("--no-overlay")
+        .flag("--clean");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -1578,17 +1579,11 @@ pub fn restore(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if specs.is_empty() {
         return Err(exit(128, "fatal: you must specify path(s) to restore"));
     }
-    restore_impl(
-        ctx,
-        &h,
-        &line,
-        &specs,
-        a.has("-S"),
-        a.has("-W") || !a.has("-S"),
-        a.get("-s"),
-        a.has("--ours"),
-        a.has("--theirs"),
-    )
+    let worktree = a.has("-W") || !a.has("-S");
+    if a.has("--clean") && !worktree {
+        return Err(exit(128, "fatal: --clean restores the working folder: use it without --staged only, or with --worktree"));
+    }
+    restore_impl(ctx, &h, &line, &specs, a.has("-S"), worktree, a.get("-s"), a.has("--ours"), a.has("--theirs"), a.has("--clean"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1602,6 +1597,7 @@ pub fn restore_impl(
     source: Option<&str>,
     ours: bool,
     theirs: bool,
+    clean: bool,
 ) -> Result<i32> {
     let (_line_lock, w) = begin_line(ctx, &h.repo, line, crate::repo::LineOp::Direct)?;
     let line = h.repo.line(&line.id)?;
@@ -1674,6 +1670,28 @@ pub fn restore_impl(
         let wdir = repo.working(&line);
         let d = restore_paths(repo, &line, &src_root, &scan.path, &wdir, specs, Some(&index))?;
         matched |= !d.is_empty();
+        if clean {
+            // `clean -fd` in the same operation: each new file the source does not have goes (ignored
+            // ones stay), file by file, since a new folder may hold files of the source; then the
+            // folders that this left empty and the source lacks.
+            let (st, _scan, _it, _index) = repo.status(&line)?;
+            let mut folders = BTreeSet::new();
+            for f in st.untracked.iter().filter(|f| matches(specs, f) && fsutil::lmeta(&src_root, f).is_none()) {
+                fsutil::remove_entry(&wdir, f)?;
+                matched = true;
+                let mut at = f.as_str();
+                while let Some((parent, _)) = at.rsplit_once('/') {
+                    folders.insert(parent.to_string());
+                    at = parent;
+                }
+            }
+            // Deepest first; a folder that still holds anything stays.
+            for d in folders.iter().rev() {
+                if fsutil::lmeta(&src_root, d).is_none() {
+                    let _ = std::fs::remove_dir(wdir.join(d));
+                }
+            }
+        }
     }
     if !matched {
         let exists =
@@ -1787,7 +1805,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !paths.is_empty() {
         let specs = h.specs(&paths)?;
         let src = pos.first().map(|s| s.as_str()).unwrap_or("head");
-        return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false);
+        return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false, false);
     }
     let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     // APFS: an equal tree with a clean working folder moves only the head (`reset_same_tree`).

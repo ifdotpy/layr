@@ -3956,12 +3956,9 @@ mod cache_copy_tests {
         assert_eq!(std::fs::read_to_string(ctx.cwd.join("cache/data"))?, "original");
         assert_eq!(std::fs::metadata(ctx.cwd.join("cache"))?.mode() & 0o777, 0o555);
         drop(ctx);
-        btrfs::delete_tree(&root.join("store")).context("remove the concurrent cache test store")?;
-        let tree = Tree::open(&root)?;
-        for name in tree.list("")? {
-            tree.remove(&name)?;
-        }
-        std::fs::remove_dir(root)?;
+        // Best effort, as the other tests here: without root a read-only state subvolume stays.
+        let _ = btrfs::delete_tree(&root.join("store"));
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 
@@ -4292,7 +4289,10 @@ mod cache_platform_tests {
         p.append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
         for kind in [StateKind::Cache, StateKind::Derived] {
             let id = ids::new_id();
-            std::fs::create_dir(p.state_path(&id)).unwrap();
+            // A state is a subvolume where the store can make one (btrfs): a plain folder there reads as a rollback.
+            if crate::storage::create_subvolume(&p.state_path(&id)).is_err() {
+                std::fs::create_dir(p.state_path(&id)).unwrap();
+            }
             let mut rec = Record::new("state");
             rec.states.push(StateRec {
                 id: id.clone(),

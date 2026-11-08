@@ -80,6 +80,8 @@ pub struct DiffOpts {
     pub context: usize,
     pub stat_width: usize,
     pub filter: Option<String>,
+    /// `-z` (diff only): NUL-terminated paths in the numstat, name-only and name-status forms.
+    pub nul: bool,
 }
 
 impl DiffOpts {
@@ -102,6 +104,7 @@ impl DiffOpts {
             context: a.get("-U").map(|v| v.parse()).transpose()?.unwrap_or(3),
             stat_width: a.get("--stat-width").map(|v| v.parse()).transpose()?.unwrap_or(80),
             filter: a.get("--diff-filter").map(|s| s.to_string()),
+            nul: a.has("-z"),
         })
     }
 }
@@ -119,7 +122,7 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
         return problems;
     }
     if o.numstat {
-        ctx.print(&diff::numstat_analyzed(&analyzed));
+        ctx.print(&if o.nul { diff::numstat_z_analyzed(&analyzed) } else { diff::numstat_analyzed(&analyzed) });
     }
     if o.stat {
         ctx.print(&diff::stat_analyzed(&analyzed, o.stat_width));
@@ -128,10 +131,10 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
         ctx.print(&diff::shortstat_analyzed(&analyzed));
     }
     if o.name_only {
-        ctx.print(&diff::name_only_analyzed(&analyzed));
+        ctx.print(&if o.nul { diff::name_only_z_analyzed(&analyzed) } else { diff::name_only_analyzed(&analyzed) });
     }
     if o.name_status {
-        ctx.print(&diff::name_status_analyzed(&analyzed));
+        ctx.print(&if o.nul { diff::name_status_z_analyzed(&analyzed) } else { diff::name_status_analyzed(&analyzed) });
     }
     if o.patch {
         if o.stat || o.numstat || o.shortstat {
@@ -144,6 +147,7 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
     problems
 }
 
+<<<<<<< head
 /// Split diff arguments into revisions and paths, as git does. Before `--` every argument is a
 /// revision; without `--`, an argument that is neither a revision nor a path in the folder is an
 /// error, not an empty path filter.
@@ -153,6 +157,20 @@ fn split_revs(
     cwd: &std::path::Path,
     a: &crate::args::Parsed,
 ) -> Result<(Vec<String>, Vec<String>)> {
+=======
+/// The tree that git would call tracked for a state: an automatic state's line head (its first
+/// parent), a named state itself (`diff --exclude-standard`).
+fn tracked_root(repo: &Repo, id: &str) -> Result<Snap> {
+    let st = repo.state(id)?;
+    match (st.kind, st.parents.first()) {
+        (StateKind::Auto, Some(parent)) => repo.state_src(parent),
+        _ => repo.state_src(id),
+    }
+}
+
+/// Split diff arguments into revisions and paths, as git does without `--`.
+fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> Result<(Vec<String>, Vec<String>)> {
+>>>>>>> agent-checkpoints
     let mut revs = Vec::new();
     let mut paths = a.paths.clone();
     let mut in_paths = false;
@@ -242,7 +260,7 @@ fn revs_to_pin(repo: &Repo, line: Option<&Line>, names: &[String]) -> Vec<String
 }
 
 pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&diff_spec(), args)?;
+    let a = parse(&diff_spec().flag("-z").flag("--exclude-standard"), args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
@@ -339,6 +357,16 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
             (o, n, false)
         }
     };
+    // The tracked tree of each side for `--exclude-standard`, as git sees it: an automatic state's
+    // line head (its parent), a named state itself. Only a diff of two states has them.
+    let tracked = match (a.has("--exclude-standard"), revs_v.as_slice()) {
+        (true, [x, y]) if !x.contains("..") => Some((tracked_root(repo, &resolve_id(x)?)?, tracked_root(repo, &resolve_id(y)?)?)),
+        (true, [r]) if r.contains("..") && !r.contains("...") => {
+            let (x, y) = r.split_once("..").unwrap_or_default();
+            Some((tracked_root(repo, &resolve_id(x)?)?, tracked_root(repo, &resolve_id(y)?)?))
+        }
+        _ => None,
+    };
     // The files of quiet overlays stay out of a diff of the working content or the index.
     let quiet_paths = match (&line, revs_v.len()) {
         (Some(l), n) if n <= 1 && !revs_v.iter().any(|r| r.contains("..")) => repo.quiet_paths(l)?,
@@ -346,12 +374,30 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let reverse = a.has("-R");
     let renames = !a.has("--no-renames");
+    // Automatic states keep ignored files; `--exclude-standard` leaves out a file that the ignore
+    // rules of its own side ignore (the new side, or the old one for a deletion).
+    let exclude_standard = a.has("--exclude-standard");
     let compute = |old: &Snap, new: &Snap| -> Result<Vec<FileDiff>> {
         let (old, new) = if reverse { (new, old) } else { (old, new) };
+        let rules = exclude_standard.then(|| (crate::ignore_rules::Rules::of(old), crate::ignore_rules::Rules::of(new)));
+        let sides = tracked.as_ref().map(|(o, n)| if reverse { (n, o) } else { (o, n) });
+        // A tracked file stays in the diff even where an ignore rule matches it, as in git.
+        let untracked = |root: Option<&Snap>, path: &str| root.is_none_or(|r| fsutil::lmeta(r, path).is_none());
+        let ignored = |c: &Change| match &rules {
+            Some((old_rules, new_rules)) => match &c.new {
+                Some(m) => new_rules.ignored(&c.path, m.is_dir()) && untracked(sides.map(|s| s.1), &c.path),
+                None => {
+                    let path = c.old_path.as_deref().unwrap_or(&c.path);
+                    old_rules.ignored(path, false) && untracked(sides.map(|s| s.0), path)
+                }
+            },
+            None => false,
+        };
         let mut list: Vec<Change> = changes::file_changes(old, new)?
             .into_iter()
             .filter(|c| {
                 !skip_path(&c.path)
+                    && !ignored(c)
                     && !quiet_paths.contains(&c.path)
                     && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
             })
@@ -1930,6 +1976,7 @@ mod renderer_regression {
                 context: 3,
                 stat_width: 80,
                 filter: None,
+                nul: false,
             };
             let mut output = String::new();
             if combined {
