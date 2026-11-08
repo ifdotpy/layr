@@ -679,20 +679,30 @@ fn execute(
         // cp -a also copies the source root's mode over the prepared folder.
         // Restore traversal for the suite's unprivileged service clients.
         std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
-        relocate_copy(repo, 0, &private.path, &private.path)?;
-        home = private.path.join(format!(".check-home-{}", crate::ids::new_id()));
+        // In its mount namespace the check sees its copy at /work and its home at /home/check, as a sandboxed
+        // check does: the caches that a sandboxed check gives back (target/, the dependencies' sources below the
+        // home) fit without a rebuild. The two host folders are only mount points.
+        for point in ["/work", "/home/check"] {
+            std::fs::DirBuilder::new().recursive(true).mode(0o755).create(point)?;
+        }
+        relocate_copy(repo, 0, &private.path, std::path::Path::new("/work"))?;
+        home = private.path.join(".check-home");
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
         // This is cleanup isolation, not a security boundary for code running as root.
         command = Command::new("/usr/bin/unshare");
         command
-            .args(["--mount", "--propagation", "private", "--fork", "--kill-child", "--"])
+            .args(["--mount", "--propagation", "private", "--fork", "--kill-child", "--", "/bin/sh", "-c"])
+            .arg(r#"mount --bind "$1" /work && mount --bind "$2" /home/check && cd /work && shift 2 && exec "$@""#)
+            .arg("sh")
+            .arg(&private.path)
+            .arg(&home)
             .args(argv)
             .current_dir(&private.path);
         crate::privs::command_as(
             &mut command,
             0,
-            &[("HOME".into(), home.display().to_string()), ("LAYR_TRY_STATE".into(), state.to_string())],
+            &[("HOME".into(), "/home/check".into()), ("LAYR_TRY_STATE".into(), state.to_string())],
         )?;
     } else {
         // The check sees the copy at /work: its warm caches must not name the line they were built in.

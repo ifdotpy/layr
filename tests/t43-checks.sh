@@ -218,7 +218,8 @@ rows=json.loads(sys.argv[1])['checks']; assert rows
 for r in rows:
  assert r['privileged'] and r['exit']==0
  log=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
- assert log.startswith('root:/var/tmp/layr-check-') and not pathlib.Path(log[5:]).exists()
+ # The check sees its copy at /work, a mount point that is empty once the check is done.
+ assert log=='root:/work' and not any(pathlib.Path('/work').iterdir())
 PY
 (export LAYR_ROOT=$AR; cd "$A/../topic"; l approve head -q; l push archive -q)
 l fetch origin -q
@@ -235,7 +236,7 @@ rows=json.loads(sys.argv[1])['checks']; assert rows
 for r in rows:
  assert r['privileged'] and r['exit']==124
  path=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
- assert path.startswith('/var/tmp/layr-check-') and not pathlib.Path(path).exists()
+ assert path=='/work' and not any(pathlib.Path(path).iterdir())
 PY
 project_config checks.timeout 5
 ok 'local config is not a signed project record' python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); assert not d.execute("select 1 from config where key=?",("checks.privileged-runner",)).fetchone()' "$DB"
