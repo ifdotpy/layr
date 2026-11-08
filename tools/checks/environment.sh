@@ -48,6 +48,18 @@ if [ "$(id -u)" = 0 ]; then
     TMPDIR=$(mktemp -d /var/tmp/layr-root-tmp.XXXXXX)
     # Tests run commands as other users (an owner) below it.
     chmod 755 "$TMPDIR"
+    if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_CHECK_TMP_ON_DISK:-}" ]; then
+        # The suite waits on the disk, not the CPUs: its tests get a Btrfs in memory. The check's
+        # private mount namespace (checks.rs) drops it, and its loop device, with the check.
+        half=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) * 512 ))
+        mount -t tmpfs -o size=$half,mode=755 layr-check-tmp "$TMPDIR"
+        truncate -s $half "$TMPDIR/btrfs.img"
+        mkfs.btrfs -q "$TMPDIR/btrfs.img"
+        mkdir "$TMPDIR/fs"
+        mount -o loop "$TMPDIR/btrfs.img" "$TMPDIR/fs"
+        chmod 755 "$TMPDIR/fs"
+        TMPDIR=$TMPDIR/fs
+    fi
     # Git refuses folders of another owner to root; the test stores are such folders.
     export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
     git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory '*'

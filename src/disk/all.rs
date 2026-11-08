@@ -42,7 +42,7 @@ impl All {
                 self.limit,
             )?;
             opened.keychain.store(cfg!(target_os = "macos"), std::sync::atomic::Ordering::SeqCst);
-            opened.background(Duration::from_secs(120));
+            opened.background(super::refresh_interval());
             *disk = Some(opened);
         }
         Ok(disk.clone())

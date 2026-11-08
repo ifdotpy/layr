@@ -35,7 +35,7 @@ root=pathlib.Path(os.environ['DISK_TEST_T'])
 binary=str(root/'layr'); remote='file://'+str(root/'remote')
 command=['runuser','-u','layr-disk-test','--','env','HOME='+str(root/'home'),
  'XDG_CACHE_HOME='+str(root/'home/cache'),'XDG_CONFIG_HOME='+str(root/'home/.config'),'LAYR_ROOT='+str(root/'no-project-store'),
- 'LAYR_SOCKET='+str(root/'no-service'),'LAYR_DIRECT=0',binary,'mount',remote,
+ 'LAYR_SOCKET='+str(root/'no-service'),'LAYR_DIRECT=0','LAYR_TEST_DISK_REFRESH_SECONDS=15',binary,'mount',remote,
  '--listen','127.0.0.1:0','--cache-size','5','--paper-key-file',str(root/'paper')]
 log=open(root/'disk.log','w+')
 process=subprocess.Popen(command,stdout=log,stderr=log,start_new_session=True)
@@ -101,7 +101,7 @@ try:
  while time.monotonic()<deadline:
   if request('GET','/main/a.txt')[2]==b'new': break
   time.sleep(1)
- else: raise AssertionError('the two-minute refresh did not publish the new view')
+ else: raise AssertionError('the refresh did not publish the new view')
  check(True,'refresh publishes the new head')
  print(f'PASS rootless WebDAV ({checks} checks)')
 finally:

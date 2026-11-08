@@ -616,8 +616,14 @@ pub fn run(args: &[String]) -> Result<i32> {
     if a.has("--at") && !cfg!(target_os = "macos") {
         bail!("--at requires macOS");
     }
-    disk.background(Duration::from_secs(120));
+    disk.background(refresh_interval());
     serve(disk, address, a.get("--at"))
+}
+
+/// How often a mount looks for a new head: two minutes; tests set `LAYR_TEST_DISK_REFRESH_SECONDS`.
+pub(super) fn refresh_interval() -> Duration {
+    let test = std::env::var("LAYR_TEST_DISK_REFRESH_SECONDS").ok().and_then(|s| s.parse().ok());
+    Duration::from_secs(test.unwrap_or(120))
 }
 
 pub(super) trait View: Send + Sync {

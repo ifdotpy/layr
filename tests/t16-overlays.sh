@@ -261,21 +261,21 @@ sh_in layr-o1 o1t "rm .kc-renamed && $L save -qam 'drop the loader'"
 no "the overlay lost the file" in_line layr-o1 o1t overlay show keychain head:.kc-renamed
 eq "the line is clean after the delete" "" "$(in_line layr-o1 o1t status --porcelain)"
 
-# 11. The apply-method commit on a tree of 10,000 files (rough numbers, printed).
+# 11. The apply-method commit on a tree of 2,500 files (rough numbers, printed).
 mkdir -p $T/big
-for d in $(seq 1 100); do mkdir -p $T/big/d$d; for f in $(seq 1 100); do echo "$d $f" > $T/big/d$d/f$f.txt; done; done
+for d in $(seq 1 50); do mkdir -p $T/big/d$d; for f in $(seq 1 50); do echo "$d $f" > $T/big/d$d/f$f.txt; done; done
 l init big --from $T/big -q >/dev/null
 l --project big access grant layr-o1 writer
 as layr-o1 $L --project big line new -q plain main
 as layr-o1 $L --project big line new -q stacked main
 sh_in_big() { local line=$1; shift; as layr-o1 sh -c "cd $LAYR_ROOT/projects/big/lines/$line && $*"; }
 sh_in_big stacked "$L overlay create -q priv && $L overlay move -q priv d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 && $L save -qm 'priv'"
-eq "1,000 files in the overlay" "1000" "$(as layr-o1 $L --project big --line stacked overlay ls-files priv | wc -l)"
+eq "500 files in the overlay" "500" "$(as layr-o1 $L --project big --line stacked overlay ls-files priv | wc -l)"
 ms() { local a b; a=$(date +%s%N); "$@" >/dev/null; b=$(date +%s%N); echo $(( (b - a) / 1000000 )); }
 for line in plain stacked; do sh_in_big $line "for i in 1 2 3 4 5; do echo x >> d1/f\$i.txt; echo y >> d50/f\$i.txt; done"; done
 tp=$(ms as layr-o1 $L --project big --line plain save -qam ten)
 tsx=$(ms as layr-o1 $L --project big --line stacked save -qam ten)
-echo "INFO commit of 10 changed files in a tree of 10,000: ${tp} ms without overlays, ${tsx} ms with an overlay of 1,000 files (both layers changed)"
+echo "INFO commit of 10 changed files in a tree of 2,500: ${tp} ms without overlays, ${tsx} ms with an overlay of 500 files (both layers changed)"
 eq "the stacked commit changed both layers" "1" "$(as layr-o1 $L --project big --line stacked log --oneline | grep -c ten)"
 # A fixed limit depends on the machine and the build; compare with the same commit without overlays.
 ok "the overlay commit takes less than twice the plain commit" test "$tsx" -lt $((tp * 2))

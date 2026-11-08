@@ -908,8 +908,15 @@ mod trash_sweep_tests {
         assert!(root.join("trash/deferred").exists(), "a locked trash is left for the next sweep");
         assert!(!volume.join("trash/deferred").exists());
         drop(lock);
-        super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
-        assert!(!root.join("trash/deferred").exists());
+        // Rare on the Linux CI check: the error and trash.errors say why the trash stayed.
+        super::sweep_trash_with(&root, |path| {
+            crate::store::empty_trash_process(path).map_err(|e| eprintln!("sweep of {}: {e:#}", path.display())).is_ok()
+        });
+        assert!(
+            !root.join("trash/deferred").exists(),
+            "trash.errors: {}",
+            std::fs::read_to_string(root.join("trash.errors")).unwrap_or_default()
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 }
