@@ -382,7 +382,10 @@ pub fn self_holder() -> String {
     HOLDER
         .get_or_init(|| {
             let pid = std::process::id();
-            format!("{pid}:{}", process_start(pid).unwrap_or_default())
+            let start = process_start(pid).or_else(|| {
+                HolderProcesses::new(&[format!("{pid}:")]).start(pid).filter(|&time| time != 0).and_then(format_start)
+            });
+            format!("{pid}:{}", start.unwrap_or_default())
         })
         .clone()
 }
@@ -643,6 +646,15 @@ mod holder_tests {
     }
 
     #[test]
+    fn current_holder_has_start_when_system_lookup_succeeds() {
+        let pid = std::process::id();
+        let processes = super::HolderProcesses::new(&[format!("{pid}:")]);
+        if processes.start(pid).filter(|&time| time != 0).is_some() {
+            assert!(!super::self_holder().split_once(':').unwrap().1.is_empty());
+        }
+    }
+
+    #[test]
     fn detects_live_reused_and_dead_holders() {
         let holder = super::self_holder();
         assert!(super::holder_alive(&holder));
@@ -651,6 +663,9 @@ mod holder_tests {
         assert!(!super::holder_alive("2147483647:1"));
         let output = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
         let legacy = String::from_utf8(output.stdout).unwrap();
+        let processes = super::HolderProcesses::new(&[format!("{pid}:")]);
+        let native = processes.start(pid).and_then(super::format_start).unwrap();
+        assert_eq!(native, legacy.trim());
         assert!(super::holder_alive(&format!("{pid}:{}", legacy.trim())));
     }
 }

@@ -30,6 +30,7 @@ if [ -x ./unit-test-bin ]; then
   ./unit-test-bin service::request_tests::incompatible_client_schemas_are_refused_before_opening_the_store --exact
   ./unit-test-bin service::request_tests::malformed_environment_is_an_error --exact
   ./unit-test-bin ctx::author_tests
+  ./unit-test-bin free::holder_tests::current_holder_has_start_when_system_lookup_succeeds --exact
   ./unit-test-bin store_remote::gateway::tests --skip epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists --skip missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants
 fi
 CHECK
@@ -49,7 +50,7 @@ short=$(head -1 "$LAYR_ROOT/projects/p/states/$log_state/check.log" 2>/dev/null)
 has "the check gets a short temporary path" "/tmp/lct-" "$short"
 no "the temporary link is removed after the check" test -L "$short"
 if [ -n "${LAYR_SANDBOX_TEST_BINARY:-}" ]; then
-  ok "socket, author and gateway unit tests pass in the sandbox" python3 -c 'import pathlib,sys; s=pathlib.Path(sys.argv[1]).read_text(); assert s.count("test result: ok. 1 passed;")==4 and "test result: ok. 3 passed;" in s and "test result: ok. 18 passed;" in s' "$LAYR_ROOT/projects/p/states/$log_state/check.log"
+  ok "socket, author and gateway unit tests pass in the sandbox" python3 -c 'import pathlib,sys; s=pathlib.Path(sys.argv[1]).read_text(); assert s.count("test result: ok. 1 passed;")==5 and "test result: ok. 3 passed;" in s and "test result: ok. 18 passed;" in s' "$LAYR_ROOT/projects/p/states/$log_state/check.log"
 fi
 echo 'exit 17' >> socket-check.sh
 l save -qam 'fail after socket' >/dev/null
