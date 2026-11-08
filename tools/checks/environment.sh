@@ -33,5 +33,12 @@ if [ "$(uname -s)" = Darwin ]; then
     export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
     : > "$GIT_CONFIG_GLOBAL"
 fi
-export TMPDIR="$PWD/.check-tmp"
-mkdir -p "$TMPDIR"
+if [ "$(id -u)" = 0 ]; then
+    # A privileged check copy lives at /var/tmp/layr-check-<id>: below it the Unix sockets of the
+    # tests get paths longer than SUN_LEN.
+    TMPDIR=$(mktemp -d /var/tmp/layr-root-tmp.XXXXXX)
+else
+    TMPDIR="$PWD/.check-tmp"
+    mkdir -p "$TMPDIR"
+fi
+export TMPDIR

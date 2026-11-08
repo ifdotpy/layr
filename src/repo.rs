@@ -4290,7 +4290,11 @@ mod cache_platform_tests {
         for kind in [StateKind::Cache, StateKind::Derived] {
             let id = ids::new_id();
             // A state is a subvolume where the store can make one (btrfs): a plain folder there reads as a rollback.
-            if crate::storage::create_subvolume(&p.state_path(&id)).is_err() {
+            #[cfg(not(feature = "overlayfs"))]
+            let made = crate::storage::create_subvolume(&p.state_path(&id)).is_ok();
+            #[cfg(feature = "overlayfs")]
+            let made = false;
+            if !made {
                 std::fs::create_dir(p.state_path(&id)).unwrap();
             }
             let mut rec = Record::new("state");

@@ -1203,7 +1203,8 @@ mod merge_sides_tests {
                 theirs_label: "theirs",
                 config: &config,
                 run_as: Some((rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())),
-                allow_root: false,
+                // The privileged checks run this as root, where a derive needs the explicit opt-in.
+                allow_root: rustix::process::geteuid().is_root(),
             };
             let out = merge_sides(&i, &sides)?;
             assert_eq!(std::fs::read(result.join(".gitattributes"))?, b"ours");
