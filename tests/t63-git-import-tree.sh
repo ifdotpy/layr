@@ -53,7 +53,8 @@ expected() {
     done | sort -k3
 }
 n=0
-for c in $(git -C $U rev-list main side side2 | sort -u); do
+# Parents first: a tree built before its parent cannot be a thin layer over it.
+for c in $(git -C $U rev-list --topo-order --reverse main side side2); do
     n=$((n + 1))
     (cd $P/main && l line new -q chk$n $c) || { echo "FAIL line for $c"; FAIL=$((FAIL + 1)); continue; }
     eq "tree of imported commit $(git -C $U log -1 --format=%s $c) equals git ls-tree" "$(expected $c)" "$(listing $P/chk$n | sort -k3)"
