@@ -71,18 +71,26 @@ report() {
     read -r rc seconds < "$logdir/$t.rc"
     out=$(cat "$logdir/$t.log")
     summary=$(echo "$out" | tail -1)
-    # LAYR_TEST_TIMES=1: each summary names the test's wall time, to find the slow ones.
-    [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
     if [ "$rc" -eq 124 ]; then
         printf '%s\n' "$out"
         echo "FAIL $t: timeout after $timeout_s s"
         failed=1
         return
     fi
+    # A green summary counts only with exit 0: a test that fails after its summary has failed.
     case "$summary" in
-        *", 0 failed"*) echo "$summary" ;;
-        *) printf '%s\n' "$out"; failed=1 ;;
+        *", 0 failed") ;;
+        *) printf '%s\n' "$out"; failed=1; return ;;
     esac
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out"
+        echo "FAIL $t: exit $rc after a green summary"
+        failed=1
+        return
+    fi
+    # LAYR_TEST_TIMES=1: each summary names the test's wall time, to find the slow ones.
+    [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
+    echo "$summary"
 }
 one() {
     local rc=0 started=$SECONDS
