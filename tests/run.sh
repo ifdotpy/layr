@@ -89,6 +89,15 @@ one() {
     run_test "$1" "$logdir/$1.log" || rc=$?
     echo "$rc $((SECONDS - started))" > "$logdir/$1.rc.tmp" && mv "$logdir/$1.rc.tmp" "$logdir/$1.rc"
 }
+# A test whose line 3 or later says `# serial` measures time: it runs alone, after the others.
+serial=()
+if [ "$jobs_n" -gt 1 ]; then
+    parallel=()
+    for t in "${files[@]}"; do
+        if grep -qx '# serial' "tests/$t.sh"; then serial+=("$t"); else parallel+=("$t"); fi
+    done
+    files=("${parallel[@]}" "${serial[@]}")
+fi
 next=0
 flush() {
     while [ "$next" -lt "${#files[@]}" ] && [ -f "$logdir/${files[$next]}.rc" ]; do
@@ -97,7 +106,8 @@ flush() {
     done
 }
 for t in "${files[@]}"; do
-    if [ "$jobs_n" -le 1 ]; then
+    if [ "$jobs_n" -le 1 ] || [[ " ${serial[*]} " == *" $t "* ]]; then
+        wait; flush
         one "$t"
     else
         while [ "$(jobs -rp | wc -l)" -ge "$jobs_n" ]; do wait -n; flush; done

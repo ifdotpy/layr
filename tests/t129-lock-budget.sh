@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# serial
 # The project lock budget (issue #194): a command holds the project lock only for its commit. Each
 # common command runs on a project with 2000 files, a cache folder and several lines; the test
 # prints the longest project lock hold of each command and fails when one is over the limit.

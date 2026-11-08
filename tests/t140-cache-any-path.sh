@@ -23,11 +23,9 @@ if [ "$(id -u)" = 0 ]; then
     REAL_CARGO=$(rustup which cargo 2>/dev/null || command -v cargo || true)
     [ -n "$REAL_CARGO" ] || { echo "FATAL: no cargo for the test owner (run with the PATH of the runner)" >&2; exit 1; }
     TOOLS=$(dirname "$REAL_CARGO")
-    OWN_CARGO_HOME=$(mktemp -d /tmp/layr-cargo-home.XXXXXX) && chmod 777 "$OWN_CARGO_HOME"
-    printf '#!/bin/sh\nexport PATH=%s:/usr/bin:/bin\nexport CARGO_HOME=%s\nexec %s "$@"\n' "$TOOLS" "$OWN_CARGO_HOME" "$REAL_CARGO" > /usr/local/bin/cargo
-    chmod 755 /usr/local/bin/cargo
-    trap 'rm -f /usr/local/bin/cargo; rm -rf "$OWN_CARGO_HOME"; cleanup' EXIT
-    owned() { runuser -u $OWN -- env PATH=/usr/local/bin:/usr/bin:/bin "$@"; }
+    owner_cargo $OWN
+    OWN_HOME=$(getent passwd $OWN | cut -d: -f6)
+    owned() { runuser -u $OWN -- env PATH=$OWN_HOME/.cargo/bin:/usr/bin:/bin "$@"; }
     OWNER_ARG="--owner $OWN"
 else
     OWN=$(id -un)

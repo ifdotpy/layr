@@ -127,7 +127,15 @@ cleanup() {
     while read -r device image; do
         case "$image" in "$T/"*) losetup -d "$device" 2>/dev/null || true ;; esac
     done < <(losetup --list --noheadings --output NAME,BACK-FILE)
-    rm -rf "$T"
+    # A store that a test made below $T on the test file system holds read-only subvolumes (states):
+    # rm cannot remove them. Delete them quietly, so the test's summary stays its last line.
+    if ! rm -rf "$T" 2>/dev/null; then
+        find "$T" -depth -type d -inum 256 2>/dev/null | while read -r d; do
+            btrfs property set -ts "$d" ro false 2>/dev/null
+            btrfs subvolume delete "$d" >/dev/null 2>&1
+        done
+        rm -rf "$T" 2>/dev/null
+    fi
 }
 trap cleanup EXIT
 
