@@ -1517,7 +1517,7 @@ fn mapped_ancestor_once(repo: &Repo, state: &str) -> Result<Option<(String, Stri
                 return Ok(Some((a, c)));
             }
             if repo.p.db.git_import(&a)?.is_some() {
-                let (c, _) = export_history(repo, &a)?;
+                let c = export_commit(repo, &a)?;
                 return Ok(Some((a, c)));
             }
         }
@@ -1576,7 +1576,7 @@ fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>
         Some(c) => c,
         None => match commit_of(repo, state)? {
             Some(c) => c,
-            None => export_history(repo, state)?.0,
+            None => export_commit(repo, state)?,
         },
     };
     let mut cat = CatFile::new(&s)?;
@@ -1681,10 +1681,17 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
 pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
-    cache_retry(repo, || export_history_once(repo, state))
+    cache_retry(repo, || export_history_once(repo, state, true))
 }
 
-fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+/// The commit of `state`, as `export_history` makes it, without naming the history commits that
+/// no record names yet: a history commit's parents have theirs, so the walk stops there. A line's
+/// `.git` folder needs only this; without the stop each save walks every earlier unpushed save.
+pub fn export_commit(repo: &Repo, state: &str) -> Result<String> {
+    cache_retry(repo, || export_history_once(repo, state, false)).map(|(c, _)| c)
+}
+
+fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
     repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1707,6 +1714,9 @@ fn export_history_once(repo: &Repo, state: &str) -> Result<(String, Vec<(String,
         if let Some(c) = history_commit(repo, &s)? {
             made.push((s.clone(), c.clone()));
             known.insert(s.clone(), c);
+            if !name_history {
+                continue;
+            }
             // Its parents have history commits too. The record names them all, so later pushes,
             // their secret check and `foreign_base` stop at them.
             for p in repo.state(&s)?.parents.iter().rev() {
@@ -1971,7 +1981,7 @@ pub fn prune_indexes(repo: &Repo) -> Result<usize> {
 /// would send for exactly this state (made in the git store when it has none, without a record),
 /// and a kept index of that state whose stat data matches files copied from it.
 pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
-    let (c, _) = export_history(repo, state)?;
+    let c = export_commit(repo, state)?;
     if !index_path(repo, state).exists() {
         let prev = repo.state(state)?.parents.first().cloned().filter(|p| index_path(repo, p).exists());
         build_index(repo, state, &c, prev.as_deref())?;
@@ -2017,7 +2027,7 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         crate::store_remote::restore_git_objects(ctx, repo)?;
         let mut rebuilt = false;
         for state in repo.p.db.state_of_commit(commit)? {
-            if repo.tree_available(&state) && export_history(repo, &state)?.0 == commit {
+            if repo.tree_available(&state) && export_commit(repo, &state)? == commit {
                 rebuilt = true;
                 break;
             }
