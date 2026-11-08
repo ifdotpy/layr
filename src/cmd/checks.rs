@@ -701,7 +701,9 @@ fn execute(
         }
         command = Command::new("/usr/bin/bwrap");
         command.args(["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
-        for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives"] {
+        // The users and groups (never /etc/shadow): a check's tools look up its own user, as git,
+        // ssh-keygen and layr's `privs::command_as` do.
+        for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives", "/etc/passwd", "/etc/group"] {
             if std::path::Path::new(system).exists() {
                 command.args(["--ro-bind", system, system]);
             }
