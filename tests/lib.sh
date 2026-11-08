@@ -37,6 +37,20 @@ owner_toolchain_env() {
     fi
 }
 
+# owner_cargo <user>: on a root run, the machine's cargo for a test owner, in the owner's ~/.cargo/bin
+# (on the PATH of its cache hooks). The same content for every test, written atomically and kept, so
+# tests that run at once share it.
+owner_cargo() {
+    local user=$1 home real
+    home=$(getent passwd "$user" | cut -d: -f6)
+    real=$(rustup which cargo 2>/dev/null || command -v cargo || true)
+    [ -n "$home" ] && [ -n "$real" ] || { echo "FATAL: no cargo for test owner $user" >&2; exit 1; }
+    install -d -o "$user" "$home/.cargo" "$home/.cargo/bin"
+    printf '#!/bin/sh\nexport PATH=%s:/usr/bin:/bin\nexport CARGO_HOME=%s\nexec %s "$@"\n' \
+        "$(dirname "$real")" "$home/.cargo" "$real" > "$home/.cargo/bin/cargo.$$"
+    chmod 755 "$home/.cargo/bin/cargo.$$"
+    mv -f "$home/.cargo/bin/cargo.$$" "$home/.cargo/bin/cargo"
+}
 # Inside a macOS check sandbox (tools/checks/apfs.sh): the executor sets LAYR_CHECK_TMPDIR.
 in_check_sandbox() { [ -n "${LAYR_CHECK_TMPDIR:-}" ]; }
 # skip_in_check_sandbox <why>: the sandbox forbids what this test needs; ci.yml's macos job runs it.

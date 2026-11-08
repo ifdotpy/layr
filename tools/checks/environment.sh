@@ -19,10 +19,12 @@ else
 fi
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH" CARGO_NET_OFFLINE=true
 if [ "$(uname -s)" = Linux ]; then
-    # One rustc job per CPU, at most one per 2 GiB of memory; the shell tests wait on I/O, one per CPU.
+    # One rustc job per CPU, at most one per 2 GiB of memory; one shell test per CPU.
     cpus=$(nproc)
     memory_jobs=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 2097152 ))
-    export CARGO_BUILD_JOBS=$(( memory_jobs < 1 ? 1 : memory_jobs < cpus ? memory_jobs : cpus ))
+    # In Cargo's config, not the environment: retest doctor reports a shell's CARGO_* variables.
+    grep -qs '^\[build\]' "$CARGO_HOME/config.toml" ||
+        printf '[build]\njobs = %s\n' $(( memory_jobs < 1 ? 1 : memory_jobs < cpus ? memory_jobs : cpus )) >> "$CARGO_HOME/config.toml"
     export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$cpus}
 fi
 if [ "$(uname -s)" = Darwin ]; then

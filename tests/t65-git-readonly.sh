@@ -33,9 +33,11 @@ check() { # check <description> <git args...>: the write fails and nothing chang
     local d=$1; shift
     out=$(git_as "$@" 2>&1); rc=$?
     eq "$d fails" refused "$([ "$rc" -ne 0 ] && echo refused)"
-    has "$d: permission denied" "ermission denied" "$out"
     eq "$d leaves HEAD" "$head" "$(git rev-parse HEAD)"
     eq "$d leaves the files" "$sum" "$(cat a.txt b.txt | cksum)"
+    # Some git versions end `git stash` on the sealed index with exit 1 and no message.
+    [ -n "${quiet:-}" ] && [ -z "$out" ] && return 0
+    has "$d: permission denied" "ermission denied" "$out"
 }
 # The worktree parent is writable for the git user, so only the sealed .git can refuse it.
 wt_parent=$T/wt-parent; mkdir -p $wt_parent
@@ -46,7 +48,7 @@ check "git merge" merge --no-edit -q $sidec
 check "git checkout" checkout -q "$head"
 check "git reset" reset -q --hard HEAD~1
 echo dirty >> b.txt; sum=$(cat a.txt b.txt | cksum)
-check "git stash" stash
+quiet=1 check "git stash" stash
 check "git worktree add" worktree add -q "$wt_parent/wt" HEAD
 ok "git status works" git_as status --short
 ok "git log works" git_as log --oneline

@@ -32,9 +32,9 @@ if [ "$(id -u)" = 0 ]; then
     [ -n "$REAL_CARGO" ] || { echo "FATAL: no cargo for the test (run with the PATH of the runner)" >&2; exit 1; }
     TOOLS=$(dirname "$REAL_CARGO")
     export PATH=$TOOLS:$PATH
-    OWN_CARGO_HOME=$(mktemp -d /tmp/layr-cargo-home.XXXXXX) && chmod 777 "$OWN_CARGO_HOME"
-    trap 'rm -rf "$OWN_CARGO_HOME"; cleanup' EXIT
-    owned() { runuser -u $OWN -- env PATH=$TOOLS:/usr/bin:/bin CARGO_HOME=$OWN_CARGO_HOME "$@"; }
+    owner_cargo $OWN
+    OWN_HOME=$(getent passwd $OWN | cut -d: -f6)
+    owned() { runuser -u $OWN -- env PATH=$OWN_HOME/.cargo/bin:$TOOLS:/usr/bin:/bin CARGO_HOME=$OWN_HOME/.cargo "$@"; }
     CARGO=$REAL_CARGO
     OWNER_ARG="--owner $OWN"
 else
