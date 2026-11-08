@@ -850,7 +850,6 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow file-write*
     (subpath {work}) (literal "/dev/null")
     (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
-(allow file-read* (literal "/Library/Preferences/com.apple.dt.Xcode.plist"))
 ; Sandbox regexes take no repetition counts.
 (allow file-write-create file-write-unlink (regex #"^/private/tmp/lct-[0-9a-f]+$"))
 ; One rule per path: a unix-socket address takes only its first filter.
