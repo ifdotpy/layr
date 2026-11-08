@@ -60,6 +60,10 @@ All of them run without a prompt; `--json` prints one object.
    states only on the lines it moves. No record of a limited machine (its `machine` record too) carries a queue
    change, a ref change or an attestation, and its `machine` record makes no state and moves no line. The
    `config` of a writer cannot change project settings: other machines keep it as `<key>@<machine>`.
+   The creator can give other machines its own rights: `layr config admin.machines '["<machine id>", ...]'`.
+   The records of those machines then count as the creator's (project settings, line heads, machine
+   approvals, main heads for checks), so two machines of one owner work on a project alike. Only the
+   creator's own latest `admin.machines` counts: an admin machine names no further admin.
 7. A delegation is a `trust.delegate` record of a full machine. A `machine.trust` record signed by a broker
    counts only when, at its time, a delegation of that broker is live and the trust is inside it: `expires_at`
    at most `max-hours` after the record time, the same or a smaller role, overlays a subset, and the machine name

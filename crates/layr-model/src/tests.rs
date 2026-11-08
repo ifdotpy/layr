@@ -537,6 +537,33 @@ fn project_policy_perspective_requires_one_creator_and_keeps_foreign_config_name
 }
 
 #[test]
+fn admin_machines_of_the_creator_count_as_the_creator() {
+    let mut creator = record(1, "project");
+    creator.data = json!({"id":"project","config":{"admin.machines":["b"]}});
+    let mut admin = record(2, "config");
+    admin.machine = "b".into();
+    admin.lines.insert("line".into(), line("two", "b"));
+    admin.data = json!({"config":{"person.keys":{"ann@example.com":"ann-key"},"admin.machines":["c"]}});
+    let mut approval = record(3, "approve");
+    approval.machine = "b".into();
+    approval.data = json!({"state":"s1"});
+    let mut other = record(4, "config");
+    other.machine = "c".into();
+    other.data = json!({"config":{"person.keys":{"eve@example.com":"eve-key"}}});
+    let mut other_approval = record(5, "approve");
+    other_approval.machine = "c".into();
+    other_approval.data = json!({"state":"s2"});
+    let p = fold(vec![creator, admin, approval, other, other_approval]);
+    assert_eq!(p.config["person.keys"], json!({"ann@example.com":"ann-key"}));
+    assert_eq!(p.line_list()[0].head, "two");
+    assert_eq!(p.approvals("s1"), [(10, 3)]);
+    // Only the creator names admin machines: c, named by the admin machine b, stays foreign.
+    assert_eq!(p.config["person.keys@c"], json!({"eve@example.com":"eve-key"}));
+    assert!(p.approvals("s2").is_empty());
+    assert_eq!(p.admins, BTreeSet::from(["a".to_string(), "b".to_string()]));
+}
+
+#[test]
 fn project_access_mode_and_epoch_metadata_follow_signed_order_without_keys() {
     use layr_store::epochs::Mode;
     let mut first = record(1, "project.key");

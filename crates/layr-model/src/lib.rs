@@ -158,6 +158,10 @@ pub struct StateView {
 pub struct Project {
     pub id: String,
     pub machine: String,
+    /// The perspective machine and the machines its `admin.machines` setting names: their records
+    /// count as the perspective's own (settings, line heads, machine approvals).
+    #[serde(default)]
+    pub admins: BTreeSet<String>,
     pub name: Option<String>,
     pub states: BTreeMap<String, StateView>,
     pub lines: BTreeMap<String, LineView>,
@@ -219,9 +223,18 @@ impl Project {
         }
         let mut records: Vec<_> = unique.into_values().collect();
         records.sort_by(|a, b| order(a).cmp(&order(b)));
+        // Only the perspective machine names the machines of equal rights, so no admin machine adds another.
+        let mut admins = BTreeSet::from([machine.to_string()]);
+        let named = records
+            .iter()
+            .filter(|r| r.machine == machine && matches!(r.op.as_str(), "project" | "config"))
+            .filter_map(|r| r.data["config"].get("admin.machines"))
+            .last();
+        admins.extend(named.and_then(Value::as_array).into_iter().flatten().filter_map(|m| m.as_str().map(String::from)));
         let mut p = Self {
             id: id.into(),
             machine: machine.into(),
+            admins,
             name: None,
             states: BTreeMap::new(),
             lines: BTreeMap::new(),
@@ -244,7 +257,7 @@ impl Project {
     }
 
     fn derive(&mut self, index: usize, r: &Record) -> Result<()> {
-        let foreign = r.machine != self.machine;
+        let foreign = !self.admins.contains(&r.machine);
         for state in &r.states {
             if self.states.contains_key(&state.id) {
                 bail!("state {} is named by two records", state.id);
@@ -266,7 +279,7 @@ impl Project {
                 }
                 heads.heads.insert(r.machine.clone(), after.head.clone());
             }
-            if foreign && heads.line.machine == self.machine {
+            if foreign && self.admins.contains(&heads.line.machine) {
                 continue;
             }
             if let Some(after) = &change.after {
@@ -739,7 +752,7 @@ impl Project {
                 || self.is_revoked(&a.attestation_id)
                 || record.data.get("declassify").is_some()
                 || a.signer.starts_with("person:")
-                || record.machine != self.machine
+                || !self.admins.contains(&record.machine)
             {
                 continue;
             }

@@ -595,9 +595,10 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
 fn creator_policy(project: &str, records: Vec<crate::model::Record>) -> Result<(layr_model::Project, BTreeSet<String>)> {
     let creator = layr_model::project_perspective(project, &records)
         .context("automatic checks refuse to run without an unambiguous verified project creator")?;
+    let model = layr_model::Project::from_records(project, records.clone(), &creator)?;
     let mut states = BTreeSet::new();
     for record in &records {
-        if record.machine == creator {
+        if model.admins.contains(&record.machine) {
             for movement in record.lines.values() {
                 if let Some(after) = &movement.after {
                     if after.name == "main" {
@@ -607,7 +608,7 @@ fn creator_policy(project: &str, records: Vec<crate::model::Record>) -> Result<(
             }
         }
     }
-    Ok((layr_model::Project::from_records(project, records, &creator)?, states))
+    Ok((model, states))
 }
 
 /// Only exact-state, active approvals from current maintainers authorize host code.
