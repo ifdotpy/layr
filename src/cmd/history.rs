@@ -144,8 +144,15 @@ pub fn print_diffs(ctx: &Ctx, fds: &[FileDiff], o: &DiffOpts) -> bool {
     problems
 }
 
-/// Split diff arguments into revisions and paths, as git does without `--`.
-fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> Result<(Vec<String>, Vec<String>)> {
+/// Split diff arguments into revisions and paths, as git does. Before `--` every argument is a
+/// revision; without `--`, an argument that is neither a revision nor a path in the folder is an
+/// error, not an empty path filter.
+fn split_revs(
+    repo: &Repo,
+    line: Option<&Line>,
+    cwd: &std::path::Path,
+    a: &crate::args::Parsed,
+) -> Result<(Vec<String>, Vec<String>)> {
     let mut revs = Vec::new();
     let mut paths = a.paths.clone();
     let mut in_paths = false;
@@ -157,12 +164,37 @@ fn split_revs(repo: &Repo, line: Option<&Line>, a: &crate::args::Parsed) -> Resu
         }
         if !in_paths && is_rev(repo, line, p) {
             revs.push(p.clone());
+        } else if a.dashdash {
+            return Err(exit(128, format!("fatal: bad revision '{p}'")));
+        } else if !in_paths && !is_path_arg(cwd, p) {
+            return Err(exit(
+                128,
+                format!(
+                    "fatal: ambiguous argument '{p}': unknown revision or path not in the working tree.\n\
+                     Use '--' to separate paths from revisions, like this:\n\
+                     'layr <command> [<revision>...] -- [<file>...]'"
+                ),
+            ));
         } else {
             in_paths = true;
             paths.push(p.clone());
         }
     }
     Ok((revs, paths))
+}
+
+/// The folder that a path argument is relative to: the current folder of the line (its line folder
+/// and `loc.sub`, as `Here::specs` reads paths), or the working folder outside a line.
+fn path_base(ctx: &Ctx, h: &Here) -> std::path::PathBuf {
+    match &h.line {
+        Some(line) => h.repo.working(line).join(&h.loc.sub),
+        None => ctx.cwd.clone(),
+    }
+}
+
+/// A path argument without `--`: it names something in the folder, or it is a pattern.
+fn is_path_arg(cwd: &std::path::Path, p: &str) -> bool {
+    p.contains(['*', '?', '[']) || p.starts_with(':') || std::fs::symlink_metadata(cwd.join(p)).is_ok()
 }
 
 fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
@@ -214,7 +246,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
-    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
+    let (revs_v, paths) = split_revs(repo, line.as_ref(), &path_base(ctx, &h), &a)?;
     let _pin = pin_revs_borrowed(repo, line.as_ref(), &revs_v)?;
     for rev in &revs_v {
         for part in rev.split("...").flat_map(|s| s.split("..")) {
@@ -937,7 +969,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
-    let (revs_v, paths) = split_revs(repo, line.as_ref(), &a)?;
+    let (revs_v, paths) = split_revs(repo, line.as_ref(), &path_base(ctx, &h), &a)?;
     repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&paths)?;
     let mut include: Vec<String> = Vec::new();
