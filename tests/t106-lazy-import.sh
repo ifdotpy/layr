@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: overlayfs macos-plain
 # An imported history keeps its records; a tree is built from git when a command reads it
-# (docs/ownership.md, "States imported from Git"). A 200-commit history whose 1 MB file changes
+# (docs/ownership.md, "States imported from Git"). A 200-commit history whose 170 KB file changes
 # in every commit costs about one tree on disk, not one per commit.
 . "$(dirname "$0")/lib.sh"
 
@@ -9,7 +9,7 @@ U=$T/up; R=$T/remote.git
 git init -q --bare -b main $R
 git init -q -b main $U; cd $U
 git config user.email tester@example.com; git config user.name Tester
-seq 1 150000 > big.txt; mkdir small
+seq 1 30000 > big.txt; mkdir small
 for i in $(seq 1 200); do
     echo "change $i" >> big.txt
     echo "$i" > small/f$((i % 10)).txt
@@ -29,7 +29,7 @@ trees() { echo $(( $(ls -A $P/states 2>/dev/null | wc -l) + $(ls -A $P/deltas 2>
 
 eq "log lists all 200 imported commits" 200 "$(l log --json | wc -l | tr -d ' ')"
 eq "only the tip tree is on disk after init" 1 "$(trees)"
-ok "the store costs about one tree, not 200 (under 20 MB)" test "$(du -sk $P | cut -f1)" -lt 20000
+ok "the store costs about one tree, not 200 (under 20 of them)" test "$(du -sk $P | cut -f1)" -lt $((20 * $(du -k $U/big.txt | cut -f1)))
 
 # A fetch of 50 commits writes records only.
 cd $U; for i in $(seq 201 250); do echo "change $i" >> big.txt; git add -A; git commit -qm "c$i"; done; git push -q origin main

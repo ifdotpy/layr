@@ -16,6 +16,9 @@ fi
 # A test that runs longer than LAYR_TEST_TIMEOUT seconds (default 900) is stopped: its output so
 # far and the process list are printed, its process group is killed, and it counts as failed.
 timeout_s=${LAYR_TEST_TIMEOUT:-900}
+# LAYR_TEST_JOBS tests run at once (default 1). Each has its own folder (lib.sh), and the output
+# keeps the order of the list. More than one needs bash 4.3 (wait -n).
+jobs_n=${LAYR_TEST_JOBS:-1}
 
 # descendants <pid>: the pids below <pid> (children first), from the process table.
 descendants() {
@@ -62,22 +65,49 @@ run_test() {
 
 failed=0
 logdir=$(mktemp -d "${TMPDIR:-/tmp}/layr-run.XXXXXX")
-for t in "${files[@]}"; do
-    log="$logdir/$t.log"
-    rc=0
-    run_test "$t" "$log" || rc=$?
-    out=$(cat "$log")
+# report <name>: print a finished test's summary, or its whole output when it failed.
+report() {
+    local t=$1 rc out summary
+    rc=$(cat "$logdir/$t.rc")
+    out=$(cat "$logdir/$t.log")
     summary=$(echo "$out" | tail -1)
     if [ "$rc" -eq 124 ]; then
         printf '%s\n' "$out"
         echo "FAIL $t: timeout after $timeout_s s"
         failed=1
-        continue
+        return
     fi
     case "$summary" in
         *", 0 failed") echo "$summary" ;;
         *) printf '%s\n' "$out"; failed=1 ;;
     esac
+}
+one() {
+    local rc=0
+    run_test "$1" "$logdir/$1.log" || rc=$?
+    echo "$rc" > "$logdir/$1.rc.tmp" && mv "$logdir/$1.rc.tmp" "$logdir/$1.rc"
+}
+next=0
+flush() {
+    while [ "$next" -lt "${#files[@]}" ] && [ -f "$logdir/${files[$next]}.rc" ]; do
+        report "${files[$next]}"
+        next=$((next + 1))
+    done
+}
+for t in "${files[@]}"; do
+    if [ "$jobs_n" -le 1 ]; then
+        one "$t"
+    else
+        while [ "$(jobs -rp | wc -l)" -ge "$jobs_n" ]; do wait -n; flush; done
+        one "$t" &
+    fi
+    flush
 done
+while [ "$next" -lt "${#files[@]}" ] && [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+    wait -n || true
+    flush
+done
+wait
+flush
 rm -rf "$logdir"
 exit $failed

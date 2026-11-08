@@ -18,6 +18,13 @@ else
     chmod -R u+rwX "$CARGO_HOME"
 fi
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH" CARGO_NET_OFFLINE=true
+if [ "$(uname -s)" = Linux ]; then
+    # One rustc job per CPU, at most one per 2 GiB of memory; the shell tests wait on I/O, one per CPU.
+    cpus=$(nproc)
+    memory_jobs=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 2097152 ))
+    export CARGO_BUILD_JOBS=$(( memory_jobs < 1 ? 1 : memory_jobs < cpus ? memory_jobs : cpus ))
+    export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$cpus}
+fi
 if [ "$(uname -s)" = Darwin ]; then
     toolchain=$(cat "$seed/toolchain")
     export PATH="$RUSTUP_HOME/toolchains/$toolchain/bin:$PATH"
