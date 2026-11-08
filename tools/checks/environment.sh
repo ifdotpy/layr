@@ -44,6 +44,11 @@ if [ "$(id -u)" = 0 ]; then
     # A privileged check copy lives at /var/tmp/layr-check-<id>: below it the Unix sockets of the
     # tests get paths longer than SUN_LEN.
     TMPDIR=$(mktemp -d /var/tmp/layr-root-tmp.XXXXXX)
+    # Tests run commands as other users (an owner) below it.
+    chmod 755 "$TMPDIR"
+    # Git refuses folders of another owner to root; the test stores are such folders.
+    export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+    git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory '*'
 elif [ "$(uname -s)" = Darwin ] && [ -n "${LAYR_CHECK_TMPDIR:-}" ]; then
     TMPDIR="$LAYR_CHECK_TMPDIR"
     export LAYR_TEST_GATEWAY_UNIX=1

@@ -67,10 +67,12 @@ failed=0
 logdir=$(mktemp -d "${TMPDIR:-/tmp}/layr-run.XXXXXX")
 # report <name>: print a finished test's summary, or its whole output when it failed.
 report() {
-    local t=$1 rc out summary
-    rc=$(cat "$logdir/$t.rc")
+    local t=$1 rc seconds out summary
+    read -r rc seconds < "$logdir/$t.rc"
     out=$(cat "$logdir/$t.log")
     summary=$(echo "$out" | tail -1)
+    # LAYR_TEST_TIMES=1: each summary names the test's wall time, to find the slow ones.
+    [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
     if [ "$rc" -eq 124 ]; then
         printf '%s\n' "$out"
         echo "FAIL $t: timeout after $timeout_s s"
@@ -78,14 +80,14 @@ report() {
         return
     fi
     case "$summary" in
-        *", 0 failed") echo "$summary" ;;
+        *", 0 failed"*) echo "$summary" ;;
         *) printf '%s\n' "$out"; failed=1 ;;
     esac
 }
 one() {
-    local rc=0
+    local rc=0 started=$SECONDS
     run_test "$1" "$logdir/$1.log" || rc=$?
-    echo "$rc" > "$logdir/$1.rc.tmp" && mv "$logdir/$1.rc.tmp" "$logdir/$1.rc"
+    echo "$rc $((SECONDS - started))" > "$logdir/$1.rc.tmp" && mv "$logdir/$1.rc.tmp" "$logdir/$1.rc"
 }
 next=0
 flush() {

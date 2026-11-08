@@ -25,7 +25,7 @@ no "a cache never goes to git" l overlay remote add cache.target c $T/notes.git
 no "a remote needs a URL" l overlay remote add notes broken
 
 out=$(l push --dry-run)
-has "dry-run lists the shared set" "shared	origin	git	" "$out"
+has "dry-run lists the shared set" "shared (main)	origin	git	" "$out"
 has "and the overlay" "notes	notes-gh	git	" "$out"
 eq "and no cache row without a layr remote" "" "$(echo "$out" | grep cache)"
 eq "dry-run sends nothing" "" "$(git --git-dir=$T/shared.git branch)"

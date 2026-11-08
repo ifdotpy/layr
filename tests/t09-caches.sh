@@ -27,7 +27,15 @@ eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # sync with --caches must still send them.
 new_fs $T/b 4G
 head -c 1000000 /dev/urandom > target/warm.bin
+# The regenerable setting belongs to this machine: .layrattributes makes target a cache on the peer too.
+echo 'target regenerable' > .layrattributes
+l add .layrattributes; l save -q -m "target is a cache"
 l save -q --caches
+# Caches go only to machines the project trusts (docs/cache-overlays.md).
+peer_self=$(env LAYR_ROOT=$T/b/store $LAYR remote self --json)
+l remote add test-peer ssh://test/g >/dev/null
+ok "trust the peer" l remote trust test-peer "$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" \
+    --public-key "$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')"
 peer_exchange sync g -q --auto -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
 peer_exchange sync g -q --auto --caches -- env LAYR_ROOT=$T/b/store $LAYR serve-peer g
 env LAYR_ROOT=$T/b/store $LAYR --project g adopt w >/dev/null

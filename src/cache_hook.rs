@@ -157,8 +157,9 @@ fn owner_path(uid: u32) -> String {
     let defaults = format!(
         "{home}/.cargo/bin:{home}/.local/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     );
+    // A root service runs other owners' hooks with the defaults only; root's own lines take its PATH.
     match std::env::var("PATH") {
-        Ok(own) if !rustix::process::geteuid().is_root() => format!("{own}:{defaults}"),
+        Ok(own) if !rustix::process::geteuid().is_root() || uid == 0 => format!("{own}:{defaults}"),
         _ => defaults,
     }
 }
