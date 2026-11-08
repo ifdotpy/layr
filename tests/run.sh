@@ -19,6 +19,15 @@ timeout_s=${LAYR_TEST_TIMEOUT:-900}
 # LAYR_TEST_JOBS tests run at once (default 1). Each has its own folder (lib.sh), and the output
 # keeps the order of the list. More than one needs bash 4.3 (wait -n).
 jobs_n=${LAYR_TEST_JOBS:-1}
+[[ "$jobs_n" =~ ^[1-9][0-9]*$ ]] && [ "${#jobs_n}" -le 6 ] || {
+    echo "LAYR_TEST_JOBS must be a positive integer with at most six digits" >&2
+    exit 2
+}
+if [ "$jobs_n" -gt 1 ] && { [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 3 ]; }; }; then
+    echo "parallel tests require Bash 4.3 or later" >&2
+    exit 2
+fi
 
 # descendants <pid>: the pids below <pid> (children first), from the process table.
 descendants() {
@@ -77,20 +86,19 @@ report() {
         failed=1
         return
     fi
-    # A green summary counts only with exit 0: a test that fails after its summary has failed.
-    case "$summary" in
-        *", 0 failed") ;;
-        *) printf '%s\n' "$out"; failed=1; return ;;
-    esac
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out"
-        echo "FAIL $t: exit $rc after a green summary"
+        echo "FAIL $t: exit $rc"
         failed=1
         return
     fi
-    # LAYR_TEST_TIMES=1: each summary names the test's wall time, to find the slow ones.
-    [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
-    echo "$summary"
+    case "$summary" in
+        *", 0 failed")
+            # Add timing only after the original summary passes its exact check.
+            [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
+            echo "$summary" ;;
+        *) printf '%s\n' "$out"; failed=1 ;;
+    esac
 }
 one() {
     local rc=0 started=$SECONDS
@@ -129,5 +137,9 @@ while [ "$next" -lt "${#files[@]}" ] && [ "$(jobs -rp | wc -l)" -gt 0 ]; do
 done
 wait
 flush
+if [ "$next" -ne "${#files[@]}" ]; then
+    echo "FAIL runner: a test returned no result"
+    failed=1
+fi
 rm -rf "$logdir"
 exit $failed
