@@ -37,6 +37,21 @@ owner_toolchain_env() {
     fi
 }
 
+# Inside a macOS check sandbox (tools/checks/apfs.sh): the executor sets LAYR_CHECK_TMPDIR.
+in_check_sandbox() { [ -n "${LAYR_CHECK_TMPDIR:-}" ]; }
+# skip_in_check_sandbox <why>: the sandbox forbids what this test needs; ci.yml's macos job runs it.
+skip_in_check_sandbox() {
+    in_check_sandbox || return 0
+    echo "$(basename "$0") (skipped in a check sandbox: $1): 0 passed, 0 failed"
+    exit 0
+}
+# A check sandbox may refuse a nested sandbox (sandbox_apply EPERM, as on macOS 27).
+needs_nested_sandbox() {
+    in_check_sandbox || return 0
+    /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null ||
+        skip_in_check_sandbox "it runs a nested check sandbox"
+}
+
 l() {
     "$LAYR" "$@"
     local rc=$?

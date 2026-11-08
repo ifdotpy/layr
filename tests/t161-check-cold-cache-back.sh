@@ -3,6 +3,7 @@
 # A check that starts cold gives its cache back too (docs/checks.md): no cache warmed the copy, so the check made its
 # cache folder as a plain folder; the save-back makes it a cache first, so the first build of a platform is saved.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"

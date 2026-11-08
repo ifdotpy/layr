@@ -13,6 +13,7 @@
 # owner of the lines, so the sweep and the cache hook see the owner's units. On a root run the owner's cargo is the
 # toolchain of the runner, found through the runner's rustup home.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "its cache worker runs cargo with the OS home"
 fail() { FAIL=$((FAIL + 1)); echo "FAIL $*"; }
 # layr follow probes the user socket (macOS: under HOME) or LAYR_SOCKET: keep both in the test folder. Cargo and
 # rustup keep their homes from the runner.

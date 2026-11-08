@@ -851,11 +851,15 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
     (subpath {work}) (literal "/dev/null")
     (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
 (allow file-read* (literal "/Library/Preferences/com.apple.dt.Xcode.plist"))
-(allow file-write-create file-write-unlink (regex #"^/private/tmp/lct-[0-9a-f]{{16}}$"))
-(allow network-bind (local unix-socket (subpath {work})
-    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase")))
-(allow network-outbound (remote unix-socket (subpath {work})
-    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase")))
+; Sandbox regexes take no repetition counts.
+(allow file-write-create file-write-unlink (regex #"^/private/tmp/lct-[0-9a-f]+$"))
+; One rule per path: a unix-socket address takes only its first filter.
+(allow network-bind (local unix-socket (subpath {work})))
+(allow network-outbound (remote unix-socket (subpath {work})))
+(allow network-bind (local unix-socket (subpath "/Volumes/LayrRunner")))
+(allow network-outbound (remote unix-socket (subpath "/Volumes/LayrRunner")))
+(allow network-bind (local unix-socket (subpath "/Volumes/LayrRunnerCase")))
+(allow network-outbound (remote unix-socket (subpath "/Volumes/LayrRunnerCase")))
 "#,
         work = quote(work)?,
         seed = quote(seed)?

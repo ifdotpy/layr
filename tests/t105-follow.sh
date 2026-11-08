@@ -226,8 +226,8 @@ stop_daemon() {
 }
 
 # 7. macOS: the daemon runs the pass as the user (socket in the test folder). A fresh clone, so no
-#    conflict of step 5 is in its way.
-if [ "$(uname -s)" = Darwin ]; then
+#    conflict of step 5 is in its way. A check sandbox hides the OS home of the pass's Git.
+if [ "$(uname -s)" = Darwin ] && ! in_check_sandbox; then
     l git clone $R gm2 -q >/dev/null
     D=$LAYR_ROOT/projects/gm2/lines/main
     cd $D && l follow origin/main >/dev/null 2>&1

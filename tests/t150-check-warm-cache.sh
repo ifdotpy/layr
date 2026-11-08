@@ -4,6 +4,7 @@
 # rules of `line new <state>`, relocated to the copy, the check can write there, and the line's own cache stays as
 # it was.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"

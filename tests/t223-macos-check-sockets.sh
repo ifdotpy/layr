@@ -2,6 +2,7 @@
 # ci: macos
 # The macOS check sandbox permits private Unix sockets with a short temporary path.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(uname -s)" = Darwin ] && [ "$(id -u)" != 0 ] || { echo "$(basename "$0"): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"

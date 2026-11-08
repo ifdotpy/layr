@@ -4,6 +4,7 @@
 # pass the needed checks run first. A failed need skips it and a missing result makes it wait, both with no
 # attestation; `<check>@<platform>` needs a result of that platform.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"

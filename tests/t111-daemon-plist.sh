@@ -13,7 +13,7 @@ NO_DAEMON='warning: no layr daemon runs for this store; follow passes run only o
 OLDER='warning: the layr daemon runs an older build; restart it'
 # The socket path must stay under 104 bytes (AF_UNIX on macOS): a short home folder there.
 if [ "$(uname -s)" = Darwin ]; then
-    HOMEDIR=$(mktemp -d /tmp/layr-home.XXXXXX)
+    HOMEDIR=$(mktemp -d "${LAYR_CHECK_TMPDIR:-/tmp}/layr-home.XXXXXX")
     export HOME=$HOMEDIR
     SOCK=$HOMEDIR/Library/Caches/layr/layr.sock
 else

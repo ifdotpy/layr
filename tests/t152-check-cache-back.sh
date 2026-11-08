@@ -3,6 +3,7 @@
 # A check runner gives warmth back (docs/checks.md): runner c checks the head of protected main and pushes, and the
 # laptop a starts a new line from that head with the cache that c's check built. One build per head.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"

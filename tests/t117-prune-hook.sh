@@ -9,6 +9,7 @@
 # belong to the user. On a root run (the Linux CI job) the lines belong to a test user, so the checks run as that
 # user, and the last check is the refusal of a root-owned line.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "its cache worker runs cargo with the OS home"
 owner_toolchain_env
 
 if [ "$(id -u)" = 0 ]; then
