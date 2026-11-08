@@ -922,11 +922,117 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    // macOS check sandboxes deny TCP. The same HTTP fixtures use a private Unix socket there;
+    // ordinary test runs retain TCP, including its connection and retry behavior.
+    enum TestListener {
+        Tcp(std::net::TcpListener),
+        Unix(std::os::unix::net::UnixListener),
+    }
+
+    enum TestStream {
+        Tcp(std::net::TcpStream),
+        Unix(std::os::unix::net::UnixStream),
+    }
+
+    enum TestEndpoint {
+        Tcp(std::net::SocketAddr),
+        Unix(std::path::PathBuf),
+    }
+
+    impl Drop for TestEndpoint {
+        fn drop(&mut self) {
+            if let Self::Unix(path) = self {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    impl TestListener {
+        fn accept(&self) -> std::io::Result<(TestStream, ())> {
+            match self {
+                Self::Tcp(listener) => listener.accept().map(|(stream, _)| (TestStream::Tcp(stream), ())),
+                Self::Unix(listener) => listener.accept().map(|(stream, _)| (TestStream::Unix(stream), ())),
+            }
+        }
+    }
+
+    impl TestStream {
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            match self {
+                Self::Tcp(stream) => stream.set_read_timeout(timeout),
+                Self::Unix(stream) => stream.set_read_timeout(timeout),
+            }
+        }
+    }
+
+    impl std::io::Read for TestStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Tcp(stream) => stream.read(buf),
+                Self::Unix(stream) => stream.read(buf),
+            }
+        }
+    }
+
+    impl std::io::Write for TestStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Tcp(stream) => stream.write(buf),
+                Self::Unix(stream) => stream.write(buf),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                Self::Tcp(stream) => stream.flush(),
+                Self::Unix(stream) => stream.flush(),
+            }
+        }
+    }
+
+    impl TestEndpoint {
+        fn configure(&self, gateway: &mut Gateway) {
+            let host = match self {
+                Self::Tcp(address) => address.to_string(),
+                Self::Unix(path) => {
+                    gateway.http = Client::builder()
+                        .no_proxy()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .connect_timeout(Duration::from_secs(5))
+                        .timeout(Duration::from_secs(150))
+                        .unix_socket(path.clone())
+                        .build()
+                        .unwrap();
+                    "localhost".into()
+                }
+            };
+            gateway.base = reqwest::Url::parse(&format!("http://{host}/v1/p/project/")).unwrap();
+        }
+
+        fn connect(&self) -> std::io::Result<TestStream> {
+            match self {
+                Self::Tcp(address) => std::net::TcpStream::connect(address).map(TestStream::Tcp),
+                Self::Unix(path) => std::os::unix::net::UnixStream::connect(path).map(TestStream::Unix),
+            }
+        }
+    }
+
+    fn test_listener() -> (TestListener, TestEndpoint) {
+        if std::env::var_os("LAYR_TEST_GATEWAY_UNIX").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            let path = std::env::temp_dir().join(format!("lg-{:016x}.sock", rand::random::<u64>()));
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            (TestListener::Unix(listener), TestEndpoint::Unix(path))
+        } else {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            (TestListener::Tcp(listener), TestEndpoint::Tcp(address))
+        }
+    }
+
     fn listing_pages(pages: Vec<serde_json::Value>, public: bool) -> Result<Vec<Object>> {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             for (number, page) in pages.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -948,7 +1054,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         if public {
             gateway.use_public_access();
@@ -961,9 +1067,7 @@ mod tests {
     #[test]
     fn a_restarting_gateway_is_asked_again_for_a_read() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             for answer in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -987,7 +1091,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         let result = gateway.list("states/");
         server.join().unwrap();
@@ -997,9 +1101,7 @@ mod tests {
     #[test]
     fn a_release_file_goes_again_from_its_start_while_the_gateway_restarts() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let content: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
         let expected = content.clone();
         let server = std::thread::spawn(move || {
@@ -1026,7 +1128,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("layr-release-{}", crate::ids::new_id()));
         std::fs::write(&path, &content).unwrap();
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         let created = gateway.put_file_new("public/release/v1.0.0/layr.tar.gz", std::fs::File::open(&path).unwrap()).unwrap();
         let bodies = server.join().unwrap();
@@ -1038,9 +1140,7 @@ mod tests {
     #[test]
     fn a_delete_error_names_the_key_and_the_answer() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             for (status, body) in [
                 ("204 No Content", ""),
@@ -1060,7 +1160,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         let key = "states/01a1af29-70f7-7566-ac60-2a4fc1b7b4d5/bf9b1e4e.tree.age";
         gateway.delete(key).unwrap();
@@ -1074,9 +1174,7 @@ mod tests {
     #[test]
     fn a_missing_project_is_not_a_missing_object() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             for body in ["no such project", "no such object", "no such project", "no such object"] {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -1092,7 +1190,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         // A key that the grant reads, then a data part that a public reader reads.
         for key in ["keys/fixture.age", "states/01a1aad8-a8ed-7385-8cda-05195b72afa3/681e275b.0000.data.age"] {
@@ -1109,9 +1207,7 @@ mod tests {
     #[test]
     fn a_busy_gateway_is_asked_again() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             for answer in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -1133,7 +1229,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("fixture.write".into());
         let result = gateway.list("states/");
         server.join().unwrap();
@@ -1154,10 +1250,8 @@ mod tests {
     #[test]
     fn old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
         for public in [false, true] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
+            let (listener, address) = test_listener();
             let server = std::thread::spawn(move || {
                 for first in [true, false] {
                     let (mut stream, _) = listener.accept().unwrap();
@@ -1183,7 +1277,7 @@ mod tests {
                 }
             });
             let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            address.configure(&mut gateway);
             gateway.token = Some("fixture.write".into());
             if public {
                 gateway.use_public_access();
@@ -1232,10 +1326,8 @@ mod tests {
     #[test]
     fn missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
         for mode in ["reader", "person", "machine", "grant"] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
+            let (listener, address) = test_listener();
             let server = std::thread::spawn(move || {
                 // Without a grant, automatic public discovery still probes public.json anonymously.
                 for n in 0..if mode == "grant" { 1 } else { 2 } {
@@ -1261,7 +1353,7 @@ mod tests {
                 }
             });
             let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-            gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+            address.configure(&mut gateway);
             if mode != "reader" {
                 gateway.machine = Some("test-machine".into());
             }
@@ -1294,9 +1386,7 @@ mod tests {
     #[test]
     fn epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (listener, address) = test_listener();
         let epoch = "01a12290-0000-7000-8000-000000000008";
         let server = std::thread::spawn(move || {
             for (path, bearer) in [
@@ -1320,7 +1410,7 @@ mod tests {
             }
         });
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.token = Some("project.grant".into());
         *gateway.read.lock().unwrap() = Some(("old.read.proof".into(), crate::ids::now_ms() + 300_000));
         for key in [
@@ -1393,10 +1483,9 @@ mod tests {
     fn proof_gateway(
         recipient: String,
         answer: impl Fn(&str, &str) -> (&'static str, String) + Send + 'static,
-    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    ) -> (TestEndpoint, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap().to_string();
+        let (listener, address) = test_listener();
         let server = std::thread::spawn(move || {
             let mut log = Vec::new();
             let mut issued = 0;
@@ -1451,17 +1540,17 @@ mod tests {
     }
 
     /// A client with a read identity and a cached proof that expires in `expires_in` ms.
-    fn proof_client(address: &str, identity: &str, expires_in: i64) -> Gateway {
+    fn proof_client(address: &TestEndpoint, identity: &str, expires_in: i64) -> Gateway {
         let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
-        gateway.base = reqwest::Url::parse(&format!("http://{address}/v1/p/project/")).unwrap();
+        address.configure(&mut gateway);
         gateway.set_identity(identity).unwrap();
         *gateway.read.lock().unwrap() = Some(("old.proof".into(), crate::ids::now_ms() + expires_in));
         gateway
     }
 
-    fn quit(address: &str, server: std::thread::JoinHandle<Vec<String>>) -> Vec<String> {
+    fn quit(address: &TestEndpoint, server: std::thread::JoinHandle<Vec<String>>) -> Vec<String> {
         use std::io::Write;
-        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        let mut stream = address.connect().unwrap();
         write!(stream, "GET /quit HTTP/1.1\r\n\r\n").unwrap();
         server.join().unwrap()
     }

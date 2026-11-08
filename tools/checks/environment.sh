@@ -39,6 +39,7 @@ if [ "$(id -u)" = 0 ]; then
     TMPDIR=$(mktemp -d /var/tmp/layr-root-tmp.XXXXXX)
 elif [ "$(uname -s)" = Darwin ] && [ -n "${LAYR_CHECK_TMPDIR:-}" ]; then
     TMPDIR="$LAYR_CHECK_TMPDIR"
+    export LAYR_TEST_GATEWAY_UNIX=1
     mkdir -p "$TMPDIR"
 else
     TMPDIR="$PWD/.check-tmp"
