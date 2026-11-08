@@ -15,7 +15,12 @@ assert p.get("FilesystemType")=="apfs" and p.get("MountPoint")==sys.argv[1], p
     test -w "$volume"
 done
 cargo build --locked --offline
+# The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec.
+# ci.yml's macos job runs them outside a sandbox.
 cargo test --locked --offline -- --include-ignored \
+    --skip apfs_commit::tests::recovery_takes_over_a_reused_pid \
+    --skip free::holder_tests::detects_live_reused_and_dead_holders \
+    --skip cmd::checks::macos_tests::sandbox_allows_only_unix_sockets_inside_work \
     --skip store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local \
     --skip store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists \
     --skip store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants \
