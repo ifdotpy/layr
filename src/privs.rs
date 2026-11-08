@@ -91,7 +91,7 @@ fn child_path(euid: u32, uid: u32) -> std::ffi::OsString {
     }
 }
 
-/// Make `cmd` run as `uid` with a clean environment: HOME, USER, LOGNAME, PATH, and `env`.
+/// Make `cmd` run as `uid` with a clean environment: HOME, USER, LOGNAME, PATH, the caller's own TMPDIR, and `env`.
 /// When the service is root and `uid` is not, the child sets the user's groups, gid and uid
 /// before `exec`; nothing of the service's environment or groups reaches it.
 pub fn command_as(cmd: &mut Command, uid: u32, env: &[(String, String)]) -> Result<()> {
@@ -99,6 +99,10 @@ pub fn command_as(cmd: &mut Command, uid: u32, env: &[(String, String)]) -> Resu
     cmd.env_clear();
     let path = child_path(rustix::process::geteuid().as_raw(), uid);
     cmd.env("HOME", &u.home).env("USER", &u.name).env("LOGNAME", &u.name).env("PATH", path);
+    // Like PATH: the caller's own TMPDIR (a check sandbox permits only its private one).
+    if let Some(tmp) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty() && rustix::process::geteuid().as_raw() == uid) {
+        cmd.env("TMPDIR", tmp);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }

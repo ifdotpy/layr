@@ -850,8 +850,12 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow file-write*
     (subpath {work}) (literal "/dev/null")
     (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase"))
-(allow network-bind (local unix-socket (subpath {work})))
-(allow network-outbound (remote unix-socket (subpath {work})))
+(allow file-read* (literal "/Library/Preferences/com.apple.dt.Xcode.plist"))
+(allow file-write-create file-write-unlink (regex #"^/private/tmp/lct-[0-9a-f]{{16}}$"))
+(allow network-bind (local unix-socket (subpath {work})
+    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase")))
+(allow network-outbound (remote unix-socket (subpath {work})
+    (subpath "/Volumes/LayrRunner") (subpath "/Volumes/LayrRunnerCase")))
 "#,
         work = quote(work)?,
         seed = quote(seed)?

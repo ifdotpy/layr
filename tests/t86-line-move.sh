@@ -32,7 +32,9 @@ out=$(l line move w 2>&1); rc=$?
 eq "a line in the store cannot move back" 1 "$rc"; has "already in store message" "already in the store" "$out"
 dev() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_dev)' "$1"; }
 for other in /dev/shm /tmp "$HOME"; do # a folder on another file system, when one exists
-    if [ -d "$other" ] && [ "$(dev $other)" != "$(dev $FS)" ]; then
+    # A check sandbox refuses writes to /tmp before the file system test.
+    if [ -d "$other" ] && [ "$(dev $other)" != "$(dev $FS)" ] && mkdir "$other/layr-move-probe.$$" 2>/dev/null; then
+        rmdir "$other/layr-move-probe.$$"
         out=$(l line move w $other/layr-move-x 2>&1); rc=$?
         eq "another file system is refused" 1 "$rc"; has "other file system message" "another file system" "$out"
         no "nothing was created there" test -e $other/layr-move-x
