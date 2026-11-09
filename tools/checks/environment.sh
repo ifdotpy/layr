@@ -52,6 +52,9 @@ if [ "$(id -u)" = 0 ]; then
         # The suite waits on the disk, not the CPUs: its tests get a Btrfs in memory. The check's
         # private mount namespace (checks.rs) drops it, and its loop device, with the check.
         half=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) * 512 ))
+        # A check's file size limit (checks.memory) bounds the image too.
+        fsize=$(awk '/^Max file size/ {print $4}' /proc/self/limits)
+        [ "$fsize" != unlimited ] && [ "$half" -gt "$fsize" ] && half=$(( fsize - 1048576 ))
         mount -t tmpfs -o size=$half,mode=755 layr-check-tmp "$TMPDIR"
         truncate -s $half "$TMPDIR/btrfs.img"
         mkfs.btrfs -q "$TMPDIR/btrfs.img"
