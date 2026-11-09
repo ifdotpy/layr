@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.41.0](https://github.com/ifdotpy/layr/compare/v0.40.1...v0.41.0) (2026-11-09)
+
+
+### Features
+
+* **checkpoints:** `save --keep <name>` keeps a state on this machine through retention, reindex and undo; `keep list` and `keep drop` manage them; `diff -z --exclude-standard` and `restore --clean` give tools git-compatible checkpoint diffs and restores
+* **checks:** checks run in a working sandbox on Linux and macOS (private Unix sockets, system users, gateway fixtures), privileged checks see their copy at /work as sandboxed checks do, and a root check's temporary folder is a Btrfs in memory
+* **access:** admin.machines gives other machines the creator's rights ([dae710e](https://github.com/ifdotpy/layr/commit/dae710ead16fa1a86590bd5ccf588e5bd2ffd2e4))
+
+
+### Bug Fixes
+
+* **checks:** the privileged checks pass as root: short TMPDIR, derive opt-in in a test ([b6bc9ef](https://github.com/ifdotpy/layr/commit/b6bc9efdeeb4bfa4f37ae96aa19957e99fdcee87))
+* **diff:** an unknown revision is an error, as in git ([9cedcd7](https://github.com/ifdotpy/layr/commit/9cedcd7619efdaa118c635c1806a555fbd194c54))
+
+
+### Performance
+
+* **git:** a save in a Git-store line no longer walks every earlier unpushed save ([971068e](https://github.com/ifdotpy/layr/commit/971068e4757fa28976e048241704380006871b5c))
+
 ## [0.40.1](https://github.com/ifdotpy/layr/compare/v0.40.0...v0.40.1) (2026-11-07)
 
 
