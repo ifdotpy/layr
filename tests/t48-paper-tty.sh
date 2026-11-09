@@ -21,6 +21,14 @@ def run(args):
  return subprocess.run([binary,*args],cwd=line,env=env,capture_output=True,timeout=30)
 def objects(path):
  return [p for p in path.rglob('*') if p.is_file()]
+def holds(path,needle):
+ # In chunks: a check's address space limit is below the size of some store files.
+ with open(path,'rb') as f:
+  tail=b''
+  while chunk:=f.read(1<<20):
+   if needle in tail+chunk: return True
+   tail=chunk[-len(needle):]
+ return False
 
 p=run(['remote','add','captured','file://'+str(root/'captured'),'--paper-key-tty'])
 check(p.returncode!=0 and b'terminal stdin and stdout' in p.stderr,'captured invocation refuses terminal key output')
@@ -78,7 +86,7 @@ def terminal_run(name,answer='correct',redirect_in=False,redirect_out=False,cont
  if words:
   check(words not in received['stdout'] and words not in received['stderr'],'paper words never enter stdout or stderr')
   # Only synthetic keys are inspected; none are written to a test log or key file.
-  check(all(words not in path.read_bytes() for path in objects(root)),'paper words do not appear in store files, records or logs')
+  check(not any(holds(path,words) for path in objects(root)),'paper words do not appear in store files, records or logs')
  return code,received,words
 
 for name,settings,expected in [
@@ -103,7 +111,7 @@ check(words not in run(['op','export']).stdout,'exported records contain no pape
 # A real clone opens the generated paper slot, using only this synthetic in-memory key.
 p=run(['clone','file://'+str(root/'terminal-store'),'paper-copy','--paper-key',words.decode(),'-q'])
 check(p.returncode==0 and words not in p.stdout+p.stderr,'the displayed paper key opens the published store slot')
-check(all(words not in path.read_bytes() for path in objects(root)),'push and paper-key clone persist no plaintext paper words')
+check(not any(holds(path,words) for path in objects(root)),'push and paper-key clone persist no plaintext paper words')
 p=run(['remote','add','existing','file://'+str(root/'terminal-store'),'--paper-key-tty'])
 check(p.returncode!=0 and b'already exists' in p.stderr,'an existing store cannot print its paper key again')
 (root/'paper-tty-counts').write_text(str(checks))
