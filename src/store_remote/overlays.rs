@@ -78,18 +78,28 @@ fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeS
         if let Some(own) = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(&line.id))? {
             out.insert(own.head);
         }
-        let mut seen = BTreeSet::new();
-        let mut queue = std::collections::VecDeque::from([line.head.clone()]);
-        while let Some(id) = queue.pop_front() {
-            if seen.len() >= 200 || !seen.insert(id.clone()) {
-                continue;
+        // Every machine's head of the line: a check runner's own main can be an old head while a server
+        // queue moved main on its merge machine, and the runner checks states made from that newer head.
+        let mut heads = vec![line.head.clone()];
+        for (_, head) in repo.p.db.line_heads(&line.id)? {
+            if !heads.contains(&head) {
+                heads.push(head);
             }
-            if let Some(cache) = saved_with.get(&id) {
-                out.insert(cache.clone());
-                break;
-            }
-            if let Some(state) = repo.p.db.state(&id)? {
-                queue.extend(state.parents);
+        }
+        for head in heads {
+            let mut seen = BTreeSet::new();
+            let mut queue = std::collections::VecDeque::from([head]);
+            while let Some(id) = queue.pop_front() {
+                if seen.len() >= 200 || !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(cache) = saved_with.get(&id) {
+                    out.insert(cache.clone());
+                    break;
+                }
+                if let Some(state) = repo.p.db.state(&id)? {
+                    queue.extend(state.parents);
+                }
             }
         }
     }

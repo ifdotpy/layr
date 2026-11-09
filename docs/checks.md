@@ -87,7 +87,10 @@ and the next push deletes the older cache states on the remote. Another machine 
 starts warm from that head (`layr line new X <state>`, and `layr line new X main` when main's own
 cache is of an older head): one build per head warms the next check and every machine. A protected
 head is reviewed code built in the sandbox, so these caches count as caches of a protected line for
-other users. A check of any other state, such as a pull request, gives nothing back. A privileged
+other users. A pending fast-forward entry of the queue into such a line counts as its next head: a server
+queue (Layr Cloud) merges an entry only after its checks passed, so no check runs on the head it becomes, and the
+entry's passing check gives the caches back instead. A titled entry merges as a new squash state and gives nothing
+back. A check of any other state, such as a pull request, gives nothing back. A privileged
 check gives nothing back either: its copy is a plain folder of root. A runner that pushes after its
 checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <head>` (or
 `checks watch --once`), `layr push <remote> --caches`.

@@ -371,6 +371,28 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
             }
         }
     }
+    // A pending fast-forward entry of the queue into a watched line is that line's next head: a server queue
+    // (Layr Cloud) merges an entry only after its checks passed, so they never run again on the head. Its passing
+    // check gives the caches back as the head's, and main is warm the moment it moves. A titled entry merges as a
+    // new squash state, which these caches would not be saved with.
+    for (id, (line, _)) in &watched_lines {
+        let line_heads = repo.p.db.line_heads(id)?;
+        for entry in repo.p.db.queue_entries(Some(id))? {
+            if entry.status != "pending" || entry.title.is_some() || heads.contains_key(&entry.state) {
+                continue;
+            }
+            let mut fast_forward = false;
+            for (_, head) in &line_heads {
+                if repo.is_ancestor(head, &entry.state)? {
+                    fast_forward = true;
+                    break;
+                }
+            }
+            if fast_forward {
+                heads.insert(entry.state, line.clone());
+            }
+        }
+    }
     if let Some(state) = state {
         jobs.retain(|(s, _)| s == state);
     }

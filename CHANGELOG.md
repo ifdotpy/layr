@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.41.1](https://github.com/ifdotpy/layr/compare/v0.41.0...v0.41.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **checks:** a passing check of a pending fast-forward queue entry into a protected line gives its caches back as that line's next head, so main stays warm when a server queue (Layr Cloud) merges it
+* **caches:** `clone` and `fetch --caches-of <line>` take the cache saved with every machine's head of the line, so a runner whose own main is older still starts warm
+
 ## [0.41.0](https://github.com/ifdotpy/layr/compare/v0.40.1...v0.41.0) (2026-11-09)
 
 
