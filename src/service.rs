@@ -907,6 +907,8 @@ mod trash_sweep_tests {
         super::sweep_trash_with(&root, |path| crate::store::empty_trash_process(path).is_ok());
         assert!(root.join("trash/deferred").exists(), "a locked trash is left for the next sweep");
         assert!(!volume.join("trash/deferred").exists());
+        // A child that another test forked meanwhile shares this lock: unlock it rather than close.
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(lock);
         // Rare on the Linux CI check: the error and trash.errors say why the trash stayed.
         super::sweep_trash_with(&root, |path| {
