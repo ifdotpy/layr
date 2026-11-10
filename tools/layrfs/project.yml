@@ -1,0 +1,53 @@
+name: LayrFSHost
+
+options:
+  bundleIdPrefix: dev.layr
+  deploymentTarget:
+    macOS: "27.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Signing: set your team here once (or pass DEVELOPMENT_TEAM=... to xcodebuild).
+    DEVELOPMENT_TEAM: TEAM_ID
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  LayrFSHost:
+    type: application
+    platform: macOS
+    sources: [LayrFSHost]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.layr.fshost
+        PRODUCT_NAME: LayrFSHost
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: LayrFS Host
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        ENABLE_APP_SANDBOX: NO
+    dependencies:
+      - target: LayrFS
+        embed: true
+
+  LayrFS:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - path: LayrFS
+        excludes: ["Info.plist", "LayrFS.entitlements"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.layr.fshost.fs
+        PRODUCT_NAME: LayrFS
+        INFOPLIST_FILE: LayrFS/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: LayrFS/LayrFS.entitlements
+        ENABLE_APP_SANDBOX: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
+        SKIP_INSTALL: YES

@@ -187,10 +187,22 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
-    let filtered = h.repo.filtered_view(ctx, &line)?;
+    // A virtual line (docs/views.md): the changes come from its upper folder, without a scan.
+    #[cfg(target_os = "macos")]
+    let view = crate::views::of(&h.repo, &line);
+    #[cfg(not(target_os = "macos"))]
+    let view: Option<()> = None;
+    let filtered = if view.is_some() { None } else { h.repo.filtered_view(ctx, &line)? };
     let specs = h.specs(&a.rest())?;
+    #[cfg(target_os = "macos")]
+    let st = match &view {
+        Some(v) => crate::views::status(&h.repo, &line, v)?,
+        None => shown_status(ctx, &h, &line, filtered.is_some())?,
+    };
+    #[cfg(not(target_os = "macos"))]
     let st = shown_status(ctx, &h, &line, filtered.is_some())?;
     let overlaps = if options.overlaps == StatusOverlaps::Include
+        && view.is_none()
         && filtered.is_none()
         && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain")))
     {
@@ -1219,6 +1231,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if message.is_empty() {
         return Err(exit(1, "Cannot save a state with an empty message (use -m <message>)."));
     }
+    // A virtual line saves every change of its view (docs/views.md).
+    #[cfg(target_os = "macos")]
+    if let Some(v) = crate::views::of(&h.repo, &line) {
+        if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
+            return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
+        }
+        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"));
+    }
     // In a line with overlays the owner commits; a change of the shared set also needs the line's
     // rule (commit_layers checks it), so a protected line takes commits of its overlays only.
     let op = if stacked { crate::repo::LineOp::Save } else { crate::repo::LineOp::Direct };
@@ -1407,6 +1427,11 @@ fn warn_left_out(ctx: &Ctx) -> Result<()> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
+    // A virtual line saves every change: nothing is left out.
+    #[cfg(target_os = "macos")]
+    if crate::views::of(&h.repo, &line).is_some() {
+        return Ok(());
+    }
     let filtered = h.repo.filtered_view(ctx, &line)?.is_some();
     let st = shown_status(ctx, &h, &line, filtered)?;
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
