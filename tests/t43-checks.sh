@@ -210,16 +210,20 @@ eq 'local opt-in is readable' true "$(l config --local --get checks.privileged-r
 no 'local opt-in is absent from project config' l config --get checks.privileged-runner
 (export LAYR_ROOT=$AR; cd "$A/../topic"; echo unapproved > value; l save -qam unapproved; l push archive -q)
 l fetch origin -q
+# What this suite sees at /work: nothing, or its own copy when the suite itself runs as a privileged check
+# (integration on a runner). A finished check leaves it as it was: its copy and its mount are gone.
+work_view() { ls -A /work 2>/dev/null | sort; awk '$5 == "/work"' /proc/self/mountinfo 2>/dev/null | wc -l; }
+before=$(work_view)
 priv=$(watch_checks --once --privileged-only --json)
 ok 'unapproved change versions remain pending on a privileged runner' python3 -c 'import json,sys; assert json.loads(sys.argv[1])["pending_privileged"]==1' "$priv"
-ok 'privileged checks record root execution in a fresh removed folder' python3 - "$priv" "$BR/projects/p/states" <<'PY'
+ok 'privileged checks record root execution in a fresh removed folder' python3 - "$priv" "$BR/projects/p/states" "$before" "$(work_view)" <<'PY'
 import json,pathlib,sys
 rows=json.loads(sys.argv[1])['checks']; assert rows
 for r in rows:
  assert r['privileged'] and r['exit']==0
  log=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
- # The check sees its copy at /work, a mount point that is empty once the check is done.
- assert log=='root:/work' and not any(pathlib.Path('/work').iterdir())
+ # The check sees its copy at /work; once it is done, /work is as it was before.
+ assert log=='root:/work' and sys.argv[3]==sys.argv[4]
 PY
 (export LAYR_ROOT=$AR; cd "$A/../topic"; l approve head -q; l push archive -q)
 l fetch origin -q
@@ -228,15 +232,16 @@ ok 'a creator maintainer approval releases the exact privileged version' python3
 ok 'privileged reruns are deduplicated' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert not r["work_done"] and r["count"]==0 and r["pending_privileged"]==0' "$(watch_checks --once --privileged-only --json)"
 project_config check.root 'set -e; mkdir m; mount -t tmpfs tmpfs m; printf "%s\n" "$PWD"; sleep 30'
 project_config checks.timeout 1
+before=$(work_view)
 rc=0; mounted=$(watch_checks --once --privileged-only --json) || rc=$?
 eq 'privileged timeout reports a failed scan' 1 "$rc"
-ok 'timed out root checks release their mounts and work folders' python3 - "$mounted" "$BR/projects/p/states" <<'PY'
+ok 'timed out root checks release their mounts and work folders' python3 - "$mounted" "$BR/projects/p/states" "$before" "$(work_view)" <<'PY'
 import json,pathlib,sys
 rows=json.loads(sys.argv[1])['checks']; assert rows
 for r in rows:
  assert r['privileged'] and r['exit']==124
  path=(pathlib.Path(sys.argv[2])/r['output_state']/'check.log').read_text().strip()
- assert path=='/work' and not any(pathlib.Path(path).iterdir())
+ assert path=='/work' and sys.argv[3]==sys.argv[4]
 PY
 project_config checks.timeout 5
 ok 'local config is not a signed project record' python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); assert not d.execute("select 1 from config where key=?",("checks.privileged-runner",)).fetchone()' "$DB"
