@@ -55,6 +55,7 @@ mod rootcheck;
 mod secrets;
 #[cfg(target_os = "linux")]
 mod send_cache;
+mod server_checks;
 mod service;
 mod source_times;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]

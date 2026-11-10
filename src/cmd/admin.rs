@@ -2755,6 +2755,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let val =
         if command { serde_json::Value::String(v) } else { serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)) };
     super::checks::validate_config(k, &val)?;
+    if crate::server_checks::is_key_setting(k) {
+        return Err(exit(128, format!("{k} is machine-local; use layr remote add --server-key or layr remote server-key")));
+    }
     if k == "queue.probes" && !val.is_null() && !val.is_boolean() {
         return Err(exit(128, "queue.probes must be true or false"));
     }

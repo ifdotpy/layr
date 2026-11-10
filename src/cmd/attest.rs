@@ -18,10 +18,14 @@ pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload
     record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
 }
 
-/// Whether a check attestation of exactly `state` ran `command` (split as `check_argv` does) and
-/// exited 0. The protection of lines and refs reads required checks through this alone.
-pub(crate) fn check_passed(repo: &Repo, state: &str, command: &str) -> Result<bool> {
-    Ok(repo.p.db.check_exit(state, &layr_model::protection::check_argv(command), Some(0))?.is_some())
+/// Whether check `name` passed on exactly `state`: a check attestation that ran `command` (split as
+/// `check_argv` does) and exited 0, or a passing result that a pinned Layr Cloud server key signed
+/// (`server_checks`). The protection of lines and refs reads required checks through this alone.
+pub(crate) fn check_passed(repo: &Repo, state: &str, name: &str, command: &str) -> Result<bool> {
+    if repo.p.db.check_exit(state, &layr_model::protection::check_argv(command), Some(0))?.is_some() {
+        return Ok(true);
+    }
+    crate::server_checks::passed(repo, state, name, command, None)
 }
 
 fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {

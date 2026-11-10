@@ -736,7 +736,7 @@ pub(crate) fn merge_met_rule(repo: &Repo, rule: &crate::access::Rule, before: &s
         let Some(cmd) = repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)) else {
             return Ok(false);
         };
-        if !super::attest::check_passed(repo, after, &cmd)? {
+        if !super::attest::check_passed(repo, after, name, &cmd)? {
             return Ok(false);
         }
     }
@@ -769,7 +769,7 @@ fn run_line_checks(
         if !wants.is_empty() {
             let here = super::checks::platform();
             for want in &wants {
-                if passed_on(repo, candidate, &argv, want)? {
+                if passed_on(repo, candidate, &argv, want)? || crate::server_checks::passed(repo, candidate, name, command, Some(want))? {
                     continue;
                 }
                 if !super::checks::meets(want, &here) {
@@ -794,7 +794,7 @@ fn run_line_checks(
             }
             continue;
         }
-        if super::attest::check_passed(repo, candidate, command)? {
+        if super::attest::check_passed(repo, candidate, name, command)? {
             continue;
         }
         let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
