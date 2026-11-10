@@ -181,8 +181,8 @@ There are two kinds of remote:
   imports a cache state only for its own platform, and only a state that a line here can take
   (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
   `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
-  those lines: the newest cache of the line, and the newest cache saved with each machine's head of it or
-  that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
+  those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
+  head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
   of a server queue). `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it

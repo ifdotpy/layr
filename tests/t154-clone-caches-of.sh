@@ -2,7 +2,8 @@
 # ci: macos
 # `clone --caches-of <line>` (docs/cache-overlays.md): a clone for one line downloads only the caches that a new line
 # from it takes, the newest cache of the line or of its nearest ancestor, and not the caches of every other line.
-# A plain clone still takes all usable caches, and a cache that a sweep deleted during a clone only omits.
+# The newest cache of this platform counts: a newer one of another platform stays on the remote. A plain clone
+# still takes all usable caches, and a cache that a sweep deleted during a clone only omits.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -15,7 +16,12 @@ cd "$P/main" || exit 1
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 self() { env LAYR_ROOT="$T/$1/store" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])'; }
 for m in x y; do read id key <<<"$(self $m)"; l remote trust cloud "$id" --public-key "$key" >/dev/null; done
-mkdir -p target; echo main > target/a; l save --caches -q
+mkdir -p target; echo main > target/a
+# The cache of main's head comes from another line, as a check runner saves it (main.checks-<platform>), and a newer
+# one of another platform follows (an x86 runner after an arm one): this platform's cache still comes.
+l line new runner main >/dev/null 2>&1
+(cd "$P/runner" && mkdir -p target && echo main > target/a && l save --caches -q \
+    && echo plan9 > target/a && LAYR_TEST_PLATFORM=plan9-mips l save --caches -q)
 l line new other main >/dev/null 2>&1
 (cd "$P/other" && echo other > o.txt && l add o.txt >/dev/null && l save -qm other && echo other > target/a && head -c 300000 /dev/urandom > target/big && l save --caches -q)
 l push cloud -q --caches >/dev/null 2>&1

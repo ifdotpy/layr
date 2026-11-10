@@ -57,11 +57,16 @@ impl Published {
 }
 
 /// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
-/// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache saved
-/// with its head or else with its nearest ancestor that has one (`cache_source`).
+/// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
+/// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
 fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
     let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
     for (id, of) in orepo.p.db.cache_states_known()? {
+        // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
+        // not hide this platform's cache of the same state.
+        if orepo.p.db.state(&id)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
+            continue;
+        }
         // A save with no named change saves with an automatic state over the head: it counts for the head.
         if let Some(st) = repo.p.db.state(&of)? {
             if st.kind == crate::model::StateKind::Auto {

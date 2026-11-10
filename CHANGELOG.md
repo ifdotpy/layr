@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.2](https://github.com/ifdotpy/layr/compare/v0.41.1...v0.41.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **caches:** `clone` and `fetch --caches-of <line>` take the newest cache of this platform saved with a head: a newer cache of another platform (an x86 check runner's after an arm one's) no longer leaves the line cold
+
 ## [0.41.1](https://github.com/ifdotpy/layr/compare/v0.41.0...v0.41.1) (2026-11-09)
 
 
