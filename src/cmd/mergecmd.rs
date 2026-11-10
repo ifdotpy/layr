@@ -757,7 +757,6 @@ fn run_line_checks(
     head: &str,
     candidate: &str,
     settled: &Settled<'_>,
-    quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<()> {
     let platforms = repo.p.config_value("checks.platforms")?.unwrap_or_else(|| serde_json::json!({}));
@@ -779,7 +778,9 @@ fn run_line_checks(
                         line.name
                     ))));
                 }
-                let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
+                let Some(code) = super::checks::run_for_merge(ctx, repo, candidate, name, command, &argv)? else {
+                    return Err(anyhow::Error::from(ChecksWaiting(sandbox_wait(name, candidate, &line.name))));
+                };
                 if code != 0 {
                     return Err(exit(
                         1,
@@ -797,7 +798,9 @@ fn run_line_checks(
         if super::attest::check_passed(repo, candidate, command)? {
             continue;
         }
-        let code = super::admin::run_check(ctx, repo, candidate, &argv, command, quiet)?;
+        let Some(code) = super::checks::run_for_merge(ctx, repo, candidate, name, command, &argv)? else {
+            return Err(anyhow::Error::from(ChecksWaiting(sandbox_wait(name, candidate, &line.name))));
+        };
         if code != 0 {
             return Err(exit(
                 1,
@@ -841,12 +844,11 @@ fn checks_unlocked(
     head: &str,
     candidate: &str,
     settled: &Settled<'_>,
-    quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
     held: &mut Option<crate::store::LineLock>,
 ) -> Result<std::collections::BTreeSet<String>> {
     held.take();
-    run_line_checks(ctx, repo, line, head, candidate, settled, quiet, queue)?;
+    run_line_checks(ctx, repo, line, head, candidate, settled, queue)?;
     *held = Some(repo.line_lock(line)?);
     let now = repo.line(&line.id)?;
     if now.head != head {
@@ -1089,6 +1091,14 @@ struct QueuedMerge<'a> {
     probes: std::cell::RefCell<Option<serde_json::Value>>,
 }
 
+/// Why a merge waits for a check that this process may not run (`checks::run_for_merge`).
+fn sandbox_wait(name: &str, candidate: &str, line: &str) -> String {
+    format!(
+        "check '{name}' has no passing run for {}, the state '{line}' would take; it runs only in the check sandbox of a runner (layr checks watch), not as this process",
+        ids::short(candidate)
+    )
+}
+
 /// A queue entry pins its source and compares the target under the merge's project lock.
 pub fn merge_queued(
     ctx: &Ctx,
@@ -1230,7 +1240,7 @@ fn merge_rev_inner(
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
         if queue.is_some() {
             if queue.is_some_and(|q| q.run_probes) {
-                checks_unlocked(ctx, repo, line, &head, &head, &settled, true, queue, &mut held)?;
+                checks_unlocked(ctx, repo, line, &head, &head, &settled, queue, &mut held)?;
             }
             finish(
                 ctx,
@@ -1321,7 +1331,7 @@ fn merge_rev_inner(
         check_paths(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
         check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
         if !checks.is_empty() || run_probes {
-            local = checks_unlocked(ctx, repo, line, &head, &theirs, &settled, quiet, queue, &mut held)?;
+            local = checks_unlocked(ctx, repo, line, &head, &theirs, &settled, queue, &mut held)?;
         }
         finish(
             ctx,
@@ -1361,7 +1371,7 @@ fn merge_rev_inner(
         if let Some(sid) = recorded_candidate(repo, line, &head, &theirs, a.has("--squash"), &message)? {
             check_paths(ctx, repo, line, rule.as_ref(), &head, &sid)?;
             check_approvals(ctx, repo, line, rule.as_ref(), &head, &theirs)?;
-            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
+            local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, queue, &mut held)?;
             finish(
                 ctx,
                 repo,
@@ -1422,7 +1432,7 @@ fn merge_rev_inner(
         }
         // Recorded: the states of the finish below come from the candidate record.
         states.clear();
-        local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
+        local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, queue, &mut held)?;
     }
     finish(
         ctx,
