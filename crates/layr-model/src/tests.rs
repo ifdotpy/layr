@@ -31,6 +31,8 @@ pub(super) fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
         cache_shared: false,
         cache_platform: None,
         cache_of: None,
+        tree: None,
+        times: None,
         cache_key_parts: Default::default(),
     }
 }
@@ -513,27 +515,30 @@ fn a_person_proof_cannot_be_reused_for_another_effect() {
 
 #[test]
 fn project_policy_perspective_requires_one_creator_and_keeps_foreign_config_namespaced() {
-    let mut creator = record(1,"project");
+    let mut creator = record(1, "project");
     creator.data = json!({"id":"project","config":{"person.keys":{"owner@example.com":"owner-key"},"protect":{"main":{}}}});
-    let mut executor = record(1,"config");
-    executor.id = "executor-config".into(); executor.machine = "b".into(); executor.time = -10;
+    let mut executor = record(1, "config");
+    executor.id = "executor-config".into();
+    executor.machine = "b".into();
+    executor.time = -10;
     executor.data = json!({"config":{"person.keys":{"other@example.com":"foreign-key"},"protect":{}}});
-    let records = vec![executor.clone(),creator.clone()];
+    let records = vec![executor.clone(), creator.clone()];
     let perspective = project_perspective("project", &records).unwrap();
-    assert_eq!(perspective,"a");
-    let model = Project::from_records("project",records,&perspective).unwrap();
-    assert_eq!(model.config["person.keys"],creator.data["config"]["person.keys"]);
-    assert_eq!(model.config["protect"],json!({"main":{}}));
-    assert_eq!(model.config["person.keys@b"],executor.data["config"]["person.keys"]);
-    assert!(project_perspective("project",[&executor]).is_err());
-    assert!(project_perspective("wrong",[&creator]).is_err());
-    assert_eq!(project_perspective("project",[&creator,&creator]).unwrap(),"a");
-    let mut other_creator = creator.clone(); other_creator.id = "another-project-record".into();
-    assert!(project_perspective("project",[&creator,&other_creator]).is_err());
+    assert_eq!(perspective, "a");
+    let model = Project::from_records("project", records, &perspective).unwrap();
+    assert_eq!(model.config["person.keys"], creator.data["config"]["person.keys"]);
+    assert_eq!(model.config["protect"], json!({"main":{}}));
+    assert_eq!(model.config["person.keys@b"], executor.data["config"]["person.keys"]);
+    assert!(project_perspective("project", [&executor]).is_err());
+    assert!(project_perspective("wrong", [&creator]).is_err());
+    assert_eq!(project_perspective("project", [&creator, &creator]).unwrap(), "a");
+    let mut other_creator = creator.clone();
+    other_creator.id = "another-project-record".into();
+    assert!(project_perspective("project", [&creator, &other_creator]).is_err());
     other_creator.machine = "b".into();
-    assert!(project_perspective("project",[&creator,&other_creator]).is_err());
+    assert!(project_perspective("project", [&creator, &other_creator]).is_err());
     other_creator.data["id"] = json!("wrong");
-    assert!(project_perspective("project",[&other_creator]).is_err());
+    assert!(project_perspective("project", [&other_creator]).is_err());
 }
 
 #[test]

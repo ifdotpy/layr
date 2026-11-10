@@ -106,9 +106,8 @@ pub(crate) fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<
 
 /// The bytes of a pipe that `drain` reads, after its command ended.
 pub(crate) fn pipe_end(rx: &mpsc::Receiver<Vec<u8>>, program: &str) -> Result<Vec<u8>> {
-    rx.recv_timeout(PIPE_GRACE).map_err(|_| {
-        anyhow!("{program}: a pipe stayed open after the command ended; a process outside its group holds it")
-    })
+    rx.recv_timeout(PIPE_GRACE)
+        .map_err(|_| anyhow!("{program}: a pipe stayed open after the command ended; a process outside its group holds it"))
 }
 
 /// Waits for `child`. At `until` its process group is killed. Returns the status and whether the limit passed.

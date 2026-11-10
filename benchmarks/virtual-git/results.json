@@ -1,0 +1,348 @@
+{
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "work": "/private/tmp/layr-virtual-git-tqwsycpg",
+  "rounds": 9,
+  "binaries": {
+    "before": {
+      "path": "/tmp/layr-before-git-virtual",
+      "sha256": "f484773a0242794153f2e31313614f17252fc5e5b57257524aa6f292a0da9eac"
+    },
+    "after": {
+      "path": "/tmp/layr-after-git-virtual",
+      "sha256": "47f768403da5d86840000f29df4bd59645428f29f33464de26c102b83418df71"
+    }
+  },
+  "cases": [
+    {
+      "files": 1000,
+      "changed_files": 5,
+      "samples": [
+        {
+          "phase": "without_git_export",
+          "trial": 0,
+          "binary": "before",
+          "status_ms": 1191.811334,
+          "diff_ms": 1209.439666,
+          "save_ms": 1063.849167
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 0,
+          "binary": "after",
+          "status_ms": 1346.300666,
+          "diff_ms": 1443.225792,
+          "save_ms": 1545.362667
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 1,
+          "binary": "after",
+          "status_ms": 2709.14425,
+          "diff_ms": 2285.813542,
+          "save_ms": 1716.174375
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 1,
+          "binary": "before",
+          "status_ms": 1489.99125,
+          "diff_ms": 1477.457208,
+          "save_ms": 1659.431917
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 2,
+          "binary": "before",
+          "status_ms": 1538.144917,
+          "diff_ms": 1512.327417,
+          "save_ms": 1679.486375
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 2,
+          "binary": "after",
+          "status_ms": 1540.420625,
+          "diff_ms": 1412.919292,
+          "save_ms": 1470.714417
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 3,
+          "binary": "after",
+          "status_ms": 1440.163792,
+          "diff_ms": 1527.743875,
+          "save_ms": 1634.441083
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 3,
+          "binary": "before",
+          "status_ms": 1405.640667,
+          "diff_ms": 1315.361083,
+          "save_ms": 1446.841875
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 4,
+          "binary": "before",
+          "status_ms": 1303.8985,
+          "diff_ms": 1319.316375,
+          "save_ms": 2012.07375
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 4,
+          "binary": "after",
+          "status_ms": 1511.991208,
+          "diff_ms": 1452.016292,
+          "save_ms": 1688.255583
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 5,
+          "binary": "after",
+          "status_ms": 1490.718459,
+          "diff_ms": 1422.689583,
+          "save_ms": 1540.634083
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 5,
+          "binary": "before",
+          "status_ms": 1439.0605,
+          "diff_ms": 1451.184458,
+          "save_ms": 1444.348209
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 6,
+          "binary": "before",
+          "status_ms": 1155.404208,
+          "diff_ms": 1153.978417,
+          "save_ms": 1301.190417
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 6,
+          "binary": "after",
+          "status_ms": 1139.080709,
+          "diff_ms": 1171.762875,
+          "save_ms": 1298.151041
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 7,
+          "binary": "after",
+          "status_ms": 1138.741583,
+          "diff_ms": 1156.819875,
+          "save_ms": 1409.398375
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 7,
+          "binary": "before",
+          "status_ms": 1203.004084,
+          "diff_ms": 1199.372417,
+          "save_ms": 1422.692583
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 8,
+          "binary": "before",
+          "status_ms": 1188.9165,
+          "diff_ms": 1194.836292,
+          "save_ms": 1341.096584
+        },
+        {
+          "phase": "without_git_export",
+          "trial": 8,
+          "binary": "after",
+          "status_ms": 1203.649833,
+          "diff_ms": 1326.260167,
+          "save_ms": 1383.617333
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 0,
+          "binary": "before",
+          "status_ms": 1054.510959,
+          "diff_ms": 1089.028959,
+          "save_ms": 1204.25875
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 0,
+          "binary": "after",
+          "status_ms": 1144.448167,
+          "diff_ms": 1173.563958,
+          "save_ms": 1952.779417,
+          "sync_ms": 2304.564625
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 1,
+          "binary": "after",
+          "status_ms": 1220.113333,
+          "diff_ms": 1201.297542,
+          "save_ms": 1354.001333,
+          "sync_ms": 2418.938625
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 1,
+          "binary": "before",
+          "status_ms": 1445.081166,
+          "diff_ms": 1426.124209,
+          "save_ms": 1530.336125
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 2,
+          "binary": "before",
+          "status_ms": 1600.469791,
+          "diff_ms": 1333.394875,
+          "save_ms": 1172.661459
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 2,
+          "binary": "after",
+          "status_ms": 1046.418292,
+          "diff_ms": 1050.05975,
+          "save_ms": 1152.991,
+          "sync_ms": 2029.277292
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 3,
+          "binary": "after",
+          "status_ms": 1038.393666,
+          "diff_ms": 1037.354959,
+          "save_ms": 1157.678958,
+          "sync_ms": 2004.188666
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 3,
+          "binary": "before",
+          "status_ms": 1045.753917,
+          "diff_ms": 1077.145125,
+          "save_ms": 1169.866667
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 4,
+          "binary": "before",
+          "status_ms": 1048.003458,
+          "diff_ms": 1026.922208,
+          "save_ms": 1169.864584
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 4,
+          "binary": "after",
+          "status_ms": 1065.597083,
+          "diff_ms": 1055.981042,
+          "save_ms": 1169.0815,
+          "sync_ms": 2041.732334
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 5,
+          "binary": "after",
+          "status_ms": 1066.507458,
+          "diff_ms": 1059.505292,
+          "save_ms": 1190.241375,
+          "sync_ms": 2090.555291
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 5,
+          "binary": "before",
+          "status_ms": 1104.341125,
+          "diff_ms": 1077.290667,
+          "save_ms": 1207.971292
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 6,
+          "binary": "before",
+          "status_ms": 1075.682708,
+          "diff_ms": 1091.808542,
+          "save_ms": 1242.212292
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 6,
+          "binary": "after",
+          "status_ms": 1133.000584,
+          "diff_ms": 1280.696958,
+          "save_ms": 1264.591125,
+          "sync_ms": 2191.123959
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 7,
+          "binary": "after",
+          "status_ms": 1130.938958,
+          "diff_ms": 1164.320458,
+          "save_ms": 1249.095584,
+          "sync_ms": 2225.156375
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 7,
+          "binary": "before",
+          "status_ms": 1128.427375,
+          "diff_ms": 1164.729333,
+          "save_ms": 1301.103833
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 8,
+          "binary": "before",
+          "status_ms": 1288.656791,
+          "diff_ms": 1318.755958,
+          "save_ms": 1409.856917
+        },
+        {
+          "phase": "with_git_export",
+          "trial": 8,
+          "binary": "after",
+          "status_ms": 1174.261833,
+          "diff_ms": 1192.649291,
+          "save_ms": 1329.625583,
+          "sync_ms": 2269.200333
+        }
+      ],
+      "first_sync_ms": 22384.346209,
+      "medians": {
+        "without_git_export": {
+          "before": {
+            "status": 1303.8985,
+            "diff": 1315.361083,
+            "save": 1444.348209
+          },
+          "after": {
+            "status": 1440.163792,
+            "diff": 1422.689583,
+            "save": 1540.634083
+          }
+        },
+        "with_git_export": {
+          "before": {
+            "status": 1104.341125,
+            "diff": 1091.808542,
+            "save": 1207.971292
+          },
+          "after": {
+            "status": 1130.938958,
+            "diff": 1164.320458,
+            "save": 1249.095584
+          }
+        }
+      },
+      "incremental_sync_median_ms": 2191.123959
+    }
+  ]
+}

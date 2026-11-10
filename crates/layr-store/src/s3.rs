@@ -6,9 +6,9 @@ pub struct Object {
 }
 
 use anyhow::{anyhow, bail, Context, Result};
+use layr_hashers::{ContentAddress, Digest};
 use reqwest::blocking::Client;
 use reqwest::Method;
-use layr_hashers::{ContentAddress, Digest};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The time limit of a call without a body, and the base of one with a body.

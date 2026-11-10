@@ -1,0 +1,11 @@
+[main 8b6082f] Empty object state
+changed!
+records of machine 6c73b54d: 28, signatures ok
+overlay cache.ignored: 6 records, signatures ok
+0 problem(s)
+dry run: nothing changes
+4 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 17 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)

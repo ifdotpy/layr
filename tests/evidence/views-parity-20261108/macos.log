@@ -1,0 +1,27 @@
+/private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/main
+virtual lines are experimental: set LAYR_EXPERIMENTAL_VIEWS=1 (docs/views.md)
+Created virtual line virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/virtual from 34214a6
+ready
+[virtual 8dd78a5] Save all view changes
+ create added/new
+ modify file
+ create fresh
+ delete sub/remove
+fatal: path 'sub/remove' does not exist in 'head'
+Line virtual has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/meta/vlines/01a1bb9f-2350-7647-b3c5-44c8520bd3c5/upper
+Line virtual has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/meta/vlines/01a1bb9f-2350-7647-b3c5-44c8520bd3c5/upper
+[virtual fd5a2c4] Save while hidden
+ modify file
+Line virtual is virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/virtual
+Line virtual is virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/virtual
+fatal: /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T//layr-view-parity.BT66oH/occupied already exists
+Line virtual has a folder at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/virtual
+[virtual 8b20c90] Save after conversion
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+Created virtual line hidden at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/lines/hidden from 34214a6
+Line hidden has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-parity-mac-opcfad2b/store/projects/parity-1794149131-23717/meta/vlines/01a1bb9f-26dc-75f5-8873-4ea2994ad8c8/upper
+Deleted line hidden (was 34214a6).
+Deleted line virtual (was 8b20c90).
+PASS: Darwin view lifecycle, saves, metadata, ignored paths, and hidden deletion
+Evidence: /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T//layr-view-parity.BT66oH
+Project: parity-1794149131-23717

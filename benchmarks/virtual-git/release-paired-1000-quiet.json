@@ -1,0 +1,459 @@
+{
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "work": "/private/tmp/layr-git-release-0wnwbe7b",
+  "rounds": 15,
+  "warmup_pairs": 2,
+  "profile": "release",
+  "started_at_unix": 1794171748.400693,
+  "cases": [
+    {
+      "files": 1000,
+      "changed_files": 5,
+      "samples": [
+        {
+          "trial": 0,
+          "binary": "before",
+          "load": [
+            3.59423828125,
+            4.611328125,
+            5.61865234375
+          ],
+          "started_at_unix": 1794171759.5454478,
+          "status_ms": 592.470208,
+          "diff_ms": 580.196583,
+          "save_ms": 667.269875,
+          "finished_at_unix": 1794171761.3854342
+        },
+        {
+          "trial": 0,
+          "binary": "after",
+          "load": [
+            3.59423828125,
+            4.611328125,
+            5.61865234375
+          ],
+          "started_at_unix": 1794171761.976984,
+          "status_ms": 605.986,
+          "diff_ms": 590.036916,
+          "save_ms": 662.932,
+          "finished_at_unix": 1794171763.835998
+        },
+        {
+          "trial": 1,
+          "binary": "after",
+          "load": [
+            3.46630859375,
+            4.56787109375,
+            5.59716796875
+          ],
+          "started_at_unix": 1794171764.426188,
+          "status_ms": 591.609541,
+          "diff_ms": 580.712375,
+          "save_ms": 667.851666,
+          "finished_at_unix": 1794171766.266409
+        },
+        {
+          "trial": 1,
+          "binary": "before",
+          "load": [
+            3.46630859375,
+            4.56787109375,
+            5.59716796875
+          ],
+          "started_at_unix": 1794171766.850357,
+          "status_ms": 587.606458,
+          "diff_ms": 580.004417,
+          "save_ms": 665.125875,
+          "finished_at_unix": 1794171768.683145
+        },
+        {
+          "trial": 2,
+          "binary": "before",
+          "load": [
+            3.5888671875,
+            4.57470703125,
+            5.59326171875
+          ],
+          "started_at_unix": 1794171769.2737558,
+          "status_ms": 575.817416,
+          "diff_ms": 579.948084,
+          "save_ms": 670.150042,
+          "finished_at_unix": 1794171771.099721
+        },
+        {
+          "trial": 2,
+          "binary": "after",
+          "load": [
+            3.5888671875,
+            4.57470703125,
+            5.59326171875
+          ],
+          "started_at_unix": 1794171771.699571,
+          "status_ms": 590.482333,
+          "diff_ms": 595.548458,
+          "save_ms": 670.746792,
+          "finished_at_unix": 1794171773.556393
+        },
+        {
+          "trial": 3,
+          "binary": "after",
+          "load": [
+            3.62158203125,
+            4.56494140625,
+            5.58349609375
+          ],
+          "started_at_unix": 1794171774.140984,
+          "status_ms": 586.060333,
+          "diff_ms": 621.287291,
+          "save_ms": 670.222417,
+          "finished_at_unix": 1794171776.0185978
+        },
+        {
+          "trial": 3,
+          "binary": "before",
+          "load": [
+            3.62158203125,
+            4.56494140625,
+            5.58349609375
+          ],
+          "started_at_unix": 1794171776.606764,
+          "status_ms": 593.641666,
+          "diff_ms": 577.623334,
+          "save_ms": 661.2825,
+          "finished_at_unix": 1794171778.4393542
+        },
+        {
+          "trial": 4,
+          "binary": "before",
+          "load": [
+            3.49169921875,
+            4.52197265625,
+            5.56201171875
+          ],
+          "started_at_unix": 1794171779.047563,
+          "status_ms": 578.724,
+          "diff_ms": 579.946875,
+          "save_ms": 668.10025,
+          "finished_at_unix": 1794171780.874377
+        },
+        {
+          "trial": 4,
+          "binary": "after",
+          "load": [
+            3.49169921875,
+            4.52197265625,
+            5.56201171875
+          ],
+          "started_at_unix": 1794171781.468052,
+          "status_ms": 587.224708,
+          "diff_ms": 588.445833,
+          "save_ms": 666.847625,
+          "finished_at_unix": 1794171783.310613
+        },
+        {
+          "trial": 5,
+          "binary": "after",
+          "load": [
+            3.3720703125,
+            4.47998046875,
+            5.541015625
+          ],
+          "started_at_unix": 1794171783.9052238,
+          "status_ms": 576.92525,
+          "diff_ms": 589.589459,
+          "save_ms": 680.134542,
+          "finished_at_unix": 1794171785.751921
+        },
+        {
+          "trial": 5,
+          "binary": "before",
+          "load": [
+            3.3720703125,
+            4.47998046875,
+            5.541015625
+          ],
+          "started_at_unix": 1794171786.379482,
+          "status_ms": 636.109167,
+          "diff_ms": 610.846,
+          "save_ms": 696.050084,
+          "finished_at_unix": 1794171788.322531
+        },
+        {
+          "trial": 6,
+          "binary": "before",
+          "load": [
+            3.26171875,
+            4.4384765625,
+            5.52001953125
+          ],
+          "started_at_unix": 1794171788.932528,
+          "status_ms": 608.874708,
+          "diff_ms": 602.009125,
+          "save_ms": 673.305625,
+          "finished_at_unix": 1794171790.816761
+        },
+        {
+          "trial": 6,
+          "binary": "after",
+          "load": [
+            3.26171875,
+            4.4384765625,
+            5.52001953125
+          ],
+          "started_at_unix": 1794171791.41546,
+          "status_ms": 580.90675,
+          "diff_ms": 594.326166,
+          "save_ms": 661.263708,
+          "finished_at_unix": 1794171793.252002
+        },
+        {
+          "trial": 7,
+          "binary": "after",
+          "load": [
+            3.08056640625,
+            4.38134765625,
+            5.4931640625
+          ],
+          "started_at_unix": 1794171793.8489332,
+          "status_ms": 593.702625,
+          "diff_ms": 599.693959,
+          "save_ms": 724.208042,
+          "finished_at_unix": 1794171795.7665842
+        },
+        {
+          "trial": 7,
+          "binary": "before",
+          "load": [
+            3.08056640625,
+            4.38134765625,
+            5.4931640625
+          ],
+          "started_at_unix": 1794171796.3648498,
+          "status_ms": 583.280625,
+          "diff_ms": 587.333375,
+          "save_ms": 669.255083,
+          "finished_at_unix": 1794171798.2047622
+        },
+        {
+          "trial": 8,
+          "binary": "before",
+          "load": [
+            2.99365234375,
+            4.341796875,
+            5.47265625
+          ],
+          "started_at_unix": 1794171798.78555,
+          "status_ms": 591.530292,
+          "diff_ms": 630.595542,
+          "save_ms": 671.550542,
+          "finished_at_unix": 1794171800.6792698
+        },
+        {
+          "trial": 8,
+          "binary": "after",
+          "load": [
+            2.99365234375,
+            4.341796875,
+            5.47265625
+          ],
+          "started_at_unix": 1794171801.2756999,
+          "status_ms": 582.172458,
+          "diff_ms": 578.097209,
+          "save_ms": 667.875583,
+          "finished_at_unix": 1794171803.103889
+        },
+        {
+          "trial": 9,
+          "binary": "after",
+          "load": [
+            3.154296875,
+            4.3525390625,
+            5.4697265625
+          ],
+          "started_at_unix": 1794171803.7202392,
+          "status_ms": 617.85675,
+          "diff_ms": 645.417667,
+          "save_ms": 691.974417,
+          "finished_at_unix": 1794171805.6755369
+        },
+        {
+          "trial": 9,
+          "binary": "before",
+          "load": [
+            3.154296875,
+            4.3525390625,
+            5.4697265625
+          ],
+          "started_at_unix": 1794171806.354343,
+          "status_ms": 735.313541,
+          "diff_ms": 647.937708,
+          "save_ms": 690.312,
+          "finished_at_unix": 1794171808.427953
+        },
+        {
+          "trial": 10,
+          "binary": "before",
+          "load": [
+            2.9814453125,
+            4.296875,
+            5.443359375
+          ],
+          "started_at_unix": 1794171809.0393019,
+          "status_ms": 609.969083,
+          "diff_ms": 608.252666,
+          "save_ms": 692.736042,
+          "finished_at_unix": 1794171810.950306
+        },
+        {
+          "trial": 10,
+          "binary": "after",
+          "load": [
+            2.9814453125,
+            4.296875,
+            5.443359375
+          ],
+          "started_at_unix": 1794171811.562488,
+          "status_ms": 652.081625,
+          "diff_ms": 633.50025,
+          "save_ms": 696.019,
+          "finished_at_unix": 1794171813.5441349
+        },
+        {
+          "trial": 11,
+          "binary": "after",
+          "load": [
+            3.22314453125,
+            4.32470703125,
+            5.4462890625
+          ],
+          "started_at_unix": 1794171814.1949599,
+          "status_ms": 613.531458,
+          "diff_ms": 607.162917,
+          "save_ms": 684.96675,
+          "finished_at_unix": 1794171816.1006668
+        },
+        {
+          "trial": 11,
+          "binary": "before",
+          "load": [
+            3.22314453125,
+            4.32470703125,
+            5.4462890625
+          ],
+          "started_at_unix": 1794171816.702098,
+          "status_ms": 614.2365,
+          "diff_ms": 661.43775,
+          "save_ms": 781.440125,
+          "finished_at_unix": 1794171818.7592561
+        },
+        {
+          "trial": 12,
+          "binary": "before",
+          "load": [
+            3.205078125,
+            4.30224609375,
+            5.431640625
+          ],
+          "started_at_unix": 1794171819.447773,
+          "status_ms": 647.700416,
+          "diff_ms": 689.473916,
+          "save_ms": 702.506417,
+          "finished_at_unix": 1794171821.4874969
+        },
+        {
+          "trial": 12,
+          "binary": "after",
+          "load": [
+            3.205078125,
+            4.30224609375,
+            5.431640625
+          ],
+          "started_at_unix": 1794171822.196877,
+          "status_ms": 1483.999375,
+          "diff_ms": 777.510708,
+          "save_ms": 895.690791,
+          "finished_at_unix": 1794171825.354128
+        },
+        {
+          "trial": 13,
+          "binary": "after",
+          "load": [
+            3.3486328125,
+            4.3134765625,
+            5.4287109375
+          ],
+          "started_at_unix": 1794171826.122061,
+          "status_ms": 751.4775,
+          "diff_ms": 770.311209,
+          "save_ms": 879.350375,
+          "finished_at_unix": 1794171828.523246
+        },
+        {
+          "trial": 13,
+          "binary": "before",
+          "load": [
+            3.3203125,
+            4.29150390625,
+            5.4140625
+          ],
+          "started_at_unix": 1794171829.301811,
+          "status_ms": 752.914417,
+          "diff_ms": 803.711292,
+          "save_ms": 856.954792,
+          "finished_at_unix": 1794171831.7154438
+        },
+        {
+          "trial": 14,
+          "binary": "before",
+          "load": [
+            3.3203125,
+            4.29150390625,
+            5.4140625
+          ],
+          "started_at_unix": 1794171832.491738,
+          "status_ms": 778.419459,
+          "diff_ms": 778.091458,
+          "save_ms": 904.519125,
+          "finished_at_unix": 1794171834.952815
+        },
+        {
+          "trial": 14,
+          "binary": "after",
+          "load": [
+            3.29443359375,
+            4.27001953125,
+            5.39990234375
+          ],
+          "started_at_unix": 1794171835.738378,
+          "status_ms": 807.766708,
+          "diff_ms": 1038.238334,
+          "save_ms": 1103.978084,
+          "finished_at_unix": 1794171838.68841
+        }
+      ],
+      "initial_sync_ms": 604.837917,
+      "medians": {
+        "before": {
+          "status": 608.874708,
+          "diff": 608.252666,
+          "save": 673.305625
+        },
+        "after": {
+          "status": 593.702625,
+          "diff": 599.693959,
+          "save": 680.134542
+        }
+      }
+    }
+  ],
+  "binaries": {
+    "before": {
+      "path": "/tmp/layr-git-before-release",
+      "sha256": "94aca088730bf4f6a97ca66d714cc285ffcd84d7112e72db2c9c15482831d2cf"
+    },
+    "after": {
+      "path": "/tmp/layr-git-after-release",
+      "sha256": "2a7c80323bc98ed501fd300bcf43e42dfdbe12378029dbf9a495397ee7365557"
+    }
+  }
+}

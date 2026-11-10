@@ -1,0 +1,42 @@
+--- history of layr, 60 commits, with deltas
+free 31 GiB, load 19.50 25.82 33.19
+import 12.67 s
+    times: 1934,
+    times_bytes: 166205,
+total bytes 3393682 in 0.04s
+PackReport { packs: 1, objects: 3134, removed: 3134, loose_bytes: 3393682, pack_bytes: 2021599 } in 2.97s
+repack 3.00 s
+total bytes 2136287 in 0.00s
+checkout of 60 states: total 7.24 s, worst 0.17 s
+entries 704 bytes 8713492 differences 0 in 0.02s
+890 distinct blobs; 100 cold reads, 1967197 bytes; forms {"Delta": 28, "Whole": 72}
+open the store: median 0.29 ms, p90 0.32 ms, p99 0.34 ms, max 0.36 ms
+read one blob: median 3.17 ms, p90 4.26 ms, p99 4.73 ms, max 4.98 ms
+decoded 649 blobs, 8713492 bytes in 0.01 s: 870 MB/s
+--- Chromium
+free 31 GiB, load 19.72 25.20 32.70
+cold write 121.56 s
+416db3b23b7 files 516265 dirs 47031 bytes 4472453602 new objects 583186 new bytes 162312836
+PackReport { packs: 73, objects: 583186, removed: 583186, loose_bytes: 1623128368, pack_bytes: 1210079112 } in 341.96s
+repack 342.01 s
+    times: 0,
+    times_bytes: 0,
+total bytes 1210193800 in 0.03s
+free 29 GiB, load 36.42 32.12 33.24
+480076 distinct blobs; 100 cold reads, 724229 bytes; forms {"Whole": 100}
+open the store: median 2.25 ms, p90 2.59 ms, p99 2.92 ms, max 3.22 ms
+read one blob: median 4.75 ms, p90 7.06 ms, p99 8.63 ms, max 8.83 ms
+decoded 516265 blobs, 4472453602 bytes in 3.43 s: 1302 MB/s
+get root tree: 4.77 ms (95 entries)
+read and decode the root times: 4.69 ms (95 records)
+walk all times tables: 563.94 ms (47032 tables)
+hash, compress, write the root times: 7.82 ms
+save of 1 changed files, ms: 22.73 8.55 8.66 7.90 8.07 8.17
+save of 10 changed files, ms: 121.15 33.69 39.51 31.23 33.04 30.90
+free 29 GiB, load 32.95 31.58 33.03
+checkout skipped: disk
+df: $TMPDIR/ob: No such file or directory
+free  GiB, load 32.95 31.58 33.03
+df: $TMPDIR/ob: No such file or directory
+$TMPDIR/ob4.sh: line 10: [: : integer expression expected
+STOP: under 25 GiB

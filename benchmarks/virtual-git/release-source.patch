@@ -1,0 +1,296 @@
+diff --git a/src/cmd/remote.rs b/src/cmd/remote.rs
+index abf4ce2..5e30ef3 100644
+--- a/src/cmd/remote.rs
++++ b/src/cmd/remote.rs
+@@ -180,6 +180,13 @@ pub mod git {
+             .value("--expect");
+         let a = parse(&spec, args)?;
+         let h = here(ctx)?;
++        #[cfg(target_os = "macos")]
++        return crate::views::with_working(ctx, &h.repo, h.line()?, || pull_from(ctx, &h, &a));
++        #[cfg(not(target_os = "macos"))]
++        pull_from(ctx, &h, &a)
++    }
++
++    fn pull_from(ctx: &Ctx, h: &crate::cmd::Here, a: &crate::args::Parsed) -> Result<i32> {
+         let line = h.line()?.clone();
+         let remote = a.pos.first().cloned().unwrap_or_else(|| "origin".into());
+         let refs = gitbridge::fetch(ctx, &h.repo, &remote)?;
+@@ -204,8 +211,12 @@ pub mod git {
+         if h.repo.p.db.remote_ref(&rev)?.is_none() {
+             return Err(exit(1, format!("fatal: couldn't find remote ref {branch}")));
+         }
+-        if a.has("-r") {
+-            return mergecmd::rebase(ctx, &[rev]);
++        if a.has("--rebase") {
++            let mut args = vec![rev];
++            if a.has("-q") {
++                args.push("-q".into());
++            }
++            return mergecmd::rebase(ctx, &args);
+         }
+         let mut margs = vec![rev];
+         for f in ["--ff-only", "--no-ff", "-q"] {
+@@ -213,13 +224,16 @@ pub mod git {
+                 margs.push(f.into());
+             }
+         }
++        if let Some(expected) = a.get("--expect") {
++            margs.extend(["--expect".into(), expected.into()]);
++        }
+         let pa = parse(&Spec::new().flag("--ff-only").flag("--no-ff").flag("-q|--quiet").value("--expect"), &margs[1..])?;
+         mergecmd::merge_rev(ctx, &h.repo, &line, &margs[0], &pa)
+     }
+ 
+-    /// Give the line's `.git` folder a commit of the line's head without a remote, so tools that
+-    /// read git HEAD see the current state. The commits are the ones `layr git push` would send for the
+-    /// same states; nothing leaves the machine.
++    /// Export the head without a remote. A native line also refreshes its `.git` folder.
++    /// A virtual line can keep the commit only in the project Git store.
++    /// The commit is the one `layr git push` sends; nothing leaves the machine.
+     /// The remote name of a `git-sync` export record: no remote exists, so `layr git remote add` refuses it.
+     const GIT_SYNC_REMOTE: &str = "git-sync";
+ 
+@@ -259,7 +273,7 @@ pub mod git {
+             let _lock = repo.p.lock()?;
+             repo.commit_record(ctx, rec)?;
+         }
+-        if !repo.working(&line).join(".git").is_dir() {
++        if crate::views::of(repo, &line).is_none() && !repo.working(&line).join(".git").is_dir() {
+             return Err(exit(
+                 1,
+                 format!("error: line '{}' has no .git folder; commit {} is in the project git store", line.name, &commit[..10]),
+diff --git a/src/cmd/work.rs b/src/cmd/work.rs
+index fac7032..daa74a2 100644
+--- a/src/cmd/work.rs
++++ b/src/cmd/work.rs
+@@ -1132,8 +1132,8 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
+ }
+ 
+ /// The options of a named save that its checks use.
+-#[derive(Clone, Copy)]
+-struct NamedOpts {
++#[derive(Clone, Copy, Default)]
++pub(crate) struct NamedOpts {
+     allow_empty: bool,
+     allow_markers: bool,
+     amend: bool,
+@@ -1147,7 +1147,7 @@ fn named_opts(a: &crate::args::Parsed) -> NamedOpts {
+ /// conflict markers, the conflicts that stay open (into `state`), and the secret check. Returns the
+ /// staged changes and the conflicts that the save clears. On APFS they run before the project lock,
+ /// on the clone, which does not change.
+-fn named_checks(
++pub(crate) fn named_checks(
+     ctx: &Ctx,
+     repo: &Repo,
+     head: &crate::model::StateRec,
+diff --git a/src/gitbridge.rs b/src/gitbridge.rs
+index 6478295..b30848c 100644
+--- a/src/gitbridge.rs
++++ b/src/gitbridge.rs
+@@ -853,16 +853,20 @@ pub fn stored_remote_refs(repo: &Repo, remote: &str) -> Result<Vec<(String, Stri
+         .collect())
+ }
+ 
+-/// The state of a Git commit that the store maps (an imported state, or a state with a tree here).
++/// The state of a Git commit that the store maps through Git, native trees, or object store v2.
+ pub(crate) fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
+     for st in repo.p.db.state_of_commit(oid)? {
+         // An imported state is mapped by its record, which holds the Git objects of the commit
+         // (earlier versions imported only the tip and their records lack them). Other states are
+-        // mapped when their tree is on disk.
++        // mapped when their native tree or verified object tree is available.
+         let Some(rec) = repo.p.db.state(&st)? else {
+             continue;
+         };
+-        let mapped = if rec.kind == StateKind::Import { repo.p.db.has_git_import(&st)? } else { repo.p.has_state(&st) };
++        let mapped = if rec.kind == StateKind::Import {
++            repo.p.db.has_git_import(&st)?
++        } else {
++            repo.p.has_state(&st) || crate::objstore::verified(&repo.p, &st)?.is_some()
++        };
+         if mapped {
+             return Ok(Some(st));
+         }
+diff --git a/src/repo.rs b/src/repo.rs
+index 92bfa14..238134c 100644
+--- a/src/repo.rs
++++ b/src/repo.rs
+@@ -745,6 +745,10 @@ impl<'a> Repo<'a> {
+         message: &str,
+         base: &str,
+     ) -> Result<StateRec> {
++        #[cfg(target_os = "macos")]
++        if let Some(view) = crate::views::of(self, line) {
++            return crate::views::working_snapshot(ctx, self, line, &view, parents, message, base);
++        }
+         let w = self.working(line);
+         recover_cache_replacements(&w)?;
+         self.restore_caches(line)?;
+@@ -1906,6 +1910,9 @@ impl<'a> Repo<'a> {
+     /// Commands that use the returned file bytes must still call `status`.
+     #[cfg(target_os = "macos")]
+     pub fn status_report(&self, line: &Line) -> Result<Status> {
++        if let Some(view) = crate::views::of(self, line) {
++            return crate::views::working_status(self, line, &view);
++        }
+         let work = self.working(line);
+         let (index, stage) = self.index_source(line)?;
+         // LAYR_NO_STATUS_CACHE=1 compares the whole folder every time (for comparisons).
+diff --git a/src/views.rs b/src/views.rs
+index c348834..711ca13 100644
+--- a/src/views.rs
++++ b/src/views.rs
+@@ -139,6 +139,50 @@ fn write_conf(vdir: &Path, lower: &Path, ctx: &Ctx) -> Result<()> {
+     fsutil::atomic_write(&vdir.join(CONF), conf.as_bytes(), 0o600)
+ }
+ 
++/// Serialize mount lifecycle changes with commands that need a working mount.
++fn lifecycle_lock(repo: &Repo, line: &Line) -> Result<crate::store::LineLock> {
++    repo.p.line_lock(&format!("view-{}", line.id), &line.name)
++}
++
++/// A hidden line gets a temporary mount for an in-place update. Its saved view stays hidden.
++/// The lifecycle lock prevents show or delete from unmounting it during the command.
++pub fn with_working<T>(ctx: &Ctx, repo: &Repo, line: &Line, run: impl FnOnce() -> Result<T>) -> Result<T> {
++    if of(repo, line).is_none() {
++        return run();
++    }
++    let _lifecycle = lifecycle_lock(repo, line)?;
++    let hidden = {
++        let _line = repo.line_lock(line)?;
++        let view = of(repo, line).context("virtual line changed before pull")?;
++        let at = repo.working(line);
++        if !is_mounted(&at) {
++            repo.authorize_line(ctx, line, crate::repo::LineOp::Manage)?;
++            match std::fs::symlink_metadata(&at) {
++                Ok(meta) => anyhow::ensure!(
++                    meta.is_dir() && std::fs::read_dir(&at)?.next().is_none(),
++                    "the virtual line mount path is not an empty directory: {}",
++                    at.display()
++                ),
++                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++                    std::fs::create_dir(&at)?;
++                    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700))?;
++                }
++                Err(error) => return Err(error.into()),
++            }
++            mount(&dir(&repo.p, &line.id), &at)?;
++        }
++        !view.mounted
++    };
++    let result = run();
++    if hidden {
++        let _line = repo.line_lock(line)?;
++        let at = repo.working(line);
++        unmount(&at).context("the command finished, but its temporary view could not be hidden")?;
++        std::fs::remove_dir(&at)?;
++    }
++    result
++}
++
+ /// Make a virtual line `name` at `start`: the line record, its upper folder, and the mount at the
+ /// line's folder. The lower tree is the complete tree of `start`; a thin state gets one once.
+ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Result<Line> {
+@@ -325,7 +369,7 @@ fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
+             })?;
+             strip_quarantine(&t.upper, &paths);
+             changes::file_changes(&t.head, &t.merged)?
+-        },
++        }
+     };
+     Ok(list
+         .into_iter()
+@@ -338,7 +382,39 @@ fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
+ pub fn status(repo: &Repo, line: &Line, v: &View) -> Result<Status> {
+     let t = trees(repo, line, v)?;
+     let staged = changes::with_renames(&t.head, &t.merged, file_changes(&t, v)?);
+-    Ok(Status { staged, ..Default::default() })
++    let mut conflicts = Vec::new();
++    for conflict in repo.state(&line.head)?.conflicts {
++        if crate::repo::conflict_open(&t.merged, &conflict)? {
++            conflicts.push(conflict);
++        }
++    }
++    Ok(Status { staged, conflicts, ..Default::default() })
++}
++
++/// Merge and replay treat unsaved view changes as local edits, not an explicit index.
++pub fn working_status(repo: &Repo, line: &Line, v: &View) -> Result<Status> {
++    let mut result = status(repo, line, v)?;
++    result.unstaged = std::mem::take(&mut result.staged);
++    Ok(result)
++}
++
++/// Record working content for a command without cloning the FSKit mount.
++pub fn working_snapshot(
++    ctx: &Ctx,
++    repo: &Repo,
++    line: &Line,
++    v: &View,
++    parents: Vec<String>,
++    message: &str,
++    base: &str,
++) -> Result<StateRec> {
++    let mut prior = line.clone();
++    prior.head = base.to_string();
++    let t = trees(repo, &prior, v)?;
++    let list = file_changes(&t, v)?;
++    let mut state = write_state(ctx, repo, &prior, &t, &list, StateKind::Auto, message)?;
++    state.parents = parents;
++    Ok(state)
+ }
+ 
+ /// The trees and changes for `layr diff` of a virtual line against its head.
+@@ -484,8 +560,13 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
+         outln!(ctx, "On line {}\nnothing to save, working tree clean", line.name);
+         return Ok(1);
+     }
+-    crate::secrets::check_changes(ctx, repo, &t.head, &t.merged, &line.head, &list)?;
+-    let st = write_state(ctx, repo, &line, &t, &list, StateKind::Commit, message)?;
++    let head = repo.state(&line.head)?;
++    let mut st = write_state(ctx, repo, &line, &t, &list, StateKind::Commit, message)?;
++    let checked = crate::cmd::work::named_checks(ctx, repo, &head, &mut st, &t.head, &t.merged, &line, &list, Default::default());
++    if let Err(error) = checked {
++        repo.discard_states(std::slice::from_ref(&st));
++        return Err(error);
++    }
+     let moved = repo.commit_line(&line, &line.head, |now| {
+         repo.move_head(ctx, "commit", now, &st.id, vec![st.clone()], None, serde_json::json!({"line": line.id}))
+     });
+@@ -536,6 +617,7 @@ pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str
+ 
+ /// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
+ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
++    let _lifecycle = lifecycle_lock(repo, l)?;
+     let _line_lock = repo.line_lock(l)?;
+     let l = repo.line(&l.id)?;
+     let at = repo.working(&l);
+@@ -599,6 +681,7 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
+         "config",
+         "usage",
+         "init",
++        "git",
+     ];
+     if SUPPORTED.contains(&cmd) {
+         return Ok(());
+@@ -641,6 +724,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
+     if h.line.as_ref().is_some_and(|c| c.id == l.id) || ctx.cwd.starts_with(repo.working(&l)) {
+         return Err(exit(1, "run this command outside the line's folder: its mount changes"));
+     }
++    let _lifecycle = lifecycle_lock(repo, &l)?;
+     let _line_lock = repo.line_lock(&l)?;
+     let l = repo.line(&l.id)?;
+     let at = repo.working(&l);
+diff --git a/src/views_linux.rs b/src/views_linux.rs
+index cbc8214..17ca08f 100644
+--- a/src/views_linux.rs
++++ b/src/views_linux.rs
+@@ -212,6 +212,7 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
+         "config",
+         "usage",
+         "init",
++        "git",
+     ];
+     if SUPPORTED.contains(&cmd) {
+         return Ok(());

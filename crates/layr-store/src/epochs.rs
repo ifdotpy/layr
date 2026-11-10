@@ -1,7 +1,7 @@
 //! Public epoch descriptors contain audience hashes, never reader identities.
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

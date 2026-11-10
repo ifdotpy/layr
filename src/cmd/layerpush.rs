@@ -285,7 +285,8 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
     targets.sort();
     let mut waiting = pending(repo);
     let policy = repo.policy();
-    let protected: Vec<String> = repo.lines()?.into_iter().filter(|l| policy.rule_for(&l.name).is_some()).map(|l| l.name).collect();
+    let protected: Vec<String> =
+        repo.lines()?.into_iter().filter(|l| policy.rule_for(&l.name).is_some()).map(|l| l.name).collect();
     let git_lines = |remote: &str, waiting: &BTreeMap<String, std::collections::BTreeSet<String>>| -> Vec<String> {
         let mut lines: std::collections::BTreeSet<String> = waiting.get(remote).cloned().unwrap_or_default();
         lines.insert(line.name.clone());
@@ -295,7 +296,12 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut rows = Vec::new();
     for (role, name, is_layr) in &targets {
         if *is_layr {
-            rows.push(Row { layer: "repository".into(), remote: name.clone(), kind: "layr", size: format!("all layers ({})", role.name()) });
+            rows.push(Row {
+                layer: "repository".into(),
+                remote: name.clone(),
+                kind: "layr",
+                size: format!("all layers ({})", role.name()),
+            });
             for (overlay, folder) in repo.folder_overlays()? {
                 if let Some(head) = overlay_head(repo, &line, &overlay)? {
                     let orepo = repo.overlay_repo(&overlay)?;
@@ -332,7 +338,12 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let orepo = repo.overlay_repo(&name)?;
             for r in overlay_remotes(repo, &name)? {
                 let branch = r.branch.clone().unwrap_or_else(|| line.name.clone());
-                rows.push(Row { layer: name.clone(), remote: r.name.clone(), kind: "git", size: git_size(&orepo, &head, &r.name, &branch)? });
+                rows.push(Row {
+                    layer: name.clone(),
+                    remote: r.name.clone(),
+                    kind: "git",
+                    size: git_size(&orepo, &head, &r.name, &branch)?,
+                });
                 overlay_pushes.push((name.clone(), r, head.clone(), branch));
             }
         }
@@ -362,7 +373,13 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 cwd: ctx.cwd.clone(),
                 env: ctx.env.clone(),
                 author: Default::default(),
-                out: std::cell::RefCell::new(if json { Box::new(capture.clone()) } else if quiet { Box::new(std::io::sink()) } else { Box::new(std::io::stdout()) }),
+                out: std::cell::RefCell::new(if json {
+                    Box::new(capture.clone())
+                } else if quiet {
+                    Box::new(std::io::sink())
+                } else {
+                    Box::new(std::io::stdout())
+                }),
             };
             let mut v = vec![name.clone(), if json { "--json".to_string() } else { "-q".to_string() }];
             if !json && !quiet {
@@ -405,11 +422,21 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 eprintln!("error: push to {name} ({what}): {}", f["error"].as_str().unwrap_or(""));
             } else {
                 entry.insert(what.to_string());
-                eprintln!("warning: push to {name} ({what}) failed: {}; the next push tries again", f["error"].as_str().unwrap_or(""));
+                eprintln!(
+                    "warning: push to {name} ({what}) failed: {}; the next push tries again",
+                    f["error"].as_str().unwrap_or("")
+                );
             }
         }
         if !quiet {
-            outln!(ctx, "push {name} ({}, {}): {} pushed, {} failed", if *is_layr { "layr" } else { "git" }, role.name(), pushed.len(), failed.len());
+            outln!(
+                ctx,
+                "push {name} ({}, {}): {} pushed, {} failed",
+                if *is_layr { "layr" } else { "git" },
+                role.name(),
+                pushed.len(),
+                failed.len()
+            );
         }
         report.push(serde_json::json!({"name": name, "kind": if *is_layr { "layr" } else { "git" }, "role": role.name(),
             "pushed": pushed, "failed": failed, "report": store_report}));

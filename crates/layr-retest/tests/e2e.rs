@@ -194,10 +194,15 @@ fn runs_only_the_stale_test() {
     // 3. Change the body of `a`: only `ta` runs. The build leaves old files behind: the sweep
     // removes what this build did not use and keeps the rest (the run below needs the test binaries).
     let debug = line.join("target/retest/debug");
-    let (zombie, zombie_meta) = (debug.join("deps/libzombie-0123456789abcdef.rlib"), debug.join("deps/zombie-0123456789abcdef.d"));
+    let (zombie, zombie_meta) =
+        (debug.join("deps/libzombie-0123456789abcdef.rlib"), debug.join("deps/zombie-0123456789abcdef.d"));
     std::fs::write(&zombie, vec![0u8; 3_000_000]).unwrap();
     std::fs::write(&zombie_meta, "x").unwrap();
-    let inc = std::fs::read_dir(debug.join("incremental")).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("tiny-")).unwrap();
+    let inc = std::fs::read_dir(debug.join("incremental"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("tiny-"))
+        .unwrap();
     std::fs::create_dir_all(inc.join("s-0-old/x")).unwrap();
     std::fs::write(inc.join("s-0-old.lock"), "").unwrap();
     // Make the old session the oldest.
@@ -208,9 +213,15 @@ fn runs_only_the_stale_test() {
     assert!(err.contains("ran 1, passed 1"), "{err}");
     assert!(err.contains("swept stale build output, freed "), "{err}");
     assert!(!zombie.exists() && !zombie_meta.exists() && !inc.join("s-0-old").exists() && !inc.join("s-0-old.lock").exists());
-    let live = std::fs::read_dir(debug.join("deps")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("libtiny-")).count();
+    let live = std::fs::read_dir(debug.join("deps"))
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("libtiny-"))
+        .count();
     assert!(live >= 1, "the sweep removed the live rlib of the package");
-    assert!(std::fs::read_dir(&inc).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("s-")), "the newest session stays");
+    assert!(
+        std::fs::read_dir(&inc).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("s-")),
+        "the newest session stays"
+    );
 
     // 4. A new function that no test calls: nothing runs.
     let s = std::fs::read_to_string(&lib).unwrap();
@@ -276,7 +287,14 @@ fn runs_only_the_stale_test() {
     // 8. A new test in a file that no recorded test selects: it is found and runs, no false pass.
     let lib2 = root.join("projects/app/lines/work2/src/lib.rs");
     let s = std::fs::read_to_string(&lib2).unwrap();
-    std::fs::write(&lib2, s.replace("    #[test]\n    fn tb()", "    #[test]\n    fn tn() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn tb()")).unwrap();
+    std::fs::write(
+        &lib2,
+        s.replace(
+            "    #[test]\n    fn tb()",
+            "    #[test]\n    fn tn() {\n        assert_eq!(b(), 2);\n    }\n\n    #[test]\n    fn tb()",
+        ),
+    )
+    .unwrap();
     let err = retest(&root.join("projects/app/lines/work2"), &root, &["run"]);
     assert!(err.contains("7 tests, 1 selected") && err.contains("tiny tests::tn") && !err.contains("no build"), "{err}");
 
@@ -402,7 +420,11 @@ fn workspace_dylib_is_an_export_object() {
     let deps_dir = line.join("target/retest/debug/deps");
     let linkage = |p: &std::path::Path| {
         let p = p.to_str().unwrap();
-        if cfg!(target_os = "macos") { sh_out("otool", &["-L", p]) } else { sh_out("ldd", &[p]) }
+        if cfg!(target_os = "macos") {
+            sh_out("otool", &["-L", p])
+        } else {
+            sh_out("ldd", &[p])
+        }
     };
     let plain: Vec<String> = std::fs::read_dir(&deps_dir)
         .unwrap()
@@ -629,12 +651,104 @@ fn gate_applies_the_project_env_and_returns_the_command_status() {
     .unwrap();
     std::fs::write(bad.join("src/lib.rs"), "").unwrap();
     cargo(&bad, &["generate-lockfile"]);
-    // A folder that a build wrote: it has a profile folder with a fingerprint folder.
-    std::fs::create_dir_all(bad.join("target/debug/.fingerprint")).unwrap();
+    // A real build provides the Cargo lock and profile metadata before the invalid sweep runs.
+    cargo(&bad, &["build"]);
     let out = finish(gate_child(&bad, &lock, &["--", "true"]), LIMIT);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(err.contains("sweep failed"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A project whose `sweep` builds only the library.
+const COVER_TOML: &str = "[package]\nname = \"covp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [[\"build\", \"--locked\"]]\n";
+const COVER_LIB: &str = "pub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ta() {\n        assert_eq!(super::a(), 1);\n    }\n}\n";
+
+#[test]
+fn gate_names_the_cargo_calls_that_sweep_does_not_cover() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-gate-cover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("project");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), COVER_TOML).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), COVER_LIB).unwrap();
+    cargo(&dir, &["generate-lockfile"]);
+    let lock = tmp.join("gate.lock");
+    // The gate command calls cargo by name, as a justfile or a script does. `-j 2` and `-q` change no unit.
+    let gate = ["--", "sh", "-c", "cargo build --locked -q && cargo test --locked --no-run -q -j 2"];
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("cargo test --locked --no-run -q -j 2: "), "{err}");
+    assert!(err.contains("units that no sweep command builds (first: debug/covp-"), "{err}");
+    assert!(err.contains(r#"Add to sweep in [workspace.metadata.layr-retest]: ["test","--locked","--no-run"]"#), "{err}");
+    // The build call is covered, so it is not named.
+    assert!(!err.contains("cargo build --locked -q:"), "{err}");
+    let report = std::fs::read_to_string(dir.join(".layr-retest/gate-coverage.json")).unwrap();
+    assert!(report.contains("\"calls\": 2"), "{report}");
+    let doctor =
+        run_limited(Command::new("layr").args(["retest", "doctor"]).current_dir(&dir).env("LAYR_ROOT", dir.join("unused-store")));
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    assert!(text.contains("warn: last gate (") && text.contains("units that no sweep command builds"), "{text}");
+
+    // With the entry that the gate printed, sweep covers both calls.
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        COVER_TOML.replace(
+            r#"sweep = [["build", "--locked"]]"#,
+            r#"sweep = [["build", "--locked"], ["test", "--locked", "--no-run"]]"#,
+        ),
+    )
+    .unwrap();
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep covers the units of all 2 cargo calls of this gate"), "{err}");
+
+    // Nothing that decides the units changed: the gate reuses the result instead of listing again.
+    let out = finish(gate_child(&dir, &lock, &gate), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("sweep coverage unchanged (same calls, sweep, manifests, Cargo.lock and toolchain): 2 of 2"), "{err}");
+
+    // A failing gate is not checked.
+    let out = finish(gate_child(&dir, &lock, &["--", "sh", "-c", "cargo build --locked -q && exit 3"]), LIMIT);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("the command failed, so the sweep coverage of its cargo calls is not checked"), "{err}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn doctor_names_an_include_of_another_workspace_folder() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-doctor-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("project");
+    let files = [
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n"),
+        ("crates/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        // A file of the package itself is named relative to it: not a finding.
+        (
+            "crates/a/src/lib.rs",
+            "pub const OWN: &str = include_str!(\"own.txt\");\npub const OTHER: &str = include_str!(\"../../b/data.txt\");\n",
+        ),
+        ("crates/a/src/own.txt", "own"),
+        ("crates/b/Cargo.toml", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("crates/b/src/lib.rs", ""),
+        ("crates/b/data.txt", "data"),
+    ];
+    for (path, text) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    cargo(&dir, &["generate-lockfile"]);
+    cargo(&dir, &["build", "--workspace"]);
+    let out =
+        run_limited(Command::new("layr").args(["retest", "doctor"]).current_dir(&dir).env("LAYR_ROOT", dir.join("unused-store")));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("warn: a: includes 1 file(s) out of its package (crates/b/data.txt)"), "{text}");
+    assert!(!text.contains("own.txt"), "{text}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -691,7 +805,11 @@ fn sweep_workspace(dir: &Path, sweep: &str) {
         format!("[workspace]\nmembers = [\"lib-a\", \"app\"]\nresolver = \"2\"\n\n[workspace.metadata.layr-retest]\n{sweep}\n"),
     )
     .unwrap();
-    std::fs::write(dir.join("lib-a/Cargo.toml"), "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n").unwrap();
+    std::fs::write(
+        dir.join("lib-a/Cargo.toml"),
+        "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("lib-a/src/lib.rs"),
         "pub fn a() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::a(), 1);\n    }\n}\n",
@@ -710,7 +828,10 @@ fn sessions_per_folder(debug: &Path) -> BTreeMap<String, usize> {
     entries(debug, "incremental")
         .into_iter()
         .map(|f| {
-            let n = entries(&debug.join("incremental"), &f).into_iter().filter(|e| e.starts_with("s-") && !e.ends_with(".lock") && !e.ends_with("-working")).count();
+            let n = entries(&debug.join("incremental"), &f)
+                .into_iter()
+                .filter(|e| e.starts_with("s-") && !e.ends_with(".lock") && !e.ends_with("-working"))
+                .count();
             (f, n)
         })
         .collect()
@@ -727,7 +848,13 @@ fn link_table(dir: &Path) -> String {
             if p.is_dir() {
                 todo.push(p);
             } else if let Ok(m) = p.metadata() {
-                out.push(format!("{} ino={} nlink={} mtime={}", p.strip_prefix(dir).unwrap_or(&p).display(), m.ino(), m.nlink(), m.mtime()));
+                out.push(format!(
+                    "{} ino={} nlink={} mtime={}",
+                    p.strip_prefix(dir).unwrap_or(&p).display(),
+                    m.ino(),
+                    m.nlink(),
+                    m.mtime()
+                ));
             }
         }
     }
@@ -792,7 +919,11 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     assert!(entries(&debug, ".fingerprint").len() > units.len());
 
     // A changed function keeps the unit hash: the build writes new object files of the same unit.
-    std::fs::write(ws.join("lib-a/src/lib.rs"), std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n")).unwrap();
+    std::fs::write(
+        ws.join("lib-a/src/lib.rs"),
+        std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n"),
+    )
+    .unwrap();
     cargo(&ws, &build);
 
     // A dry run names the bytes and removes nothing.
@@ -864,7 +995,10 @@ fn sweep_sweeps_a_release_only_target() {
     let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-release-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let ws = tmp.join("ws");
-    sweep_workspace(&ws, "sweep = [[\"build\", \"--release\", \"--workspace\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }");
+    sweep_workspace(
+        &ws,
+        "sweep = [[\"build\", \"--release\", \"--workspace\"]]\nenv = { CARGO_INCREMENTAL = \"1\", RUSTC_WRAPPER = \"\" }",
+    );
     // The layr project's release profile (`debug = 1`): the objects of a bin stay in `deps` and link it to its incremental data.
     let manifest = std::fs::read_to_string(ws.join("Cargo.toml")).unwrap();
     std::fs::write(ws.join("Cargo.toml"), manifest + "\n[profile.release]\ndebug = 1\n").unwrap();
@@ -910,10 +1044,12 @@ fn output_times(debug: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
                 if p.file_name().is_some_and(|n| n != ".fingerprint" && n != "incremental") {
                     todo.push(p);
                 }
-            } else if p.parent() != Some(debug) && p.file_name().is_some_and(|n| {
-                let n = n.to_string_lossy();
-                n != "invoked.timestamp" && !n.starts_with(".cargo-") && !n.ends_with(".d")
-            }) {
+            } else if p.parent() != Some(debug)
+                && p.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n != "invoked.timestamp" && !n.starts_with(".cargo-") && !n.ends_with(".d")
+                })
+            {
                 out.insert(p.clone(), p.metadata().unwrap().modified().unwrap());
             }
         }
@@ -949,10 +1085,10 @@ fn set_lib_a(ws: &Path, body: &str) {
     std::fs::write(ws.join("lib-a/src/lib.rs"), src).unwrap();
 }
 
-/// The listing of a standard command finds a unit that is not fresh: the sweep stops at that unit,
-/// compiles nothing, and removes nothing from the folder. The next build of the command makes it sweepable.
+/// A partial workspace listing preserves every workspace unit without compiling it.
+/// A later complete listing can remove obsolete feature variants.
 #[test]
-fn sweep_skips_a_folder_with_a_unit_that_is_not_fresh() {
+fn sweep_keeps_workspace_units_from_a_partial_listing() {
     let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-skip-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let ws = tmp.join("ws");
@@ -967,9 +1103,9 @@ fn sweep_skips_a_folder_with_a_unit_that_is_not_fresh() {
     let before = entries(&debug, ".fingerprint");
     let times = output_times(&debug);
 
-    // The second standard command was never built: it is not fresh, so nothing is swept.
+    // The second command has stale workspace units. The partial listing retains them all.
     let err = sweep_cmd(&ws, &[]);
-    assert!(err.contains("sweep skipped") && err.contains("not fresh") && err.contains("run the standard build first"), "{err}");
+    assert!(err.contains("swept target, freed"), "{err}");
     assert!(before.is_subset(&entries(&debug, ".fingerprint")), "a unit was removed:\n{err}");
     assert_no_output_written(&debug, &times, &err);
 
@@ -982,9 +1118,9 @@ fn sweep_skips_a_folder_with_a_unit_that_is_not_fresh() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// A source change makes `target/debug` stale. The sweep skips it with the reason, and compiles nothing.
+/// A source change permits partial cleanup but preserves workspace units and compiles nothing.
 #[test]
-fn sweep_skips_a_stale_target_and_compiles_nothing() {
+fn sweep_keeps_stale_workspace_units_and_compiles_nothing() {
     let tmp = std::env::temp_dir().canonicalize().unwrap().join(format!("layr-retest-sweep-stale-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let ws = tmp.join("ws");
@@ -994,9 +1130,11 @@ fn sweep_skips_a_stale_target_and_compiles_nothing() {
     cargo(&ws, &build);
     set_lib_a(&ws, "1 + 0");
     let times = output_times(&debug);
+    let fingerprints = entries(&debug, ".fingerprint");
 
     let err = sweep_cmd(&ws, &[]);
-    assert!(err.contains("sweep skipped") && err.contains("run the standard build first"), "{err}");
+    assert!(err.contains("swept target, freed"), "{err}");
+    assert!(fingerprints.is_subset(&entries(&debug, ".fingerprint")), "a workspace unit was removed:\n{err}");
     assert_no_output_written(&debug, &times, &err);
 
     // The standard build makes the folder fresh, and then the sweep runs.
@@ -1198,7 +1336,11 @@ fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
     // A feature build: its units are not listed by the standard command.
     cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--examples", "--features", "lib-a/extra"]);
     // A changed source: the standard units build again, so a live unit has the objects of two builds.
-    std::fs::write(ws.join("lib-a/src/lib.rs"), std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n")).unwrap();
+    std::fs::write(
+        ws.join("lib-a/src/lib.rs"),
+        std::fs::read_to_string(ws.join("lib-a/src/lib.rs")).unwrap().replace("    1\n", "    1 + 0\n"),
+    )
+    .unwrap();
     cargo(&ws, &build);
 
     // Garbage that no command lists.
@@ -1214,7 +1356,15 @@ fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept target, freed"), "{err}");
 
-    for gone in ["libgone.a", "deps/libgone-0123456789abcdef.a", "deps/lib_a.0abc.0deadbe.rcgu.o", "stale-bin", "examples/stale-ex", "examples/stale-ex-0123456789abcdef", "incremental/orphan-zz9"] {
+    for gone in [
+        "libgone.a",
+        "deps/libgone-0123456789abcdef.a",
+        "deps/lib_a.0abc.0deadbe.rcgu.o",
+        "stale-bin",
+        "examples/stale-ex",
+        "examples/stale-ex-0123456789abcdef",
+        "incremental/orphan-zz9",
+    ] {
         assert!(!debug.join(gone).exists(), "{gone} stays");
     }
     // The outputs that the standard command names, and the hashes of its units.
@@ -1234,7 +1384,8 @@ fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
     }
     // Every file of the profile folder is a listed output, cargo's lock, or an entry of a listed unit.
     let hash = |n: &str| n.split('.').next().unwrap().rsplit_once('-').map(|(_, h)| h.to_string()).filter(|h| h.len() == 16);
-    let live: BTreeSet<String> = listed.iter().filter_map(|f| hash(Path::new(f).file_name().unwrap().to_str().unwrap())).collect();
+    let live: BTreeSet<String> =
+        listed.iter().filter_map(|f| hash(Path::new(f).file_name().unwrap().to_str().unwrap())).collect();
     // A hashed file of a unit (a bin has a copy in the folder and a hashed file in `deps`) stays with its fingerprint.
     let fingerprints: BTreeSet<String> = entries(&debug, ".fingerprint").iter().filter_map(|n| hash(n)).collect();
     for sub in ["", "deps", "examples"] {
@@ -1244,7 +1395,10 @@ fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
                 continue;
             }
             let name = e.file_name().to_string_lossy().into_owned();
-            let ok = listed.contains(p.to_str().unwrap()) || name.starts_with(".cargo-") || (name.ends_with(".d") && listed.contains(p.with_extension("").to_str().unwrap())) || hash(&name).is_some_and(|h| fingerprints.contains(&h));
+            let ok = listed.contains(p.to_str().unwrap())
+                || name.starts_with(".cargo-")
+                || (name.ends_with(".d") && listed.contains(p.with_extension("").to_str().unwrap()))
+                || hash(&name).is_some_and(|h| fingerprints.contains(&h));
             assert!(ok, "{} stays but no listed unit needs it", p.display());
         }
     }
@@ -1282,11 +1436,20 @@ fn sweep_keeps_the_incremental_folder_of_a_dylib_dev_dependency() {
     )
     .unwrap();
     std::fs::write(ws.join("dy/src/lib.rs"), "pub fn d() -> i32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::d(), 2);\n    }\n}\n").unwrap();
-    std::fs::write(ws.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\ndy = { path = \"../dy\" }\n").unwrap();
-    std::fs::write(ws.join("app/src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1 + 1, 2);\n    }\n}\n").unwrap();
+    std::fs::write(
+        ws.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\ndy = { path = \"../dy\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("app/src/lib.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1 + 1, 2);\n    }\n}\n",
+    )
+    .unwrap();
     let build = ["build", "--workspace", "--tests"];
     let debug = ws.join("target/debug");
-    let dy_folders = || -> BTreeSet<String> { entries(&debug, "incremental").into_iter().filter(|n| n.starts_with("dy-")).collect() };
+    let dy_folders =
+        || -> BTreeSet<String> { entries(&debug, "incremental").into_iter().filter(|n| n.starts_with("dy-")).collect() };
 
     cargo(&ws, &build);
     let live = dy_folders();

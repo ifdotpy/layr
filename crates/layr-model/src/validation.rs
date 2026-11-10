@@ -113,6 +113,34 @@ pub fn is_ref(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
 }
 
+/// The operation of a record that gives states their tree and times table in the object store
+/// (docs/objects.md, section 13): `{"states": {"<state id>": {"times": "<id>", "tree": "<id>"}}}`.
+pub const STATE_TREE_OP: &str = "state.tree";
+
+/// An object id of docs/objects.md: 64 lowercase hex digits.
+pub fn is_object_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+/// The (state, tree, times) entries of a `state.tree` record, checked: state ids are ids, trees
+/// and times tables are object ids.
+pub fn state_trees(data: &serde_json::Value) -> anyhow::Result<Vec<(String, String, String)>> {
+    let Some(states) = data.get("states").and_then(|v| v.as_object()) else {
+        anyhow::bail!("a state.tree record names no states");
+    };
+    let mut out = Vec::with_capacity(states.len());
+    for (state, v) in states {
+        let (Some(tree), Some(times)) = (v.get("tree").and_then(|t| t.as_str()), v.get("times").and_then(|t| t.as_str())) else {
+            anyhow::bail!("state.tree: state {state:?} has no tree or no times");
+        };
+        if !is_uuid(state) || !is_object_id(tree) || !is_object_id(times) {
+            anyhow::bail!("state.tree: bad entry for state {state:?}");
+        }
+        out.push((state.clone(), tree.to_string(), times.to_string()));
+    }
+    Ok(out)
+}
+
 /// Every id, name and path in a record is checked before the record is stored: ids are
 /// canonical UUIDs, names follow the name rules, paths are relative. A record from another
 /// machine can then never name a path outside the project.
@@ -120,6 +148,19 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
     use anyhow::bail;
     if r.op == "release.files" {
         serde_json::from_value::<crate::release::Files>(r.data.clone())?.validate()?;
+    }
+    if r.op == STATE_TREE_OP {
+        state_trees(&r.data)?;
+    }
+    if r.states.iter().any(|s| s.tree.is_some() != s.times.is_some()) {
+        bail!("record {}: a state names a tree without a times table, or the reverse", r.seq);
+    }
+    for s in &r.states {
+        for id in [&s.tree, &s.times].into_iter().flatten() {
+            if !is_object_id(id) {
+                bail!("record {}: {id:?} is not an object id", r.seq);
+            }
+        }
     }
     let uuid = |what: &str, v: &str| -> anyhow::Result<()> {
         if !is_uuid(v) {
@@ -311,8 +352,8 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         bail!("person attestation needs its signed request");
     }
     if let Some(proof) = d.get("request") {
-        use layr_store::request::{Action, Signed};
         use layr_hashers::{ContentAddress, Digest};
+        use layr_store::request::{Action, Signed};
         let text = proof.as_str().ok_or_else(|| anyhow::anyhow!("request proof must preserve exact envelope bytes"))?;
         let signed = Signed::parse(text.as_bytes())?;
         let public = d["person_key"].as_str().ok_or_else(|| anyhow::anyhow!("request proof has no public key"))?;
@@ -536,6 +577,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         }
     }

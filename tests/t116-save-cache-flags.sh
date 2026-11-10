@@ -16,6 +16,9 @@ has "target is saved" "target: overlay" "$out"
 has "node_modules is saved" "node_modules: overlay" "$out"
 has "the target overlay is saved" "saved " "$(l overlay list | grep 'folder=target')"
 has "the node_modules overlay is saved" "saved " "$(l overlay list | grep 'folder=node_modules')"
+l line new verify main >/dev/null 2>&1
+eq "a new line receives the selected target bytes" "bin" "$(cat "$LAYR_ROOT/projects/p/lines/verify/target/debug/x" 2>/dev/null)"
+eq "a new line receives the selected node_modules bytes" "m" "$(cat "$LAYR_ROOT/projects/p/lines/verify/node_modules/pkg/index.js" 2>/dev/null)"
 out=$(l save --caches --cache target --cache nope 2>&1); rc=$?
 eq "an unknown cache path fails" 1 "$rc"
 has "the error names the unknown path" "'nope' is no cache path" "$out"

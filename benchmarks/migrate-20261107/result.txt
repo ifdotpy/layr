@@ -1,0 +1,100 @@
+Platform: macOS/APFS, native non-root user
+Build: cargo build --locked --offline (debug)
+Binary SHA-256: ab2a54c4265c543c2dac98e7b3fca2aff055e770448b0f35e4abd4b789ea85a2
+Command: python3 benchmarks/migrate-20261107/run.py --binary <layr>
+Concurrent load: integration and unit tests
+
+fixture ready: 10000 files, 60 states
+1/60 state ecad732 cold: 10000 files, import 2.23 s, checkout 1.94 s, compare 0.32 s
+2/60 state 71a6e1b cold: 1 files, import 0.04 s, checkout 2.05 s, compare 1.60 s
+3/60 state c8af8ca cold: 1 files, import 0.10 s, checkout 1.83 s, compare 1.47 s
+4/60 state d23a6e8 cold: 1 files, import 0.11 s, checkout 1.74 s, compare 1.43 s
+5/60 state c664006 cold: 1 files, import 0.11 s, checkout 1.90 s, compare 1.58 s
+6/60 state b26aca4 cold: 1 files, import 0.12 s, checkout 2.44 s, compare 1.46 s
+7/60 state 0ec1dc9 cold: 1 files, import 0.10 s, checkout 1.85 s, compare 1.39 s
+8/60 state 391a3b9 cold: 1 files, import 0.10 s, checkout 1.71 s, compare 1.45 s
+9/60 state f776868 cold: 1 files, import 0.10 s, checkout 1.76 s, compare 1.49 s
+10/60 state db17d71 cold: 1 files, import 0.10 s, checkout 2.01 s, compare 1.74 s
+11/60 state fb2da2a cold: 1 files, import 0.10 s, checkout 2.02 s, compare 1.41 s
+12/60 state e7b15ff cold: 1 files, import 0.10 s, checkout 1.64 s, compare 1.36 s
+13/60 state 9f29339 cold: 1 files, import 0.09 s, checkout 2.00 s, compare 1.44 s
+14/60 state 7c72cbd cold: 1 files, import 0.10 s, checkout 1.74 s, compare 1.38 s
+15/60 state 01bf624 cold: 1 files, import 0.11 s, checkout 1.88 s, compare 1.54 s
+16/60 state a67f585 cold: 1 files, import 0.11 s, checkout 2.10 s, compare 1.43 s
+17/60 state e8e7089 cold: 1 files, import 0.10 s, checkout 2.29 s, compare 1.74 s
+18/60 state ff355f8 cold: 1 files, import 0.10 s, checkout 2.06 s, compare 1.41 s
+19/60 state b66538e cold: 1 files, import 0.11 s, checkout 1.35 s, compare 1.21 s
+20/60 state b0a58c8 cold: 1 files, import 0.10 s, checkout 1.44 s, compare 1.54 s
+21/60 state c40c5fe cold: 1 files, import 0.10 s, checkout 1.34 s, compare 1.45 s
+22/60 state 630e43e cold: 1 files, import 0.10 s, checkout 1.72 s, compare 1.27 s
+23/60 state e7bb257 cold: 1 files, import 0.10 s, checkout 1.76 s, compare 1.36 s
+24/60 state 996dd5c cold: 1 files, import 0.10 s, checkout 1.77 s, compare 1.50 s
+25/60 state 44ff80b cold: 1 files, import 0.10 s, checkout 1.57 s, compare 1.55 s
+26/60 state fcbf58f cold: 1 files, import 0.11 s, checkout 2.20 s, compare 1.65 s
+27/60 state d6f6f92 cold: 1 files, import 0.10 s, checkout 1.59 s, compare 1.40 s
+28/60 state 0b02675 cold: 1 files, import 0.11 s, checkout 2.19 s, compare 1.61 s
+29/60 state 4bab181 cold: 1 files, import 0.10 s, checkout 1.84 s, compare 1.60 s
+30/60 state c2a548a cold: 1 files, import 0.10 s, checkout 1.44 s, compare 1.43 s
+31/60 state ec778b3 cold: 1 files, import 0.10 s, checkout 1.85 s, compare 1.60 s
+32/60 state caf15dd cold: 1 files, import 0.10 s, checkout 1.47 s, compare 1.37 s
+33/60 state 3e44091 cold: 1 files, import 0.10 s, checkout 1.90 s, compare 1.61 s
+34/60 state 1339cc6 cold: 1 files, import 0.10 s, checkout 1.65 s, compare 1.43 s
+35/60 state 10248ff cold: 1 files, import 0.11 s, checkout 1.45 s, compare 1.54 s
+36/60 state 0151e16 cold: 1 files, import 0.10 s, checkout 1.75 s, compare 1.92 s
+37/60 state 2b211dd cold: 1 files, import 0.10 s, checkout 1.60 s, compare 1.54 s
+38/60 state beb0c7f cold: 1 files, import 0.11 s, checkout 1.91 s, compare 1.74 s
+39/60 state 2047807 cold: 1 files, import 0.11 s, checkout 1.26 s, compare 1.33 s
+40/60 state 0dc26fc cold: 1 files, import 0.11 s, checkout 1.82 s, compare 1.68 s
+41/60 state 7acb998 cold: 1 files, import 0.11 s, checkout 1.87 s, compare 1.70 s
+42/60 state 4c1c5e2 cold: 1 files, import 0.10 s, checkout 1.38 s, compare 1.60 s
+43/60 state fef3fbd cold: 1 files, import 0.10 s, checkout 1.96 s, compare 1.44 s
+44/60 state 6494791 cold: 1 files, import 0.10 s, checkout 1.83 s, compare 1.32 s
+45/60 state 6c82145 cold: 1 files, import 0.10 s, checkout 2.03 s, compare 1.37 s
+46/60 state 0273855 cold: 1 files, import 0.10 s, checkout 1.68 s, compare 1.31 s
+47/60 state 0ba5428 cold: 1 files, import 0.10 s, checkout 1.80 s, compare 1.51 s
+48/60 state 309ca23 cold: 1 files, import 0.09 s, checkout 1.66 s, compare 1.20 s
+49/60 state 5b48f17 cold: 1 files, import 0.10 s, checkout 1.97 s, compare 1.41 s
+50/60 state 8d2be3c cold: 1 files, import 0.10 s, checkout 1.65 s, compare 1.59 s
+51/60 state d5cf138 cold: 1 files, import 0.10 s, checkout 1.50 s, compare 1.39 s
+52/60 state 6b2317f cold: 1 files, import 0.21 s, checkout 2.00 s, compare 1.92 s
+53/60 state e037aaa cold: 1 files, import 0.12 s, checkout 2.01 s, compare 1.56 s
+54/60 state fe878ef cold: 1 files, import 0.10 s, checkout 1.39 s, compare 1.61 s
+55/60 state 2b9910b cold: 1 files, import 0.11 s, checkout 1.34 s, compare 1.44 s
+56/60 state 4ecf5a6 hot: 1 files, import 0.11 s, checkout 1.34 s, compare 1.65 s
+57/60 state 5c20d95 hot: 1 files, import 0.10 s, checkout 1.30 s, compare 1.43 s
+58/60 state df1de6e hot: 1 files, import 0.11 s, checkout 1.33 s, compare 1.44 s
+59/60 state c0b7b7a hot: 1 files, import 0.12 s, checkout 1.45 s, compare 1.31 s
+60/60 state 7421ed8 hot: 1 files, import 0.10 s, checkout 1.32 s, compare 1.35 s
+migrated 60 state(s) (10059 files, 10158875 bytes read) in 207.4 s; repack 6.7 s (0 hot blobs turned cold, 1 packs)
+states: 60 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 978.8 KiB (1002295 bytes)
+old snapshots: `layr migrate --delete-old` frees 0 B in 59 snapshot(s) (line heads keep theirs)
+
+{
+  "files": 10000,
+  "states": 60,
+  "wall_seconds": 231.26345250000003,
+  "objects": {
+    "chunk_bytes": 0,
+    "chunked_blobs": 0,
+    "chunked_bytes": 0,
+    "chunks": 0,
+    "delta_blobs": 0,
+    "delta_bytes": 0,
+    "hot_blobs": 5,
+    "hot_bytes": 5085,
+    "loose_bytes": 0,
+    "pack_bytes": 882522,
+    "packed_objects": 10492,
+    "packed_plain_bytes": 11362141,
+    "packs": 1,
+    "states": 60,
+    "times": 0,
+    "times_bytes": 0,
+    "total_bytes": 1002295,
+    "tree_bytes": 0,
+    "trees": 0,
+    "whole_blobs": 0,
+    "whole_bytes": 0
+  }
+}

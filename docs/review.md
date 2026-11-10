@@ -539,9 +539,13 @@ project epoch for rotation; the current CLI submits and accepts epoch `root`.
 
 The executor claims each id at `requests/claims/<id>.json` with a machine signature.
 Each claim is create-only and binds the project, request, and executor machine.
-Another trusted machine skips a valid claim.
-An untrusted claimant causes a signed refusal: `claimed by an untrusted machine`.
-Invalid claims and invalid claim signatures also cause signed refusals.
+Another trusted machine stops the pass at a valid claim. Later requests wait. `requests apply`
+returns exit code 2, and the pass does not run the queue, while a claim is waiting.
+For encrypted stores, an untrusted claimant causes a signed refusal: `claimed by an untrusted machine`.
+Invalid claims and invalid claim signatures also cause signed refusals there. For Cloud API v1,
+the gateway checks each claim at creation. A claim by another machine stops the pass, even when
+its key is not in this clone. A malformed claim, or a bad signature from a locally known machine,
+stops the pass with an error. A claim with an unknown key waits without a local signature check.
 After a crash, the owning machine resumes from its atomic local result record.
 Claims never expire or transfer automatically.
 Keep the owning machine's local records until its results reach the store.

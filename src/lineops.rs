@@ -67,7 +67,7 @@ fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
 /// Line folders made without the project lock, waiting for `commit_prepared_lines`.
 pub(crate) struct PreparedLines {
     start: String,
-    lines: Vec<Line>,
+    pub(crate) lines: Vec<Line>,
     tmps: Vec<PathBuf>,
     recs: Vec<Record>,
     /// The line that the lines start from: an OverlayFS commit takes its caches (`commit_prepared_lines`).
@@ -94,6 +94,15 @@ impl Repo<'_> {
     ) -> Result<Vec<Line>> {
         let prepared = self.prepare_named_lines(ctx, names, start, owner, source, view)?;
         self.commit_prepared_lines(ctx, prepared)
+    }
+
+    /// The object store and tree of `start` when the state has no snapshot here and `layr migrate`
+    /// recorded its tree (docs/objects.md, section 13).
+    fn objects_start(&self, start: &str) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {
+        if self.p.has_state(start) {
+            return Ok(None);
+        }
+        crate::objstore::verified(&self.p, start)
     }
 
     fn check_names_free(&self, names: &[String]) -> Result<()> {
@@ -136,14 +145,27 @@ impl Repo<'_> {
             .collect();
         let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(crate::store::temp_name())).collect();
         let result = (|| -> Result<Vec<Record>> {
-            // On APFS each folder is made from the layers of the state: a complete view of a thin
-            // state first, and a copy of the view after it, cloned the whole tree twice.
-            #[cfg(target_os = "macos")]
-            for tmp in &tmps {
-                self.snapshot_state(start, tmp, false)?;
+            match self.objects_start(start)? {
+                // A migrated state without a snapshot here: each folder is a checkout of its tree
+                // with its times (hot blobs are clones), no snapshot is built first.
+                Some((store, refs)) => {
+                    for tmp in &tmps {
+                        crate::storage::create_subvolume(tmp)?;
+                        // This private work directory is inaccessible to the caller. Decode
+                        // here with the service identity; prepare_at assigns the line owner
+                        // before publication, including every file below the root.
+                        layr_objects::checkout_with(&store, &refs.tree, Some(&refs.times), tmp)?;
+                    }
+                }
+                None => {
+                    #[cfg(target_os = "macos")]
+                    for tmp in &tmps {
+                        self.snapshot_state(start, tmp, false)?;
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    snapshots(&self.state_root(start)?, &tmps)?;
+                }
             }
-            #[cfg(not(target_os = "macos"))]
-            snapshots(&self.state_root(start)?, &tmps)?;
             let mut recs = Vec::new();
             for (line, tmp) in lines.iter().zip(&tmps) {
                 let layers = if let Some(view) = view {

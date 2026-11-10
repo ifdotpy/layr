@@ -15,10 +15,13 @@
 - Stored as project config `follow.<line id>` = `"<remote>/<branch>"`. The key is built in one
   place only: `follow::config_key`.
 - Setting or removing a target needs the same right as `layr merge --expect` on the line.
+- A Layr store supports `<remote>/main`. The creator sets `queue.merge-machine` to the trusted
+  merge machine UUID and pushes that setting. The pass verifies its signed queue completion.
+- Git remotes continue to support their named branches.
 
 ## One pass (`Repo::follow_pass`)
 
-1. Fetch: `layr git fetch <remote> <branch>`.
+1. Fetch the Git branch, or fetch the Layr store heads and verify its main from signed records.
 2. Stop when the remote state is the line head or an ancestor of it (result: up to date). If a cache folder has
    no cache saved with the head (an earlier pass stopped before its save, or a save moved the head), build and
    save the line's own caches as in step 5, with no other line as a source (result: up to date; caches saved
@@ -28,6 +31,9 @@
    limit, a compile error) leaves the mark too: the next pass builds again, and cargo goes on from the units it made.
    The prune of the pass has a limit of 10 min (`BACKGROUND_PRUNE_LIMIT`), not the 120 s of a command: no one waits
    for it, and a loaded machine makes a prune of seconds take minutes.
+   For a Layr store with no unsaved work, each pass also checks for a shared compatible cache of the verified head. It can take a cache
+   published after the head moved. The local record of each taken cache prevents a later pass from taking it again.
+   A cache saved with an automatic state is accepted only when its source tree matches the verified head.
 3. Stop when the line has unsaved work: a changed file or a conflict (result: `skipped: unsaved work`).
    Nothing is saved for it. An untracked file is not unsaved work: the merge keeps it out of the state,
    and refuses a remote state that writes its path (the pair is then recorded as in step 4).
@@ -36,7 +42,8 @@
    Any error keeps the head too. A failed merge records the pair (fetched remote state, line head).
    A tick then skips the pair without output and without a new record, until the remote state or
    the line head changes. `layr follow` and `--run` always try.
-5. Caches, only after a merge:
+5. Caches after a merge:
+   - A Layr store fast-forward takes a shared compatible cache of the verified main, when one is available.
    - Candidate lines: lines with an `export` record to that remote in the last 14 days, newest
      export first. A line is a candidate through the state of its export. A remote with the same
      repository URL counts as that remote (`git@host:path`, `ssh://` and `https://` forms of one
@@ -49,11 +56,16 @@
    - The tracked files get the source times that the taken caches recorded (`.layr-times`,
      docs/cache-overlays.md section 20).
    - The build: the adapter of each folder overlay builds the project's standard commands into the
-     folder (`warm`, as the line owner, limit 30 min; cargo: the `sweep` list with the project env; pnpm:
+     folder (`warm`, as the line owner, limit 120 min; cargo: the `sweep` list with the project env; pnpm:
      `pnpm install --frozen-lockfile`, online, from a copy that a failure puts back). A
-     change that came without a cache (a branch that no line here pushed) is built once here, so the
-     lines from this line start warm. A failed or stopped build is one log line; the save still runs.
-   - `layr save --caches` for the line: it prunes each folder first (the adapter's `prune`).
+     change that came without a cache (a branch that no line here pushed) is built here. If the
+     head moves during the build, the pass retries, at most three times. A failed build or a head
+     that keeps moving leaves the line marked for the next pass. It does not save the cache.
+   - `layr save --caches` for the line: it prunes each folder first (the adapter's `prune`). The
+     line lock keeps the checked head unchanged until the cache is saved and the mark is cleared. A separate
+     cache build lock prevents a cache save from overlapping the build. An ordinary head save
+     can proceed during the build; follow then builds the new head again. Cache operations take
+     the cache build lock before the line lock.
 6. Record the result in the project meta folder (`follow.json`, this machine only): time, ok, text.
 
 A failed cache step does not undo the merge. Its text is part of the result.

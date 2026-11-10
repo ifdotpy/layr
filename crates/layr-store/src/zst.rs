@@ -27,19 +27,28 @@ pub fn check_pack_header(frame: &[u8], limit: usize) -> Result<()> {
     let size_flag = descriptor >> 6;
     anyhow::ensure!(single || size_flag != 0, "pack frame content size is missing");
     let mut offset = 5;
-    let window = if single { None } else {
+    let window = if single {
+        None
+    } else {
         let byte = *frame.get(offset).ok_or_else(|| anyhow::anyhow!("short pack frame header"))?;
         offset += 1;
         let base = 1u64 << (10 + (byte >> 3));
         Some(base + (base / 8) * u64::from(byte & 7))
     };
     offset += [0, 1, 2, 4][(descriptor & 3) as usize];
-    let width = match size_flag { 0 => 1, 1 => 2, 2 => 4, _ => 8 };
+    let width = match size_flag {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
     let field = frame.get(offset..offset + width).ok_or_else(|| anyhow::anyhow!("short pack frame header"))?;
     let mut bytes = [0u8; 8];
     bytes[..width].copy_from_slice(field);
     let mut content = u64::from_le_bytes(bytes);
-    if width == 2 { content += 256; }
+    if width == 2 {
+        content += 256;
+    }
     anyhow::ensure!(content <= limit as u64, "pack frame content size exceeds its limit");
     anyhow::ensure!(window.unwrap_or(content) <= limit as u64, "pack frame window exceeds its limit");
     Ok(())
@@ -85,7 +94,9 @@ fn decompress_stream(frame: &[u8], base: Option<&[u8]>, limit: usize) -> Result<
     }
     let mut out = Vec::new();
     if let Some(size) = size.map(|n| n as usize) {
-        if size > limit { bail!("a zstd frame decodes to more than {limit} bytes"); }
+        if size > limit {
+            bail!("a zstd frame decodes to more than {limit} bytes");
+        }
         out.try_reserve_exact(size)?;
     }
     let mut input = InBuffer::around(frame);
@@ -169,7 +180,9 @@ fn decompress_rust(frame: &[u8], base: Option<&[u8]>, limit: usize) -> Result<Ve
 
 /// Maximum encoded length of a zstd frame for an input of this size.
 #[cfg(feature = "native")]
-pub fn compress_bound(size: usize) -> usize { zstd_safe::compress_bound(size) }
+pub fn compress_bound(size: usize) -> usize {
+    zstd_safe::compress_bound(size)
+}
 
 /// The zstd level of the writer.
 pub const LEVEL: i32 = 3;

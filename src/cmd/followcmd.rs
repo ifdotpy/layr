@@ -54,7 +54,7 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
             None => Err(exit(1, format!("line '{}' follows no branch: layr follow <remote>/<branch>", line.name))),
         };
     };
-    let (remote, _) =
+    let (remote, branch) =
         follow::split(&target).ok_or_else(|| exit(128, "usage: layr follow <remote>/<branch> (both names are needed)"))?;
     if a.has("--run") {
         return Err(usage());
@@ -62,7 +62,13 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The same right as `layr merge --expect` on this line; a protected line needs its admin.
     repo.authorize_line(ctx, &line, LineOp::Merge { expect: true, hint: None })?;
     // The remote must exist before the target is stored.
-    gitbridge::remote_url(repo, remote)?;
+    if repo.p.config_value(&format!("cloud.remote.{remote}.url"))?.is_some() {
+        if branch != "main" || super::remote::kind(&super::remote::remote_url(repo, remote)?)? != super::remote::Kind::Store {
+            return Err(exit(128, "Layr follow requires a store remote and main"));
+        }
+    } else {
+        gitbridge::remote_url(repo, remote)?;
+    }
     {
         let _lock = repo.p.lock()?;
         set_config(ctx, repo, &follow::config_key(&line.id), serde_json::Value::String(target.clone()))?;

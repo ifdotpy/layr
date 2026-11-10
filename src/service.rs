@@ -197,9 +197,8 @@ fn negotiate(sock: &UnixStream) -> Result<()> {
     }
     let mut bytes = vec![0; size];
     (&*sock).read_exact(&mut bytes)?;
-    let daemon = serde_json::from_slice::<layr_api::Peer>(&bytes).context(
-        "incompatible daemon negotiation (a valid database schema is required); upgrade both the CLI and the daemon",
-    )?;
+    let daemon = serde_json::from_slice::<layr_api::Peer>(&bytes)
+        .context("incompatible daemon negotiation (a valid database schema is required); upgrade both the CLI and the daemon")?;
     crate::store_version::require_peer_compatible(&crate::store_version::peer()?, &daemon, "daemon")?;
     // Commands can take longer than negotiation.
     sock.set_read_timeout(None)?;
@@ -497,7 +496,7 @@ const PERIODIC_CHECKS: &str = "periodic-checks.json";
 /// the operations that make data dead free it, and the daily garbage report (`garbage_report`) names a gap. A user
 /// daemon (`user_mode`, the macOS LaunchAgent) runs the requests and the queue of its own store as its user; the
 /// automatic states and the git store access stay with the root service.
-fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>) {
+fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
         Ok(s) => s,
@@ -528,17 +527,19 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>) {
         }
         // Person requests (approve, comment, queue add) of `requests.remote`: before the queue pass, so a queued
         // entry merges on the same tick.
-        match crate::cmd::requests::daemon_remote(&repo) {
-            Ok(Some(remote)) => {
-                if let Err(error) = crate::cmd::requests::apply(&ctx, &repo, &remote, true) {
-                    eprintln!("layr requests ({name}): {error:#}");
+        if !manual_queue {
+            match crate::cmd::requests::daemon_remote(&repo) {
+                Ok(Some(remote)) => {
+                    if let Err(error) = crate::cmd::requests::apply(&ctx, &repo, &remote, true, true, |_| Ok(())) {
+                        eprintln!("layr requests ({name}): {error:#}");
+                    }
                 }
+                Ok(None) => {}
+                Err(error) => eprintln!("layr requests ({name}): {error:#}"),
             }
-            Ok(None) => {}
-            Err(error) => eprintln!("layr requests ({name}): {error:#}"),
-        }
-        if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
-            eprintln!("layr queue ({name}): {error:#}");
+            if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
+                eprintln!("layr queue ({name}): {error:#}");
+            }
         }
         if hourly && user_mode.is_none() {
             // Also repairs the git store of a project from an earlier layr, soon after a start.
@@ -645,7 +646,7 @@ fn user_socket_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/layr/layr.sock"))
 }
 
-/// `layr daemon [--socket <path>] [--tick <seconds>]`. Root serves every local user (Linux, or
+/// `layr daemon [--socket <path>] [--tick <seconds>] [--manual-queue]`. Root serves every local user (Linux, or
 /// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
 /// uid, switches no user and runs no periodic saves, only the follow tick and the daily garbage report.
 /// How long a stopping service waits for its running requests. The service managers allow more
@@ -661,6 +662,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     }
     let mut sock: Option<PathBuf> = None;
     let mut tick = if user_mode { 120u64 } else { 60u64 };
+    let mut manual_queue = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -672,6 +674,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                 tick = args.get(i + 1).ok_or_else(|| anyhow!("--tick needs seconds"))?.parse()?;
                 i += 1;
             }
+            "--manual-queue" => manual_queue = true,
             x => bail!("unknown option {x}"),
         }
         i += 1;
@@ -728,6 +731,13 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     let mut children: HashMap<i32, u32> = HashMap::new();
     // One periodic pass at a time: a pass longer than the tick must not start another.
     let mut periodic_child: Option<i32> = None;
+    // The check runner of a Layr Cloud gateway (src/runner.rs): one long-lived child while the
+    // store has runner settings. A user daemon runs it as its user; it restarts after 10 s.
+    let mut runner_child: Option<i32> = None;
+    let mut runner_start = std::time::Instant::now();
+    // The restart delay: 10 s, doubled after each run shorter than a minute, at most 60 s.
+    let mut runner_delay = 10u64;
+    let mut runner_started = std::time::Instant::now();
     let (max_total, max_per_user) =
         (limit("LAYR_MAX_REQUESTS", DEFAULT_MAX_REQUESTS), limit("LAYR_MAX_REQUESTS_PER_USER", DEFAULT_MAX_REQUESTS_PER_USER));
     loop {
@@ -737,6 +747,9 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             drop(listener);
             drop(registry_listeners);
             let _ = std::fs::remove_file(&sock);
+            if let Some(pid) = runner_child.and_then(rustix::process::Pid::from_raw) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+            }
             eprintln!("layr service: stopping after {} running requests", children.len());
             let deadline = std::time::Instant::now() + STOP_WAIT;
             while std::time::Instant::now() < deadline {
@@ -761,6 +774,33 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             children.remove(&pid);
             if periodic_child == Some(pid) {
                 periodic_child = None;
+            }
+            if runner_child == Some(pid) {
+                runner_child = None;
+                runner_delay =
+                    if runner_started.elapsed() < std::time::Duration::from_secs(60) { (runner_delay * 2).min(60) } else { 10 };
+                runner_start = std::time::Instant::now() + std::time::Duration::from_secs(runner_delay);
+            }
+        }
+        if user_mode && runner_child.is_none() && std::time::Instant::now() >= runner_start {
+            runner_start = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if root.join(crate::runner::DIR).join("config.json").exists() {
+                runner_started = std::time::Instant::now();
+                match crate::sys::fork() {
+                    Ok(crate::sys::Fork::Child) => {
+                        drop(listener);
+                        let code = match crate::runner::serve(&root) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                eprintln!("layr runner: {e:#}");
+                                1
+                            }
+                        };
+                        std::process::exit(code);
+                    }
+                    Ok(crate::sys::Fork::Parent(pid)) => runner_child = Some(pid),
+                    Err(e) => eprintln!("layr service: fork failed: {e}"),
+                }
             }
         }
         let wait = next.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
@@ -836,7 +876,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                     drop(listener);
                     sweep_trash(&root);
                     let caller = Caller::from_uid(if user_mode { own } else { 0 });
-                    periodic(&root, hourly, user_mode.then_some(own));
+                    periodic(&root, hourly, user_mode.then_some(own), manual_queue);
                     crate::follow::tick(&root, caller.clone());
                     // Dead cache states in remotes that nobody pushes to (docs/cache-overlays.md).
                     if hourly {
@@ -1073,12 +1113,21 @@ mod request_tests {
         peer: serde_json::Value,
     ) -> Result<(i32, Vec<u8>, String)> {
         use std::process::{Command, Stdio};
-        let path = root.join("request.sock");
-        let listener = UnixListener::bind(&path)?;
+        // sockaddr_un has a short path limit on macOS. The child inherits this cwd.
+        let id = crate::ids::display(&crate::ids::new_id());
+        let path = std::path::PathBuf::from(format!(".layr-request-{}", &id[..16]));
+        struct SocketPath(std::path::PathBuf);
+        impl Drop for SocketPath {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let path = SocketPath(path);
+        let listener = UnixListener::bind(&path.0)?;
         let mut command = Command::new(std::env::current_exe()?);
         command
             .args(["--exact", "service::request_tests::request_child", "--nocapture"])
-            .env("LAYR_TEST_REQUEST_SOCKET", &path)
+            .env("LAYR_TEST_REQUEST_SOCKET", &path.0)
             .env("LAYR_ROOT", root.join("store"))
             .env_remove("LAYR_TRACE")
             .stdout(Stdio::null())
@@ -1108,7 +1157,6 @@ mod request_tests {
         let child = child.wait_with_output()?;
         let mut stderr = std::fs::read_to_string(root.join("stderr"))?;
         stderr.push_str(&String::from_utf8_lossy(&child.stderr));
-        std::fs::remove_file(path)?;
         Ok((code, std::fs::read(root.join("stdout"))?, stderr))
     }
 

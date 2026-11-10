@@ -51,11 +51,7 @@ fn move_lock(root: &Path, wait: bool) -> Result<Option<File>> {
     let dir = root.join(DIR);
     fs::create_dir_all(&dir).context("create the folder of the project moves")?;
     let file = fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(dir.join(LOCK))?;
-    let how = if wait {
-        rustix::fs::FlockOperation::LockExclusive
-    } else {
-        rustix::fs::FlockOperation::NonBlockingLockExclusive
-    };
+    let how = if wait { rustix::fs::FlockOperation::LockExclusive } else { rustix::fs::FlockOperation::NonBlockingLockExclusive };
     match rustix::fs::flock(&file, how) {
         Ok(()) => Ok(Some(file)),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
@@ -361,7 +357,8 @@ fn finish(root: &Path, machine: &str, project: &str, from: &str, to: &str, src: 
     }
     let _t = crate::trace::begin(format!("project move {project}: remove the old folder"));
     if fs::symlink_metadata(src).is_ok() {
-        let from_root = layout.ready(from).with_context(|| format!("the old folder of '{project}' stays until its volume is ready"))?;
+        let from_root =
+            layout.ready(from).with_context(|| format!("the old folder of '{project}' stays until its volume is ready"))?;
         to_trash(&from_root, src)?;
     }
     match fs::remove_file(journal_of(root, project)) {
@@ -381,11 +378,8 @@ pub fn recover(store: &Store) {
 
 fn recover_all(store: &Store) -> Result<()> {
     let Ok(entries) = fs::read_dir(store.root.join(DIR)) else { return Ok(()) };
-    let journals: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
+    let journals: Vec<PathBuf> =
+        entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     if journals.is_empty() {
         return Ok(());
     }

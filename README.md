@@ -88,7 +88,7 @@ signs a record for it. The [design document](docs/design.md) explains each choic
 ## Install
 
 ```sh
-cargo install --git https://github.com/ifdotpy/layr layr
+curl -fsSL https://cloud.layr.ws/p/layr/install.sh | sh
 ```
 
 | Platform | Store on | Notes |
@@ -199,7 +199,7 @@ See [what this version does not do](docs/limits.md).
 
 ## Layr Cloud
 
-[Layr Cloud](https://github.com/ifdotpy/layr-cloud) runs Layr in your own AWS account:
+[Layr Cloud](https://cloud.layr.ws/) runs Layr in your own AWS account:
 
 - an end-to-end encrypted S3 store per project, in an account you own;
 - a gateway, so machines and people reach stores without AWS credentials (`layr+https://`);
@@ -219,6 +219,7 @@ Layr talks to it as an ordinary remote.
 [Remotes](docs/remotes.md) ·
 [Containers](docs/oci.md) ·
 [Overlays](docs/overlays.md) ·
+[Virtual lines (experimental)](docs/views.md) ·
 [Security](docs/security.md) ·
 [Performance](docs/performance.md) ·
 [Design](docs/design.md)

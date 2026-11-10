@@ -254,10 +254,14 @@ pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str, limits: Option<&V
         return Ok(false);
     }
     if let Some(k) = p.db.trusted(machine)? {
-        if k == key {
+        if k != key {
+            bail!("machine {} is trusted with another key", &ids::display(machine)[..8]);
+        }
+        // A trust with limits narrows a trusted machine (the narrowest limits win, docs/ci-trust.md), for example
+        // a full merge machine that becomes a merge machine. A second trust without limits changes nothing.
+        if limits.is_none() {
             return Ok(false);
         }
-        bail!("machine {} is trusted with another key", &ids::display(machine)[..8]);
     }
     let mut rec = crate::model::Record::new("machine.trust");
     rec.data = json!({"machine": machine, "public_key": key});
@@ -585,8 +589,7 @@ pub fn exchange(
         let (mut sent, mut bytes) = (0, 0);
         if direction != "fetch" {
             let list = plan(repo, &mine, &peer_present, auto, caches)?;
-            let (n, b) =
-                send_states(ctx, &mut w, repo, &list, &peer_present, SendFeatures::from_hello(&hello))?;
+            let (n, b) = send_states(ctx, &mut w, repo, &list, &peer_present, SendFeatures::from_hello(&hello))?;
             sent = n;
             bytes = b;
         } else {
@@ -968,7 +971,9 @@ mod tests {
         use crate::ctx::Caller;
         use crate::model::Record;
         // Only a root Btrfs fixture sets this folder.
-        let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else { return };
+        let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else {
+            return;
+        };
         let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
         let source = base.join("source");
         btrfs::create_subvolume(&source).unwrap();

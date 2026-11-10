@@ -100,6 +100,9 @@ pub(crate) struct ScanEntry {
     pub(crate) nlink: u64,
     /// The creation time: the file identity for moves (`file_identity`).
     pub(crate) birth: (i64, i64),
+    /// `st_flags`. Not part of the comparison. A writable copy opens the entries that have the
+    /// immutable flag (the seal of an older store) and no other entry (`clone_complete`).
+    pub(crate) flags: u32,
 }
 impl PartialEq for ScanEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -246,8 +249,8 @@ fn entry_at(root: &Path, rel: &str) -> Result<Option<ScanEntry>> {
 }
 
 /// The file that keeps the scan of a sealed state or layer. A sealed tree cannot change: each
-/// entry has the immutable flag, and a change must clear the flag of the root first, which
-/// changes its ctime, a part of the name. `None` for other trees.
+/// entry has the seal (`seal`), and the root has the immutable flag; layr clears the flag of the
+/// root before a change, which changes its ctime, a part of the name. `None` for other trees.
 fn sealed_scan_file(root: &Path, m: &fs::Metadata) -> Option<std::path::PathBuf> {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
     if !m.is_dir() || m.st_flags() & libc::UF_IMMUTABLE == 0 {
@@ -290,7 +293,7 @@ pub(crate) fn prune_saved_scans(dir: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-const SCAN_MAGIC: &[u8] = b"layr scan 1\n";
+const SCAN_MAGIC: &[u8] = b"layr scan 2\n";
 
 fn encode_scan(scan: &BTreeMap<String, ScanEntry>) -> Vec<u8> {
     let mut out = Vec::with_capacity(scan.len() * 160);
@@ -320,6 +323,7 @@ fn encode_scan(scan: &BTreeMap<String, ScanEntry>) -> Vec<u8> {
         for v in [e.nlink, e.birth.0 as u64, e.birth.1 as u64] {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out.extend_from_slice(&e.flags.to_le_bytes());
     }
     out
 }
@@ -359,6 +363,7 @@ fn decode_scan(raw: &[u8]) -> Option<BTreeMap<String, ScanEntry>> {
         for v in &mut rest {
             *v = u64_of(take(8)?);
         }
+        let st_flags = u32::from_le_bytes(take(4)?.try_into().ok()?);
         let data = (flags & 1 != 0).then_some(crate::sys::ApfsDataIdentity {
             generation: (flags & 2 != 0).then_some(generation),
             clone_id: (flags & 4 != 0).then_some(clone_id),
@@ -379,6 +384,7 @@ fn decode_scan(raw: &[u8]) -> Option<BTreeMap<String, ScanEntry>> {
                 data,
                 nlink: rest[0],
                 birth: (rest[1] as i64, rest[2] as i64),
+                flags: st_flags,
             },
         );
     }
@@ -393,6 +399,7 @@ fn entry_of_metadata(m: &fs::Metadata, path: &Path, data: bool) -> Result<ScanEn
         data: if data && m.is_file() { Some(crate::sys::apfs_data_identity(path)?) } else { None },
         nlink: m.nlink(),
         birth: (m.st_birthtime(), m.st_birthtime_nsec()),
+        flags: m.st_flags(),
     })
 }
 
@@ -462,6 +469,7 @@ fn read_folder(
                 data: is_file.then_some(e.data),
                 nlink: e.nlink,
                 birth: e.birth,
+                flags: e.flags,
             },
         ));
     }
@@ -498,7 +506,9 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
     let error = Mutex::new(None);
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Unbounded, || {
         crate::fsutil::work_queue(vec![Job { parent: None, name: String::new(), rel: String::new() }], |job, add| {
-            if error.lock().unwrap().is_some() { return; }
+            if error.lock().unwrap().is_some() {
+                return;
+            }
             let step = (|| -> Result<()> {
                 let dir = match &job.parent {
                     None => root_dir.clone(),
@@ -517,12 +527,18 @@ fn scan_parallel(dir: File, root: &Path, out: &mut BTreeMap<String, ScanEntry>) 
                 }
                 Ok(())
             })();
-            if let Err(e) = step { error.lock().unwrap().get_or_insert(e); }
+            if let Err(e) = step {
+                error.lock().unwrap().get_or_insert(e);
+            }
         })
     })??;
-    if let Some(e) = error.into_inner().unwrap() { return Err(e); }
+    if let Some(e) = error.into_inner().unwrap() {
+        return Err(e);
+    }
     out.extend(found.into_inner().unwrap());
-    for g in gone.into_inner().unwrap() { out.remove(&g); }
+    for g in gone.into_inner().unwrap() {
+        out.remove(&g);
+    }
     Ok(())
 }
 
@@ -543,6 +559,7 @@ pub(crate) fn scan_with_lstat(root: &Path, data: bool) -> Result<BTreeMap<String
                     use std::os::macos::fs::MetadataExt as MacMetadataExt;
                     (m.st_birthtime(), m.st_birthtime_nsec())
                 },
+                flags: std::os::macos::fs::MetadataExt::st_flags(&m),
             },
         );
         if m.is_dir() && (rel.is_empty() || !is_subvolume(&path)) {
@@ -645,6 +662,9 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
     let source = crate::tree::Tree::open(src)?;
     let target = crate::tree::Tree::open(dst)?;
     let mut entries = Vec::new();
+    let mut folders = Vec::new();
+    let mut first_link = HashMap::new();
+    let mut links = Vec::new();
     for rel in paths {
         // Descendants of a directory replaced by a symlink are deletions.
         let path = match crate::fsutil::safe_join(src, rel) {
@@ -660,8 +680,23 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
         };
         target.mkdirs_for(rel, None)?;
         match m.ftype {
-            crate::fsutil::FType::File | crate::fsutil::FType::Symlink => entries.push((rel, m)),
-            crate::fsutil::FType::Dir => target.mkdirs(rel, None)?,
+            crate::fsutil::FType::File => {
+                let metadata = fs::symlink_metadata(&path)?;
+                let key = (metadata.dev(), metadata.ino());
+                if metadata.nlink() > 1 {
+                    if let Some(first) = first_link.get(&key) {
+                        links.push((*first, rel));
+                        continue;
+                    }
+                    first_link.insert(key, rel);
+                }
+                entries.push((rel, m));
+            }
+            crate::fsutil::FType::Symlink => entries.push((rel, m)),
+            crate::fsutil::FType::Dir => {
+                target.mkdirs(rel, None)?;
+                folders.push(rel);
+            }
             crate::fsutil::FType::Special => bail!("cannot snapshot special file {}", src.join(rel).display()),
         }
     }
@@ -684,7 +719,18 @@ pub fn copy_selected(src: &Path, dst: &Path, paths: &std::collections::BTreeSet<
         };
         output.set_permissions(fs::Permissions::from_mode(m.mode & 0o7777))?;
         crate::fsutil::set_mtime(&output, metadata.mtime(), metadata.mtime_nsec())
-    })
+    })?;
+    for (first, rel) in links {
+        target.hard_link(first, rel)?;
+    }
+    use std::os::fd::AsFd;
+    for rel in folders.into_iter().rev() {
+        let from = source.open_folder(rel)?;
+        let to = target.open_folder(rel)?;
+        crate::fsutil::sync_saved_xattrs(&from, &to)?;
+        crate::sys::apfs_copy_acl_fd(from.as_fd(), to.as_fd())?;
+    }
+    Ok(())
 }
 /// Identity used to find moves. APFS clones, writes, and renames keep the creation time.
 /// A new inode, such as a safe save, has a new identity, as with btrfs inode numbers.
@@ -758,16 +804,28 @@ fn copy_tree(src: &Path, dst: &Path, root: bool, links: &mut BTreeMap<(u64, u64)
     }
     Ok(())
 }
+/// Seal a tree (`readonly`) or open it. A sealed tree has the immutable flag on its root and the
+/// seal entry in the ACL of every other entry (`sys::apfs_seal_entry`); an older store has the
+/// flag on every entry, and opening clears both. `for_delete` opens only what a delete needs:
+/// the folders (and the flag of any entry), with owner rights on each folder.
 pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> {
-    // One flag change per entry: several threads share them. A folder is opened before its
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    // One change per entry: several threads share them. A folder is opened before its
     // content is read, and sealed after its content.
     let open = |p: &Path| -> Result<bool> {
-        // The mode is read only when a delete needs it: one flag change is the whole cost otherwise.
+        // The mode is read only when a delete needs it: one change is the whole cost otherwise.
         if !for_delete {
             crate::sys::apfs_immutable(p, false)?;
             return Ok(false);
         }
         let m = fs::symlink_metadata(p)?;
+        if !m.is_dir() {
+            // The seal entry of a file allows its delete: only an immutable flag stops it.
+            if m.st_flags() & libc::UF_IMMUTABLE != 0 {
+                crate::sys::apfs_set_flags(p, m.st_flags(), m.st_flags() & !libc::UF_IMMUTABLE)?;
+            }
+            return Ok(false);
+        }
         crate::sys::apfs_immutable(p, false)?;
         if m.is_dir() && m.mode() & 0o700 != 0o700 {
             fs::set_permissions(p, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
@@ -807,7 +865,11 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
             each_parallel(&files, |f| open(f).map(|_| ()))
         };
         return if dirs.len().max(files.len()) >= PARALLEL_FROM {
-            crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(std::num::NonZeroUsize::new(dirs.len().max(files.len())).unwrap()), apply)?
+            crate::pools::run(
+                crate::pools::Priority::Foreground,
+                crate::pools::Width::Items(std::num::NonZeroUsize::new(dirs.len().max(files.len())).unwrap()),
+                apply,
+            )?
         } else {
             apply()
         };
@@ -822,18 +884,71 @@ pub(crate) fn seal(path: &Path, readonly: bool, for_delete: bool) -> Result<()> 
         }
         levels.push(sub);
     }
-    let apply = || -> Result<()> {
-        each_parallel(&files, |f| Ok(crate::sys::apfs_immutable(f, true)?))?;
-        for level in levels.iter().rev() {
-            each_parallel(level, |d| Ok(crate::sys::apfs_immutable(d, true)?))?;
+    let acl = acl_seal();
+    let user_acls = std::sync::Mutex::new(Vec::<String>::new());
+    let seal_one = |entry: &PathBuf| -> Result<()> {
+        if crate::sys::apfs_has_acl(entry)? {
+            user_acls.lock().unwrap().push(entry.strip_prefix(path)?.to_str().context("ACL path is not UTF-8")?.to_string());
         }
-        Ok(())
+        seal_entry(entry, acl)
+    };
+    let apply = || -> Result<()> {
+        each_parallel(&files, seal_one)?;
+        for level in levels.iter().skip(1).rev() {
+            each_parallel(level, seal_one)?;
+        }
+        // The root is immutable only after the ACL index is durable. Writable trees never use
+        // this index, because their ACLs can change without a Layr command.
+        crate::sys::apfs_immutable(path, false)?;
+        let mut paths = user_acls.lock().unwrap();
+        paths.sort();
+        let bytes = serde_json::to_vec(&*paths)?;
+        let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+        let written = crate::sys::apfs_attribute(path, c"com.layr.user-acls", Some(&bytes));
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        written?;
+        Ok(crate::sys::apfs_flag(path, true)?)
     };
     if files.len() >= PARALLEL_FROM || levels.iter().any(|level| level.len() >= PARALLEL_FROM) {
-        crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(std::num::NonZeroUsize::new(files.len().max(levels.iter().map(Vec::len).max().unwrap_or(0))).unwrap()), apply)?
+        crate::pools::run(
+            crate::pools::Priority::Foreground,
+            crate::pools::Width::Items(
+                std::num::NonZeroUsize::new(files.len().max(levels.iter().map(Vec::len).max().unwrap_or(0))).unwrap(),
+            ),
+            apply,
+        )?
     } else {
         apply()
     }
+}
+
+/// Seal one entry below the root of a tree. With `acl`, the seal entry in its ACL and no
+/// immutable flag (an entry of an older store, or of a copy of one, has it); else the flag.
+pub(crate) fn seal_entry(p: &Path, acl: bool) -> Result<()> {
+    if !acl {
+        return Ok(crate::sys::apfs_flag(p, true)?);
+    }
+    // Older snapshots carry the flag, which also prevents setting the ACL.
+    crate::sys::apfs_flag(p, false)?;
+    match crate::sys::apfs_seal_entry(p) {
+        Ok(()) => Ok(()),
+        // Some volumes keep no ACL on a symbolic link: it keeps the flag.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP)) => Ok(crate::sys::apfs_flag(p, true)?),
+        Err(e) => {
+            // Keep the entry protected if installing its new seal failed.
+            crate::sys::apfs_flag(p, true)?;
+            Err(e.into())
+        }
+    }
+}
+
+/// True when the seal entry of an ACL stops a write by this process: always, except for the root
+/// user, which ACLs do not stop (the root service). It seals with the immutable flag on each
+/// entry, as before; so does `LAYR_APFS_FLAG_SEAL=1`. An entry that keeps no ACL (a symbolic link
+/// on some volumes) gets the flag (`seal_entry`).
+pub(crate) fn acl_seal() -> bool {
+    std::env::var_os("LAYR_APFS_FLAG_SEAL").is_none() && !rustix::process::geteuid().is_root()
 }
 
 /// Below this workload, thread startup costs more than it saves.
@@ -844,10 +959,14 @@ fn each_parallel<T: Sync>(items: &[T], f: impl Fn(&T) -> Result<()> + Send + Syn
     if items.len() < PARALLEL_FROM {
         return items.iter().try_for_each(f);
     }
-    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(std::num::NonZeroUsize::new(items.len()).unwrap()), || {
-        use rayon::prelude::*;
-        items.par_iter().map(f).collect::<Vec<_>>().into_iter().collect()
-    })?
+    crate::pools::run(
+        crate::pools::Priority::Foreground,
+        crate::pools::Width::Items(std::num::NonZeroUsize::new(items.len()).unwrap()),
+        || {
+            use rayon::prelude::*;
+            items.par_iter().map(f).collect::<Vec<_>>().into_iter().collect()
+        },
+    )?
 }
 /// True when a scanned tree needs file-by-file copies: special files, nested layers, or hard
 /// links (a recursive clone copies hard links as separate files).
@@ -862,11 +981,7 @@ pub(crate) fn needs_file_copies(_src: &Path, entries: &BTreeMap<String, ScanEntr
 
 /// Folders inside the tree that are trees of their own (nested layers).
 fn nested_layers<'a>(src: &Path, entries: &'a BTreeMap<String, ScanEntry>) -> Vec<&'a String> {
-    entries
-        .iter()
-        .filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p)))
-        .map(|(p, _)| p)
-        .collect()
+    entries.iter().filter(|(p, e)| !p.is_empty() && e.meta.is_dir() && is_subvolume(&src.join(p))).map(|(p, _)| p).collect()
 }
 
 /// Copy the complete tree `src` (scanned as `entries`) to the new path `dst`. A read-only copy
@@ -894,7 +1009,7 @@ fn clone_complete_with(
     let linked: BTreeSet<&str> = if keep_links { hard_linked(entries) } else { BTreeSet::new() };
     if nested.is_empty() && linked.is_empty() {
         let _t = crate::trace::span("APFS clone root");
-        crate::sys::apfs_clone(src, dst)?;
+        crate::thin::clone_from_source(src, dst)?;
     } else {
         let _t =
             crate::trace::span(format!("APFS clone around {} nested layers and {} linked files", nested.len(), linked.len()));
@@ -917,9 +1032,43 @@ fn clone_complete_with(
     }
     if readonly {
         crate::sys::apfs_immutable(dst, false)?;
+    } else if nested.is_empty() && linked.is_empty() && !clone_keeps_seals(src, dst, entries)? {
+        // A folder clone carries the flags of the entries but not their ACLs: only the entries
+        // with the immutable flag (an older store) need a change. A tree sealed by `seal` has
+        // none below its root, so a new line costs the clone alone.
+        let _t = crate::trace::span("APFS open flagged entries");
+        crate::sys::apfs_immutable(dst, false)?;
+        let flagged: Vec<(&String, &ScanEntry)> =
+            entries.iter().filter(|(rel, e)| !rel.is_empty() && e.flags & libc::UF_IMMUTABLE != 0).collect();
+        each_parallel(&flagged, |(rel, e)| {
+            match crate::sys::apfs_set_flags(&dst.join(rel), e.flags, e.flags & !libc::UF_IMMUTABLE) {
+                // An entry that a writer removed during the copy: the scan after the copy sees the change.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => Ok(other?),
+            }
+        })?;
     } else {
         let _t = crate::trace::span("APFS unseal copy");
         seal(dst, false, false)?;
+    }
+    if crate::thin::read_source(crate::sys::apfs_has_acl(src), src)? {
+        crate::sys::apfs_copy_user_acl(src, dst)?;
+    }
+    let user_acls: Vec<String> = if entries.get("").is_some_and(|e| e.flags & libc::UF_IMMUTABLE != 0) {
+        match crate::sys::apfs_attribute(src, c"com.layr.user-acls", None) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.raw_os_error() == Some(libc::ENOATTR) => user_acl_paths(src, entries)?,
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        user_acl_paths(src, entries)?
+    };
+    for rel in user_acls {
+        let from = crate::fsutil::safe_join(src, &rel)?;
+        let to = crate::fsutil::safe_join(dst, &rel)?;
+        if to.symlink_metadata().is_ok() {
+            crate::sys::apfs_copy_user_acl(&from, &to)?;
+        }
     }
     // A folder clone gives the folders the time of the clone; a btrfs snapshot keeps them.
     // They get the times of the source, from its scan.
@@ -933,16 +1082,51 @@ fn clone_complete_with(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !rel.is_empty() => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let sealed = m.st_flags() & libc::UF_IMMUTABLE != 0;
-        if sealed {
-            crate::sys::apfs_immutable(&p, false)?;
+        let flagged = m.st_flags() & libc::UF_IMMUTABLE != 0;
+        if !flagged {
+            match crate::sys::apfs_mtime(&p, e.fingerprint.4, e.fingerprint.5) {
+                // A folder with the seal entry (a clone of one sealed folder) refuses the time.
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied && crate::sys::apfs_has_seal_entry(&p)? => {}
+                other => return Ok(other?),
+            }
+            crate::sys::apfs_unseal_entry(&p)?;
+            crate::sys::apfs_mtime(&p, e.fingerprint.4, e.fingerprint.5)?;
+            return Ok(crate::sys::apfs_seal_entry(&p)?);
         }
+        crate::sys::apfs_immutable(&p, false)?;
         crate::sys::apfs_mtime(&p, e.fingerprint.4, e.fingerprint.5)?;
-        if sealed {
-            crate::sys::apfs_immutable(&p, true)?;
-        }
+        crate::sys::apfs_immutable(&p, true)?;
         Ok(())
     })
+}
+
+fn user_acl_paths(src: &Path, entries: &BTreeMap<String, ScanEntry>) -> Result<Vec<String>> {
+    let paths = std::sync::Mutex::new(Vec::new());
+    let names: Vec<&String> = entries.keys().filter(|p| !p.is_empty()).collect();
+    each_parallel(&names, |rel| {
+        match crate::sys::apfs_has_acl(&src.join(rel)) {
+            Ok(true) => paths.lock().unwrap().push((*rel).clone()),
+            Ok(false) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    })?;
+    Ok(paths.into_inner().unwrap())
+}
+
+/// True when the folder clone `dst` of `src` kept the seal entries of the entries below its root.
+/// APFS clones of a folder drop them; one file and one folder of the copy are checked, so a
+/// system that copies them gets the full pass over the copy instead of sealed files in a line.
+fn clone_keeps_seals(src: &Path, dst: &Path, entries: &BTreeMap<String, ScanEntry>) -> Result<bool> {
+    let file = entries.iter().find(|(rel, e)| !rel.is_empty() && e.meta.is_file()).map(|(rel, _)| rel);
+    let dir = entries.iter().find(|(rel, e)| !rel.is_empty() && e.meta.is_dir()).map(|(rel, _)| rel);
+    for rel in file.into_iter().chain(dir) {
+        if crate::sys::apfs_has_seal_entry(&src.join(rel)).unwrap_or(false) && crate::sys::apfs_has_seal_entry(&dst.join(rel))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The files of a scan that have more than one link inside it (the members of each hard link group).
@@ -981,7 +1165,8 @@ fn clone_around(
     fs::create_dir(&to)?;
     for e in fs::read_dir(&from)? {
         let name = e?.file_name();
-        let child = if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
+        let child =
+            if rel.is_empty() { name.to_string_lossy().into_owned() } else { format!("{rel}/{}", name.to_string_lossy()) };
         let (cfrom, cto) = (from.join(&name), to.join(&name));
         if nested.contains(child.as_str()) {
             let cm = fs::symlink_metadata(&cfrom)?;
@@ -1129,7 +1314,7 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
         let _t = crate::trace::span("APFS scan before");
         scan(src)?
     };
-    let temp = dst.with_file_name(format!(".apfs-{}", crate::ids::new_id()));
+    let temp = dst.with_file_name(format!(".apfs-{}", crate::store::temp_name()));
     let mut published = false;
     let result = (|| -> Result<BTreeMap<String, ScanEntry>> {
         let mut before = before;
@@ -1290,12 +1475,17 @@ pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanE
 }
 /// Candidates with the exact changed ranges of every changed file.
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
-    candidates_of(parent, child, true)
+    candidates_of(parent, child, true, false)
 }
 
 /// Candidates for callers that only ask whether content differs: a changed file has no ranges.
 pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
-    candidates_of(parent, child, false)
+    candidates_of(parent, child, false, false)
+}
+
+/// Candidate paths for object imports also include nanosecond-only time changes.
+pub fn candidates_with_times(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+    candidates_of(parent, child, true, true)
 }
 
 thread_local! {
@@ -1311,13 +1501,18 @@ pub(crate) fn with_stored_compare<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-fn candidates_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), exact: bool) -> Result<Vec<crate::changes::Change>> {
+fn candidates_of(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    exact: bool,
+    times: bool,
+) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("APFS candidates");
     let (a, b) = match top_layer_scans(parent, child)? {
         Some(both) => both,
         None => (scan_src(parent)?, scan_src(child)?),
     };
-    candidates_scanned_with(parent, child, a, b, exact)
+    candidates_scanned_with(parent, child, a, b, exact, times)
 }
 
 /// The entries that can differ when `parent` is the direct base of the thin tree `child`: those
@@ -1402,7 +1597,7 @@ pub(crate) fn candidates_scanned(
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
 ) -> Result<Vec<crate::changes::Change>> {
-    candidates_scanned_with(parent, child, a, b, false)
+    candidates_scanned_with(parent, child, a, b, false, false)
 }
 
 /// `candidates` from given scans of both trees. `exact` computes the changed ranges of changed
@@ -1413,12 +1608,17 @@ fn candidates_scanned_with(
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
     exact: bool,
+    times: bool,
 ) -> Result<Vec<crate::changes::Change>> {
     // An entry that both trees have with the same metadata and shared data is no candidate, as
     // the btrfs stream would not name it: no `Change` for it.
     let same_meta = |x: &ScanEntry, y: &ScanEntry| {
         let (m, n) = (&x.meta, &y.meta);
-        m.ftype == n.ftype && m.mode == n.mode && m.uid == n.uid && m.gid == n.gid
+        m.ftype == n.ftype
+            && m.mode == n.mode
+            && m.uid == n.uid
+            && m.gid == n.gid
+            && (!times || (x.fingerprint.4, x.fingerprint.5) == (y.fingerprint.4, y.fingerprint.5))
     };
     let unchanged = |p: &String| match (a.get(p), b.get(p)) {
         (Some(x), Some(y)) if same_meta(x, y) && x.meta.is_dir() => true,
@@ -1434,22 +1634,34 @@ fn candidates_scanned_with(
     };
     let mut names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty() && !unchanged(s)).collect();
     if STORED_COMPARE.get() {
-        // A file with the same data can differ in extended attributes or ACL alone: a state keeps
-        // them, so it is a change. Paths are read in threads, as `thin::diff` does.
+        // A file or directory can differ only in extended attributes or ACLs.
+        // Object imports need both; other callers retain the existing file-only scan.
         let same_data: Vec<&String> = a
             .iter()
-            .filter(|(p, x)| !p.is_empty() && x.meta.is_file() && b.get(*p).is_some_and(|y| y.meta.is_file()) && unchanged(p))
+            .filter(|(p, x)| {
+                !p.is_empty()
+                    && (x.meta.is_file() || x.meta.is_dir())
+                    && b.get(*p).is_some_and(|y| y.meta.ftype == x.meta.ftype)
+                    && unchanged(p)
+            })
             .map(|(p, _)| p)
             .collect();
         let stored_differ: Vec<&String> = if let Some(width) = std::num::NonZeroUsize::new(same_data.len()) {
-            crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
-            use rayon::prelude::*;
-            same_data.par_iter().copied().filter(|p| match (parent.at(p), child.at(p)) {
-                (Ok(x), Ok(y)) => !crate::thin::stored_metadata_same(&x, &y).unwrap_or(false),
-                _ => false,
-            }).collect()
-            })?
-        } else { Vec::new() };
+            let checked = crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
+                use rayon::prelude::*;
+                same_data
+                    .par_iter()
+                    .copied()
+                    .map(|p| -> Result<Option<&String>> {
+                        let (x, y) = (parent.at(p)?, child.at(p)?);
+                        Ok((!crate::thin::stored_metadata_same(&x, &y)?).then_some(p))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })??;
+            checked.into_iter().flatten().collect()
+        } else {
+            Vec::new()
+        };
         names.extend(stored_differ);
     }
     let mut changes: BTreeMap<_, _> = names
@@ -1600,14 +1812,22 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
 
 /// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,
 /// and the first error in that order is returned.
-fn changed_ranges_all(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), paths: &[String]) -> Result<Vec<Vec<(u64, u64)>>> {
+fn changed_ranges_all(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    paths: &[String],
+) -> Result<Vec<Vec<(u64, u64)>>> {
     if paths.len() < PARALLEL_FROM {
         return paths.iter().map(|p| changed_ranges(parent, child, p)).collect();
     }
-    crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(std::num::NonZeroUsize::new(paths.len()).unwrap()), || {
-        use rayon::prelude::*;
-        paths.par_iter().map(|p| changed_ranges(parent, child, p)).collect::<Vec<_>>().into_iter().collect()
-    })?
+    crate::pools::run(
+        crate::pools::Priority::Foreground,
+        crate::pools::Width::Items(std::num::NonZeroUsize::new(paths.len()).unwrap()),
+        || {
+            use rayon::prelude::*;
+            paths.par_iter().map(|p| changed_ranges(parent, child, p)).collect::<Vec<_>>().into_iter().collect()
+        },
+    )?
 }
 
 // Compare fixed blocks when APFS cannot report changed extents. Adjacent blocks coalesce.
@@ -1727,6 +1947,105 @@ mod tests {
         assert_eq!(crate::sys::apfs_data_identity(&source)?.clone_id, identity);
         fs::write(&source, b"new cache output")?;
         assert_eq!(fs::read(&reference)?, vec![42; 1024 * 1024]);
+        Ok(())
+    }
+
+    /// Every entry of a tree, except the root, with (immutable flag, seal entry).
+    fn seals_of(root: &Path) -> Result<BTreeMap<String, (bool, bool)>> {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        let mut out = BTreeMap::new();
+        for rel in scan(root)?.into_keys().filter(|r| !r.is_empty()) {
+            let p = root.join(&rel);
+            let flag = fs::symlink_metadata(&p)?.st_flags() & libc::UF_IMMUTABLE != 0;
+            out.insert(rel, (flag, crate::sys::apfs_has_seal_entry(&p)?));
+        }
+        Ok(out)
+    }
+
+    /// A sealed tree has the seal entry on every entry below its root (where the volume applies
+    /// it) and the flag on the root. Writes, new entries and deletes fail; a folder clone carries
+    /// no seal, so a writable copy needs no pass; a copy of one sealed file carries none either. A
+    /// tree of an older store (the flag on every entry) still gives a writable copy.
+    #[test]
+    #[ignore = "requires an APFS test volume"]
+    fn sealed_trees_clone_writable_without_a_pass() -> Result<()> {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        create_subvolume(&src)?;
+        fs::create_dir_all(src.join("dir/deep"))?;
+        fs::write(src.join("dir/file"), b"data")?;
+        fs::write(src.join("dir/deep/more"), b"more")?;
+        std::os::unix::fs::symlink("dir/file", src.join("link"))?;
+        let sealed = s.0.join("sealed");
+        snapshot(&src, &sealed, true)?;
+        let acl = acl_seal();
+        assert!(fs::symlink_metadata(&sealed)?.st_flags() & libc::UF_IMMUTABLE != 0, "the root has the flag");
+        for (rel, (flag, entry)) in seals_of(&sealed)? {
+            let symlink = rel == "link";
+            assert!(flag || entry, "{rel} is sealed");
+            if acl && !symlink {
+                assert!(entry && !flag, "{rel} has the seal entry and no flag");
+            }
+        }
+        assert!(fs::OpenOptions::new().append(true).open(sealed.join("dir/file")).is_err(), "a sealed file refuses a write");
+        assert!(fs::write(sealed.join("dir/new"), b"x").is_err(), "a sealed folder refuses a new entry");
+        assert!(fs::remove_file(sealed.join("dir/file")).is_err(), "a sealed folder refuses a delete");
+        // A copy of one sealed file carries no seal.
+        let one = s.0.join("one");
+        crate::sys::apfs_clone(&sealed.join("dir/file"), &one)?;
+        if acl {
+            assert!(!crate::sys::apfs_has_seal_entry(&one)?, "a file clone leaves the inherited seal entry out");
+        }
+        fs::remove_file(&one).or_else(|_| delete_tree(&one))?;
+        // A writable copy: no seal on any entry, and every entry can change.
+        let line = s.0.join("line");
+        snapshot(&sealed, &line, false)?;
+        assert!(fs::symlink_metadata(&line)?.st_flags() & libc::UF_IMMUTABLE == 0);
+        for (rel, seal) in seals_of(&line)? {
+            assert_eq!(seal, (false, false), "{rel} of a writable copy is open");
+        }
+        fs::write(line.join("dir/file"), b"changed")?;
+        fs::write(line.join("dir/new"), b"new")?;
+        assert_eq!(fs::read(sealed.join("dir/file"))?, b"data");
+        // A tree of an older store: the flag on every entry.
+        let old = s.0.join("old");
+        snapshot(&src, &old, false)?;
+        for rel in scan(&old)?.into_keys().filter(|r| !r.is_empty()) {
+            crate::sys::apfs_flag(&old.join(rel), true)?;
+        }
+        crate::sys::apfs_flag(&old, true)?;
+        let from_old = s.0.join("from-old");
+        snapshot(&old, &from_old, false)?;
+        for (rel, seal) in seals_of(&from_old)? {
+            assert_eq!(seal, (false, false), "{rel} of a writable copy of an older tree is open");
+        }
+        // The seal entry is no ACL content: an entry with another ACL entry keeps it, and the
+        // text of its ACL is the same with and without the seal.
+        if acl {
+            let user = s.0.join("user-acl");
+            fs::write(&user, b"x")?;
+            assert!(std::process::Command::new("/bin/chmod").arg("+a").arg("everyone allow read").arg(&user).status()?.success());
+            let plain = crate::sys::apfs_acl_text(&user)?;
+            assert!(plain.is_some());
+            crate::sys::apfs_seal_entry(&user)?;
+            assert!(crate::sys::apfs_has_seal_entry(&user)?);
+            assert_eq!(crate::sys::apfs_acl_text(&user)?, plain);
+            assert!(crate::sys::apfs_has_acl(&user)?);
+            crate::sys::apfs_unseal_entry(&user)?;
+            assert!(!crate::sys::apfs_has_seal_entry(&user)?);
+            assert_eq!(crate::sys::apfs_acl_text(&user)?, plain);
+            let only = s.0.join("only-seal");
+            fs::write(&only, b"x")?;
+            crate::sys::apfs_seal_entry(&only)?;
+            assert_eq!(crate::sys::apfs_acl_text(&only)?, None);
+            assert!(!crate::sys::apfs_has_acl(&only)?);
+            crate::sys::apfs_unseal_entry(&only)?;
+        }
+        // A delete opens what it needs, in both formats.
+        delete_tree(&sealed)?;
+        delete_tree(&old)?;
+        assert!(!sealed.exists() && !old.exists());
         Ok(())
     }
 
@@ -2044,6 +2363,34 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
+    fn object_candidates_keep_attribute_only_changes() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("source");
+        create_subvolume(&src).context("create")?;
+        fs::create_dir(src.join("folder")).context("mkdir source")?;
+        fs::write(src.join("file"), b"unchanged").context("write source")?;
+        let base = s.0.join("base");
+        fs::create_dir_all(base.join("folder")).context("mkdir base")?;
+        crate::sys::apfs_clone(&src.join("file"), &base.join("file")).context("clone file")?;
+        let folder_time = fs::symlink_metadata(src.join("folder")).context("stat folder")?;
+        crate::sys::apfs_mtime(&base.join("folder"), folder_time.mtime(), folder_time.mtime_nsec()).context("set base time")?;
+        for name in ["file", "folder"] {
+            let path = src.join(name);
+            let m = fs::symlink_metadata(&path).context("stat input")?;
+            crate::sys::apfs_attribute(&path, c"user.layr-test", Some(b"changed")).context("set attribute")?;
+            crate::sys::apfs_mtime(&path, m.mtime(), m.mtime_nsec()).context("restore time")?;
+        }
+        let (changed, dirty) = crate::changes::object_candidates(&base, &src).context("object candidates")?;
+        assert!(changed.contains(&b"file".to_vec()), "file attributes are missing: {changed:?}");
+        assert!(
+            dirty.contains(&b"folder".to_vec()) || changed.contains(&b"folder".to_vec()),
+            "folder attributes are missing: {changed:?}, {dirty:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
     fn copies_keep_the_times_of_folders() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("src");
@@ -2224,8 +2571,9 @@ pub(crate) struct Copier {
     shared: HashMap<u64, Vec<(Vec<(u64, u64, u64)>, PathBuf)>>,
     /// (device, inode) -> the first copy of a file with several names.
     links: HashMap<(u64, u64), PathBuf>,
-    /// Sealed entries of the source, children before their folders.
-    seals: Vec<PathBuf>,
+    /// Sealed entries of the copy, children before their folders, with the seal of the source
+    /// entry: true for the immutable flag, false for the seal entry of the ACL.
+    seals: Vec<(PathBuf, bool)>,
 }
 
 /// Give the copy the owner and group of the source (the copy runs as the owner or as root).
@@ -2233,9 +2581,14 @@ fn own(dst: &Path, m: &fs::Metadata) -> Result<()> {
     std::os::unix::fs::lchown(dst, Some(m.uid()), Some(m.gid())).with_context(|| format!("owner of {}", dst.display()))
 }
 
-fn sealed(m: &fs::Metadata) -> bool {
+/// The seal of the source entry `src`: `Some(true)` for the immutable flag, `Some(false)` for
+/// the seal entry of its ACL.
+fn sealed(src: &Path, m: &fs::Metadata) -> Result<Option<bool>> {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
-    m.st_flags() & libc::UF_IMMUTABLE != 0
+    if m.st_flags() & libc::UF_IMMUTABLE != 0 {
+        return Ok(Some(true));
+    }
+    Ok(crate::sys::apfs_has_seal_entry(src)?.then_some(false))
 }
 
 impl Copier {
@@ -2266,8 +2619,8 @@ impl Copier {
         own(dst, m)?;
         fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))?;
         crate::fsutil::set_mtime(&File::open(dst)?, m.mtime(), m.mtime_nsec())?;
-        if sealed(m) {
-            self.seals.push(dst.to_path_buf());
+        if let Some(flag) = sealed(src, m)? {
+            self.seals.push((dst.to_path_buf(), flag));
         }
         Ok(())
     }
@@ -2277,8 +2630,8 @@ impl Copier {
         if m.nlink() > 1 {
             if let Some(first) = self.links.get(&link) {
                 fs::hard_link(first, dst).with_context(|| format!("link {}", dst.display()))?;
-                if sealed(m) {
-                    self.seals.push(dst.to_path_buf());
+                if let Some(flag) = sealed(src, m)? {
+                    self.seals.push((dst.to_path_buf(), flag));
                 }
                 return Ok(());
             }
@@ -2290,7 +2643,9 @@ impl Copier {
             None => None,
         };
         let same = match (identity.clone_id, &extents) {
-            (Some(id), Some(extents)) => self.shared.get(&id).and_then(|copies| copies.iter().find(|(e, _)| e == extents)).map(|(_, p)| p.clone()),
+            (Some(id), Some(extents)) => {
+                self.shared.get(&id).and_then(|copies| copies.iter().find(|(e, _)| e == extents)).map(|(_, p)| p.clone())
+            }
             _ => None,
         };
         let cloned = match same {
@@ -2302,7 +2657,11 @@ impl Copier {
         };
         if !cloned {
             let mut from = File::open(src).with_context(|| format!("open {}", src.display()))?;
-            let mut to = fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
+            let mut to = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)
+                .with_context(|| format!("create {}", dst.display()))?;
             io::copy(&mut from, &mut to).with_context(|| format!("copy {}", src.display()))?;
         }
         crate::sys::apfs_copy_metadata(src, dst).with_context(|| format!("copy metadata {}", dst.display()))?;
@@ -2317,8 +2676,8 @@ impl Copier {
         if m.nlink() > 1 {
             self.links.insert(link, dst.to_path_buf());
         }
-        if sealed(m) {
-            self.seals.push(dst.to_path_buf());
+        if let Some(flag) = sealed(src, m)? {
+            self.seals.push((dst.to_path_buf(), flag));
         }
         Ok(())
     }
@@ -2333,8 +2692,12 @@ impl Copier {
 
     /// Seal the copied entries as the source is sealed (children before folders).
     pub(crate) fn finish(self) -> Result<()> {
-        for path in &self.seals {
-            crate::sys::apfs_immutable(path, true)?;
+        for (path, flag) in &self.seals {
+            if *flag || !acl_seal() {
+                crate::sys::apfs_immutable(path, true)?;
+            } else {
+                crate::sys::apfs_seal_entry(path)?;
+            }
         }
         Ok(())
     }

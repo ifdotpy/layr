@@ -45,6 +45,38 @@ fn repo_key(url: &str) -> String {
 /// The results of the passes, in the project meta folder. Local to this machine.
 const RESULTS: &str = "follow.json";
 
+#[derive(Default, Deserialize, Serialize)]
+struct StoreCaches {
+    remote: String,
+    head: String,
+    folders: BTreeMap<String, SeenCaches>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum SeenCaches {
+    One(String),
+    Many(BTreeSet<String>),
+}
+
+impl SeenCaches {
+    fn contains(&self, id: &str) -> bool {
+        match self {
+            Self::One(value) => value == id,
+            Self::Many(values) => values.contains(id),
+        }
+    }
+
+    fn insert(&mut self, id: String) {
+        match self {
+            Self::One(value) => *self = Self::Many(BTreeSet::from([value.clone(), id])),
+            Self::Many(values) => {
+                values.insert(id);
+            }
+        }
+    }
+}
+
 /// The config key of a line's follow target. The only code that builds the key.
 pub fn config_key(line_id: &str) -> String {
     format!("{KEY_PREFIX}{line_id}")
@@ -161,6 +193,25 @@ fn has_unsaved(st: &Status) -> bool {
     !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicts.is_empty())
 }
 
+/// The build is useful only when the head stays unchanged for the whole build.
+fn build_for_stable_head(
+    head: impl Fn() -> Result<String>,
+    mut build: impl FnMut() -> bool,
+    mut moved: impl FnMut(&str),
+) -> Result<Option<String>> {
+    let mut before = head()?;
+    for _ in 0..3 {
+        let built = build();
+        let after = head()?;
+        if before == after {
+            return Ok(built.then_some(after));
+        }
+        moved(&after);
+        before = after;
+    }
+    Ok(None)
+}
+
 impl<'a> Repo<'a> {
     /// One follow pass of `line` (docs/follow.md). `ctx.cwd` must be the working folder of the line:
     /// the fetch and the cache save are the commands, which run in that folder. Takes the project
@@ -204,8 +255,20 @@ impl<'a> Repo<'a> {
         pending: &mut Option<Refused>,
     ) -> Result<Option<String>> {
         let rb = format!("{remote}/{branch}");
-        remote::git::fetch(ctx, &[remote.to_string(), branch.to_string(), "-q".to_string()])?;
-        let fetched = revs::resolve(self, Some(line), &rb)?;
+        let is_store = self.p.config_value(&format!("cloud.remote.{remote}.url"))?.is_some();
+        let fetched = if is_store {
+            if branch != "main" || remote::kind(&remote::remote_url(self, remote)?)? != remote::Kind::Store {
+                bail!("Layr follow requires a store remote and main");
+            }
+            let code = remote::fetch(ctx, &[remote.to_string(), "--heads".into(), "-q".into()])?;
+            if code != 0 {
+                bail!("fetch of {remote} was incomplete");
+            }
+            crate::store_remote::open_named(remote, self)?.verified_main_head(ctx)?
+        } else {
+            remote::git::fetch(ctx, &[remote.to_string(), branch.to_string(), "-q".to_string()])?;
+            revs::resolve(self, Some(line), &rb)?
+        };
         let head = self.line(&line.id)?.head;
         if fetched == head || self.is_ancestor(&fetched, &head)? {
             // A pass that merged but saved no cache (it stopped, or an older layr ran it) leaves the head without
@@ -213,7 +276,7 @@ impl<'a> Repo<'a> {
             // with the head, the next passes do nothing.
             let now = self.line(&line.id)?;
             let behind = self.caches_behind_head(&now)?;
-            if behind.is_empty() {
+            if behind.is_empty() && !(is_store && fetched == head) {
                 return Ok(Some("up to date".into()));
             }
             {
@@ -222,8 +285,22 @@ impl<'a> Repo<'a> {
                     return Ok(Some("up to date; caches not saved: unsaved work".into()));
                 }
             }
-            // No merge ran, so no cache of another line is taken: the line's own caches are built and saved.
+            let cache_result = if is_store && fetched == head {
+                self.take_store_follow_caches(ctx, line, remote, &fetched)
+            } else {
+                Ok(Vec::new())
+            };
+            if behind.is_empty() && cache_result.as_ref().is_ok_and(Vec::is_empty) {
+                return Ok(Some("up to date".into()));
+            }
+            let remote_taken = cache_result.as_ref().is_ok_and(|folders| !folders.is_empty());
+            let cache_error = cache_result.err();
+            if behind.is_empty() && cache_error.is_some() {
+                return Ok(Some(format!("up to date; remote cache not taken: {:#}", cache_error.unwrap())));
+            }
             return Ok(Some(match self.take_follow_caches(ctx, line, Vec::new(), Some(&head), true) {
+                Ok(_) if cache_error.is_some() => format!("up to date; remote cache not taken: {:#}", cache_error.unwrap()),
+                Ok(_) if remote_taken && behind.is_empty() => "up to date; remote caches taken and saved".into(),
                 Ok(_) => format!("up to date; caches saved with the head ({})", behind.join(", ")),
                 Err(e) => format!("up to date; caches not saved: {e:#}"),
             }));
@@ -243,19 +320,80 @@ impl<'a> Repo<'a> {
         args.values.insert("--expect".into(), vec![fetched.clone()]);
         args.flags.insert("-q".into(), 1);
         args.flags.insert(mergecmd::REFUSE_CONFLICTS.into(), 1);
-        let code = mergecmd::merge_rev(ctx, self, line, &rb, &args)?;
+        let code = mergecmd::merge_rev(ctx, self, line, if is_store { &fetched } else { &rb }, &args)?;
         if code != 0 {
             bail!("merge of {rb} left conflicts");
         }
         let after = self.line(&line.id)?.head;
         let short = ids::short(&fetched);
         let mut text = if after == fetched { format!("fast-forward to {short}") } else { format!("merged {short}") };
+        let cache_error =
+            if is_store && after == fetched { self.take_store_follow_caches(ctx, line, remote, &fetched).err() } else { None };
+        if let Some(e) = cache_error {
+            text.push_str(&format!("; remote cache not taken: {e:#}"));
+        }
         match self.follow_caches(ctx, line, remote, &head) {
             Ok((taken, Some(reason))) if taken.is_empty() => text.push_str(&format!("; no cache taken: {reason}")),
             Ok(_) => {}
             Err(e) => text.push_str(&format!("; caches not taken: {e:#}")),
         }
         Ok(Some(text))
+    }
+
+    fn take_store_follow_caches(&self, ctx: &Ctx, line: &Line, remote: &str, head: &str) -> Result<Vec<String>> {
+        let mut repo = Repo::open(ctx, &self.p.name)?;
+        let mut store = crate::store_remote::open_named(remote, &repo)?;
+        store.configure(ctx, &crate::store_remote::ConfigureOptions::default())?;
+        let opts = crate::store_remote::Options {
+            auto: true,
+            caches: true,
+            heads: true,
+            caches_of_state: Some(head.to_string()),
+            ..Default::default()
+        };
+        let report = store.fetch(ctx, &mut repo, &opts)?;
+        if !report.missing_lines.is_empty() {
+            bail!("fetch of {remote} was incomplete");
+        }
+        let _line_lock = self.line_lock(line)?;
+        let now = {
+            let _lock = self.p.lock()?;
+            let now = self.line(&line.id)?;
+            if now.head != head || has_unsaved(&self.locked_status_report(&now)?) {
+                bail!("line changed during cache fetch");
+            }
+            now
+        };
+        let path = self.p.meta_dir().join("line-locks").join(format!("{}.follow-caches", line.id));
+        let mut recorded: StoreCaches = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("reading follow cache state")?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreCaches::default(),
+            Err(e) => return Err(e.into()),
+        };
+        if recorded.remote != remote || recorded.head != head {
+            recorded = StoreCaches { remote: remote.to_string(), head: head.to_string(), folders: BTreeMap::new() };
+        }
+        let overlays = self.folder_overlays()?;
+        let all: BTreeSet<String> = overlays.iter().map(|(_, folder)| folder.clone()).collect();
+        let mut folders = Vec::new();
+        let source = Source::ExactState(head, &line.id, None);
+        for (name, folder) in overlays {
+            let key = self.cache_key(ctx, &name, &self.working(&now), self.owner_ids(&now).0)?;
+            let Some(id) = self.cache_source(&name, &source, self.owner_ids(&now).0, &key)? else { continue };
+            if recorded.folders.get(&folder).is_some_and(|seen| seen.contains(&id)) {
+                continue;
+            }
+            let skip = all.iter().filter(|f| *f != &folder).cloned().collect();
+            let exact = Source::ExactState(head, &line.id, Some(&id));
+            let taken = self.pull_caches(ctx, &now, &exact, &skip)?;
+            if !taken.is_empty() {
+                recorded.folders.entry(folder.clone()).and_modify(|seen| seen.insert(id.clone())).or_insert(SeenCaches::One(id));
+                crate::fsutil::atomic_write(&path, &serde_json::to_vec(&recorded)?, 0o600)?;
+                folders.push(folder);
+            }
+        }
+        crate::source_times::apply(&self.working(line), &folders)?;
+        Ok(folders)
     }
 
     /// The caches after a merge (docs/cache-overlays.md): the candidates of `remote`, newest first.
@@ -283,6 +421,14 @@ impl<'a> Repo<'a> {
         before: Option<&str>,
         warm: bool,
     ) -> Result<(Vec<(String, String)>, Option<String>)> {
+        // Cache saves wait for this build, while ordinary head saves can trigger a retry.
+        let _cache_lock = if warm { Some(self.cache_build_lock(line)?) } else { None };
+        let preparation_lock = self.line_lock(line)?;
+        let line = &self.line(&line.id)?;
+        // A crash at any later step must leave a followed line due for another build.
+        if target(self, line)?.is_some() {
+            self.set_unbuilt(line, true)?;
+        }
         let folders: BTreeSet<String> = self.folder_overlays()?.into_iter().map(|(_, f)| f).collect();
         let mut done = BTreeSet::new();
         let mut taken = Vec::new();
@@ -316,26 +462,69 @@ impl<'a> Repo<'a> {
         }
         // A change without a cache (a merge on the remote of a branch with no line here) leaves units to build. The
         // build runs once here, so the lines from this line start warm (docs/follow.md).
-        let mut built = true;
+        // Cache transfer is complete. Allow a head save during the build and check it again.
         if warm {
-            for folder in &folders {
-                built &= self.warm_cache_folder(line, folder);
-            }
+            drop(preparation_lock);
         }
+        let mut paused = false;
+        let built_head = if warm {
+            build_for_stable_head(
+                || Ok(self.line(&line.id)?.head),
+                || {
+                    let built = folders.iter().fold(true, |all, folder| self.warm_cache_folder(line, folder) & all);
+                    if !paused {
+                        if let Some(ms) =
+                            std::env::var("LAYR_TEST_FOLLOW_AFTER_BUILD_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok())
+                        {
+                            eprintln!("layr: test pause after follow build");
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        paused = true;
+                    }
+                    built
+                },
+                |head| eprintln!("layr: line {} moved to {head} during the cache build; building again", line.name),
+            )?
+        } else {
+            None
+        };
         // Prunes each taken folder, then saves the caches of the line.
         // The follow pass runs in the background, so its prune may take long on a loaded machine.
         let save = || admin::save(ctx, &["--caches".to_string(), "-q".to_string()]);
         if warm {
-            Repo::with_prune_limit(crate::cache_hook::BACKGROUND_PRUNE_LIMIT, save)?;
-        } else {
-            save()?;
+            if let Some(ms) = std::env::var("LAYR_TEST_FOLLOW_BEFORE_PUBLISH_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                eprintln!("layr: test pause before follow cache publish");
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            // Hold the line lock through the final comparison, cache save and mark update. A
+            // save on the line cannot move the head between this check and publishing the cache.
+            let _publication_lock = self.line_lock(line)?;
+            for variable in ["LAYR_TEST_FOLLOW_CACHE_BARRIER", "LAYR_TEST_FOLLOW_MARK_BARRIER"] {
+                if let Some(root) = std::env::var_os(variable) {
+                    let root = std::path::PathBuf::from(root);
+                    std::fs::write(root.join("ready"), b"ready")?;
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while !root.join("release").exists() {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "follow cache test barrier timed out");
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
+            }
+            let now = self.line(&line.id)?;
+            if built_head.as_deref() != Some(now.head.as_str()) {
+                self.set_unbuilt(&now, true)?;
+                bail!("cache build did not finish for the current head; the next follow pass will retry");
+            }
+            self.set_unbuilt(&now, true)?;
+            Repo::with_prune_limit(crate::cache_hook::BACKGROUND_PRUNE_LIMIT, || {
+                admin::save_expected_head(ctx, &["--caches".to_string(), "-q".to_string()], Some(&now.head))
+            })?;
+            self.set_unbuilt(&now, false)?;
+            return Ok((taken, refusal));
         }
-        // A save with no build (a local merge), or after a build that stopped (its time limit, a compile error), is
-        // not warm for the new head: a followed line gets the mark, and its next follow pass builds and saves again.
-        // Only a followed line reads the mark, so only it gets one.
-        if warm && built {
-            self.set_unbuilt(line, false)?;
-        } else if target(self, line)?.is_some() {
+        save()?;
+        // A local merge saves without a build. A followed line must build again on its next pass.
+        if target(self, line)?.is_some() {
             self.set_unbuilt(line, true)?;
         }
         Ok((taken, refusal))
@@ -471,9 +660,79 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
 
 #[cfg(test)]
 mod tests {
-    use super::repo_key;
+    use super::{build_for_stable_head, repo_key, StoreCaches};
     use crate::repo::Repo;
     use std::time::Duration;
+
+    #[test]
+    fn a_follow_build_retries_a_moved_head_and_stops_after_three_moves() {
+        use std::cell::{Cell, RefCell};
+        let heads = RefCell::new(["a", "b", "b"].into_iter());
+        let builds = Cell::new(0);
+        let mut moved = Vec::new();
+        let result = build_for_stable_head(
+            || Ok(heads.borrow_mut().next().unwrap().to_string()),
+            || {
+                builds.set(builds.get() + 1);
+                true
+            },
+            |head| moved.push(head.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("b"));
+        assert_eq!(builds.get(), 2);
+        assert_eq!(moved, ["b"]);
+        let n = Cell::new(0);
+        let result = build_for_stable_head(
+            || {
+                n.set(n.get() + 1);
+                Ok(n.get().to_string())
+            },
+            || true,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result, None);
+        assert_eq!(n.get(), 4);
+        assert_eq!(build_for_stable_head(|| Ok("same".into()), || false, |_| {}).unwrap(), None);
+    }
+
+    #[test]
+    fn a_retried_build_replaces_the_cache_for_the_moved_head() {
+        use std::cell::{Cell, RefCell};
+        let head = RefCell::new("first".to_string());
+        let cache = RefCell::new(String::new());
+        let calls = Cell::new(0);
+        let built = build_for_stable_head(
+            || Ok(head.borrow().clone()),
+            || {
+                *cache.borrow_mut() = head.borrow().clone();
+                if calls.get() == 0 {
+                    *head.borrow_mut() = "second".to_string();
+                }
+                calls.set(calls.get() + 1);
+                true
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(built.as_deref(), Some("second"));
+        assert_eq!(&*cache.borrow(), "second");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn follow_cache_history_keeps_the_old_single_cache_format() {
+        let mut state: StoreCaches =
+            serde_json::from_str(r#"{"remote":"origin","head":"head","folders":{"target":"old"}}"#).unwrap();
+        let seen = state.folders.get_mut("target").unwrap();
+        seen.insert("new".into());
+        let saved = serde_json::to_vec(&state).unwrap();
+        let restored: StoreCaches = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.folders["target"].contains("old"));
+        assert!(restored.folders["target"].contains("new"));
+        assert!(!restored.folders["target"].contains("other"));
+    }
 
     #[test]
     fn the_background_prune_limit_holds_inside_and_is_restored_after() {

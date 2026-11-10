@@ -3,8 +3,8 @@
 // Unsafe code is allowed only in `sys` (system calls without safe wrappers).
 #![deny(unsafe_code)]
 
-mod pools;
 mod busy;
+mod pools;
 #[macro_use]
 mod ctx;
 mod access;
@@ -21,23 +21,28 @@ mod cache_overlay;
 mod changes;
 mod cmd;
 mod db;
-mod free;
-mod owners;
 mod dedup;
 mod diff;
 mod disk;
 mod follow;
+mod free;
 mod fsutil;
 mod gitbridge;
 mod ids;
+mod owners;
 use layr_store::http;
-mod ignore_rules;
-mod lineops;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_scan;
+mod ignore_rules;
+mod layrfs;
+mod lineops;
 mod linepaths;
 mod merge;
 mod model;
+mod objstore;
+mod object_tree;
+#[cfg(not(target_os = "macos"))]
+mod source;
 mod oci;
 mod oplog;
 mod overlay;
@@ -52,6 +57,7 @@ mod recv;
 mod repo;
 mod revs;
 mod rootcheck;
+mod runner;
 mod secrets;
 #[cfg(target_os = "linux")]
 mod send_cache;
@@ -77,6 +83,11 @@ mod thin;
 mod trace;
 mod tree;
 mod usage;
+#[cfg(target_os = "macos")]
+mod views;
+#[cfg(target_os = "linux")]
+#[path = "views_linux.rs"]
+mod views;
 mod volumes;
 
 use std::collections::HashMap;
@@ -84,6 +95,14 @@ use std::collections::HashMap;
 mod cache_hook;
 
 fn main() {
+    // Started as `rg` or `find` (a link on an agent's PATH): LayrFS answers from its index.
+    let argv0 = std::env::args_os().next().map(std::path::PathBuf::from);
+    if let Some(tool) = argv0.as_deref().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        if layrfs::TOOLS.contains(&tool) {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            std::process::exit(layrfs::run_tool(tool, &args));
+        }
+    }
     // The cache adapters of the binary (issue #167). Core reaches them only through `cache_hook`.
     cache_hook::register(layr_cache::adapters());
     if std::env::args().nth(1).as_deref() == Some(cache_hook::WORKER_ARG) {
@@ -101,13 +120,29 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
-    if argv.first().map(String::as_str) == Some("__keyframe") && argv.len() == 4 {
-        // A complete tree for a thin line head with a long chain, after the command that moved it (`free`).
-        if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3]) {
+    if argv.first().map(String::as_str) == Some("__keyframe") && (argv.len() == 4 || argv.len() == 5 && argv[4] == "final") {
+        // A complete tree for a thin line head with a long chain, after the command that moved it, or for the
+        // final state of a deleted line (`free`).
+        if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3], argv.len() == 5) {
             eprintln!("layr keyframe: {e:#}");
             std::process::exit(1);
         }
         return;
+    }
+    // `layr tool <rg|find> <args>`: before the global options and help, because the tool's own
+    // arguments (`rg -h`, `find -C`) belong to the tool.
+    if argv.first().map(String::as_str) == Some("tool") {
+        match argv.get(1).map(String::as_str) {
+            Some(tool) if layrfs::TOOLS.contains(&tool) => std::process::exit(layrfs::run_tool(tool, &argv[2..])),
+            Some("--help" | "-h") => {
+                print!("{}", cmd::HELP);
+                return;
+            }
+            _ => {
+                eprintln!("usage: layr tool <{}> [<args>]", layrfs::TOOLS.join("|"));
+                std::process::exit(2);
+            }
+        }
     }
     if let Some(code) = project_copy::hidden(&argv) {
         std::process::exit(code);
@@ -233,6 +268,15 @@ fn main() {
             Ok(code) => std::process::exit(early(&argv, code)),
             Err(error) => {
                 eprintln!("layr person: {error:#}");
+                std::process::exit(early(&argv, 1));
+            }
+        }
+    }
+    if argv.first().map(String::as_str) == Some("fs") {
+        match layrfs::run_fs(&argv[1..]) {
+            Ok(code) => std::process::exit(early(&argv, code)),
+            Err(error) => {
+                eprintln!("layr fs: {error:#}");
                 std::process::exit(early(&argv, 1));
             }
         }

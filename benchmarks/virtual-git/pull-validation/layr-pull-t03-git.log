@@ -1,0 +1,71 @@
+PASS clone: history from git
+PASS clone: clean status
+PASS git folder: clean for git
+PASS git folder: describe works
+PASS git folder: not part of states
+PASS fetch imports the branch
+PASS pull merges
+PASS pull keeps local work
+PASS push makes a new branch
+PASS one commit on top of upstream
+PASS the commit has the task content
+PASS a push without --squash does not reuse the squash commit
+PASS repeated push is a no-op
+PASS a push without --squash sends the history commit of the state
+PASS the history commit is not the squash commit
+PASS the history keeps the line's commits
+PASS git folder after push: clean
+PASS git folder HEAD is the pushed commit
+PASS a push checks only its new states for secrets
+PASS a repeated push reads the remote ref first
+PASS no second commit
+PASS non-fast-forward push is refused
+PASS git-sync: .git HEAD is the commit of the head state
+PASS git-sync: clean for git
+PASS the tree hash of the head is the tree of its git commit
+PASS rev-parse <rev>:<dir> is the tree in the exported commit
+PASS rev-parse <rev>:<file> is the blob in the exported commit
+PASS rev-parse <rev>: is the root tree
+PASS rev-parse <rev>: is the same as <rev>^{tree}
+PASS rev-parse --short <rev>:<file>
+PASS rev-parse <rev>:./<file> resolves in the current folder
+PASS rev-parse <rev>:../<dir> resolves in the current folder
+PASS rev-parse <rev>:<missing> exits 128
+PASS rev-parse <rev>:<missing> fails like git
+PASS rev-parse <rev>:./<missing> names the full path like git
+PASS rev-parse -q <rev>:<missing> exits 1 quietly
+PASS git-sync: the remote is untouched
+PASS git-sync again: no new record
+PASS the git-sync remote name is reserved
+PASS a later push sends the same commit
+PASS commit: .git HEAD has the tree of the new head
+PASS commit: its parent is the commit of the previous head
+PASS commit: its subject is the message
+PASS commit: clean for git
+PASS commit: the commit is the newest record (no export record)
+PASS layr reads the commit id of .git HEAD
+PASS the next commit moves HEAD forward
+PASS amend: HEAD is the amended state on the same parent
+PASS reset: HEAD is the commit of the state it went to
+PASS reset: clean for git
+PASS a push sends the commit that .git HEAD shows
+PASS and HEAD stays
+PASS the Git bridge accepts HEAD as a push source
+PASS the HEAD push publishes the current commit
+PASS try: .git HEAD of the copy is the commit of the state, clean
+PASS try: the line did not change
+PASS try: a missing command is named
+PASS try: a bad revision is named
+PASS merge of an imported branch
+PASS remote -v
+PASS open conflicts block a push
+PASS save refuses after a git commit in the line
+PASS the refusal names the git HEAD
+PASS the refused save leaves git HEAD
+PASS the refused save leaves the line head
+PASS after a reset to the last export, save builds on it
+PASS save refuses after a git merge in the line
+PASS the merge refusal names the git HEAD
+PASS the refused save leaves the merge in git HEAD
+PASS the refused save leaves the line head of the merge case
+t03-git.sh: 70 passed, 0 failed

@@ -8,9 +8,10 @@ use crate::{
     repo::Repo,
 };
 use anyhow::{bail, Context, Result};
-use layr_store::request::{self, Action, Request, Sealed, Signed};
-use serde_json::json;
 use layr_hashers::{ContentAddress, Digest};
+use layr_store::request::{self, Action, Request, Sealed, Signed};
+use rusqlite::OptionalExtension;
+use serde_json::json;
 
 pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(
@@ -73,8 +74,12 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
         request.expires = expires.parse().context("--expires must be epoch milliseconds")?;
     }
     let signed = request.sign(&key)?;
-    let (epoch, recipient) = store.request_epoch(ctx)?;
-    let sealed = request::seal_for_epoch(&signed.to_bytes()?, &epoch, &recipient, &key)?;
+    let sealed = if store.is_api() {
+        signed.to_bytes()?
+    } else {
+        let (epoch, recipient) = store.request_epoch(ctx)?;
+        request::seal_for_epoch(&signed.to_bytes()?, &epoch, &recipient, &key)?
+    };
     let backend = store.request_backend(ctx)?;
     let name = format!("requests/{}.json", request.id);
     if !backend.put_new(&name, sealed.clone())? {
@@ -110,37 +115,66 @@ fn claim(ctx: &Ctx, repo: &Repo, backend: &crate::store_remote::backend::Backend
     }
     let prior = backend.get(&name)?.context("request claim disappeared")?;
     let parsed = Signed::parse(&prior).and_then(|s| Ok(serde_json::from_str::<Claim>(s.r.get())?));
+    let invalid = |reason| {
+        if backend.api().is_some() {
+            bail!("{reason}");
+        }
+        Ok(ClaimState::Refused(reason))
+    };
     let Ok(claim) = parsed else {
-        return Ok(ClaimState::Refused("invalid request claim"));
+        return invalid("invalid request claim");
     };
     if claim.validate().is_err() || claim.project != repo.p.id || claim.request != id {
-        return Ok(ClaimState::Refused("invalid request claim"));
+        return invalid("invalid request claim");
     }
     let public = if claim.machine == machine.id {
         machine.key.verifying_key()
     } else {
         let Some(public) = repo.p.db.trusted(&claim.machine)? else {
+            // The API accepts only an authenticated executor's signed claim. Another job's key
+            // need not be in this clone yet. Wait instead of writing a permanent refusal.
+            if backend.api().is_some() {
+                return Ok(ClaimState::Other);
+            }
             return Ok(ClaimState::Refused("claimed by an untrusted machine"));
         };
         layr_store::person::verifying_key(&public)?
     };
     if Claim::verify(&prior, &public).is_err() {
-        return Ok(ClaimState::Refused("request claim signature does not verify"));
+        return invalid("request claim signature does not verify");
     }
     Ok(if claim.machine == machine.id { ClaimState::Owned } else { ClaimState::Other })
 }
 
 pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--remote").flag("--json"), args)?;
+    let a = parse(&Spec::new().value("--remote").flag("--json").flag("--no-run-queue"), args)?;
     if a.pos != ["apply"] {
-        bail!("usage: layr requests apply [--remote <name>] [--json]");
+        bail!("usage: layr requests apply [--remote <name>] [--no-run-queue] [--json]");
     }
     let h = here(ctx)?;
-    let results = apply(ctx, &h.repo, a.get("--remote").unwrap_or("origin"), false)?;
+    let spool = crate::db::Db::scratch()?;
+    spool.execute_batch("CREATE TABLE results(value TEXT NOT NULL); BEGIN;")?;
+    let waiting = apply(ctx, &h.repo, a.get("--remote").unwrap_or("origin"), false, !a.has("--no-run-queue"), |result| {
+        spool.execute("INSERT INTO results(value) VALUES(?1)", [serde_json::to_string(&result)?])?;
+        Ok(())
+    })?;
+    let mut statement = spool.prepare("SELECT value FROM results ORDER BY rowid")?;
+    let mut rows = statement.query([])?;
     if a.has("--json") {
-        outln!(ctx, "{}", serde_json::to_string(&results)?);
+        out!(ctx, "[");
+        let mut first = true;
+        while let Some(row) = rows.next()? {
+            let value: String = row.get(0)?;
+            if !first {
+                out!(ctx, ",");
+            }
+            out!(ctx, "{}", value);
+            first = false;
+        }
+        outln!(ctx, "]");
     } else {
-        for result in results {
+        while let Some(row) = rows.next()? {
+            let result: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
             outln!(
                 ctx,
                 "{} {}{}",
@@ -150,7 +184,7 @@ pub fn requests(ctx: &Ctx, args: &[String]) -> Result<i32> {
             );
         }
     }
-    Ok(0)
+    Ok(if waiting { 2 } else { 0 })
 }
 
 /// The remote whose person requests the daemon applies on each tick (`requests.remote`), if any.
@@ -164,57 +198,64 @@ pub fn daemon_remote(repo: &Repo) -> Result<Option<String>> {
 
 /// Apply the person requests on `remote`: each new request becomes its record (or a signed refusal), then the
 /// queues that a request added to run. `skip_busy`: a running queue pass leaves the requests to the next tick (the
-/// daemon). Returns one JSON object per request.
-pub fn apply(ctx: &Ctx, repo: &Repo, remote: &str, skip_busy: bool) -> Result<Vec<serde_json::Value>> {
+/// daemon). Reports one JSON object per request and returns whether a claim blocks the pass.
+pub fn apply(
+    ctx: &Ctx,
+    repo: &Repo,
+    remote: &str,
+    skip_busy: bool,
+    run_queue: bool,
+    mut report: impl FnMut(serde_json::Value) -> Result<()>,
+) -> Result<bool> {
     repo.require(ctx, "sync")?;
     let mut store = crate::store_remote::open_named(remote, repo)?;
     let identity = store.request_identity(ctx)?;
+    let plain_api = store.is_api();
+    store.register_request_executor()?;
     let backend = store.request_backend(ctx)?;
     let _queue_lock = match super::queue::try_lock(repo)? {
         Some(lock) => lock,
-        None if skip_busy => return Ok(Vec::new()),
+        None if skip_busy => return Ok(false),
         None => return Err(exit(1, "a queue runner is already active for this project")),
     };
-    let mut results = Vec::new();
-    let mut queue_targets = std::collections::BTreeSet::new();
-    // The digests of the requests that records already applied or refused: one read of the records, not one per
-    // request on the remote.
-    let mut done: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
-    for r in repo.p.db.records(usize::MAX >> 1)? {
-        if let Some(id) = r.data["request_id"].as_str() {
-            done.entry(id.to_string()).or_insert_with(|| r.data["request_digest"].clone());
-        }
-    }
-    for object in backend.list("requests/")? {
+    let mut blocked = false;
+    let done = crate::db::Db::scratch()?;
+    done.execute_batch("CREATE TABLE request_outcomes(id TEXT PRIMARY KEY, digest TEXT NOT NULL) WITHOUT ROWID; CREATE TABLE queue_targets(name TEXT PRIMARY KEY) WITHOUT ROWID; BEGIN;")?;
+    repo.p.db.copy_request_outcomes(&done)?;
+    backend.visit_requests(|object| {
         let Some(id) = object
             .key
             .strip_prefix("requests/")
             .and_then(|s| s.strip_suffix(".json"))
             .filter(|s| layr_store::request::request_id(s))
         else {
-            continue;
+            return Ok(true);
         };
-        if let Some(old) = done.get(id) {
+        let old: Option<String> =
+            done.query_row("SELECT digest FROM request_outcomes WHERE id=?1", [id], |row| row.get(0)).optional()?;
+        if let Some(old) = old {
             // An applied request is not read again; a reused id with other content is found by `requests apply`.
             if skip_busy {
-                continue;
+                return Ok(true);
             }
             let (bytes, _, _) = backend.request_object(&object.key, &identity)?;
-            if *old != digest(&bytes) {
+            if serde_json::from_str::<serde_json::Value>(&old)? != digest(&bytes) {
                 bail!("request id was reused with different content");
             }
-            results.push(json!({"id":id,"status":"ignored"}));
-            continue;
+            report(json!({"id":id,"status":"ignored"}))?;
+            return Ok(true);
         }
         let _lock = repo.p.lock()?;
         let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
         let hash = digest(&bytes);
         let claim = claim(ctx, repo, backend, id)?;
         if matches!(claim, ClaimState::Other) {
-            results.push(json!({"id":id,"status":"claimed"}));
-            continue;
+            report(json!({"id":id,"status":"claimed"}))?;
+            blocked = true;
+            // A later withdrawal, approval or queue action must not overtake this request.
+            return Ok(false);
         }
-        let verified = verify_request(repo, id, &bytes, &epoch, &identity);
+        let verified = verify_request(repo, id, &bytes, &epoch, &identity, plain_api);
         let mut record = match (&claim, &verified) {
             (ClaimState::Refused(reason), _) => refusal(reason),
             (_, Ok((request, _, _))) => match effect(ctx, repo, request) {
@@ -228,7 +269,9 @@ pub fn apply(ctx: &Ctx, repo: &Repo, remote: &str, skip_busy: bool) -> Result<Ve
         let actor = match verified {
             Ok((request, public, inner)) => {
                 record.data["request"] = json!(std::str::from_utf8(&inner)?);
-                record.data["encrypted_request"] = json!(std::str::from_utf8(&bytes)?);
+                if !plain_api {
+                    record.data["encrypted_request"] = json!(std::str::from_utf8(&bytes)?);
+                }
                 record.data["person_key"] = json!(public);
                 if let Some(a) = record.data.get_mut("attestation") {
                     a["payload_digest"] = json!(digest(Signed::parse(&inner)?.r.get().as_bytes()));
@@ -238,21 +281,31 @@ pub fn apply(ctx: &Ctx, repo: &Repo, remote: &str, skip_busy: bool) -> Result<Ve
             Err(_) => ctx.actor(),
         };
         let status = if record.op == "request.refused" { "refused" } else { "applied" };
-        let record = repo.p.append(record, &actor)?;
         if record.op == "queue.add" {
             if let Some(target) = record.data["queue_change"]["after"]["target_line"].as_str() {
-                queue_targets.insert(target.to_owned());
+                done.execute("INSERT OR IGNORE INTO queue_targets(name) VALUES(?1)", [target])?;
             }
         }
-        results.push(json!({"id":id,"status":status,"record":record.id,"reason":record.data.get("reason")}));
-    }
+        done.execute(
+            "INSERT OR REPLACE INTO request_outcomes(id,digest) VALUES(?1,?2)",
+            rusqlite::params![id, serde_json::to_string(&hash)?],
+        )?;
+        let record = repo.p.append(record, &actor)?;
+        report(json!({"id":id,"status":status,"record":record.id,"reason":record.data.get("reason")}))?;
+        Ok(true)
+    })?;
     drop(_queue_lock);
-    for target in queue_targets {
-        if let Err(error) = super::queue::run_configured(ctx, repo, Some(&target)) {
-            eprintln!("layr queue: {error:#}");
+    if run_queue && !blocked {
+        let mut statement = done.prepare("SELECT name FROM queue_targets ORDER BY name")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let target: String = row.get(0)?;
+            if let Err(error) = super::queue::run_configured(ctx, repo, Some(&target)) {
+                eprintln!("layr queue: {error:#}");
+            }
         }
     }
-    Ok(results)
+    Ok(blocked)
 }
 
 fn refusal(reason: &str) -> Record {
@@ -260,7 +313,28 @@ fn refusal(reason: &str) -> Record {
     record.data = json!({"reason":reason});
     record
 }
-fn verify_request(repo: &Repo, id: &str, bytes: &[u8], epoch: &str, identity: &str) -> Result<(Request, String, Vec<u8>)> {
+fn verify_request(
+    repo: &Repo,
+    id: &str,
+    bytes: &[u8],
+    epoch: &str,
+    identity: &str,
+    plain_api: bool,
+) -> Result<(Request, String, Vec<u8>)> {
+    if plain_api {
+        let signed = Signed::parse(bytes)?;
+        let request = signed.request()?;
+        if request.id != id || request.project != repo.p.id {
+            bail!("request id or project does not match");
+        }
+        let public = repo
+            .p
+            .config_value("person.keys")?
+            .and_then(|v| v[&request.person].as_str().map(str::to_owned))
+            .context("person signing key is not pinned")?;
+        let request = signed.verify(&layr_store::person::verifying_key(&public)?)?;
+        return Ok((request, public, bytes.to_vec()));
+    }
     if Signed::parse(bytes).is_ok() {
         bail!("plaintext requests are not accepted");
     }
@@ -313,7 +387,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
         Action::QueueAdd { state, into } => {
             policy.check_person(login, "merge").map_err(anyhow::Error::msg)?;
             let source = repo.source_state(state)?;
-            repo.state_root(state)?;
+            repo.state_src(state)?;
             let target = repo.line(into)?;
             if !repo.working(&target).exists() {
                 bail!("queue target line has no local work folder");
@@ -360,7 +434,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 bail!("invalid mutable ref name");
             }
             repo.source_state(target)?;
-            repo.state_root(target)?;
+            repo.state_src(target)?;
             let before = repo.p.db.ref_value(name, ids::now_ms())?;
             if before.as_ref().map(|r| &r.target) != expected.as_ref() {
                 bail!("ref changed: expected value does not match");
@@ -452,10 +526,12 @@ mod tests {
         .unwrap();
         let inner = request.sign(&key).unwrap().to_bytes().unwrap();
         let bytes = request::seal(&inner, &recipient, &key).unwrap();
-        assert!(verify_request(&repo, &request.id, &bytes, "root", &identity).is_ok());
-        let reason = verify_request(&repo, &request.id, &inner, "root", &identity).err().unwrap().to_string();
+        assert!(verify_request(&repo, &request.id, &bytes, "root", &identity, false).is_ok());
+        assert!(verify_request(&repo, &request.id, &inner, "root", &identity, true).is_ok());
+        assert!(verify_request(&repo, &ids::new_id(), &inner, "root", &identity, true).is_err());
+        let reason = verify_request(&repo, &request.id, &inner, "root", &identity, false).err().unwrap().to_string();
         assert_eq!(reason, "plaintext requests are not accepted");
-        assert!(verify_request(&repo, &ids::new_id(), &bytes, "root", &identity).is_err());
+        assert!(verify_request(&repo, &ids::new_id(), &bytes, "root", &identity, false).is_err());
         // Construct hostile envelopes directly: seal intentionally refuses an invalid
         // inner signature, so normal submissions cannot construct these cases.
         let wrap = |inner: &[u8]| {
@@ -471,20 +547,21 @@ mod tests {
         };
         let mut bad = request.sign(&key).unwrap();
         bad.s = STANDARD.encode([0; 64]);
+        assert!(verify_request(&repo, &request.id, &bad.to_bytes().unwrap(), "root", &identity, true).is_err());
         let malicious = wrap(&bad.to_bytes().unwrap());
-        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity).err().unwrap().to_string();
+        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity, false).err().unwrap().to_string();
         assert_eq!(reason, "person request signature does not verify");
         let mut other = request.clone();
         other.person = "bob@example.com".into();
         let malicious = wrap(&other.sign(&key).unwrap().to_bytes().unwrap());
-        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity).err().unwrap().to_string();
+        let reason = verify_request(&repo, &request.id, &malicious, "root", &identity, false).err().unwrap().to_string();
         assert!(reason.contains("outer and inner"));
         let mut sealed = Sealed::parse(&bytes).unwrap();
         sealed.sig = "0".repeat(128);
-        assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity).is_err());
+        assert!(verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity, false).is_err());
         sealed = Sealed::parse(&bytes).unwrap();
         sealed.epoch = ids::new_id();
-        let reason = verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity)
+        let reason = verify_request(&repo, &request.id, &serde_json::to_vec(&sealed).unwrap(), "root", &identity, false)
             .err()
             .unwrap()
             .to_string();

@@ -5,11 +5,7 @@ test "$(uname -s)" = Darwin
 if [ "${1:-}" = --keychain ]; then
     test "$(id -u)" != 0
     cd "$(dirname "$0")/../.."
-    for name in disk::catalog::tests::status_reports_the_keychain_and_service_without_the_identity \
-        disk::keystore::tests::login_keychain_roundtrip \
-        disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock; do
-        cargo test --locked --bin layr "$name" -- --exact
-    done
+    python3 tools/checks/keychain-isolation.py
     exit
 fi
 test "$(id -u)" = 0

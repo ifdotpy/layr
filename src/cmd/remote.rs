@@ -180,6 +180,13 @@ pub mod git {
             .value("--expect");
         let a = parse(&spec, args)?;
         let h = here(ctx)?;
+        #[cfg(target_os = "macos")]
+        return crate::views::with_working(ctx, &h.repo, h.line()?, || pull_from(ctx, &h, &a));
+        #[cfg(not(target_os = "macos"))]
+        pull_from(ctx, &h, &a)
+    }
+
+    fn pull_from(ctx: &Ctx, h: &crate::cmd::Here, a: &crate::args::Parsed) -> Result<i32> {
         let line = h.line()?.clone();
         let remote = a.pos.first().cloned().unwrap_or_else(|| "origin".into());
         let refs = gitbridge::fetch(ctx, &h.repo, &remote)?;
@@ -204,8 +211,27 @@ pub mod git {
         if h.repo.p.db.remote_ref(&rev)?.is_none() {
             return Err(exit(1, format!("fatal: couldn't find remote ref {branch}")));
         }
-        if a.has("-r") {
-            return mergecmd::rebase(ctx, &[rev]);
+        if a.has("--rebase") {
+            // Replay the exact fetched state after checking the review expectation.
+            let target = revs::resolve(&h.repo, Some(&line), &rev)?;
+            if let Some(expected) = a.get("--expect") {
+                let expected = revs::resolve(&h.repo, Some(&line), expected)?;
+                if expected != target {
+                    return Err(exit(
+                        1,
+                        format!(
+                            "error: {rev} is at {} but --expect names {}: review the new state first",
+                            ids::short(&target),
+                            ids::short(&expected),
+                        ),
+                    ));
+                }
+            }
+            let mut args = vec![target];
+            if a.has("-q") {
+                args.push("-q".into());
+            }
+            return mergecmd::rebase(ctx, &args);
         }
         let mut margs = vec![rev];
         for f in ["--ff-only", "--no-ff", "-q"] {
@@ -213,13 +239,16 @@ pub mod git {
                 margs.push(f.into());
             }
         }
+        if let Some(expected) = a.get("--expect") {
+            margs.extend(["--expect".into(), expected.into()]);
+        }
         let pa = parse(&Spec::new().flag("--ff-only").flag("--no-ff").flag("-q|--quiet").value("--expect"), &margs[1..])?;
         mergecmd::merge_rev(ctx, &h.repo, &line, &margs[0], &pa)
     }
 
-    /// Give the line's `.git` folder a commit of the line's head without a remote, so tools that
-    /// read git HEAD see the current state. The commits are the ones `layr git push` would send for the
-    /// same states; nothing leaves the machine.
+    /// Export the head without a remote. A native line also refreshes its `.git` folder.
+    /// A virtual line can keep the commit only in the project Git store.
+    /// The commit is the one `layr git push` sends; nothing leaves the machine.
     /// The remote name of a `git-sync` export record: no remote exists, so `layr git remote add` refuses it.
     const GIT_SYNC_REMOTE: &str = "git-sync";
 
@@ -259,7 +288,7 @@ pub mod git {
             let _lock = repo.p.lock()?;
             repo.commit_record(ctx, rec)?;
         }
-        if !repo.working(&line).join(".git").is_dir() {
+        if crate::views::of(repo, &line).is_none() && !repo.working(&line).join(".git").is_dir() {
             return Err(exit(
                 1,
                 format!("error: line '{}' has no .git folder; commit {} is in the project git store", line.name, &commit[..10]),
@@ -698,7 +727,10 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let mut store = store_remote::open(url, repo)?;
                 store.use_aws_profile(repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v|v.as_str().map(str::to_owned)));
                 let mode = a.get("--mode").map(|m| layr_store::format::Mode::parse(m)).transpose()?;
-                store.require_mode(mode);
+                store.require_mode(mode)?;
+                if mode.is_none() && (a.has("--paper-key-out") || a.has("--paper-key-tty")) {
+                    store.choose_transport(Some(layr_store::format::Mode::Secret))?;
+                }
                 let opts = store_remote::ConfigureOptions {
                     paper_key_out: a.get("--paper-key-out").map(|p| ctx.cwd.join(p)),
                     paper_key_tty: a.has("--paper-key-tty"),
@@ -889,7 +921,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer|merge] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
@@ -916,6 +948,26 @@ pub fn push(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     drop(h);
     exchange(ctx, args, "push")
+}
+/// `layr login <remote>`: a person signs in to Layr Cloud and registers this machine's signing key.
+pub fn login(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new().flag("--json"), args)?;
+    if a.pos.len() != 1 || !a.paths.is_empty() {
+        bail!("usage: layr login <remote>");
+    }
+    let h = here(ctx)?;
+    let store = store_remote::open_named(&a.pos[0], &h.repo)?;
+    let login = store.login(ctx, |link| {
+        if !a.has("--json") {
+            outln!(ctx, "open {link} and sign in with your passkey");
+        }
+    })?;
+    if a.has("--json") {
+        outln!(ctx, "{}", json!({"login": login, "machine": h.repo.p.store.machine.id}));
+    } else {
+        outln!(ctx, "signed in as {login}; this machine's key is registered");
+    }
+    Ok(0)
 }
 pub fn index(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new().flag("--json").flag("-q|--quiet").value("--remote"), args)?;
@@ -977,8 +1029,10 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             .flag("--index")
             .flag("--auto")
             .flag("--caches")
+            .flag("--no-cache-sweep")
             .value("--caches-of")
             .flag("--heads")
+            .value("--only-line")
             .flag("-q|--quiet")
             .flag("--json")
             .flag("--command")
@@ -993,8 +1047,17 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     let mut h = here(ctx)?;
     let url = remote_url(&h.repo, name).map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let remote_kind = kind(&url)?;
+    if a.has("--no-cache-sweep") && (op != "push" || remote_kind != Kind::Store) {
+        bail!("--no-cache-sweep requires layr push to a store remote");
+    }
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
+    }
+    if let Some(line) = a.get("--only-line") {
+        crate::store::check_name("line", line)?;
+        if op != "fetch" || remote_kind != Kind::Store || !a.has("--heads") {
+            bail!("--only-line requires layr fetch --heads from a store remote");
+        }
     }
     if a.has("--runnable") && remote_kind != Kind::Registry {
         bail!("--runnable requires an OCI remote");
@@ -1062,11 +1125,14 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             let opts = store_remote::Options {
                 auto: a.has("--auto"),
                 caches: a.has("--caches"),
+                no_cache_sweep: a.has("--no-cache-sweep"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 public: false,
                 caches_of: caches_of(&a),
+                caches_of_state: None,
                 only_caches: None,
                 heads: a.has("--heads"),
+                only_line: a.get("--only-line").map(str::to_owned),
             };
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
@@ -1248,6 +1314,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .flag("--caches")
             .value("--caches-of")
             .flag("--heads")
+            .value("--only-line")
             .flag("--json")
             .flag("-q|--quiet"),
         args,
@@ -1260,6 +1327,12 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos.len() > 2 {
         bail!("usage: layr clone <url> [<project>] [--mode secret|private|public]");
     }
+    if let Some(line) = a.get("--only-line") {
+        crate::store::check_name("line", line)?;
+        if !a.has("--heads") {
+            bail!("--only-line requires --heads");
+        }
+    }
     let name = a.pos.get(1).cloned().unwrap_or_else(|| url.trim_end_matches('/').rsplit('/').next().unwrap_or("project").into());
     // Remove a new project if store open or clone fails.
     let p = crate::store::Project::create_empty_on(&ctx.store, &name, a.get("--volume"))?;
@@ -1268,16 +1341,19 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut store = store_remote::open(url, &repo)?;
         store.use_public_access(a.has("--public"));
         // `--mode secret` refuses a server that serves this project as plain, and the reverse.
-        store.require_mode(a.get("--mode").map(layr_store::format::Mode::parse).transpose()?);
+        store.require_mode(a.get("--mode").map(layr_store::format::Mode::parse).transpose()?)?;
         store.configure(ctx, &store_remote::ConfigureOptions::default())?;
         let opts = store_remote::Options {
             public: a.has("--public"),
             auto: a.has("--auto"),
             caches: a.has("--caches"),
+            no_cache_sweep: false,
             paper_key: a.get("--paper-key").map(str::to_owned),
             caches_of: caches_of(&a),
+            caches_of_state: None,
             only_caches: None,
             heads: a.has("--heads"),
+            only_line: a.get("--only-line").map(str::to_owned),
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         store_remote::backend::trace_requests();
@@ -1354,7 +1430,7 @@ mod tests {
     }
 }
 
-/// The limits of `remote trust` (docs/ci-trust.md): `--expires <RFC 3339 time or duration>`, `--role reader|writer`
+/// The limits of `remote trust` (docs/ci-trust.md): `--expires <RFC 3339 time or duration>`, `--role reader|writer|merge`
 /// (reader by default) and `--overlays <name>,<name>`. None without any of them: a full trust without an end.
 fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str) -> Result<Option<serde_json::Value>> {
     if !["--expires", "--role", "--overlays", "--name"].iter().any(|f| a.get(f).is_some()) {
@@ -1377,7 +1453,11 @@ fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str
     }
     let role = a.get("--role").unwrap_or("reader");
     if layr_store::trust::Role::parse(role).is_none() {
-        return Err(exit(128, format!("--role {role}: use reader or writer")));
+        return Err(exit(128, format!("--role {role}: use reader, writer or merge")));
+    }
+    // The narrowest limits win: a machine with limits already cannot become a merge machine (docs/ci-trust.md).
+    if role == "merge" && repo.p.trust_terms(&[])?.get(machine).is_some() {
+        return Err(exit(128, "the machine has limits already; untrust it and trust a new machine with --role merge"));
     }
     limits["role"] = json!(role);
     if let Some(list) = a.get("--overlays") {

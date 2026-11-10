@@ -404,7 +404,8 @@ mod tests {
         std::fs::remove_file(root.join("node_modules/pkg/index.js")).unwrap();
         assert_eq!(recover_with(&NoHost, &root.join("node_modules")), Ok(true));
         assert_eq!(std::fs::read_to_string(root.join("node_modules/pkg/index.js")).unwrap(), "copy");
-        let mut left: Vec<String> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        let mut left: Vec<String> =
+            std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
         left.sort();
         assert_eq!(left, vec!["node_modules".to_string()]);
         let _ = std::fs::remove_dir_all(root);

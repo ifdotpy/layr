@@ -110,7 +110,10 @@ pub(super) fn sweep(
         for _ in 0..1000 {
             let Some(id) = at else { break };
             if pushed.contains(id.as_str()) {
-                why(&id, format!("nearest pushed ancestor of live state {} whose tree is not on the remote", crate::ids::short(state)));
+                why(
+                    &id,
+                    format!("nearest pushed ancestor of live state {} whose tree is not on the remote", crate::ids::short(state)),
+                );
                 keep.extend(trees.iter().filter(|(s, _)| *s == id).cloned());
                 break;
             }
@@ -160,7 +163,10 @@ pub(super) fn sweep(
         let tree = match reader.tree(state, attempt) {
             Ok((_, _, tree)) => tree,
             Err(e) => {
-                eprintln!("layr: remote tree {} cannot be read ({e:#}); the sweep leaves it and its data", tree_name(state, attempt));
+                eprintln!(
+                    "layr: remote tree {} cannot be read ({e:#}); the sweep leaves it and its data",
+                    tree_name(state, attempt)
+                );
                 broken.insert(((*state).clone(), (*attempt).clone()));
                 continue;
             }
@@ -261,7 +267,8 @@ fn sweep_chunks(
         // A marked chunk whose tree an earlier pass deleted is still dead while no live tree names it and a pack
         // holds it.
         dead.extend(marks.keys().filter(|id| !live.contains(*id) && held.contains(id.as_str())).cloned());
-        let now_marks: BTreeMap<String, i64> = dead.iter().map(|id| (id.clone(), marks.get(id).copied().unwrap_or(now))).collect();
+        let now_marks: BTreeMap<String, i64> =
+            dead.iter().map(|id| (id.clone(), marks.get(id).copied().unwrap_or(now))).collect();
         if now_marks != marks {
             let text: String = now_marks.iter().map(|(id, t)| format!("{id} {t}\n")).collect();
             crate::fsutil::atomic_write(&store.dir.join("dead-chunks"), text.as_bytes(), 0o600)?;

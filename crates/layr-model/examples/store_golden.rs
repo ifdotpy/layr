@@ -1,10 +1,10 @@
 //! Read the golden fixture through the shared store reader and the pure model.
 use anyhow::{bail, ensure, Context, Result};
+use layr_hashers::{ContentAddress, Digest};
 use layr_model::{probes, Model, Project, Record, StateKind, Subject};
 use layr_store::{format, keys, record};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};

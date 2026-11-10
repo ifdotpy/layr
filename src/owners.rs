@@ -9,7 +9,6 @@
 //! owner releases them. Rings (automatic states, undo records, deleted lines) are sets of the
 //! newest entries, so the table does not depend on the order in which records arrive.
 
-
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state needs"). `parent`,
 /// `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record. `conflict` needs the trees of its sides.
 pub const TREE_OWNERS: [&str; 9] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict", "keep"];
@@ -746,11 +745,21 @@ impl Db {
             for state in states {
                 let dropping: bool =
                     self.one("SELECT EXISTS(SELECT 1 FROM owners WHERE state=?1 AND kind='drop')", params![state], |r| r.get(0))?;
-                anyhow::ensure!(!dropping, "layr gc is removing the tree of state {} from this machine; read it again", ids_short(state));
+                anyhow::ensure!(
+                    !dropping,
+                    "layr gc is removing the tree of state {} from this machine; read it again",
+                    ids_short(state)
+                );
                 if !self.owners_live(state)? {
-                    let queued: bool =
-                        self.one("SELECT EXISTS(SELECT 1 FROM free_queue WHERE state=?1)", params![state], |r| r.get(0))?;
-                    anyhow::ensure!(!queued, "state {} was freed by another layr command; read it again", ids_short(state));
+                    // The free queue no longer contains a state after its storage is removed.
+                    // Its tombstone must still refuse a reader that selected it before removal.
+                    let freed: bool = self.one(
+                        "SELECT EXISTS(SELECT 1 FROM free_queue WHERE state=?1)
+                         OR EXISTS(SELECT 1 FROM states WHERE id=?1 AND deleted=1)",
+                        params![state],
+                        |r| r.get(0),
+                    )?;
+                    anyhow::ensure!(!freed, "state {} was freed by another layr command; read it again", ids_short(state));
                     continue;
                 }
                 self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,'pin',?2)", params![state, holder])?;
@@ -792,9 +801,7 @@ impl Db {
 
     /// Release pins in one transaction. States that lose their last owner become dead.
     pub fn pins_remove(&self, states: &[String], holder: &str) -> Result<()> {
-        self.with_tx(|| {
-            self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect())
-        })
+        self.with_tx(|| self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect()))
     }
 
     /// Keep `state` under `name` in `line` (`layr save --keep`), in place of the state it kept before.
@@ -902,6 +909,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         }
     }
@@ -1064,12 +1073,7 @@ mod tests {
         let mut del = record(seq, "line.delete");
         del.lines.insert(
             line.into(),
-            LineChange {
-                before: Some(head(&head_id)),
-                after: None,
-                working_before: Some(working),
-                working_after: None,
-            },
+            LineChange { before: Some(head(&head_id)), after: None, working_before: Some(working), working_after: None },
         );
         apply(db, &del);
         del
@@ -1101,7 +1105,11 @@ mod tests {
         assert!(owners_of(&db, "deleted", &deleted_of_line).is_empty(), "the deleted owner left the ring");
         assert!(owners_of(&db, "undo", &undo_of_delete).is_empty(), "the undo owner of the delete goes with it");
         assert!(!db.is_owned(&id(2)).unwrap(), "the final state of the line has no owner");
-        assert_eq!(db.queued_frees().unwrap().iter().filter(|s| *s == &id(2)).count(), 1, "the final state is queued for freeing");
+        assert_eq!(
+            db.queued_frees().unwrap().iter().filter(|s| *s == &id(2)).count(),
+            1,
+            "the final state is queued for freeing"
+        );
     }
 
     #[test]
@@ -1111,7 +1119,8 @@ mod tests {
         save_on(&db, 2, LINE, id(1), id(3));
         let del = delete_of(&db, 3, LINE, id(1), id(3));
         let undo_of_delete = format!("{LINE}|{}", record_ord(&del));
-        let earlier = [format!("{LINE}|{}", record_ord(&record(1, "save"))), format!("{LINE}|{}", record_ord(&record(2, "save")))];
+        let earlier =
+            [format!("{LINE}|{}", record_ord(&record(1, "save"))), format!("{LINE}|{}", record_ord(&record(2, "save")))];
         for h in &earlier {
             assert!(owners_of(&db, "undo", h).is_empty(), "the delete released the earlier undo {h}");
         }
@@ -1131,8 +1140,9 @@ mod tests {
         let (a, b) = (id(1), id(2));
         db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", params![a]).unwrap();
         // A late refusal must undo pins acquired earlier in this batch, for either reason.
-        for refusal in ["INSERT INTO owners(state, kind, holder) VALUES(?1,'drop','gc')",
-                        "INSERT INTO free_queue(state) VALUES(?1)"] {
+        for refusal in
+            ["INSERT INTO owners(state, kind, holder) VALUES(?1,'drop','gc')", "INSERT INTO free_queue(state) VALUES(?1)"]
+        {
             db.conn.execute(refusal, params![b]).unwrap();
             let before = db.owner_rows().unwrap();
             assert!(db.pins_add(&[&a, &b], "reader").unwrap_err().to_string().contains("read it again"));
@@ -1141,6 +1151,21 @@ mod tests {
             db.conn.execute("DELETE FROM owners WHERE kind='drop'", []).unwrap();
             db.conn.execute("DELETE FROM free_queue", []).unwrap();
         }
+    }
+
+    #[test]
+    fn pin_refuses_a_freed_state_after_the_free_queue_is_drained() {
+        let db = memory();
+        let (live, freed) = (id(1), id(2));
+        db.conn.execute("INSERT INTO states(id, present, deleted) VALUES(?1,1,0)", params![live]).unwrap();
+        db.conn.execute("INSERT INTO states(id, present, deleted) VALUES(?1,0,1)", params![freed]).unwrap();
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", params![live]).unwrap();
+        assert!(db.queued_frees().unwrap().is_empty());
+        let before = db.owner_rows().unwrap();
+        let error = db.pins_add(&[&live, &freed], "publisher").unwrap_err();
+        assert!(error.to_string().contains("read it again"));
+        assert_eq!(db.owner_rows().unwrap(), before, "the earlier pin rolls back");
+        assert_eq!(db.state_flags(&freed).unwrap(), Some((false, true)));
     }
 
     #[test]
@@ -1153,10 +1178,12 @@ mod tests {
         let pinned = db.pins_add(&[&a, &b], "reader").unwrap();
         let before = db.owner_rows().unwrap();
         // remove_rows visits the last state first: fail after it has already removed b.
-        db.conn.execute_batch(&format!(
-            "CREATE TRIGGER refuse_pin_release BEFORE DELETE ON owners WHEN OLD.state='{a}' AND OLD.kind='pin'
+        db.conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_pin_release BEFORE DELETE ON owners WHEN OLD.state='{a}' AND OLD.kind='pin'
              BEGIN SELECT RAISE(ABORT, 'test release failure'); END;"
-        )).unwrap();
+            ))
+            .unwrap();
         assert!(db.pins_remove(&pinned, "reader").is_err());
         assert_eq!(db.owner_rows().unwrap(), before);
         db.conn.execute_batch("DROP TRIGGER refuse_pin_release").unwrap();
@@ -1199,7 +1226,11 @@ mod tests {
         let refused = db.pins_add(&[&b], "1:reader").unwrap_err().to_string();
         assert!(refused.contains("read it again"), "{refused}");
         db.release_trees(&[b.clone()], &[b.clone()], "2:gc").unwrap();
-        assert_eq!(db.pins_add(&[&b], "1:reader").unwrap(), vec![b], "after the release the absent state is pinned (fetched on demand)");
+        assert_eq!(
+            db.pins_add(&[&b], "1:reader").unwrap(),
+            vec![b],
+            "after the release the absent state is pinned (fetched on demand)"
+        );
         assert!(db.owner_rows().unwrap().iter().all(|r| r.1 != "drop"));
     }
 }

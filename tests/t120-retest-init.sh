@@ -154,7 +154,8 @@ cd $U && git pull -q origin main
 printf 'pub fn a() -> i32 {\n    not_here()\n}\n' > crates/a/src/lib.rs && git add crates/a/src && git commit -qm "a: broken" && git push -q origin main || fail "the broken remote change failed"
 has "the pass of a broken change does not build" "not built with cargo" "$(cd $P/main && ly follow --tick 2>&1)"
 (cd $P/main && ly follow --tick >/dev/null 2>&1)
-has "the next pass builds again" "up to date; caches saved with the head" "$(cd $P/main && ly follow 2>&1)"
+# A build that did not finish saves no cache for the head: main stays marked and the next pass builds again.
+has "the next pass builds again" "cache build did not finish for the current head; the next follow pass will retry" "$(cd $P/main && ly follow 2>&1)"
 cd $U && printf 'pub fn a() -> i32 {\n    2 - 1\n}\n' > crates/a/src/lib.rs && git add crates/a/src && git commit -qm "a: fixed" && git push -q origin main || fail "the fix on the remote failed"
 has "the pass of the fix builds" "built with cargo" "$(cd $P/main && ly follow --tick 2>&1)"
 (cd $P/main && ly follow --tick >/dev/null 2>&1)

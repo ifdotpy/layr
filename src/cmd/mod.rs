@@ -3,7 +3,6 @@
 pub mod admin;
 pub mod attest;
 pub mod bisect;
-pub mod release_prepare;
 pub mod branch;
 pub mod change;
 pub mod checks;
@@ -12,19 +11,22 @@ pub mod followcmd;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
+pub mod migrate;
+pub mod objects;
 pub mod oci;
 pub mod overlaycmd;
 pub mod park;
 pub mod probe;
+pub mod project;
 pub mod queue;
 pub mod refs;
 pub mod release;
+pub mod release_prepare;
 pub mod remote;
 pub mod replicate;
 pub mod requests;
 pub mod transfer;
 pub mod view;
-pub mod project;
 pub mod volume;
 pub mod work;
 
@@ -69,7 +71,9 @@ impl<'a> Here<'a> {
             let lines = arg.lines().filter(|l| !l.is_empty()).count();
             return Err(exit(
                 128,
-                format!("one argument holds {lines} lines; pass each path as its own argument (in zsh: ${{=var}} or ${{(f)var}})"),
+                format!(
+                    "one argument holds {lines} lines; pass each path as its own argument (in zsh: ${{=var}} or ${{(f)var}})"
+                ),
             ));
         }
         args.iter().map(|a| normalize(&self.loc.sub, a)).collect()
@@ -222,9 +226,12 @@ Lines and states:
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    person keys, show, accept
-   remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone
+   remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone; login
    index write [<remote>] [--json]; push <remote> --index
    mount <remote> [--listen 127.0.0.1:8095]
+LayrFS (tree tools of agents from an in-memory index):
+   fs serve, fs warm [<dir>] [--wait], fs status, fs stop
+   tool rg|find [<args>]; or a link named rg or find to layr
 Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
@@ -234,7 +241,7 @@ Overlays (files with their own readers and history, shown in lines):
 Projects and machines:
    init [--allow-root-snapshots], projects, project delete <project>, config, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
    usage [--days <n>] [--json]
-   daemon [--allow-root-snapshots]
+   daemon [--allow-root-snapshots] [--manual-queue]
 
 Lines are folders: <root>/projects/<project>/lines/<line>. Run commands inside a line folder.
 ";
@@ -249,10 +256,10 @@ pub const COMMANDS: &[&str] = &[
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
-    "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "overlay",
+    "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
-    "usage",
-    "keep",
+    "usage", "keep", "objects",
+    "migrate", "fs", "tool",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
@@ -272,6 +279,8 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
             return Err(exit(1, format!("layr {cmd} is not available in an overlay; see 'layr overlay'")));
         }
     }
+    // A virtual line (docs/views.md) takes only the commands that support it.
+    crate::views::guard(ctx, cmd)?;
     match cmd {
         "help" | "--help" | "-h" => {
             ctx.print(HELP);
@@ -345,7 +354,10 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "push" => remote::push(ctx, rest),
         "git" => remote::git::run(ctx, rest),
         "clone" => remote::clone(ctx, rest),
+        "login" => remote::login(ctx, rest),
         "overlay" => overlaycmd::overlay(ctx, rest),
+        "objects" => objects::objects(ctx, rest),
+        "migrate" => migrate::migrate(ctx, rest),
         "export" => transfer::export(ctx, rest),
         "sync" => remote::sync(ctx, rest),
         "serve-peer" => replicate::serve(ctx, rest),

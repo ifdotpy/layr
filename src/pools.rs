@@ -5,9 +5,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static FORKING_PARENT: AtomicBool = AtomicBool::new(false);
 
-pub fn mark_forking_parent() { FORKING_PARENT.store(true, Ordering::Relaxed); }
-pub fn mark_worker() { FORKING_PARENT.store(false, Ordering::Relaxed); }
-pub fn is_forking_parent() -> bool { FORKING_PARENT.load(Ordering::Relaxed) }
+pub fn mark_forking_parent() {
+    FORKING_PARENT.store(true, Ordering::Relaxed);
+}
+pub fn mark_worker() {
+    FORKING_PARENT.store(false, Ordering::Relaxed);
+}
+pub fn is_forking_parent() -> bool {
+    FORKING_PARENT.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy)]
 pub enum Width {
@@ -48,8 +54,15 @@ pub fn run<R: Send>(priority: Priority, width: Width, work: impl FnOnce() -> R +
     run_for_role(priority, width, is_forking_parent(), work)
 }
 
-fn run_for_role<R: Send>(priority: Priority, width: Width, forking_parent: bool, work: impl FnOnce() -> R + Send) -> Result<R, PoolError> {
-    if forking_parent { return Err(PoolError::ForkingParent); }
+fn run_for_role<R: Send>(
+    priority: Priority,
+    width: Width,
+    forking_parent: bool,
+    work: impl FnOnce() -> R + Send,
+) -> Result<R, PoolError> {
+    if forking_parent {
+        return Err(PoolError::ForkingParent);
+    }
     if IN_POOL.with(Cell::get) {
         return Ok(work());
     }
@@ -74,8 +87,8 @@ fn run_for_role<R: Send>(priority: Priority, width: Width, forking_parent: bool,
 #[cfg(test)]
 mod tests {
     use super::{run, Priority, Width};
-    use std::num::NonZeroUsize;
     use rayon::prelude::*;
+    use std::num::NonZeroUsize;
 
     #[test]
     fn nested_work_stays_in_background_pool() {
@@ -88,8 +101,10 @@ mod tests {
                     #[cfg(target_os = "linux")]
                     assert_eq!(crate::sys::test_thread_priority(), (19, (2 << 13) | 7));
                 });
-            }).unwrap();
-        }).unwrap();
+            })
+            .unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -100,18 +115,18 @@ mod tests {
 
     #[test]
     fn forking_parent_cannot_start_a_pool() {
-        let result = super::run_for_role(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), true, || panic!("must not run"));
+        let result = super::run_for_role(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), true, || {
+            panic!("must not run")
+        });
         assert!(matches!(result, Err(super::PoolError::ForkingParent)));
     }
 
     #[test]
     fn build_errors_are_reported() {
-        let error = match rayon::ThreadPoolBuilder::new()
-            .spawn_handler(|_| Err(std::io::Error::other("test failure")))
-            .build() {
-                Ok(_) => panic!("test builder unexpectedly succeeded"),
-                Err(error) => error,
-            };
+        let error = match rayon::ThreadPoolBuilder::new().spawn_handler(|_| Err(std::io::Error::other("test failure"))).build() {
+            Ok(_) => panic!("test builder unexpectedly succeeded"),
+            Err(error) => error,
+        };
         assert!(super::PoolError::Build(error).to_string().starts_with("cannot start worker threads:"));
     }
 
@@ -121,9 +136,11 @@ mod tests {
         let caller = crate::sys::test_thread_priority();
         run(Priority::Foreground, Width::Items(NonZeroUsize::new(2).unwrap()), || {
             assert_eq!(crate::sys::test_thread_priority(), caller);
-        }).unwrap();
+        })
+        .unwrap();
         run(Priority::Background, Width::Items(NonZeroUsize::new(2).unwrap()), || {
             assert_eq!(crate::sys::test_thread_priority(), (19, (2 << 13) | 7));
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

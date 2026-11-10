@@ -200,7 +200,7 @@ fn reviewed(repo: &Repo, ctx: &Ctx, versions: &[StateRec], person: Option<&str>)
 
 fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
     repo.source_state(&state.id)?;
-    let new = repo.state_root(&state.id)?;
+    let new = repo.state_src(&state.id)?;
     let empty = if state.parents.is_empty() {
         let path = std::env::temp_dir().join(format!("layr-change-{}", crate::ids::new_id()));
         std::fs::create_dir(&path)?;
@@ -209,8 +209,8 @@ fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
         None
     };
     let old = match state.parents.first() {
-        Some(p) => repo.state_root(p)?,
-        None => empty.as_ref().unwrap().path.clone(),
+        Some(p) => repo.state_src(p)?,
+        None => crate::repo::snap(&empty.as_ref().unwrap().path),
     };
     let changes: Vec<_> = crate::changes::file_changes(&old, &new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
     diff::file_diffs(&old, &new, &changes)

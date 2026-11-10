@@ -124,3 +124,38 @@ The build identity and date come from `LAYR_BUILD_ID` and `LAYR_BUILD_DATE` at b
 A release build sets both, for example `LAYR_BUILD_ID=$(git rev-parse --short HEAD)
 LAYR_BUILD_DATE=$(date +%F) cargo build --release`. Without them, both are `dev`.
 The build never reads `.git`: a watch of `.git/HEAD` rebuilt the binary in every new layr line.
+
+## Project storage version
+
+Project storage uses these version names:
+
+- **v1:** saved source states use native snapshots.
+- **v2:** saved source states use the object store.
+
+`layr migrate` converts a project's source history from v1 to v2.
+Cache and derived states can keep native snapshots in a v2 project.
+The migration guide is [migrate.md](migrate.md).
+
+Each project's `meta/objects/config.json` identifies its object format and object ID algorithm:
+
+```json
+{"ids":"sha256","v":2}
+```
+
+The object library also supports `hmac-sha256` IDs.
+Experimental object stores used `v:1` with the same object encoding.
+On a normal open, the current library atomically upgrades that marker to `v:2`.
+`layr migrate --dry-run` leaves the marker unchanged.
+The upgrade preserves object bytes and IDs. It does not convert snapshots.
+
+`layr objects stat` displays `object store v2`.
+Its JSON output includes `"format":2`.
+The object reader rejects unsupported configurations before it creates directories or removes temporary files.
+Future incompatible object formats need an explicit migration.
+Do not change a format number manually to convert data.
+
+The root `store-version.json` describes the local container, which can hold both v1 and v2 projects.
+Its format remains 1. `layr store-version --json` reports that container format.
+Remote protocol versions and the Layr release version are independent of project storage versions.
+Older binaries can lack object support even when their container format is 1.
+Upgrade all binaries that access a migrated project.

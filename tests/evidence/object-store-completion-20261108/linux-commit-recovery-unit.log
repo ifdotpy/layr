@@ -1,0 +1,7 @@
+
+running 2 tests
+test repo::commit_record_tests::a_state_that_the_database_names_keeps_its_snapshot_after_a_failed_commit ... ok
+test repo::commit_record_tests::object_state_survives_commit_error_and_deferred_native_cleanup ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 394 filtered out; finished in 0.04s
+

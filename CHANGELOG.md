@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.42.0](https://github.com/ifdotpy/layr/compare/v0.41.2...v0.42.0) (2026-11-11)
+
+
+### Features
+
+* **migrate:** allow explicit exceptions for unavailable states
+* **store:** Integrate object store v2, LayrFS and virtual Git
+
+
+### Bug Fixes
+
+* **checks:** an older head's check keeps a newer head's caches; checks of states without rust-toolchain.toml use the prepared Rust
+* **checks:** keep the macOS check skips and skip the gateway fixture test without its fixture
+* **migrate:** a state in the free queue without an owner counts as freed
+* **migrate:** preserve absent unowned records after replay
+
 ## [0.41.2](https://github.com/ifdotpy/layr/compare/v0.41.1...v0.41.2) (2026-11-10)
 
 

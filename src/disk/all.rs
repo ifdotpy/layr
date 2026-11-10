@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn locked_stores_have_one_note_and_distinct_folders() {
         #[cfg(target_os = "macos")]
-        keystore::test_service();
+        let _keychain = keystore::test_service();
         let url = format!("file:///layr-test-{}", crate::ids::new_id());
         let store = catalog::Known { name: "origin".into(), url, pin: None, profile: None };
         let disk = All {
@@ -196,7 +196,7 @@ mod installed_tests {
     #[test]
     fn a_single_store_agent_stays_locked_without_a_keychain_item() {
         #[cfg(target_os = "macos")]
-        keystore::test_service();
+        let _keychain = keystore::test_service();
         // No backend exists. A machine slot must never be consulted on this path.
         let url = format!("file:///no-backend-{}", crate::ids::new_id());
         let disk = keychain_only(url.clone(), HashMap::new(), None, PathBuf::new(), 0);

@@ -109,6 +109,7 @@ pub trait Src: Sync {
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.
     fn folder(&self) -> Option<&Path>;
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> { None }
     /// The layers, when the tree is not one folder.
     #[cfg(target_os = "macos")]
     fn layered(&self) -> Option<&crate::thin::Layered> {
@@ -144,8 +145,9 @@ impl Src for crate::thin::Layered {
     fn folder(&self) -> Option<&Path> {
         self.is_complete().then(|| self.bottom())
     }
-    fn layered(&self) -> Option<&crate::thin::Layered> {
-        Some(self)
+    fn layered(&self) -> Option<&crate::thin::Layered> { Some(self) }
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
+        if self.layers.is_empty() { self.object_base.as_deref() } else { None }
     }
 }
 
@@ -214,10 +216,7 @@ fn refuse_case_clash_apfs(root: &Path, rel: &str) -> Result<()> {
                 continue;
             }
             let parent = done.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
-            bail!(
-                "{done} and {parent}{stored} {}",
-                clash_reason(sensitive)
-            );
+            bail!("{done} and {parent}{stored} {}", clash_reason(sensitive));
         }
         if fs::symlink_metadata(&path).is_err() {
             break;
@@ -351,10 +350,7 @@ fn refuse_remaining_clashes(dst: &Path, gone: &[&str], write: &[&str]) -> Result
                 let other = if parent.is_empty() { stored } else { format!("{parent}/{stored}") };
                 // After the removals, nothing but empty folders may stay there.
                 if !holds_no_files(dst, &other, &leaves) {
-                    bail!(
-                        "{done} and {other} {}",
-                        clash_reason(sensitive)
-                    );
+                    bail!("{done} and {other} {}", clash_reason(sensitive));
                 }
                 break;
             }
@@ -406,6 +402,7 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
 
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
+    if let Some(o) = root.objects() { return o.meta(rel).ok().flatten(); }
     let p = root.at(rel).ok()?;
     exact_metadata(&p, rel).map(|m| meta_of(&m))
 }
@@ -486,6 +483,11 @@ fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
 }
 
 pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+    if let Some(o) = root.objects() {
+        let entry = o.entry(rel)?.context("object path does not exist")?;
+        let layr_objects::Node::Symlink { target } = entry.entry.node else { bail!("object path is not a symbolic link") };
+        return Ok(String::from_utf8_lossy(&target).into_owned());
+    }
     let p = root.at(rel)?;
     Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.to_string_lossy().into_owned())
 }
@@ -509,6 +511,12 @@ pub fn open_regular(p: &Path) -> Result<File> {
 
 /// Read a regular file (not following links) of at most `MAX_TEXT` bytes.
 pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    if let Some(o) = root.objects() {
+        let meta = o.meta(rel)?.context("object path does not exist")?;
+        anyhow::ensure!(meta.is_file(), "object path is not a file");
+        anyhow::ensure!(meta.size <= MAX_TEXT, "object file is larger than {} MiB", MAX_TEXT >> 20);
+        return o.read(rel);
+    }
     let p = root.at(rel)?;
     let f = open_regular(&p)?;
     let len = f.metadata()?.len();
@@ -544,6 +552,11 @@ pub fn copy_regular(src: &Path, dst: &Path) -> Result<()> {
 
 /// Copy a regular file in pieces to `out`.
 pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io::Write) -> Result<()> {
+    if let Some(o) = root.objects() {
+        anyhow::ensure!(o.meta(rel)?.is_some_and(|m| m.is_file()), "object path is not a regular file");
+        out.write_all(&o.read(rel)?)?;
+        return Ok(());
+    }
     let mut f = open_regular(&root.at(rel)?)?;
     std::io::copy(&mut f, out)?;
     Ok(())
@@ -551,7 +564,8 @@ pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io
 
 /// The bytes of an entry for diffs: file content, or the link target for a symbolic link.
 pub fn entry_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
-    match lmeta(root, rel) {
+    let meta = match root.objects() { Some(objects) => objects.meta(rel)?, None => lmeta(root, rel) };
+    match meta {
         Some(m) if m.ftype == FType::Symlink => Ok(read_link(root, rel)?.into_bytes()),
         Some(m) if m.ftype == FType::File => read_file(root, rel),
         Some(_) => Ok(Vec::new()),
@@ -588,7 +602,11 @@ pub fn copy_open_file(src: &File, dst_root: &Path, dst_rel: &str) -> Result<()> 
             d
         }
     };
+    #[cfg(target_os = "linux")]
+    copy_user_xattrs(src, &d)?;
     d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
+    #[cfg(target_os = "linux")]
+    copy_user_xattrs(src, &d)?;
     set_mtime(&d, m.mtime(), m.mtime_nsec())
 }
 
@@ -667,7 +685,9 @@ pub fn same_entry(
     pb: &str,
     ranges: Option<&[(u64, u64)]>,
 ) -> Result<bool> {
-    let (ma, mb) = match (lmeta(ra, pa), lmeta(rb, pb)) {
+    let left = match ra.objects() { Some(objects) => objects.meta(pa)?, None => lmeta(ra, pa) };
+    let right = match rb.objects() { Some(objects) => objects.meta(pb)?, None => lmeta(rb, pb) };
+    let (ma, mb) = match (left, right) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
         _ => return Ok(false),
@@ -681,6 +701,26 @@ pub fn same_entry(
         FType::File => {
             if ma.size != mb.size {
                 return Ok(false);
+            }
+            if let Some(o) = ra.objects() {
+                let entry = o.entry(pa)?.context("missing object entry")?;
+                if let layr_objects::Node::File { blob, .. } = entry.entry.node {
+                    if let Some(other) = rb.objects() {
+                        if let Some(entry) = other.entry(pb)? {
+                            if let layr_objects::Node::File { blob: other_blob, .. } = entry.entry.node {
+                                if blob == other_blob { return Ok(true); }
+                            }
+                        }
+                        return Ok(o.read(pa)? == other.read(pb)?);
+                    }
+                    return Ok(o.store.hash_file(&rb.at(pb)?)?.0 == blob);
+                }
+            }
+            if let Some(o) = rb.objects() {
+                let entry = o.entry(pb)?.context("missing object entry")?;
+                if let layr_objects::Node::File { blob, .. } = entry.entry.node {
+                    return Ok(o.store.hash_file(&ra.at(pa)?)?.0 == blob);
+                }
             }
             let mut a = open_ro(&ra.at(pa)?)?;
             let mut b = open_ro(&rb.at(pb)?)?;
@@ -806,6 +846,20 @@ fn copy_entry_impl(
     }
     if ft.is_dir() {
         t.mkdirs(dst_rel, own)?;
+        #[cfg(target_os = "linux")]
+        {
+            let source = open_ro(&src)?;
+            let dest = t.open_folder(dst_rel)?;
+            sync_user_xattrs(&source, &dest)?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsFd;
+            let source = open_ro(&src)?;
+            let dest = t.open_folder(dst_rel)?;
+            sync_saved_xattrs(&source, &dest)?;
+            crate::sys::apfs_copy_acl_fd(source.as_fd(), dest.as_fd())?;
+        }
         t.chmod(dst_rel, m.mode() & 0o7777)?;
         return Ok(());
     }
@@ -814,6 +868,12 @@ fn copy_entry_impl(
     }
     let s = open_ro(&src)?;
     let finish = |d: &File| -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsFd;
+            sync_saved_xattrs(&s, d)?;
+            crate::sys::apfs_copy_acl_fd(s.as_fd(), d.as_fd())?;
+        }
         d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
         if now {
             set_mtime(d, 0, rustix::fs::UTIME_NOW as i64)?;
@@ -837,7 +897,7 @@ fn copy_entry_impl(
         }
         // Linux clones and copies carry no attributes: keep the user ones, as an APFS clone does.
         #[cfg(target_os = "linux")]
-        copy_user_xattrs(&s, d)?;
+        sync_user_xattrs(&s, d)?;
         Ok(())
     };
     // An index file is never written in place: a failed copy would lose the staged version,
@@ -849,7 +909,7 @@ fn copy_entry_impl(
             #[cfg(target_os = "linux")]
             if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
                 #[cfg(target_os = "linux")]
-                copy_user_xattrs(&s, &old)?;
+                sync_user_xattrs(&s, &old)?;
                 return finish(&old);
             }
             return t.replace_file_atomic(dst_rel, |d| {
@@ -945,6 +1005,56 @@ fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
     Ok(())
 }
 
+/// Make the stage's user attributes match the source, including removals.
+#[cfg(target_os = "linux")]
+fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
+    let names = |file: &File| -> Result<Vec<Vec<u8>>> {
+        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let mut bytes = vec![0; size];
+        let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
+        Ok(bytes[..size]
+            .split(|b| *b == 0)
+            .filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_"))
+            .map(|n| n.to_vec())
+            .collect())
+    };
+    let source = names(src)?;
+    for name in names(dst)? {
+        if !source.contains(&name) {
+            rustix::fs::fremovexattr(dst, name.as_slice())?;
+        }
+    }
+    copy_user_xattrs(src, dst)
+}
+
+/// Synchronize the attributes stored in snapshots without changing Layr's own markers.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
+    let names = |file: &File| -> Result<Vec<Vec<u8>>> {
+        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let mut bytes = vec![0; size];
+        let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
+        Ok(bytes[..size]
+            .split(|b| *b == 0)
+            .filter(|n| !n.is_empty() && layr_objects::fsx::keep_xattr(n))
+            .map(|n| n.to_vec())
+            .collect())
+    };
+    let source = names(src)?;
+    for name in names(dst)? {
+        if !source.contains(&name) {
+            rustix::fs::fremovexattr(dst, name.as_slice())?;
+        }
+    }
+    for name in source {
+        let size = rustix::fs::fgetxattr(src, name.as_slice(), &mut [] as &mut [u8])?;
+        let mut value = vec![0; size];
+        let size = rustix::fs::fgetxattr(src, name.as_slice(), value.as_mut_slice())?;
+        rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty())?;
+    }
+    Ok(())
+}
+
 /// Linux symlink descriptors do not support fgetxattr. The caller pins both parent folders.
 #[cfg(target_os = "linux")]
 pub fn copy_symlink_xattrs(src: &Path, dst: &Path) -> Result<()> {
@@ -1008,6 +1118,7 @@ pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
 /// Paths are relative to `root`. Folders are reported before their content.
 pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
+    if let Some(o) = root.objects() { return o.walk(rel, f); }
     match root.folder() {
         Some(dir) => walk_folder(dir, rel, f),
         #[cfg(target_os = "macos")]
@@ -1236,7 +1347,9 @@ pub fn git_writable(w: &Path, writable: bool) {
         let _ = rustix::fs::fchmod(&g, mode);
     }
     for s in subs {
-        if let Ok(fd) = rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()) {
+        if let Ok(fd) =
+            rustix::fs::openat(&g, s, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())
+        {
             let _ = rustix::fs::fchmod(&fd, mode);
         }
     }
@@ -1454,6 +1567,45 @@ mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copying_an_open_file_keeps_user_attributes() {
+        let root = std::env::temp_dir().join(format!("layr-open-attributes-{}", crate::ids::new_id()));
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        let path = root.join("source");
+        fs::write(&path, b"data").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let name = std::ffi::CString::new("user.layr-test").unwrap();
+        rustix::fs::fsetxattr(&file, name.as_c_str(), b"value", rustix::fs::XattrFlags::empty()).unwrap();
+        super::copy_open_file(&file, &dst, "file").unwrap();
+        let copied = fs::File::open(dst.join("file")).unwrap();
+        let mut value = [0; 32];
+        let len = rustix::fs::fgetxattr(&copied, name.as_c_str(), &mut value[..]).unwrap();
+        assert_eq!(&value[..len], b"value");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn staging_attributes_removes_old_values() {
+        let root = std::env::temp_dir().join(format!("layr-sync-attributes-{}", crate::ids::new_id()));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::create_dir_all(root.join("stage")).unwrap();
+        let source = fs::File::open(root.join("source")).unwrap();
+        let stage = fs::File::open(root.join("stage")).unwrap();
+        let old = std::ffi::CString::new("user.old").unwrap();
+        let new = std::ffi::CString::new("user.new").unwrap();
+        rustix::fs::fsetxattr(&stage, old.as_c_str(), b"old", rustix::fs::XattrFlags::empty()).unwrap();
+        rustix::fs::fsetxattr(&source, new.as_c_str(), b"new", rustix::fs::XattrFlags::empty()).unwrap();
+        super::sync_user_xattrs(&source, &stage).unwrap();
+        let mut value = [0; 32];
+        assert_eq!(rustix::fs::fgetxattr(&stage, old.as_c_str(), &mut value[..]).unwrap_err(), rustix::io::Errno::NODATA);
+        let len = rustix::fs::fgetxattr(&stage, new.as_c_str(), &mut value[..]).unwrap();
+        assert_eq!(&value[..len], b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
     #[test]
     fn work_queue_finishes_dynamic_jobs_and_propagates_panics() {
@@ -1464,7 +1616,8 @@ mod range_tests {
                 add(job * 2 + 1);
                 add(job * 2 + 2);
             }
-        }).unwrap();
+        })
+        .unwrap();
         let mut jobs = visited.into_inner().unwrap();
         jobs.sort_unstable();
         assert_eq!(jobs, (1..=32).collect::<Vec<_>>());
@@ -1522,6 +1675,22 @@ mod write_tests {
     use super::{atomic_write, cache_write, copy_entry};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn importing_an_open_file_preserves_user_xattrs() {
+        let dir = std::env::temp_dir().join(format!("layr-import-xattr-{}", crate::ids::new_id()));
+        fs::create_dir_all(dir.join("out")).unwrap();
+        fs::write(dir.join("source"), b"content").unwrap();
+        let src = fs::File::open(dir.join("source")).unwrap();
+        rustix::fs::fsetxattr(&src, "user.layr-test", b"value", rustix::fs::XattrFlags::empty()).unwrap();
+        super::copy_open_file(&src, &dir.join("out"), "copy").unwrap();
+        let dst = fs::File::open(dir.join("out/copy")).unwrap();
+        let mut value = [0; 5];
+        assert_eq!(rustix::fs::fgetxattr(&dst, "user.layr-test", &mut value[..]).unwrap(), 5);
+        assert_eq!(&value, b"value");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A copy over a file with a second link (cargo hard-links an uplifted library to its deps
     /// file) must leave the other link as it was: the copied file is a new inode.

@@ -186,7 +186,7 @@ thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 network=dict(U,LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'))
 url='layr+https://localhost:'+str(server.server_port)+'/project'
 try:
- output=run(['clone',url,'network','--public','--json'],network)
+ output=run(['clone',url,'network','--mode','secret','--public','--json'],network)
  check(clean(output.stdout+output.stderr,ids),'HTTP public clone has no hidden trace')
  nproject=pathlib.Path(network['LAYR_ROOT'])/'projects/network'
  check((nproject/'lines/main/future.txt').read_text()=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
@@ -201,7 +201,7 @@ try:
  machine=(pathlib.Path(network['LAYR_ROOT'])/'machine/id').read_text().strip()
  check(not (root/f'archive/slots/machine-{machine}.age').exists(),'HTTP public clone creates no machine slot')
  requests.clear()
- output=run(['clone',url,'network-auto','--json'],network)
+ output=run(['clone',url,'network-auto','--mode','secret','--json'],network)
  check(clean(output.stdout+output.stderr,ids) and (pathlib.Path(network['LAYR_ROOT'])/'projects/network-auto/lines/main/future.txt').read_text()=='future public bytes\n','automatic HTTP clone discovers a public store after its private descriptor is unavailable')
  check([path for _,path,_ in requests if not path.startswith('/p/project/')]==['/v1/p/project/store.json'],'automatic HTTP discovery probes only the private descriptor before switching to /p/')
  check(all(method=='GET' and auth is None for method,_,auth in requests),'automatic HTTP discovery sends no credential, read proof or write')
@@ -272,7 +272,7 @@ thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 writer_env=dict(W,LAYR_GATEWAY_CA_FILE=str(root/'tls-ca.pem'),LAYR_GATEWAY_TOKEN_FILE=str(token_file))
 writer_url='layr+https://localhost:'+str(server.server_port)+'/project'
 try:
- run(['remote','add','gateway-write',writer_url],writer_env)
+ run(['remote','add','gateway-write',writer_url,'--mode','secret'],writer_env)
  (wline/'gateway-write.txt').write_text('authenticated gateway writer bytes\n')
  run(['--line','main','add','gateway-write.txt'],W);run(['--line','main','save','-qm','Gateway writer state'],W)
  gateway_state=run(['--line','main','rev-parse','head'],W).stdout.strip()

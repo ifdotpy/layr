@@ -4,8 +4,8 @@ set -euo pipefail
 test "$(uname -s)" = Darwin
 test "$(id -u)" != 0
 . tools/checks/environment.sh
-export LAYR_APFS_TEST_ROOT=/Volumes/LayrRunner
-case_root=/Volumes/LayrRunnerCase
+export LAYR_APFS_TEST_ROOT="${LAYR_APFS_TEST_ROOT:-/Volumes/LayrRunner}"
+case_root="${LAYR_APFS_CASE_ROOT:-/Volumes/LayrRunnerCase}"
 for volume in "$LAYR_APFS_TEST_ROOT" "$case_root"; do
     diskutil info -plist "$volume" | python3 -c '
 import plistlib,sys
@@ -14,6 +14,7 @@ assert p.get("FilesystemType")=="apfs" and p.get("MountPoint")==sys.argv[1], p
 ' "$volume"
     test -w "$volume"
 done
+python3 tests/test_run_harness.py
 cargo build --locked --offline
 # The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec.
 # ci.yml's macos job runs them outside a sandbox.

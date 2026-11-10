@@ -10,6 +10,8 @@
 B=$LAYR_ROOT
 export LAYR_ROOT=$B/store
 mkdir -p "$LAYR_ROOT"
+# Use Git's canonical modes for the exact HEAD check below.
+umask 022
 
 git init -q --bare $B/origin.git
 git clone -q $B/origin.git $B/co 2>/dev/null
@@ -54,8 +56,29 @@ eq "a branch of origin resolves" "$(git -C $B/origin.git rev-parse feat/remote)"
 eq "an unpushed local branch resolves" "$(git -C $B/co.before-layr rev-parse wip)" "$(l rev-parse --git local/wip)"
 eq "the target cache is kept" built "$(cat rs/target/debug/x)"
 eq "the node_modules cache is kept" dep "$(cat web/node_modules/dep/index.js)"
+before=$(l rev-parse head)
+no "a repeated import refuses the existing project" "$LAYR" init co --from-git "$B/co"
+eq "a repeated import keeps the line head" "$before" "$(l rev-parse head)"
+eq "a repeated import keeps the target cache" built "$(cat rs/target/debug/x)"
+eq "a repeated import keeps the original Git history" "$(git -C "$B/origin.git" rev-parse main)" "$(git -C "$B/co.before-layr" rev-parse HEAD)"
 has "rs/target is a cache overlay" "folder=rs/target" "$(l overlay list 2>&1)"
 has "web/node_modules is a cache overlay" "folder=web/node_modules" "$(l overlay list 2>&1)"
 l line new -q next main >/dev/null
 eq "a new line starts warm" built "$(cat $LAYR_ROOT/projects/co/lines/next/rs/target/debug/x)"
+
+# Git does not record group write bits. Preserve them in a child state of the imported HEAD.
+umask 002
+git init -q -b main "$B/group"
+mkdir -p "$B/group/sub"
+printf 'group writable\n' > "$B/group/sub/file"
+git -C "$B/group" add .
+git -C "$B/group" commit -qm 'group modes'
+group_head=$(git -C "$B/group" rev-parse HEAD)
+ok "import preserves modes outside Git's model" "$LAYR" init group --from-git "$B/group" -q
+cd "$B/group" || exit 1
+eq "the group-writable file keeps its mode" 664 "$(stat_field mode sub/file)"
+eq "the group-writable directory keeps its mode" 775 "$(stat_field mode sub)"
+eq "the imported Git HEAD is the parent" "$group_head" "$(l rev-parse --git head~1)"
+eq "the imported working folder is clean" "" "$(l status --short)"
+umask 022
 finish

@@ -1,0 +1,4 @@
+before: exit 1
+layr git does not support virtual lines yet (LAYR_EXPERIMENTAL_VIEWS); convert the line first: layr line show after --folder
+
+after: exit 0

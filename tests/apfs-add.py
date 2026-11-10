@@ -59,4 +59,5 @@ try:
  for i in range(2):run(i,'save','-qm','mapped');run(i,'fsck')
  print('PASS both histories pass fsck',flush=True)
 finally:
+ subprocess.run(['/bin/chmod', '-R', '-N', str(root)], capture_output=True)
  subprocess.run(['chflags','-R','nouchg',str(root)],check=True);shutil.rmtree(root)

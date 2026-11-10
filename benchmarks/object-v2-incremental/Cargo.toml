@@ -1,0 +1,10 @@
+[package]
+name = "object-v2-incremental-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+layr-objects = { path = "../../crates/layr-objects" }

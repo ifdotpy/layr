@@ -1,0 +1,57 @@
+/var/tmp/layr-parity-overlay/store/projects/objects-1794153238-3458/lines/main
+1/1 state 0672b3f hot: 4 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (4 files, 34 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 585 B (585 bytes)
+old snapshots: deleted 1 snapshot(s), 12.0 KiB freed; their states remain in the object store
+dry run: nothing changes
+1 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 1 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+Created line branch at /var/tmp/layr-parity-overlay/store/projects/objects-1794153238-3458/lines/branch from 0672b3f
+[branch f8f9fb3] Change object state
+ 3 files changed, 3 insertions(+), 2 deletions(-)
+ create mode 100644 added/file
+dry run: nothing changes
+2 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 2 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+Created line copy at /var/tmp/layr-parity-overlay/store/projects/objects-1794153238-3458/lines/copy from f8f9fb3
+dry run: nothing changes
+3 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 4 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+exported state f8f9fb3 to /var/tmp/layr-parity-overlay/tmp/layr-objects.WY4cQ5/export: 6 path(s) written
+head is now at 0672b3f initial state
+Undid 157aa8359a7c reset (2026-11-08 15:53:59 +0000); undo it with 'layr undo a170a6654cd1'
+Dropped park@{0} parked.copy.1 (b5bc67b)
+[main cc5b8f4] Independent main change
+ 1 file changed, 1 insertion(+)
+ create mode 100644 main-file
+Merge made by the 'layr' strategy: c7e0f38
+ added/file | 1 +
+ file       | 2 +-
+ hardlink   | 2 +-
+ 3 files changed, 3 insertions(+), 2 deletions(-)
+ create mode 100644 added/file
+records of machine 6d1a5f87: 23, signatures ok
+0 problem(s)
+dry run: nothing changes
+3 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 15 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+ignored: overlay cache.ignored 82f902c
+main 460f49603a6d7400bf0c01a1bbddd8ba
+Created line with-cache at /var/tmp/layr-parity-overlay/store/projects/objects-1794153238-3458/lines/with-cache from c7e0f38
+overlay cache.ignored: 0 unreachable state(s), 0 bytes; 0 overlay line(s) of deleted lines
+old cache snapshots of states: 0, 0 bytes
+unreachable cache data: 0 item(s), 0 bytes
+PASS object state lifecycle (Linux)

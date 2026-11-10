@@ -1,0 +1,10 @@
+PackReport { packs: 73, objects: 583186, removed: 583186, loose_bytes: 1623128468, pack_bytes: 1210079203 } in 356.39s
+free 46 GiB, load 57.64 41.27 35.12
+CheckoutReport { files: 516265, clones: 0, copies: 0, decoded: 516265, dirs: 47031, symlinks: 21, hard_links: 0, times: 563318 } in 106.56s
+checkout from packs 106.6 s
+entries 563317 bytes 4472453602 differences 1 in 26.59s
+  only in the original: .git
+verify 26.6 s
+free 39 GiB, load 30.43 35.19 33.49
+
+[exited with code 0]

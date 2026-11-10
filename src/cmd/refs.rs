@@ -70,8 +70,13 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let before = repo.p.db.ref_value(name, ids::now_ms())?;
             if let Some(expect) = a.get("--expect") {
-                let expected = crate::revs::resolve(repo, h.line.as_ref(), expect)?;
-                if before.as_ref().map(|r| &r.target) != Some(&expected) {
+                let matches = if expect == "none" {
+                    before.is_none()
+                } else {
+                    let expected = crate::revs::resolve(repo, h.line.as_ref(), expect)?;
+                    before.as_ref().is_some_and(|r| r.target == expected)
+                };
+                if !matches {
                     bail!("ref '{name}' changed: --expect does not match its current position");
                 }
             }
@@ -80,7 +85,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let after = if set {
                 let target = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[2])?;
-                repo.state_root(&target)?;
+                repo.state_src(&target)?;
                 let expires_at = a
                     .get("--ttl")
                     .map(ttl_ms)

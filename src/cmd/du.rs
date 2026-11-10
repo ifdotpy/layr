@@ -56,6 +56,11 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let mut lines = Vec::new();
     for l in repo.lines()? {
+        // The folder of a virtual line is a mount; its upper folder is in the project's meta folder.
+        #[cfg(target_os = "macos")]
+        if crate::views::of(repo, &l).is_some() {
+            continue;
+        }
         if a.pos.is_empty() || a.pos.contains(&l.name) {
             let path = repo.working(&l);
             if path.is_dir() {
@@ -74,10 +79,12 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
     let results = if let Some(width) = std::num::NonZeroUsize::new(lines.len()) {
         crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
-        use rayon::prelude::*;
-        lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
+            use rayon::prelude::*;
+            lines.par_iter().map(|(_, path)| crate::storage::space(path)).collect::<Vec<_>>()
         })?
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     let mut rows = Vec::new();
     for ((name, path), r) in lines.into_iter().zip(results) {
         match r {
@@ -323,15 +330,19 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let outside = {
         let paths: Vec<_> = parts.iter().map(|(_, path)| path.clone()).collect();
-        let plan = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::MIN), || {
-            if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
-                eprintln!("note: nested mount {}: walking files instead", mount.display());
-                *mounts.lock().unwrap() = Mounts::Below;
-                return Ok(None);
-            }
-            *mounts.lock().unwrap() = Mounts::None;
-            crate::btrfs_scan::plan(root, &paths).map(Some)
-        })?;
+        let plan = crate::pools::run(
+            crate::pools::Priority::Background,
+            crate::pools::Width::Items(std::num::NonZeroUsize::MIN),
+            || {
+                if let Some(mount) = crate::btrfs_scan::nested_mount(&paths)? {
+                    eprintln!("note: nested mount {}: walking files instead", mount.display());
+                    *mounts.lock().unwrap() = Mounts::Below;
+                    return Ok(None);
+                }
+                *mounts.lock().unwrap() = Mounts::None;
+                crate::btrfs_scan::plan(root, &paths).map(Some)
+            },
+        )?;
         match plan {
             Ok(Some(plan)) => {
                 let failed = Mutex::new(None);
@@ -340,26 +351,26 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
                     crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(width), || {
                         use rayon::prelude::*;
                         plan.units.into_par_iter().for_each(|unit| {
-                    let mut local = HashMap::<(usize, ExtentKey), u64>::new();
-                    let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
-                        for &(key, bytes) in held.shared {
-                            let value = local.entry((part, key)).or_default();
-                            *value = (*value).max(bytes);
-                        }
-                    });
-                    if let Err(err) = visited {
-                        *failed.lock().unwrap() = Some(err);
-                        return;
-                    }
-                    let mut all = bulk.lock().unwrap();
-                    for ((part, key), bytes) in local {
-                        let Some(fsid) = filesystems[part] else { continue };
-                        let entry = all.entry((fsid, key)).or_insert((part, bytes));
-                        if entry.0 != part {
-                            entry.0 = SHARED;
-                        }
-                        entry.1 = entry.1.max(bytes);
-                    }
+                            let mut local = HashMap::<(usize, ExtentKey), u64>::new();
+                            let visited = crate::btrfs_scan::visit(&unit, &mut |part, held| {
+                                for &(key, bytes) in held.shared {
+                                    let value = local.entry((part, key)).or_default();
+                                    *value = (*value).max(bytes);
+                                }
+                            });
+                            if let Err(err) = visited {
+                                *failed.lock().unwrap() = Some(err);
+                                return;
+                            }
+                            let mut all = bulk.lock().unwrap();
+                            for ((part, key), bytes) in local {
+                                let Some(fsid) = filesystems[part] else { continue };
+                                let entry = all.entry((fsid, key)).or_insert((part, bytes));
+                                if entry.0 != part {
+                                    entry.0 = SHARED;
+                                }
+                                entry.1 = entry.1.max(bytes);
+                            }
                         });
                     })?;
                 }
@@ -500,10 +511,7 @@ fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
     rows.sort_by(|x, y| (y.1.own + y.1.sole).cmp(&(x.1.own + x.1.sole)).then_with(|| x.0.cmp(y.0)));
     let total = rows.iter().map(|r| r.1.own + r.1.sole).sum::<u64>() + shared;
     if json {
-        let v: Vec<_> = rows
-            .iter()
-            .map(|(n, s)| serde_json::json!({"part": n, "frees": s.own + s.sole}))
-            .collect();
+        let v: Vec<_> = rows.iter().map(|(n, s)| serde_json::json!({"part": n, "frees": s.own + s.sole})).collect();
         outln!(ctx, "{}", serde_json::to_string(&serde_json::json!({"parts": v, "shared": shared, "total": total}))?);
         return Ok(0);
     }

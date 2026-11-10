@@ -11,6 +11,8 @@ pub mod diff;
 pub mod history;
 pub mod index;
 pub mod interdiff;
+pub mod main_head;
+pub mod merge_authority;
 pub mod operations;
 pub mod overlays;
 pub mod policy;
@@ -22,9 +24,9 @@ pub mod types;
 pub mod validation;
 
 use anyhow::{bail, Context, Result};
+use layr_hashers::{ContentAddress, Digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 pub use types::*;
 
@@ -38,7 +40,9 @@ pub fn project_perspective<'a>(project: &str, records: impl IntoIterator<Item = 
         if record.project != project {
             bail!("policy records belong to another project");
         }
-        if record.op != "project" { continue; }
+        if record.op != "project" {
+            continue;
+        }
         if record.data["id"].as_str() != Some(project) || record.machine.is_empty() {
             bail!("invalid project creator record");
         }
@@ -206,7 +210,9 @@ impl Project {
         let mut unique = BTreeMap::<String, Record>::new();
         let mut sequences = BTreeMap::new();
         for record in records {
-            if record.op == "release.files" { serde_json::from_value::<release::Files>(record.data.clone())?.validate()?; }
+            if record.op == "release.files" {
+                serde_json::from_value::<release::Files>(record.data.clone())?.validate()?;
+            }
             if !record.project.is_empty() && record.project != id {
                 bail!("record belongs to another project");
             }
@@ -251,6 +257,16 @@ impl Project {
         };
         for (index, rec) in records.iter().enumerate() {
             p.derive(index, rec)?;
+        }
+        // Apply mappings after all source states exist. Their own record order decides the
+        // winner even when clock skew sorts a migration before the source record.
+        for rec in records.iter().filter(|rec| rec.op == validation::STATE_TREE_OP) {
+            for (id, tree, times) in validation::state_trees(&rec.data)? {
+                if let Some(state) = p.states.get_mut(&id) {
+                    state.state.tree = Some(tree);
+                    state.state.times = Some(times);
+                }
+            }
         }
         p.records = records;
         Ok(p)
@@ -387,6 +403,15 @@ impl Project {
             "stash.drop" => {
                 if let Some(s) = self.states.get_mut(&str_at("state")) {
                     s.dropped = true;
+                }
+            }
+            validation::STATE_TREE_OP => {
+                // Records are replayed in order: a later record of a state replaces its tree.
+                for (id, tree, times) in validation::state_trees(d)? {
+                    if let Some(s) = self.states.get_mut(&id) {
+                        s.state.tree = Some(tree);
+                        s.state.times = Some(times);
+                    }
                 }
             }
             "save.caches" | "save.layers" => {

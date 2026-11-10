@@ -9,6 +9,7 @@ sample "$T/src"
 l init rp --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/rp/lines
 cd "$P/main" || exit 1
+root=$(l rev-parse head) || exit 1
 l line new -q feat
 cd "$P/feat" && echo f1 > f1.txt && l add f1.txt && l save -qm f1
 cd "$P/main" && echo m1 > m1.txt && l add m1.txt && l save -qm m1
@@ -39,4 +40,22 @@ rc=$?
 [ $rc -eq 0 ] || printf '%s\n' "$out"
 eq "pick of main..other succeeds" 0 "$rc"
 eq "pick brings the files of o1 and o2" "o1 o2" "$(cat o1.txt o2.txt | tr '\n' ' ' | sed 's/ $//')"
+
+# Replaying onto a new base from the root must stop before the root state.
+l line new -q rootbase "$root" || exit 1
+cd "$P/rootbase" || exit 1
+echo base > rootbase.txt && l add rootbase.txt && l save -qm rootbase || exit 1
+base=$(l rev-parse head) || exit 1
+l line new -q rootwork "$root" || exit 1
+cd "$P/rootwork" || exit 1
+echo work > rootwork.txt && l add rootwork.txt && l save -qm rootwork || exit 1
+out=$(l replay --onto rootbase "$root" 2>&1); rc=$?
+eq "replay from the root onto another base succeeds" 0 "$rc"
+eq "root replay applies only the new work" "rootwork rootbase" "$(l log -2 --format=%s | tr '\n' ' ' | sed 's/ $//')"
+eq "root replay starts at the requested base" "$base" "$(l rev-parse head~1)"
+eq "root replay keeps both files" "base work" "$(cat rootbase.txt rootwork.txt | tr '\n' ' ' | sed 's/ $//')"
+before=$(l rev-parse head)
+out=$(l replay "$root" 2>&1); rc=$?
+eq "replay of an already included root succeeds" 0 "$rc"
+eq "replay of an included root leaves the head unchanged" "$before" "$(l rev-parse head)"
 finish

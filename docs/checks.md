@@ -63,11 +63,35 @@ no active executor result covers for the platform (default: this machine's). `--
 the list to one state and adds the change checks (`checks.changes`) for it. A CI job resolves its
 commit with `layr rev-parse <commit>`, fetches the project records, and runs only these checks.
 
+In JSON output, `change` is true when the check applies to the newest version of an open change.
+It is false for other checks. A check can apply to both an open change and a protected line.
+
+With `--passing`, the list also includes checks whose active results failed. Use this option for
+merge and deployment gates. The default keeps failed results out of the executor's pending list,
+so a watcher does not repeatedly run the same failed check.
+`--required-checks <name,...>` also plans those checks for the selected state, even when they are
+absent from `checks.changes`. It requires `--state` and `--passing`. A missing check definition is
+an error. This prevents an incomplete check selection from appearing to satisfy a merge gate.
+JSON output also includes `required_definitions`, with the creator's command and platform setting
+for each required check. A gate must compare these to the settings it uses to merge.
+
+A service that checks a queue entry before merging can bind the merge to that decision with
+`layr queue run --checked-entry <id> --checked-head <state> --checked-state <state>`. It processes
+only that entry and refuses a changed target head, entry state or non-pending entry. It never runs a missing check.
+The entry stays pending when a check is missing. This mode also waits when queue probes are enabled,
+because those probes execute commands during the merge. It requires an untitled fast-forward entry:
+a squash or other merge creates a different state that the service has not checked. Pass all three
+options together.
+
 `layr checks run --state <rev> [--privileged-only] [--json]` is one executor pass over the jobs of
 that one state: the same jobs as `checks pending --state`, run with the same sandbox, approval and
 lock rules as `watch`, attested in the same way. Its JSON line and exit code are those of
 `watch --once`. A CI job for a Git commit fetches it (`layr git fetch <remote> <branch>`), runs
 `layr checks run --state <commit>`, and pushes the results.
+
+`layr checks run --state <rev> --planned-only` runs only jobs that a watcher already plans for that
+state. It does not add change checks to an unrelated state. It can restore the selected state from the
+remote. It cannot be combined with `--required-checks`.
 
 A check starts warm. Its copy of the state gets the cache of each cache overlay by the rules of
 `layr line new <state>` ([cache overlays](cache-overlays.md)): the newest cache saved with the state
@@ -109,6 +133,59 @@ Output above the cap is discarded while the command keeps running; `truncated`
 records that fact. Timeout records exit 124. Signals record 128 plus the signal.
 A crash before the signed result commits can rerun that job: execution is at least
 once, and completed results are deduplicated. Check commands must tolerate retries.
+
+## Cloud runners
+
+A Mac can join a Layr Cloud gateway as a check runner of chosen projects (platform
+macos-aarch64). A gateway administrator makes a one-time join code on the site (valid 1 hour).
+On the Mac, as the user who runs the checks:
+
+```sh
+layr checks join https://cloud.layr.ws --code <code> --project <a,b>
+```
+
+`--project` is required: the person at the Mac chooses the projects. `join` sends the list with
+the request and refuses a gateway reply that names any other project; the runner refuses work of
+a project that is not in its list. A change of projects needs a new join (remove
+`<store>/runner` first); a gateway message never changes it.
+
+`join` registers the machine key of the store with the gateway, keeps the runner token in
+`<store>/runner/token` (0600) and the settings in `<store>/runner/config.json`, and installs the
+user daemon LaunchAgent (`ws.layr.daemon`) when it is missing. No sudo is used.
+
+The daemon (`src/service.rs`) keeps one long-lived child for the runner (`src/runner.rs`): a
+WebSocket to `/v1/runners/connect`, authenticated by the runner token. The gateway pushes work that
+names a project only. The runner clones the project once (`--heads --caches-of main`, then
+`config --local checks.runner true`), fetches it, runs `checks watch --once --json` and pushes the
+results and caches with the runner token. The commands come only from the project's check
+settings; the gateway never sends a command. A job reports pass, fail, error or waiting (the
+project does not open yet: a private project opens after the creator trusts the machine with
+`layr remote trust`).
+
+Two transports carry the same messages. The join reply may name a WebTransport endpoint (for
+example `https://rt.layr.ws/v1/runners/connect`, HTTP/3 over QUIC on UDP 443, one bidirectional
+stream of JSON lines). `join` keeps it in `config.json` only when it is https, has the runner
+path, and its host is the join gateway's host or a host of the same domain (the last two labels).
+A welcome only switches it on or off; it never names where the token goes. When it is on, the
+runner tries it first on the next connect; a failed
+attempt (for example a network that blocks UDP) falls back to the WebSocket at once and skips
+WebTransport for 10 minutes. The connection pings every 20 seconds (a WebSocket ping frame, or a
+`{"type":"ping"}` line) and reconnects with backoff (1 to 60 seconds). On each
+connect it sends its cursor (gateway epoch and last sequence, kept in `<store>/runner/cursor.json`)
+and the project that it still checks, so the gateway resumes without losing work. Close code 4001
+or HTTP 401 renews the token with a signature of the machine key; 4003 or HTTP 403 means the
+runner was removed. The gateway gives a project to one runner of a platform at a time, so two
+cloud runners do not run the same check at once. The local flock still covers one machine.
+
+Jobs run as the joining user, inside sandbox-exec, with the macOS watcher rules (only main heads
+and exact states that a maintainer approved). The residual risk is that of
+[laptop-runner.md](laptop-runner.md): the process limit covers all processes of that user. A
+dedicated runner account (a LaunchDaemon with its own `UserName`) is the next step.
+
+The daemon restarts a runner child that ended after 10 s, and doubles the delay up to 60 s while
+each run lasts less than a minute (for example, an invalid `config.json`).
+
+To leave: remove the runner on the site, then remove `<store>/runner`.
 
 ## Service and sandbox
 
@@ -229,3 +306,11 @@ outside that copy, including paths through symlinks.
 Privileged execution remains unavailable on macOS. The separate root-only service
 test is an operator check. See [laptop-runner.md](laptop-runner.md) for machine
 provisioning, volume setup, services, verification and residual host risk.
+
+### Headless runner setup
+
+Use `layr checks join <gateway> --code-file <path> --project <projects> --no-start` on a headless
+Mac when a system service starts the daemon. Store the code in a private file owned by the runner.
+The command saves the runner identity and token but
+does not install or start a LaunchAgent. Start `layr daemon` as the same non-root user after the
+service has applied its network restrictions.

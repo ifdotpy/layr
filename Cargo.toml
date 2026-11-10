@@ -1,10 +1,10 @@
 [workspace]
-members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers"]
+members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers", "crates/layr-objects"]
 resolver = "2"
 
 [workspace.package]
 # The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
-version = "0.41.2"
+version = "0.42.0"
 rust-version = "1.99.1"
 
 [workspace.metadata.layr-retest]
@@ -39,6 +39,7 @@ layr-model = { path = "crates/layr-model" }
 layr-retest = { path = "crates/layr-retest" }
 layr-adapter = { path = "crates/layr-adapter" }
 layr-cache = { path = "crates/layr-cache" }
+layr-objects = { path = "crates/layr-objects" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 base64 = "0.22"
@@ -46,6 +47,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+globset = "0.4"
+grep-matcher = "0.1"
+grep-printer = "0.2"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 hmac = "0.12"
 ignore = "0.4"
 libc = "0.2"
@@ -66,9 +72,22 @@ toml = "0.8"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v7"] }
 zerocopy = { version = "0.8.63", features = ["derive"] }
+# The check runner's connection to a Layr Cloud gateway (src/runner.rs).
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+wtransport = { version = "0.7", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+# The runner tests: a self-signed WebTransport server and a client that skips its certificate.
+wtransport = { version = "0.7", default-features = false, features = ["ring", "self-signed", "dangerous-configuration"] }
 
 [profile.release]
 debug = 1
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-foundation = "0.10"
+security-framework-sys = "2"

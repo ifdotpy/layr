@@ -81,8 +81,12 @@ impl Browse {
         if let Some(person) = &person {
             person.check(&descriptor)?;
         }
-        let pin =
-            StorePin { project: descriptor.project.clone(), recipient: descriptor.recipient.clone(), paper_recipient: None, mode: descriptor.mode };
+        let pin = StorePin {
+            project: descriptor.project.clone(),
+            recipient: descriptor.recipient.clone(),
+            paper_recipient: None,
+            mode: descriptor.mode,
+        };
         drop(stage);
         let stage = crate::trace::span("disk slot");
         let own = (|| -> Result<String> {
@@ -134,7 +138,12 @@ impl Browse {
         })?;
         let root_descriptor = descriptor.clone();
         let (backend, descriptor, identity, public_reader) = if let Some((backend, current, public)) = resolved {
-            let descriptor = Descriptor { format: 2, project: current.key.project, recipient: current.key.recipient, mode: Default::default() };
+            let descriptor = Descriptor {
+                format: 2,
+                project: current.key.project,
+                recipient: current.key.recipient,
+                mode: Default::default(),
+            };
             (backend, descriptor, current.identity, public)
         } else {
             let (identity, public_reader) = if access.public {
@@ -322,7 +331,8 @@ impl Browse {
     }
 
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
-        let descriptor: Descriptor = serde_json::from_slice(&self.backend.root().get("store.json")?.context("store.json is missing")?)?;
+        let descriptor: Descriptor =
+            serde_json::from_slice(&self.backend.root().get("store.json")?.context("store.json is missing")?)?;
         if descriptor.format != 2 {
             bail!("unsupported store format {}", descriptor.format);
         }

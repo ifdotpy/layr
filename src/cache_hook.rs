@@ -253,7 +253,15 @@ pub fn relocate_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str
 /// The build of the standard commands in a worker. After a stop at the hard limit the adapter's `recover` runs,
 /// as after a prune (cargo has nothing to restore; pnpm puts its copy back).
 #[allow(clippy::too_many_arguments)]
-pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
+pub fn warm_with(
+    launch: &Launch,
+    env: &[(&str, &str)],
+    setting: Option<&str>,
+    folder: &Path,
+    uid: u32,
+    limit: Duration,
+    wait: Duration,
+) -> Done {
     let shown = folder.display();
     let mut built = false;
     let log = match execute(launch, env, "warm", setting, folder, uid, limit, wait) {
@@ -283,7 +291,15 @@ pub fn warm_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, f
 }
 
 /// The repair of a damaged folder in a worker. `folder_ok` is true only when the adapter repaired it.
-pub fn repair_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
+pub fn repair_with(
+    launch: &Launch,
+    env: &[(&str, &str)],
+    setting: Option<&str>,
+    folder: &Path,
+    uid: u32,
+    limit: Duration,
+    wait: Duration,
+) -> Done {
     let shown = folder.display();
     let (log, ok) = match execute(launch, env, "repair", setting, folder, uid, limit, wait) {
         Run::Report(r) if r.pruned => (format!("{shown}: repaired with {}", r.adapter), true),
@@ -308,7 +324,16 @@ enum Run {
 
 /// Starts a worker in `mode` on `folder`, and waits `wait` for it. `env` is extra environment for it.
 #[allow(clippy::too_many_arguments)]
-fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Run {
+fn execute(
+    launch: &Launch,
+    env: &[(&str, &str)],
+    mode: &str,
+    setting: Option<&str>,
+    folder: &Path,
+    uid: u32,
+    limit: Duration,
+    wait: Duration,
+) -> Run {
     let mut vars: Vec<(String, String)> = vec![
         (ENV_MODE.into(), mode.into()),
         (ENV_SETTING.into(), setting.unwrap_or("-").into()),
@@ -357,7 +382,15 @@ fn execute(launch: &Launch, env: &[(&str, &str)], mode: &str, setting: Option<&s
 /// `run` with the worker started by `launch`, extra environment for it, and `wait` as the hard limit: the time
 /// core waits for the worker before it kills the worker's process group.
 #[allow(clippy::too_many_arguments)]
-pub fn run_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, uid: u32, limit: Duration, wait: Duration) -> Done {
+pub fn run_with(
+    launch: &Launch,
+    env: &[(&str, &str)],
+    setting: Option<&str>,
+    folder: &Path,
+    uid: u32,
+    limit: Duration,
+    wait: Duration,
+) -> Done {
     let shown = folder.display();
     if setting == Some("none") {
         return Done { log: format!("{shown}: prune is off"), folder_ok: true, built: true };
@@ -459,7 +492,8 @@ pub fn adapter_for(setting: Option<&str>, folder: &Path) -> Option<&'static dyn 
 }
 
 /// Outputs of `toolchain_output`, by command, selecting files and user: one run per command.
-static OUTPUTS: std::sync::Mutex<Vec<((String, Vec<(String, Vec<u8>)>, u32), Option<String>)>> = std::sync::Mutex::new(Vec::new());
+static OUTPUTS: std::sync::Mutex<Vec<((String, Vec<(String, Vec<u8>)>, u32), Option<String>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The standard output of the toolchain command `t` for the files in `dir`, run as `uid` with the owner's search
 /// path, in an empty folder with copies of the files that select the toolchain (`dir` may be a folder that the
@@ -514,8 +548,16 @@ pub fn toolchain_output(t: &Toolchain, dir: &Path, uid: u32) -> Option<String> {
 /// The adapter for a folder: the one named by the setting, or the one that detects the folder.
 fn find<'a>(adapters: &'a [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path) -> Result<&'a dyn CacheAdapter, String> {
     match setting {
-        Some(name) => adapters.iter().map(|a| a.as_ref()).find(|a| a.name() == name).ok_or_else(|| format!("unknown prune adapter '{name}'")),
-        None => adapters.iter().map(|a| a.as_ref()).find(|a| a.detects(folder)).ok_or_else(|| "no adapter matches the folder".to_string()),
+        Some(name) => adapters
+            .iter()
+            .map(|a| a.as_ref())
+            .find(|a| a.name() == name)
+            .ok_or_else(|| format!("unknown prune adapter '{name}'")),
+        None => adapters
+            .iter()
+            .map(|a| a.as_ref())
+            .find(|a| a.detects(folder))
+            .ok_or_else(|| "no adapter matches the folder".to_string()),
     }
 }
 
@@ -523,12 +565,25 @@ fn find<'a>(adapters: &'a [Box<dyn CacheAdapter>], setting: Option<&str>, folder
 fn prune_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
-        Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+        Err(reason) => {
+            return Report {
+                adapter: setting.unwrap_or("-").into(),
+                pruned: false,
+                freed: 0,
+                restored: false,
+                folder_ok: true,
+                reason,
+            }
+        }
     };
     let host = WorkerHost::new(limit);
     match found.prune(&host, folder) {
-        Outcome::Pruned { freed } => Report { adapter: found.name().into(), pruned: true, freed, restored: false, folder_ok: true, reason: String::new() },
-        Outcome::Skipped { reason } => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+        Outcome::Pruned { freed } => {
+            Report { adapter: found.name().into(), pruned: true, freed, restored: false, folder_ok: true, reason: String::new() }
+        }
+        Outcome::Skipped { reason } => {
+            Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason }
+        }
     }
 }
 
@@ -536,7 +591,16 @@ fn prune_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>,
 fn warm_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
-        Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+        Err(reason) => {
+            return Report {
+                adapter: setting.unwrap_or("-").into(),
+                pruned: false,
+                freed: 0,
+                restored: false,
+                folder_ok: true,
+                reason,
+            }
+        }
     };
     let host = WorkerHost::new(limit);
     let (pruned, reason) = match found.warm(&host, folder) {
@@ -551,7 +615,16 @@ fn repair_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
         // Without an adapter nothing changed the folder: it is as whole as it can be.
-        Err(_) => return Report { adapter: "-".into(), pruned: true, freed: 0, restored: false, folder_ok: true, reason: String::new() },
+        Err(_) => {
+            return Report {
+                adapter: "-".into(),
+                pruned: true,
+                freed: 0,
+                restored: false,
+                folder_ok: true,
+                reason: String::new(),
+            }
+        }
     };
     let host = WorkerHost::new(limit);
     let (pruned, reason) = match found.repair(&host, folder) {
@@ -566,11 +639,24 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
         // Without an adapter nothing changed the folder under this hook.
-        Err(_) => return Report { adapter: "-".into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason: String::new() },
+        Err(_) => {
+            return Report {
+                adapter: "-".into(),
+                pruned: false,
+                freed: 0,
+                restored: false,
+                folder_ok: true,
+                reason: String::new(),
+            }
+        }
     };
     match found.recover(&WorkerHost::new(RECOVER_LIMIT), folder) {
-        Ok(restored) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored, folder_ok: true, reason: String::new() },
-        Err(reason) => Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: false, reason },
+        Ok(restored) => {
+            Report { adapter: found.name().into(), pruned: false, freed: 0, restored, folder_ok: true, reason: String::new() }
+        }
+        Err(reason) => {
+            Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: false, reason }
+        }
     }
 }
 
@@ -578,7 +664,16 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
 fn relocate_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, at: &Path) -> Report {
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
-        Err(reason) => return Report { adapter: setting.unwrap_or("-").into(), pruned: false, freed: 0, restored: false, folder_ok: true, reason },
+        Err(reason) => {
+            return Report {
+                adapter: setting.unwrap_or("-").into(),
+                pruned: false,
+                freed: 0,
+                restored: false,
+                folder_ok: true,
+                reason,
+            }
+        }
     };
     let (freed, reason) = match found.relocated(folder, at) {
         Ok(n) => (n as u64, String::new()),
@@ -652,7 +747,8 @@ mod tests {
             match self.0 {
                 "hard-restore" if copy_of(folder).exists() => {
                     let _ = std::fs::remove_file(folder.join("partial.txt"));
-                    std::fs::write(folder.join("kept.txt"), std::fs::read(copy_of(folder)).unwrap()).map_err(|e| e.to_string())?;
+                    std::fs::write(folder.join("kept.txt"), std::fs::read(copy_of(folder)).unwrap())
+                        .map_err(|e| e.to_string())?;
                     std::fs::remove_file(copy_of(folder)).map_err(|e| e.to_string())?;
                     Ok(true)
                 }
@@ -681,7 +777,10 @@ mod tests {
 
     /// The test binary as the worker: the test `worker_entry` runs the worker when the test env is set.
     fn launch() -> Launch {
-        Launch { exe: std::env::current_exe().unwrap(), args: vec!["--exact".into(), "cache_hook::tests::worker_entry".into(), "--nocapture".into()] }
+        Launch {
+            exe: std::env::current_exe().unwrap(),
+            args: vec!["--exact".into(), "cache_hook::tests::worker_entry".into(), "--nocapture".into()],
+        }
     }
 
     const TEST_ENV: [(&str, &str); 1] = [("LAYR_CACHE_HOOK_TEST", "1")];
@@ -700,7 +799,8 @@ mod tests {
     }
 
     fn names(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let mut v: Vec<String> =
+            std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         v.sort();
         v
     }

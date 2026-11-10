@@ -15,6 +15,9 @@ pub enum Role {
     Reader,
     /// A cache writer: cache states in the overlays it names and the save-back lines of the project.
     Writer,
+    /// A queue merge executor (docs/ci-trust.md, "Merge machines"): queue results, merge candidates, request
+    /// evidence, release refs and release files, and head moves of existing lines. No project policy.
+    Merge,
     Full,
 }
 
@@ -23,6 +26,7 @@ impl Role {
         match text {
             "reader" => Some(Role::Reader),
             "writer" => Some(Role::Writer),
+            "merge" => Some(Role::Merge),
             _ => None,
         }
     }
@@ -31,6 +35,7 @@ impl Role {
         match self {
             Role::Reader => "reader",
             Role::Writer => "writer",
+            Role::Merge => "merge",
             Role::Full => "full",
         }
     }
@@ -71,18 +76,54 @@ impl Terms {
         self.overlays.as_ref().is_none_or(|names| names.contains(name))
     }
 
-    /// Why a record of this machine, signed at `time`, has no effect; None when it counts. `overlay` is the overlay
-    /// whose log holds the record (None: the project log). `payload` is what the record changes besides its data:
-    /// `Db::derive` applies the states and lines of a record of any op, so the role covers them too.
-    pub fn refusal(&self, time: i64, op: &str, data: &Value, overlay: Option<&str>, payload: &Payload) -> Option<&'static str> {
+    /// `refusal`, with the reader's state for the records of a merge machine (`Role::Merge`): they count only
+    /// against what the reader has now, never against the `before` values that the record claims. The caller
+    /// applies the records in order, so `current` includes every record before this one.
+    pub fn refusal_in(
+        &self,
+        time: i64,
+        op: &str,
+        data: &Value,
+        overlay: Option<&str>,
+        payload: &Payload,
+        signer: &str,
+        current: &dyn Current,
+    ) -> Option<&'static str> {
+        if self.role != Role::Merge {
+            return self.refusal(time, op, data, overlay, payload);
+        }
+        if let Some(why) = self.ended(time) {
+            return Some(why);
+        }
+        // A record from the future would win every later change by its time (and outlive an untrust).
+        if time > current.now().saturating_add(MERGE_CLOCK_SKEW_MS) {
+            return Some("a merge machine's record is signed in the future");
+        }
+        merge_refusal(op, data, overlay, payload, Some((signer, current)))
+    }
+
+    fn ended(&self, time: i64) -> Option<&'static str> {
         if self.untrusted_at.is_some_and(|at| time >= at) {
             return Some("signed after the machine was untrusted");
         }
         if self.expires_at.is_some_and(|end| time >= end) {
             return Some("signed after the trust of the machine ended");
         }
+        None
+    }
+
+    /// Why a record of this machine, signed at `time`, has no effect; None when it counts. `overlay` is the overlay
+    /// whose log holds the record (None: the project log). `payload` is what the record changes besides its data:
+    /// `Db::derive` applies the states and lines of a record of any op, so the role covers them too.
+    pub fn refusal(&self, time: i64, op: &str, data: &Value, overlay: Option<&str>, payload: &Payload) -> Option<&'static str> {
+        if let Some(why) = self.ended(time) {
+            return Some(why);
+        }
         if self.role == Role::Full {
             return None;
+        }
+        if self.role == Role::Merge {
+            return merge_refusal(op, data, overlay, payload, None);
         }
         if SHARED_DATA.iter().any(|key| data.get(key).is_some()) {
             return Some("a limited machine changes no queue, ref or attestation");
@@ -95,7 +136,7 @@ impl Terms {
         }
         let own = payload.lines.iter().all(|line| line.own);
         match self.role {
-            Role::Full => None,
+            Role::Full | Role::Merge => None,
             Role::Reader => Some("a reader machine makes no shared record"),
             Role::Writer => match overlay {
                 None if !payload.states.is_empty() => Some("a cache writer makes no source state"),
@@ -109,6 +150,152 @@ impl Terms {
             },
         }
     }
+}
+
+/// How far ahead of the reader's clock a merge machine's record may be signed.
+pub const MERGE_CLOCK_SKEW_MS: i64 = 10 * 60 * 1000;
+
+/// What a reader has now, for the records of a merge machine (`Terms::refusal_in`).
+pub trait Current {
+    /// The name, owner and machine of a live line.
+    fn line(&self, id: &str) -> Option<(String, u32, String)>;
+    /// A queue entry, as its JSON.
+    fn queue_entry(&self, id: &str) -> Option<Value>;
+    /// The target of a live ref.
+    fn ref_target(&self, name: &str) -> Option<String>;
+    /// The machine whose record first set the current target of a ref (a repeated set keeps it).
+    fn ref_setter(&self, name: &str) -> Option<String>;
+    /// The reader's time, unix ms.
+    fn now(&self) -> i64;
+}
+
+/// Why a record of a merge machine (`Role::Merge`) has no effect. The machine runs the queue of a protected line:
+/// it completes queue entries that exist and moves their target line to the result, makes merge candidates,
+/// records the signed evidence of person requests and request refusals, makes release refs and lists the files of
+/// its own release refs. It changes no policy: no trust, no access, no protection, no overlay or project setting (its
+/// `config` is namespaced as `<key>@<machine>` by every other machine), no other ref, no other line, and no line
+/// name, owner or home machine. Each check reads `current`, never the record's own `before`.
+fn merge_refusal(
+    op: &str,
+    data: &Value,
+    overlay: Option<&str>,
+    payload: &Payload,
+    current: Option<(&str, &dyn Current)>,
+) -> Option<&'static str> {
+    if overlay.is_some() {
+        return Some("a merge machine writes no overlay");
+    }
+    let shared = |key: &str| data.get(key).is_some();
+    let quiet = payload.states.is_empty() && payload.lines.is_empty();
+    match op {
+        "queue.result" => merge_queue_result(data, payload, current),
+        "merge.candidate" if payload.lines.is_empty() && !SHARED_DATA.iter().any(|key| shared(key)) => None,
+        // Evidence of a person-signed request: the reader checks it against the person key.
+        "attest" if quiet && !shared("queue_change") && !shared("ref_change") && shared("request") && shared("person_key") => {
+            None
+        }
+        "ref.set" if quiet && !shared("queue_change") && !shared("attestation") => {
+            merge_release_ref(data, current.map(|(_, c)| c))
+        }
+        "release.files" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => merge_release_files(data, current),
+        "request.refused" | "config" | "push" | "machine" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => None,
+        _ => Some("a merge machine makes only queue, review evidence and release records"),
+    }
+}
+
+/// A queue result of a merge machine: it ends a pending entry with the same entry fields, releases only that
+/// entry's hold, and moves only its target line, to the result, keeping the line's name, owner and machine.
+/// With `current`, the entry and the line are the reader's; without it (a check outside an ordered replay), the
+/// record's own `before` stands for the entry and the line is not checked, so that check accepts more.
+fn merge_queue_result(data: &Value, payload: &Payload, current: Option<(&str, &dyn Current)>) -> Option<&'static str> {
+    if data.get("attestation").is_some() || data.get("stack").is_some() {
+        return Some("a queue result of a merge machine carries no attestation and no overlay stack");
+    }
+    let change = &data["queue_change"];
+    let Some(id) = change["id"].as_str() else { return Some("a queue result needs a queue change") };
+    let entry = match current {
+        Some((_, current)) => {
+            let Some(entry) = current.queue_entry(id) else { return Some("a merge machine ends only a queue entry that exists") };
+            if change["before"] != entry {
+                return Some("a merge machine ends only an entry as the reader has it");
+            }
+            entry
+        }
+        None => change["before"].clone(),
+    };
+    let after = &change["after"];
+    if entry["status"] != "pending" || entry["id"].as_str() != Some(id) {
+        return Some("a merge machine ends only a pending entry");
+    }
+    let fixed = ["id", "into", "target_line", "state", "change_id", "added_by", "time", "title"];
+    if fixed.iter().any(|key| after.get(key) != entry.get(key)) {
+        return Some("a queue result keeps the entry's fields");
+    }
+    let done = match after["status"].as_str() {
+        Some("done") => true,
+        Some("failed") => false,
+        _ => return Some("a queue result ends the entry"),
+    };
+    if let Some(hold) = data.get("ref_change") {
+        if hold["name"].as_str() != Some(&format!("holds/queue/{id}")) || !hold["after"].is_null() {
+            return Some("a queue result releases only the hold of its entry");
+        }
+    }
+    let target = entry["target_line"].as_str().unwrap_or("");
+    for line in &payload.lines {
+        if !done || line.id != target || line.new || line.renamed || line.head.is_none() || line.head != after["result"].as_str()
+        {
+            return Some("a queue result moves only its target line to its result");
+        }
+        if let Some((signer, current)) = current {
+            let Some((name, owner, machine)) = current.line(line.id) else { return Some("a merge machine makes no line") };
+            // The line keeps its name and its home machine, or the merge machine adopts it, as any machine that makes
+            // a working folder of a line does. The owner stays, or becomes root (a queue runner as root): a root-owned
+            // line gives no user a right (`authorize_line`), and another uid would give one on other machines.
+            let home = line.machine == Some(machine.as_str()) || line.machine == Some(signer);
+            let owner_kept = line.owner == Some(owner) || line.owner == Some(0);
+            if line.name != Some(name.as_str()) || !home || !owner_kept {
+                return Some("a queue result keeps the line's name, and its home or adopts it");
+            }
+        }
+    }
+    None
+}
+
+/// A release ref of a merge machine: a new `release/` ref without an end, or a repeated set of the same target.
+/// Without `current` only the record's shape is checked; its own `before` is never read.
+fn merge_release_ref(data: &Value, current: Option<&dyn Current>) -> Option<&'static str> {
+    let change = &data["ref_change"];
+    let (Some(name), after) = (change["name"].as_str(), &change["after"]) else {
+        return Some("a ref record needs a ref change");
+    };
+    if !name.starts_with("release/") || after["name"].as_str() != Some(name) || !after["expires_at"].is_null() {
+        return Some("a merge machine sets only release refs, without an end");
+    }
+    let Some(target) = after["target"].as_str() else { return Some("a release ref needs a target") };
+    let Some(current) = current else { return None };
+    match current.ref_target(name) {
+        Some(existing) if existing != target => Some("a merge machine never moves a release ref"),
+        _ => None,
+    }
+}
+
+/// A release file list of a merge machine: only for a release ref that the merge machine itself set, at the
+/// list's state. An attach replaces the list, so the files of a release that another machine made stay out of its
+/// reach. Without `current` only the list's shape is checked.
+fn merge_release_files(data: &Value, current: Option<(&str, &dyn Current)>) -> Option<&'static str> {
+    let (Some(name), Some(state), Some(_)) = (data["reference"].as_str(), data["state"].as_str(), data["files"].as_array())
+    else {
+        return Some("a release file list needs its ref, state and files");
+    };
+    if !name.starts_with("release/") {
+        return Some("a release file list belongs to a release ref");
+    }
+    let Some((signer, current)) = current else { return None };
+    if current.ref_target(name).as_deref() != Some(state) || current.ref_setter(name).as_deref() != Some(signer) {
+        return Some("a merge machine lists files only of a release ref that it set, at its state");
+    }
+    None
 }
 
 /// Data keys that `Db::derive` applies for a record of any op: a limited machine's record carries none of them.
@@ -132,6 +319,12 @@ pub struct LineMove<'a> {
     pub name: Option<&'a str>,
     /// The line is new, or a record of the same machine made it.
     pub own: bool,
+    /// The line had a head and another name before the record.
+    pub renamed: bool,
+    /// The head, owner and home machine of the line after the record.
+    pub head: Option<&'a str>,
+    pub owner: Option<u32>,
+    pub machine: Option<&'a str>,
 }
 
 impl Payload<'_> {
@@ -444,7 +637,7 @@ mod tests {
     fn moves<'a>(id: &'a str, new: bool, name: &'a str, own: bool, states: &[&'a str]) -> Payload<'a> {
         Payload {
             states: states.iter().map(|line| Some(*line)).collect(),
-            lines: vec![LineMove { id, new, name: Some(name), own }],
+            lines: vec![LineMove { id, new, name: Some(name), own, renamed: false, head: None, owner: None, machine: None }],
         }
     }
 
@@ -501,7 +694,16 @@ mod tests {
         let moved = create("main-id", false, "main.checks-linux-x86_64", false, &[]);
         assert!(writer.refusal(5, "line.create", &back, None, &moved).is_some(), "a line of another machine");
         let mut two = create("l", true, "main.checks-linux-x86_64", true, &[]);
-        two.lines.push(LineMove { id: "main-id", new: false, name: None, own: false });
+        two.lines.push(LineMove {
+            id: "main-id",
+            new: false,
+            name: None,
+            own: false,
+            renamed: false,
+            head: None,
+            owner: None,
+            machine: None,
+        });
         assert!(writer.refusal(5, "line.create", &back, None, &two).is_some(), "a second line");
         // In its overlay: states only on the lines the record moves.
         let elsewhere = moves("l", false, "x", true, &["other"]);
@@ -509,6 +711,181 @@ mod tests {
         assert!(writer.refusal(5, "commit", &json!({}), Some("cache-target"), &a_state).is_some(), "a state without a line");
         let full = Terms { expires_at: None, role: Role::Full, overlays: None, untrusted_at: Some(50) };
         assert!(full.refusal(5, "config", &json!({"queue_change": {}}), None, &a_state).is_none(), "a full machine");
+    }
+
+    /// A reader's state: line `main-id` (main, uid 501, machine `home`), a pending entry `q` into it, release ref
+    /// `release/v1` at `s` set by the merge machine, and `release/full` at `s` set by the owner.
+    struct Reader;
+    impl Current for Reader {
+        fn line(&self, id: &str) -> Option<(String, u32, String)> {
+            (id == "main-id").then(|| ("main".into(), 501, "home".into()))
+        }
+        fn queue_entry(&self, id: &str) -> Option<Value> {
+            (id == "q").then(entry)
+        }
+        fn ref_target(&self, name: &str) -> Option<String> {
+            matches!(name, "release/v1" | "release/full").then(|| "s".into())
+        }
+        fn now(&self) -> i64 {
+            1000
+        }
+        fn ref_setter(&self, name: &str) -> Option<String> {
+            match name {
+                "release/v1" => Some("merge".into()),
+                "release/full" => Some("owner".into()),
+                _ => None,
+            }
+        }
+    }
+
+    fn entry() -> Value {
+        json!({"id": "q", "into": "main", "target_line": "main-id", "state": "t", "added_by": 501, "time": 1, "status": "pending", "attempts": 0})
+    }
+
+    fn result(status: &str) -> Value {
+        let mut after = entry();
+        after["status"] = json!(status);
+        after["result"] = json!("m");
+        json!({"queue_change": {"id": "q", "before": entry(), "after": after},
+            "ref_change": {"name": "holds/queue/q", "before": {}, "after": null}})
+    }
+
+    fn line_move<'a>(id: &'a str, name: &'a str, owner: u32, machine: &'a str, head: &'a str) -> Payload<'a> {
+        Payload {
+            states: vec![Some(id)],
+            lines: vec![LineMove {
+                id,
+                new: false,
+                name: Some(name),
+                own: false,
+                renamed: false,
+                head: Some(head),
+                owner: Some(owner),
+                machine: Some(machine),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_merge_machine_runs_the_queue_and_releases_but_changes_no_policy() {
+        let merge = Terms::of_trust(&json!({"role": "merge"})).unwrap();
+        assert_eq!((merge.role, merge.expires_at), (Role::Merge, None));
+        let at = |op: &str, data: &Value, payload: &Payload| merge.refusal_in(5, op, data, None, payload, "merge", &Reader);
+        let none = Payload::default();
+        let state = Payload { states: vec![None], lines: vec![] };
+        let main = line_move("main-id", "main", 501, "home", "m");
+        assert!(at("queue.result", &result("done"), &main).is_none());
+        assert!(at("queue.result", &result("failed"), &none).is_none());
+        assert!(at("merge.candidate", &json!({}), &state).is_none());
+        let proof = json!({"request": "r", "person_key": "k", "attestation": {}});
+        assert!(at("attest", &proof, &none).is_none());
+        let release = |name: &str, target: &str| {
+            json!({"ref_change": {"name": name, "before": null,
+            "after": {"name": name, "target": target, "expires_at": null}}})
+        };
+        assert!(at("ref.set", &release("release/v2", "x"), &none).is_none(), "a new release ref");
+        assert!(at("ref.set", &release("release/v1", "s"), &none).is_none(), "a retry");
+        let files = |list: Value| json!({"reference": "release/v1", "state": "s", "files": list});
+        assert!(at("release.files", &files(json!([{"name": "b"}])), &none).is_none(), "its own release ref");
+        for op in ["request.refused", "config", "push", "machine"] {
+            assert!(at(op, &json!({}), &none).is_none(), "{op}");
+        }
+        // Without the reader's state, the record's shape decides, and that check accepts at least as much.
+        assert!(merge.refusal(5, "queue.result", &result("done"), None, &main).is_none());
+        assert!(merge.refusal(5, "ref.set", &release("release/v1", "t"), None, &none).is_none(), "no state: no ref");
+        let mut claimed = release("release/v2", "x");
+        claimed["ref_change"]["before"] = json!({"name": "release/v2", "target": "y"});
+        assert!(merge.refusal(5, "ref.set", &claimed, None, &none).is_none(), "the shape check ignores before");
+        assert!(at("ref.set", &claimed, &none).is_none(), "and so does the ordered check");
+        assert!(merge.refusal(5, "line.adopt", &json!({}), None, &none).is_some());
+        // Policy, other refs and lines stay with full machines.
+        for op in [
+            "machine.trust",
+            "machine.untrust",
+            "trust.delegate",
+            "access.grant",
+            "project.mode",
+            "overlay.readers",
+            "protect",
+            "commit",
+            "save",
+            "tag",
+            "line.delete",
+            "line.rename",
+            "line.adopt",
+            "line.create",
+            "queue.add",
+            "queue.remove",
+            "ref.expire",
+        ] {
+            assert!(at(op, &json!({}), &none).is_some(), "{op}");
+        }
+        // Queue results: only a pending entry that the reader has, its hold, and its target line to the result.
+        let mut unknown = result("done");
+        unknown["queue_change"]["id"] = json!("other");
+        assert!(at("queue.result", &unknown, &main).is_some(), "an entry the reader does not have");
+        let mut claimed = result("done");
+        claimed["queue_change"]["before"]["state"] = json!("forged");
+        assert!(at("queue.result", &claimed, &main).is_some(), "a before that the reader does not have");
+        let mut retarget = result("done");
+        retarget["queue_change"]["after"]["target_line"] = json!("other-id");
+        assert!(at("queue.result", &retarget, &main).is_some(), "a changed entry field");
+        assert!(at("queue.result", &result("pending"), &none).is_some(), "an entry that does not end");
+        let mut hold = result("done");
+        hold["ref_change"]["name"] = json!("holds/queue/other");
+        assert!(at("queue.result", &hold, &main).is_some(), "another entry's hold");
+        assert!(at("queue.result", &result("failed"), &main).is_some(), "a failed entry moves no line");
+        for (payload, why) in [
+            (line_move("main-id", "main", 501, "home", "other"), "another head than the result"),
+            (line_move("main-id", "renamed", 501, "home", "m"), "a new name"),
+            (line_move("main-id", "main", 1001, "home", "m"), "a new owner"),
+            (line_move("main-id", "main", 501, "other", "m"), "another home machine"),
+            (line_move("new-id", "main", 501, "home", "m"), "a line the reader does not have"),
+        ] {
+            assert!(at("queue.result", &result("done"), &payload).is_some(), "{why}");
+        }
+        // Release refs: never moved, never ended, only release refs.
+        assert!(at("ref.set", &release("release/v1", "t"), &none).is_some(), "a moved release ref");
+        let mut ends = release("release/v2", "x");
+        ends["ref_change"]["after"]["expires_at"] = json!(10);
+        assert!(at("ref.set", &ends, &none).is_some(), "an end");
+        let removed = json!({"ref_change": {"name": "release/v2", "before": null, "after": null}});
+        assert!(at("ref.set", &removed, &none).is_some(), "a removal");
+        assert!(at("ref.set", &release("env/prod", "x"), &none).is_some(), "another ref");
+        let mut renamed = release("release/v2", "x");
+        renamed["ref_change"]["after"]["name"] = json!("env/prod");
+        assert!(at("ref.set", &renamed, &none).is_some(), "a renamed ref");
+        // Release files: only for a release ref that the merge machine set, at the list's state.
+        let mut theirs = files(json!([{"name": "b"}]));
+        theirs["reference"] = json!("release/full");
+        assert!(at("release.files", &theirs, &none).is_some(), "another machine's release");
+        let mut moved = files(json!([{"name": "a"}]));
+        moved["state"] = json!("t");
+        assert!(at("release.files", &moved, &none).is_some(), "another state");
+        // Shared data outside its record.
+        assert!(at("config", &json!({"queue_change": {}}), &none).is_some());
+        assert!(at("config", &json!({"attestation": {}}), &none).is_some());
+        assert!(at("attest", &json!({"attestation": {}}), &none).is_some(), "only request proofs");
+        assert!(at("config", &json!({}), &state).is_some(), "no state outside a merge");
+        assert!(at("merge.candidate", &json!({}), &main).is_some(), "a candidate moves no line");
+        assert!(at("queue.result", &result("done"), &line_move("main-id", "main", 0, "merge", "m")).is_none(), "a root adoption");
+        assert!(at("queue.result", &result("done"), &line_move("main-id", "main", 501, "merge", "m")).is_none(), "an adoption");
+        let other_owner = line_move("main-id", "main", 1001, "merge", "m");
+        assert!(at("queue.result", &result("done"), &other_owner).is_some(), "an adoption gives no other uid the line");
+        assert!(
+            merge.refusal_in(5, "machine", &json!({}), Some("cache-target"), &none, "merge", &Reader).is_some(),
+            "no overlay"
+        );
+        let future = 1000 + MERGE_CLOCK_SKEW_MS + 1;
+        assert!(merge.refusal_in(future, "machine", &json!({}), None, &none, "merge", &Reader).is_some(), "the future");
+        let mut stacked = result("done");
+        stacked["stack"] = json!({"layers": []});
+        assert!(at("queue.result", &stacked, &main).is_some(), "an overlay stack");
+        let ended = Terms { untrusted_at: Some(5), ..merge.clone() };
+        assert!(ended.refusal_in(5, "machine", &json!({}), None, &none, "merge", &Reader).is_some(), "after an untrust");
+        // A writer delegation never makes a merge machine.
+        let delegation = Delegation::of(0, &json!({"max_hours": 1, "role": "writer"}));
+        assert!(!delegation.covers(1, &json!({"expires_at": 100, "role": "merge"})));
     }
 
     #[test]

@@ -1,0 +1,51 @@
+PASS merge with conflicts exits 1
+PASS 1 rename (theirs) vs modify (ours): A2.txt has the ours edit
+PASS 1 A.txt is gone
+PASS 2 folder deleted (ours) vs new file (theirs): conflict
+PASS 2 the new file is kept
+PASS 3a symlink changed by ours only: kept
+PASS 3b symlink changed by theirs only: taken
+PASS 3c symlink changed by both: conflict
+PASS 4 mode (theirs) and content (ours): both kept
+PASS 5 file to folder vs modify: conflict
+PASS 6a both add the same file: no conflict
+PASS 6b both add different files: conflict
+PASS 7 rename/rename: conflict
+PASS 8 case-only rename: applied
+PASS 9 folder deleted by theirs: removed
+PASS 10 edits of different lines: merged
+PASS 11 ours deleted, theirs modified: conflict
+PASS merge state has two parents
+PASS text conflict exits 1
+PASS conflict markers written
+PASS status shows the unmerged path
+PASS resolved: no conflicts left
+PASS the resolution state lists no conflicts
+PASS fast-forward
+PASS already up to date
+PASS squash: one parent
+PASS squash brings the files
+PASS --expect refuses a moved line
+PASS merge of an exact state does not take later work
+PASS untracked file in the way: refused
+PASS the local file is untouched
+PASS cherry-pick
+PASS cherry-pick brings the file
+PASS revert
+PASS revert removes the file
+PASS rebase replays two states
+PASS rebased onto main
+PASS drivers merge without conflicts
+PASS union keeps both lines
+PASS ours keeps ours
+PASS blocks: ours range
+PASS blocks: theirs range
+PASS custom driver
+PASS overlapping blocks: conflict
+PASS overlapping blocks keep ours
+PASS binary conflict listed
+PASS checkout --theirs takes the other version
+PASS a move meets an edit of the other line
+PASS the edit is in the moved file
+PASS the old name is gone
+t02-merge.sh: 50 passed, 0 failed

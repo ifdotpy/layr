@@ -1,0 +1,37 @@
+/private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/lines/main
+target storage: object store v2 (snapshot storage is v1)
+1/1 state ff32a2e hot: 3 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (3 files, 20 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 390 B (390 bytes)
+old snapshots: deleted 1 snapshot(s), 0 B freed; their states remain in the object store
+Created virtual line virtual at /private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/lines/virtual from ff32a2e
+Updating ff32a2e..3a85e12
+Fast-forward
+ executable | 2 ++
+ file       | 2 +-
+ link       | 2 +-
+ removed    | 1 -
+ 4 files changed, 4 insertions(+), 3 deletions(-)
+ create mode 100755 executable
+ delete mode 100644 removed
+Merge made by the 'layr' strategy: 9bfe09e
+ file | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+Updating 3e62b50..87b841c
+Fast-forward
+ roundtrip | 1 +
+ 1 file changed, 1 insertion(+)
+ create mode 100644 roundtrip
+Created virtual line replay at /private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/lines/replay from 7c84ba3
+Successfully replayed replay onto 0d9c2b4.
+Successfully replayed replay onto b30a118.
+Created virtual line hidden at /private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/lines/hidden from b30a118
+Line hidden has no folder now; its changes stay in /private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/meta/vlines/01a1bcf7-6903-74f7-87a5-27dbf30ea8e3/upper
+Updating b30a118..6582bc8
+Fast-forward
+ hidden | 1 +
+ 1 file changed, 1 insertion(+)
+ create mode 100644 hidden
+Line hidden is virtual at /private/tmp/layr-git-virtual-validation/store/projects/views-pull-8863/lines/hidden
+PASS: virtual Git pull, ff-only, merge, conflicts, replay, v2 roundtrip, and hidden views

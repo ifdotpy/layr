@@ -1,0 +1,33 @@
+/private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/main
+1/1 state 650acee hot: 3 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (3 files, 25 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 581 B (581 bytes)
+old snapshots: deleted 1 snapshot(s), 0 B freed; their states remain in the object store
+virtual lines are experimental: set LAYR_EXPERIMENTAL_VIEWS=1 (docs/views.md)
+Created virtual line virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/virtual from 650acee
+ready
+[virtual e29e78f] Save all view changes
+ create added/new
+ modify file
+ create fresh
+ delete sub/remove
+fatal: path 'sub/remove' does not exist in 'head'
+Line virtual has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/meta/vlines/01a1bbde-d3df-70a1-ac13-bf80ac5b5f60/upper
+Line virtual has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/meta/vlines/01a1bbde-d3df-70a1-ac13-bf80ac5b5f60/upper
+[virtual fd1a031] Save while hidden
+ modify file
+Line virtual is virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/virtual
+Line virtual is virtual at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/virtual
+fatal: /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T//layr-view-parity.FNxBcd/occupied already exists
+Line virtual has a folder at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/virtual
+not saved (modified, not added): added/new, fresh
+[virtual e5602be] Save after conversion
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+Created virtual line hidden at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/lines/hidden from 650acee
+Line hidden has no folder now; its changes stay in /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-views.nHGJgi/store/projects/parity-1794153303-50447/meta/vlines/01a1bbde-d7fd-72f9-ba1d-9171f66e7379/upper
+Deleted line hidden (was 650acee).
+Deleted line virtual (was e5602be).
+PASS: Darwin view lifecycle, saves, metadata, ignored paths, and hidden deletion
+Evidence: /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T//layr-view-parity.FNxBcd
+Project: parity-1794153303-50447

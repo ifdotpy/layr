@@ -11,9 +11,9 @@
 
 use crate::storage;
 use anyhow::{bail, ensure, Context, Result};
+use layr_hashers::FastCryptographic;
 use rusqlite::types::Value;
 use rusqlite::OpenFlags;
-use layr_hashers::FastCryptographic;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Read;
@@ -200,9 +200,8 @@ pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
 
 /// Copy the folder `src` (a project or a part of one) into `dst`, entry by entry.
 fn walk(c: &mut storage::Copier, src: &Path, dst: &Path, rel: &mut Vec<String>, out: &mut Sink) -> Result<()> {
-    let mut entries = fs::read_dir(src)
-        .with_context(|| format!("read {}", src.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries =
+        fs::read_dir(src).with_context(|| format!("read {}", src.display()))?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -247,7 +246,11 @@ fn entry(c: &mut storage::Copier, s: &Path, d: &Path, m: &fs::Metadata, rel: &mu
         c.file(s, d, m)
     } else if m.file_type().is_symlink() {
         c.symlink(s, d, m)
-    } else if m.file_type().is_fifo() || m.file_type().is_socket() || m.file_type().is_block_device() || m.file_type().is_char_device() {
+    } else if m.file_type().is_fifo()
+        || m.file_type().is_socket()
+        || m.file_type().is_block_device()
+        || m.file_type().is_char_device()
+    {
         bail!("cannot copy special file {}", s.display())
     } else {
         bail!("cannot copy {}", s.display())
@@ -304,7 +307,13 @@ fn compare_dir(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -> 
         Ok(set)
     };
     let (sn, dn) = (names(s)?, names(d)?);
-    ensure!(sn == dn, "different entries in {}: only in source {:?}, only in copy {:?}", rel.join("/"), sn.difference(&dn).collect::<Vec<_>>(), dn.difference(&sn).collect::<Vec<_>>());
+    ensure!(
+        sn == dn,
+        "different entries in {}: only in source {:?}, only in copy {:?}",
+        rel.join("/"),
+        sn.difference(&dn).collect::<Vec<_>>(),
+        dn.difference(&sn).collect::<Vec<_>>()
+    );
     for name in sn {
         let (sp, dp) = (s.join(&name), d.join(&name));
         rel.push(name.clone());
@@ -361,16 +370,25 @@ fn compare_entry(s: &Path, d: &Path, rel: &mut Vec<String>, stats: &mut Stats) -
 
 /// Compare file contents using reusable buffers for each parallel job.
 fn compare_contents(files: &[(PathBuf, PathBuf, String)]) -> Result<()> {
-    let Some(width) = std::num::NonZeroUsize::new(files.len()) else { return Ok(()); };
+    let Some(width) = std::num::NonZeroUsize::new(files.len()) else {
+        return Ok(());
+    };
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
         use rayon::prelude::*;
-        files.par_iter().map_init(
-            || (vec![0u8; 1 << 20], vec![0u8; 1 << 20]),
-            |(a, b), (s, d, rel)| {
-                let same = same_content(s, d, a, b)?;
-                if same { Ok(()) } else { Err(anyhow::anyhow!("{rel}: content differs")) }
-            },
-        ).collect::<Result<()>>()
+        files
+            .par_iter()
+            .map_init(
+                || (vec![0u8; 1 << 20], vec![0u8; 1 << 20]),
+                |(a, b), (s, d, rel)| {
+                    let same = same_content(s, d, a, b)?;
+                    if same {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("{rel}: content differs"))
+                    }
+                },
+            )
+            .collect::<Result<()>>()
     })?
 }
 
@@ -411,7 +429,8 @@ fn compare_db(s: &Path, d: &Path, name: &str) -> Result<()> {
     };
     let (sc, dc) = (open(s)?, open(d)?);
     let tables = |c: &rusqlite::Connection| -> Result<Vec<String>> {
-        let mut stmt = c.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let mut stmt =
+            c.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     };

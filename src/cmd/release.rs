@@ -11,10 +11,17 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return super::release_prepare::prepare(ctx, &args[1..]);
     }
     let a = parse(
-        &Spec::new().flag("--json").flag("--public").flag("--public-files").value("--remote").value("--name").value("--expect").value("-o|--output"),
+        &Spec::new()
+            .flag("--json")
+            .flag("--public")
+            .flag("--public-files")
+            .value("--remote")
+            .value("--name")
+            .value("--expect")
+            .value("-o|--output"),
         args,
     )?;
-    let usage = "usage: layr release (attach release/<version> <path>... [--name <name>] [--public-files]|files release/<version>|get release/<version> [<name>] [-o <dir>]) [--remote <name>]";
+    let usage = "usage: layr release (attach release/<version> <path>... [--name <name>] [--public-files]|publish-public release/<version> [--expect <state>]|verify-main release/<version> --expect <state>|files release/<version>|get release/<version> [<name>] [-o <dir>]) [--remote <name>]";
     let command = a.pos.first().map(String::as_str).context(usage)?;
     let name = a.pos.get(1).context(usage)?;
     if !name.starts_with("release/") || !crate::model::is_ref(name) {
@@ -23,13 +30,39 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut h = here(ctx)?;
     let mut store = crate::store_remote::open_named(a.get("--remote").unwrap_or("origin"), &h.repo)?;
     store.use_public_access(a.has("--public"));
+    if command == "verify-main" {
+        if a.pos.len() != 2 || a.has("-o") || a.has("--public-files") || a.has("--name") {
+            bail!("verify-main takes a release ref and --expect <state>");
+        }
+        let expected =
+            crate::revs::resolve(&h.repo, h.line.as_ref(), a.get("--expect").context("verify-main requires --expect")?)?;
+        store.verify_release_main(ctx, name, &expected)?;
+        return Ok(0);
+    }
     let files = match command {
         "attach" if a.pos.len() >= 3 => {
             if a.has("-o") || a.has("--public") {
                 bail!("attach needs private access and does not take -o");
             }
             let expected = a.get("--expect").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
-            store.attach_release(ctx, &mut h.repo, name, &a.pos[2..], a.get("--name"), expected.as_deref(), a.has("--public-files"))?.files
+            store
+                .attach_release(
+                    ctx,
+                    &mut h.repo,
+                    name,
+                    &a.pos[2..],
+                    a.get("--name"),
+                    expected.as_deref(),
+                    a.has("--public-files"),
+                )?
+                .files
+        }
+        "publish-public" if a.pos.len() == 2 => {
+            if a.has("-o") || a.has("--public") || a.has("--public-files") || a.has("--name") {
+                bail!("publish-public requires private access and takes no file options");
+            }
+            let expected = a.get("--expect").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+            store.publish_release(ctx, &h.repo, name, expected.as_deref())?
         }
         "files" | "get" if a.pos.len() <= if command == "files" { 2 } else { 3 } => {
             if a.has("--name") || a.has("--expect") {

@@ -139,7 +139,8 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
             // A library with no matching file takes the newest-unit rule below, not every unit of its name.
             if c.marker != "lib" {
                 let base = c.name.replace('-', "_");
-                live.hashes.extend(outputs.iter().filter(|o| unit_base(&o.name).is_some_and(|b| b == base)).map(|o| o.hash.clone()));
+                live.hashes
+                    .extend(outputs.iter().filter(|o| unit_base(&o.name).is_some_and(|b| b == base)).map(|o| o.hash.clone()));
                 live.hashes.extend(marked(&c.profile, c.marker, &base).into_iter().map(|(h, _)| h));
             }
         } else {
@@ -598,7 +599,11 @@ fn read_dir(p: &Path) -> Vec<std::fs::DirEntry> {
 pub fn locked<T>(debug: &Path, f: impl FnOnce() -> T) -> Result<Option<T>> {
     let Ok(lock) = File::open(debug.join(LOCK)) else { return Ok(None) };
     match lock.try_lock() {
-        Ok(()) => Ok(Some(f())),
+        Ok(()) => {
+            let out = f();
+            crate::cargo::unlock_all(std::slice::from_ref(&lock));
+            Ok(Some(out))
+        }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(e).context("cannot lock the cargo build lock"),
     }

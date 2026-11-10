@@ -24,6 +24,33 @@ sha=$(shasum -a 256 "$T/layr-v1.0.0-linux-x86_64.tar.gz" | cut -d' ' -f1)
 eq "files.json names its SHA-256" "$sha" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print([f["sha256"] for f in d["files"] if f["name"].endswith(".tar.gz")][0])' "$pub/files.json")"
 eq "files.json names the version" v1.0.0 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$pub/files.json")"
 eq "the signed record has the same digest" "$sha" "$(l release files release/v1.0.0 --json | python3 -c 'import json,sys; print([f["sha256"] for f in json.load(sys.stdin) if f["name"].endswith(".tar.gz")][0])')"
+ok "remote main contains the release" l release verify-main release/v1.0.0 --expect main
+no "an unknown remote release is refused" l release verify-main release/v9.9.9 --expect main
+before_records=$(find "$T/archive/records" -type f | wc -l | tr -d ' ')
+l line new -q unrelated
+cd ../unrelated || exit 1
+echo private-work > private.txt; l add private.txt; l save -qm private
+cd ../main || exit 1
+rm "$pub/files.json" "$pub/notes.txt"
+ok "public files are restored from the signed attachment" l release publish-public release/v1.0.0 --expect main
+eq "restored public bytes match" built "$(cat "$pub/notes.txt")"
+ok "the restored list exists" test -f "$pub/files.json"
+eq "restoring public files publishes no records" "$before_records" "$(find "$T/archive/records" -type f | wc -l | tr -d ' ')"
+no "an incorrect expected state is refused" l release publish-public release/v1.0.0 --expect unrelated
+no "verify-main refuses a different expected state" l release verify-main release/v1.0.0 --expect unrelated
+object=$(l release files release/v1.0.0 --json | python3 -c 'import json,sys; print(next(f["object"] for f in json.load(sys.stdin) if f["name"] == "notes.txt"))')
+cp "$T/archive/$object" "$T/notes-ciphertext"
+echo corrupted > "$T/archive/$object"
+rm "$pub/files.json" "$pub/notes.txt"
+no "corrupt signed attachment is refused" l release publish-public release/v1.0.0 --expect main
+no "corruption does not publish the list" test -e "$pub/files.json"
+no "corruption does not publish the file" test -e "$pub/notes.txt"
+cp "$T/notes-ciphertext" "$T/archive/$object"
+ok "restoration succeeds after the attachment is repaired" l release publish-public release/v1.0.0 --expect main
+echo altered > "$pub/notes.txt"
+no "a conflicting public object is not replaced" l release publish-public release/v1.0.0 --expect main
+eq "the conflicting object stays unchanged" altered "$(cat "$pub/notes.txt")"
+echo built > "$pub/notes.txt"
 ok "a second attach of the same bytes succeeds" l release attach release/v1.0.0 "$T/layr-v1.0.0-linux-x86_64.tar.gz" "$T/notes.txt" --public-files
 echo other > "$T/notes.txt"
 no "other bytes under a published name are refused" l release attach release/v1.0.0 "$T/notes.txt" --public-files
@@ -33,4 +60,7 @@ out=$(l release attach release/v1.0.0 "$T/big.bin" --public-files 2>&1); rc=$?
 eq "a public file over 32 MiB is refused" 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)"
 has "the refusal names the limit" "32 MiB" "$out"
 no "and nothing of it is public" test -e "$pub/big.bin"
+l ref set release/v2.0.0 unrelated >/dev/null
+l push origin -q
+no "a remote release outside main is refused" l release verify-main release/v2.0.0 --expect unrelated
 finish

@@ -98,7 +98,7 @@ fn send_busy(send: impl FnMut() -> Result<Response>) -> Result<Response> {
 /// `send_busy` for a request that a repeat cannot harm (GET, HEAD, a create-only PUT that answers 412 when the first
 /// one landed): it is sent again also on 502 and 504 and when the connection fails, as when the gateway restarts
 /// for a release or a project change (about 2 s).
-fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
+pub(super) fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> Result<Response> {
     let mut wait = std::time::Duration::from_millis(500);
     let mut attempt = 1;
     loop {
@@ -112,7 +112,8 @@ fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Response>) -> R
             }
             Err(e) => return Err(e),
         };
-        let again = matches!(response.status().as_u16(), 429 | 503) || (idempotent && matches!(response.status().as_u16(), 502 | 504));
+        let again =
+            matches!(response.status().as_u16(), 429 | 503) || (idempotent && matches!(response.status().as_u16(), 502 | 504));
         if !again || attempt >= BUSY_TRIES {
             return Ok(response);
         }
@@ -328,7 +329,14 @@ impl Gateway {
             if let Some(body) = body {
                 request = request.json(body);
             }
-            send_busy(|| request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into))
+            send_busy(|| {
+                request
+                    .try_clone()
+                    .context("gateway request cannot be sent again")?
+                    .send()
+                    .map_err(reqwest::Error::without_url)
+                    .map_err(Into::into)
+            })
         };
         if let Some(token) = token {
             return json(send(token)?, 512 << 10);
@@ -420,7 +428,12 @@ impl Gateway {
             }
             let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE);
             send_again(idempotent, || {
-                request.try_clone().context("gateway request cannot be sent again")?.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+                request
+                    .try_clone()
+                    .context("gateway request cannot be sent again")?
+                    .send()
+                    .map_err(reqwest::Error::without_url)
+                    .map_err(Into::into)
             })
         };
         if person {
@@ -721,6 +734,7 @@ impl Gateway {
         let mut continuation: Option<String> = None;
         let mut objects = Vec::new();
         let mut legacy = false;
+        let mut restarted = false;
         loop {
             let mut query = vec![("prefix", prefix)];
             if !legacy {
@@ -745,6 +759,23 @@ impl Gateway {
                 // Older servers may reject the opt-in pagination query. Retry only the first
                 // page with the legacy prefix query and the same authentication boundary.
                 legacy = true;
+                continue;
+            }
+            if response.status().as_u16() == 400 && continuation.is_some() && !legacy {
+                // Listing cursors expire and are bound to the Gateway process. Discard the
+                // partial result before one restart, without changing the access mode.
+                let body = bytes(response, 4096)?;
+                let invalid_cursor = serde_json::from_slice::<serde_json::Value>(&body).ok().is_some_and(|value| {
+                    value.get("error").and_then(|error| error.as_str()) == Some("invalid listing continuation")
+                });
+                if !invalid_cursor || restarted {
+                    bail!("gateway: HTTP 400");
+                }
+                restarted = true;
+                objects.clear();
+                found.clear();
+                cursors.clear();
+                continuation = None;
                 continue;
             }
             // Older gateways may omit the cursor and return their bounded complete listing.
@@ -1220,7 +1251,8 @@ mod tests {
                 }
                 if answer < 2 {
                     let status = if answer == 0 { "503 Service Unavailable" } else { "429 Too Many Requests" };
-                    write!(stream, "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    write!(stream, "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
                 } else {
                     let body = serde_json::to_vec(&serde_json::json!({"objects": [], "continuation": null})).unwrap();
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
@@ -1244,6 +1276,98 @@ mod tests {
                 "continuation": if page < 10 { Some(format!("page{page}")) } else { None }
             })).collect();
             assert_eq!(listing_pages(pages, public).unwrap().len(), 11_000);
+        }
+    }
+
+    #[test]
+    fn listings_restart_once_only_for_an_invalid_continuation() {
+        use std::io::{Read, Write};
+        for public in [false, true] {
+            for failure in [None, Some("invalid listing continuation"), Some("invalid object prefix")] {
+                let (listener, address) = test_listener();
+                let server = std::thread::spawn(move || {
+                    let mut requests = Vec::new();
+                    for number in 0..4 {
+                        let (mut stream, _) = listener.accept().unwrap();
+                        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        let mut request = Vec::new();
+                        let mut byte = [0];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            if stream.read_exact(&mut byte).is_err() {
+                                return requests;
+                            }
+                            request.push(byte[0]);
+                        }
+                        if request == b"\r\n\r\n" {
+                            return requests;
+                        }
+                        let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                        assert!(request.starts_with(if public {
+                            "get /p/project/objects?"
+                        } else {
+                            "get /v1/p/project/objects?"
+                        }));
+                        assert!(request.contains("prefix=states%2f"));
+                        assert!(request.contains("limit=1000"));
+                        assert_eq!(request.contains("continuation="), number % 2 == 1);
+                        assert_eq!(request.contains("authorization: bearer fixture.write"), !public);
+                        requests.push(request);
+                        let (status, body) = if number == 1 || (number == 3 && failure.is_some()) {
+                            (400, serde_json::json!({"error":failure.unwrap_or("invalid listing continuation")}))
+                        } else {
+                            let key = if number == 0 {
+                                "states/stale"
+                            } else if number == 2 {
+                                "states/new"
+                            } else {
+                                "states/final"
+                            };
+                            (
+                                200,
+                                serde_json::json!({"objects":[{"key":key,"modified":1000}],
+                                "continuation":if number % 2 == 0 { Some("cursor") } else { None }}),
+                            )
+                        };
+                        let body = body.to_string();
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status} response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .unwrap();
+                    }
+                    requests
+                });
+                let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+                address.configure(&mut gateway);
+                gateway.token = Some("fixture.write".into());
+                if public {
+                    gateway.use_public_access();
+                }
+                let result = gateway.list("states/");
+                // Release a server waiting for the next request when the client refuses early.
+                let mut wake = address.connect().ok();
+                if let Some(stream) = &mut wake {
+                    let _ = stream.write_all(b"\r\n\r\n");
+                }
+                let requests = server.join().unwrap();
+                drop(wake);
+                match failure {
+                    None => {
+                        let keys: Vec<_> = result.unwrap().into_iter().map(|object| object.key).collect();
+                        assert_eq!(keys, ["states/final", "states/new"]);
+                        assert_eq!(requests.len(), 4);
+                    }
+                    Some("invalid listing continuation") => {
+                        assert!(result.unwrap_err().to_string().contains("HTTP 400"));
+                        assert_eq!(requests.len(), 4);
+                    }
+                    Some(_) => {
+                        assert!(result.unwrap_err().to_string().contains("HTTP 400"));
+                        assert_eq!(requests.len(), 2);
+                    }
+                }
+            }
         }
     }
 

@@ -248,7 +248,6 @@ fn read_pending_journal(p: &Project, dir: &Path) -> Result<PendingJournal> {
     Ok(j)
 }
 
-
 /// True when `path` is the subvolume with this UUID and identity; false when nothing is there.
 fn is_tree(path: &Path, subvol: &str, device: u64, inode: u64) -> Result<bool> {
     let m = match fs::symlink_metadata(path) {
@@ -577,6 +576,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         p.append(r, &actor())?;
@@ -607,7 +608,10 @@ mod tests {
         // Readers of the index that do not use the inode: the data identity (an APFS clone shares the
         // extents) and the move identity (the creation time, kept by a clone; the inode is not used).
         let stage_file = p.stage_path(&line).join("file");
-        assert_eq!(crate::sys::apfs_data_identity(&stage_file)?.clone_id, crate::sys::apfs_data_identity(&pc.tree.join("file"))?.clone_id);
+        assert_eq!(
+            crate::sys::apfs_data_identity(&stage_file)?.clone_id,
+            crate::sys::apfs_data_identity(&pc.tree.join("file"))?.clone_id
+        );
         assert_eq!(storage::file_identity(&stage_file)?, storage::file_identity(&pc.tree.join("file"))?);
         let dir = pending_dir(&p, &pc.id);
         drop(pc);
@@ -765,7 +769,9 @@ mod tests {
             std::mem::forget(pc);
         }
         let p = Project::open(&store, "p")?;
-        assert!(!pending(&p)?);
+        let can_read_start = crate::free::process_start(std::process::id()).is_some();
+        // A sandbox that denies ps cannot prove PID reuse and must keep the journal.
+        assert_eq!(pending(&p)?, !can_read_start);
         assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), stage_inode);
         Ok(())
     }

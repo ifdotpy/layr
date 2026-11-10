@@ -1,8 +1,12 @@
 //! Encrypted immutable remotes, independent of the local snapshot backend.
 
+pub(crate) mod api;
+#[cfg(test)]
+mod api_tests;
 pub(crate) mod backend;
 pub(crate) mod browse;
 pub(crate) mod chunked;
+mod cloud_objects;
 pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod gitpack;
@@ -11,9 +15,9 @@ pub(crate) mod overlays;
 mod public;
 mod push_cache;
 mod push_journal;
-pub(crate) mod sweep;
 pub(crate) mod reader;
 mod release;
+pub(crate) mod sweep;
 mod writer;
 
 pub(crate) use layr_store::{canonical, format, keys, s3, zst};
@@ -23,25 +27,34 @@ use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use backend::Backend;
 use format::{Descriptor, Mode};
-use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[derive(Clone, Default)]
 pub struct Options {
     pub public: bool,
     pub auto: bool,
     pub caches: bool,
+    /// Leave ordinary cache cleanup to a later push or daemon sweep.
+    pub no_cache_sweep: bool,
     pub paper_key: Option<String>,
     /// `--caches-of <line>`: restore only the cache states that `line new X <line>` takes for these lines.
     pub caches_of: Vec<String>,
+    /// Fetch caches saved with this state, including its automatic save states.
+    pub(crate) caches_of_state: Option<String>,
     /// `--heads`: restore only the heads of the lines; the other states stay on the remote and come on first read.
     pub heads: bool,
+    /// Clone only this line's working folder and head; other states stay on the remote.
+    pub only_line: Option<String>,
     /// The cache states of `caches_of` in one cache overlay, set by the overlay fetch (None: every usable one).
     pub only_caches: Option<std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
+    /// One authenticated head snapshot for clone restoration and working folders.
+    #[serde(skip)]
+    pub clone_lines: Option<Vec<crate::model::Line>>,
     pub records: usize,
     pub states: usize,
     /// Git packs (`git/`) that a push wrote or a fetch installed.
@@ -90,7 +103,8 @@ impl StorePin {
         if self.project != descriptor.project {
             bail!("store project changed: pinned {}, store.json {}", self.project, descriptor.project);
         }
-        if self.mode != descriptor.mode {
+        // Public and Private differ only in the server access list; a change between Secret and plain is refused.
+        if self.mode.is_secret() != descriptor.mode.is_secret() {
             bail!("store mode changed: pinned {}, store.json {}", self.mode.name(), descriptor.mode.name());
         }
         if self.recipient != descriptor.recipient {
@@ -150,6 +164,7 @@ pub fn open(url: &str, repo: &Repo) -> Result<Store> {
                 repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
             store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
             store.mode = configured_mode(repo, name)?;
+            store.choose_transport(store.mode)?;
             break;
         }
     }
@@ -167,8 +182,62 @@ pub(crate) fn configured_mode(repo: &Repo, name: &str) -> Result<Option<Mode>> {
 
 impl Store {
     /// Require this project mode in store.json (`remote add --mode`).
-    pub fn require_mode(&mut self, mode: Option<Mode>) {
+    pub fn require_mode(&mut self, mode: Option<Mode>) -> Result<()> {
         self.mode = mode;
+        self.choose_transport(mode)
+    }
+
+    /// A `layr+https://` remote talks to the Layr Cloud API v1 unless it is Secret: a Secret project keeps the
+    /// encrypted store routes of the gateway. No mode is Private, the default of a new store.
+    pub fn choose_transport(&mut self, mode: Option<Mode>) -> Result<()> {
+        if !self.url.starts_with("layr+https://") {
+            return Ok(());
+        }
+        // A pin without a mode is an existing encrypted store. Keep using its gateway until a
+        // verified migration changes the pin; never silently downgrade a pinned plain store.
+        let effective_mode = mode.or_else(|| self.pin.as_ref().map(|pin| pin.mode));
+        let api = !effective_mode.is_some_and(|m| m.is_secret());
+        if api != matches!(self.backend.root(), Backend::Api(_)) {
+            self.backend = if api { Backend::Api(api::Api::open(&self.url)?) } else { Backend::open(&self.url)? };
+        }
+        Ok(())
+    }
+
+    /// `layr login`: the device sign-in of a person (docs/remotes.md, "Person login"). The session goes to the
+    /// caller's `~/.config/layr/cloud/<host>.json`, and this machine's key is registered with it.
+    pub fn login(&self, ctx: &Ctx, show: impl Fn(&str)) -> Result<String> {
+        let mut api = self.backend.api().context("layr login is for Layr Cloud remotes (layr+https, Public or Private)")?.clone();
+        api.set_token(None);
+        let start = api.login_start()?;
+        show(api.login_link(&start.link)?.as_str());
+        let deadline = if start.expires > 0 { start.expires } else { crate::ids::now_ms() + 600_000 };
+        let session = loop {
+            if let Some(session) = api.login_poll(&start.code)? {
+                break session;
+            }
+            if crate::ids::now_ms() >= deadline {
+                bail!("the sign-in was not finished in time; run layr login again");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(if cfg!(test) { 10 } else { 2000 }));
+        };
+        let path = api::session_file(&ctx.caller.home, api.host());
+        crate::privs::as_caller_fs(ctx, || api::save_session(&path, &session))?;
+        api.set_token(Some(session.token.clone()));
+        api.register_machine(&self.machine, &self.key.verifying_key())?;
+        Ok(session.login)
+    }
+
+    /// True for a remote of the Layr Cloud API v1.
+    pub fn is_api(&self) -> bool {
+        self.backend.api().is_some()
+    }
+
+    /// The route scope of this store on the Layr Cloud API: `overlays/<name>/` for a plain overlay layer.
+    pub(crate) fn api_scope(&self) -> String {
+        match &self.backend {
+            Backend::Prefix(_, scope) => scope.clone(),
+            _ => String::new(),
+        }
     }
 }
 
@@ -182,6 +251,7 @@ pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
         .context("invalid store pin")?;
     let mut store = open_with_pin(&url, repo, pin)?;
     store.mode = configured_mode(repo, name)?;
+    store.choose_transport(store.mode)?;
     store.aws_profile = repo.p.config_value(&format!("remote.{name}.aws-profile"))?.and_then(|v| v.as_str().map(str::to_owned));
     store.public_clone = repo.p.config_value(&format!("cloud.remote.{name}.public"))? == Some(serde_json::json!(true));
     Ok(store)
@@ -199,7 +269,8 @@ pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Ve
         if data["result"] != "success" || !matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
             continue;
         }
-        if crate::cmd::remote::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file() {
+        if crate::cmd::remote::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file()
+        {
             continue;
         }
         for id in data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
@@ -315,7 +386,8 @@ fn mark_read(dir: &std::path::Path) -> Result<()> {
 /// tree (`thin::complete_tree` would copy one), so a thin state is checked layer by layer.
 pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
     #[cfg(target_os = "macos")]
-    let roots: Vec<std::path::PathBuf> = crate::thin::Layered::of_state(&repo.p, id)?.layers.into_iter().map(|layer| layer.root).collect();
+    let roots: Vec<std::path::PathBuf> =
+        crate::thin::Layered::of_state(&repo.p, id)?.layers.into_iter().map(|layer| layer.root).collect();
     #[cfg(not(target_os = "macos"))]
     let roots = vec![repo.p.state_path(id)];
     for root in roots {
@@ -327,7 +399,7 @@ pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
 }
 
 fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store> {
-    Ok(Store {
+    let mut store = Store {
         backend: Backend::open(url)?,
         url: url.to_string(),
         project: repo.p.id.clone(),
@@ -346,7 +418,9 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
         public_clone: false,
         public_reader: std::sync::atomic::AtomicBool::new(false),
         mode: None,
-    })
+    };
+    store.choose_transport(None)?;
+    Ok(store)
 }
 
 impl Store {
@@ -367,13 +441,34 @@ impl Store {
         self.epoch = None;
         self.epoch_public = false;
         self.backend.as_caller(ctx);
+        let public_only = self.force_public
+            || (self.public_clone
+                && ctx.env("LAYR_GATEWAY_TOKEN_FILE").is_none()
+                && ctx.env("LAYR_PERSON_KEY_FILE").is_none()
+                && ctx.env("LAYR_PAPER_KEY_FILE").is_none());
+        // A new, unpinned URL may still name a legacy gateway. Project info also exists on the
+        // older read API, so check the V1 records route before selecting the protocol.
+        let mut legacy_probe = false;
+        if let Backend::Api(api) = &mut self.backend {
+            api.connect(ctx, &self.project, public_only)?;
+            let info = api.project_info()?;
+            let may_probe = self.pin.is_none() && self.mode.is_none();
+            let legacy = may_probe
+                && match info {
+                    None => true,
+                    Some(_) => !api.has_v1_records()?,
+                };
+            if !legacy {
+                self.person = None;
+                self.paper_key_text = None;
+                return Ok(());
+            }
+            legacy_probe = true;
+            self.backend = Backend::open(&self.url)?;
+            self.backend.as_caller(ctx);
+        }
         if let Backend::Gateway(gateway) = &mut self.backend {
-            if self.force_public
-                || (self.public_clone
-                    && ctx.env("LAYR_GATEWAY_TOKEN_FILE").is_none()
-                    && ctx.env("LAYR_PERSON_KEY_FILE").is_none()
-                    && ctx.env("LAYR_PAPER_KEY_FILE").is_none())
-            {
+            if public_only {
                 gateway.connect_public(&ctx.env)?;
                 gateway.use_public_access();
             } else {
@@ -428,6 +523,11 @@ impl Store {
                 Ok(Backend::S3(s3))
             })?;
         }
+        if legacy_probe {
+            // Fail before configure can create a store. The descriptor also checks the project,
+            // recipient, mode and any person pin against the same origin.
+            self.descriptor().context("V1 project was not found and the legacy store could not be verified")?;
+        }
         Ok(())
     }
 
@@ -441,7 +541,20 @@ impl Store {
 
     pub fn request_person(&mut self, ctx: &Ctx) -> Result<Option<crate::person::Access>> {
         self.connect(ctx)?;
+        if self.is_api() {
+            return crate::privs::as_caller_fs(ctx, || {
+                crate::person::load(&ctx.env, &ctx.caller.home, &ctx.cwd, ctx.caller.uid, None)
+            });
+        }
         Ok(self.person.clone())
+    }
+
+    /// Register the executor before it signs a request claim. A fresh clone has not pushed yet.
+    pub fn register_request_executor(&self) -> Result<()> {
+        if let Some(api) = self.backend.api() {
+            api.register_machine(&self.machine, &self.key.verifying_key())?;
+        }
+        Ok(())
     }
 
     /// Current request encryption target; the root epoch retains the legacy trust anchor.
@@ -485,6 +598,12 @@ impl Store {
             self.pin_descriptor()?;
             return Ok(Configured { created: false, recovery_key_file: None });
         }
+        if self.is_api() {
+            bail!(
+                "Layr Cloud has no project at {}, or this token cannot read it; create the project on the site first",
+                self.url
+            );
+        }
         if self.project.is_empty() {
             bail!("the remote store is empty");
         }
@@ -519,7 +638,12 @@ impl Store {
             pin.check_store(&descriptor)?;
         }
         let paper_recipient = self.pin.as_ref().and_then(|pin| pin.paper_recipient.clone());
-        self.pin = Some(StorePin { mode: descriptor.mode, project: descriptor.project, recipient: descriptor.recipient, paper_recipient });
+        self.pin = Some(StorePin {
+            mode: descriptor.mode,
+            project: descriptor.project,
+            recipient: descriptor.recipient,
+            paper_recipient,
+        });
         Ok(())
     }
 
@@ -589,7 +713,12 @@ impl Store {
         if descriptor.recipient != recipient {
             bail!("store recipient differs: requested {}, store.json {}", recipient, descriptor.recipient);
         }
-        self.pin = Some(StorePin { mode: descriptor.mode, project: descriptor.project, recipient: descriptor.recipient, paper_recipient: None });
+        self.pin = Some(StorePin {
+            mode: descriptor.mode,
+            project: descriptor.project,
+            recipient: descriptor.recipient,
+            paper_recipient: None,
+        });
         self.save_pin(ctx, repo, name)
     }
 
@@ -601,7 +730,10 @@ impl Store {
         }
         descriptor.check_mode()?;
         if descriptor.mode.is_secret() {
-            descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|_| anyhow::anyhow!("invalid root store recipient"))?;
+            descriptor
+                .recipient
+                .parse::<age::x25519::Recipient>()
+                .map_err(|_| anyhow::anyhow!("invalid root store recipient"))?;
         }
         self.check_mode(&descriptor)?;
         if !self.project.is_empty() && self.project != descriptor.project {
@@ -612,10 +744,29 @@ impl Store {
 
     fn descriptor(&self) -> Result<Descriptor> {
         if let Some(epoch) = &self.epoch {
-            return Ok(Descriptor { format: 2, project: epoch.key.project.clone(), recipient: epoch.key.recipient.clone(), mode: Default::default() });
+            return Ok(Descriptor {
+                format: 2,
+                project: epoch.key.project.clone(),
+                recipient: epoch.key.recipient.clone(),
+                mode: Default::default(),
+            });
         }
         if let Some(layer) = &self.layer {
-            return Ok(Descriptor { format: 2, project: self.project.clone(), recipient: layer.recipient.clone(), mode: Default::default() });
+            return Ok(Descriptor {
+                format: 2,
+                project: self.project.clone(),
+                recipient: layer.recipient.clone(),
+                mode: Default::default(),
+            });
+        }
+        // A plain overlay layer of a Layr Cloud project (`overlays/<name>/`): no keys, the project's object store.
+        if matches!(self.backend, Backend::Prefix(..)) && self.is_api() {
+            return Ok(Descriptor {
+                format: 2,
+                project: self.project.clone(),
+                recipient: keys::PLAIN.into(),
+                mode: Mode::Private,
+            });
         }
         let data = self
             .backend
@@ -641,7 +792,10 @@ impl Store {
         }
         descriptor.check_mode()?;
         if descriptor.mode.is_secret() {
-            descriptor.recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
+            descriptor
+                .recipient
+                .parse::<age::x25519::Recipient>()
+                .map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
         }
         self.check_mode(&descriptor)?;
         Ok(descriptor)
@@ -651,7 +805,7 @@ impl Store {
     /// must not turn a Secret project into a plain one, nor the reverse.
     fn check_mode(&self, descriptor: &Descriptor) -> Result<()> {
         if let Some(mode) = self.mode {
-            if mode != descriptor.mode {
+            if mode.is_secret() != descriptor.mode.is_secret() || (!self.is_api() && mode != descriptor.mode) {
                 bail!("store mode differs: this remote is {}, store.json says {}", mode.name(), descriptor.mode.name());
             }
         }
@@ -666,7 +820,7 @@ impl Store {
     fn identity(&self, descriptor: &Descriptor, paper: Option<&str>) -> Result<String> {
         // A Private or Public store has no keys: the server's access list decides who reads and writes.
         if !descriptor.mode.is_secret() {
-            self.public_reader.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.public_reader.store(self.force_public, std::sync::atomic::Ordering::SeqCst);
             return Ok(keys::PLAIN.to_string());
         }
         if let Some(epoch) = &self.epoch {
@@ -796,6 +950,13 @@ impl Store {
                 }
             }
         }
+        if self.is_api() {
+            self.private_dir()?;
+            let mut report = writer::push(self, ctx, repo, opts)?;
+            push_refs(self, repo, &mut report)?;
+            overlays::api_push(self, ctx, repo, opts, &mut report)?;
+            return Ok(report);
+        }
         let mut report = writer::push(self, ctx, repo, opts)?;
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)
@@ -810,11 +971,18 @@ impl Store {
         }
         self.connect(ctx)?;
         let mut report = reader::fetch(self, ctx, repo, opts)?;
-        overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        if self.is_api() {
+            self.private_dir()?;
+            fetch_refs(self, repo, &mut report)?;
+            overlays::api_fetch(self, ctx, repo, opts, &mut report)?;
+        } else {
+            overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        }
         let pending = self.dir.join("pending-lines.json");
         if pending.exists() {
             let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
-            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids))?;
+            let lines = report.clone_lines.take();
+            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids), lines.as_deref())?;
         }
         Ok(report)
     }
@@ -826,8 +994,21 @@ impl Store {
             bail!("clone needs an empty project");
         }
         let mut report = reader::fetch(self, ctx, repo, opts)?;
-        overlays::fetch(self, ctx, repo, opts, &mut report)?;
-        report.missing_lines = self.materialize_clone_lines(ctx, repo, None)?;
+        if self.is_api() {
+            self.private_dir()?;
+            fetch_refs(self, repo, &mut report)?;
+            overlays::api_fetch(self, ctx, repo, opts, &mut report)?;
+        } else {
+            overlays::fetch(self, ctx, repo, opts, &mut report)?;
+        }
+        let lines = report.clone_lines.take().unwrap_or(repo.p.db.lines()?);
+        let only = if let Some(name) = &opts.only_line {
+            let line = lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+            Some(std::collections::BTreeSet::from([line.id.clone()]))
+        } else {
+            None
+        };
+        report.missing_lines = self.materialize_clone_lines(ctx, repo, only.as_ref(), Some(&lines))?;
         Ok(report)
     }
 
@@ -836,15 +1017,23 @@ impl Store {
         ctx: &Ctx,
         repo: &mut Repo,
         only: Option<&std::collections::BTreeSet<String>>,
+        source_lines: Option<&[crate::model::Line]>,
     ) -> Result<Vec<String>> {
         self.private_dir()?;
         // The working folders are written with no project lock: each under its line's lock, with the
         // head pinned. Only the adopt record is written under the project lock, after the folder.
-        let lines = repo.p.db.lines()?;
+        let lines = match source_lines {
+            Some(lines) => lines.to_vec(),
+            None => repo.p.db.lines()?,
+        };
         let mut pending = Vec::new();
         let mut missing = Vec::new();
         for line in lines {
             if only.is_some_and(|ids| !ids.contains(&line.id)) {
+                continue;
+            }
+            let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
+            if repo.working(&local).exists() {
                 continue;
             }
             if !repo.p.has_state(&line.head) {
@@ -853,10 +1042,6 @@ impl Store {
                     "line {}: head state {} is not in the store yet; run `layr fetch <remote>` later",
                     line.name, line.head
                 ));
-                continue;
-            }
-            let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
-            if repo.working(&local).exists() {
                 continue;
             }
             repo.hold(repo.pin(&[line.head.as_str()])?);
@@ -874,7 +1059,7 @@ impl Store {
                 record.lines.insert(
                     local.id.clone(),
                     crate::model::LineChange {
-                        before: Some(repo.line_state(&line, &line.head)),
+                        before: repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
                         after: Some(repo.line_state(&local, &local.head)),
                         working_before: None,
                         working_after: None,
@@ -990,8 +1175,13 @@ impl Store {
 
 /// The CLI commands use the same named-remote configuration as push and fetch.
 pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
-    let spec =
-        crate::args::Spec::new().value("--remote").flag("--files").flag("--json").flag("-n|--dry-run").flag("-q|--quiet").flag("--caches");
+    let spec = crate::args::Spec::new()
+        .value("--remote")
+        .flag("--files")
+        .flag("--json")
+        .flag("-n|--dry-run")
+        .flag("-q|--quiet")
+        .flag("--caches");
     let a = crate::args::parse(&spec, args)?;
     let name = a.get("--remote").context("name a remote with --remote <name>")?;
     let h = crate::cmd::here(ctx)?;
@@ -1191,7 +1381,12 @@ mod pin_tests {
         let recipient = keys::recipient_of(&attacker).unwrap();
         std::fs::write(
             root.join("remote/store.json"),
-            serde_json::to_vec(&Descriptor { format: 2, project: project_id.clone(), recipient: recipient.clone(), mode: Default::default() })
+            serde_json::to_vec(&Descriptor {
+                format: 2,
+                project: project_id.clone(),
+                recipient: recipient.clone(),
+                mode: Default::default(),
+            })
             .unwrap(),
         )
         .unwrap();
@@ -1214,7 +1409,12 @@ mod pin_tests {
         let other_project = crate::ids::new_id();
         std::fs::write(
             root.join("remote/store.json"),
-            serde_json::to_vec(&Descriptor { format: 2, project: other_project.clone(), recipient: pin.recipient.clone(), mode: Default::default() })
+            serde_json::to_vec(&Descriptor {
+                format: 2,
+                project: other_project.clone(),
+                recipient: pin.recipient.clone(),
+                mode: Default::default(),
+            })
             .unwrap(),
         )
         .unwrap();
@@ -1344,4 +1544,291 @@ mod restore_tests {
         assert!(err.contains("first: offline first") && err.contains("second: offline second"), "{err}");
         assert!(err.contains("not on this machine"), "{err}");
     }
+}
+
+/// The line refs that this machine last read from Layr Cloud (`refs.json` of the remote folder): the `expect` of
+/// the next compare and swap.
+fn tracked_refs(dir: &std::path::Path) -> Result<std::collections::BTreeMap<String, String>> {
+    match std::fs::read(dir.join("refs.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("invalid refs.json")?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_tracked_refs(dir: &std::path::Path, refs: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    crate::fsutil::atomic_write(&dir.join("refs.json"), &serde_json::to_vec(refs)?, 0o600)
+}
+
+/// The newest record of this machine that moved each line: line id to the record id and the head after it
+/// (None for a deleted line).
+fn own_line_moves(repo: &Repo, machine: &str) -> Result<std::collections::BTreeMap<String, (String, Option<String>)>> {
+    /// The order of a record (time, sequence), its id and the head after it.
+    type Move = ((i64, u64), String, Option<String>);
+    let mut moves: std::collections::BTreeMap<String, Move> = Default::default();
+    for line in repo.p.export_jsonl()?.lines() {
+        let record = crate::oplog::parse_line(line, None)?.record;
+        if record.machine != machine {
+            continue;
+        }
+        for (id, change) in &record.lines {
+            let order = (record.time, record.seq);
+            if moves.get(id).is_none_or(|(newest, ..)| order >= *newest) {
+                moves.insert(id.clone(), (order, record.id.clone(), change.after.as_ref().map(|after| after.head.clone())));
+            }
+        }
+    }
+    Ok(moves.into_iter().map(|(id, (_, record, head))| (id, (record, head))).collect())
+}
+
+/// Moves the line refs on Layr Cloud to this machine's line heads with one compare and swap
+/// (docs/remotes.md, "Records and refs"). A line that another writer moved on the server since this machine
+/// read it fails the push: fetch, then push again.
+fn push_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    let scope = store.api_scope();
+    let mut tracked = tracked_refs(&store.dir)?;
+    let present: std::collections::BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.id).collect();
+    let mut updates = Vec::new();
+    for (line, (record, head)) in own_line_moves(repo, &store.machine)? {
+        // A line that exists now must point where the database says; the newest record names its head.
+        let head = if present.contains(&line) { head } else { None };
+        let name = format!("lines/{line}");
+        let expect = tracked.get(&name).cloned();
+        if expect == head {
+            continue;
+        }
+        // A state that this push left out (an automatic state without --auto) cannot be a ref target.
+        if let Some(target) = &head {
+            if !report.state_ids.contains(target) && !api.state_held(&scope, target)? {
+                report.omitted.push(format!("line {line}: head {} is not on Layr Cloud", crate::ids::short(target)));
+                continue;
+            }
+        }
+        // Like a Git push without force: the new head must contain what the server had, or a move of another
+        // writer would be lost. The person merges it first.
+        if let (Some(expect), Some(target)) = (&expect, &head) {
+            if !reader::state_ancestry(repo, target)?.contains(expect) {
+                bail!(
+                    "Layr Cloud: {name} is at {} there, and head {} here does not contain it; merge it into the line, then push",
+                    crate::ids::short(expect),
+                    crate::ids::short(target)
+                );
+            }
+        }
+        updates.push(api::RefUpdate { name, expect, target: head, record });
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    for _ in 0..2 {
+        match api.cas(&scope, &updates, &format!("layr push from machine {}", store.machine))? {
+            api::Cas::Done(refs) => {
+                for update in &updates {
+                    match &update.target {
+                        Some(target) => tracked.insert(update.name.clone(), target.clone()),
+                        None => tracked.remove(&update.name),
+                    };
+                }
+                for reference in refs {
+                    match reference.target {
+                        Some(target) => tracked.insert(reference.name, target),
+                        None => tracked.remove(&reference.name),
+                    };
+                }
+                save_tracked_refs(&store.dir, &tracked)?;
+                return Ok(());
+            }
+            api::Cas::Conflict(conflicts) => {
+                // A ref that is already at its target (an earlier push moved it, but this machine did not keep the
+                // answer) is no conflict: keep it and send the rest again.
+                let (done, moved): (Vec<_>, Vec<_>) = conflicts
+                    .into_iter()
+                    .partition(|(name, actual)| updates.iter().any(|u| &u.name == name && &u.target == actual));
+                if !moved.is_empty() || done.is_empty() {
+                    let names: Vec<String> = moved.iter().map(|(name, _)| name.clone()).collect();
+                    save_tracked_refs(&store.dir, &tracked)?;
+                    bail!(
+                        "Layr Cloud: {} moved on the server since this machine read it; run layr fetch, then push again",
+                        if names.is_empty() { "a line".to_string() } else { names.join(", ") }
+                    );
+                }
+                for (name, actual) in done {
+                    if let Some(target) = actual {
+                        tracked.insert(name.clone(), target);
+                    }
+                    updates.retain(|u| u.name != name);
+                }
+                if updates.is_empty() {
+                    save_tracked_refs(&store.dir, &tracked)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    bail!("Layr Cloud: the refs changed again during the push; push again")
+}
+
+/// Reads the line refs of Layr Cloud: they are the `expect` of the next push. A line whose head here differs
+/// from the server is named in the report: the server ref is the truth for its position.
+fn fetch_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    let refs = api.refs(&store.api_scope(), "lines/")?;
+    let mut tracked = std::collections::BTreeMap::new();
+    let lines: std::collections::BTreeMap<String, String> =
+        repo.p.db.lines()?.into_iter().map(|line| (line.id, line.head)).collect();
+    for reference in refs {
+        let Some(target) = reference.target else { continue };
+        if let Some(line) = reference.name.strip_prefix("lines/") {
+            if lines.get(line).is_some_and(|head| head != &target) {
+                report.omitted.push(format!(
+                    "line {line}: Layr Cloud has {}, the records here {}",
+                    crate::ids::short(&target),
+                    crate::ids::short(&lines[line])
+                ));
+            }
+        }
+        tracked.insert(reference.name, target);
+    }
+    save_tracked_refs(&store.dir, &tracked)
+}
+
+#[cfg(test)]
+mod clone_head_tests {
+    use super::*;
+    use crate::model::{LineChange, LineState, Record};
+
+    #[test]
+    fn clone_uses_the_creator_head_after_a_later_foreign_adoption() -> Result<()> {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root)?;
+        let store = crate::store::Store::open(&root.join("local"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let project = crate::ids::new_id();
+        let db = crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?;
+        let creator = crate::ids::new_id();
+        let peer = crate::ids::new_id();
+        let line = crate::ids::new_id();
+        let old = crate::ids::new_id();
+        let new = crate::ids::new_id();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let change = |head: &str, machine: &str| LineChange {
+            before: None,
+            after: Some(LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() }),
+            working_before: None,
+            working_after: None,
+        };
+        let mut creation = Record::new("project");
+        creation.project = project.clone();
+        creation.machine = creator.clone();
+        creation.seq = 1;
+        creation.time = 1;
+        creation.data = serde_json::json!({"id":project,"name":"p","config":{}});
+        creation.lines.insert(line.clone(), change(&old, &creator));
+        let mut update = Record::new("commit");
+        update.project = project.clone();
+        update.machine = creator.clone();
+        update.seq = 2;
+        update.time = 2;
+        update.lines.insert(line.clone(), change(&new, &creator));
+        let mut adoption = Record::new("line.adopt");
+        adoption.project = project.clone();
+        adoption.machine = peer.clone();
+        adoption.seq = 1;
+        adoption.time = 3;
+        adoption.lines.insert(line.clone(), change(&old, &peer));
+        for mut record in [creation, update, adoption] {
+            record.id = crate::ids::new_id();
+            db.insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
+            db.derive(&record, &|_| false, &store.machine.id)?;
+        }
+        let mut repo = Repo { p: crate::store::Project { store: &store, name: "p".into(), dir, id: project, db }, ctx: None };
+        assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, old, "the foreign row reproduces the stale selection");
+        let remote = open(&format!("file://{}", root.join("remote").display()), &repo)?;
+        let selected = reader::clone_lines(&remote, &repo)?;
+        assert_eq!(selected.iter().find(|row| row.id == line).unwrap().head, new, "the clone selects the authoritative head");
+        assert!(repo.p.db.line_heads(&line)?.contains(&(peer, old)), "the foreign head remains available");
+        let caller = crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw());
+        let local_head = crate::ids::new_id();
+        let mut own = Record::new("line.adopt");
+        own.id = crate::ids::new_id();
+        own.project = repo.p.id.clone();
+        own.machine = store.machine.id.clone();
+        own.seq = 1;
+        own.time = 4;
+        let mut own_change = change(&local_head, &store.machine.id);
+        own_change.after.as_mut().unwrap().owner = caller.uid;
+        own.lines.insert(line.clone(), own_change);
+        repo.p.db.insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
+        repo.p.db.derive(&own, &|_| false, &store.machine.id)?;
+        let local = repo.p.db.line_by_id(&line)?.unwrap();
+        let working = repo.working(&local);
+        std::fs::create_dir_all(&working)?;
+        std::fs::write(working.join("keep"), "local work")?;
+        let ctx = crate::ctx::Ctx {
+            store: crate::store::Store::open(&root.join("local"))?, caller,
+            cwd: root.clone(), env: Default::default(), author: Default::default(),
+            out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
+        };
+        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected))?.is_empty());
+        assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, local_head);
+        assert_eq!(std::fs::read_to_string(working.join("keep"))?, "local work");
+        drop(repo);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn legacy_clone_keeps_a_valid_configured_merge_after_private_adoption() -> Result<()> {
+        use ed25519_dalek::SigningKey;
+        use serde_json::{json, Value};
+        const PROJECT: &str = "01a1c000-0000-7000-8000-000000000003";
+        const OWNER: &str = "01a1c000-0000-7000-8000-000000000001";
+        const MERGER: &str = "01a1c000-0000-7000-8000-000000000002";
+        const BASE: &str = "01a1c000-0000-7000-8000-000000000004";
+        const MERGED: &str = "01a1c000-0000-7000-8000-000000000005";
+        const LINE: &str = "01a1c000-0000-7000-8000-000000000006";
+        const QUEUE: &str = "01a1c000-0000-7000-8000-000000000007";
+        let signed = |machine: &str, seq: u64, time: i64, op: &str, data: Value, lines: Value, states: Value, key: &SigningKey| -> Result<String> {
+            let record: Record = serde_json::from_value(json!({
+                "id":crate::ids::new_id(),"project":PROJECT,"machine":machine,"seq":seq,"time":time,"op":op,
+                "actor":{"uid":1,"name":"fixture"},"data":data,"lines":lines,"states":states,
+            }))?;
+            crate::oplog::sign_line(&record, key)
+        };
+        let state = |id: &str, parents: Vec<&str>| json!({"id":id,"kind":"commit","parents":parents,"subvol":"","author":{"name":"fixture","email":"fixture@example.invalid"},"time":if id==BASE {2} else {5}});
+        let head = |state: &str, machine: &str| json!({"name":"main","head":state,"owner":1,"machine":machine});
+        for role in [None, Some("merge")] {
+            let root = std::env::temp_dir().join(crate::ids::new_id());
+            std::fs::create_dir_all(&root)?;
+            let store = crate::store::Store::open(&root.join("local"))?;
+            let dir = store.project_dir("p")?;
+            std::fs::create_dir_all(dir.join("meta/db"))?;
+            let mut repo = Repo { p: crate::store::Project { store: &store, name:"p".into(), dir:dir.clone(), id:PROJECT.into(), db:crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))? }, ctx:None };
+            let owner = SigningKey::from_bytes(&[7;32]);
+            let merger = SigningKey::from_bytes(&[8;32]);
+            let mut trust = json!({"machine":MERGER,"public_key":hex::encode(merger.verifying_key().to_bytes())});
+            if let Some(role) = role { trust["role"] = json!(role); }
+            let pending = json!({"id":QUEUE,"into":"main","target_line":LINE,"state":MERGED,"added_by":1,"time":4,"status":"pending"});
+            let mut done = pending.clone();
+            done["status"] = json!("done"); done["result"] = json!(MERGED);
+            let records = vec![
+                signed(OWNER,1,1,"machine",json!({"public_key":hex::encode(owner.verifying_key().to_bytes())}),json!({}),json!([]),&owner)?,
+                signed(MERGER,1,1,"machine",json!({"public_key":hex::encode(merger.verifying_key().to_bytes())}),json!({}),json!([]),&merger)?,
+                signed(OWNER,2,2,"project",json!({"id":PROJECT,"name":"p","config":{"queue.merge-machine":MERGER}}),json!({LINE:{"before":null,"after":head(BASE,OWNER)}}),json!([state(BASE,vec![])]),&owner)?,
+                signed(OWNER,3,3,"machine.trust",trust,json!({}),json!([]),&owner)?,
+                signed(OWNER,4,4,"queue.add",json!({"queue_change":{"id":QUEUE,"before":null,"after":pending}}),json!({}),json!([]),&owner)?,
+                signed(MERGER,2,5,"queue.result",json!({"queue_change":{"id":QUEUE,"before":pending,"after":done}}),json!({LINE:{"before":head(BASE,OWNER),"after":head(MERGED,OWNER)}}),json!([state(MERGED,vec![BASE])]),&merger)?,
+                signed(MERGER,3,6,"line.adopt",json!({"line":LINE}),json!({LINE:{"before":head(MERGED,OWNER),"after":head(BASE,MERGER)}}),json!([]),&merger)?,
+            ];
+            repo.p.import_lines(&records, crate::store::Trust::All)?;
+            let remote = open(&format!("file://{}",root.join("remote").display()), &repo)?;
+            let lines = reader::clone_lines(&remote, &repo)?;
+            assert_eq!(lines.iter().find(|line| line.id==LINE).unwrap().head, MERGED, "role {role:?}");
+            drop(repo);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
 }

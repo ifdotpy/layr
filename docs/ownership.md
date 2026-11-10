@@ -88,8 +88,12 @@ A crash between the commit and the move leaves the state in `free_queue`. The ne
 A replay (a rebuild of the derived tables, and the owners of `gc` check) runs with freeing off
 (`owners::fill_only`). The replay only fills owners.
 
-Before a line delete, its final state gets a complete tree (APFS, `thin::make_keyframe`). The
-`deleted` ring keeps that state, and as a thin layer it would keep every automatic state under it.
+After a line delete, its final state gets a complete tree (APFS, `thin::make_keyframe`). The
+`deleted` ring keeps that state, and as a thin layer it keeps the states under it (for example the
+automatic state it changes from). A background process (`layr __keyframe <store> <project> <state> final`)
+makes the tree after the command, waits `thin.view_seconds`, drops the layer and runs the free step: the
+states under it go then. The delete itself makes no copy of the tree. `gc --repair` makes the tree at once
+for a final state that is still thin (a stopped background process).
 
 ## Storage that a live state needs
 
@@ -195,6 +199,9 @@ ends; the end of the command marks it dead, and the free step of that command fr
 processes are released by the next free step and by `gc --repair`. A pinned state also keeps its
 ancestors, because its parent rows stay.
 
+A database rebuild preserves process pins and tree removal reservations in the same transaction.
+Signed records cannot recreate these local rows.
+
 `gc` removes the trees of some states whose records stay: states with a copy on a store remote
 (eviction) and imported states that git builds again. It reserves each tree first: a row `drop`
 with its holder, written in one transaction with the check for pins. A pinned state is not reserved.
@@ -221,6 +228,16 @@ process after its pins are taken, so a second process can drop the last owner of
 reader holds.
 
 ## Temporary objects
+
+`gc --repair` checks `meta/scan` and `meta/work` in the parent project and its local, visible
+overlays. It removes a copy only when the process ID in its name identifies a process that
+has exited. `gc --repair -n` lists these paths without removing them. A live process keeps
+its copies, even when their copied modification times are old.
+
+New APFS temporary copies use `.apfs-<uuid>.<pid>`. Older names without a process ID stay
+in place and produce a `creator unknown` message. Their age does not prove that they are
+unused. This repair does not yet provide the complete temporary-object registry described
+below.
 
 A crash must not leave space that nothing owns. Every temporary path that layr makes on the
 store's disk has an owner too: the process that made it. Before a command creates a temporary
@@ -333,7 +350,8 @@ the replay fills the owners, and `layr gc` reports the states that no owner name
 
 - tests/t100-pin-reads.sh: a merge source, a save base and an overlap compare stay on disk while
   their reader runs, and go after it.
-- tests/t99-ownership-free.sh: line delete frees its states in that command, the `undo.deleted`
+- tests/t99-ownership-free.sh: line delete frees its states (on APFS the states under the thin final
+  state go with its complete tree; the test makes it with `gc --repair`), the `undo.deleted`
   ring, the auto ring, `undo.ops`, the crash between commit and move, a pinned read, the time keys,
   `gc` check and repair.
 - tests/apfs-ownership-bases.sh (APFS only): a dead base of a live thin layer keeps its storage and

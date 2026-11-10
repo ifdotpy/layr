@@ -272,6 +272,38 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
     let resolve_id = |r: &str| revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r });
+    // A virtual line (docs/views.md): its working content is the merged view of its upper folder.
+    if let Some((l, v)) = line.as_ref().and_then(|l| crate::views::of(repo, l).map(|v| (l, v))) {
+        if revs_v.len() <= 1 && !revs_v.iter().any(|r| r.contains("..")) {
+            if a.has("-R") {
+                return Err(super::exit(2, "diff -R is not available in a virtual line yet"));
+            }
+            let (head, merged, list) = crate::views::diff_input(repo, l, &v, &mut keep)?;
+            let (old, list) = match revs_v.first().map(|r| resolve_id(r)).transpose()? {
+                Some(id) if id != l.head => {
+                    let o = repo.state_src(&id)?;
+                    let list = changes::file_changes(&o, &merged)?;
+                    (o, list)
+                }
+                _ => (head, list),
+            };
+            let list: Vec<Change> = list
+                .into_iter()
+                .filter(|c| {
+                    !skip_path(&c.path)
+                        && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+                })
+                .collect();
+            let list = if a.has("--no-renames") { list } else { changes::with_renames(&old, &merged, list) };
+            let fds = diff::file_diffs(&old, &merged, &list)?;
+            let quiet = a.has("--quiet");
+            let problems = if quiet { false } else { print_diffs(ctx, &fds, &opts) };
+            if opts.check && problems {
+                return Ok(2);
+            }
+            return Ok(if (a.has("--exit-code") || quiet) && !fds.is_empty() { 1 } else { 0 });
+        }
+    }
     // (old root, new root, new side is the working content, index for tracked check)
     let mut index_root: Option<Snap> = None;
     let needs_working_view = revs_v.is_empty() || (revs_v.len() == 1 && !revs_v[0].contains(".."));
@@ -739,9 +771,14 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
 
 /// `layr show <rev>:<path>` of an imported state that is not on disk: the entry is read from git.
 fn show_git_entry(repo: &Repo, ctx: &Ctx, commit: &str, r: &str, rv: &str, p: &str) -> Result<()> {
+    print_entry(ctx, crate::gitbridge::entry(repo, commit, p)?, r, rv, p)
+}
+
+/// Print one entry of `show <rev>:<path>` read without a snapshot (Git objects, the object store).
+fn print_entry(ctx: &Ctx, entry: crate::gitbridge::Entry, r: &str, rv: &str, p: &str) -> Result<()> {
     use crate::gitbridge::Entry;
     use std::io::Write;
-    match crate::gitbridge::entry(repo, commit, p)? {
+    match entry {
         Entry::Missing => Err(exit(128, format!("fatal: path '{p}' does not exist in '{rv}'"))),
         Entry::Dir(names) => {
             outln!(ctx, "tree {r}\n");
@@ -872,6 +909,19 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         path.trim_start_matches('/').to_string()
                     };
                     show_git_entry(repo, ctx, &commit, &r, rv, &p)?;
+                    first = false;
+                    continue;
+                }
+                // A migrated state: its entry is read from the object store (docs/objects.md,
+                // section 13), no snapshot is read or built.
+                if let Some((store, refs)) = crate::objstore::verified(&repo.p, &id)? {
+                    let p = if path.starts_with("./") || path.starts_with("../") {
+                        super::normalize(&h.loc.sub, path)?
+                    } else {
+                        path.trim_start_matches('/').to_string()
+                    };
+                    let entry = crate::objstore::entry(&store, &refs.tree, &p)?;
+                    print_entry(ctx, entry, &r, rv, &p)?;
                     first = false;
                     continue;
                 }
@@ -1641,31 +1691,31 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     if from_git.is_none() {
-    fsutil::walk(&root, "", &mut |rel, m| {
-        if skip_path(rel) {
-            return Ok(false);
-        }
-        if rules.ignored(rel, m.is_dir()) {
-            if let Some(idx) = &index {
-                if fsutil::lmeta(idx, rel).is_none() {
-                    return Ok(false);
-                }
-            } else {
+        fsutil::walk(&root, "", &mut |rel, m| {
+            if skip_path(rel) {
                 return Ok(false);
             }
-        }
-        if m.is_file() {
-            if let Some(idx) = &index {
-                if !a.has("--untracked") && fsutil::lmeta(idx, rel).is_none() {
-                    return Ok(true);
+            if rules.ignored(rel, m.is_dir()) {
+                if let Some(idx) = &index {
+                    if fsutil::lmeta(idx, rel).is_none() {
+                        return Ok(false);
+                    }
+                } else {
+                    return Ok(false);
                 }
             }
-            if matches(&specs, rel) {
-                files.push(rel.to_string());
+            if m.is_file() {
+                if let Some(idx) = &index {
+                    if !a.has("--untracked") && fsutil::lmeta(idx, rel).is_none() {
+                        return Ok(true);
+                    }
+                }
+                if matches(&specs, rel) {
+                    files.push(rel.to_string());
+                }
             }
-        }
-        Ok(true)
-    })?;
+            Ok(true)
+        })?;
     }
     let sep = if a.has("-z") { "\0" } else { ":" };
     // Files of a git state come in batches of blobs, not one process per file.

@@ -1,0 +1,57 @@
+/private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-completion.e5gyaE/store/projects/objects-1794153303-50446/lines/main
+1/1 state 23dae45 hot: 4 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (4 files, 34 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 593 B (593 bytes)
+old snapshots: deleted 1 snapshot(s), 0 B freed; their states remain in the object store
+dry run: nothing changes
+1 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 1 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+Created line branch at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-completion.e5gyaE/store/projects/objects-1794153303-50446/lines/branch from 23dae45
+[branch 2a774e6] Change object state
+ 3 files changed, 3 insertions(+), 2 deletions(-)
+ create mode 100644 added/file
+dry run: nothing changes
+2 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 2 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+Created line copy at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-completion.e5gyaE/store/projects/objects-1794153303-50446/lines/copy from 2a774e6
+dry run: nothing changes
+3 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 4 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+exported state 2a774e6 to /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T//layr-objects.0Cekjm/export: 6 path(s) written
+head is now at 23dae45 initial state
+Undid a33c365c0b5b reset (2026-11-08 15:55:05 +0000); undo it with 'layr undo cc4bb825d9d8'
+Dropped park@{0} parked.copy.1 (99d6ba2)
+[main 63db965] Independent main change
+ 1 file changed, 1 insertion(+)
+ create mode 100644 main-file
+Merge made by the 'layr' strategy: 1a3bf5d
+ added/file | 1 +
+ file       | 2 +-
+ hardlink   | 2 +-
+ 3 files changed, 3 insertions(+), 2 deletions(-)
+ create mode 100644 added/file
+records of machine 6c73b54d: 23, signatures ok
+0 problem(s)
+dry run: nothing changes
+3 line folder(s): unsaved work in them is saved as automatic states first
+0 state(s) to migrate: 0 hot (line heads and the states before them), 0 cold
+0 verified by an earlier run and not recorded, 15 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+snapshots of source states here: 0 B in 0 state(s)
+old snapshots: `layr migrate --delete-old` would free 0 B in 0 snapshot(s)
+ignored: overlay cache.ignored f3574e4
+main 4ed5131c9fec712b90a201a1bbdeda5e
+Created line with-cache at /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-object-completion.e5gyaE/store/projects/objects-1794153303-50446/lines/with-cache from 1a3bf5d
+overlay cache.ignored: 0 unreachable state(s), 0 bytes; 0 overlay line(s) of deleted lines
+old cache snapshots of states: 0, 0 bytes
+unreachable cache data: 0 item(s), 0 bytes
+PASS object state lifecycle (Darwin)

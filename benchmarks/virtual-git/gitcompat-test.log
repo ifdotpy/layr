@@ -1,0 +1,37 @@
+sed: 1: "a.txt
+": command a expects \ followed by text
+sed: 1: "code.rs
+": command c expects \ followed by text
+sed: 1: "a.txt
+": command a expects \ followed by text
+sed: 1: "code.rs
+": command c expects \ followed by text
+PASS diff (patch)
+PASS diff --stat
+PASS diff --numstat
+PASS diff --name-status
+PASS diff --name-only
+PASS diff --shortstat
+PASS diff -U1
+PASS status --porcelain
+PASS status -s
+PASS diff --cached (patch with add, delete, rename, mode, binary)
+PASS diff --cached --name-status
+PASS diff --cached --stat
+PASS status --porcelain with a rename
+PASS show HEAD:a.txt
+PASS log --format=%s
+PASS show --name-status --format=
+PASS show --stat --format=%s
+PASS log --format=%an%x09%ae
+PASS rev-parse HEAD^{tree}
+PASS log --format=%T
+PASS log -1 --format=%T %t
+PASS rev-parse HEAD:d (a tree)
+PASS rev-parse HEAD:a.txt (a blob)
+PASS rev-parse HEAD: (the root tree)
+PASS rev-parse HEAD~1:gone.txt (a path of an older state)
+PASS rev-parse head:gone.txt (a missing path) fails like git
+PASS same-size edits in the same second are exported
+PASS diff --check
+t08-gitcompat.sh: 28 passed, 0 failed

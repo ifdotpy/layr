@@ -85,6 +85,11 @@ impl Tree {
         openat2(&self.root, rel_dir, OFlags::RDONLY | OFlags::DIRECTORY)
     }
 
+    pub(crate) fn open_folder(&self, rel: &str) -> Result<File> {
+        crate::fsutil::check_rel(rel)?;
+        Ok(File::from(self.dir(rel)?))
+    }
+
     fn parent<'a>(&self, rel: &'a str) -> Result<(OwnedFd, &'a str)> {
         crate::fsutil::check_rel(rel)?;
         let (p, n) = split(rel);
@@ -378,6 +383,23 @@ impl Tree {
         Ok(())
     }
 
+    /// Replace an entry with a hard link without removing the old entry first.
+    pub fn replace_hard_link(&self, from: &str, to: &str) -> Result<()> {
+        let (source, source_name) = self.parent(from)?;
+        self.mkdirs_for(to, None)?;
+        let (destination, destination_name) = self.parent(to)?;
+        let temp = format!(".layr-link-{}", crate::ids::new_id());
+        rustix::fs::linkat(&source, source_name, &destination, temp.as_str(), AtFlags::empty())
+            .with_context(|| format!("link {from} to {to}"))?;
+        if let Err(error) = rustix::fs::renameat(&destination, temp.as_str(), &destination, destination_name) {
+            let _ = rustix::fs::unlinkat(&destination, temp.as_str(), AtFlags::empty());
+            return Err(error).with_context(|| format!("replace {to}"));
+        }
+        // Rename can be a no-op when both names already refer to the same inode.
+        let _ = rustix::fs::unlinkat(&destination, temp.as_str(), AtFlags::empty());
+        Ok(())
+    }
+
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         #[cfg(feature = "overlayfs")]
         if crate::storage::contains_managed_tree(&self.path.join(from)) {
@@ -643,6 +665,31 @@ impl Tree {
     pub fn destroy_nested(&self) -> Result<()> {
         let d = openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?;
         destroy_nested_in(&d)
+    }
+}
+
+#[cfg(test)]
+mod hard_link_tests {
+    use super::Tree;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn replacement_is_atomic_and_leaves_no_temporary_link() {
+        let root = std::env::temp_dir().join(format!("layr-link-replace-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("source"), "new").unwrap();
+        std::fs::write(root.join("target"), "old").unwrap();
+        let tree = Tree::open(&root).unwrap();
+        assert!(tree.replace_hard_link("missing", "target").is_err());
+        assert_eq!(std::fs::read(root.join("target")).unwrap(), b"old");
+        std::fs::create_dir(root.join("folder")).unwrap();
+        assert!(tree.replace_hard_link("source", "folder").is_err());
+        assert!(root.join("folder").is_dir());
+        tree.replace_hard_link("source", "target").unwrap();
+        tree.replace_hard_link("source", "target").unwrap();
+        assert_eq!(std::fs::metadata(root.join("source")).unwrap().ino(), std::fs::metadata(root.join("target")).unwrap().ino());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

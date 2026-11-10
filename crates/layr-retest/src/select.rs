@@ -180,7 +180,8 @@ mod tests {
     use crate::parse::parse_hunks;
 
     fn rs_diff(path: &str, removed: &[&str], added: &[&str]) -> Vec<FileChange> {
-        let mut d = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -5,{} +5,{} @@\n", removed.len(), added.len());
+        let mut d =
+            format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -5,{} +5,{} @@\n", removed.len(), added.len());
         d.extend(removed.iter().map(|r| format!("-{r}\n")));
         d.extend(added.iter().map(|a| format!("+{a}\n")));
         parse_hunks(&d)
@@ -194,7 +195,15 @@ mod tests {
 
     #[test]
     fn build_for_build_inputs() {
-        for p in ["Cargo.toml", "crates/a/Cargo.toml", "Cargo.lock", "a/build.rs", ".cargo/config.toml", "rust-toolchain.toml", ".config/nextest.toml"] {
+        for p in [
+            "Cargo.toml",
+            "crates/a/Cargo.toml",
+            "Cargo.lock",
+            "a/build.rs",
+            ".cargo/config.toml",
+            "rust-toolchain.toml",
+            ".config/nextest.toml",
+        ] {
             assert!(!no_build_needed(&format!("M\t{p}\n"), &[]), "{p}");
         }
     }

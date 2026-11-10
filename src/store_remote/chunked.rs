@@ -203,13 +203,11 @@ impl Uploader {
             .map(|_| {
                 let (queue, done, backend, recipient, dir) =
                     (queue.clone(), done.clone(), backend.clone(), recipient.to_string(), dir.to_path_buf());
-                std::thread::spawn(move || {
-                    loop {
-                        let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
-                            return;
-                        };
-                        let _ = done.send(upload(&backend, &recipient, &dir, builder));
-                    }
+                std::thread::spawn(move || loop {
+                    let Ok(builder) = queue.lock().map_err(|_| ()).and_then(|q| q.recv().map_err(|_| ())) else {
+                        return;
+                    };
+                    let _ = done.send(upload(&backend, &recipient, &dir, builder));
                 })
             })
             .collect();
@@ -500,7 +498,8 @@ impl Prefetch {
                         // Stay within AHEAD packs of the reader.
                         {
                             let mut guard = shared.ready.lock().unwrap();
-                            while at >= shared.reader.load(Ordering::SeqCst) + shared.ahead && !shared.stop.load(Ordering::SeqCst) {
+                            while at >= shared.reader.load(Ordering::SeqCst) + shared.ahead && !shared.stop.load(Ordering::SeqCst)
+                            {
                                 guard = shared.changed.wait(guard).unwrap();
                             }
                         }

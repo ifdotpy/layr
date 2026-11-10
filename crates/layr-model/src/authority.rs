@@ -3,8 +3,8 @@
 use crate::Record;
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
-use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn parse(line: &str, key: Option<&VerifyingKey>) -> Result<Record> {

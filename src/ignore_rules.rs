@@ -38,6 +38,8 @@ pub struct Rules {
     /// The layers of a thin state: rule files are read from the layer that holds them.
     #[cfg(target_os = "macos")]
     layers: Option<crate::thin::Layered>,
+    #[cfg(not(target_os = "macos"))]
+    source: Option<crate::source::Source>,
 }
 
 impl Rules {
@@ -51,6 +53,8 @@ impl Rules {
             dirs: None,
             #[cfg(target_os = "macos")]
             layers: None,
+            #[cfg(not(target_os = "macos"))]
+            source: None,
         }
     }
 
@@ -67,6 +71,8 @@ impl Rules {
             dirs: Some(dirs),
             #[cfg(target_os = "macos")]
             layers: None,
+            #[cfg(not(target_os = "macos"))]
+            source: None,
         }
     }
 
@@ -80,11 +86,18 @@ impl Rules {
         r
     }
     #[cfg(not(target_os = "macos"))]
-    pub fn of(tree: &Path) -> Rules {
-        Rules::new(tree)
+    pub fn of(tree: &crate::source::Source) -> Rules {
+        use crate::fsutil::Src;
+        let mut rules = Rules::new(tree.folder().unwrap_or_else(|| tree.objects().unwrap().root()));
+        rules.source = Some(tree.clone());
+        rules
     }
 
     fn file(&self, rel: &str) -> PathBuf {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(source) = &self.source {
+            return source.path(rel).unwrap_or_else(|_| self.root.join(rel));
+        }
         #[cfg(target_os = "macos")]
         if let Some(l) = &self.layers {
             return l.path(rel).unwrap_or_else(|_| self.root.join(rel));
@@ -95,6 +108,10 @@ impl Rules {
     }
 
     fn is_file(&self, rel: &str) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(source) = &self.source {
+            return crate::fsutil::lmeta(source, rel).map(|m| m.is_file()).unwrap_or(false);
+        }
         #[cfg(target_os = "macos")]
         if let Some(l) = &self.layers {
             return crate::fsutil::lmeta(l, rel).map(|m| m.is_file()).unwrap_or(false);
@@ -113,6 +130,8 @@ impl Rules {
             dirs: None,
             #[cfg(target_os = "macos")]
             layers: None,
+            #[cfg(not(target_os = "macos"))]
+            source: None,
         }
     }
 

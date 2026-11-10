@@ -1,8 +1,8 @@
 //! The npm adapter on a real npm project. The packages are local tarballs (`file:` specs), and the registry is an
 //! address that refuses connections: a call that reaches the network fails.
 
-use layr_cache::{pnpm, LocalHost, Outcome};
 use layr_adapter::CacheAdapter;
+use layr_cache::{pnpm, LocalHost, Outcome};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,15 +27,24 @@ fn npm_ok(dir: &Path, args: &[&str]) {
 fn tarball(dir: &Path, name: &str) {
     let pkg = dir.join("src").join(name).join("package");
     std::fs::create_dir_all(&pkg).unwrap();
-    std::fs::write(pkg.join("package.json"), format!("{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"main\":\"index.js\"}}")).unwrap();
+    std::fs::write(pkg.join("package.json"), format!("{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"main\":\"index.js\"}}"))
+        .unwrap();
     std::fs::write(pkg.join("index.js"), format!("module.exports = \"{name}\";\n")).unwrap();
-    let o = Command::new("tar").args(["-czf", &format!("{name}-1.0.0.tgz"), "-C", &format!("src/{name}"), "package"]).current_dir(dir).output().unwrap();
+    let o = Command::new("tar")
+        .args(["-czf", &format!("{name}-1.0.0.tgz"), "-C", &format!("src/{name}"), "package"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
     assert!(o.status.success());
 }
 
 fn manifest(dir: &Path, deps: &[&str]) {
     let list: Vec<String> = deps.iter().map(|d| format!("\"{d}\":\"file:./{d}-1.0.0.tgz\"")).collect();
-    std::fs::write(dir.join("package.json"), format!("{{\"name\":\"proj\",\"version\":\"1.0.0\",\"private\":true,\"dependencies\":{{{}}}}}", list.join(","))).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        format!("{{\"name\":\"proj\",\"version\":\"1.0.0\",\"private\":true,\"dependencies\":{{{}}}}}", list.join(",")),
+    )
+    .unwrap();
 }
 
 #[test]

@@ -30,6 +30,28 @@ l remote trust cloud "$e_id" --public-key "$e_key" --expires 6s --role writer >/
 trusted_at=$(date +%s)
 l push cloud -q --caches >/dev/null 2>&1
 
+# A merge machine: a full machine narrowed to the merge role. Its release ref counts; another ref and a new line
+# do not. A broker cannot hand out the role.
+read m_id m_key <<<"$(self m)"
+l remote trust cloud "$m_id" --public-key "$m_key" >/dev/null
+out=$(l remote trust cloud "$m_id" --public-key "$m_key" --role merge --json)
+has "a trust narrows a full machine to the merge role" '"role":"merge"' "$out"
+l push cloud -q >/dev/null 2>&1
+ml() { env LAYR_ROOT="$T/m/store" "$LAYR" "$@"; }
+(cd "$T" && ml clone "file://$T/archive" p >/dev/null 2>$T/m-clone.err) || cat $T/m-clone.err
+M=$T/m/store/projects/p/lines
+(cd "$M/main" && ml ref set release/v1 main >/dev/null && ml ref set env/prod main >/dev/null \
+  && ml line new mx main >/dev/null 2>&1 && ml push origin -q >/dev/null 2>&1)
+l fetch cloud -q >/dev/null 2>&1
+refs=$(l ref list 2>&1)
+has "the merge machine's release ref arrives" "release/v1" "$refs"
+no "its other ref does not" grep -q "env/prod" <<<"$refs"
+no "nor its new line" grep -qx '  mx' <<<"$(l line list 2>&1)"
+has "a machine with limits cannot become a merge machine" "has limits already" \
+  "$(l remote trust cloud "$r_id" --public-key "$r_key" --role merge 2>&1)"
+has "a broker cannot delegate the merge role" "use reader or writer" \
+  "$(l access grant "machine:$r_id" trust --max-hours 1 --role merge 2>&1)"
+
 # The writer: a cache on its save-back line counts; a source state, another line and a trust do not.
 wl() { env LAYR_ROOT="$T/w/store" "$LAYR" "$@"; }
 (cd "$T" && wl clone "file://$T/archive" p --caches-of main >/dev/null 2>&1)

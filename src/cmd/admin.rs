@@ -11,7 +11,7 @@ use crate::repo::{skip_path, Repo};
 use crate::revs;
 use crate::storage as btrfs;
 use crate::store::Project;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -55,8 +55,10 @@ fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
         }
         let (name, saved) = super::checks::save_back_caches(ctx, repo, target, &line.head, &repo.working(&line))?;
         if a.has("--json") {
-            let caches: Vec<_> =
-                saved.iter().map(|(path, overlay, state)| serde_json::json!({"path":path,"overlay":overlay,"state":state})).collect();
+            let caches: Vec<_> = saved
+                .iter()
+                .map(|(path, overlay, state)| serde_json::json!({"path":path,"overlay":overlay,"state":state}))
+                .collect();
             outln!(ctx, "{}", serde_json::json!({"line": name, "source": line.head, "caches": caches}));
         } else if !a.has("-q") {
             if saved.is_empty() {
@@ -71,6 +73,15 @@ fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
 }
 
 pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    #[cfg(debug_assertions)]
+    let expected = std::env::var("LAYR_TEST_SAVE_EXPECTED_HEAD").ok();
+    #[cfg(not(debug_assertions))]
+    let expected: Option<String> = None;
+    save_expected_head(ctx, args, expected.as_deref())
+}
+
+/// Save a cache only if the line still has the head used by the build.
+pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Option<&str>) -> Result<i32> {
     let spec = Spec::new()
         .value("-m|--message")
         .value("--note")
@@ -114,11 +125,17 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let repo = &h.repo;
+    // Virtual lines save their upper layer; cache overlays still require folder lines.
+    #[cfg(target_os = "macos")]
+    let virtual_line = |l: &Line| crate::views::of(repo, l).is_some();
+    #[cfg(not(target_os = "macos"))]
+    let virtual_line = |_: &Line| false;
     let lines: Vec<Line> = if a.has("--all-lines") {
         repo.require(ctx, "line.manage")?;
         repo.lines()?.into_iter().filter(|l| repo.working(l).exists()).collect()
     } else {
-        vec![h.line()?.clone()]
+        let l = h.line()?.clone();
+        vec![l]
     };
     let msg = a.get("--note").unwrap_or("").to_string();
     // `--cache <path>` (repeatable) saves only the named cache paths. A big cache (build output)
@@ -131,6 +148,16 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut refusals: Vec<String> = Vec::new();
     for l in lines {
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        if virtual_line(&l) && a.has("--caches") {
+            return Err(exit(2, "cache overlays require a folder line (docs/views.md)"));
+        }
+        // Keep cache preparation and publication in the same line operation as follow and other hooks.
+        let _cache_lock = if a.has("--caches") { Some(repo.cache_build_lock(&l)?) } else { None };
+        let _line_lock = if a.has("--caches") { Some(repo.line_lock(&l)?) } else { None };
+        let l = if a.has("--caches") { repo.line(&l.id)? } else { l };
+        if a.has("--caches") {
+            repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
+        }
         let mut prepared = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
@@ -153,6 +180,18 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else if !a.has("--force") {
             repo.prepare_save(&l)?;
         }
+        // Test barrier after cache preparation and before publication.
+        if a.has("--caches") {
+            if let Some(root) = std::env::var_os("LAYR_TEST_CACHE_SAVE_BARRIER") {
+                let root = std::path::PathBuf::from(root);
+                std::fs::write(root.join("ready"), b"ready")?;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !root.join("release").exists() {
+                    anyhow::ensure!(std::time::Instant::now() < deadline, "cache save test barrier timed out");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
         // Test hook (tests/t128-caches-prepare.sh): wait after the prepare step, so a test can
         // change the folder before the lock.
         if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
@@ -166,7 +205,14 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         };
         let l = repo.line(&l.id)?;
-        crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        if expected_head.is_some_and(|expected| expected != l.head) {
+            repo.discard_prepared_caches(prepared.take());
+            repo.discard_prepared();
+            bail!("line {} moved before the cache save", l.name);
+        }
+        if !virtual_line(&l) {
+            crate::repo::recover_cache_replacements(&repo.working(&l))?;
+        }
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
         if !only.is_empty() {
             if let Some(missing) = only.iter().find(|o| !caches.contains(o) && !versioned.contains(o)) {
@@ -287,6 +333,10 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 /// Prepare the copies of the line's caches before the lock; `only` (empty: all) names the paths.
 /// Returns the cache paths that it refused (a process uses them).
 fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = cleanup_abandoned_cache_copies(repo) {
+        eprintln!("layr: abandoned cache copies remain until the next cache save: {e:#}");
+    }
     let w = repo.working(l);
     let (u, g) = repo.owner_ids(l);
     let mut ready = Vec::new();
@@ -324,10 +374,44 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     Ok(refused)
 }
 
+/// A killed APFS cache save can leave its prepared snapshots in the project work folder.
+/// Only copies with the exact generated name and a creator known to have exited can go.
+#[cfg(target_os = "macos")]
+fn cleanup_abandoned_cache_copies(repo: &Repo) -> Result<()> {
+    use anyhow::Context;
+    let dir = repo.p.work_dir();
+    let mut moved = false;
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some((id, _)) = name.strip_prefix("prepared-").and_then(|n| n.rsplit_once('.')) else {
+            continue;
+        };
+        if !crate::model::is_uuid(id) || crate::store::creator_gone(name) != Some(true) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        repo.p.trash(&path).with_context(|| format!("remove abandoned cache copy {}", path.display()))?;
+        moved = true;
+    }
+    if moved {
+        crate::store::kick_trash(&repo.p.trash_dir()?);
+    }
+    Ok(())
+}
+
 /// The cache paths that `save --caches` gives `caches_state` under the lock, read before it:
 /// the cache paths of the line (or `only`), without damaged and refused folders. Then the
 /// state of the folder (`Repo::prepare_caches_state`).
-fn prepared_caches_state(ctx: &Ctx, repo: &Repo, l: &Line, msg: &str, only: &[String], refused: &[String]) -> Result<Option<crate::repo::PreparedCaches>> {
+fn prepared_caches_state(
+    ctx: &Ctx,
+    repo: &Repo,
+    l: &Line,
+    msg: &str,
+    only: &[String],
+    refused: &[String],
+) -> Result<Option<crate::repo::PreparedCaches>> {
     let damaged = repo.damaged_folders(l)?;
     let caches: Vec<String> = repo
         .line_cache_paths(l)?
@@ -600,7 +684,9 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
         return false;
     }
     r.lines.iter().all(|(lid, ch)| {
-        let Some(before) = &ch.before else { return false };
+        let Some(before) = &ch.before else {
+            return false;
+        };
         match repo.p.db.line_by_id(lid) {
             Ok(Some(cur)) => {
                 cur.name == before.name && repo.p.db.line_by_name(&cur.name).ok().flatten().is_some_and(|x| x.id == cur.id)
@@ -1274,7 +1360,7 @@ fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owne
 /// The bytes that only the storage of these states holds (as `layr du` counts them): clones that
 /// other states or lines share are not counted, so the number is what freeing them gives back
 /// (blocks shared only among these states are left out, so it is a lower bound).
-fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
+pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
     states
         .iter()
         .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
@@ -1317,12 +1403,7 @@ fn check(ctx: &Ctx, repo: &Repo, quiet: bool) -> Result<i32> {
     }
     if !c.freed.is_empty() {
         let bytes = states_bytes(repo, &c.freed);
-        outln!(
-            ctx,
-            "leaks: {} state(s), {} would be freed by `layr gc --repair`",
-            c.freed.len(),
-            human_size(bytes)
-        );
+        outln!(ctx, "leaks: {} state(s), {} would be freed by `layr gc --repair`", c.freed.len(), human_size(bytes));
     }
     if c.clean() {
         if !quiet {
@@ -1342,19 +1423,7 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
         return Ok(vec![]);
     }
     let db = &repo.p.db;
-    // A cache overlay names project states through its heads and records: they stay.
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for name in repo.overlay_names()? {
-        let overlay = repo.overlay_repo(&name)?;
-        for line in overlay.p.db.lines()? {
-            named.insert(line.head);
-        }
-        for raw in overlay.p.db.all_lines()? {
-            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                named.insert(token.to_string());
-            }
-        }
-    }
+    let named = overlay_named_states(repo)?;
     let mut st = db.conn.prepare(
         "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
          AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
@@ -1376,12 +1445,30 @@ fn evict_stored(repo: &Repo) -> Result<Vec<String>> {
     drop_trees(repo, &evict)
 }
 
+/// The project states that a cache overlay names through its heads and records: eviction and
+/// `layr migrate --delete-old` keep their trees.
+pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for name in repo.overlay_names()? {
+        let overlay = repo.overlay_repo(&name)?;
+        for line in overlay.p.db.lines()? {
+            named.insert(line.head);
+        }
+        for raw in overlay.p.db.all_lines()? {
+            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
+                named.insert(token.to_string());
+            }
+        }
+    }
+    Ok(named)
+}
+
 /// Remove the trees of states whose records stay (eviction, imports that git builds again) and
 /// mark them absent. The states are reserved first, in one transaction with the check for pins
 /// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
 /// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
 /// the states whose trees went.
-fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
+pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
     let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
         if !crate::free::holder_alive(&holder) {
@@ -1435,7 +1522,11 @@ pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
 /// free it under the command).
 /// `diff` is `owners_diff` against the replay when the caller made it with no record added
 /// since (the rows that records make are the same); `None` replays here.
-pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>) -> Result<Vec<String>> {
+pub fn repair_table(
+    repo: &Repo,
+    free: bool,
+    diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>,
+) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
         None => repo.p.db.owners_diff(&repo.p.recomputed_owners()?)?,
@@ -1457,8 +1548,16 @@ pub fn repair_table(repo: &Repo, free: bool, diff: Option<(Vec<crate::owners::Ro
 /// states are freed, expired refs are released and the side caches are trimmed. The storage of
 /// the freed states moves after the lock (`free::finish_project`), then the trash is emptied.
 /// With `dry`, nothing changes: it prints what it would free.
-fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, bases_read: Option<&BTreeMap<String, String>>) -> Result<usize> {
+fn repair_project(
+    ctx: &Ctx,
+    repo: &Repo,
+    dry: bool,
+    quiet: bool,
+    free: bool,
+    bases_read: Option<&BTreeMap<String, String>>,
+) -> Result<usize> {
     if dry {
+        repair_temporary(ctx, repo, true, quiet)?;
         let c = snapshot(repo, || owners_check(repo))?;
         let queued: Vec<String> = repo.p.db.queued_frees()?;
         let bytes = states_bytes(repo, &c.freed);
@@ -1536,7 +1635,18 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         {
             let lines = repo.lines()?;
             let heads: BTreeSet<String> = lines.iter().map(|l| l.head.clone()).collect();
-            let done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            let mut done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
+            // Final states of deleted lines that are still thin: their background keyframe
+            // (`free::keyframe_later`) did not run.
+            let finals: Vec<String> = {
+                let mut q = repo.p.db.conn.prepare("SELECT DISTINCT state FROM owners WHERE kind='deleted'")?;
+                let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for id in finals.iter().filter(|id| repo.p.delta_path(id).is_dir()) {
+                crate::thin::make_keyframe(&repo.p, id)?;
+                done.keyframes += 1;
+            }
             // Saved statuses of lines that are gone.
             let ids: BTreeSet<String> = lines.iter().map(|l| format!("{}.cache", l.id)).collect();
             if let Ok(rd) = std::fs::read_dir(repo.p.meta_dir().join("status")) {
@@ -1563,34 +1673,8 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
     };
     // The storage of the freed states: the leaks above and states that died before this repair.
     let freed = crate::free::finish_project(&repo.p)?;
+    repair_temporary(ctx, repo, false, quiet)?;
     crate::store::empty_trash(&repo.p.trash_dir()?, None)?;
-    // Temporary objects whose creator is gone, and old ones without a creator pid. A live
-    // creator keeps its object: a copy has the times of its source, so its age says nothing.
-    // Overlay projects have their own: a killed cache save leaves a whole build folder there.
-    let overlays: Vec<_> = repo
-        .overlay_names()
-        .unwrap_or_default()
-        .iter()
-        .filter(|name| repo.p.store.project_dir(&format!("{}%{name}", repo.p.name)).is_ok_and(|d| d.exists()))
-        .filter_map(|name| repo.overlay_project(name).ok())
-        .collect();
-    for (p, d) in std::iter::once(&repo.p).chain(&overlays).flat_map(|p| [(p, p.scan_dir()), (p, p.work_dir())]) {
-        if let Ok(rd) = std::fs::read_dir(&d) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let stale = crate::store::creator_gone(&name).unwrap_or_else(|| {
-                    e.metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| t.elapsed().map(|x| x.as_secs() > 3600).unwrap_or(false))
-                        .unwrap_or(false)
-                });
-                if stale {
-                    let _ = p.trash(&e.path());
-                }
-            }
-        }
-    }
     // OCI blobs that no export names (a failed export), and saved scans of removed or changed
     // trees. Every gc path runs them: the daemon, overlay projects and the command.
     if repo.p.meta_dir().join("oci").is_dir() {
@@ -1605,6 +1689,52 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
         outln!(ctx, "freed {freed} state(s), {} leaked", leaks.len());
     }
     Ok(freed)
+}
+
+/// Reclaim temporary copies of this project and its local, visible overlays. A copied tree
+/// inherits source times, so neither old mtime nor a missing owner proves that a copy is dead.
+/// Older names without a creator stay for explicit inspection. New APFS copies name their pid.
+fn repair_temporary(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool) -> Result<()> {
+    repair_project_temporary(ctx, &repo.p, dry, quiet)?;
+    if !repo.p.is_overlay() {
+        for name in repo.visible_overlay_names(ctx)? {
+            if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
+                continue;
+            }
+            let overlay = repo.overlay_repo(&name)?;
+            repair_project_temporary(ctx, &overlay.p, dry, quiet)?;
+        }
+    }
+    Ok(())
+}
+
+fn repair_project_temporary(ctx: &Ctx, project: &Project, dry: bool, quiet: bool) -> Result<()> {
+    for dir in [project.scan_dir(), project.work_dir()] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read temporary folder {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            match crate::store::creator_gone(&name.to_string_lossy()) {
+                Some(true) => {
+                    if !dry {
+                        project.trash(&path).with_context(|| format!("remove abandoned temporary copy {}", path.display()))?;
+                    }
+                    if !quiet {
+                        let verb = if dry { "would remove" } else { "removed" };
+                        outln!(ctx, "{verb} temporary copy: {}", path.display());
+                    }
+                }
+                None if !quiet => outln!(ctx, "kept temporary copy (creator unknown): {}", path.display()),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `layr fsck --caches`: the cache data of this project that nothing keeps, by reason, with its bytes
@@ -1639,7 +1769,12 @@ fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize
         let orphans = repo.orphan_cache_lines(&orepo)?;
         let dead = repo.cache_unreachable(&name)?;
         let size: u64 = dead.iter().map(|id| crate::cache_overlay::tree_size(&orepo.p.state_path(id))).sum();
-        say(format!("overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines", dead.len(), size, orphans.len()));
+        say(format!(
+            "overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines",
+            dead.len(),
+            size,
+            orphans.len()
+        ));
         states += dead.len() + orphans.len();
         bytes += size;
     }
@@ -1752,8 +1887,11 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .filter(|(state, base)| rows.get(*state) != Some(*base) && h.repo.p.delta_path(state).is_dir())
             .map(|(s, b)| (s.clone(), b.clone()))
             .collect();
-        let gone: Vec<String> =
-            rows.keys().filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir()).cloned().collect();
+        let gone: Vec<String> = rows
+            .keys()
+            .filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir())
+            .cloned()
+            .collect();
         h.repo.p.db.fix_bases(&set, &gone)?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
@@ -1764,6 +1902,21 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
+    // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
+    // without one is not touched.
+    if !a.has("-n") && h.repo.p.meta_dir().join("objects").is_dir() {
+        let (e, p, seconds) = super::objects::repack_store(&h)?;
+        if !a.has("-q") {
+            outln!(
+                ctx,
+                "objects: {} hot blobs turned cold, {} objects into {} packs in {:.1} s",
+                e.blobs,
+                p.objects,
+                p.packs,
+                seconds
+            );
+        }
+    }
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
@@ -1861,7 +2014,9 @@ fn print_trash_errors(store: &crate::store::Store) {
     roots.extend(store.layout().map(|l| l.ready_volume_paths()).unwrap_or_default());
     for root in roots {
         let path = root.join("trash.errors");
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         if text.is_empty() {
             continue;
         }
@@ -1907,7 +2062,13 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let c = owners_check(repo)?;
     if !c.clean() {
         problems += 1;
-        outln!(ctx, "owners differ from the records: {} missing, {} extra, {} leaked", c.missing.len(), c.extra.len(), c.freed.len());
+        outln!(
+            ctx,
+            "owners differ from the records: {} missing, {} extra, {} leaked",
+            c.missing.len(),
+            c.extra.len(),
+            c.freed.len()
+        );
         for (s, k, h) in c.missing.iter().take(5) {
             outln!(ctx, "\tmissing: {} {k} {h}", ids::short(s));
         }
@@ -2005,6 +2166,17 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         }
         for l in o.lines()? {
             if !o.p.has_state(&l.head) {
+                // Remote sync imports cache records for every platform, but only the local
+                // platform's trees. An intentional absence is not damage; a present/deleted
+                // marker or a local-platform head still requires the normal error below.
+                let foreign_cache =
+                    o.p.db
+                        .state(&l.head)?
+                        .is_some_and(|state| crate::cache_overlay::other_platform(state.cache_platform.as_deref()));
+                if foreign_cache && o.p.db.state_flags(&l.head)? == Some((false, false)) {
+                    outln!(ctx, "overlay {name}: the head of line {} is not local (another cache platform)", l.name);
+                    continue;
+                }
                 problems += 1;
                 let deleted = match crate::overlay::line_of_overlay_line(&l.name) {
                     Some(id) => repo.p.db.line_deleted(id)?,
@@ -2079,7 +2251,9 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     if !h.repo.p.is_overlay() {
         for name in h.repo.visible_overlay_names(ctx)? {
             // An overlay without a key on this machine has no local project to index.
-            let Ok(o) = h.repo.overlay_project(&name) else { continue };
+            let Ok(o) = h.repo.overlay_project(&name) else {
+                continue;
+            };
             let _l = o.lock()?;
             o.rebuild_index()?;
             let n: i64 = o.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
@@ -2165,7 +2339,11 @@ fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::pr
     let mut command = std::process::Command::new("git");
     command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
     // The caller's choice of git configuration (the global file and its excludes) applies, as in their shell.
-    crate::privs::command_as(&mut command, ctx.caller.uid, &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]))?;
+    crate::privs::command_as(
+        &mut command,
+        ctx.caller.uid,
+        &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]),
+    )?;
     Ok(command.output()?)
 }
 
@@ -2394,7 +2572,8 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let usage = "usage: layr init [<project>] --from-git <checkout> [--line <name>]";
     let from = a.get("--from-git").ok_or_else(|| exit(128, usage))?;
     let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
-    let src = crate::privs::as_caller_fs(ctx, || Ok(src.canonicalize()?)).map_err(|_| exit(128, format!("fatal: not a folder: {from}")))?;
+    let src = crate::privs::as_caller_fs(ctx, || Ok(src.canonicalize()?))
+        .map_err(|_| exit(128, format!("fatal: not a folder: {from}")))?;
     let git_text = |args: &[&str]| -> Result<String> {
         let out = caller_git(ctx, &src, args)?;
         if !out.status.success() {
@@ -2422,8 +2601,10 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             ),
         ));
     }
-    let worktrees: Vec<String> =
-        git_text(&["worktree", "list", "--porcelain"])?.lines().filter_map(|l| l.strip_prefix("worktree ").map(String::from)).collect();
+    let worktrees: Vec<String> = git_text(&["worktree", "list", "--porcelain"])?
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree ").map(String::from))
+        .collect();
     if worktrees.len() > 1 {
         return Err(exit(
             1,
@@ -2444,14 +2625,21 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if std::fs::metadata(&src)?.dev() != store_dev {
             return Err(exit(
                 1,
-                format!("error: {} is on another file system than the layr store; the line can stay only on the store's file system", src.display()),
+                format!(
+                    "error: {} is on another file system than the layr store; the line can stay only on the store's file system",
+                    src.display()
+                ),
             ));
         }
     }
     let name = a.pos.first().cloned().unwrap_or_else(|| src.file_name().unwrap_or_default().to_string_lossy().into_owned());
     let branch = git_text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let line_name = a.get("--line").map(String::from).unwrap_or_else(|| {
-        if branch == "HEAD" || crate::store::check_name("line", &branch).is_err() { "main".to_string() } else { branch.clone() }
+        if branch == "HEAD" || crate::store::check_name("line", &branch).is_err() {
+            "main".to_string()
+        } else {
+            branch.clone()
+        }
     });
     let caches = git_caches(ctx, &src)?;
     // Git ignores files through `.git/info/exclude` and the user's `core.excludesFile` too. The import
@@ -2460,7 +2648,8 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let local = local_excludes(&src, &git_text(&["config", "--path", "--get", "core.excludesFile"]).unwrap_or_default(), ctx)?;
 
     // The project and its line, from the folder and its history (the `--from` path).
-    let mut init_args = vec![name.clone(), "--from".into(), src.to_string_lossy().into_owned(), "--line".into(), line_name.clone(), "-q".into()];
+    let mut init_args =
+        vec![name.clone(), "--from".into(), src.to_string_lossy().into_owned(), "--line".into(), line_name.clone(), "-q".into()];
     if let Some(v) = a.get("--volume") {
         init_args.extend(["--volume".into(), v.to_string()]);
     }
@@ -2514,10 +2703,20 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
     }
     if !a.has("-q") {
-        let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]).unwrap_or_default();
-        outln!(ctx, "Project {name}: line {line_name} at {} (Git HEAD {})", src.display(), &git_text(&["-C", &backup.to_string_lossy(), "rev-parse", "--short", "HEAD"]).unwrap_or_default());
+        let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])
+            .unwrap_or_default();
+        outln!(
+            ctx,
+            "Project {name}: line {line_name} at {} (Git HEAD {})",
+            src.display(),
+            &git_text(&["-C", &backup.to_string_lossy(), "rev-parse", "--short", "HEAD"]).unwrap_or_default()
+        );
         outln!(ctx, "Local branches: {}", locals.lines().map(|b| format!("local/{b}")).collect::<Vec<_>>().join(", "));
-        outln!(ctx, "Branches of origin: {} (imported on first use)", tracking.iter().filter(|(n, _)| !n.ends_with("/HEAD")).count());
+        outln!(
+            ctx,
+            "Branches of origin: {} (imported on first use)",
+            tracking.iter().filter(|(n, _)| !n.ends_with("/HEAD")).count()
+        );
         if !caches.is_empty() {
             outln!(ctx, "Caches kept: {}", caches.join(", "));
         }
@@ -2616,7 +2815,9 @@ fn copy_keeping_times(from: &std::path::Path, to: &std::path::Path) -> Result<()
 fn git_caches(ctx: &Ctx, src: &std::path::Path) -> Result<Vec<String>> {
     let mut found = Vec::new();
     fn scan(dir: &std::path::Path, rel: &str, depth: usize, out: &mut Vec<String>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let Ok(t) = e.file_type() else { continue };
             if !t.is_dir() {
@@ -2772,7 +2973,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if k == "queue.push" && !val.is_null() && !val.as_str().is_some_and(|v| v.split(',').any(|n| !n.trim().is_empty())) {
         return Err(exit(128, "queue.push must be a comma-separated list of remotes"));
     }
-    if k.starts_with("remote.") && k.ends_with(".push") && !val.is_null()
+    if k.starts_with("remote.")
+        && k.ends_with(".push")
+        && !val.is_null()
         && !matches!(val.as_str(), Some("required" | "optional" | "off"))
     {
         return Err(exit(128, format!("{k} must be required, optional or off")));
@@ -2949,7 +3152,9 @@ fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) 
     } else {
         let hours: i64 = a.get("--max-hours").and_then(|h| h.parse().ok()).filter(|h| *h > 0).ok_or_else(|| exit(128, usage))?;
         let role = a.get("--role").unwrap_or("reader");
-        if layr_store::trust::Role::parse(role).is_none() {
+        // A merge machine comes only from a full machine's own trust, never from a broker (docs/ci-trust.md).
+        use layr_store::trust::Role;
+        if !matches!(Role::parse(role), Some(Role::Reader | Role::Writer)) {
             return Err(exit(128, format!("--role {role}: use reader or writer")));
         }
         data["max_hours"] = serde_json::json!(hours);
@@ -3005,8 +3210,12 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => super::attest::record(repo, &state, if withdraw { "revoke" } else { "approval" }, b"")?,
     };
     if withdraw {
-        rec.data["revokes"] =
-            serde_json::json!(repo.p.db.own_attestations(&state, &repo.p.store.machine.id, Some(ctx.caller.uid), Some("approval"))?);
+        rec.data["revokes"] = serde_json::json!(repo.p.db.own_attestations(
+            &state,
+            &repo.p.store.machine.id,
+            Some(ctx.caller.uid),
+            Some("approval")
+        )?);
     }
     let rec = repo.commit_record(ctx, rec)?;
     if a.has("--json") {

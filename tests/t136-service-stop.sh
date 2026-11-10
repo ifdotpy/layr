@@ -44,4 +44,43 @@ eq "a panic gives exit code 101" 101 "$rc"
 has "the client sees the panic" "test panic in status" "$out"
 has "the client sees that the command failed in the service" "stopped on an internal error (a panic)" "$out"
 no "the connection is not cut" grep -q "closed the connection" <<< "$out"
+
+# A service manager can kill the process group while a request is active. The client must
+# report why it did not receive an exit code, rather than returning a bare EOF.
+start_daemon LAYR_TEST_LOCK_HOLD_MS=10000
+"$LAYR" line new -q interrupted main > "$T/interrupted.log" 2>&1 &
+REQ=$!
+for _ in $(seq 1 100); do [ -f "$LAYR_ROOT/projects/stop/meta/lock.holder" ] && break; sleep 0.1; done
+if [ ! -f "$LAYR_ROOT/projects/stop/meta/lock.holder" ]; then
+    kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
+    wait "$REQ" 2>/dev/null
+    echo 'FATAL: request did not acquire the project lock'; exit 1
+fi
+group=$(ps -o pgid= -p "$DPID" | tr -d ' ')
+if [ "$group" != "$DPID" ]; then
+    kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
+    wait "$REQ" 2>/dev/null
+    echo 'FATAL: daemon does not own its process group'; exit 1
+fi
+kill -KILL -- "-$DPID" 2>/dev/null
+wait "$DPID" 2>/dev/null
+wait "$REQ"; rc=$?
+no "a killed service does not report success" test "$rc" -eq 0
+has "a killed service gives a useful error" "the layr service closed the connection before the command finished" "$(cat "$T/interrupted.log")"
+has "the error points to the service log" "see the log of the layr service" "$(cat "$T/interrupted.log")"
+
+# The service reaps completed request children while it continues to serve requests.
+export LAYR_SOCKET=$T/reap.sock
+start_daemon
+for _ in 1 2 3 4 5; do
+    if ! "$LAYR" status >"$T/reap.log" 2>&1; then
+        cat "$T/reap.log"
+        kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
+        echo 'FATAL: service request failed'; exit 1
+    fi
+done
+sleep 2
+zombies=$(ps -A -o ppid=,stat= | awk -v parent="$DPID" '$1 == parent && $2 ~ /^Z/ { n++ } END { print n+0 }')
+eq "the running service reaps completed request children" 0 "$zombies"
+kill -TERM "$DPID"; wait "$DPID"
 finish

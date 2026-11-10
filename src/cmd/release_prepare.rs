@@ -74,7 +74,8 @@ fn entries(sha: &str, message: &str) -> Vec<Entry> {
     out
 }
 
-/// The commits of a `git log --format=%H%x1f%B%x1e` output, newest first. Release commits are left out.
+/// Read the historical release-please fixtures.
+#[cfg(test)]
 fn commits(log: &str) -> Vec<Entry> {
     log.split('\u{1e}')
         .filter_map(|c| c.trim_start_matches('\n').split_once('\u{1f}'))
@@ -118,7 +119,7 @@ fn line(e: &Entry, with_commit: bool) -> String {
     } else if let Some(id) = &e.change {
         s.push_str(&format!(" ([{id}]({CHANGES}/{id}))"));
     }
-    if with_commit {
+    if with_commit && !e.sha.is_empty() {
         s.push_str(&format!(" ([{}]({REPO}/commit/{}))", &e.sha[..7.min(e.sha.len())], e.sha));
     }
     s
@@ -192,37 +193,67 @@ pub fn prepare(ctx: &Ctx, args: &[String]) -> Result<i32> {
         &std::fs::read(root.join(".release-please-manifest.json")).context("no .release-please-manifest.json here")?,
     )?;
     let previous = manifest["."].as_str().context("manifest has no version")?.to_string();
-    let out = std::process::Command::new("git")
-        .args(["log", "--first-parent", "--format=%H%x1f%B%x1e", &format!("v{previous}..HEAD")])
-        .current_dir(&root)
-        .output()?;
-    if !out.status.success() {
-        bail!("git log v{previous}..HEAD: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let here = super::here(ctx)?;
+    let head = &here.line()?.head;
+    let ref_name = format!("release/v{previous}");
+    let base = crate::revs::resolve(&here.repo, here.line.as_ref(), &ref_name)
+        .or_else(|_| crate::revs::resolve(&here.repo, here.line.as_ref(), &format!("v{previous}")))
+        .with_context(|| format!("no release ref or tag for v{previous}"))?;
+    if !here.repo.is_ancestor(&base, head)? {
+        bail!("v{previous} is not in the current line history");
     }
-    let all = commits(&String::from_utf8_lossy(&out.stdout));
+    let mut all = Vec::new();
+    for id in here.repo.first_parents_since(head, &base)? {
+        let state = here.repo.state(&id)?;
+        if state.message.starts_with("chore(main): release ") {
+            continue;
+        }
+        let commit = here.repo.p.db.git_commit_of(&id)?.unwrap_or_default();
+        all.extend(entries(&commit, &state.message));
+    }
     let sections = sections(&root)?;
     let Some(next) = next_version(&previous, &all, &sections)? else {
-        outln!(ctx, "no release: no feat, fix, perf, revert or breaking change since v{previous}");
+        if a.has("--json") {
+            outln!(ctx, "{}", serde_json::json!({"status":"none","previous":previous,"base":base,"head":head}));
+        } else {
+            outln!(ctx, "no release: no feat, fix, perf, revert or breaking change since v{previous}");
+        }
         return Ok(0);
     };
     let date = a.get("--date").map(str::to_owned).unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
     let text = section(&previous, &next, &date, &all, &sections);
     if a.has("-n") {
-        ctx.print(&text);
+        if a.has("--json") {
+            outln!(
+                ctx,
+                "{}",
+                serde_json::json!({"status":"ready","previous":previous,"version":next,
+                "tag":format!("v{next}"),"base":base,"head":head,"changelog":text})
+            );
+        } else {
+            ctx.print(&text);
+        }
         return Ok(0);
     }
     let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap_or_else(|_| "# Changelog\n\n".into());
     let rest = changelog.strip_prefix("# Changelog\n\n").unwrap_or(&changelog);
-    std::fs::write(root.join("CHANGELOG.md"), format!("# Changelog\n\n{text}{rest}"))?;
     let toml = std::fs::read_to_string(root.join("Cargo.toml"))?;
     // The workspace version is the version of layr and layr-api (`version.workspace = true`).
-    std::fs::write(root.join("Cargo.toml"), set_version(&toml, "[workspace.package]", &previous, &next)?)?;
+    let toml = set_version(&toml, "[workspace.package]", &previous, &next)?;
     let lock = std::fs::read_to_string(root.join("Cargo.lock"))?;
     let lock = set_version(&lock, "name = \"layr\"\n", &previous, &next)?;
-    std::fs::write(root.join("Cargo.lock"), set_version(&lock, "name = \"layr-api\"\n", &previous, &next)?)?;
+    let lock = set_version(&lock, "name = \"layr-api\"\n", &previous, &next)?;
+    std::fs::write(root.join("CHANGELOG.md"), format!("# Changelog\n\n{text}{rest}"))?;
+    std::fs::write(root.join("Cargo.toml"), toml)?;
+    std::fs::write(root.join("Cargo.lock"), lock)?;
     std::fs::write(root.join(".release-please-manifest.json"), format!("{{\n  \".\": \"{next}\"\n}}\n"))?;
     if a.has("--json") {
-        outln!(ctx, "{}", serde_json::json!({"previous": previous, "version": next, "tag": format!("v{next}")}));
+        outln!(
+            ctx,
+            "{}",
+            serde_json::json!({"status":"written","previous":previous,"version":next,
+            "tag":format!("v{next}"),"base":base,"head":head})
+        );
     } else {
         outln!(ctx, "{next}: CHANGELOG.md, Cargo.toml, Cargo.lock and the manifest written; save, queue, then tag v{next}");
     }
@@ -234,13 +265,12 @@ mod tests {
     use super::*;
 
     fn config() -> Sections {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        sections(root).unwrap()
+        sections(&std::env::current_dir().unwrap()).unwrap()
     }
 
     /// The section of `version` in the CHANGELOG.md of the repository.
     fn recorded(version: &str) -> String {
-        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md")).unwrap();
+        let text = std::fs::read_to_string(std::env::current_dir().unwrap().join("CHANGELOG.md")).unwrap();
         let start = text.find(&format!("## [{version}]")).unwrap();
         let end = text[start + 3..].find("\n## [").map(|i| start + 3 + i + 1).unwrap();
         text[start..end].to_string()
@@ -249,7 +279,7 @@ mod tests {
     /// Release-please made these sections from the same commits: the output is the same, byte for byte.
     #[test]
     fn the_sections_of_0_36_and_0_37_come_out_as_release_please_wrote_them() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/release");
+        let dir = std::env::current_dir().unwrap().join("tests/fixtures/release");
         for (previous, version) in [("0.35.0", "0.36.0"), ("0.36.0", "0.37.0")] {
             let all = commits(&std::fs::read_to_string(dir.join(format!("v{version}.log"))).unwrap());
             assert_eq!(next_version(previous, &all, &config()).unwrap().as_deref(), Some(version));

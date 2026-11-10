@@ -113,7 +113,51 @@ pub fn trusted_writers_checked(project: &str, lines: &[String]) -> Result<BTreeM
     writers(project, lines, false)
 }
 
+/// The machines whose records count for release verification: the full writers, and the merge machines
+/// (`trust::Role::Merge`, docs/ci-trust.md) with their terms. A merge machine's record counts only when its
+/// terms accept it (`trust::Terms::refusal`).
+#[derive(Debug, Default)]
+pub struct Writers {
+    pub full: BTreeMap<String, VerifyingKey>,
+    pub merge: BTreeMap<String, (VerifyingKey, crate::trust::Terms)>,
+}
+
+impl Writers {
+    /// The key of a full writer, or of a merge machine whose trust is live at `now`.
+    pub fn key(&self, machine: &str, now: i64) -> Option<&VerifyingKey> {
+        self.full.get(machine).or_else(|| self.merge.get(machine).filter(|(_, terms)| terms.live(now)).map(|(key, _)| key))
+    }
+}
+
+/// `trusted_writers_checked` plus the merge machines.
+pub fn release_writers_checked(project: &str, lines: &[String]) -> Result<Writers> {
+    let (keys, trusted, limited) = resolve(project, lines, false)?;
+    let mut writers = Writers::default();
+    for (machine, key) in keys {
+        if !trusted.contains(&machine) {
+            continue;
+        }
+        match limited.get(&machine) {
+            None => {
+                writers.full.insert(machine, key);
+            }
+            Some(terms) if terms.role == crate::trust::Role::Merge => {
+                writers.merge.insert(machine, (key, terms.clone()));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(writers)
+}
+
 fn writers(project: &str, lines: &[String], verify: bool) -> Result<BTreeMap<String, VerifyingKey>> {
+    let (keys, trusted, limited) = resolve(project, lines, verify)?;
+    Ok(keys.into_iter().filter(|(machine, _)| trusted.contains(machine) && !limited.contains_key(machine)).collect())
+}
+
+type Resolved = (BTreeMap<String, VerifyingKey>, BTreeSet<String>, crate::trust::Rules);
+
+fn resolve(project: &str, lines: &[String], verify: bool) -> Result<Resolved> {
     let mut parsed = Vec::new();
     let mut keys = BTreeMap::new();
     let mut creator = None;
@@ -182,7 +226,7 @@ fn writers(project: &str, lines: &[String], verify: bool) -> Result<BTreeMap<Str
             break;
         }
     }
-    Ok(keys.into_iter().filter(|(machine, _)| trusted.contains(machine) && !limited.contains_key(machine)).collect())
+    Ok((keys, trusted, limited))
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -195,7 +239,12 @@ mod tests {
 
     fn fixture() -> (Descriptor, String, Manifest, SigningKey) {
         let vault = keys::generate_identity();
-        let descriptor = Descriptor { format: 2, project: PROJECT.into(), recipient: keys::recipient_of(&vault).unwrap(), mode: Default::default() };
+        let descriptor = Descriptor {
+            format: 2,
+            project: PROJECT.into(),
+            recipient: keys::recipient_of(&vault).unwrap(),
+            mode: Default::default(),
+        };
         let key = SigningKey::from_bytes(&[7; 32]);
         let manifest = Manifest::new(&descriptor, keys::generate_identity(), OWNER.into(), &key).unwrap();
         (descriptor, vault, manifest, key)

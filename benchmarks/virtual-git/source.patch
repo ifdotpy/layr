@@ -1,0 +1,65 @@
+diff --git a/src/cmd/remote.rs b/src/cmd/remote.rs
+index abf4ce2..617b0e5 100644
+--- a/src/cmd/remote.rs
++++ b/src/cmd/remote.rs
+@@ -217,9 +217,9 @@ pub mod git {
+         mergecmd::merge_rev(ctx, &h.repo, &line, &margs[0], &pa)
+     }
+ 
+-    /// Give the line's `.git` folder a commit of the line's head without a remote, so tools that
+-    /// read git HEAD see the current state. The commits are the ones `layr git push` would send for the
+-    /// same states; nothing leaves the machine.
++    /// Export the head without a remote. A native line also refreshes its `.git` folder.
++    /// A virtual line can keep the commit only in the project Git store.
++    /// The commit is the one `layr git push` sends; nothing leaves the machine.
+     /// The remote name of a `git-sync` export record: no remote exists, so `layr git remote add` refuses it.
+     const GIT_SYNC_REMOTE: &str = "git-sync";
+ 
+@@ -259,7 +259,7 @@ pub mod git {
+             let _lock = repo.p.lock()?;
+             repo.commit_record(ctx, rec)?;
+         }
+-        if !repo.working(&line).join(".git").is_dir() {
++        if crate::views::of(repo, &line).is_none() && !repo.working(&line).join(".git").is_dir() {
+             return Err(exit(
+                 1,
+                 format!("error: line '{}' has no .git folder; commit {} is in the project git store", line.name, &commit[..10]),
+@@ -514,7 +514,13 @@ pub mod git {
+         match cmd.as_str() {
+             "remote" => remote(ctx, rest),
+             "fetch" => fetch(ctx, rest),
+-            "pull" => pull(ctx, rest),
++            "pull" => {
++                let h = here(ctx)?;
++                if h.line.as_ref().is_some_and(|line| crate::views::of(&h.repo, line).is_some()) {
++                    return Err(exit(1, "layr git pull does not support virtual lines yet; use layr git fetch, or convert with layr line show <line> --folder"));
++                }
++                pull(ctx, rest)
++            },
+             "push" => push(ctx, rest),
+             "clone" => clone(ctx, rest),
+             "sync" => sync(ctx, rest),
+diff --git a/src/views.rs b/src/views.rs
+index c348834..cb9d324 100644
+--- a/src/views.rs
++++ b/src/views.rs
+@@ -599,6 +599,7 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
+         "config",
+         "usage",
+         "init",
++        "git",
+     ];
+     if SUPPORTED.contains(&cmd) {
+         return Ok(());
+diff --git a/src/views_linux.rs b/src/views_linux.rs
+index cbc8214..17ca08f 100644
+--- a/src/views_linux.rs
++++ b/src/views_linux.rs
+@@ -212,6 +212,7 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
+         "config",
+         "usage",
+         "init",
++        "git",
+     ];
+     if SUPPORTED.contains(&cmd) {
+         return Ok(());

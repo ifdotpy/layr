@@ -17,7 +17,11 @@ const LOCK: &str = ".layr-version.lock";
 
 pub fn binary() -> Version {
     // The version of this binary (the layr package), not of the layr-api crate, which `release prepare` does not bump.
-    Version { format: FORMAT, version: env!("CARGO_PKG_VERSION").into(), build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into() }
+    Version {
+        format: FORMAT,
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: option_env!("LAYR_BUILD_ID").unwrap_or("unknown").into(),
+    }
 }
 
 /// Advertise the binary's database schema without changing the store marker contract.

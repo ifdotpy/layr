@@ -731,7 +731,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn keychain_lock_hides_files_and_blocks_webdav_until_unlock() {
-        keystore::test_service();
+        let _keychain = keystore::test_service();
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let url = format!("file://{}", root.join("remote").display());
         let backend = crate::store_remote::backend::Backend::open(&url).unwrap();
@@ -795,8 +795,18 @@ mod tests {
     fn url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use() {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let path = root.join("mount-pins.json");
-        let first = StorePin { project: crate::ids::new_id(), recipient: "age1first".into(), paper_recipient: None, mode: Default::default() };
-        let second = StorePin { project: crate::ids::new_id(), recipient: "age1second".into(), paper_recipient: None, mode: Default::default() };
+        let first = StorePin {
+            project: crate::ids::new_id(),
+            recipient: "age1first".into(),
+            paper_recipient: None,
+            mode: Default::default(),
+        };
+        let second = StorePin {
+            project: crate::ids::new_id(),
+            recipient: "age1second".into(),
+            paper_recipient: None,
+            mode: Default::default(),
+        };
         assert!(record_pin(&path, "file:///one", &first).unwrap());
         assert!(record_pin(&path, "file:///two", &second).unwrap());
         assert!(!record_pin(&path, "file:///one", &first).unwrap());

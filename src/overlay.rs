@@ -271,9 +271,10 @@ impl ListedOverlay<'_> {
     pub(crate) fn visible_to(&self, ctx: &Ctx) -> bool {
         !self.info.hidden
             || ctx.caller.is_root()
-            || self.project.as_ref().is_ok_and(|p| {
-                Policy::load(p).check(&Who::of(ctx.caller.uid, ctx.caller.gid), "read").is_ok()
-            })
+            || self
+                .project
+                .as_ref()
+                .is_ok_and(|p| Policy::load(p).check(&Who::of(ctx.caller.uid, ctx.caller.gid), "read").is_ok())
     }
 }
 
@@ -616,7 +617,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Descriptor metadata remains usable after its source snapshots are collected.
-    fn check_view_access(&self, ctx: &Ctx, view: &View) -> Result<()> {
+    pub(crate) fn check_view_access(&self, ctx: &Ctx, view: &View) -> Result<()> {
         self.can_read(ctx)?;
         view.validate()?;
         for layer in &view.layers {
@@ -1004,10 +1005,16 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// The caller owns the line and the line's home is this machine (an owner of another machine's line is a
+    /// user of that machine).
+    fn owns_here(&self, ctx: &Ctx, line: &Line) -> bool {
+        ctx.caller.uid == line.owner && line.machine == self.p.store.machine.id
+    }
+
     /// Reading the working content of a line with overlays (status, diff, grep, ls-files, the
     /// index) needs the read right of each of its overlays, unless the caller owns the line.
     pub fn check_view(&self, ctx: &Ctx, line: &Line) -> Result<()> {
-        if ctx.caller.is_root() || ctx.caller.uid == line.owner || self.p.is_overlay() {
+        if ctx.caller.is_root() || self.owns_here(ctx, line) || self.p.is_overlay() {
             return Ok(());
         }
         for l in self.layers(line)? {
@@ -1036,7 +1043,7 @@ impl<'a> Repo<'a> {
 
     pub fn filtered_view(&self, ctx: &Ctx, line: &Line) -> Result<Option<Temp>> {
         self.check_view(ctx, line)?;
-        if ctx.caller.is_root() || ctx.caller.uid == line.owner || self.p.is_overlay() {
+        if ctx.caller.is_root() || self.owns_here(ctx, line) || self.p.is_overlay() {
             return Ok(None);
         }
         let layers = self.caller_layers(ctx, line)?;
@@ -1299,7 +1306,12 @@ impl<'a> Repo<'a> {
         let mut rec = Record::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
-            LineChange { before: Some(self.line_state(&l, &l.head)), after: Some(after), working_before: None, working_after: None },
+            LineChange {
+                before: Some(self.line_state(&l, &l.head)),
+                after: Some(after),
+                working_before: None,
+                working_after: None,
+            },
         );
         rec.data = serde_json::json!({"from": l.name, "to": name});
         self.p.append(rec, &ctx.actor())?;
@@ -1338,7 +1350,14 @@ impl<'a> Repo<'a> {
 
     /// The states of overlay `name` (project `orepo`) beyond its history limit `keep_n` that no
     /// line uses. It only reads.
-    fn history_excess(&self, orepo: &Repo, name: &str, keep_n: usize, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<Vec<String>> {
+    fn history_excess(
+        &self,
+        orepo: &Repo,
+        name: &str,
+        keep_n: usize,
+        lines: &[Line],
+        stacks: &BTreeMap<String, Vec<Layer>>,
+    ) -> Result<Vec<String>> {
         let Some(keep) = self.history_kept(orepo, name, keep_n, lines, stacks)? else {
             return Ok(Vec::new());
         };
@@ -1462,7 +1481,13 @@ impl<'a> Repo<'a> {
         }
     }
 
-    fn commit_overlay_clean(&self, ctx: &Ctx, c: OverlayClean, lines: &[Line], stacks: &BTreeMap<String, Vec<Layer>>) -> Result<()> {
+    fn commit_overlay_clean(
+        &self,
+        ctx: &Ctx,
+        c: OverlayClean,
+        lines: &[Line],
+        stacks: &BTreeMap<String, Vec<Layer>>,
+    ) -> Result<()> {
         let orepo = self.overlay_repo(&c.name)?;
         let _lock = orepo.p.lock()?;
         let c = if orepo.p.db.records_mark()? == c.mark {
@@ -1550,6 +1575,8 @@ pub fn next_state(
         cache_shared: false,
         cache_platform: None,
         cache_of: None,
+        tree: None,
+        times: None,
         cache_key_parts: Default::default(),
     })
 }
@@ -1841,8 +1868,10 @@ mod tests {
 
     #[test]
     fn union_takes_each_unit_whole_from_theirs() {
-        let ours: BTreeSet<String> =
-            ["t/d/deps/libx-1.rlib", "t/d/deps/libx-1.rmeta", "t/d/deps/liby-2.rlib", "t/a.txt"].iter().map(|s| s.to_string()).collect();
+        let ours: BTreeSet<String> = ["t/d/deps/libx-1.rlib", "t/d/deps/libx-1.rmeta", "t/d/deps/liby-2.rlib", "t/a.txt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let theirs = vec!["t/d/deps/libx-1.rmeta".to_string(), "t/b.txt".to_string()];
         let unit = |p: &str| p.split("deps/lib").nth(1).and_then(|r| r.split('.').next()).map(str::to_string);
         let ops = union_ops_by_unit(&ours, theirs, &unit);
@@ -1880,7 +1909,13 @@ mod tests {
         assert_eq!(parse_gc("lru"), None);
         assert_eq!(MergeKind::parse("union-theirs"), Some(MergeKind::UnionTheirs));
         assert_eq!(MergeKind::parse("ours"), None);
-        let p = Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: Some(20 << 30), prune: Some("pnpm".into()) };
+        let p = Props {
+            history: Some(1),
+            quiet: true,
+            merge: MergeKind::UnionTheirs,
+            gc_lru: Some(20 << 30),
+            prune: Some("pnpm".into()),
+        };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
         assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G", "prune=pnpm"]);

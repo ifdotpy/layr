@@ -58,6 +58,7 @@ try:
  assert stage().stat().st_ino==ino and not pending_left();assert not run(work,'status','--porcelain').stdout
  run(work,'fsck');print('PASS empty commit keeps the original index',flush=True)
 finally:
+ subprocess.run(['/bin/chmod', '-R', '-N', str(root)], capture_output=True)
  subprocess.run(['chflags','-R','nouchg',str(root)],check=False)
  # Layr's background trash emptier may remove entries while this walks them.
  def gone(f,p,e):

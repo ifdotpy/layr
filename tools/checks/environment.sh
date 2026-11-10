@@ -28,7 +28,21 @@ if [ "$(uname -s)" = Linux ]; then
     export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$cpus}
 fi
 if [ "$(uname -s)" = Darwin ]; then
-    toolchain=$(cat "$seed/toolchain")
+    prepared_toolchain=$(cat "$seed/toolchain")
+    toolchain=$prepared_toolchain
+    # A state that pins Rust gets that version; a state without rust-toolchain.toml gets the prepared one.
+    if [ -e rust-toolchain.toml ]; then
+        channel=$(sed -n 's/^channel = "\([0-9][0-9.]*\)"$/\1/p' rust-toolchain.toml)
+        test -n "$channel" && test "$(printf '%s\n' "$channel" | wc -l | tr -d ' ')" = 1 || {
+            echo 'The state must pin one stable Rust version' >&2
+            exit 1
+        }
+        toolchain="$channel-${prepared_toolchain#*-}"
+        test -x "$RUSTUP_HOME/toolchains/$toolchain/bin/rustc" || {
+            echo "Prepare Rust $toolchain in $seed" >&2
+            exit 1
+        }
+    fi
     export PATH="$RUSTUP_HOME/toolchains/$toolchain/bin:$PATH"
     # Bypass xcrun's per-user cache writes outside the sandbox's private HOME.
     export CC="$(cat "$seed/clang")" SDKROOT="$(cat "$seed/sdk")"

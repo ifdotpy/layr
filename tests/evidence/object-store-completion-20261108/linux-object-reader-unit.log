@@ -1,0 +1,9 @@
+
+running 4 tests
+test object_tree::tests::corrupt_blob_fails_without_publishing_a_partial_entry ... ok
+test object_tree::tests::direct_read_and_pruned_walk_need_no_native_tree ... ok
+test object_tree::tests::decoded_entries_keep_metadata_and_cross_directory_links ... ok
+test object_tree::tests::writing_an_object_source_keeps_tree_times_and_link_groups ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 392 filtered out; finished in 0.01s
+

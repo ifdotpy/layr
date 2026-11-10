@@ -33,11 +33,19 @@ pub(super) fn seen_file(dir: &Path) -> PathBuf {
 /// all here, was read and checked before: it is not read again, so an idle fetch reads no segment. A segment with
 /// another time (a replaced object) or with records that are not here is read and checked, and the file is written
 /// again after a fetch that checked every segment.
-pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &str, local: &[String], seen: Option<&Path>) -> Result<Records> {
+pub(super) fn records_with_local(
+    backend: &Backend,
+    identity: &str,
+    project: &str,
+    local: &[String],
+    seen: Option<&Path>,
+) -> Result<Records> {
     let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
     let mut overlaps = 0;
-    let known: std::collections::BTreeSet<String> =
-        seen.and_then(|path| std::fs::read_to_string(path).ok()).map(|text| text.lines().map(str::to_owned).collect()).unwrap_or_default();
+    let known: std::collections::BTreeSet<String> = seen
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
     let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
@@ -66,7 +74,10 @@ pub(super) fn records_with_local(backend: &Backend, identity: &str, project: &st
                 .iter()
                 .map(|(key, ..)| scope.spawn(move || backend.get(key)?.context("record segment disappeared")))
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked")))).collect::<Vec<_>>()
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked"))))
+                .collect::<Vec<_>>()
         }));
     }
     for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
@@ -325,8 +336,13 @@ impl<'a> Reader<'a> {
         if !tree.chunks.is_empty() {
             // The chunks of the files that the loop below writes, in its order, so their packs
             // load ahead in the background.
-            let ids: Vec<&String> =
-                tree.files.iter().filter(|(path, entry)| !unchanged(path, entry)).filter_map(|(path, _)| tree.chunks.get(path)).flatten().collect();
+            let ids: Vec<&String> = tree
+                .files
+                .iter()
+                .filter(|(path, entry)| !unchanged(path, entry))
+                .filter_map(|(path, _)| tree.chunks.get(path))
+                .flatten()
+                .collect();
             let (backend, identity) = (self.backend, self.identity);
             let chunks = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity));
             // A chunk that no pack holds fails the restore before any file is read: the indexes are small, the files
@@ -362,6 +378,64 @@ impl<'a> Reader<'a> {
         }
         Ok(written)
     }
+}
+
+/// The machines that a project's own signed history trusts: the creator (the signer of the `project` record), then
+/// each machine that a member trusts with a `machine.trust` record naming the key it really has. A machine that a
+/// server serves but nobody in this chain vouched for is not in it.
+pub(super) fn project_trust_chain(lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeSet<String>> {
+    let records: Vec<Record> = lines.iter().map(|line| Ok(oplog::parse_line(line, None)?.record)).collect::<Result<_>>()?;
+    let mut chain: BTreeSet<String> = records.iter().filter(|r| r.op == "project").map(|r| r.machine.clone()).take(1).collect();
+    loop {
+        let vouched: Vec<String> = records
+            .iter()
+            .filter(|r| r.op == "machine.trust" && chain.contains(&r.machine))
+            .filter_map(|r| {
+                let (machine, key) = (r.data["machine"].as_str()?, r.data["public_key"].as_str()?);
+                keys.get(machine).is_some_and(|k| hex::encode(k.to_bytes()) == key).then(|| machine.to_string())
+            })
+            .filter(|machine| !chain.contains(machine))
+            .collect();
+        if vouched.is_empty() {
+            return Ok(chain);
+        }
+        chain.extend(vouched);
+    }
+}
+
+/// The writer keys that a Layr Cloud remote served before (`writer-keys.json` of the remote folder): a server
+/// cannot give a machine another key later.
+pub(super) fn pin_writer_keys(dir: &Path, keys: &BTreeMap<String, VerifyingKey>) -> Result<()> {
+    let path = dir.join("writer-keys.json");
+    let mut pinned: BTreeMap<String, String> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("invalid writer-keys.json")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let before = pinned.len();
+    for (machine, key) in keys {
+        let key = hex::encode(key.to_bytes());
+        match pinned.get(machine) {
+            Some(old) if old != &key => {
+                bail!("Layr Cloud serves machine {machine} with another key than before; nothing is taken")
+            }
+            Some(_) => {}
+            None => {
+                pinned.insert(machine.clone(), key);
+            }
+        }
+    }
+    if pinned.len() != before {
+        std::fs::create_dir_all(dir)?;
+        crate::fsutil::atomic_write(&path, &serde_json::to_vec(&pinned)?, 0o600)?;
+    }
+    Ok(())
+}
+
+/// The states of the project for a read from the Layr Cloud API, which has no state listing: every state that
+/// the records name. `fetch` asks the server which of them it holds, in one batch.
+fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
+    Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, String::new())).collect())
 }
 
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
@@ -408,35 +482,44 @@ pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<Stri
     Ok(omitted)
 }
 
-pub(super) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
-    let mut queue = std::collections::VecDeque::from([id.to_string()]);
+fn walk_ancestry(
+    tips: impl IntoIterator<Item = String>,
+    mut parents: impl FnMut(&str) -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
+    let mut queue: std::collections::VecDeque<String> = tips.into_iter().collect();
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
     while let Some(id) = queue.pop_front() {
         if !seen.insert(id.clone()) {
             continue;
         }
-        if let Some(state) = repo.p.db.state(&id)? {
-            queue.extend(state.parents);
-            queue.extend(state.derived_from);
-        }
+        queue.extend(parents(&id)?);
         order.push(id);
     }
     Ok(order)
 }
 
+fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
+    walk_ancestry(tips, |id| {
+        Ok(repo.p.db.state(id)?.map(|state| state.parents.into_iter().chain(state.derived_from).collect()).unwrap_or_default())
+    })
+}
+
+pub(super) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
+    state_ancestries(repo, [id.to_string()])
+}
+
 pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
     let mut required = deletion_dependencies(lines)?;
-    for line in repo.p.db.lines()? {
-        required.extend(state_ancestry(repo, &line.head)?);
-    }
+    let mut tips: Vec<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
     for reference in repo.p.db.refs("", crate::ids::now_ms())? {
         let state = repo.state(&reference.target)?;
         if state.kind == crate::model::StateKind::Cache && !opts.caches {
             continue;
         }
-        required.extend(state_ancestry(repo, &reference.target)?);
+        tips.push(reference.target);
     }
+    required.extend(state_ancestries(repo, tips)?);
     Ok(required)
 }
 
@@ -478,30 +561,8 @@ fn restore_one(
     }
     let result = (|| -> Result<usize> {
         let n = reader.restore_over(&tree, base.as_ref(), &stage)?;
-        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
-        let destination = repo.p.state_path(&id);
-        if destination.exists() {
-            repo.p.db.set_present(&id, true)?;
-            return Ok(0);
-        }
-        // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
-        crate::fsutil::rename_tree(&stage, &destination)?;
-        let publish = (|| -> Result<()> {
-            // Every backend gives the restored tree the identity of its signed state (a send names it).
-            let transid = header.btrfs.as_ref().map_or(0, |i| i.transid);
-            // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
-            // fresh one here, since no record names its snapshot.
-            let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
-            crate::storage::mark_received(&destination, &received, transid)?;
-            crate::storage::set_readonly(&destination)?;
-            repo.p.db.set_present(&id, true)?;
-            Ok(())
-        })();
-        if publish.is_err() {
-            let _ = crate::storage::delete_tree(&destination);
-        }
-        publish?;
-        Ok(n)
+        let published = publish_restored(repo, state, &stage, header.btrfs.as_ref().map_or(0, |i| i.transid))?;
+        Ok(if published { n } else { 0 })
     })();
     if stage.exists() {
         let _ = crate::storage::delete_tree(&stage);
@@ -509,9 +570,47 @@ fn restore_one(
     result
 }
 
+/// Make the restored folder `stage` the state `state`: renamed into place and sealed under the project
+/// lock, with the identity of its signed state (`transid` names the btrfs send it came from, else 0). False
+/// when the state was there already (`stage` stays for the caller to delete).
+pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stage: &Path, transid: u64) -> Result<bool> {
+    let id = &state.id;
+    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let destination = repo.p.state_path(id);
+    if destination.exists() {
+        repo.p.db.set_present(id, true)?;
+        return Ok(false);
+    }
+    // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
+    crate::fsutil::rename_tree(stage, &destination)?;
+    let publish = (|| -> Result<()> {
+        // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
+        // fresh one here, since no record names its snapshot.
+        let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
+        crate::storage::mark_received(&destination, &received, transid)?;
+        crate::storage::set_readonly(&destination)?;
+        repo.p.db.set_present(id, true)?;
+        Ok(())
+    })();
+    if publish.is_err() {
+        let _ = crate::storage::delete_tree(&destination);
+    }
+    publish?;
+    Ok(true)
+}
+
 /// Restore the listed states that are not on this machine, from the store's own trees. The
 /// machine keys come from this project's trusted records, so no record segment is read.
 pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Result<usize> {
+    if store.is_api() {
+        let mut states = Vec::new();
+        for id in ids.iter().filter(|id| !repo.p.has_state(id)) {
+            states.push(repo.state(id)?);
+        }
+        let mut report = Report::default();
+        super::cloud_objects::fetch_states(store, repo, states, &mut report)?;
+        return Ok(report.files);
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let mut keys = BTreeMap::new();
@@ -536,7 +635,58 @@ pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Resu
     Ok(files)
 }
 
+/// Source heads for a new working copy, before it has a local line perspective.
+pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model::Line>> {
+    if repo.p.is_overlay() {
+        return repo.p.db.lines();
+    }
+    let lines = repo.p.effective_jsonl()?.lines().map(str::to_owned).collect::<Vec<_>>();
+    let effective = if store.is_api() {
+        // The API has already authorized its records; published refs select the head below.
+        layr_model::merge_authority::Effective { lines, merge_keys: BTreeMap::new() }
+    } else {
+        layr_model::merge_authority::effective_lines(&repo.p.id, &lines, crate::ids::now_ms())?
+    };
+    let records = effective.lines.iter()
+        .map(|line| oplog::parse_line(line, None).map(|signed| signed.record))
+        .collect::<Result<Vec<_>>>()?;
+    let creator = layr_model::project_perspective(&repo.p.id, &records)?;
+    let mut model = layr_model::Project::from_records(&repo.p.id, records.clone(), &creator)?;
+    let Some(api) = store.backend.api() else {
+        if model.config.contains_key("queue.merge-machine") {
+            // Merge keys authorize canonical-main selection only, never manifests or epochs.
+            let mut trusted = layr_store::public::trusted_writers_checked(&repo.p.id, &effective.lines)?;
+            trusted.extend(effective.merge_keys);
+            layr_model::main_head::select(&mut model, &records, &trusted)?;
+        }
+        return Ok(model.line_list());
+    };
+    let lines = model.line_list();
+    // V1 refs are the server's published positions, including a merge-job result.
+    // The record snapshot must contain each target before a working copy can use it.
+    let mut known: BTreeMap<_, _> = lines.into_iter().map(|line| (line.id.clone(), line)).collect();
+    let mut selected = Vec::new();
+    for reference in api.refs(&store.api_scope(), "lines/")? {
+        let Some(target) = reference.target else { continue };
+        let id = reference.name.strip_prefix("lines/").context("invalid line ref")?;
+        let mut line = known.remove(id).with_context(|| format!("remote line {id} has no fetched metadata; fetch again"))?;
+        let state = repo.p.db.state(&target)?.with_context(|| format!("remote line {id} target has no fetched record; fetch again"))?;
+        anyhow::ensure!(!state.kind.auxiliary(), "remote line {id} targets an auxiliary state");
+        line.head = target;
+        selected.push(line);
+    }
+    Ok(selected)
+}
+
 pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
+    fetch_inner(store, ctx, repo, opts, None)
+}
+
+pub(super) fn fetch_cache(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: &Repo) -> Result<Report> {
+    fetch_inner(store, ctx, repo, opts, Some(parent))
+}
+
+fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: Option<&Repo>) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
@@ -553,8 +703,20 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let count;
     {
         let _lock = repo.p.lock()?;
-        count =
-            repo.p.import_lines(&records.lines, if bootstrap { crate::store::Trust::All } else { crate::store::Trust::Known })?;
+        // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
+        // the key that the writer registered; local machine trust is not asked and does not grow
+        // (docs/cloud-rfc.md 7.0). Each writer key is pinned per remote on first sight.
+        if store.is_api() {
+            pin_writer_keys(&store.dir, &records.keys)?;
+        }
+        let trust = if store.is_api() {
+            crate::store::Trust::Server
+        } else if bootstrap {
+            crate::store::Trust::All
+        } else {
+            crate::store::Trust::Known
+        };
+        count = repo.p.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -563,7 +725,23 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     if repo.p.id != descriptor.project {
         bail!("the records do not belong to store.json's project");
     }
+    // Cache selection needs the imported overlay records, including on the first fetch.
+    let mut selected = opts.clone();
+    if let Some(parent) = parent {
+        if let Some(state) = opts.caches_of_state.as_deref() {
+            selected.only_caches = Some(super::overlays::caches_of_state(parent, repo, state)?);
+        } else if !opts.caches_of.is_empty() {
+            selected.only_caches = Some(super::overlays::caches_of_lines(parent, repo, &opts.caches_of)?);
+        }
+    }
+    let opts = &selected;
+    let pending = store.dir.join("pending-lines.json");
+    let pending_clone = if pending.exists() {
+        !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty()
+    } else { false };
+    let clone_lines = if bootstrap || pending_clone { Some(clone_lines(store, repo)?) } else { None };
     let mut report = Report {
+        clone_lines,
         records: count,
         overlaps: records.overlaps,
         gaps: records.gaps.clone(),
@@ -571,17 +749,33 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         ..Default::default()
     };
     report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
-    let required = required_states(repo, &records.lines, opts)?;
+    let mut required = required_states(repo, &records.lines, opts)?;
+    if let Some(lines) = &report.clone_lines {
+        required.extend(state_ancestries(repo, lines.iter().map(|line| line.head.clone()))?);
+    }
     // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
-    let heads: Option<BTreeSet<String>> = opts.heads.then(|| -> Result<BTreeSet<String>> {
-        let mut keep: BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|l| l.head).collect();
-        keep.extend(deletion_dependencies(&records.lines)?);
-        Ok(keep)
-    }).transpose()?;
+    let heads: Option<BTreeSet<String>> = opts
+        .heads
+        .then(|| -> Result<BTreeSet<String>> {
+            let lines = match &report.clone_lines {
+                Some(lines) => lines.clone(),
+                None => repo.p.db.lines()?,
+            };
+            if let Some(name) = opts.only_line.as_ref().filter(|_| !repo.p.is_overlay()) {
+                let line = lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+                return Ok(BTreeSet::from([line.head.clone()]));
+            }
+            let mut keep: BTreeSet<String> = lines.into_iter().map(|l| l.head).collect();
+            keep.extend(deletion_dependencies(&records.lines)?);
+            Ok(keep)
+        })
+        .transpose()?;
     let mut left = Vec::new();
-    let states = attempts(&store.backend)?;
+    let api = store.backend.api();
+    let states = if api.is_some() { api_states(repo)? } else { attempts(&store.backend)? };
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
+    let mut asked = Vec::new();
     for id in states.keys() {
         // A tree whose record this fetch did not read: a push published both after this fetch read the records
         // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
@@ -614,10 +808,7 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         // `--caches-of`: only the caches that a new line from those lines takes.
         // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
         // a cache that no line takes here: nothing else needs its files.
-        if repo.p.is_overlay()
-            && state.cache_of.is_some()
-            && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id))
-        {
+        if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
             report.omitted.push(format!("cache state {}: not for --caches-of", crate::ids::short(id)));
             continue;
         }
@@ -632,9 +823,26 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         }
         if repo.p.has_state(id) {
             repo.p.db.set_present(id, true)?;
+        } else if api.is_some() {
+            // One `POST /states/missing` after the loop tells which of these the server holds.
+            asked.push(state);
         } else {
             missing.push(state);
         }
+    }
+    if let Some(api) = api {
+        // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
+        let scope = store.api_scope();
+        api.learn_states(&scope, &asked.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
+        for state in asked {
+            if api.state_held(&scope, &state.id)? {
+                missing.push(state);
+            } else if heads.is_none() {
+                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
+            }
+        }
+        // The states come as trees, times tables and packs (docs/objects.md) through the local object store.
+        super::cloud_objects::fetch_states(store, repo, std::mem::take(&mut missing), &mut report)?;
     }
     if !left.is_empty() {
         // A read of such a state restores it from this remote (`restore_state`).
@@ -663,7 +871,10 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
                 None => packs_now.insert(super::chunked::packs_fingerprint(&store.backend)?).clone(),
             };
             if failed.get(&id) == Some(&now) {
-                report.omitted.push(format!("cache state {}: not restored (it failed before, and the remote did not change)", crate::ids::short(&id)));
+                report.omitted.push(format!(
+                    "cache state {}: not restored (it failed before, and the remote did not change)",
+                    crate::ids::short(&id)
+                ));
                 continue;
             }
         }
@@ -693,9 +904,14 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
         let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
         crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
     }
-    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does.
+    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does. A Layr Cloud clone
+    // trusts only the project's own trust chain (`project_trust_chain`): the server access list is not local trust.
     if bootstrap {
+        let chain = if store.is_api() { Some(project_trust_chain(&records.lines, &records.keys)?) } else { None };
         for (machine, key) in &records.keys {
+            if chain.as_ref().is_some_and(|chain| !chain.contains(machine)) {
+                continue;
+            }
             if repo.p.db.trusted(machine)?.is_none() {
                 let mut record = Record::new("machine.trust");
                 record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
@@ -728,6 +944,9 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
 }
 
 pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
+    if store.is_api() {
+        bail!("Layr Cloud checks each object against its id on upload; verify is for store folders and buckets");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     let records = records(&store.backend, &identity, &descriptor.project)?;
@@ -773,6 +992,9 @@ pub(super) fn log(store: &Store) -> Result<Vec<String>> {
 }
 
 pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
+    if store.is_api() {
+        bail!("Layr Cloud collects garbage on the server; a client does not sweep");
+    }
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, None)?;
     store.require_private_access()?;
@@ -845,6 +1067,51 @@ mod tests {
     const MACHINE: &str = "01a12290-0000-7000-8000-000000000001";
     const PROJECT: &str = "01a12290-0000-7000-8000-000000000002";
     const STATE: &str = "01a12290-0000-7000-8000-000000000003";
+
+    #[test]
+    fn shared_ancestry_is_read_once_and_includes_every_parent() {
+        let mut calls = BTreeMap::<String, usize>::new();
+        let mut tips = vec!["missing".to_string()];
+        tips.extend((0..400).map(|n| format!("branch-{n}")));
+        tips.push("branch-0".into());
+        let parents = |id: &str| {
+            if id.starts_with("branch-") {
+                vec!["shared-999".into(), "derived".into()]
+            } else if let Some(number) = id.strip_prefix("shared-").and_then(|n| n.parse::<u32>().ok()) {
+                if number == 0 {
+                    vec![]
+                } else {
+                    vec![format!("shared-{}", number - 1)]
+                }
+            } else {
+                vec![]
+            }
+        };
+        let mut previous = BTreeSet::new();
+        let mut previous_reads = 0;
+        for tip in &tips {
+            previous.extend(
+                walk_ancestry([tip.clone()], |id| {
+                    previous_reads += 1;
+                    Ok(parents(id))
+                })
+                .unwrap(),
+            );
+        }
+        let found = walk_ancestry(tips, |id| {
+            *calls.entry(id.to_string()).or_default() += 1;
+            Ok(parents(id))
+        })
+        .unwrap();
+        assert_eq!(found.iter().cloned().collect::<BTreeSet<_>>(), previous);
+        assert_eq!(found.len(), 1402);
+        assert_eq!(calls.len(), 1402);
+        assert!(calls.values().all(|&count| count == 1));
+        assert!(previous_reads > 400_000);
+        eprintln!("ancestry reads: previous {previous_reads}, combined {}", calls.len());
+        assert!(found.contains(&"missing".to_string()));
+        assert!(found.contains(&"derived".to_string()));
+    }
 
     fn fixture() -> (Backend, String, ed25519_dalek::SigningKey, std::path::PathBuf) {
         let root = std::env::temp_dir().join(crate::ids::new_id());
@@ -969,7 +1236,8 @@ mod tests {
             hex::encode(ContentAddress::digest(content)),
             vec![format::Link(STATE.into(), "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
         );
-        let tree = Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
+        let tree =
+            Tree { files: BTreeMap::from([("a.txt".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         let canonical = tree.canonical().unwrap();
         let mut header = Header {
             v: 2,

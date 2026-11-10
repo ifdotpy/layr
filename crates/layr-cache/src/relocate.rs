@@ -171,6 +171,77 @@ fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: 
     Ok(())
 }
 
+/// Files that cargo or clippy name by an absolute path in every unit of a workspace (the workspace manifest, the
+/// clippy config). A project cannot change that, and `relocate` moves such a unit when the file has the same bytes.
+const TOOL_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "clippy.toml", ".clippy.toml"];
+
+/// The sources below `root` that a unit of the cargo `target` folder names by an absolute path, as (unit, path
+/// relative to `root`). Cargo names a source of the unit's own package relative to the package, and a source in the
+/// target folder relative to that folder; any other source by its absolute path. So a unit that includes a file of
+/// another folder of the workspace (`include_str!("../../other/x.json")`) names this place: a copy of the workspace
+/// at another path builds it again, and a new line keeps it warm only when the file there has the same bytes.
+/// Paths in `target` and the files of `TOOL_FILES` are left out. Each (unit, path) once.
+pub fn outside_sources(target: &Path, root: &Path) -> Vec<(String, String)> {
+    // Cargo writes the path that it was given: the root as named, or its canonical form (`/tmp` is `/private/tmp`).
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for root in if canonical == root { vec![root.to_path_buf()] } else { vec![root.to_path_buf(), canonical] } {
+        for item in sources_below(target, &root) {
+            if !out.contains(&item) {
+                out.push(item);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `outside_sources` for one spelling of the root.
+fn sources_below(target: &Path, root: &Path) -> Vec<(String, String)> {
+    let root_bytes = root.as_os_str().as_encoded_bytes();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for profile in profiles(target).unwrap_or_default() {
+        for unit in fs::read_dir(profile.join(".fingerprint")).into_iter().flatten().flatten() {
+            let Some(name) = unit.file_name().to_str().map(String::from) else { continue };
+            for file in fs::read_dir(unit.path()).into_iter().flatten().flatten() {
+                if !file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(file.path()) else { continue };
+                for path in encoded_paths(&bytes, root_bytes) {
+                    // rustc names an include as written: `<package>/src/../../other/x.json`.
+                    let rel = lexical(Path::new(&path)).strip_prefix(root).map(Path::to_path_buf).unwrap_or_default();
+                    let tool = rel.file_name().and_then(|n| n.to_str()).is_some_and(|n| TOOL_FILES.contains(&n));
+                    if rel.as_os_str().is_empty() || rel.starts_with("target") || tool {
+                        continue;
+                    }
+                    let item = (name.clone(), rel.display().to_string());
+                    if !out.contains(&item) {
+                        out.push(item);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `path` without `.` parts, and with each `..` part taken back with the part before it. Reads no file.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The binary dep-info files of the unit `stem` (`<name>-<hash>`): `.fingerprint/<package>-<hash>/dep-*`.
 fn unit_dep_files(profile: &Path, stem: &str) -> Result<Vec<PathBuf>> {
     let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(Vec::new()) };
@@ -288,6 +359,17 @@ fn remove_fingerprint(profile: &Path, stem: &str) -> Result<usize> {
 }
 
 #[cfg(test)]
+mod lexical_tests {
+    #[test]
+    fn parent_parts_take_back_the_part_before() {
+        assert_eq!(
+            super::lexical(std::path::Path::new("/w/crates/a/src/../../b/./x.json")),
+            std::path::PathBuf::from("/w/crates/b/x.json")
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -321,7 +403,8 @@ mod tests {
         assert_eq!(foreign_registry(&target), Some(PathBuf::from("/nowhere/u/.cargo/registry/src")));
         let here = root.join("home/registry/src");
         fs::create_dir_all(&here).unwrap();
-        fs::write(target.join("debug/deps/serde-eee.d"), format!("{old}/serde-eee.d: {}/idx/serde/lib.rs\n", here.display())).unwrap();
+        fs::write(target.join("debug/deps/serde-eee.d"), format!("{old}/serde-eee.d: {}/idx/serde/lib.rs\n", here.display()))
+            .unwrap();
         assert_eq!(foreign_registry(&target), None, "this machine has that registry");
         fs::remove_dir_all(&root).unwrap();
     }
@@ -337,8 +420,18 @@ mod tests {
             "my-x",
             &format!("{old}/it-aaa.d: tests/it.rs\n\n{old}/it-aaa: tests/it.rs\n\ntests/it.rs:\n\n# env-dep:CARGO_BIN_EXE_x=/lines/old/target/debug/x\n"),
         );
-        unit(&target, "dir-bbb", "my-y", &format!("{old}/dir-bbb.d: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=/lines/old/y\n"));
-        unit(&target, "shared-ccc", "shared", &format!("{old}/shared-ccc.d: /lines/old/shared/src/lib.rs\n\n/lines/old/shared/src/lib.rs:\n"));
+        unit(
+            &target,
+            "dir-bbb",
+            "my-y",
+            &format!("{old}/dir-bbb.d: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=/lines/old/y\n"),
+        );
+        unit(
+            &target,
+            "shared-ccc",
+            "shared",
+            &format!("{old}/shared-ccc.d: /lines/old/shared/src/lib.rs\n\n/lines/old/shared/src/lib.rs:\n"),
+        );
         // OUT_DIR content was copied with the folder; a registry crate names no line path.
         unit(
             &target,
@@ -351,7 +444,12 @@ mod tests {
         assert!(!fresh(&target, "my-x", "aaa") && !fresh(&target, "my-y", "bbb") && !fresh(&target, "shared", "ccc"));
         assert!(fresh(&target, "gen", "ddd") && fresh(&target, "serde", "eee"));
         // At the place where it was built nothing is stale.
-        unit(&target, "it-fff", "my-x", &format!("{old}/it-fff.d: tests/it.rs\n\n# env-dep:CARGO_BIN_EXE_x=/lines/old/target/debug/x\n"));
+        unit(
+            &target,
+            "it-fff",
+            "my-x",
+            &format!("{old}/it-fff.d: tests/it.rs\n\n# env-dep:CARGO_BIN_EXE_x=/lines/old/target/debug/x\n"),
+        );
         assert_eq!(relocate(&target, Path::new("/lines/old/target")).unwrap(), 0);
         assert!(fresh(&target, "my-x", "fff"));
         fs::remove_dir_all(&root).unwrap();

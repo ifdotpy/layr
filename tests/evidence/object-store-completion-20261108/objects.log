@@ -1,0 +1,35 @@
+PASS import prints a tree id
+PASS a second import gives the same tree
+PASS a second import adds no object
+PASS the blob id is SHA-256 of the typed content
+PASS verify passes on the imported state
+PASS verify leaves no copy in the work folder
+PASS checkout of the tree
+PASS file content
+PASS large file content
+PASS symbolic link
+PASS dangling symbolic link
+PASS the executable mode
+PASS the empty folder
+PASS ignored files stay out (not in the state)
+PASS checkout refuses a folder with files
+PASS checkout by revision
+PASS checkout restores the modification time
+PASS and the time of a folder
+PASS checkout of an unknown tree
+PASS a cold import names the parent tree
+PASS an incremental import reads fewer files than a full one
+PASS a full import gives the same tree
+PASS and the same times
+PASS the changed file is a delta
+PASS verify of the cold state
+PASS stat names delta blobs
+PASS repack writes a pack
+PASS no loose object is left
+PASS verify of the packed state
+PASS verify of the first state from packs
+PASS gc repacks the object store
+PASS gc left no loose object
+PASS verify of a corrupted store fails
+PASS and names the file
+t200-objects.sh: 34 passed, 0 failed

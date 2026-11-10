@@ -1,0 +1,148 @@
+{
+  "line": "/private/tmp/layr-virtual-git-tqwsycpg/store/projects/bench-1000/lines/after",
+  "rounds": 9,
+  "samples": [
+    {
+      "trial": 0,
+      "binary": "before",
+      "status_ms": 1825.243583,
+      "diff_ms": 1763.959958,
+      "save_ms": 1751.008792
+    },
+    {
+      "trial": 0,
+      "binary": "after",
+      "status_ms": 1579.504166,
+      "diff_ms": 1556.428042,
+      "save_ms": 1700.192875
+    },
+    {
+      "trial": 1,
+      "binary": "after",
+      "status_ms": 1559.937875,
+      "diff_ms": 1619.734667,
+      "save_ms": 1831.47025
+    },
+    {
+      "trial": 1,
+      "binary": "before",
+      "status_ms": 1540.3875,
+      "diff_ms": 1566.605625,
+      "save_ms": 1684.220375
+    },
+    {
+      "trial": 2,
+      "binary": "before",
+      "status_ms": 1718.637125,
+      "diff_ms": 1642.333958,
+      "save_ms": 1782.64425
+    },
+    {
+      "trial": 2,
+      "binary": "after",
+      "status_ms": 1795.581375,
+      "diff_ms": 1782.479541,
+      "save_ms": 1903.876792
+    },
+    {
+      "trial": 3,
+      "binary": "after",
+      "status_ms": 1468.477708,
+      "diff_ms": 2253.786,
+      "save_ms": 1948.133083
+    },
+    {
+      "trial": 3,
+      "binary": "before",
+      "status_ms": 2052.701459,
+      "diff_ms": 2747.275666,
+      "save_ms": 3543.9645
+    },
+    {
+      "trial": 4,
+      "binary": "before",
+      "status_ms": 6172.404583,
+      "diff_ms": 2770.356041,
+      "save_ms": 2298.517834
+    },
+    {
+      "trial": 4,
+      "binary": "after",
+      "status_ms": 2134.224083,
+      "diff_ms": 3896.584291,
+      "save_ms": 3056.866875
+    },
+    {
+      "trial": 5,
+      "binary": "after",
+      "status_ms": 2562.84825,
+      "diff_ms": 3534.200167,
+      "save_ms": 2534.636667
+    },
+    {
+      "trial": 5,
+      "binary": "before",
+      "status_ms": 1637.698458,
+      "diff_ms": 1339.132792,
+      "save_ms": 1607.337125
+    },
+    {
+      "trial": 6,
+      "binary": "before",
+      "status_ms": 1688.204416,
+      "diff_ms": 1831.868584,
+      "save_ms": 2070.873625
+    },
+    {
+      "trial": 6,
+      "binary": "after",
+      "status_ms": 1749.388292,
+      "diff_ms": 1658.301292,
+      "save_ms": 1952.5155
+    },
+    {
+      "trial": 7,
+      "binary": "after",
+      "status_ms": 1758.463209,
+      "diff_ms": 1879.869459,
+      "save_ms": 1861.741875
+    },
+    {
+      "trial": 7,
+      "binary": "before",
+      "status_ms": 1305.90925,
+      "diff_ms": 1068.931875,
+      "save_ms": 1165.502542
+    },
+    {
+      "trial": 8,
+      "binary": "before",
+      "status_ms": 1167.807375,
+      "diff_ms": 1047.230417,
+      "save_ms": 1163.63975
+    },
+    {
+      "trial": 8,
+      "binary": "after",
+      "status_ms": 1053.771084,
+      "diff_ms": 1085.492125,
+      "save_ms": 1515.857167
+    }
+  ],
+  "binaries": {
+    "before": "f484773a0242794153f2e31313614f17252fc5e5b57257524aa6f292a0da9eac",
+    "after": "47f768403da5d86840000f29df4bd59645428f29f33464de26c102b83418df71"
+  },
+  "medians": {
+    "before": {
+      "status": 1688.204416,
+      "diff": 1642.333958,
+      "save": 1751.008792
+    },
+    "after": {
+      "status": 1749.388292,
+      "diff": 1782.479541,
+      "save": 1903.876792
+    }
+  }
+}

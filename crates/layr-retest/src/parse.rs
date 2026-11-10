@@ -223,7 +223,10 @@ mod tests {
         assert_eq!((h[0].old_start, h[0].old_len, h[0].new_len, h[0].added.len()), (3, 0, 2, 2));
         assert_eq!((h[1].old_start, h[1].old_len, h[1].added.clone()), (10, 1, vec!["new".to_string()]));
         assert_eq!((h[2].old_start, h[2].old_len), (20, 2));
-        assert_eq!((h[1].removed.clone(), h[2].removed.clone()), (vec!["old".to_string()], vec!["x".to_string(), "y".to_string()]));
+        assert_eq!(
+            (h[1].removed.clone(), h[2].removed.clone()),
+            (vec!["old".to_string()], vec!["x".to_string(), "y".to_string()])
+        );
     }
 
     #[test]

@@ -1,0 +1,40 @@
+/var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/main
+1/1 state 0b33222 hot: 3 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (3 files, 25 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 575 B (575 bytes)
+old snapshots: deleted 1 snapshot(s), 12.0 KiB freed; their states remain in the object store
+virtual lines are experimental: set LAYR_EXPERIMENTAL_VIEWS=1 (docs/views.md)
+Created virtual line virtual at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/virtual from 0b33222
+ready
+[virtual ab2b7b4] Save all view changes
+ 4 files changed, 3 insertions(+), 2 deletions(-)
+ create mode 100755 added/new
+ create mode 100644 fresh
+ delete mode 100644 sub/remove
+fatal: path 'sub/remove' does not exist in 'head'
+Line virtual has no visible folder; its changes stay in /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/meta/vlines/01a1bbdd-da7a-75ee-82a7-9554b97f5d9d/tree
+Line virtual has no visible folder; its changes stay in /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/meta/vlines/01a1bbdd-da7a-75ee-82a7-9554b97f5d9d/tree
+[virtual 03dc339] Save while hidden
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+Line virtual has a virtual view at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/virtual
+Line virtual has a virtual view at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/virtual
+error: /var/tmp/layr-parity-overlay/tmp/layr-view-parity.dNxBNv/occupied already exists
+Line virtual has a folder view at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/virtual
+[virtual 0b1f16d] Save after conversion
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+Created virtual line hidden at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/hidden from 0b33222
+Line hidden has no visible folder; its changes stay in /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/meta/vlines/01a1bbdd-deaf-731c-b7be-05bc74b4d8be/tree
+Deleted line hidden (was 0b33222).
+Deleted line virtual (was 0b1f16d).
+Created virtual line retry at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/retry from 0b33222
+fatal: injected view move failure after rename
+fatal: line retry has an interrupted view move; retry line show first
+fatal: line retry has an interrupted view move; retry line show first
+Line retry has a virtual view at /var/tmp/layr-parity-overlay/store/projects/parity-1794153240-3691/lines/retry
+fatal: injected view move failure after rename
+Line retry has a folder view at /var/tmp/layr-parity-overlay/tmp/layr-view-parity.dNxBNv/moved
+Deleted line retry (was 0b33222).
+PASS: Linux view lifecycle, saves, metadata, ignored paths, and hidden deletion
+Evidence: /var/tmp/layr-parity-overlay/tmp/layr-view-parity.dNxBNv
+Project: parity-1794153240-3691

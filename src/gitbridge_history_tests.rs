@@ -35,9 +35,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let tmp = Command::new("mktemp").args(["-d", "-t", "layr-history.XXXXXXXX"]).output()?;
-        anyhow::ensure!(tmp.status.success(), "mktemp failed");
-        let root = PathBuf::from(std::str::from_utf8(&tmp.stdout)?.trim());
+        let root = std::env::temp_dir().join(format!("layr-history-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
         let store = Store::open(&root.join("store"))?;
         let dir = store.root.join("projects/history");
         std::fs::create_dir_all(dir.join("meta/db"))?;

@@ -113,7 +113,7 @@ fn command_list(cfg: &Value, key: &str) -> Result<Vec<Vec<String>>> {
 
 /// The environment variables that change cargo's unit hashes or the code that rustc and build scripts make
 /// (docs/cache-overlays.md, section 6).
-const KEY_ENV: &[&str] = &[
+pub const KEY_ENV: &[&str] = &[
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
     "RUSTDOCFLAGS",
@@ -188,26 +188,60 @@ pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
 /// for the version and the target information (they pass through), and a compile emits outputs (`--emit`), which it
 /// refuses. Cargo prints `Dirty` before it compiles a unit, but a unit before the stale one can still compile before
 /// the listing stops; the wrapper stops that too. The wrapper is not part of a unit's hash (a fresh unit stays fresh).
-fn no_compile_wrapper() -> Result<std::path::PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    const SCRIPT: &str = "#!/bin/sh\ncase \" $* \" in *\" --emit\"*) exit 1 ;; esac\nexec \"$@\"\n";
-    let path = std::env::temp_dir().join(format!("layr-nocompile-{}.sh", rustix::process::getuid().as_raw()));
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&tmp, SCRIPT).with_context(|| format!("cannot write {}", tmp.display()))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::rename(&tmp, &path)?;
+struct CompileGuard {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for CompileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.dir);
     }
-    Ok(path)
+}
+
+fn no_compile_wrapper() -> Result<CompileGuard> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    const SCRIPT: &str =
+        "#!/bin/sh\ncase \" $* \" in *\" --emit\"*) echo LAYR_PRUNE_COMPILE_REFUSED >&2; exit 1 ;; esac\nexec \"$@\"\n";
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("layr-nocompile-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => break dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).context("cannot create private Cargo wrapper folder"),
+        }
+    };
+    let guard = CompileGuard { path: dir.join("rustc-wrapper"), dir };
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(&guard.path)?;
+    file.write_all(SCRIPT.as_bytes())?;
+    Ok(guard)
 }
 
 /// The cargo arguments of a listing: `-v` names each unit that is not fresh before cargo compiles or runs
 /// it, and `--message-format json` names the units. Both go before a `--` that ends the cargo arguments.
-fn listing(args: &[String]) -> Vec<String> {
+fn listing(args: &[String]) -> Result<Vec<String>> {
     let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let mut out = args.to_vec();
-    out.splice(at..at, ["-v", "--message-format", "json"].map(String::from));
-    out
+    let command = args.first().context("empty Cargo sweep command")?;
+    let before = &args[..at];
+    let no_run = match command.as_str() {
+        "build" | "check" | "clippy" => false,
+        "test" | "bench" => {
+            anyhow::ensure!(!before.iter().any(|a| a == "--doc"), "Cargo doc tests cannot be listed without running them");
+            !before.iter().any(|a| a == "--no-run")
+        }
+        _ => bail!("Cargo command {command} cannot be safely listed"),
+    };
+    let mut options = vec!["-v".to_string(), "--message-format".to_string(), "json".to_string()];
+    if no_run {
+        options.push("--no-run".into());
+    }
+    out.splice(at..at, options);
+    Ok(out)
 }
 
 /// What the listing of the units of one folder found.
@@ -222,20 +256,57 @@ pub enum Listed {
 }
 
 /// The process that holds the lock file `lock`, named by pid and command. `except` is the pid of the waiting
-/// cargo, which also has the file open. `lsof` finds the holder on macOS and Linux, and `/proc/locks` on Linux.
-/// The text says `unknown` when neither finds a process.
+/// cargo, which also has the file open. Native process tables are tried before `lsof`.
+/// Diagnostics have a two-second budget. The text says `unknown` when neither finds a process.
 pub fn lock_holder(lock: &Path, except: u32) -> String {
     let mut pids: std::collections::BTreeSet<u32> = Default::default();
-    if let Ok(o) = Command::new("lsof").arg("-t").arg(lock).stderr(Stdio::null()).output() {
-        pids.extend(String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
-    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
     pids.extend(proc_locks(lock));
+    #[cfg(target_os = "macos")]
+    pids.extend(macos_openers(lock, until));
     pids.remove(&except);
-    if pids.is_empty() {
-        return format!("unknown (lsof and /proc/locks name no process for {})", lock.display());
+    if pids.is_empty() && std::time::Instant::now() < until {
+        let mut command = Command::new("lsof");
+        command.args(["-n", "-P", "-t"]).arg(lock).process_group(0);
+        if let Ok(out) = run(&mut command, Some(until)) {
+            pids.extend(String::from_utf8_lossy(&out).lines().filter_map(|l| l.trim().parse::<u32>().ok()));
+        }
+        pids.remove(&except);
     }
-    let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p))).collect();
+    if pids.is_empty() {
+        return format!("unknown (process tables and lsof name no process for {})", lock.display());
+    }
+    let named: Vec<String> = pids.iter().map(|p| format!("pid {p} ({})", command_name(*p, until))).collect();
     named.join(", ")
+}
+
+/// macOS file references, without lsof's scan of unrelated file metadata.
+#[cfg(target_os = "macos")]
+fn macos_openers(lock: &Path, until: std::time::Instant) -> Vec<u32> {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn proc_listpidspath(kind: u32, info: u32, path: *const c_char, flags: u32, buffer: *mut c_void, size: c_int) -> c_int;
+    }
+    let Ok(path) = CString::new(lock.as_os_str().as_bytes()) else { return Vec::new() };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Keep the caller's deadline even if a kernel query takes too long.
+    std::thread::spawn(move || {
+        const PROC_ALL_PIDS: u32 = 1;
+        // SAFETY: path is NUL-terminated; a null buffer requests its required size.
+        let size = unsafe { proc_listpidspath(PROC_ALL_PIDS, 0, path.as_ptr(), 0, std::ptr::null_mut(), 0) };
+        if size <= 0 {
+            return;
+        }
+        // Leave room for processes created between the two calls.
+        let mut pids = vec![0i32; size as usize / std::mem::size_of::<i32>() + 256];
+        let bytes = (pids.len() * std::mem::size_of::<i32>()) as c_int;
+        // SAFETY: the buffer is aligned and writable for `bytes`; path remains alive.
+        let count = unsafe { proc_listpidspath(PROC_ALL_PIDS, 0, path.as_ptr(), 0, pids.as_mut_ptr().cast(), bytes) };
+        pids.truncate(count.max(0) as usize / std::mem::size_of::<i32>());
+        let _ = tx.send(pids.into_iter().filter(|p| *p > 0).map(|p| p as u32).collect());
+    });
+    rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).unwrap_or_default()
 }
 
 /// The pids that hold a flock on the inode of `lock`, from `/proc/locks`. Empty without that file.
@@ -256,9 +327,17 @@ fn proc_locks(lock: &Path) -> Vec<u32> {
 }
 
 /// The command name of `pid`, or `?`.
-fn command_name(pid: u32) -> String {
-    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into())
+fn command_name(pid: u32, until: std::time::Instant) -> String {
+    if std::time::Instant::now() >= until {
+        return "?".into();
+    }
+    let mut command = Command::new("ps");
+    command.args(["-o", "comm=", "-p", &pid.to_string()]).process_group(0);
+    run(&mut command, Some(until))
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "?".into())
 }
 
 /// The cargo home of a command: the last `CARGO_HOME` of its env, else the env of this process, else `~/.cargo`.
@@ -291,11 +370,228 @@ fn halt(stop: &Mutex<Option<Listed>>, pid: u32, why: Listed) {
 /// host ends them: the group is killed and the listing is an error that names the holder. The listing runs in
 /// its own process group. Any other failure is an error.
 pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], args: &[String]) -> Result<Listed> {
+    Ok(list_units_with(host, root, target, env, args, false)?.0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StalePackage {
+    name: String,
+    source: Option<PathBuf>,
+}
+
+fn stale_package(line: &str) -> StalePackage {
+    let rest = line.strip_prefix("Dirty ").or_else(|| line.strip_prefix("Compiling ")).unwrap_or("");
+    let name = rest.split_whitespace().next().unwrap_or("").to_string();
+    let source = rest.split_once(" (").and_then(|(_, path)| path.split_once(')').map(|(path, _)| PathBuf::from(path)));
+    StalePackage { name, source }
+}
+
+fn cargo_lines(reader: impl BufRead, mut each: impl FnMut(String)) -> std::io::Result<()> {
+    for line in reader.lines() {
+        each(line?);
+    }
+    Ok(())
+}
+
+fn validate_messages(lines: &[String], success: bool) -> Result<()> {
+    let mut finished = false;
+    for line in lines.iter().filter(|line| !line.trim().is_empty()) {
+        anyhow::ensure!(!finished, "Cargo output continues after completion");
+        let message: Value = serde_json::from_str(line).context("invalid Cargo JSON output")?;
+        match message["reason"].as_str() {
+            Some("compiler-artifact") => {
+                anyhow::ensure!(message["target"]["name"].is_string(), "Cargo artifact has no target name");
+                let kinds = message["target"]["kind"].as_array().context("Cargo artifact has no target kind")?;
+                anyhow::ensure!(!kinds.is_empty() && kinds.iter().all(Value::is_string), "invalid Cargo target kind");
+                let files = message["filenames"].as_array().context("Cargo artifact has no filenames")?;
+                anyhow::ensure!(
+                    files.iter().all(Value::is_string)
+                        && (!files.is_empty() || message["executable"].is_string())
+                        && message["fresh"].is_boolean(),
+                    "invalid Cargo artifact"
+                );
+            }
+            Some("build-script-executed") => {
+                anyhow::ensure!(message["out_dir"].is_string(), "Cargo build script has no output folder")
+            }
+            Some("compiler-message") => {}
+            Some("build-finished") => {
+                anyhow::ensure!(!finished && message["success"].as_bool() == Some(success), "invalid Cargo completion");
+                finished = true;
+            }
+            _ => bail!("unknown Cargo JSON message"),
+        }
+    }
+    anyhow::ensure!(finished, "Cargo listing has no completion message");
+    Ok(())
+}
+
+fn list_units_with(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    env: &[(String, String)],
+    args: &[String],
+    partial: bool,
+) -> Result<(Listed, Vec<StalePackage>)> {
+    // Cargo puts cross-target output under target/<triple>/<profile>, but host build scripts can
+    // still use target/<profile>. Hold every matching profile lock while the copy and listing run.
+    let profile = profile_of(args);
+    let mut profiles = vec![target.join(&profile)];
+    if target.is_dir() {
+        for entry in std::fs::read_dir(target)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                profiles.push(entry.path().join(&profile));
+            }
+        }
+    }
+    let mut locks = Vec::new();
+    for dir in profiles.into_iter().filter(|p| p.join(".fingerprint").is_dir()) {
+        let path = dir.join(".cargo-lock");
+        let Ok(lock) = std::fs::File::open(&path) else {
+            return Ok((Listed::Busy("missing cargo build lock".into()), Vec::new()));
+        };
+        match lock.try_lock() {
+            Ok(()) => locks.push(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Ok((Listed::Busy(lock_holder(&path, std::process::id())), Vec::new()))
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e).context("cannot lock the cargo build lock"),
+        }
+    }
+    let result = list_snapshot(host, root, target, env, args, partial);
+    unlock_all(&locks);
+    result
+}
+
+/// Releases each flock before its file closes. A child that another thread forks keeps a copy of every
+/// descriptor until it runs exec, so a lock released only by the close stays held for that time, and the
+/// sweep that follows sees its own listing as a busy build.
+pub(crate) fn unlock_all(locks: &[std::fs::File]) {
+    for lock in locks {
+        let _ = lock.unlock();
+    }
+}
+
+/// Cargo may delete stale outputs before it reports `Dirty`. List a private copy so that a skipped
+/// listing cannot change the cache. Never follow links from the copy back into the original tree.
+fn list_snapshot(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    env: &[(String, String)],
+    args: &[String],
+    partial: bool,
+) -> Result<(Listed, Vec<StalePackage>)> {
+    let cargo_args = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    if cargo_args
+        .iter()
+        .any(|a| a == "--target-dir" || a.starts_with("--target-dir=") || a == "--config" || a.starts_with("--config="))
+    {
+        bail!("the listing cannot use --target-dir or --config; use a sweep target_dir entry instead");
+    }
+    fn check_tree(dir: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() || !(kind.is_dir() || kind.is_file()) {
+                bail!("cannot safely list a target with links or special files: {}", entry.path().display());
+            }
+            if kind.is_dir() {
+                check_tree(&entry.path())?;
+            }
+        }
+        Ok(())
+    }
+    // Cargo can run an already compiled build script after reporting it stale. Disable those
+    // executables in the private copy before starting Cargo; the original target stays unchanged.
+    fn block_build_scripts(dir: &Path, in_build: bool) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                block_build_scripts(&entry.path(), in_build || entry.file_name() == "build")?;
+            } else if in_build
+                && kind.is_file()
+                && (entry.file_name().to_string_lossy().starts_with("build-script-")
+                    || entry.file_name().to_string_lossy().starts_with("build_script_"))
+            {
+                let mut permissions = entry.metadata()?.permissions();
+                permissions.set_mode(permissions.mode() & !0o111);
+                std::fs::set_permissions(entry.path(), permissions)?;
+            }
+        }
+        Ok(())
+    }
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = target.parent().context("target has no parent")?;
+    let scratch = loop {
+        use std::os::unix::fs::DirBuilderExt;
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = parent.join(format!(".layr-cargo-list-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => break Scratch(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).context("cannot create cargo listing folder"),
+        }
+    };
+    let copy = scratch.0.join("target");
+    if target.exists() {
+        if target.symlink_metadata()?.file_type().is_symlink() {
+            bail!("cannot safely list a target that is a symbolic link");
+        }
+        check_tree(target)?;
+        let mut cp = host.command("cp").context("cannot run cp")?;
+        #[cfg(target_os = "macos")]
+        cp.args(["-cRp"]);
+        #[cfg(not(target_os = "macos"))]
+        cp.args(["-a", "--reflink=auto"]);
+        cp.arg(target).arg(&copy);
+        run(&mut cp, Some(host.deadline())).context("cannot copy cargo target for listing")?;
+        check_tree(&copy)?;
+    } else {
+        std::fs::create_dir(&copy)?;
+    }
+    block_build_scripts(&copy, false)?;
+    match list_units_in(host, root, &copy, env, args, partial)? {
+        (Listed::Fresh(plans), dirty) => {
+            let mut mapped = sweep::Plans::new();
+            for (path, live) in plans {
+                mapped.insert(target.join(path.strip_prefix(&copy)?), live);
+            }
+            Ok((Listed::Fresh(mapped), dirty))
+        }
+        other => Ok(other),
+    }
+}
+
+fn list_units_in(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    env: &[(String, String)],
+    args: &[String],
+    partial: bool,
+) -> Result<(Listed, Vec<StalePackage>)> {
     let mut c = host_cargo(host)?;
-    c.args(listing(args)).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
-    c.envs(env.iter().map(|(k, v)| (k, v))).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
+    let mut list_args = listing(args)?;
+    if partial {
+        let at = list_args.iter().position(|a| a == "--").unwrap_or(list_args.len());
+        list_args.insert(at, "--keep-going".into());
+    }
+    c.args(list_args).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_BUILD_JOBS", "1");
+    c.envs(env.iter().map(|(k, v)| (k, v))).env("CARGO_TARGET_DIR", target).env("LLVM_PROFILE_FILE", cargo_profile_file(target));
     // Set after the project's env: the listing must not compile, whatever the project's wrapper is.
-    c.env("RUSTC_WRAPPER", no_compile_wrapper()?);
+    let wrapper = no_compile_wrapper()?;
+    c.env("RUSTC_WRAPPER", &wrapper.path);
     // Set last: the project's env cannot turn the color back on (see `cargo_cmd`).
     let mut c = with_color(c);
     c.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -303,34 +599,39 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
     let pid = child.id();
     let (out, err) = (child.stdout.take().context("cargo stdout")?, child.stderr.take().context("cargo stderr")?);
     let stop: Arc<Mutex<Option<Listed>>> = Arc::default();
-    let waited: Arc<Mutex<Option<String>>> = Arc::default();
+    let waited: Arc<Mutex<Option<(String, Option<PathBuf>)>>> = Arc::default();
+    let dirty: Arc<Mutex<Vec<StalePackage>>> = Arc::default();
+    let errors: Arc<Mutex<Vec<String>>> = Arc::default();
+    let refused: Arc<Mutex<usize>> = Arc::default();
     let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Vec<String>>();
     let (errs_tx, errs_rx) = std::sync::mpsc::channel::<()>();
     {
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let lines: Vec<String> = BufReader::new(out)
-                .lines()
-                .map_while(Result::ok)
-                .inspect(|line| {
-                    if let Some(name) = sweep::not_fresh(line) {
-                        halt(&stop, pid, Listed::NotFresh(format!("{name} is not fresh")));
-                    }
-                })
-                .collect();
+            let mut lines = Vec::new();
+            if let Err(e) = cargo_lines(BufReader::new(out), |line| {
+                if let Some(name) = sweep::not_fresh(&line) {
+                    halt(&stop, pid, Listed::NotFresh(format!("{name} is not fresh")));
+                }
+                lines.push(line);
+            }) {
+                halt(&stop, pid, Listed::NotFresh(format!("cannot read Cargo output: {e}")));
+            }
             let _ = lines_tx.send(lines);
         });
     }
     {
-        let (stop, waited) = (stop.clone(), waited.clone());
+        let (stop, waited, dirty, errors, refused) =
+            (stop.clone(), waited.clone(), dirty.clone(), errors.clone(), refused.clone());
         let lock_dir = target.join(profile_of(args));
         let home = cargo_home(env);
+        let wrapper_line = format!("Running `{} ", wrapper.path.display());
         std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
+            if let Err(e) = cargo_lines(BufReader::new(err), |line| {
                 let t = line.trim_start();
                 if t.starts_with("Blocking ") && t.contains("directory") {
-                    let holder = lock_holder(&lock_dir.join(".cargo-lock"), pid);
-                    halt(&stop, pid, Listed::Busy(holder));
+                    // Stop cargo before doing potentially slow process diagnostics.
+                    halt(&stop, pid, Listed::Busy(String::new()));
                 } else if t.starts_with("Blocking ") {
                     let holder = if t.contains("package cache") {
                         lock_holder(&home.join(".package-cache"), pid)
@@ -338,58 +639,216 @@ pub fn list_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, S
                         "unknown (layr does not know this lock)".to_string()
                     };
                     eprintln!("layr-retest: cargo waits: {t}; holder: {holder}");
-                    *waited.lock().unwrap() = Some(format!("{t}; holder: {holder}"));
+                    *waited.lock().unwrap() =
+                        Some((t.to_string(), t.contains("package cache").then(|| home.join(".package-cache"))));
+                } else if partial && (t.starts_with("Dirty ") || t.starts_with("Compiling ")) {
+                    let package = stale_package(t);
+                    let mut d = dirty.lock().unwrap();
+                    if !d.contains(&package) {
+                        d.push(package);
+                    }
+                } else if partial && t.starts_with(&wrapper_line) && t.contains("--crate-name build_script_") {
+                    halt(&stop, pid, Listed::NotFresh("a build script needs compilation".into()));
+                } else if partial && t.starts_with(&wrapper_line) {
+                    // The wrapper refuses compilation before rustc can write an output.
+                } else if partial && t == "LAYR_PRUNE_COMPILE_REFUSED" {
+                    *refused.lock().unwrap() += 1;
+                } else if partial && t.starts_with("error:") {
+                    errors.lock().unwrap().push(t.to_string());
                 } else if ["Dirty ", "Compiling ", "Running "].iter().any(|p| t.starts_with(p)) {
                     halt(&stop, pid, Listed::NotFresh(t.to_string()));
                 }
+            }) {
+                halt(&stop, pid, Listed::NotFresh(format!("cannot read Cargo errors: {e}")));
             }
             let _ = errs_tx.send(());
         });
     }
-    let (status, late) = wait_child(&mut child, Some(host.deadline())).with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?;
+    let (status, late) =
+        wait_child(&mut child, Some(host.deadline())).with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?;
     let _ = std::fs::remove_dir_all(profile_scratch(target));
+    let describe = |stopped| match stopped {
+        Listed::Busy(_) => Listed::Busy(lock_holder(&target.join(profile_of(args)).join(".cargo-lock"), pid)),
+        other => other,
+    };
     if let Some(stopped) = stop.lock().unwrap().take() {
-        return Ok(stopped);
+        return Ok((stopped, Vec::new()));
     }
     if late {
-        let why = waited.lock().unwrap().take().unwrap_or_default();
+        let why = waited
+            .lock()
+            .unwrap()
+            .take()
+            .map(|(message, lock)| {
+                let holder =
+                    lock.map(|p| lock_holder(&p, pid)).unwrap_or_else(|| "unknown (layr does not know this lock)".into());
+                format!("{message}; holder: {holder}")
+            })
+            .unwrap_or_default();
         bail!("the cargo listing of {} reached its time limit while it waited: {why}", args.join(" "));
     }
     // The readers finish before the stop is final: a line that was read after the exit can still stop the listing.
     let lines = lines_rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
     let errs_done = errs_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+    let dirty = std::mem::take(&mut *dirty.lock().unwrap());
     if let Some(stopped) = stop.lock().unwrap().take() {
-        return Ok(stopped);
+        return Ok((stopped, dirty));
     }
     let (Some(lines), true) = (lines, errs_done) else {
         bail!("the cargo listing of {} kept its output open; a process outside its group holds it", args.join(" "));
     };
-    if !status.success() {
+    let errors = errors.lock().unwrap();
+    let refusals = *refused.lock().unwrap();
+    let expected_errors = !errors.is_empty()
+        && errors.len() == refusals
+        && errors.iter().all(|line| {
+            line.strip_prefix("error: could not compile `")
+                .and_then(|rest| rest.split_once('`'))
+                .is_some_and(|(package, _)| dirty.iter().any(|item| item.name == package))
+        });
+    if !status.success() && !(partial && !dirty.is_empty() && expected_errors) {
         bail!("cargo {} failed", args.join(" "));
     }
-    Ok(Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?))
+    validate_messages(&lines, status.success())?;
+    Ok((Listed::Fresh(sweep::plan(target, lines.join("\n").as_bytes())?), dirty))
 }
 
-/// The live units of the target folder `target`: the units that every command of `commands` uses, each
-/// run with `env`. Stops at the first command whose units are not fresh.
-pub fn live_units(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Listed> {
+/// The live units of the target folder. A partial listing keeps every workspace unit in the
+/// affected profiles and is accepted only when the stale units are workspace members.
+pub fn live_units(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    env: &[(String, String)],
+    commands: &[Vec<String>],
+) -> Result<Listed> {
     let mut live = sweep::Plans::new();
+    let mut members: Option<Vec<WorkspaceMember>> = None;
+    let mut keep = std::collections::BTreeSet::new();
     for args in commands {
         match list_units(host, root, target, env, args)? {
             Listed::Fresh(units) => sweep::merge(&mut live, units),
-            stale => return Ok(stale),
+            Listed::NotFresh(why) => {
+                if members.is_none() {
+                    members = Some(workspace_members(host, root)?);
+                }
+                let workspace = members.as_deref().unwrap_or_default();
+                match list_units_with(host, root, target, env, args, true)? {
+                    (Listed::Fresh(units), dirty) => {
+                        if let Some(other) = dirty.iter().find(|package| !workspace_contains(workspace, package)) {
+                            return Ok(Listed::NotFresh(format!("{why}; {} is not a workspace member", other.name)));
+                        }
+                        sweep::merge(&mut live, units);
+                        let selected = profile_folder(target, args)?;
+                        let host = target.join(profile_of(args));
+                        // A cross-target listing may not enumerate the host profile. Do not add
+                        // that profile to the sweep unless Cargo actually listed units there.
+                        if host != selected && live.contains_key(&host) {
+                            keep.insert(host);
+                        }
+                        keep.insert(selected);
+                    }
+                    (Listed::NotFresh(more), _) => return Ok(Listed::NotFresh(format!("{why}; {more}"))),
+                    (busy, _) => return Ok(busy),
+                }
+            }
+            busy => return Ok(busy),
+        }
+    }
+    if let Some(workspace) = &members {
+        let names: Vec<String> = workspace.iter().map(|member| member.name.clone()).collect();
+        for profile in keep {
+            if !profile.try_exists()? {
+                continue;
+            }
+            sweep::merge(&mut live, sweep::Plans::from([(profile.clone(), member_units(&profile, &names)?)]));
         }
     }
     Ok(Listed::Fresh(live))
+}
+
+struct WorkspaceMember {
+    name: String,
+    source: PathBuf,
+}
+
+fn workspace_contains(workspace: &[WorkspaceMember], package: &StalePackage) -> bool {
+    let source = package.source.as_ref().and_then(|path| path.canonicalize().ok());
+    workspace.iter().any(|member| member.name == package.name && source.as_ref() == Some(&member.source))
+}
+
+fn workspace_members(host: &dyn Host, root: &Path) -> Result<Vec<WorkspaceMember>> {
+    let meta = metadata(host, root)?;
+    let ids = meta["workspace_members"].as_array().context("cargo metadata has no workspace members")?;
+    let packages = meta["packages"].as_array().context("cargo metadata has no packages")?;
+    let mut members = Vec::new();
+    for id in ids {
+        let id = id.as_str().context("invalid workspace member id")?;
+        let package = packages.iter().find(|p| p["id"].as_str() == Some(id)).context("workspace member has no package")?;
+        let name = package["name"].as_str().context("workspace member has no name")?.to_string();
+        let manifest = package["manifest_path"].as_str().context("workspace member has no manifest")?;
+        let source = Path::new(manifest).parent().context("workspace manifest has no folder")?.canonicalize()?;
+        members.push(WorkspaceMember { name, source });
+    }
+    anyhow::ensure!(!members.is_empty(), "cargo metadata has no workspace members");
+    Ok(members)
+}
+
+fn profile_folder(target: &Path, args: &[String]) -> Result<PathBuf> {
+    let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    let triple = own
+        .iter()
+        .position(|a| a == "--target")
+        .and_then(|i| own.get(i + 1))
+        .cloned()
+        .or_else(|| own.iter().find_map(|a| a.strip_prefix("--target=")).map(String::from));
+    let base = match triple {
+        Some(t) => {
+            anyhow::ensure!(
+                !t.is_empty() && t != "." && t != ".." && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+                "unsupported Cargo target path"
+            );
+            target.join(t)
+        }
+        None => target.to_path_buf(),
+    };
+    let profile = profile_of(args);
+    anyhow::ensure!(
+        !profile.is_empty()
+            && profile != "."
+            && profile != ".."
+            && profile.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)),
+        "unsupported Cargo profile"
+    );
+    Ok(base.join(profile))
+}
+
+fn member_units(profile: &Path, members: &[String]) -> Result<sweep::Live> {
+    let mut live = sweep::Live::default();
+    let fingerprints = profile.join(".fingerprint");
+    if profile.try_exists()? {
+        for entry in std::fs::read_dir(fingerprints).context("missing Cargo fingerprints")? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some((package, hash)) = name.rsplit_once('-') else { continue };
+            if members.iter().any(|m| m == package) && sweep::unit_hash(&name).is_some() {
+                live.hashes.insert(hash.to_string());
+            }
+        }
+    }
+    live.crates.extend(members.iter().map(|m| m.replace('-', "_")));
+    Ok(live)
 }
 
 /// The profile folder that a cargo command builds into: `--profile <name>` (`dev` and `test` are `debug`, `bench`
 /// is `release`), `--release` is `release`, and the default is `debug`. Only the cargo arguments count (before `--`).
 pub fn profile_of(args: &[String]) -> String {
     let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
-    let named = own.iter().position(|a| a == "--profile").and_then(|i| own.get(i + 1)).cloned().or_else(|| {
-        own.iter().find_map(|a| a.strip_prefix("--profile=")).map(String::from)
-    });
+    let named = own
+        .iter()
+        .position(|a| a == "--profile")
+        .and_then(|i| own.get(i + 1))
+        .cloned()
+        .or_else(|| own.iter().find_map(|a| a.strip_prefix("--profile=")).map(String::from));
     match named.as_deref() {
         Some("dev") | Some("test") => "debug".to_string(),
         Some("bench") => "release".to_string(),
@@ -402,7 +861,13 @@ pub fn profile_of(args: &[String]) -> String {
 /// The live units of each profile folder, listed on its own: the commands of one profile name only that profile's
 /// units. A profile whose command is not fresh is `NotFresh` (its folder is kept), and the other profiles still
 /// count, so a stale release command does not block the debug folder.
-pub fn live_by_profile(host: &dyn Host, root: &Path, target: &Path, env: &[(String, String)], commands: &[Vec<String>]) -> Result<Vec<(String, Vec<Vec<String>>, Listed)>> {
+pub fn live_by_profile(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    env: &[(String, String)],
+    commands: &[Vec<String>],
+) -> Result<Vec<(String, Vec<Vec<String>>, Listed)>> {
     let mut groups: std::collections::BTreeMap<String, Vec<Vec<String>>> = std::collections::BTreeMap::new();
     for args in commands {
         groups.entry(profile_of(args)).or_default().push(args.clone());
@@ -485,7 +950,12 @@ pub fn stale_unlisted(target: &Path, commands: &[Vec<String>], now: std::time::S
 }
 
 /// `stale_unlisted`, keeping the top-level folders of `other` (the `target_dir` of `OtherDir` entries) too.
-pub fn stale_unlisted_but(target: &Path, commands: &[Vec<String>], other: &[OtherDir], now: std::time::SystemTime) -> Vec<PathBuf> {
+pub fn stale_unlisted_but(
+    target: &Path,
+    commands: &[Vec<String>],
+    other: &[OtherDir],
+    now: std::time::SystemTime,
+) -> Vec<PathBuf> {
     let mut listed = listed_dirs(commands);
     listed.extend(other.iter().filter_map(|o| o.dir.split('/').next().map(String::from)));
     let mut out = Vec::new();
@@ -642,7 +1112,9 @@ pub fn warm(host: &dyn Host, target: &Path) -> Result<()> {
 /// (such as `nextest list`) take their arguments as they are.
 fn keep_going(args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
-    if matches!(args.first().map(String::as_str), Some("build" | "check" | "clippy" | "doc")) && !args.iter().any(|a| a == "--keep-going") {
+    if matches!(args.first().map(String::as_str), Some("build" | "check" | "clippy" | "doc"))
+        && !args.iter().any(|a| a == "--keep-going")
+    {
         // Before a `--` that passes the rest to a tool (clippy lints).
         let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
         out.insert(at, "--keep-going".to_string());
@@ -655,24 +1127,19 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
     if !cfg.listed {
         return Ok(skip("no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"));
     }
-    if !built(target) {
+    if !built(target) && !cfg.other_dirs.iter().any(|other| built(&target.join(&other.dir))) {
         return Ok(skip("target has no build output"));
     }
     // The listings must not reach the network: a unit whose crate is not in the cargo cache fails the listing.
     let mut env = cfg.env;
     env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
     // Each profile folder is pruned on its own: a stale command of one profile keeps only that folder.
-    let mut freed = 0;
-    let mut busy = 0;
-    let mut fresh = 0;
+    let mut ready = Vec::new();
     let mut kept = Vec::new();
     for (profile, _, listed) in live_by_profile(host, root, target, &env, &cfg.commands)? {
         match listed {
             Listed::Fresh(live) => {
-                fresh += 1;
-                let (n, b) = sweep_plans(&live, false)?;
-                freed += n;
-                busy += b;
+                ready.push((profile, live));
             }
             Listed::NotFresh(why) => {
                 // A registry source at another path is another CARGO_HOME: name the one that the listing used.
@@ -697,14 +1164,26 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
         for (profile, _, listed) in live_by_profile(host, root, &dir, &own, std::slice::from_ref(&other.args))? {
             match listed {
                 Listed::Fresh(live) => {
-                    let (n, b) = sweep_plans(&live, false)?;
-                    freed += n;
-                    busy += b;
+                    ready.push((format!("{}/{profile}", other.dir), live));
                 }
                 Listed::NotFresh(why) => kept.push(format!("{}/{profile}: a unit is not fresh ({why})", other.dir)),
                 Listed::Busy(holder) => kept.push(format!("{}/{profile}: build lock busy (holder: {holder})", other.dir)),
             }
         }
+    }
+    // Complete every listing before removing output: a later listing error must leave the target intact.
+    let mut freed = 0;
+    let mut fresh = 0;
+    for (profile, live) in ready {
+        let (n, busy) = sweep_plans(&live, false)?;
+        fresh += usize::from(!live.is_empty() && busy < live.len());
+        if busy > 0 {
+            kept.push(format!("{profile}: build lock busy during sweep"));
+        }
+        freed += n;
+    }
+    if fresh == 0 {
+        return Ok(skip(format!("no profile folder is fresh: {}; run the standard build first", kept.join("; "))));
     }
     // The folders that no listed command makes have no live set: an old one goes (issue #195).
     for dir in stale_unlisted_but(target, &cfg.commands, &cfg.other_dirs, std::time::SystemTime::now()) {
@@ -713,12 +1192,41 @@ fn prune_in(host: &dyn Host, root: &Path, target: &Path) -> Result<Outcome> {
             freed += n;
         }
     }
-    if fresh == 0 {
-        return Ok(skip(format!("no profile folder is fresh: {}; run the standard build first", kept.join("; "))));
-    }
-    // A busy lock keeps its profile folder (the others are swept), as the module doc says.
-    let _ = busy;
     Ok(Outcome::Pruned { freed })
+}
+
+#[cfg(test)]
+mod unlock_tests {
+    use super::unlock_all;
+    use std::fs::{File, TryLockError};
+
+    /// A descriptor copy (what a child that another thread forks holds until exec) keeps a flock that only
+    /// the close of the original released: the next lock of the file is refused. `unlock_all` releases it.
+    #[test]
+    fn a_released_build_lock_is_free_while_a_copy_of_its_descriptor_lives() {
+        let dir = std::env::temp_dir().join(format!("layr-unlock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".cargo-lock");
+        std::fs::write(&path, "").unwrap();
+
+        let closed_only = File::open(&path).unwrap();
+        closed_only.try_lock().unwrap();
+        let copy = closed_only.try_clone().unwrap();
+        drop(closed_only);
+        assert!(matches!(File::open(&path).unwrap().try_lock(), Err(TryLockError::WouldBlock)), "the copy holds the lock");
+        // A child that another test forks meanwhile keeps this description too: release it explicitly.
+        unlock_all(std::slice::from_ref(&copy));
+        drop(copy);
+
+        let released = File::open(&path).unwrap();
+        released.try_lock().unwrap();
+        let copy = released.try_clone().unwrap();
+        unlock_all(std::slice::from_ref(&released));
+        drop(released);
+        File::open(&path).unwrap().try_lock().expect("an unlocked file is free while a copy lives");
+        drop(copy);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -761,6 +1269,56 @@ mod pinned_env_tests {
 #[cfg(test)]
 mod other_dir_tests {
     use super::*;
+
+    #[test]
+    fn cargo_listing_wrappers_have_separate_private_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = no_compile_wrapper().unwrap();
+        let second = no_compile_wrapper().unwrap();
+        assert_ne!(first.path, second.path);
+        assert_eq!(std::fs::metadata(&first.dir).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(std::fs::metadata(&first.path).unwrap().permissions().mode() & 0o077, 0);
+        let dir = first.dir.clone();
+        drop(first);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_partial_listing_refuses_target_and_profile_paths() {
+        let target = Path::new("/tmp/example-target");
+        assert!(profile_folder(target, &["build".into(), "--target=../../outside".into()]).is_err());
+        assert!(profile_folder(target, &["build".into(), "--profile=../outside".into()]).is_err());
+        assert_eq!(
+            profile_folder(target, &["build".into(), "--target=x86_64-unknown-linux-gnu".into()]).unwrap(),
+            target.join("x86_64-unknown-linux-gnu/debug")
+        );
+    }
+
+    #[test]
+    fn cargo_output_read_errors_are_not_treated_as_end_of_file() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken pipe"))
+            }
+        }
+        impl std::io::BufRead for Broken {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                Err(std::io::Error::other("broken pipe"))
+            }
+            fn consume(&mut self, _: usize) {}
+        }
+        assert!(cargo_lines(Broken, |_| {}).is_err());
+    }
+
+    #[test]
+    fn listing_refuses_commands_that_can_run_project_programs() {
+        let args = |items: &[&str]| items.iter().map(|item| (*item).to_string()).collect::<Vec<_>>();
+        let test = listing(&args(&["test", "--workspace"])).unwrap();
+        assert!(test.contains(&"--no-run".to_string()));
+        assert!(listing(&args(&["test", "--doc"])).is_err());
+        assert!(listing(&args(&["run"])).is_err());
+    }
 
     #[test]
     fn an_object_entry_of_sweep_is_a_target_folder_of_its_own() {

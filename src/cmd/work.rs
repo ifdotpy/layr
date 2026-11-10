@@ -187,10 +187,16 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
-    let filtered = h.repo.filtered_view(ctx, &line)?;
+    // Every virtual-line change is included in the next save.
+    let view = crate::views::of(&h.repo, &line);
+    let filtered = if view.is_some() { None } else { h.repo.filtered_view(ctx, &line)? };
     let specs = h.specs(&a.rest())?;
-    let st = shown_status(ctx, &h, &line, filtered.is_some())?;
+    let st = match &view {
+        Some(v) => crate::views::status(&h.repo, &line, v)?,
+        None => shown_status(ctx, &h, &line, filtered.is_some())?,
+    };
     let overlaps = if options.overlaps == StatusOverlaps::Include
+        && view.is_none()
         && filtered.is_none()
         && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain")))
     {
@@ -443,7 +449,9 @@ pub fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<Strin
     #[cfg(target_os = "macos")]
     if crate::thin::is_thin(&stage) {
         // A file with several names keeps them only in a complete index.
-        if !crate::thin::any_linked(&repo.working(line), paths) {
+        if !crate::thin::any_linked(&repo.working(line), paths)
+            && !paths.iter().any(|p| fsutil::lmeta(scan, p).is_some_and(|m| m.is_dir()))
+        {
             let (index, _) = repo.index_source(line)?;
             return crate::thin::stage_entries(&index, scan, paths, repo.own(line));
         }
@@ -476,12 +484,75 @@ fn stage_into(repo: &Repo, line: &Line, stage: &Path, scan: &Path, paths: &BTree
             }
         }
     }
+    let mut first_link: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
     for p in paths {
         if fsutil::lmeta(scan, p).is_some() {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::symlink_metadata(fsutil::safe_join(scan, p)?)?;
+            if metadata.is_file() && metadata.nlink() > 1 {
+                let key = (metadata.dev(), metadata.ino());
+                if let Some(first) = first_link.get(&key) {
+                    let tree = crate::tree::Tree::open(&stage)?;
+                    tree.replace_hard_link(first, p)?;
+                    continue;
+                }
+                first_link.insert(key, p.clone());
+            }
             fsutil::copy_index_entry(scan, p, &stage, p, own)?;
         } else if fsutil::lmeta(&stage, p).is_some() {
             fsutil::remove_entry(&stage, p)?;
             prune_empty(&stage, p);
+        }
+    }
+    Ok(())
+}
+
+/// Include the tracked names of changed hard-linked files in `save -a`.
+#[cfg(target_os = "linux")]
+fn include_linked_tracked(
+    scan: &Path,
+    index: &(impl fsutil::Src + ?Sized),
+    paths: &mut BTreeSet<String>,
+    quiet: &BTreeSet<String>,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut keys = std::collections::HashSet::new();
+    for p in paths.iter() {
+        let path = fsutil::safe_join(scan, p)?;
+        if let Ok(m) = std::fs::symlink_metadata(path) {
+            if m.is_file() && m.nlink() > 1 {
+                keys.insert((m.dev(), m.ino()));
+            }
+        }
+    }
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let dev = std::fs::symlink_metadata(scan)?.dev();
+    let mut dirs = vec![std::path::PathBuf::new()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(scan.join(&dir))? {
+            let entry = entry?;
+            let rel = dir.join(entry.file_name());
+            if rel.to_str().is_some_and(|p| skip_path(p) || quiet.contains(p)) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if metadata.dev() != dev {
+                continue;
+            }
+            if metadata.is_dir() {
+                #[cfg(feature = "overlayfs")]
+                if crate::storage::is_subvolume(&entry.path()) {
+                    continue;
+                }
+                dirs.push(rel);
+            } else if metadata.is_file() && keys.contains(&(metadata.dev(), metadata.ino())) {
+                let rel = rel.to_str().ok_or_else(|| anyhow::anyhow!("a hard link has a non-UTF-8 path"))?;
+                if fsutil::lmeta(index, rel).is_some() {
+                    paths.insert(rel.to_string());
+                }
+            }
         }
     }
     Ok(())
@@ -550,6 +621,11 @@ fn select_add(
     }
     // A quiet overlay's files never go into the index: a named save takes them as they are.
     paths.retain(|p| !quiet.contains(p));
+    #[cfg(target_os = "linux")]
+    {
+        include_linked_tracked(scan, index, &mut paths, quiet)?;
+        paths.retain(|p| matches(specs, p));
+    }
     Ok((paths, ignored_named))
 }
 
@@ -1056,8 +1132,8 @@ pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// The options of a named save that its checks use.
-#[derive(Clone, Copy)]
-struct NamedOpts {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NamedOpts {
     allow_empty: bool,
     allow_markers: bool,
     amend: bool,
@@ -1071,7 +1147,7 @@ fn named_opts(a: &crate::args::Parsed) -> NamedOpts {
 /// conflict markers, the conflicts that stay open (into `state`), and the secret check. Returns the
 /// staged changes and the conflicts that the save clears. On APFS they run before the project lock,
 /// on the clone, which does not change.
-fn named_checks(
+pub(crate) fn named_checks(
     ctx: &Ctx,
     repo: &Repo,
     head: &crate::model::StateRec,
@@ -1219,6 +1295,24 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if message.is_empty() {
         return Err(exit(1, "Cannot save a state with an empty message (use -m <message>)."));
     }
+    // A virtual line saves every change of its view (docs/views.md).
+    #[cfg(target_os = "macos")]
+    if let Some(v) = crate::views::of(&h.repo, &line) {
+        if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
+            return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
+        }
+        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"));
+    }
+    #[cfg(target_os = "linux")]
+    let virtual_save = {
+        crate::views::ensure_no_pending_move(&h.repo, &line)?;
+        crate::views::of(&h.repo, &line).is_some()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let virtual_save = false;
+    if virtual_save && ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
+        return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
+    }
     // In a line with overlays the owner commits; a change of the shared set also needs the line's
     // rule (commit_layers checks it), so a protected line takes commits of its overlays only.
     let op = if stacked { crate::repo::LineOp::Save } else { crate::repo::LineOp::Direct };
@@ -1257,11 +1351,8 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // `save -m` on APFS: the index is cloned and the new tree compared before the project lock
     // (issue #194). The line lock, taken above, keeps the stage and the head unchanged to the record.
     #[cfg(target_os = "macos")]
-    let mut prepared = if stacked {
-        None
-    } else {
-        Some(prepare_named_save(ctx, &h.repo, &line, &head, &message, named_opts(&a))?)
-    };
+    let mut prepared =
+        if stacked { None } else { Some(prepare_named_save(ctx, &h.repo, &line, &head, &message, named_opts(&a))?) };
     #[cfg(target_os = "macos")]
     if prepared.as_ref().is_some_and(|np| np.checks.is_none()) {
         prepared = None;
@@ -1274,7 +1365,12 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if line.head != np.head_id {
             return Err(exit(
                 1,
-                format!("line {} moved during the command (head {} -> {}); run it again", line.name, ids::short(&np.head_id), ids::short(&line.head)),
+                format!(
+                    "line {} moved during the command (head {} -> {}); run it again",
+                    line.name,
+                    ids::short(&np.head_id),
+                    ids::short(&line.head)
+                ),
             ));
         }
     }
@@ -1283,9 +1379,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !stacked {
         h.repo.save_first_cache_states(ctx, &line)?;
     }
-    if a.has("-a") && !stacked && !cfg!(target_os = "macos") {
-        let (st, scan, _it, _index) = h.repo.status_light(&line)?;
-        let paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
+    if (a.has("-a") || virtual_save) && !stacked && !cfg!(target_os = "macos") {
+        let (st, scan, _it, index) = h.repo.status_light(&line)?;
+        let mut paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
+        if virtual_save {
+            paths.extend(st.untracked.iter().cloned());
+        }
+        #[cfg(target_os = "linux")]
+        include_linked_tracked(&scan.path, &index, &mut paths, &h.repo.quiet_paths(&line)?)?;
         if !paths.is_empty() {
             stage_paths(&h.repo, &line, &scan.path, &paths)?;
         }
@@ -1303,7 +1404,8 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let head_root = h.repo.state_src(&line.head)?;
         let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
         let stage = h.repo.current_stage(&line)?;
-        let src = stage.clone().unwrap_or(head_root.clone());
+        let mut keep = Vec::new();
+        let src = match stage { Some(path) => path, None => h.repo.complete(head_root.clone(), &mut keep)? };
         let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
         if a.has("--amend") {
             state.change_id = head.change_id.clone();
@@ -1331,13 +1433,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     #[cfg(target_os = "macos")]
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("internal error: named save has no checks"))?;
     #[cfg(not(target_os = "macos"))]
-    let (staged, cleared) = match named_checks(ctx, &h.repo, &head, &mut state, &head_root, &new_root, &line, &all_changes, named_opts(&a))? {
-        Some(checks) => checks,
-        None => {
-            h.repo.discard_states(std::slice::from_ref(&state));
-            return nothing(&h, &line);
-        }
-    };
+    let (staged, cleared) =
+        match named_checks(ctx, &h.repo, &head, &mut state, &head_root, &new_root, &line, &all_changes, named_opts(&a))? {
+            Some(checks) => checks,
+            None => {
+                h.repo.discard_states(std::slice::from_ref(&state));
+                return nothing(&h, &line);
+            }
+        };
     if let Some((n, e)) = author {
         state.author.name = n;
         state.author.email = e;
@@ -1357,7 +1460,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(pc) = pending.as_mut() {
         let _t = crate::trace::span("publish clone");
         if !pc.publish()? {
-            return Err(exit(1, format!("error: the staging content of line {} changed during the save; run it again", line.name)));
+            return Err(exit(
+                1,
+                format!("error: the staging content of line {} changed during the save; run it again", line.name),
+            ));
         }
     }
     crate::store::failpoint("pending-renamed");
@@ -1407,6 +1513,11 @@ fn warn_left_out(ctx: &Ctx) -> Result<()> {
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;
+    // A virtual line saves every change: nothing is left out.
+    #[cfg(target_os = "macos")]
+    if crate::views::of(&h.repo, &line).is_some() {
+        return Ok(());
+    }
     let filtered = h.repo.filtered_view(ctx, &line)?.is_some();
     let st = shown_status(ctx, &h, &line, filtered)?;
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
@@ -2068,6 +2179,27 @@ fn clean_targets(st: &Status, scan: &Path, index: &Snap, dirs: bool, with_ignore
 #[cfg(test)]
 mod status_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saving_a_link_includes_only_tracked_nonquiet_names() {
+        let root = std::env::temp_dir().join(format!("layr-save-linked-{}", crate::ids::new_id()));
+        let (scan, index) = (root.join("scan"), root.join("index"));
+        std::fs::create_dir_all(&scan).unwrap();
+        std::fs::create_dir_all(&index).unwrap();
+        std::fs::write(scan.join("first"), "data").unwrap();
+        for name in ["tracked", "quiet", "untracked"] {
+            std::fs::hard_link(scan.join("first"), scan.join(name)).unwrap();
+        }
+        for name in ["first", "tracked", "quiet"] {
+            std::fs::write(index.join(name), "old").unwrap();
+        }
+        let mut paths = BTreeSet::from(["first".to_string()]);
+        let quiet = BTreeSet::from(["quiet".to_string()]);
+        include_linked_tracked(&scan, &index, &mut paths, &quiet).unwrap();
+        assert_eq!(paths, BTreeSet::from(["first".to_string(), "tracked".to_string()]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn line() -> Line {
         Line { id: "id".into(), name: "topic".into(), head: "state".into(), owner: 0, machine: "machine".into() }

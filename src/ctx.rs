@@ -69,7 +69,9 @@ impl Ctx {
         let f = self.caller.home.join(".gitconfig");
         let mut command = std::process::Command::new("git");
         command.args(["config", "--file"]).arg(&f).arg(key);
-        let env = [("HOME".into(), self.caller.home.to_string_lossy().into_owned())];
+        // Git reads the caller's home, but not global configuration inside a check sandbox.
+        let env =
+            [("HOME".into(), self.caller.home.to_string_lossy().into_owned()), ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())];
         crate::privs::command_as(&mut command, self.caller.uid, &env).ok()?;
         #[cfg(test)]
         GIT_CONFIG_READS.with(|reads| reads.set(reads.get() + 1));
@@ -141,7 +143,9 @@ impl Ctx {
         let layout = self.store.layout().ok()?;
         for (_, projects) in layout.projects_dirs() {
             let projects = projects.canonicalize().unwrap_or(projects);
-            let Ok(rel) = path.strip_prefix(&projects) else { continue };
+            let Ok(rel) = path.strip_prefix(&projects) else {
+                continue;
+            };
             let comps: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             if comps.is_empty() {
                 return None;

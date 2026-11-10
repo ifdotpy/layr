@@ -48,7 +48,7 @@ l line new -q from-b $Q && cd $A/from-b && echo r >> notes.txt && l save -qam "o
 R=$(l rev-parse head)
 for v in "$BR"/projects/x/states/*; do
     if [ -e "$BR/projects/x/deltas/$(basename "$v")" ]; then
-        command -v chflags >/dev/null && chflags -R nouchg "$v"
+        command -v chflags >/dev/null && chflags -R nouchg "$v" && /bin/chmod -R -N "$v"
         rm -rf "$v"
     fi
 done

@@ -19,9 +19,10 @@ no "a Private store has no slots" test -e "$T/plain/slots"
 ok "push to the Private store" l push cloud -q
 no "no object is age encrypted" grep -rlq "age-encryption.org" "$T/plain"
 
-# The clone is another machine: its own store.
+# The clone is another machine: its own store, on its own file system (btrfs on Linux).
 FIRST=$LAYR_ROOT
-export LAYR_ROOT=$T/second
+new_fs $T/second 2G
+export LAYR_ROOT=$T/second/store
 cd "$T"
 no "a clone that asks for Secret refuses the Private store" l clone "file://$T/plain" wrong --mode secret
 ok "clone the Private store" l clone "file://$T/plain" copy -q

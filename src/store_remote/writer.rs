@@ -7,9 +7,9 @@ use super::{
 };
 use crate::{ctx::Ctx, fsutil, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
+use layr_hashers::{ContentAddress, Digest};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -299,7 +299,12 @@ fn publish_initial_slots(store: &Store, paper: &str, mut vault: String) -> Resul
         }
     }
     initialization_failpoint("machine")?;
-    let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&vault)?, mode: Default::default() };
+    let descriptor = Descriptor {
+        format: 2,
+        project: store.project.clone(),
+        recipient: keys::recipient_of(&vault)?,
+        mode: Default::default(),
+    };
     if !store.backend.put_new("store.json", canonical(&serde_json::to_value(&descriptor)?)?)? {
         if store.descriptor()?.recipient != descriptor.recipient {
             bail!("store is being created by another writer");
@@ -390,7 +395,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         }
         Ok(())
     };
+    // Layr Cloud API v1: the token belongs to this machine, so only its own segments go up, signed by the key
+    // that the server knows for it.
+    let api = store.backend.api();
+    if let Some(api) = api {
+        register_machine(store, api)?;
+    }
     for machine in repo.p.db.record_machines()? {
+        if api.is_some() && machine != store.machine {
+            continue;
+        }
         let mut last = 0;
         let mut last_key = None;
         for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
@@ -438,6 +452,11 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         }
     }
     drop(stage);
+    // Layr Cloud keeps states as trees, times tables and packs (docs/objects.md), not as store v2 trees.
+    if store.is_api() {
+        super::cloud_objects::push_states(store, ctx, repo, opts, &mut report)?;
+        return Ok(report);
+    }
     let stage = crate::trace::span("store load index");
     let mut index = load_index(&store.dir)?;
     let mut journal = super::push_journal::Journal::open(&store.dir)?;
@@ -475,7 +494,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 let handles: Vec<_> = batch
                     .iter()
                     .map(|(expected, tip)| {
-                        scope.spawn(move || Ok(backend.list(&format!("states/{tip}/"))?.iter().any(|object| &object.key == expected)))
+                        scope.spawn(move || {
+                            Ok(backend.list(&format!("states/{tip}/"))?.iter().any(|object| &object.key == expected))
+                        })
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("tip check panicked")))).collect()
@@ -640,7 +661,10 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                                 pushed = Some(restored);
                             }
                             Err(e) => {
-                                eprintln!("layr: the remote tree of {} cannot be read ({e:#}); a complete tree goes instead", crate::ids::short(&id));
+                                eprintln!(
+                                    "layr: the remote tree of {} cannot be read ({e:#}); a complete tree goes instead",
+                                    crate::ids::short(&id)
+                                );
                                 index.remove(&id);
                                 present.remove(&id);
                             }
@@ -1106,6 +1130,19 @@ fn push_failpoint(point: &str, state: &str) {
         std::process::Command::new("kill").args(["-KILL", &std::process::id().to_string()]).status().unwrap();
     }
     let _ = (point, state);
+}
+
+/// Registers this machine's signing key with Layr Cloud once per key (docs/remotes.md, "Machine key"). The
+/// `machine-key` file of the remote folder remembers the key that the server took.
+fn register_machine(store: &Store, api: &super::api::Api) -> Result<()> {
+    let public = hex::encode(store.key.verifying_key().to_bytes());
+    let marker = store.dir.join("machine-key");
+    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == public) {
+        return Ok(());
+    }
+    api.register_machine(&store.machine, &store.key.verifying_key())?;
+    std::fs::write(marker, &public)?;
+    Ok(())
 }
 
 fn put_part(
@@ -1997,7 +2034,7 @@ mod tests {
         let (_, _, tree) = reader.tree(&id, &pushed.attempt).unwrap();
         assert_eq!(reader.read(&tree.files["a"]).unwrap(), content.as_bytes());
         // A remote added as Secret refuses this plain store, and a Private remote refuses a Secret store.
-        store.require_mode(Some(format::Mode::Secret));
+        store.require_mode(Some(format::Mode::Secret)).unwrap();
         assert!(store.descriptor().err().unwrap().to_string().contains("store mode differs"));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2096,7 +2133,12 @@ mod tests {
         store.backend = super::super::backend::Backend::file(destination.into());
         let identity = keys::generate_identity();
         let paper = keys::generate_identity();
-        let descriptor = Descriptor { format: 2, project: store.project.clone(), recipient: keys::recipient_of(&identity).unwrap(), mode: Default::default() };
+        let descriptor = Descriptor {
+            format: 2,
+            project: store.project.clone(),
+            recipient: keys::recipient_of(&identity).unwrap(),
+            mode: Default::default(),
+        };
         let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(paper_file).unwrap();
         writeln!(output, "{}", keys::words_of_identity(&paper).unwrap()).unwrap();
         store

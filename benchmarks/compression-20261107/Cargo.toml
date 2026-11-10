@@ -1,0 +1,9 @@
+[package]
+name = "zbench"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+zstd = { version = "0.13", features = ["zdict_builder"] }
+[profile.release]
+opt-level = 3
+[workspace]

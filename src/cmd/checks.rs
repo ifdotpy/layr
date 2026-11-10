@@ -175,19 +175,45 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks run --state <rev> [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> (--code <join code>|--code-file <path>) --project <a,b> [--name <runner name>] [--no-start] [--json]\n       layr checks run --state <rev> [--required-checks <names> | --planned-only] [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--passing] [--required-checks <names>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    // `join`: make this store a check runner of a Layr Cloud gateway (src/runner.rs).
+    if args.first().is_some_and(|a| a == "join") {
+        return crate::runner::join(ctx, &args[1..]);
+    }
     let a = parse(
-        &Spec::new().flag("--once").flag("--json").flag("--privileged-only").value("--interval").value("--state").value("--platform"),
+        &Spec::new()
+            .flag("--once")
+            .flag("--json")
+            .flag("--privileged-only")
+            .flag("--passing")
+            .flag("--planned-only")
+            .value("--interval")
+            .value("--state")
+            .value("--platform")
+            .value("--required-checks"),
         args,
     )?;
-    if a.pos == ["pending"] && a.paths.is_empty() && !a.has("--once") && !a.has("--privileged-only") && a.get("--interval").is_none() {
+    if a.pos == ["pending"]
+        && a.paths.is_empty()
+        && !a.has("--once")
+        && !a.has("--privileged-only")
+        && !a.has("--planned-only")
+        && a.get("--interval").is_none()
+    {
         return pending(ctx, &a);
     }
     // `run`: one pass over the jobs of one exact state, such as a commit that CI fetched from Git.
     let run = a.pos == ["run"];
-    if !(a.pos == ["watch"] || run) || !a.paths.is_empty() || a.get("--state").is_some() != run || a.get("--platform").is_some() {
+    if !(a.pos == ["watch"] || run)
+        || !a.paths.is_empty()
+        || a.get("--state").is_some() != run
+        || a.get("--platform").is_some()
+        || a.has("--passing")
+        || (a.get("--required-checks").is_some() && !run)
+        || (a.has("--planned-only") && (!run || a.get("--required-checks").is_some()))
+    {
         return Err(exit(128, USAGE));
     }
     if run && (a.has("--once") || a.get("--interval").is_some()) {
@@ -206,6 +232,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
     let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let required = required_checks(a.get("--required-checks"), state.as_deref(), true)?;
     // Match the queue runner: one watcher per project without holding the project write lock.
     let lock =
         std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(h.repo.p.meta_dir().join("checks.lock"))?;
@@ -214,7 +241,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     loop {
         let h = here(ctx)?;
         h.repo.require(ctx, "try")?;
-        let results = scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref())?;
+        let results = scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref(), &required, a.has("--planned-only"))?;
         if a.has("--json") {
             outln!(
                 ctx,
@@ -253,9 +280,13 @@ fn pending(ctx: &Ctx, a: &Parsed) -> Result<i32> {
     let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let have = a.get("--platform").map_or_else(platform, str::to_owned);
     if !PLATFORMS.iter().any(|p| p.contains('-') && *p == have) {
-        bail!("--platform must be one of {}", PLATFORMS.iter().filter(|p| p.contains('-')).copied().collect::<Vec<_>>().join(", "));
+        bail!(
+            "--platform must be one of {}",
+            PLATFORMS.iter().filter(|p| p.contains('-')).copied().collect::<Vec<_>>().join(", ")
+        );
     }
-    let Plan { jobs, commands, privileged, .. } = plan(&h.repo, state.as_deref())?;
+    let required = required_checks(a.get("--required-checks"), state.as_deref(), a.has("--passing"))?;
+    let Plan { policy, jobs, commands, privileged, change_jobs, .. } = plan(&h.repo, state.as_deref(), &required, false)?;
     let mut out = Vec::new();
     for (state, name, want) in jobs {
         if want.as_deref().is_some_and(|want| !meets(want, &have)) {
@@ -263,18 +294,31 @@ fn pending(ctx: &Ctx, a: &Parsed) -> Result<i32> {
         }
         let argv = layr_model::protection::check_argv(&commands[&name]);
         let is_privileged = privileged.contains(&name);
-        if !attested(&h.repo, &state, &argv, is_privileged, want.as_deref())? {
-            out.push(json!({"state":state,"name":name,"command":commands[&name],"argv":argv,"privileged":is_privileged,"platform":want}));
+        if !attested_result(&h.repo, &state, &argv, is_privileged, want.as_deref(), a.has("--passing"))? {
+            let change = change_jobs.contains(&(state.clone(), name.clone()));
+            out.push(json!({"state":state,"name":name,"command":commands[&name],"argv":argv,"privileged":is_privileged,"platform":want,"change":change}));
         }
     }
     if a.has("--json") {
-        outln!(ctx, "{}", json!({"platform":have,"pending":out}));
+        let mut result = json!({"platform":have,"pending":out});
+        if !required.is_empty() {
+            let platforms = setting(&policy, "checks.platforms", json!({}))?;
+            result["required_definitions"] = json!(required_definitions(&required, &commands, &platforms));
+        }
+        outln!(ctx, "{}", result);
     } else {
         for job in &out {
             outln!(ctx, "{}\t{}", job["name"].as_str().unwrap_or(""), job["state"].as_str().unwrap_or(""));
         }
     }
     Ok(0)
+}
+
+fn required_definitions(required: &[String], commands: &BTreeMap<String, String>, platforms: &Value) -> BTreeMap<String, Value> {
+    required
+        .iter()
+        .map(|name| (name.clone(), json!({"command": commands[name], "platforms": platforms.get(name.as_str()).cloned()})))
+        .collect()
 }
 
 fn setting(policy: &layr_model::Project, key: &str, default: Value) -> Result<Value> {
@@ -296,13 +340,31 @@ struct Plan {
     main_states: BTreeSet<String>,
     /// The heads (also intermediate) of the protected lines in `checks.lines`, with the line name.
     heads: BTreeMap<String, String>,
-    jobs: BTreeSet<(String, String, Option<String>)>,
+    jobs: Vec<(String, String, Option<String>)>,
+    /// State and check pairs for the newest version of an open change.
+    change_jobs: BTreeSet<(String, String)>,
     commands: BTreeMap<String, String>,
     privileged: BTreeSet<String>,
 }
 
 /// `state`: also plan the change checks (`checks.changes`) of that one state.
-fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
+fn required_checks(value: Option<&str>, state: Option<&str>, passing: bool) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if state.is_none() || !passing || value.is_empty() {
+        bail!("--required-checks needs --state, --passing and a comma-separated list of check names");
+    }
+    value
+        .split(',')
+        .map(|name| {
+            crate::oci::valid_component(name)?;
+            Ok(name.to_string())
+        })
+        .collect()
+}
+
+fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: bool) -> Result<Plan> {
     let records = repo
         .p
         .db
@@ -317,8 +379,9 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
     let privileged: BTreeSet<_> =
         names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?.into_iter().collect();
     let mut jobs = BTreeSet::new();
-    if let Some(state) = state {
-        for name in &changes {
+    let mut change_jobs = BTreeSet::new();
+    if let Some(state) = state.filter(|_| !planned_only) {
+        for name in changes.iter().chain(required) {
             jobs.insert((state.to_owned(), name.clone()));
         }
     }
@@ -327,14 +390,18 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
     if !changes.is_empty() {
         let merged = protected_history(repo, &policy)?;
         for change in repo.p.db.changes()? {
-            let Some(newest) = repo.p.db.change_versions(&change)?.pop() else { continue };
+            let Some(newest) = repo.p.db.change_versions(&change)?.pop() else {
+                continue;
+            };
             if merged.contains(&newest.id)
                 || newest.line.as_deref().map(|l| repo.p.db.line_deleted(l)).transpose()?.unwrap_or(false)
             {
                 continue;
             }
             for name in &changes {
-                jobs.insert((newest.id.clone(), name.clone()));
+                let job = (newest.id.clone(), name.clone());
+                jobs.insert(job.clone());
+                change_jobs.insert(job);
             }
         }
     }
@@ -407,12 +474,17 @@ fn plan(repo: &Repo, state: Option<&str>) -> Result<Plan> {
         }
     }
     // Newest states first (state ids grow with time): a new change is checked before an old one.
-    let jobs = jobs
-        .into_iter()
+    let jobs = order_jobs(jobs, &platforms);
+    Ok(Plan { policy, main_states, heads, jobs, change_jobs, commands, privileged })
+}
+
+fn order_jobs(jobs: BTreeSet<(String, String)>, platforms: &Value) -> Vec<(String, String, Option<String>)> {
+    let mut seen = BTreeSet::new();
+    jobs.into_iter()
         .rev()
-        .flat_map(|(state, name)| platforms_of(&platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
-        .collect();
-    Ok(Plan { policy, main_states, heads, jobs, commands, privileged })
+        .flat_map(|(state, name)| platforms_of(platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
+        .filter(|job| seen.insert(job.clone()))
+        .collect()
 }
 
 /// The states in the history of the heads of the protected lines.
@@ -435,18 +507,58 @@ fn protected_history(repo: &Repo, policy: &layr_model::Project) -> Result<BTreeS
 /// `privileged` on a platform that meets `want` (None: any). A trusted machine signed it, so it
 /// counts on every machine, the laptop and CI alike.
 fn attested(repo: &Repo, state: &str, argv: &[String], privileged: bool, want: Option<&str>) -> Result<bool> {
-    if repo.p.db.check_exit(state, argv, None)?.is_none() {
+    attested_result(repo, state, argv, privileged, want, false)
+}
+
+fn attested_result(
+    repo: &Repo,
+    state: &str,
+    argv: &[String],
+    privileged: bool,
+    want: Option<&str>,
+    passing: bool,
+) -> Result<bool> {
+    if repo.p.db.check_exit(state, argv, if passing { Some(0) } else { None })?.is_none() {
         return Ok(false);
     }
     let subject = Subject { kind: "state".into(), id: state.to_owned() };
-    Ok(crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {
-        let check = &r.data["check"];
-        check["executor"] == true
-            && check["argv"] == json!(argv)
-            && check["privileged"] == privileged
-            && check["exit"].as_i64().is_some()
-            && want.is_none_or(|want| check["platform"].as_str().is_some_and(|have| meets(want, have)))
-    }))
+    Ok(crate::probes::active_checks(repo, &subject)?
+        .into_values()
+        .any(|(_, r)| matches_check(&r.data["check"], argv, privileged, want, passing)))
+}
+
+/// A queue gate uses the creator's privilege policy and requires a passing executor result.
+pub(crate) fn passing_required(repo: &Repo, state: &str, name: &str, argv: &[String], want: Option<&str>) -> Result<bool> {
+    let records = repo
+        .p
+        .db
+        .all_lines()?
+        .iter()
+        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
+        .collect::<Result<Vec<_>>>()?;
+    let (policy, _) = creator_policy(&repo.p.id, records)?;
+    let privileged = names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?;
+    attested_result(repo, state, argv, privileged.iter().any(|check| check == name), want, true)
+}
+
+pub(crate) fn creator_project(repo: &Repo) -> Result<layr_model::Project> {
+    let records = repo
+        .p
+        .db
+        .all_lines()?
+        .iter()
+        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
+        .collect::<Result<Vec<_>>>()?;
+    let (policy, _) = creator_policy(&repo.p.id, records)?;
+    Ok(policy)
+}
+
+fn matches_check(check: &Value, argv: &[String], privileged: bool, want: Option<&str>, passing: bool) -> bool {
+    check["executor"] == true
+        && check["argv"] == json!(argv)
+        && check["privileged"] == privileged
+        && check["exit"].as_i64().is_some_and(|exit| !passing || exit == 0)
+        && want.is_none_or(|want| check["platform"].as_str().is_some_and(|have| meets(want, have)))
 }
 
 /// An entry of `checks.after`: `<check>` or `<check>@<platform>`.
@@ -475,7 +587,8 @@ fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMa
         return Ok(Needs::Ready);
     };
     let subject = Subject { kind: "state".into(), id: state.to_owned() };
-    let results: Vec<Value> = crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
+    let results: Vec<Value> =
+        crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
     for need in list.iter().filter_map(Value::as_str) {
         let (check, platform) = split_need(need);
         let Some(command) = commands.get(check) else {
@@ -506,8 +619,16 @@ fn tell_pending(state: &str, name: &str, why: &str) {
 }
 
 /// One pass of the executor: runs the jobs that no attestation covers, of every state or of `state` only.
-fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> Result<Scan> {
-    let Plan { policy, main_states, heads, jobs, commands, privileged } = plan(repo, state)?;
+fn scan(
+    ctx: &Ctx,
+    repo: &Repo,
+    privileged_only: bool,
+    state: Option<&str>,
+    required: &[String],
+    planned_only: bool,
+) -> Result<Scan> {
+    let explicit_state = state.is_some();
+    let Plan { policy, main_states, heads, jobs, commands, privileged, .. } = plan(repo, state, required, planned_only)?;
     let here = platform();
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
@@ -548,10 +669,16 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
                 continue;
             }
         }
-        // Collected sources have metadata but cannot be executed. Never attest them as passing.
+        // Explicit requests can restore an older source from the remote. A watcher must not
+        // fetch every historical source as it scans for work.
         if !repo.tree_available(&state) {
-            eprintln!("layr checks: source unavailable for {state} ({name})");
-            continue;
+            if explicit_state {
+                repo.check_view_read(ctx, &crate::overlay::View::new(state.clone(), vec![]))?;
+                repo.state_root(&state).with_context(|| format!("cannot restore source for {state} ({name})"))?;
+            } else {
+                eprintln!("layr checks: source unavailable for {state} ({name})");
+                continue;
+            }
         }
         repo.check_view_read(ctx, &crate::overlay::View::new(state.clone(), vec![]))?;
         let host_allowed = (!cfg!(target_os = "macos") || !is_privileged)
@@ -568,7 +695,11 @@ fn scan(ctx: &Ctx, repo: &Repo, privileged_only: bool, state: Option<&str>) -> R
             } else if is_privileged && !local.privileged {
                 "this machine is no privileged runner (layr config --local checks.privileged-runner true)".to_string()
             } else {
-                let host = if cfg!(target_os = "macos") { "macOS runs checks without a sandbox" } else { "a privileged check runs as root" };
+                let host = if cfg!(target_os = "macos") {
+                    "macOS runs checks without a sandbox"
+                } else {
+                    "a privileged check runs as root"
+                };
                 format!("{host}, so only a state of main or a state that a maintainer approved runs here (layr approve, or layr try <state> --check {name})")
             };
             tell_pending(&state, &name, &why);
@@ -793,10 +924,38 @@ fn execute(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
     match save_back_caches(ctx, repo, line, state, dir) {
-        Ok((_, saved)) if saved.is_empty() => eprintln!("layr checks: caches of {state} not saved: the check left no cache folder"),
+        Ok((_, saved)) if saved.is_empty() => {
+            eprintln!("layr checks: caches of {state} not saved: the check left no cache folder")
+        }
         Ok(_) => {}
         Err(e) => eprintln!("layr checks: caches of {state} not saved: {e:#}"),
     }
+}
+
+/// The state, a descendant of `state`, whose caches the overlay lines of `checks_line` hold now for one of
+/// `folders`.
+fn newer_cache_given_back(
+    repo: &Repo,
+    checks_line: &crate::model::Line,
+    state: &str,
+    folders: &[String],
+) -> Result<Option<String>> {
+    for (name, folder) in repo.folder_overlays()? {
+        if !folders.contains(&folder) {
+            continue;
+        }
+        let info = repo.need_overlay(&name)?;
+        let orepo = repo.overlay_repo(&name)?;
+        let line_name = Repo::overlay_line_name(&info, &checks_line.id, checks_line.owner);
+        let Some(ol) = orepo.p.db.line_by_name(&line_name)? else { continue };
+        let Some(head) = orepo.p.db.state(&ol.head)? else { continue };
+        if let Some(of) = head.cache_of {
+            if of != state && repo.is_ancestor(state, &of)? {
+                return Ok(Some(of));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// `save_back` for any caller (`checks run`, `save --caches --save-back`): the save-back line's name and the saved
@@ -820,7 +979,9 @@ pub(crate) fn save_back_caches(
     let gid = crate::ctx::Caller::from_uid(ctx.caller.uid).gid;
     let mut folders = Vec::new();
     for folder in paths {
-        let Ok(path) = crate::fsutil::safe_join(dir, &folder) else { continue };
+        let Ok(path) = crate::fsutil::safe_join(dir, &folder) else {
+            continue;
+        };
         if !path.is_dir() {
             continue;
         }
@@ -844,6 +1005,11 @@ pub(crate) fn save_back_caches(
         Some(l) => l,
         None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
     };
+    // Checks run newest state first: the cache of an older head saved last would replace (and free) the
+    // cache that a newer head gave back, and `line new` from that head would start cold.
+    if let Some(newer) = newer_cache_given_back(repo, &checks_line, state, &folders)? {
+        bail!("the newer head {} gave its caches back already", crate::ids::short(&newer));
+    }
     let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
     Ok((name, saved))
 }
@@ -868,6 +1034,8 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow mach-lookup)
 (allow sysctl-read)
 (allow system-info (info-type "vfs.disk-space"))
+(allow network-bind (local unix-socket (path-prefix {socket_prefix})))
+(allow network-outbound (remote unix-socket (path-prefix {socket_prefix})))
 (allow file-read-metadata)
 (allow file-read*
     (literal "/")
@@ -893,7 +1061,8 @@ fn macos_profile(work: &std::path::Path, seed: &std::path::Path) -> Result<Strin
 (allow network-outbound (remote unix-socket (subpath "/Volumes/LayrRunnerCase")))
 "#,
         work = quote(work)?,
-        seed = quote(seed)?
+        seed = quote(seed)?,
+        socket_prefix = serde_json::to_string(&format!("{}/", work.display()))?
     ))
 }
 
@@ -1078,7 +1247,9 @@ mod macos_tests {
 
     #[test]
     fn sandbox_refuses_network_and_writes_outside_work() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("layr-sandbox-test-{}", crate::ids::new_id()));
+        // macOS gives TMPDIR a long path; leave room for the Unix socket names.
+        let name = crate::ids::display(&crate::ids::new_id());
+        let root = std::env::temp_dir().join(format!("ls-{}", &name[..16]));
         std::fs::create_dir(&root)?;
         let cleanup = crate::repo::Temp { path: root.clone() };
         let work = root.join("work");
@@ -1109,6 +1280,22 @@ mod macos_tests {
             port.as_ref()
         ])?
         .success());
+        // Checks may use a socket in their private work tree, but not reach a
+        // socket outside it through a symlink.
+        let local = work.join("test.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&local)?;
+        let worker = std::thread::spawn(move || -> std::io::Result<()> {
+            let (stream, _) = listener.accept()?;
+            drop(stream);
+            Ok(())
+        });
+        assert!(status(&["/usr/bin/nc".as_ref(), "-U".as_ref(), local.as_os_str()])?.success());
+        worker.join().unwrap()?;
+        let external = root.join("external.sock");
+        let _external = std::os::unix::net::UnixListener::bind(&external)?;
+        let link = work.join("external-link.sock");
+        std::os::unix::fs::symlink(&external, &link)?;
+        assert!(!status(&["/usr/bin/nc".as_ref(), "-U".as_ref(), link.as_os_str()])?.success());
         drop(cleanup);
         Ok(())
     }
@@ -1117,6 +1304,50 @@ mod macos_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    #[test]
+    fn required_definitions_include_commands_and_platforms() {
+        let required = vec!["unit".to_string(), "apfs".to_string()];
+        let commands =
+            BTreeMap::from([("unit".to_string(), "cargo test".to_string()), ("apfs".to_string(), "apfs-test".to_string())]);
+        let definitions = required_definitions(&required, &commands, &json!({"apfs": "macos-aarch64"}));
+        assert_eq!(definitions["unit"], json!({"command": "cargo test", "platforms": null}));
+        assert_eq!(definitions["apfs"], json!({"command": "apfs-test", "platforms": "macos-aarch64"}));
+    }
+
+    #[test]
+    fn required_checks_need_a_state_passing_and_valid_names() {
+        assert_eq!(required_checks(Some("unit,apfs"), Some("state"), true).unwrap(), vec!["unit", "apfs"]);
+        assert!(required_checks(Some("unit"), None, true).is_err());
+        assert!(required_checks(Some("unit"), Some("state"), false).is_err());
+        assert!(required_checks(Some(""), Some("state"), true).is_err());
+        assert!(required_checks(Some("unit,,apfs"), Some("state"), true).is_err());
+    }
+
+    #[test]
+    fn passing_checks_require_a_matching_successful_executor() {
+        let argv = vec!["sh".to_string(), "-c".to_string(), "test".to_string()];
+        let mut check = json!({"executor": true, "argv": argv, "privileged": false,
+                               "exit": 1, "platform": "macos-aarch64"});
+        assert!(matches_check(&check, &argv, false, Some("macos-aarch64"), false));
+        assert!(!matches_check(&check, &argv, false, Some("macos-aarch64"), true));
+        check["exit"] = json!(0);
+        assert!(matches_check(&check, &argv, false, Some("macos-aarch64"), true));
+        assert!(!matches_check(&check, &argv, false, Some("linux-x86_64"), true));
+        assert!(!matches_check(&check, &argv, true, Some("macos-aarch64"), true));
+        check["executor"] = json!(false);
+        assert!(!matches_check(&check, &argv, false, Some("macos-aarch64"), true));
+    }
+
+    #[test]
+    fn newest_state_checks_run_first() {
+        let jobs = BTreeSet::from([("001-old".to_string(), "unit".to_string()), ("002-new".to_string(), "unit".to_string())]);
+        let planned = order_jobs(jobs, &json!({"unit": ["linux-x86_64", "linux-aarch64", "linux-x86_64"]}));
+        assert_eq!(
+            planned.iter().map(|job| job.0.as_str()).collect::<Vec<_>>(),
+            vec!["002-new", "002-new", "001-old", "001-old"]
+        );
+    }
 
     fn record(machine: &str, op: &str, data: Value) -> crate::model::Record {
         let mut record = crate::model::Record::new(op);

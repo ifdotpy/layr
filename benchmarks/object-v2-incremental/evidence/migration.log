@@ -1,0 +1,76 @@
+Merge made by the 'layr' strategy: 877864d
+ file2.txt      | 0
+ notes-hard.txt | 1 +
+ notes.txt      | 1 +
+ staged.txt     | 1 +
+ topic.txt      | 1 +
+ 5 files changed, 4 insertions(+)
+ create mode 100644 staged.txt
+ create mode 100644 topic.txt
+PASS the merge state has two parents
+PASS dry run says nothing changes
+PASS migration targets object store v2
+PASS dry run names the states to migrate
+PASS dry run writes no record
+PASS dry run changes no file of the project
+PASS dry run makes no object store
+PASS dry run leaves the unsaved file unsaved
+PASS migrate refuses while a command holds the project lock
+PASS and says why
+PASS the refused run made no object store
+PASS the injected interruption stops the run
+PASS the run saved the unsaved work of a line folder first
+PASS the table holds the verified states
+PASS no state record has a tree yet (the record batch did not run)
+PASS a plain run refuses an interrupted migration
+PASS and names --resume
+PASS migration reports object store v2
+PASS migration writes the v2 object config
+PASS --resume finishes
+PASS it records the 3 states of the first run
+PASS every source state has a tree and a times table
+PASS the table has one line per state
+PASS the run marker is gone
+PASS dry run preserves the experimental object marker
+PASS normal open upgrades the experimental marker to v2
+PASS line heads keep their state ids
+PASS tags keep their state ids
+PASS the repack left no loose object
+PASS a second run has nothing to do
+PASS every checkout equals its snapshot, time for time
+PASS at least one state per save was compared by the second walk
+PASS a hard link group stays a group
+PASS a symbolic link stays a link
+PASS an empty folder stays
+PASS an extended attribute stays
+PASS the source snapshot keeps the hard link after a content change
+PASS both hard link names have the new content
+PASS the source snapshot has the file attribute change
+PASS the source snapshot keeps the hard link after an attribute change
+PASS the source snapshot has the directory attribute change
+PASS the already staged file stays
+PASS a file attribute change stays
+PASS a directory attribute change stays
+PASS a file attribute removal stays
+PASS a directory attribute removal stays
+PASS add -u keeps the file attribute
+PASS add -u keeps both linked names
+PASS --delete-old deletes the old snapshots
+PASS the first state had a snapshot
+PASS the snapshot of the first state is gone
+PASS and it has no thin layer
+PASS show reads a file of a deleted snapshot from the objects
+PASS and builds no snapshot for it
+PASS show lists a folder from the objects
+PASS show reads a link target
+PASS show of a missing path fails
+PASS show of a line head still works
+PASS line new from a deleted snapshot checks out the tree
+PASS and builds no snapshot for the state
+PASS nor a thin layer
+PASS with the times of the state
+PASS the new line is clean
+PASS diff between two migrated states (snapshots made again from the objects)
+PASS fsck passes after the migration
+PASS gc passes after the migration
+t202-migrate.sh: 66 passed, 0 failed

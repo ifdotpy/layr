@@ -11,7 +11,7 @@ is the layr side.
 All of them run without a prompt; `--json` prints one object.
 
 - `layr remote trust <remote> <machine> --public-key <hex> --expires <RFC 3339 time or duration>
-  [--role reader|writer] [--overlays <name>,<name>] [--json]`. Without any of these flags the trust
+  [--role reader|writer|merge] [--overlays <name>,<name>] [--json]`. Without any of these flags the trust
   is full and has no end, as before. With one of them the default role is `reader`; `--overlays`
   names the cache overlays the machine reads (and, as a writer, writes); without it, all of them.
 - `layr access grant machine:<broker> trust --max-hours <n> --role reader|writer
@@ -71,6 +71,73 @@ All of them run without a prompt; `--json` prints one object.
 8. The gateway lets a job write only the record segments of its own machine: a clone takes every machine of the
    records it reads (`Trust::All`).
 
+## Merge machines
+
+A queue merge executor (the Layr Cloud merge job) needs to publish merges and releases, but not to change
+project policy. Give it the `merge` role: `layr remote trust <remote> <machine> --role merge`, and name it with
+`layr config queue.merge-machine <machine>`. The command also narrows a machine that is already fully trusted:
+it writes a second trust record, and the narrowest limits win (rule 5). Push the record.
+
+A record of a merge machine counts only when it is one of these, and only in the project log. Each check reads
+the reader's own state, never the `before` values that the record claims. Import uses the derived tables.
+Release verification replays accepted full and merge records in time, machine and sequence order:
+
+
+- `queue.result` that ends an entry the reader has as pending (`done` or `failed`), with the entry's other fields
+  unchanged. It may release that entry's hold (`holds/queue/<entry>`). A `done` result may move the entry's
+  target line to the result. The line keeps its name and its home machine, or becomes the merge machine's line,
+  as any machine that makes a working folder of a line adopts it. Its owner stays, or becomes root (a queue runner
+  as root): a root-owned line gives no user a right, and any other uid would give that uid the line elsewhere;
+- `merge.candidate`, which makes states and moves no line;
+- `attest` with the evidence of a person-signed request (`request` and `person_key`); readers check it against
+  the person key in the project;
+- `ref.set` of a `release/` ref that the reader does not have, without an end. A set of the target the reader
+  has is a retry. A merge machine never moves or deletes a release ref;
+- `release.files` for a release ref that the merge machine itself set, at the list's state. An attach replaces
+  the list, so the files of a release that another machine made stay out of its reach;
+- `request.refused`, `config`, `push` and `machine`, which make no state and move no line.
+
+Any other record of a merge machine has no effect: it makes, renames or deletes no line, changes no other ref or
+line, writes no overlay and carries no queue change or attestation outside these records. Its `config` is
+namespaced as for any other machine. It trusts nobody. A broker cannot hand out the role (`access grant ...
+trust --role merge` is refused); only a full machine's own trust makes a merge machine, and only of a machine
+without limits. After an untrust or the end of its trust the machine is no release writer.
+
+A merge machine's record signed more than ten minutes after the reader's clock has no effect, and a merge
+result carries no overlay stack. A retry by the same machine keeps its ref authority. A same-target set by another machine removes sole
+setter authority for that target run. Further retries do not restore it. A reader gives no local right to the owner of a
+line whose home is another machine: that owner is a user of the other machine.
+
+Release verification keeps queue fields as signed JSON. It updates line metadata after each accepted record.
+It checks ref expiry at that record time; the future-record limit uses the current clock. A later full-writer
+queue removal or ref change does not erase an earlier accepted merge or release file list.
+
+Known limit: an import checks a merge record against the state when it arrives, and an index rebuild checks it in
+time order. When records arrive out of time order, two readers can disagree about a merge record (for example a
+queue result that arrives after a later removal of its entry). A merge machine signs its own record times, so an
+old time is part of this limit. The file list rule therefore needs every record of the newest run that set the
+release ref's target to be of the merge machine; a retry beside another machine's set gives no right.
+
+A root-owned target line has two effects on machines other than its home, as with a root merge job of full
+trust before this role: a non-root user there cannot merge into the line (`authorize_line` refuses every non-root
+user on a root-owned line), and the overlay checks of the line (`project_reads`, `readable_layers`,
+`check_stack`) use root's read rights, so the hidden overlay lines named for owner 0 belong to its stack. Users
+still see only the overlays they read.
+
+Known limit: a full machine that adopts a line can still give its owner uid, which is a user of that machine, line
+rights on other machines through `authorize_line`. This is older than the merge role.
+
+Owner checks (`fsck`) and the key reader lists read the records outside an ordered replay. There a merge
+machine's record is checked by its shape only, which accepts at least what the replay accepts, so these lists
+never lose a state that the replay keeps.
+
+`release verify-main`, `release attach` and `release publish-public` take a merge machine as a writer: the
+release ref and the queue completion of the merge machine count when its terms accept the record, and the
+release state must be in the accepted main history.
+
+Clients older than this role read `"role":"merge"` as an unknown role and take the machine as full. Upgrade every
+machine that verifies releases before it relies on the limits.
+
 ## Tests
 
 - A job machine with `--expires 2s`: its records before the expiry import, a record after it is
@@ -80,3 +147,6 @@ All of them run without a prompt; `--json` prints one object.
 - A writer job saves caches with `--save-back main`; a reader takes them. A writer record that
   makes a source state or deletes a line is refused.
 - `untrust` then push: the overlays the machine could read have a new epoch.
+- A full machine narrowed to `merge`: its release ref arrives, its other ref and its new line do not, and a
+  broker cannot delegate the role (`tests/t171-ci-trust.sh`). The Cloud V1 interoperability test publishes a
+  checked release through a merge machine without full trust.

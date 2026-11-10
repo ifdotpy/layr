@@ -118,9 +118,49 @@ cleanup() {
     fi
     cd /
     if [ "$(uname -s)" = Darwin ]; then
+        # Sealed entries carry the immutable flag (the root, an older store) or a deny ACL entry.
         chflags -R nouchg "$T" 2>/dev/null || true
+        /bin/chmod -R -N "$T" 2>/dev/null || true
         chmod -R u+w "$T" 2>/dev/null || true
         rm -rf "$T"
+        return
+    fi
+    if [ "${LAYR_TEST_BTRFS_CLEANUP:-}" = 1 ]; then
+        # Only an isolated test folder directly under TMPDIR may use this path.
+        local base name private trash mounts contents
+        base=$(cd "${TMPDIR:?}" && pwd -P) || exit 1
+        case "$T" in "$base"/layr-test.*) name=${T#"$base"/} ;; *) echo "FATAL: test folder is outside TMPDIR: $T" >&2; exit 1 ;; esac
+        case "$name" in */*) echo "FATAL: invalid test folder: $T" >&2; exit 1 ;; esac
+        mounts=$(findmnt -J -o TARGET) || { echo 'FATAL: cannot inspect test mounts' >&2; exit 1; }
+        if ! printf '%s\n' "$mounts" | python3 -c '
+import json, sys
+root = sys.argv[1]
+def check(items):
+    for item in items:
+        target = item["target"]
+        if target == root or target.startswith(root + "/") or check(item.get("children", [])):
+            return True
+    return False
+sys.exit(1 if check(json.load(sys.stdin)["filesystems"]) else 0)
+' "$T"; then
+            echo "FATAL: test folder contains a mount or the mount list is invalid: $T" >&2
+            exit 1
+        fi
+        private=$(mktemp -d "$base/layr-fixture-clean.XXXXXX") || exit 1
+        trash="$private/trash"
+        mkdir "$trash" || exit 1
+        mv -- "$T" "$trash/test" || { echo "FATAL: cannot move test folder to $trash" >&2; exit 1; }
+        "$LAYR" __empty-trash "$trash" || { echo "FATAL: cannot empty $trash" >&2; exit 1; }
+        contents=$(ls -A "$trash") || { echo "FATAL: cannot inspect $trash" >&2; exit 1; }
+        if [ -n "$contents" ] || [ -s "$private/trash.errors" ]; then
+            echo "FATAL: test cleanup left files in $trash" >&2
+            [ ! -f "$private/trash.errors" ] || cat "$private/trash.errors" >&2
+            exit 1
+        fi
+        rmdir "$trash" || exit 1
+        [ ! -f "$private/trash.lock" ] || unlink "$private/trash.lock" || exit 1
+        [ ! -f "$private/trash.errors" ] || unlink "$private/trash.errors" || exit 1
+        rmdir "$private" || exit 1
         return
     fi
     for mp in $(findmnt -rn -o TARGET | grep "^$T" | sort -r); do umount -l "$mp" 2>/dev/null; done

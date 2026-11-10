@@ -1,6 +1,7 @@
 //! layr-retest: run only the tests that a change can affect. See docs/retest.md.
 //! Uses the public `layr` CLI, `cargo nextest` and the LLVM tools. No internal crate of layr.
 
+mod cover;
 mod deps;
 mod doctor;
 mod gate;
@@ -61,6 +62,8 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("doctor") => doctor::run(&args[1..]),
         Some("sweep") => sweep_cmd(&args[1..]),
         Some("prune") => prune_cmd(&args[1..]),
+        // The cargo script of a gate (`cover`): records a call, then runs the real cargo.
+        Some("record-cargo") => cover::record(&args[1..]),
         _ => {
             eprintln!(
                 "usage: layr retest run [--full] [--save] [--tool vitest|jest|pytest] [-- <nextest args>]\n       layr retest gate [--name <n>] [--max-load <n>] -- <command...>\n       layr retest init [--yes]\n       layr retest doctor\n       layr retest sweep [--dry-run]\n       layr retest prune <folder> [--adapter cargo|pnpm|none]\n       layr retest wrap -- <test binary> <args>"
@@ -81,7 +84,8 @@ fn tools_on_path() {
         return;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let proxies = [PathBuf::from("/opt/homebrew/opt/rustup/bin"), PathBuf::from("/usr/local/opt/rustup/bin"), home.join(".cargo/bin")];
+    let proxies =
+        [PathBuf::from("/opt/homebrew/opt/rustup/bin"), PathBuf::from("/usr/local/opt/rustup/bin"), home.join(".cargo/bin")];
     let found = proxies.iter().find(|d| has(d)).cloned().or_else(|| {
         // rustup on PATH or in a proxy folder, without a cargo proxy next to it: its active toolchain's folder.
         let rustups = std::env::split_paths(&path).chain(proxies.iter().cloned()).map(|d| d.join("rustup"));
@@ -190,7 +194,9 @@ fn save_records() {
         return;
     }
     if let Err(e) = layr(&["save", "--caches", "--cache", record::RECORD_DIR]) {
-        eprintln!("layr-retest: warning: records are not in the cache overlay (needs a layr with `save --caches --cache`): {e:#}");
+        eprintln!(
+            "layr-retest: warning: records are not in the cache overlay (needs a layr with `save --caches --cache`): {e:#}"
+        );
     }
 }
 
@@ -289,7 +295,15 @@ fn cov_export(tools: &(PathBuf, PathBuf), bin: &Path, others: &[PathBuf], data: 
 }
 
 /// Coverage of one test, from its raw profile and its test binary.
-fn export(root: &Path, bin: &Path, others: &[PathBuf], libs: &[PathBuf], dir: &Path, tools: &(PathBuf, PathBuf), tables: &Tables) -> Result<Exported> {
+fn export(
+    root: &Path,
+    bin: &Path,
+    others: &[PathBuf],
+    libs: &[PathBuf],
+    dir: &Path,
+    tools: &(PathBuf, PathBuf),
+    tables: &Tables,
+) -> Result<Exported> {
     // The wrapper already merged the raw files. If it could not (it was killed), merge them here.
     let data = dir.join("merged.profdata");
     let n = match std::fs::read_to_string(dir.join(RAW_COUNT_FILE)) {
@@ -302,7 +316,9 @@ fn export(root: &Path, bin: &Path, others: &[PathBuf], libs: &[PathBuf], dir: &P
     // A dylib of the workspace runs inside the test process: it is an object of every test.
     let objects: Vec<PathBuf> = libs.iter().chain(others).cloned().collect();
     let rel = |p: &str| relative_to(root, p);
-    let lcov = String::from_utf8_lossy(&output(&mut cov_export(tools, bin, &objects, &data, &["-format=lcov", "-skip-functions"]))?).into_owned();
+    let lcov =
+        String::from_utf8_lossy(&output(&mut cov_export(tools, bin, &objects, &data, &["-format=lcov", "-skip-functions"]))?)
+            .into_owned();
     // Function ranges do not depend on the test; the profile only says which functions ran.
     let ran = parse::parse_covered(&String::from_utf8_lossy(&output(
         Command::new(&tools.0).args(["show", "--covered", "--all-functions"]).arg(&data),
@@ -358,7 +374,9 @@ fn hash_env(root: &Path) -> Result<Vec<(String, String)>> {
         env.push(("CARGO_INCREMENTAL".to_string(), "1".to_string()));
         env.push(("RUSTC_WRAPPER".to_string(), String::new()));
     }
-    env.extend(debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    env.extend(
+        debug_vars(std::env::var(LINE_TABLES_VAR).ok().as_deref()).into_iter().map(|(k, v)| (k.to_string(), v.to_string())),
+    );
     Ok(env)
 }
 
@@ -368,7 +386,9 @@ fn sweep_after_build(root: &Path, target: &Path, hash: &[(String, String)], own:
     let t = std::time::Instant::now();
     let cfg = match settings(&retest_host(), root) {
         Ok(c) if c.listed => c,
-        Ok(_) => return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml"),
+        Ok(_) => {
+            return eprintln!("layr-retest: sweep skipped: no `sweep` list under [workspace.metadata.layr-retest] in Cargo.toml")
+        }
         Err(e) => return eprintln!("layr-retest: sweep skipped: {e:#}"),
     };
     let mut env = hash.to_vec();
@@ -413,7 +433,9 @@ fn prune_cmd(args: &[String]) -> Result<i32> {
         }
     };
     match layr_cache::prune(setting, &std::env::current_dir()?.join(folder))? {
-        (adapter, layr_cache::Outcome::Pruned { freed }) => println!("{folder}: pruned with {adapter}, freed {:.1} MB", freed as f64 / 1e6),
+        (adapter, layr_cache::Outcome::Pruned { freed }) => {
+            println!("{folder}: pruned with {adapter}, freed {:.1} MB", freed as f64 / 1e6)
+        }
         (_, layr_cache::Outcome::Skipped { reason }) => println!("{folder}: skipped: {reason}"),
     }
     Ok(0)
@@ -460,7 +482,9 @@ fn sweep_cmd(args: &[String]) -> Result<i32> {
         };
         match live_units(&retest_host(), &root, &target, &env, &commands) {
             Ok(Listed::Fresh(live)) => lists.push((name, live)),
-            Ok(Listed::NotFresh(why)) => eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first"),
+            Ok(Listed::NotFresh(why)) => {
+                eprintln!("layr-retest: {name}: sweep skipped: a unit is not fresh ({why}); run the standard build first")
+            }
             Ok(Listed::Busy(holder)) => eprintln!("layr-retest: {name}: sweep skipped (build lock busy; holder: {holder})"),
             Err(e) => {
                 eprintln!("layr-retest: sweep skipped, nothing changed: {e:#}");
@@ -498,7 +522,13 @@ fn bin_targets() -> Result<Vec<(String, String)>> {
 
 /// Build file name of the dylib target `name`.
 fn dylib_file(name: &str) -> String {
-    let ext = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(windows) {
+        "dll"
+    } else {
+        "so"
+    };
     let prefix = if cfg!(windows) { "" } else { "lib" };
     format!("{prefix}{}.{ext}", name.replace('-', "_"))
 }
@@ -511,7 +541,11 @@ fn bin_objects(target: &Path) -> Result<Vec<PathBuf>> {
 /// The dylib targets of the workspace, built instrumented in `<target>/debug`. A dylib holds the
 /// code of the packages that it links, so `llvm-cov` needs it as an object too.
 fn dylib_objects(target: &Path) -> Result<Vec<PathBuf>> {
-    Ok(kind_targets("dylib")?.into_iter().map(|(name, _)| target.join("debug").join(dylib_file(&name))).filter(|p| p.is_file()).collect())
+    Ok(kind_targets("dylib")?
+        .into_iter()
+        .map(|(name, _)| target.join("debug").join(dylib_file(&name)))
+        .filter(|p| p.is_file())
+        .collect())
 }
 
 /// Path of `p` relative to the line root, if it is inside.
@@ -642,12 +676,11 @@ fn run(args: &[String]) -> Result<i32> {
     // The record lists every test of the baseline, so that list stands for the test list.
     if let (Some(b), Some(old), false) = (baseline.as_deref(), base_rec.as_ref(), full) {
         let name_status = if b != current { layr(&["diff", "--name-status", b, &current])? } else { String::new() };
-        let carried: Option<BTreeMap<String, TestRec>> = old
-            .tests
-            .iter()
-            .map(|(k, t)| select::carry(t, &changes, &ext).map(|c| (k.clone(), c)))
-            .collect();
-        if let Some(tests) = carried.filter(|t| !t.is_empty() && old.args == extra && select::no_build_needed(&name_status, &changes)) {
+        let carried: Option<BTreeMap<String, TestRec>> =
+            old.tests.iter().map(|(k, t)| select::carry(t, &changes, &ext).map(|c| (k.clone(), c))).collect();
+        if let Some(tests) =
+            carried.filter(|t| !t.is_empty() && old.args == extra && select::no_build_needed(&name_status, &changes))
+        {
             let n = tests.len();
             eprintln!("layr-retest: {n} tests, 0 selected, {n} skipped (incremental, no build)");
             if b != current {
@@ -658,7 +691,10 @@ fn run(args: &[String]) -> Result<i32> {
                 }
                 save_records();
             }
-            eprintln!("layr-retest: ran 0, passed 0, failed 0, skipped {n}; record {current}; {:.1}s", t0.elapsed().as_secs_f32());
+            eprintln!(
+                "layr-retest: ran 0, passed 0, failed 0, skipped {n}; record {current}; {:.1}s",
+                t0.elapsed().as_secs_f32()
+            );
             return Ok(0);
         }
     }
@@ -764,7 +800,11 @@ fn run(args: &[String]) -> Result<i32> {
                 sc.spawn(|| loop {
                     let Ok((key, bin, dir)) = rx.lock().unwrap().recv() else { break };
                     // A test that died before it wrote a profile has no coverage.
-                    let r = if dir.is_dir() { export(&root, &bin, &bins, &libs, &dir, &tools, &tables) } else { Ok(Default::default()) };
+                    let r = if dir.is_dir() {
+                        export(&root, &bin, &bins, &libs, &dir, &tools, &tables)
+                    } else {
+                        Ok(Default::default())
+                    };
                     let _ = std::fs::remove_dir_all(&dir);
                     done.lock().unwrap().insert(key, r);
                 });

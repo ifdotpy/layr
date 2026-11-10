@@ -542,7 +542,9 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
                     };
                     #[cfg(feature = "overlayfs")]
                     let name = {
-                        if !raw.starts_with(b"user.") { bail!("unsupported portable attribute namespace"); }
+                        if !raw.starts_with(b"user.") {
+                            bail!("unsupported portable attribute namespace");
+                        }
                         raw.to_vec()
                     };
                     if name == b"com.layr.subvolume"
@@ -666,11 +668,11 @@ mod tests {
     struct Sandbox(std::path::PathBuf);
     impl Sandbox {
         fn new() -> Self {
-            let key=if cfg!(feature="overlayfs") {"LAYR_OVERLAYFS_TEST_ROOT"} else {"LAYR_APFS_TEST_ROOT"};
+            let key = if cfg!(feature = "overlayfs") { "LAYR_OVERLAYFS_TEST_ROOT" } else { "LAYR_APFS_TEST_ROOT" };
             let p = std::path::PathBuf::from(std::env::var_os(key).expect("backend test root"))
                 .join(format!("stream-test-{}", crate::ids::new_id()));
             fs::create_dir(&p).unwrap();
-            #[cfg(feature="overlayfs")]
+            #[cfg(feature = "overlayfs")]
             crate::storage::recover(&p).unwrap();
             Self(p)
         }
@@ -783,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os="macos")]
+    #[cfg(target_os = "macos")]
     #[ignore = "requires a case-sensitive APFS test volume"]
     fn transfer_refuses_acl_instead_of_losing_access_rules() -> Result<()> {
         let s = Sandbox::new();

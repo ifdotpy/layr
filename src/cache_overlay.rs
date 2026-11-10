@@ -86,6 +86,8 @@ pub enum FolderIn {
 pub enum Source<'s> {
     Line(&'s Line),
     State(&'s str),
+    /// A shared cache of this exact state, with no fallback to its ancestors.
+    ExactState(&'s str, &'s str, Option<&'s str>),
 }
 
 /// The platform key of a cache (docs/cache-overlays.md, section 6): `<os>-<arch>`, and with key
@@ -230,8 +232,8 @@ impl<'a> Repo<'a> {
         if !self.is_cache_path(folder, &self.working(line)) {
             return Ok(FolderIn::Other);
         }
-        let head = self.state_root(&line.head)?;
-        Ok(if crate::repo::holds_files(&head, folder) { FolderIn::Versioned } else { FolderIn::Cache })
+        let head = self.state_src(&line.head)?;
+        Ok(if crate::repo::holds_files_in(&head, folder) { FolderIn::Versioned } else { FolderIn::Cache })
     }
 
     /// The cache overlays that `overlay remove` removed and that gc has not freed yet, with their
@@ -351,7 +353,12 @@ impl<'a> Repo<'a> {
             let mut rec = Record::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
-                LineChange { before: Some(orepo.line_state(ol, &ol.head)), after: None, working_before: None, working_after: None },
+                LineChange {
+                    before: Some(orepo.line_state(ol, &ol.head)),
+                    after: None,
+                    working_before: None,
+                    working_after: None,
+                },
             );
             rec.data = serde_json::json!({"name": ol.name});
             orepo.commit_record(ctx, rec)?;
@@ -525,6 +532,8 @@ impl<'a> Repo<'a> {
                     cache_platform: Some(key),
                     cache_key_parts: parts,
                     cache_of: Some(project_state.to_string()),
+                    tree: None,
+                    times: None,
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);
@@ -560,7 +569,8 @@ impl<'a> Repo<'a> {
             let Some(st) = orepo.p.db.state(&ol.head)? else { return Ok(None) };
             let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid);
             let same_platform = st.cache_platform.as_deref().is_some_and(|p| !other_platform(Some(p)));
-            Ok((ol.head != info.root && allowed && same_platform && !st.cache_key_parts.is_empty()).then_some((ol.head, st.cache_key_parts)))
+            Ok((ol.head != info.root && allowed && same_platform && !st.cache_key_parts.is_empty())
+                .then_some((ol.head, st.cache_key_parts)))
         })();
         if let Ok(Some((id, theirs))) = found {
             let differ = key_differences(ours, &theirs);
@@ -583,6 +593,52 @@ impl<'a> Repo<'a> {
     pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &CacheKey) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
+        if let Source::ExactState(wanted, target_line, expected) = from {
+            let own_line = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(target_line))?.map(|l| l.id);
+            for (id, of) in orepo.p.db.cache_states()? {
+                if expected.is_some_and(|value| value != id.as_str()) {
+                    continue;
+                }
+                let Some(cache) = orepo.p.db.state(&id)? else { continue };
+                // The target's own saved cache is not a new remote candidate.
+                if own_line.is_some()
+                    && cache.line == own_line
+                    && orepo.p.db.state_machine(&id)?.as_deref() == Some(self.p.store.machine.id.as_str())
+                {
+                    continue;
+                }
+                if !cache.cache_shared || !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
+                    continue;
+                }
+                if of == *wanted {
+                    return Ok(Some(id));
+                }
+                let Some(saved) = self.p.db.state(&of)? else { continue };
+                if saved.kind != crate::model::StateKind::Auto || saved.parents.first().map(String::as_str) != Some(*wanted) {
+                    continue;
+                }
+                // An automatic save can include unsaved changes. Only a matching source tree is safe.
+                let head = self.state_src(wanted)?;
+                let saved = match self.state_src(&of) {
+                    Ok(saved) => saved,
+                    Err(e) => {
+                        eprintln!("layr: cache {} skipped: source state unavailable: {e:#}", ids::short(&id));
+                        continue;
+                    }
+                };
+                let mut different = false;
+                for change in crate::changes::candidates(&head, &saved)? {
+                    if crate::changes::really_changed(&head, &saved, &change)? {
+                        different = true;
+                        break;
+                    }
+                }
+                if !different {
+                    return Ok(Some(id));
+                }
+            }
+            return Ok(None);
+        }
         let of_line = |line_id: &str| -> Result<Option<String>> {
             let name = crate::overlay::cache_line_name(line_id);
             // A line that no write moved to its platform name yet (`ensure_overlay_line`) has the old name.
@@ -632,6 +688,7 @@ impl<'a> Repo<'a> {
                 l.head.clone()
             }
             Source::State(s) => s.to_string(),
+            Source::ExactState(_, _, _) => unreachable!(),
         };
         const SEARCH: usize = 200;
         let mut seen = BTreeSet::new();
@@ -736,7 +793,14 @@ impl<'a> Repo<'a> {
     }
 
     /// The writable cache snapshots of `take_caches` in `w`: overlay name, folder and cache state.
-    fn place_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<(String, String, String)>> {
+    fn place_caches(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        start: &str,
+        source: Option<&Line>,
+        w: &Path,
+    ) -> Result<Vec<(String, String, String)>> {
         let mut taken = Vec::new();
         if self.p.is_overlay() {
             return Ok(taken);
@@ -752,7 +816,7 @@ impl<'a> Repo<'a> {
             // state. Otherwise the cache below replaces what the folder holds now: an old cache
             // of the state (`states/<id>@<folder>`, applied before), else the line would start
             // with that stale copy.
-            if !ignored.ignored(&folder, true) || crate::repo::holds_files(&self.state_root(start)?, &folder) {
+            if !ignored.ignored(&folder, true) || crate::repo::holds_files_in(&self.state_src(start)?, &folder) {
                 continue;
             }
             if !self.applies_in(&name, &folder, w)? {
@@ -773,7 +837,8 @@ impl<'a> Repo<'a> {
             };
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
-            let _t = crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
+            let _t =
+                crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
             let cp = fsutil::safe_join(w, &folder)?;
             if cp.symlink_metadata().is_ok() {
                 fsutil::remove_entry(w, &folder)?;
@@ -800,7 +865,7 @@ impl<'a> Repo<'a> {
         }
         let source_head = match from {
             Source::Line(l) => l.head.clone(),
-            Source::State(s) => s.to_string(),
+            Source::State(s) | Source::ExactState(s, _, _) => s.to_string(),
         };
         self.hold(self.pin(&[line.head.as_str(), source_head.as_str()])?);
         let w = self.working(line);
@@ -823,47 +888,62 @@ impl<'a> Repo<'a> {
             let made = {
                 let _lock = orepo.p.lock()?;
                 let ol = orepo.ensure_overlay_line(ctx, &ol_name, &info.root, line.owner)?;
-                if ol.head == sid || orepo.is_ancestor(&sid, &ol.head)? {
-                    continue;
-                }
-                let fast = ol.head == info.root || orepo.is_ancestor(&ol.head, &sid)?;
-                let (head, states) = if fast {
-                    (sid.clone(), Vec::new())
-                } else {
-                    let mut st =
-                        crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
-                    st.cache_by = Some(self.cache_maker(ctx, line));
-                    st.cache_shared = shared;
-                    st.cache_platform = Some(key.key.clone());
-                    st.cache_key_parts = key.parts.clone();
-                    (st.id.clone(), vec![st])
-                };
-                // The working folder first: a failure leaves the overlay line where it was.
                 let cp = fsutil::safe_join(&w, &folder)?;
-                let src = orepo.p.state_path(&sid);
-                let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
-                let r = if crate::repo::holds_files(&self.state_root(&line.head)?, &folder) {
-                    Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")))
-                } else if empty {
-                    (|| -> Result<()> {
-                        if cp.symlink_metadata().is_ok() {
-                            fsutil::remove_entry(&w, &folder)?;
-                        }
+                if ol.head == sid && matches!(from, Source::ExactState(_, _, _)) {
+                    if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
+                        return Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")));
+                    }
+                    let src = orepo.p.state_path(&sid);
+                    if cp.symlink_metadata().is_err() {
                         fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
                         btrfs::snapshot(&src, &cp, false)?;
-                        crate::repo::give_tree(&cp, uid, gid)
-                    })()
+                        crate::repo::give_tree(&cp, uid, gid)?;
+                    } else {
+                        let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
+                        crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)?;
+                    }
+                    sid.clone()
+                } else if ol.head == sid || orepo.is_ancestor(&sid, &ol.head)? {
+                    continue;
                 } else {
-                    let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
-                    crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)
-                };
-                if let Err(e) =
-                    r.and_then(|_| crate::overlay::move_overlay_line(&orepo, ctx, "merge", &ol, &head, states.clone()))
-                {
-                    orepo.discard_states(&states);
-                    return Err(e);
+                    let fast = ol.head == info.root || orepo.is_ancestor(&ol.head, &sid)?;
+                    let (head, states) = if fast {
+                        (sid.clone(), Vec::new())
+                    } else {
+                        let mut st =
+                            crate::overlay::union_state(&orepo, ctx, &ol, &ol.head, &sid, &format!("cache {folder}: union"))?;
+                        st.cache_by = Some(self.cache_maker(ctx, line));
+                        st.cache_shared = shared;
+                        st.cache_platform = Some(key.key.clone());
+                        st.cache_key_parts = key.parts.clone();
+                        (st.id.clone(), vec![st])
+                    };
+                    // The working folder first: a failure leaves the overlay line where it was.
+                    let src = orepo.p.state_path(&sid);
+                    let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
+                    let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
+                        Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")))
+                    } else if empty {
+                        (|| -> Result<()> {
+                            if cp.symlink_metadata().is_ok() {
+                                fsutil::remove_entry(&w, &folder)?;
+                            }
+                            fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
+                            btrfs::snapshot(&src, &cp, false)?;
+                            crate::repo::give_tree(&cp, uid, gid)
+                        })()
+                    } else {
+                        let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
+                        crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)
+                    };
+                    if let Err(e) =
+                        r.and_then(|_| crate::overlay::move_overlay_line(&orepo, ctx, "merge", &ol, &head, states.clone()))
+                    {
+                        orepo.discard_states(&states);
+                        return Err(e);
+                    }
+                    head
                 }
-                head
             };
             self.after_overlay_move(ctx, &name);
             self.relocate_caches(line, std::slice::from_ref(&folder), &w);
@@ -920,7 +1000,13 @@ impl<'a> Repo<'a> {
         };
         let _t = crate::trace::named(|| format!("warm {folder} of line {}", line.name));
         let done = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
-            crate::cache_hook::run_mode(crate::cache_hook::Mode::Warm, setting.as_deref(), &path, uid, crate::cache_hook::WARM_LIMIT)
+            crate::cache_hook::run_mode(
+                crate::cache_hook::Mode::Warm,
+                setting.as_deref(),
+                &path,
+                uid,
+                crate::cache_hook::WARM_LIMIT,
+            )
         });
         // Only a damage is recorded here: a mark from an earlier prune stays until a prune succeeds.
         if !done.folder_ok {
@@ -1251,7 +1337,9 @@ mod tests {
 
     #[test]
     fn an_unknown_toolchain_is_no_difference() {
-        let parts = |t: &str, env: &str| BTreeMap::from([("toolchain".to_string(), t.to_string()), ("env:CC".to_string(), env.to_string())]);
+        let parts = |t: &str, env: &str| {
+            BTreeMap::from([("toolchain".to_string(), t.to_string()), ("env:CC".to_string(), env.to_string())])
+        };
         assert!(key_differences(&parts("aa", "x"), &parts("-", "x")).is_empty(), "root without rustc");
         assert_eq!(key_differences(&parts("aa", "x"), &parts("bb", "x")), ["toolchain"]);
         assert_eq!(key_differences(&parts("-", "x"), &parts("-", "y")), ["env:CC"]);

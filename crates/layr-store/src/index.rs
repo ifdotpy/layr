@@ -3,8 +3,8 @@
 use crate::{canonical, keys, record};
 use anyhow::{bail, ensure, Context, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use serde::{Deserialize, Serialize};
 use layr_hashers::{ContentAddress, Digest};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

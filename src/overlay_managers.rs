@@ -15,7 +15,10 @@ pub fn of(repo: &Repo, name: &str) -> Result<Authority> {
     Ok(layr_model::authority::from_overlay_lines(&repo.p.id, &orepo.p.id, &lines, &keys)?.1)
 }
 
-pub fn validate_import(project: &crate::store::Project, incoming: &[String]) -> Result<()> {
+/// `server`: the records come from a Layr Cloud server (`Trust::Server`): a signer that this project does not
+/// trust is checked against the key of its own first record, and the key manager rules still decide what its
+/// records may change.
+pub fn validate_import(project: &crate::store::Project, incoming: &[String], server: bool) -> Result<()> {
     let Some((parent, name)) = project.name.split_once('%') else { return Ok(()) };
     let repo = Repo { p: crate::store::Project::open(project.store, parent)?, ctx: None };
     let mut lines: BTreeSet<String> = project.export_jsonl()?.lines().map(str::to_owned).collect();
@@ -31,9 +34,18 @@ pub fn validate_import(project: &crate::store::Project, incoming: &[String]) -> 
     };
     let lines: Vec<_> = lines.into_iter().collect();
     let keys = crate::store_remote::overlays::trusted_keys(&repo)?;
+    let mut signers = keys.clone();
+    if server {
+        for line in &lines {
+            let record = oplog::parse_line(line, None)?.record;
+            if record.op == "machine" && record.seq == 1 && !signers.contains_key(&record.machine) {
+                signers.insert(record.machine.clone(), oplog::machine_key(&record)?);
+            }
+        }
+    }
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     if let Some(authority) = from_lines(&repo.p.id, &parent_lines, &keys)?.remove(name) {
-        authority.validate(&lines, &id, &keys)
+        authority.validate(&lines, &id, &signers)
     } else {
         let (found, _) = layr_model::authority::from_overlay_lines(&repo.p.id, &id, &lines, &keys)?;
         anyhow::ensure!(found == name, "hidden overlay name differs from its project");

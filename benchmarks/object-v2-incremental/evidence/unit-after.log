@@ -1,0 +1,61 @@
+   Compiling layr-objects v0.1.0 (/Users/igor/Projects/layr-store/projects/layr/lines/object-v2-incremental-perf/crates/layr-objects)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.05s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/layr_objects-07507e8b8bc98d00)
+
+running 45 tests
+test id::tests::the_kind_and_the_key_change_the_id ... ok
+test pack::tests::the_builder_fills_blocks ... ok
+test pack::tests::an_index_round_trips_and_checks_itself ... ok
+test id::tests::a_short_read_is_refused ... ok
+test pack::tests::a_lazy_index_finds_what_the_full_index_holds ... ok
+test id::tests::plain_ids_are_fixed ... ok
+test store::tests::incompatible_format_does_not_change_the_store ... ok
+test store::tests::corruption_is_found_on_read ... ok
+test store::tests::writes_are_idempotent ... ok
+test store::tests::a_delta_round_trips_and_is_small ... ok
+test tests::format_test_vectors ... ok
+test tests::a_hard_link_group_cannot_leave_the_folder ... ok
+test cloud_times::tests::cloud_times_round_trip_nested_folders_and_reject_wrong_shapes ... ok
+test store::tests::delta_chains_stop_at_the_depth_limit ... ok
+test store::tests::object_storage_is_v2_and_legacy_upgrade_preserves_objects ... ok
+test tests::a_new_link_to_an_unchanged_file_keeps_both_names ... ok
+test times::tests::times_round_trip_compactly ... ok
+test tests::a_directory_time_change_keeps_its_files_and_updates_times ... ok
+test times::tests::version_one_requires_explicit_legacy_handling ... ok
+test transfer::tests::an_ambiguous_legacy_times_entry_is_not_published ... ok
+test tests::an_incremental_write_keeps_a_partly_touched_hard_link_group ... ok
+test tests::replacing_one_link_keeps_the_remaining_group ... ok
+test tests::secret_ids_differ_from_plain_ids ... ok
+test tests::a_save_writes_only_the_times_on_the_way_to_a_change ... ok
+test transfer::tests::cloud_legacy_times_reject_a_wrong_tree_before_writing_tables ... ok
+test tree::tests::a_tree_round_trips ... ok
+test tree::tests::the_empty_tree_is_fixed ... ok
+test tree::tests::noncanonical_trees_are_refused ... ok
+test transfer::tests::malformed_tree_and_times_entries_are_not_published ... ok
+test zstdx::tests::frames_round_trip_with_each_codec ... ok
+test transfer::tests::cloud_legacy_times_are_converted_without_guessing ... ok
+test tests::a_cold_history_stores_changes_as_deltas ... ok
+test tests::a_complete_changed_hard_link_group_does_not_reread_other_files ... ok
+test tests::incremental_write_does_not_resolve_unchanged_siblings ... ok
+test transfer::tests::packs_split_at_the_plain_limit_and_bad_packs_are_refused ... ok
+test tests::a_folder_round_trips_hot ... ok
+test tests::verify_finds_each_kind_of_difference ... ok
+test transfer::tests::a_transfer_pack_moves_a_tree_to_another_store_and_a_checkout_matches ... ok
+test tests::an_incremental_write_equals_a_full_write ... ok
+test tests::every_checkout_write_goes_through_the_writer ... ok
+test tests::a_repack_trains_a_dictionary_for_small_loose_blobs ... ok
+test tests::a_folder_round_trips_cold ... ok
+test store::tests::large_files_are_chunked_as_a_stream ... ok
+test tests::a_packed_store_round_trips ... ok
+test tests::hot_blobs_outside_the_kept_trees_turn_cold ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+   Doc-tests layr_objects
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -59,7 +59,7 @@ impl Published {
 /// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
 /// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
 /// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
-fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
+pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
     let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
     for (id, of) in orepo.p.db.cache_states_known()? {
         // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
@@ -106,6 +106,21 @@ fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeS
                     queue.extend(state.parents);
                 }
             }
+        }
+    }
+    Ok(out)
+}
+
+pub(super) fn caches_of_state(repo: &Repo, orepo: &Repo, state: &str) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for (id, of) in orepo.p.db.cache_states_known()? {
+        let auto_of_state = repo
+            .p
+            .db
+            .state(&of)?
+            .is_some_and(|s| s.kind == crate::model::StateKind::Auto && s.parents.first().is_some_and(|p| p == state));
+        if of == state || auto_of_state {
+            out.insert(id);
         }
     }
     Ok(out)
@@ -337,7 +352,12 @@ pub(crate) fn open_identity(
         }
     }
     if !key.hidden && key.access_mode == layr_store::epochs::Mode::Public {
-        let descriptor = super::Descriptor { format: 2, project: key.overlay.clone(), recipient: key.recipient.clone(), mode: Default::default() };
+        let descriptor = super::Descriptor {
+            format: 2,
+            project: key.overlay.clone(),
+            recipient: key.recipient.clone(),
+            mode: Default::default(),
+        };
         let manifest = layr_store::public::Manifest::parse(
             &backend.get("public.json")?.context("public overlay has no manifest")?,
             &descriptor,
@@ -551,7 +571,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         }
         merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
-        if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !opts.no_cache_sweep && repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
             let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
             if !swept.trees.is_empty() || !swept.packs.is_empty() {
                 eprintln!(
@@ -659,12 +679,8 @@ fn sweep_old_epochs(
         swept.trees.extend(trees);
         // Chunk packs of the old epoch: nothing names them once its trees are gone. Packs and
         // indexes go after the trees, so a reader never finds a tree without its chunks.
-        let chunks: Vec<String> = store
-            .backend
-            .list(&format!("overlays/{overlay}/epochs/{epoch}/chunks/"))?
-            .into_iter()
-            .map(|o| o.key)
-            .collect();
+        let chunks: Vec<String> =
+            store.backend.list(&format!("overlays/{overlay}/epochs/{epoch}/chunks/"))?.into_iter().map(|o| o.key).collect();
         for key in &chunks {
             if !dry_run {
                 store.backend.delete(key)?;
@@ -817,7 +833,8 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             }
             // Overlay records must use the same trusted machine keys as the parent. The layer's own fetch below reads
             // the same segments: both skip the ones read and checked before (`seen-records` of the layer).
-            let local: Vec<String> = if op.id.is_empty() { Vec::new() } else { op.export_jsonl()?.lines().map(str::to_owned).collect() };
+            let local: Vec<String> =
+                if op.id.is_empty() { Vec::new() } else { op.export_jsonl()?.lines().map(str::to_owned).collect() };
             let seen = reader::seen_file(&store.dir.join("overlays").join(&published.key.overlay).join(&published.key.epoch));
             let records = reader::records_with_local(&backend, &identity, &published.key.overlay, &local, Some(&seen))?;
             let trusted = trusted_keys(repo)?;
@@ -833,14 +850,19 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 .collect();
             if !waiting.is_empty() {
                 let names: Vec<&str> = waiting.iter().map(String::as_str).collect();
-                report
-                    .omitted
-                    .push(format!("overlay {name}: records of machine {} not trusted here yet; a later fetch takes them", names.join(", ")));
+                report.omitted.push(format!(
+                    "overlay {name}: records of machine {} not trusted here yet; a later fetch takes them",
+                    names.join(", ")
+                ));
             }
             if !lines.contains(&published.line) {
                 bail!("overlay {name}: published key is absent from the overlay log");
             }
-            authorities.get(&name).context("overlay has no creator authority")?.validate(&lines, &published.key.overlay, &trusted)?;
+            authorities.get(&name).context("overlay has no creator authority")?.validate(
+                &lines,
+                &published.key.overlay,
+                &trusted,
+            )?;
             // An epoch includes the complete log, so a new reader needs no older layer identity.
             if op.id.is_empty() {
                 op.import_lines(&lines, crate::store::Trust::All)?;
@@ -851,11 +873,12 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
-            let mut opts = opts.clone();
-            if is_cache && !opts.caches_of.is_empty() {
-                opts.only_caches = Some(caches_of_lines(repo, &orepo, &opts.caches_of)?);
-            }
-            merge(report, reader::fetch(&mut scoped, ctx, &mut orepo, &opts)?, &name, "fetch");
+            let fetched = if is_cache {
+                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+            } else {
+                reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
+            };
+            merge(report, fetched, &name, "fetch");
             // Fetched states of another machine move its overlay lines: the history limit applies now, as after a
             // local move, so the states beyond it go in this command.
             repo.after_overlay_move(ctx, &name);
@@ -870,9 +893,134 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     Ok(())
 }
 
+/// A plain overlay layer of a Layr Cloud project: the routes under `overlays/<name>/`, the project's object
+/// store, no keys, slots or epochs (docs/cloud-rfc.md 7.0).
+fn api_layer(store: &Store, name: &str, project: &str) -> Result<Store> {
+    Ok(Store {
+        backend: store.backend.scoped(&format!("overlays/{name}"))?,
+        url: store.url.clone(),
+        project: project.into(),
+        machine: store.machine.clone(),
+        key: store.key.clone(),
+        dir: store.dir.join("overlays").join(name),
+        paper_key_text: None,
+        person: None,
+        pin: None,
+        aws_profile: None,
+        force_public: false,
+        public_clone: false,
+        public_reader: std::sync::atomic::AtomicBool::new(false),
+        mode: None,
+        epoch: None,
+        epoch_public: false,
+        publishing_epoch: false,
+        layer: None,
+    })
+}
+
+/// Pushes each overlay that this caller sees to its plain layer on Layr Cloud, then moves its line refs.
+/// A hidden overlay stays here: Layr Cloud has no Secret overlay layer yet.
+pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    for name in repo.visible_overlay_names(ctx)? {
+        let info = repo.need_overlay(&name)?;
+        if info.hidden {
+            report.omitted.push(format!("overlay {name}: hidden overlays wait for Secret layers on Layr Cloud"));
+            continue;
+        }
+        if info.cache {
+            repo.sync_cache_readers(ctx, &name);
+        }
+        let Ok(orepo) = repo.overlay_repo(&name) else {
+            report.omitted.push(format!("overlay {name}: not on this machine"));
+            continue;
+        };
+        // The server serves a plain layer to every reader of the project (a Public project: everyone) until it
+        // keeps per-overlay readers (docs/cloud-rfc.md 7.0). A cache (readers: trusted machines) or another
+        // overlay with a reader list stays here.
+        if !readable_by_all(&orepo.policy().access) {
+            report.omitted.push(format!(
+                "overlay {name}: its readers are limited, and Layr Cloud would serve it to every reader of the project"
+            ));
+            continue;
+        }
+        let scoped = api_layer(store, &name, &orepo.p.id)?;
+        scoped.private_dir()?;
+        let _push = writer::push_folder_lock(&scoped.dir)?;
+        let mut pushed = writer::push_locked(&scoped, ctx, &orepo, opts)?;
+        super::push_refs(&scoped, &orepo, &mut pushed)?;
+        merge(report, pushed, &name, "push");
+    }
+    Ok(())
+}
+
+/// Whether an overlay's policy lets everyone (`*`) read it: only such an overlay goes to Layr Cloud as a plain
+/// layer.
+fn readable_by_all(access: &BTreeMap<String, crate::access::Role>) -> bool {
+    access.get("*").is_some_and(|role| *role >= crate::access::Role::Reader)
+}
+
+/// Fetches each overlay that the project records name from its plain layer on Layr Cloud.
+pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    let api = store.backend.api().context("not a Layr Cloud remote")?;
+    for name in repo.overlay_names()? {
+        let Some(info) = repo.overlay_info(&name)? else { continue };
+        if info.hidden {
+            continue;
+        }
+        let mut one = || -> Result<()> {
+            let scope = format!("overlays/{name}/");
+            let pname = format!("{}%{name}", repo.p.name);
+            let op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
+                Project::open_partial(&ctx.store, &pname)?
+            } else {
+                Project::create_empty_overlay(&ctx.store, &pname)?
+            };
+            // A new copy takes the overlay id from the first record of the layer; the records check it after.
+            let project = if op.id.is_empty() {
+                let segments = api.segments(&scope)?;
+                let Some(first) = segments.iter().min_by_key(|s| s.first) else { return Ok(()) };
+                let body =
+                    api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
+                let line = String::from_utf8(body)?.lines().next().map(str::to_owned).context("empty overlay segment")?;
+                oplog::parse_line(&line, None)?.record.project
+            } else {
+                op.id.clone()
+            };
+            let mut orepo = Repo { p: op, ctx: None };
+            let mut scoped = api_layer(store, &name, &project)?;
+            scoped.private_dir()?;
+            let mut fetched = if info.cache {
+                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+            } else {
+                reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
+            };
+            super::fetch_refs(&scoped, &orepo, &mut fetched)?;
+            merge(report, fetched, &name, "fetch");
+            repo.after_overlay_move(ctx, &name);
+            Ok(())
+        };
+        match one() {
+            Err(e) if info.cache => report.omitted.push(format!("overlay {name}: {e:#}")),
+            r => r?,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_overlay_that_everyone_reads_goes_to_layr_cloud_plain() {
+        use crate::access::Role;
+        let cache = BTreeMap::from([("machine:01a12290-0000-7000-8000-000000000001".to_string(), Role::Reader)]);
+        assert!(!readable_by_all(&cache), "a cache overlay (trusted machines) stays here");
+        assert!(!readable_by_all(&BTreeMap::from([("user:501".to_string(), Role::Admin)])));
+        assert!(!readable_by_all(&BTreeMap::new()));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Reader)])));
+        assert!(readable_by_all(&BTreeMap::from([("*".to_string(), Role::Writer)])));
+    }
 
     #[test]
     fn a_signer_not_trusted_yet_waits_and_another_key_fails() {

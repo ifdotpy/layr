@@ -44,6 +44,7 @@ pub struct Layer {
 #[derive(Debug, Clone)]
 pub struct Layered {
     pub layers: Vec<Layer>,
+    pub object_base: Option<std::sync::Arc<crate::object_tree::ObjectTree>>,
 }
 
 pub fn removed_of(root: &Path) -> Result<BTreeSet<String>> {
@@ -103,7 +104,7 @@ pub(crate) fn read_source<T>(r: std::io::Result<T>, path: &Path) -> Result<T> {
 /// Clone the source entry `from` to `to`. The clone fails with NotFound for a missing source or
 /// a missing destination folder. The destination folder exists here (the layer makes it first),
 /// so a NotFound with an existing destination folder is the source.
-fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
     crate::sys::apfs_clone(from, to)
         .map_err(|e| {
             if not_found(&e) && to.parent().is_some_and(|p| p.is_dir()) {
@@ -141,7 +142,7 @@ fn remove_subtree<V>(map: &mut BTreeMap<String, V>, rel: &str) {
 
 impl Layered {
     pub fn complete(root: &Path) -> Self {
-        Layered { layers: vec![Layer { root: root.to_path_buf(), removed: BTreeSet::new() }] }
+        Layered { layers: vec![Layer { root: root.to_path_buf(), removed: BTreeSet::new() }], object_base: None }
     }
 
     /// The layers of a state: its own layer and those of its bases, down to a complete tree.
@@ -156,10 +157,14 @@ impl Layered {
             let full = p.state_path(&id);
             if full.is_dir() {
                 layers.push(Layer { root: full, removed: BTreeSet::new() });
-                return Ok(Layered { layers });
+                return Ok(Layered { layers, object_base: None });
             }
             let d = p.delta_path(&id);
             if !d.is_dir() {
+                if let Some((store, refs)) = crate::objstore::verified(p, &id)? {
+                    let base = crate::object_tree::ObjectTree::new(store, refs, &p.meta_dir().join("object-reads"))?;
+                    return Ok(Layered { layers, object_base: Some(base) });
+                }
                 bail!("state {} is not on this machine (run layr sync)", crate::ids::short(&id));
             }
             let base = apfs::subvol_info(&d)?.base.with_context(|| format!("thin state {id} has no base"))?;
@@ -172,19 +177,23 @@ impl Layered {
     pub fn over(root: &Path, base: Layered) -> Result<Self> {
         let mut layers = vec![Layer { root: root.to_path_buf(), removed: removed_of(root)? }];
         layers.extend(base.layers);
-        Ok(Layered { layers })
+        Ok(Layered { layers, object_base: base.object_base })
+    }
+
+    pub fn objects(tree: std::sync::Arc<crate::object_tree::ObjectTree>) -> Self {
+        Self { layers: Vec::new(), object_base: Some(tree) }
     }
 
     pub fn is_complete(&self) -> bool {
-        self.layers.len() == 1
+        self.object_base.is_none() && self.layers.len() == 1
     }
 
     pub fn top(&self) -> &Path {
-        &self.layers[0].root
+        self.layers.first().map(|l| l.root.as_path()).unwrap_or_else(|| self.object_base.as_ref().expect("tree base").root())
     }
 
     pub fn bottom(&self) -> &Path {
-        &self.layers[self.layers.len() - 1].root
+        self.object_base.as_ref().map(|o| o.root()).unwrap_or_else(|| self.layers.last().expect("tree base").root.as_path())
     }
 
     /// The roots of the layers, top first.
@@ -194,11 +203,15 @@ impl Layered {
 
     /// The paths that the top layer removes from the layers below.
     pub fn top_removed(&self) -> &BTreeSet<String> {
-        &self.layers[0].removed
+        static EMPTY: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
+        self.layers.first().map(|layer| &layer.removed).unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
 
     /// The entry at `rel` alone (no content below it) in the merged tree, as `scan` gives it.
     pub fn entry(&self, rel: &str) -> Result<Option<ScanEntry>> {
+        if self.layers.is_empty() {
+            if let Some(o) = &self.object_base { return o.scan_entry(rel); }
+        }
         self.find(rel)?.map(|p| apfs::entry_of_path(&p)).transpose()
     }
 
@@ -230,6 +243,10 @@ impl Layered {
                 Err(e) => return Err(e.into()),
             }
         }
+        if self.layers.last().is_some_and(|l| hides(l, rel)) { return Ok(None); }
+        if let Some(o) = &self.object_base {
+            if o.entry(rel)?.is_some() { return Ok(Some(o.path(rel)?)); }
+        }
         Ok(None)
     }
 
@@ -243,8 +260,11 @@ impl Layered {
 
     /// All entries of the merged tree, as `apfs::scan_with_data` gives them for a folder.
     pub fn scan(&self, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
-        let mut map = apfs::scan_with_data(self.bottom(), data)?;
-        for l in self.layers.iter().rev().skip(1) {
+        let mut map = match &self.object_base {
+            Some(o) => o.scan()?,
+            None => apfs::scan_with_data(self.bottom(), data)?,
+        };
+        for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
             for r in &l.removed {
                 remove_subtree(&mut map, r);
             }
@@ -255,8 +275,11 @@ impl Layered {
 
     /// The entry at `rel` and its content in the merged tree, as `scan` gives them.
     pub fn scan_at(&self, rel: &str) -> Result<BTreeMap<String, ScanEntry>> {
-        let mut map = apfs::scan_at(self.bottom(), rel)?;
-        for l in self.layers.iter().rev().skip(1) {
+        let mut map = match &self.object_base {
+            Some(o) => o.scan()?.into_iter().filter(|(p, _)| rel.is_empty() || p == rel || p.starts_with(&format!("{rel}/"))).collect(),
+            None => apfs::scan_at(self.bottom(), rel)?,
+        };
+        for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
             if hides(l, rel) {
                 map.clear();
             } else {
@@ -281,13 +304,48 @@ impl Layered {
     /// immutable flags of the cloned entries; the caller seals the rest and writes the marker.
     pub fn materialize(&self, dst: &Path, readonly: bool) -> Result<()> {
         let _t = crate::trace::span(format!("thin materialize {} layers", self.layers.len()));
-        let entries = apfs::scan_with_data(self.bottom(), false)?;
-        apfs::clone_complete(self.bottom(), dst, &entries, readonly)
-            .with_context(|| format!("clone {}", self.bottom().display()))?;
+        if let Some(o) = &self.object_base {
+            layr_objects::checkout_with(&o.store, &o.refs.tree, Some(&o.refs.times), dst)?;
+        } else {
+            let entries = apfs::scan_with_data(self.bottom(), false)?;
+            apfs::clone_complete(self.bottom(), dst, &entries, readonly)
+                .with_context(|| format!("clone {}", self.bottom().display()))?;
+        }
         let result = (|| -> Result<()> {
             let mut cloned = Vec::new();
-            for l in self.layers.iter().rev().skip(1) {
+            for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
                 apply(l, dst, &mut cloned)?;
+            }
+            let mut linked_upper = false;
+            for layer in self.layers.iter().take(self.layers.len().saturating_sub(usize::from(self.object_base.is_none()))) {
+                if apfs::scan_shared(&layer.root, false)?.values().any(|e| e.meta.is_file() && e.nlink > 1) {
+                    linked_upper = true;
+                    break;
+                }
+            }
+            if linked_upper {
+                // Applying upper entries one by one copies their bytes. Restore groups from the
+                // merged inode identities, including links in different upper folders.
+                let mut groups = BTreeMap::<(u64, u64), Vec<String>>::new();
+                for (rel, entry) in self.scan(false)? {
+                    if entry.meta.is_file() && entry.nlink > 1 {
+                        groups.entry((entry.fingerprint.0, entry.fingerprint.1)).or_default().push(rel);
+                    }
+                }
+                let tree = crate::tree::Tree::open(dst)?;
+                let mut parents = BTreeSet::new();
+                for group in groups.values().filter(|g| g.len() > 1) {
+                    crate::sys::apfs_immutable(&dst.join(&group[0]), false)?;
+                    for rel in &group[1..] {
+                        open_parent(dst, rel)?;
+                        parents.insert(parent_of(rel).to_string());
+                        tree.remove(rel)?;
+                        tree.hard_link(&group[0], rel)?;
+                    }
+                }
+                for rel in parents {
+                    copy_dir_meta(&self.path(&rel)?, &dst.join(&rel), rel.is_empty())?;
+                }
             }
             // The clone of the bottom is writable already, and `apply` opens each folder it
             // changes: only the entries cloned from the sealed layers keep their flags. A pass
@@ -369,7 +427,12 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
         crate::sys::apfs_mtime(to, m.mtime(), m.mtime_nsec())?;
         return Ok(true);
     }
-    clone_from_source(from, to)?;
+    if m.is_dir() {
+        let entries = apfs::scan_with_data(from, false)?;
+        apfs::clone_complete(from, to, &entries, false)?;
+    } else {
+        clone_from_source(from, to)?;
+    }
     Ok(true)
 }
 
@@ -525,12 +588,16 @@ pub fn diff(
     let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
     let differ: Vec<&str> = if let Some(width) = std::num::NonZeroUsize::new(equal.len()) {
         crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
-        use rayon::prelude::*;
-        equal.par_iter().copied()
-            .filter(|k| !old_path(k).and_then(|a| stored_metadata_same(&a, &new_root.join(k))).unwrap_or(false))
-            .collect()
+            use rayon::prelude::*;
+            equal
+                .par_iter()
+                .copied()
+                .filter(|k| !old_path(k).and_then(|a| stored_metadata_same(&a, &new_root.join(k))).unwrap_or(false))
+                .collect()
         })?
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     d.write.extend(differ.into_iter().map(String::from));
     for k in old.keys() {
         if !k.is_empty() && !new.contains_key(k) && !ancestors(k).any(|a| d.removed.contains(a)) {
@@ -666,13 +733,10 @@ pub fn add_entries<'a>(
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
                 // content is all new). A clone keeps the folder's own mode, so open it for the
                 // metadata step below.
-                clone_from_source(&from, &to)?;
+                clone_entry(&from, &to, &m)?;
                 crate::sys::apfs_immutable(&to, false).with_context(|| format!("unlock {k} in the layer"))?;
                 let below = format!("{k}/");
-                let complete = write
-                    .iter()
-                    .filter(|w| w.starts_with(&below))
-                    .all(|w| fs::symlink_metadata(dst.join(w)).is_ok());
+                let complete = write.iter().filter(|w| w.starts_with(&below)).all(|w| fs::symlink_metadata(dst.join(w)).is_ok());
                 if complete {
                     cloned.insert(k.to_string());
                 } else {
@@ -788,6 +852,9 @@ pub fn empty_layer(dst: &Path, base: &str, root: &Path) -> Result<()> {
 impl Layered {
     /// True when folder `rel` of the merged tree has no entries.
     pub fn is_empty_dir(&self, rel: &str) -> Result<bool> {
+        if self.object_base.is_some() {
+            return Ok(self.scan_at(rel)?.keys().all(|path| path == rel));
+        }
         for (i, l) in self.layers.iter().enumerate() {
             if i > 0 && hides(&self.layers[i - 1], rel) {
                 break;
@@ -815,7 +882,7 @@ impl Layered {
 
     /// The tree without its top layer.
     pub fn below(&self) -> Option<Layered> {
-        (self.layers.len() > 1).then(|| Layered { layers: self.layers[1..].to_vec() })
+        (self.layers.len() > 1 || (self.layers.len() == 1 && self.object_base.is_some())).then(|| Layered { layers: self.layers[1..].to_vec(), object_base: self.object_base.clone() })
     }
 }
 
@@ -1231,6 +1298,7 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     let max = p.config_u64("thin.views", VIEWS) as usize;
     let in_use = p.config_u64("thin.view_seconds", VIEW_IN_USE_SECONDS);
     let dir = p.meta_dir().join("views");
+    let protected = crate::views::protected_states(p);
     let mut stamps: Vec<(std::time::SystemTime, String)> = fs::read_dir(&dir)?
         .flatten()
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().to_string_lossy().into_owned())))
@@ -1240,7 +1308,11 @@ fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
     }
     stamps.sort_by(|a, b| b.0.cmp(&a.0));
     for (time, id) in stamps.into_iter().skip(max) {
-        if id == made || !crate::model::is_uuid(&id) || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use {
+        if id == made
+            || protected.contains(&id)
+            || !crate::model::is_uuid(&id)
+            || time.elapsed().map(|d| d.as_secs()).unwrap_or(0) < in_use
+        {
             continue;
         }
         if !p.delta_path(&id).is_dir() {
@@ -1364,10 +1436,12 @@ pub fn delete_now(p: &Project, id: &str) -> Result<()> {
 /// Remove the views that no command used within `thin.view_seconds`. Returns their count.
 pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
     let limit = p.config_u64("thin.view_seconds", VIEW_SECONDS);
+    // The lower tree of a virtual line is mounted: it stays (docs/views.md).
+    let protected = crate::views::protected_states(p);
     let mut n = 0;
     for id in bases(p)?.into_keys() {
         let full = p.state_path(&id);
-        if keep.contains(&id) || !full.is_dir() {
+        if keep.contains(&id) || protected.contains(&id) || !full.is_dir() {
             continue;
         }
         let age = fs::metadata(view_stamp(p, &id))
@@ -1435,9 +1509,14 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             None => p.delta_path(id).is_dir() && old_layer(&p.delta_path(id)) && !crate::apfs_commit::preserves(p, id)?,
         })
     };
+    let protected = crate::views::protected_states(p);
     let mut queue: Vec<&str> = Vec::new();
     for id in &ids {
-        if crate::model::is_uuid(id) && refs.get(id.as_str()).copied().unwrap_or(0) == 0 && gone_record(id)? {
+        if crate::model::is_uuid(id)
+            && !protected.contains(id)
+            && refs.get(id.as_str()).copied().unwrap_or(0) == 0
+            && gone_record(id)?
+        {
             queue.push(id);
         }
     }
@@ -1452,7 +1531,7 @@ pub fn upkeep_with(p: &Project, heads: &BTreeSet<String>, bases_read: Option<&BT
             *n = n.saturating_sub(1);
             if *n == 0 {
                 if let Some(b) = ids.get(b.as_str()) {
-                    if crate::model::is_uuid(b) && gone_record(b)? {
+                    if crate::model::is_uuid(b) && !protected.contains(b) && gone_record(b)? {
                         queue.push(b);
                     }
                 }
@@ -1726,6 +1805,21 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
+    fn a_folder_removed_after_its_scan_is_a_source_change() -> Result<()> {
+        let s = Sandbox::new();
+        let src = s.0.join("work");
+        fs::create_dir(&src)?;
+        fs::write(src.join("x"), b"content")?;
+        let entries = apfs::scan_with_data(&src, false)?;
+        fs::remove_dir_all(&src)?;
+        let err =
+            apfs::clone_complete(&src, &s.0.join("copy"), &entries, false).expect_err("the source disappeared after its scan");
+        assert!(vanished(&err), "a missing source must trigger another scan: {err:?}");
         Ok(())
     }
 

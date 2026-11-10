@@ -125,6 +125,11 @@ style). Another title is refused at `queue add`. The queue merges a titled entry
 target (a squash), with the title as its message and `Layr-Change: <change id>` as a trailer, so
 `layr release prepare` sees one titled state per entry. An entry without `-m` merges as before.
 
+`layr queue add --no-run-queue` adds the entry without starting the configured
+queue in that command. A separate configured daemon can still run the queue.
+Start a worker's daemon with `--manual-queue` to disable its automatic request
+and queue passes. The worker can still apply requests and run the queue explicitly.
+
 ### Queue probe limits
 
 ```sh

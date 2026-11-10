@@ -173,9 +173,10 @@ retest = [["test", "--workspace", "--no-run"]]
 - `env` holds strings. A table named `macos` or `linux` in it applies on that OS only, over the plain values, for
   paths that differ by OS: `env = { CARGO_INCREMENTAL = "1", macos = { CC = "<clang>", SDKROOT = "<sdk>" } }`. The
   cache key, the prune listing and retest read the same table.
-- `sweep` lists cargo commands without `cargo`. It runs each command in `target` with `env`, as a listing
+- `sweep` lists cargo commands without `cargo`. It runs each command in a private copy of `target` with `env`, as a listing
   (see "Freshness"). The listing adds `-v --message-format json`. A command whose units are not all fresh
   skips the folder; the listing never builds a unit that is not fresh.
+- Listing commands cannot use `--target-dir` or `--config`. Use a `target_dir` entry for another target folder.
 - An entry of `sweep` can be an object for a test that builds into a folder of its own below `target`:
   `{ target_dir = "provider-contract-compile", args = ["check", "--offline", "-p", "x"], env = { RUSTFLAGS = "" } }`
   (a TOML inline table in the `sweep` array). The follow pass builds it with `CARGO_TARGET_DIR=target/<target_dir>` and the project `env`
@@ -292,14 +293,9 @@ is fresh, with no build:
 - Measured on 2026-11-02 with cargo 1.99.1, a two-crate test workspace: a stop at 0.11 to 0.18 s. A fresh
   listing of the same workspace: 0.1 s. A tree of Studio's size was not measured.
 
-What a stopped listing can still change:
-
-- Cargo removes the previous output of the first stale unit before it runs that unit's build step. The stop
-  can come after that removal (measured: the `.rlib` of a stale crate was removed in every run). The next build
-  compiles that unit anyway, because it was stale. No new output file is written.
-- Cargo writes its fingerprint marker files, and it creates the fingerprint folder of a unit that was never built.
-- A listing that names an uplifted binary (`debug/<bin>`) re-links it to the unit of the command. A standard
-  `cargo build` does the same.
+Cargo can remove stale outputs and change fingerprint files during a listing. The listing uses a private
+copy of the target folder, so these changes do not reach the cache. A target with symbolic links or special
+files is skipped. The copy uses a clone where the file system supports one; otherwise Linux copies the files.
 
 ### Safety
 
@@ -745,10 +741,15 @@ Run in the root folder of a layr line that is also the cargo project root.
   3. Env: `[workspace.metadata.layr-retest] env` (none without `Cargo.toml`). The command runs with it, with
      `RUSTC_WRAPPER` empty and `CARGO_TARGET_DIR` removed.
   4. `cargo fetch --locked` in a cargo project. A failure prints a warning and the gate goes on.
-  5. The command. Its output goes to the terminal.
-  6. `layr retest sweep` in a cargo project. The last line says `sweep ok`, `sweep skipped` or `sweep failed`.
+  5. The command. Its output goes to the terminal. In a cargo project a `cargo` script comes first on PATH: it
+     records each top-level cargo call (its folder, `CARGO_TARGET_DIR`, the variables of the unit env, its
+     arguments) and runs the real cargo. A call from inside cargo (cargo sets `CARGO` for build scripts,
+     `cargo-nextest` and `cargo-clippy`) is not recorded; `CARGO` from the gate's own caller is removed for the
+     command. A tool that runs cargo by an absolute path is not recorded.
+  6. Gate coverage, after a command that passed (see "Gate coverage" below).
+  7. `layr retest sweep` in a cargo project. The last line says `sweep ok`, `sweep skipped` or `sweep failed`.
      A failed sweep does not change the gate's exit status.
-  7. The lock is released. The exit status is the status of the command.
+  8. The lock is released. The exit status is the status of the command.
 - `layr retest init [--yes]` makes a project ready. It is safe to run twice.
   - Finds a cargo project (`Cargo.toml`), pnpm (`pnpm-lock.yaml`), and vitest, jest or pytest projects.
   - Adds a `regenerable` line to `.layrattributes` for each cache folder of the project that it finds: `target` (cargo),
@@ -762,6 +763,9 @@ Run in the root folder of a layr line that is also the cargo project root.
   - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
     prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
     `--yes` runs it. Exit code 1 if one is still missing.
+  - In the main line of a project with a Git remote `origin`, sets `layr follow origin/main` (once) and runs its
+    first pass. Each pass builds the `sweep` commands in main and saves its caches; a line's caches go back to main
+    after `layr git push` of the line or a local `layr merge`. Without a running daemon it says how to install one.
   - Prints the next step: `layr retest gate -- <your gate command>`.
 - `layr retest doctor` reads and never writes. It prints `ok:` or `warn:` lines with numbers; exit code 0
   when there is no warning, else 1.
@@ -786,6 +790,52 @@ Run in the root folder of a layr line that is also the cargo project root.
     - Without build output, it says `build once to check build script paths`.
   - Records: count, and the age of the newest (warning above 14 days). Size of `target/retest`
     (warning above 20 GB).
+  - Units that name a file out of their package by an absolute path (the binary dep-info in `.fingerprint`):
+    an `include_str!`, `include_bytes!` or `#[path]` of a file in another folder of the workspace. Cargo names a
+    source of the unit's package relative to the package and a source in `target` relative to `target`; any
+    other source by its absolute path. A copy of the workspace at another path builds such a crate again, and a
+    new line keeps it warm only when each file has the same bytes there (`relocate`). One warning per package,
+    with the number of files and the first three. The workspace manifest, `Cargo.lock` and the clippy config are
+    left out: cargo and clippy name them so in every unit. Fix: move a shared file into the package, or copy it
+    to `OUT_DIR` in `build.rs` and include it from there.
+  - The coverage of the last gate (`.layr-retest/gate-coverage.json`): each call that sweep does not cover is a
+    warning, with the age of the gate. Without a gate it says how to check one.
+
+### Gate coverage
+
+A new line is warm only for the units that main builds, and main builds the `sweep` commands. A gate whose cargo
+calls use other units builds them cold in every new line. After a passing command the gate lists each recorded call
+the way the sweep lists its commands: `-v --message-format json`, one job, and a rustc wrapper that never
+compiles, so the listing stops at a unit that is not fresh and builds nothing. It runs before the sweep, which
+removes the units that no sweep command lists.
+
+- A call is listed with its unit arguments. `test`, `bench` and `cargo nextest run|list|archive` become a
+  `--no-run` test build with the same package, target, feature and profile options (nextest's `--cargo-profile`
+  is cargo's `--profile`; its own `--profile`, filters and runner options go). `test --doc` becomes the
+  library's test build (doctests link with the features of a test build), `run` a build. Job, color, message format and verbosity options go. A call that builds nothing (`fetch`,
+  `metadata`, `fmt`, a help or version call) is left out.
+- The target folder is `--target-dir`, else the call's `CARGO_TARGET_DIR`, else `target` of the project. A call
+  into `target` is compared with the `sweep` commands, one into `target/<dir>` with the `sweep` entries whose
+  `target_dir` is `<dir>`. A call into a folder out of `target` is a warning: no line takes those units warm.
+- The units of a call (unit hashes per profile folder) that no `sweep` command lists are named, up to five, with
+  the `sweep` entry that covers them: the listing arguments for `target` (and the variables that the `env` table
+  needs when the call had another value), or an object with `target_dir`, `args` and `env` for a folder below it.
+  A call that selects packages with `-p` gets a note: cargo resolves the features of those packages only, so
+  their dependencies get other units than a `--workspace` build.
+- Each `sweep` command is listed on its own. A command that is not fresh after the gate (the gate did not run it,
+  or one of its units is stale in every new line) does not hide the others: a call whose units are all in the
+  fresh commands is covered; a call with other units in a profile folder where a command was not fresh is not
+  checked, and the stale command is named.
+- Not checked, with the reason: a failed command, a call whose folder is gone (a test copy in a temp folder), a
+  call whose units are not fresh after the gate, a busy build lock, more than 40 distinct calls.
+- The result goes to `.layr-retest/gate-coverage.json` with a key of what decides the units: the calls (a folder out
+  of the project as `<outside>`, so a temp copy with a new name is the same call), the `sweep` settings, every
+  manifest of the workspace (from `cargo metadata --no-deps`), `Cargo.lock`, the cargo config, the toolchain files
+  and `rustc -vV`. The source of a workspace crate is not in a unit hash, so a source change keeps the key. The next
+  gate with the same key and a result without a "not checked" that it can lift prints the saved findings and lists
+  nothing. The gate prints the time of the check (`sweep coverage took`); a Studio gate with 9 calls took 13 s at
+  load 95 when it listed them.
+- `layr retest doctor` prints the result.
 
 ### Record format
 

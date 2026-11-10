@@ -1,0 +1,21 @@
+PASS merge of origin/main exits 0
+PASS incoming-only change f1 taken
+PASS incoming-only change f2 taken
+PASS incoming-only change f3 taken
+PASS line work kept
+PASS conflicting merge exits 1
+PASS conflict output names the path
+PASS status shows the unmerged path
+PASS merge over open conflicts is refused
+PASS the refusal names the path
+PASS the refused merge keeps the head
+PASS the file of the later change is not touched
+PASS save with markers refused
+PASS the save refusal names the file
+PASS a refused save keeps the head
+PASS an incomplete marker set is saved
+PASS the flag allows markers
+PASS the open conflict is listed once after two saves
+PASS resolved: clean
+PASS after the resolution the incoming change is taken
+t62-merge-git.sh: 20 passed, 0 failed

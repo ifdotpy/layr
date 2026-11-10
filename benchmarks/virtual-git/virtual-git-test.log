@@ -1,0 +1,14 @@
+/private/tmp/layr-git-virtual-validation/store/projects/views-git-86352/lines/main
+target storage: object store v2 (snapshot storage is v1)
+1/1 state 5554a9e hot: 2 files, import 0.00 s, checkout 0.00 s, compare 0.00 s
+migrated 1 state(s) (2 files, 14 bytes read) in 0.0 s; repack 0.0 s (0 hot blobs turned cold, 1 packs)
+states: 1 migrated now, 0 recorded from an earlier run, 0 migrated before, 0 cache or derived (kept as snapshots), 0 freed
+object store: 522 B (522 bytes)
+old snapshots: deleted 1 snapshot(s), 0 B freed; their states remain in the object store
+Created virtual line virtual at /private/tmp/layr-git-virtual-validation/store/projects/views-git-86352/lines/virtual from 5554a9e
+fatal: path 'sub/removed' does not exist in '2920082d1db001552d31d1c81503fecbc8665959'
+Line virtual has no folder now; its changes stay in /private/tmp/layr-git-virtual-validation/store/projects/views-git-86352/meta/vlines/01a1bcbf-8501-77bd-b820-26bbf5f679e1/upper
+Line virtual is virtual at /private/tmp/layr-git-virtual-validation/store/projects/views-git-86352/lines/virtual
+Line virtual has a folder at /private/tmp/layr-git-virtual-validation/store/projects/views-git-86352/lines/virtual
+Deleted line virtual (was e6bea56).
+PASS: virtual Git commands, v2 export, history, hidden lines, and unchanged working content

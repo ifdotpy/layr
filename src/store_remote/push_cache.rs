@@ -5,9 +5,9 @@ use super::{
     zst,
 };
 use anyhow::{bail, Result};
+use layr_hashers::{ContentAddress, Digest};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use layr_hashers::{ContentAddress, Digest};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,

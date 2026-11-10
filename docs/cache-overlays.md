@@ -171,6 +171,10 @@ layr has no parts; its key differs once.
 - Remotes (section 7): a layr remote carries the states of every platform; a receiving machine
   imports only the states of its own `<os>-<arch>`.
 
+`layr fsck` accepts a missing overlay head tree from another platform when its record marks
+the tree absent and not deleted. It reports this as data that is not local. A head marked
+present still needs its tree. A missing head for the local platform remains an error.
+
 ## 7. Remotes per layer
 
 There are two kinds of remote:
@@ -195,7 +199,9 @@ There are two kinds of remote:
   when it is the nearest pushed ancestor of a kept state whose tree is not there yet (a push in
   flight on another machine reuses its parts). The daemon runs the same pass for each store remote
   of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
-  that cannot be reached is tried at the next pass). `layr fsck --caches --remote <name>` lists what
+  that cannot be reached is tried at the next pass). `layr push <name> --no-cache-sweep` defers
+  the ordinary cache cleanup to a later push or daemon pass. Key-epoch cleanup still runs.
+  `layr fsck --caches --remote <name>` lists what
   the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
   key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes
   only the newest published key: once the key of the new epoch is published, the push and the pass

@@ -369,10 +369,7 @@ fn fetch_refspec(ctx: &Ctx, repo: &Repo, url: &str, remote: &str, refspec: &str)
         }
     }
     let mut c = base_cmd(&tmp);
-    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
-        .arg(url)
-        .arg(refspec)
-        .arg("+refs/tags/*:refs/tags/*");
+    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"]).arg(url).arg(refspec).arg("+refs/tags/*:refs/tags/*");
     as_caller(ctx, &mut c, &tmp)?;
     let out = c.stdin(Stdio::null()).output().context("run git fetch")?;
     if !out.status.success() {
@@ -538,7 +535,13 @@ fn walk_trees(cat: &mut CatFile, old: Option<&str>, new: &str, prefix: &str, c: 
         Some(o) => parse_tree(&cat.object(o, "tree")?)?,
         None => BTreeMap::new(),
     };
-    let at = |name: &str| if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
+    let at = |name: &str| {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        }
+    };
     for (name, e) in &now {
         let path = at(name);
         c.names.push(path.clone());
@@ -850,14 +853,20 @@ pub fn stored_remote_refs(repo: &Repo, remote: &str) -> Result<Vec<(String, Stri
         .collect())
 }
 
-/// The state of a Git commit that the store maps (an imported state, or a state with a tree here).
+/// The state of a Git commit that the store maps through Git, native trees, or object store v2.
 pub(crate) fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
     for st in repo.p.db.state_of_commit(oid)? {
         // An imported state is mapped by its record, which holds the Git objects of the commit
         // (earlier versions imported only the tip and their records lack them). Other states are
-        // mapped when their tree is on disk.
-        let Some(rec) = repo.p.db.state(&st)? else { continue };
-        let mapped = if rec.kind == StateKind::Import { repo.p.db.has_git_import(&st)? } else { repo.p.has_state(&st) };
+        // mapped when their native tree or verified object tree is available.
+        let Some(rec) = repo.p.db.state(&st)? else {
+            continue;
+        };
+        let mapped = if rec.kind == StateKind::Import {
+            repo.p.db.has_git_import(&st)?
+        } else {
+            repo.p.has_state(&st) || crate::objstore::verified(&repo.p, &st)?.is_some()
+        };
         if mapped {
             return Ok(Some(st));
         }
@@ -925,7 +934,9 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
         }
         let mut written = 0;
         while written < IMPORT_CHUNK {
-            let Some((oid, rec)) = pending.next() else { break };
+            let Some((oid, rec)) = pending.next() else {
+                break;
+            };
             if mapped_state(repo, &oid)?.is_some() {
                 bail_moved(format!("commit {} of {refname} was imported by another command; run it again", &oid[..10]))?;
             }
@@ -1043,7 +1054,9 @@ fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, Stri
         if !seen.insert(id.clone()) {
             continue;
         }
-        let Some(s) = repo.p.db.state(&id)? else { continue };
+        let Some(s) = repo.p.db.state(&id)? else {
+            continue;
+        };
         if s.kind == StateKind::Import && repo.p.has_state(&id) {
             if let Some(c) = stored_commit(repo, &id)? {
                 return Ok(Some((id, c)));
@@ -1069,8 +1082,8 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
     if rec.kind != StateKind::Import {
         bail!("state {} is not an imported state", ids::short(state));
     }
-    let commit = stored_commit(repo, state)?
-        .with_context(|| format!("state {} has no Git commit in the store", ids::short(state)))?;
+    let commit =
+        stored_commit(repo, state)?.with_context(|| format!("state {} has no Git commit in the store", ids::short(state)))?;
     let s = store(repo);
     let _t = crate::trace::span(format!("build {} from git", ids::short(state)));
     let mut cat = CatFile::new(&s)?;
@@ -1226,8 +1239,8 @@ fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut 
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (repo, paths, keep);
-        Ok(src.clone())
+        let _ = paths;
+        repo.complete(src.clone(), keep)
     }
 }
 
@@ -1605,7 +1618,9 @@ fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>
             }
             rest = &rest[end..];
         }
-        let Some((next, next_kind)) = found else { return Ok(None) };
+        let Some((next, next_kind)) = found else {
+            return Ok(None);
+        };
         oid = next;
         kind = next_kind;
     }
@@ -2016,7 +2031,8 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         }
         // The damaged cache went aside. Imported states have no trees to rebuild their commits from,
         // so the Git remotes of the project give the objects back (git is the source).
-        let mut remotes: Vec<String> = repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
+        let mut remotes: Vec<String> =
+            repo.p.db.remote_refs()?.into_iter().filter_map(|(name, _, _)| name.split('/').next().map(str::to_owned)).collect();
         remotes.sort();
         remotes.dedup();
         for remote in remotes {
@@ -2101,7 +2117,8 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tcheckStat = minimal\n\ttrustctime = false\n\tlogallrefupdates = false\n",
     )?;
     // The project's local ignore patterns (`ignore.local`, from `init --from-git`): git and layr read them.
-    let local: Vec<String> = repo.p.config_value("ignore.local")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let local: Vec<String> =
+        repo.p.config_value("ignore.local")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     std::fs::write(g.join("info/exclude"), local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
     // The state's own commit; if it cannot be made, the nearest commit a record names.
     let anc = match line_commit(repo, state) {
@@ -2382,7 +2399,11 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
         if f.len() != 5 {
             bail!("bad diff-tree record for {path}");
         }
-        changes.push((path, Side { mode: f[0].to_string(), id: f[2].to_string() }, Side { mode: f[1].to_string(), id: f[3].to_string() }));
+        changes.push((
+            path,
+            Side { mode: f[0].to_string(), id: f[2].to_string() },
+            Side { mode: f[1].to_string(), id: f[3].to_string() },
+        ));
     }
     let zero = "0".repeat(40);
     let mut ids: Vec<String> = Vec::new();
@@ -2464,7 +2485,9 @@ pub fn entry(repo: &Repo, commit: &str, path: &str) -> Result<Entry> {
         return Ok(Entry::Dir(folder_names(&s, &format!("{commit}^{{tree}}"))?));
     }
     let out = git_out_bytes(&s, &["ls-tree", "-z", "--full-tree", commit, "--", path])?;
-    let Some(rec) = out.split(|b| *b == 0).find(|r| !r.is_empty()) else { return Ok(Entry::Missing) };
+    let Some(rec) = out.split(|b| *b == 0).find(|r| !r.is_empty()) else {
+        return Ok(Entry::Missing);
+    };
     let rec = String::from_utf8_lossy(rec).into_owned();
     let (meta, _) = rec.split_once('\t').context("bad Git tree entry")?;
     let fields: Vec<&str> = meta.split(' ').collect();
@@ -2521,7 +2544,11 @@ pub fn blobs(repo: &Repo, oids: &[String]) -> Result<Vec<Vec<u8>>> {
     for oid in oids {
         let mut header = String::new();
         stdout.read_line(&mut header)?;
-        let size: usize = header.split_whitespace().nth(2).and_then(|x| x.parse().ok()).with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
+        let size: usize = header
+            .split_whitespace()
+            .nth(2)
+            .and_then(|x| x.parse().ok())
+            .with_context(|| format!("bad cat-file header for {oid}: {header}"))?;
         let mut data = vec![0u8; size];
         stdout.read_exact(&mut data)?;
         let mut nl = [0u8; 1];
@@ -2594,12 +2621,8 @@ pub fn commits_outside(repo: &Repo, new: &[String], covered: &[String]) -> Resul
         return Ok(Vec::new());
     }
     let s = store(repo);
-    let mut child = base_cmd(&s)
-        .args(["rev-list", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child =
+        base_cmd(&s).args(["rev-list", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut input = child.stdin.take().context("rev-list has no input")?;
     let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
     let writer = std::thread::spawn(move || -> std::io::Result<()> {
@@ -2621,12 +2644,8 @@ pub fn commits_outside(repo: &Repo, new: &[String], covered: &[String]) -> Resul
 /// (`write_object`). A pack of a whole history is unpacked this way too.
 pub fn install_pack(repo: &Repo, pack: &[u8]) -> Result<()> {
     let s = init_store(repo)?;
-    let mut child = base_cmd(&s)
-        .args(["unpack-objects", "-q"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child =
+        base_cmd(&s).args(["unpack-objects", "-q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
     {
         let mut input = child.stdin.take().context("unpack-objects has no input")?;
         input.write_all(pack)?;
@@ -2867,6 +2886,8 @@ mod export_tests {
             assert!(raw.starts_with(&format!("tree {tree}\nparent {first}\nparent {second}\n")));
             git_out(&root, &["config", "commit.gpgsign", "true"])?;
             git_out(&root, &["config", "gpg.program", "/nonexistent/layr-signing-test"])?;
+            // A user gpg.format of ssh signs with ssh-keygen, not gpg.program: the fallback needs openpgp here.
+            git_out(&root, &["config", "gpg.format", "openpgp"])?;
             let signing = ExportContext::load(root.clone());
             assert!(signing.signs(&state.author.email));
             assert!(!signing.signs("other@example.test"));

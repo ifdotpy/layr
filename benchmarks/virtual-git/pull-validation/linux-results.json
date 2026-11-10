@@ -1,0 +1,41 @@
+{
+  "source_state": "de557ab911ff756c891f01a1bcfc2a48",
+  "reports": {
+    "x86": {
+      "path": "/tmp/layr-pull-fixed-linux-x86-report.log",
+      "sha256": "5fe98245a152ff71897dc27ce44a35137c4bdf0a4228caf61a0022747536c1bf",
+      "backends": [
+        "btrfs",
+        "overlayfs"
+      ],
+      "result_lines": [
+        "test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s",
+        "test result: ok. 421 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out; finished in 33.38s",
+        "PASS: virtual Git commands, v2 export, history, hidden lines, and unchanged working content",
+        "PASS: virtual Git pull, ff-only, merge, conflicts, replay, v2 roundtrip, and hidden views",
+        "PASS: virtual Git commands, v2 export, history, hidden lines, and unchanged working content",
+        "PASS: virtual Git pull, ff-only, merge, conflicts, replay, v2 roundtrip, and hidden views",
+        "LAYR_V1_X86_PASS=1",
+        "LAYR_V1_X86_RESULT=0"
+      ]
+    },
+    "arm": {
+      "path": "/tmp/layr-pull-fixed-linux-arm-report.log",
+      "sha256": "9a107798de1e552b8ee0b88c6317315fdaae82b1840869b80d091f56b8e71725",
+      "backends": [
+        "btrfs",
+        "overlayfs"
+      ],
+      "result_lines": [
+        "test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s",
+        "test result: ok. 421 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out; finished in 34.51s",
+        "PASS: virtual Git commands, v2 export, history, hidden lines, and unchanged working content",
+        "PASS: virtual Git pull, ff-only, merge, conflicts, replay, v2 roundtrip, and hidden views",
+        "PASS: virtual Git commands, v2 export, history, hidden lines, and unchanged working content",
+        "PASS: virtual Git pull, ff-only, merge, conflicts, replay, v2 roundtrip, and hidden views",
+        "LAYR_V1_X86_PASS=1",
+        "LAYR_V1_X86_RESULT=0"
+      ]
+    }
+  }
+}

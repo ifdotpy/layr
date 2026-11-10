@@ -23,10 +23,13 @@ mod cmd {
     pub const LINK: u16 = 10;
     pub const UNLINK: u16 = 11;
     pub const RMDIR: u16 = 12;
+    pub const SET_XATTR: u16 = 13;
+    pub const REMOVE_XATTR: u16 = 14;
     pub const WRITE: u16 = 15;
     pub const CLONE: u16 = 16;
     pub const TRUNCATE: u16 = 17;
     pub const CHMOD: u16 = 18;
+    pub const UTIMES: u16 = 20;
     pub const UPDATE_EXTENT: u16 = 22;
     pub const FALLOCATE: u16 = 23;
     pub const ENCODED_WRITE: u16 = 25;
@@ -53,6 +56,7 @@ pub enum Cmd {
     Extent { path: String, offset: u64, len: u64 },
     Truncate { path: String, size: u64 },
     Chmod { path: String, mode: u32 },
+    Metadata { path: String },
     Other,
 }
 
@@ -163,6 +167,7 @@ pub fn decode(mut r: impl Read, mut f: impl FnMut(Cmd)) -> Result<()> {
             }
             cmd::TRUNCATE => Cmd::Truncate { path: path(at.path)?, size: at.size },
             cmd::CHMOD => Cmd::Chmod { path: path(at.path)?, mode: at.mode as u32 },
+            cmd::SET_XATTR | cmd::REMOVE_XATTR | cmd::UTIMES => Cmd::Metadata { path: path(at.path)? },
             _ => Cmd::Other,
         };
         f(c);
@@ -331,6 +336,10 @@ impl Model {
                 n.touched = true;
                 n.entry.mode = Some(*mode);
             }
+            Cmd::Metadata { path } => {
+                let id = self.lookup(path);
+                self.nodes[id].touched = true;
+            }
             Cmd::Other => {}
         }
     }
@@ -394,12 +403,29 @@ mod tests {
     }
 
     #[test]
+    fn metadata_commands_mark_the_final_path() {
+        let mut data = MAGIC.to_vec();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend(command(cmd::SET_XATTR, &[(attr::PATH, b"old/file")]));
+        data.extend(command(cmd::RENAME, &[(attr::PATH, b"old"), (attr::PATH_TO, b"new")]));
+        data.extend(command(cmd::REMOVE_XATTR, &[(attr::PATH, b"new/other")]));
+        data.extend(command(cmd::UTIMES, &[(attr::PATH, b"new/time")]));
+        let got = entries_from(&data[..]).unwrap();
+        for (old, new) in [("old/file", "new/file"), ("old/other", "new/other"), ("old/time", "new/time")] {
+            assert!(got.iter().any(|e| e.origin.as_deref() == Some(old) && e.path.as_deref() == Some(new)));
+        }
+    }
+
+    #[test]
     fn decode_reads_commands_one_by_one() {
         let mut data = MAGIC.to_vec();
         data.extend_from_slice(&1u32.to_le_bytes());
         data.extend(command(cmd::MKFILE, &[(attr::PATH, b"a")]));
         data.extend(command(cmd::RENAME, &[(attr::PATH, b"a"), (attr::PATH_TO, b"b")]));
-        data.extend(command(cmd::UPDATE_EXTENT, &[(attr::PATH, b"b"), (attr::FILE_OFFSET, &4096u64.to_le_bytes()), (attr::SIZE, &8u64.to_le_bytes())]));
+        data.extend(command(
+            cmd::UPDATE_EXTENT,
+            &[(attr::PATH, b"b"), (attr::FILE_OFFSET, &4096u64.to_le_bytes()), (attr::SIZE, &8u64.to_le_bytes())],
+        ));
         data.extend(command(99, &[]));
         let mut got = Vec::new();
         decode(&data[..], |c| got.push(c)).unwrap();

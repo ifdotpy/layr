@@ -584,10 +584,8 @@ fn query(req: &Request, listen: &str) -> Result<Query> {
 }
 
 fn write_headers(stream: &mut TcpStream, m: &Metadata) -> Result<()> {
-    let mut headers = vec![
-        ("Content-Type".into(), m.media.clone()),
-        ("Docker-Distribution-Api-Version".into(), "registry/2.0".into()),
-    ];
+    let mut headers =
+        vec![("Content-Type".into(), m.media.clone()), ("Docker-Distribution-Api-Version".into(), "registry/2.0".into())];
     if let Some(digest) = &m.digest {
         headers.push(("Docker-Content-Digest".into(), digest.clone()));
     }

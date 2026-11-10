@@ -5,8 +5,8 @@ use crate::fsutil;
 use crate::repo::{Repo, Snap};
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use layr_hashers::ContentAddress;
+use rand::RngCore;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
@@ -362,7 +362,14 @@ pub fn check_between(ctx: &Ctx, repo: &Repo, old: &Snap, new: &Snap, rev: &str) 
 }
 
 /// `check_between` for a caller that already computed `file_changes(old, new)`.
-pub fn check_changes(ctx: &Ctx, repo: &Repo, old: &Snap, new: &Snap, rev: &str, changes: &[crate::changes::Change]) -> Result<()> {
+pub fn check_changes(
+    ctx: &Ctx,
+    repo: &Repo,
+    old: &Snap,
+    new: &Snap,
+    rev: &str,
+    changes: &[crate::changes::Change],
+) -> Result<()> {
     check_tree(ctx, repo, Some(old), new, rev, Some(changes))
 }
 

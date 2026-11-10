@@ -1,0 +1,62 @@
+### layr sources
+files 680  raw 8.7 MiB
+variant                           MiB   ratio  comp MB/s   dec MB/s
+per file, level 3                2.59   29.6%       39.5      686.9
+per file, level 9                2.42   27.6%        6.1       85.3
+per file, level 19               2.32   26.5%        0.5      586.0
+one stream, level 3              2.16   24.7%       13.1      137.7
+one stream, level 19             1.64   18.7%        0.5      176.0
+one stream, 19 + long            1.64   18.7%        0.4      993.4
+small files (<64 KiB): 653  raw 5.7 MiB; dictionary 112 KiB trained in 3.0 s
+small, level 3                   1.84   32.1%       20.5       33.5
+small, level 3 + dict            1.61   28.0%       18.9       64.9
+small, level 19                  1.68   29.3%        0.6      659.9
+small, level 19 + dict           1.35   23.4%        0.6      439.8
+save of  1 files (5 KiB each), level  3: 0.03 ms
+save of 10 files (5 KiB each), level  3: 0.31 ms
+save of  1 files (5 KiB each), level 19: 0.60 ms
+save of 10 files (5 KiB each), level 19: 9.32 ms
+
+### layr-studio sources
+files 3842  raw 107.3 MiB
+variant                           MiB   ratio  comp MB/s   dec MB/s
+per file, level 3               31.56   29.4%      117.0      362.8
+per file, level 9               30.19   28.1%       17.8      428.1
+per file, level 19              29.53   27.5%        0.4      559.2
+one stream, level 3             27.81   25.9%       50.8      407.2
+one stream, level 19            22.13   20.6%        0.6      237.0
+one stream, 19 + long           21.93   20.4%        0.6      251.8
+small files (<64 KiB): 3571  raw 32.5 MiB; dictionary 112 KiB trained in 6.9 s
+small, level 3                  10.04   30.9%      140.8      145.8
+small, level 3 + dict            8.97   27.6%       52.0      515.8
+small, level 19                  9.17   28.2%        1.5      682.8
+small, level 19 + dict           7.51   23.1%        1.1      116.0
+save of  1 files (5 KiB each), level  3: 0.03 ms
+save of 10 files (5 KiB each), level  3: 0.30 ms
+save of  1 files (5 KiB each), level 19: 0.98 ms
+save of 10 files (5 KiB each), level 19: 13.76 ms
+
+### layr history deltas (last 60 commits)
+pairs 213  raw 8.74 MiB  whole zstd19 2.138 MiB  delta zstd19 0.067 MiB
+
+### Chromium random sample (~400 MB)
+files 42404  raw 382.0 MiB
+variant                           MiB   ratio  comp MB/s   dec MB/s
+per file, level 3              128.69   33.7%       97.6      327.1
+per file, level 9              122.67   32.1%       15.3      596.4
+per file, level 19             119.03   31.2%        2.1      803.4
+one stream, level 3            121.22   31.7%      185.6      766.1
+one stream, level 19           105.40   27.6%        1.6      776.9
+one stream, 19 + long          102.22   26.8%        1.3      953.5
+small files (<64 KiB): 41660  raw 173.5 MiB; dictionary 112 KiB trained in 6.4 s
+small, level 3                  62.95   36.3%      149.7      416.2
+small, level 3 + dict           56.23   32.4%      109.8      319.1
+small, level 19                 59.29   34.2%        1.4      309.4
+small, level 19 + dict          49.72   28.7%        1.4      251.3
+save of  1 files (1 KiB each), level  3: 0.01 ms
+save of 10 files (1 KiB each), level  3: 0.08 ms
+save of  1 files (1 KiB each), level 19: 0.28 ms
+save of 10 files (1 KiB each), level 19: 2.32 ms
+load 215.29 158.18 133.17
+
+[exited with code 0]

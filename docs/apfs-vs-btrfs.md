@@ -20,7 +20,7 @@ See [thin APFS states](apfs-thin-states.md) and the [measurements](../benchmarks
    automatic state writes only the entries that changed. Keeping the folder times costs a few calls per folder;
    the clone itself already costs work per entry.
 3. **Weaker protection of history.** btrfs read-only subvolumes are kernel-enforced.
-   APFS uses `UF_IMMUTABLE` on each file. The store owner can remove these flags, and setting them costs CPU per file.
+   APFS seals each entry with an inherited deny ACL entry (`docs/apfs.md`, Seals). The store owner can remove it, and setting it costs one call per entry when a state is made. A clone does not copy it: a new line needs no pass over the entries.
    Without the root service this limit stays. Real protection needs the root service on a volume with ownership
    enabled: then root owns the states, and the line owner cannot change them.
 4. **Transfers.** A peer that has the parent state gets only the differences, as with btrfs.

@@ -201,6 +201,8 @@ pub(crate) fn make_overlay(
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         };
         let mut rec = Record::new("commit");
@@ -1267,12 +1269,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = crate::store::Store::open(&root.join("store"))?;
             // Visibility exercises the ordinary reader policy even when the test runner is root.
-            let caller = crate::ctx::Caller {
-                uid: 1000,
-                gid: 1000,
-                user: "reader".into(),
-                home: root.join("home"),
-            };
+            let caller = crate::ctx::Caller { uid: 1000, gid: 1000, user: "reader".into(), home: root.join("home") };
             let actor = crate::model::Actor { uid: caller.uid, name: caller.user.clone(), session: None };
             let create = |name: &str, config: serde_json::Value| -> Result<Project<'_>> {
                 let dir = store.project_dir(name)?;

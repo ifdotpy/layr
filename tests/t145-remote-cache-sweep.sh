@@ -28,6 +28,9 @@ l push archive -q --caches >/dev/null 2>&1
 eq "a line's cache state is in the remote" 3 "$(trees)"
 cd "$P/main" || exit 1
 l line delete -D x >/dev/null
+no "fetch does not accept a push-only cleanup option" l fetch archive --no-cache-sweep
+ok "a checkpoint push defers cache cleanup" l push archive -q --no-cache-sweep
+eq "the checkpoint keeps the deleted line's cache" 3 "$(trees)"
 l push archive -q --caches >/dev/null 2>&1
 eq "after the line delete and a push its cache state is gone from the remote" 2 "$(trees)"
 eq "and its data part too" "$first_parts" "$(parts)"
@@ -72,7 +75,7 @@ l push archive -q --caches >/dev/null 2>&1
 epochs() { find "$T/archive/overlays" -path '*/epochs/*' -name '*.tree.age' | sed 's|.*/epochs/\([^/]*\)/.*|\1|' | sort -u | wc -l | tr -d ' '; }
 eq "one epoch has cache states before the key change" 1 "$(epochs)"
 l overlay readers "$ov" "$r2" >/dev/null 2>&1
-out=$(l push archive -q --caches 2>&1)
+out=$(l push archive -q --caches --no-cache-sweep 2>&1)
 has "the push names the deleted states of the old epoch" "of older key epochs" "$out"
 eq "only the new epoch has cache states" 1 "$(epochs)"
 eq "and it has the kept states" 2 "$(trees)"

@@ -1,0 +1,13 @@
+PASS replay after a merge of main succeeds
+PASS only the line's own states are replayed
+PASS the replay starts at main
+PASS the files of both lines are there
+PASS pick of main..other succeeds
+PASS pick brings the files of o1 and o2
+PASS replay from the root onto another base succeeds
+PASS root replay applies only the new work
+PASS root replay starts at the requested base
+PASS root replay keeps both files
+PASS replay of an already included root succeeds
+PASS replay of an included root leaves the head unchanged
+t135-replay-after-merge.sh: 12 passed, 0 failed

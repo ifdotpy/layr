@@ -394,11 +394,16 @@ mod tests {
         };
         assert_eq!(tree.canonical().unwrap(), canonical(&serde_json::to_value(&tree).unwrap()).unwrap());
         Tree::parse(&tree.canonical().unwrap()).unwrap();
-        let escaped = Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
+        let escaped =
+            Tree { files: BTreeMap::from([("\n\t\\\"".into(), entry.clone())]), times: BTreeMap::new(), chunks: BTreeMap::new() };
         assert_eq!(escaped.canonical().unwrap(), canonical(&serde_json::to_value(&escaped).unwrap()).unwrap());
         assert_eq!(Tree::default().canonical().unwrap(), canonical(&serde_json::to_value(Tree::default()).unwrap()).unwrap());
         // File times: the same bytes as the generic canonical form, and a time needs its file.
-        let timed = Tree { files: BTreeMap::from([("a".into(), entry.clone())]), times: BTreeMap::from([("a".into(), 1_793_820_425_267_530_733)]), chunks: BTreeMap::new() };
+        let timed = Tree {
+            files: BTreeMap::from([("a".into(), entry.clone())]),
+            times: BTreeMap::from([("a".into(), 1_793_820_425_267_530_733)]),
+            chunks: BTreeMap::new(),
+        };
         assert_eq!(timed.canonical().unwrap(), canonical(&serde_json::to_value(&timed).unwrap()).unwrap());
         assert_eq!(Tree::parse(&timed.canonical().unwrap()).unwrap(), timed);
         // Chunks: canonical key order ("chunks" first), no links on a chunked file, valid ids.
@@ -425,7 +430,11 @@ mod tests {
         let mut missing = chunked.clone();
         missing.chunks.insert("gone".into(), vec![id]);
         assert!(Tree::parse(&missing.canonical().unwrap()).is_err(), "chunks of a missing file");
-        let orphan = Tree { files: BTreeMap::from([("a".into(), entry)]), times: BTreeMap::from([("b".into(), 1)]), chunks: BTreeMap::new() };
+        let orphan = Tree {
+            files: BTreeMap::from([("a".into(), entry)]),
+            times: BTreeMap::from([("b".into(), 1)]),
+            chunks: BTreeMap::new(),
+        };
         assert!(Tree::parse(&orphan.canonical().unwrap()).is_err());
     }
     use super::*;

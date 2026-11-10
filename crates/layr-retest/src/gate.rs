@@ -1,6 +1,8 @@
 //! `layr retest gate [--name <n>] [--max-load <n>] -- <command...>`: runs a gate command with one gate at a
 //! time on this machine, under a low load, with the project's build env. Then it sweeps stale build output.
 //! The command's exit status is the gate's exit status. Replaces a project wrapper script.
+//! A passing gate also checks that the `sweep` list builds the units of each cargo call that the command made
+//! (`cover`): a unit that it misses is built cold in every new line.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -22,9 +24,14 @@ fn parse_online_cpus(text: &str) -> Option<usize> {
     for part in text.trim().split(',') {
         let (start, end) = match part.split_once('-') {
             Some((start, end)) => (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?),
-            None => { let cpu = part.parse::<usize>().ok()?; (cpu, cpu) }
+            None => {
+                let cpu = part.parse::<usize>().ok()?;
+                (cpu, cpu)
+            }
         };
-        if end < start || last.is_some_and(|previous| start <= previous) { return None; }
+        if end < start || last.is_some_and(|previous| start <= previous) {
+            return None;
+        }
         total = total.checked_add(end.checked_sub(start)?.checked_add(1)?)?;
         last = Some(end);
     }
@@ -247,8 +254,42 @@ pub fn run(args: &[String]) -> Result<i32> {
         }
     }
     let (prog, rest) = opts.command.split_first().context(USAGE)?;
-    let status = with_env(Command::new(prog).args(rest), &env).status().with_context(|| format!("cannot start {prog}"))?;
+    let shim = if cargo {
+        crate::cover::shim().unwrap_or_else(|e| {
+            eprintln!("layr-retest gate: cargo calls are not recorded: {e:#}");
+            None
+        })
+    } else {
+        None
+    };
+    let mut cmd = Command::new(prog);
+    with_env(cmd.args(rest), &env);
+    if let Some(s) = &shim {
+        if let Err(e) = s.apply(&mut cmd) {
+            eprintln!("layr-retest gate: cargo calls are not recorded: {e:#}");
+        }
+    }
+    let status = cmd.status().with_context(|| format!("cannot start {prog}"))?;
     let code = exit_code(status);
+    if let Some(s) = &shim {
+        if code != 0 {
+            eprintln!("layr-retest gate: the command failed, so the sweep coverage of its cargo calls is not checked");
+        } else {
+            // Before the sweep: the sweep removes the units that no sweep command lists, the ones this check names.
+            match layr_cache::cargo::settings(&crate::retest_host(), &root) {
+                Ok(settings) => {
+                    let started = Instant::now();
+                    let calls = crate::cover::read_calls(&s.log);
+                    let key = crate::cover::key(&root, &settings, &calls);
+                    if !crate::cover::reuse(&root, &key) {
+                        crate::cover::report(&root, &crate::cover::check(&root, &settings, &calls), &key);
+                    }
+                    eprintln!("layr-retest gate: sweep coverage took {:.2}s", started.elapsed().as_secs_f64());
+                }
+                Err(e) => eprintln!("layr-retest gate: sweep coverage not checked: {e:#}"),
+            }
+        }
+    }
     let sweep = if cargo { sweep(&env) } else { "skipped" };
     eprintln!("layr-retest gate {}: exit {code}, sweep {sweep}", opts.name);
     Ok(code)

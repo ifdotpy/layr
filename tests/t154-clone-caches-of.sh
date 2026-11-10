@@ -15,7 +15,7 @@ P=$LAYR_ROOT/projects/p/lines
 cd "$P/main" || exit 1
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 self() { env LAYR_ROOT="$T/$1/store" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])'; }
-for m in x y; do read id key <<<"$(self $m)"; l remote trust cloud "$id" --public-key "$key" >/dev/null; done
+for m in x y s; do read id key <<<"$(self $m)"; l remote trust cloud "$id" --public-key "$key" >/dev/null; done
 mkdir -p target; echo main > target/a
 # The cache of main's head comes from another line, as a check runner saves it (main.checks-<platform>), and a newer
 # one of another platform follows (an x86 runner after an arm one): this platform's cache still comes.
@@ -36,6 +36,13 @@ no "the other line's cache did not come" test -e "$T/x/store/projects/p/lines/w2
 has "fsck of the clone is clean" "0 unreachable state(s)" "$(cd "$T/x/store/projects/p/lines/main" && xl fsck --caches 2>&1)"
 ok "the clone still pushes" sh -c "cd '$T/x/store/projects/p/lines/w' && echo w > target/w && env LAYR_ROOT='$T/x/store' '$LAYR' save --caches -q && env LAYR_ROOT='$T/x/store' '$LAYR' push origin -q --caches"
 no "an unknown line is refused" env LAYR_ROOT="$T/y2/store" "$LAYR" clone "file://$T/archive" p --caches-of nosuch
+
+sl() { env LAYR_ROOT="$T/s/store" "$LAYR" "$@"; }
+sl clone "file://$T/archive" p --heads --only-line main --caches-of main >/dev/null 2>&1
+eq "a selected clone with caches succeeds" 0 "$?"
+no "a selected clone leaves another line unmade" test -e "$T/s/store/projects/p/lines/other"
+(cd "$T/s/store/projects/p/lines/main" && sl line new warm main >/dev/null 2>&1)
+eq "a new line from the selected clone starts warm" main "$(cat "$T/s/store/projects/p/lines/warm/target/a" 2>&1)"
 
 yl() { env LAYR_ROOT="$T/y/store" "$LAYR" "$@"; }
 yl clone "file://$T/archive" p >/dev/null 2>&1

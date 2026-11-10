@@ -64,7 +64,12 @@ impl Cache {
                 return None;
             }
             let info = sys::subvol_info(file.as_fd()).ok()?;
-            Some(Identity { filesystem: sys::filesystem_uuid(file.as_fd()).ok()?, uuid: info.uuid, generation: info.generation, ctransid: info.ctransid })
+            Some(Identity {
+                filesystem: sys::filesystem_uuid(file.as_fd()).ok()?,
+                uuid: info.uuid,
+                generation: info.generation,
+                ctransid: info.ctransid,
+            })
         };
         Some(Self { dir, name: cache_name(&[identity(p)?, identity(c)?]) })
     }

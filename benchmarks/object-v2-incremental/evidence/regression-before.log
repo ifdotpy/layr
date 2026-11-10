@@ -1,0 +1,26 @@
+   Compiling layr-objects v0.1.0 (/Users/igor/Projects/layr-store/projects/layr/lines/object-v2-incremental-perf/crates/layr-objects)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.58s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/layr_objects-07507e8b8bc98d00)
+
+running 1 test
+test tests::incremental_write_does_not_resolve_unchanged_siblings ... FAILED
+
+failures:
+
+---- tests::incremental_write_does_not_resolve_unchanged_siblings stdout ----
+
+thread 'tests::incremental_write_does_not_resolve_unchanged_siblings' (287989694) panicked at crates/layr-objects/src/lib.rs:306:9:
+assertion `left == right` failed: unchanged metadata comes from the base tree
+  left: 101
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::incremental_write_does_not_resolve_unchanged_siblings
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p layr-objects --lib`

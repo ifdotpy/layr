@@ -1,9 +1,9 @@
 //! Pure comparisons of stored probe results. The caller supplies decrypted file bytes.
 use crate::{screenshots, Project, StateKind, Subject};
 use anyhow::{Context as _, Result};
+use layr_hashers::{ContentAddress, Digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

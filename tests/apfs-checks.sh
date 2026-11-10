@@ -9,6 +9,7 @@ cleanup() {
     result=$?
     if [ "$result" != 0 ]; then echo "Failed watcher evidence retained at $task_tmp" >&2; return; fi
     chflags -R nouchg "$task_tmp" 2>/dev/null || true
+    /bin/chmod -R -N "$task_tmp" 2>/dev/null || true
     chmod -R u+w "$task_tmp" 2>/dev/null || true
     rm -rf "$task_tmp"
 }

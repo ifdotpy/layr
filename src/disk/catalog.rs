@@ -74,7 +74,8 @@ pub(super) fn known(home: &Path) -> Result<Vec<Known>> {
     if let Some(person) = person {
         for pin in person.index.vaults {
             let Some(address) = addresses.get(&pin.project).filter(|a| a.pin == pin) else { continue };
-            let pin = StorePin { project: pin.project, recipient: pin.recipient, paper_recipient: None, mode: Default::default() };
+            let pin =
+                StorePin { project: pin.project, recipient: pin.recipient, paper_recipient: None, mode: Default::default() };
             if let Some(old) = stores.get_mut(&address.url) {
                 if old.pin.as_ref().is_some_and(|old| old != &pin) {
                     bail!("conflicting local pins for store {}", address.url);
@@ -241,7 +242,7 @@ mod tests {
     use super::*;
     #[test]
     fn status_reports_the_keychain_and_service_without_the_identity() {
-        keystore::test_service();
+        let _keychain = keystore::test_service();
         let url = format!("file:///layr-status-{}", crate::ids::new_id());
         let store = Known { name: "origin".into(), url: url.clone(), pin: None, profile: None };
         let account = keystore::account(&url);

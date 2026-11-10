@@ -125,9 +125,8 @@ pub(super) fn normalize(text: &str, extension: &str, ignore: &[String]) -> Resul
 /// structure diff.
 fn generated_id(value: &str) -> bool {
     let digits = value.bytes().filter(u8::is_ascii_digit).count();
-    let hex_run = value
-        .split(|c: char| !c.is_ascii_hexdigit())
-        .any(|run| run.len() >= 8 && run.bytes().any(|b| b.is_ascii_digit()));
+    let hex_run =
+        value.split(|c: char| !c.is_ascii_hexdigit()).any(|run| run.len() >= 8 && run.bytes().any(|b| b.is_ascii_digit()));
     value.contains(':') || digits >= 4 || hex_run
 }
 
@@ -141,9 +140,16 @@ fn without_times(text: &str) -> String {
     while i < b.len() {
         let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
         let mut end = None;
-        if boundary && digits(i, 4) && b.get(i + 4) == Some(&b'-') && digits(i + 5, 2) && b.get(i + 7) == Some(&b'-') && digits(i + 8, 2) {
+        if boundary
+            && digits(i, 4)
+            && b.get(i + 4) == Some(&b'-')
+            && digits(i + 5, 2)
+            && b.get(i + 7) == Some(&b'-')
+            && digits(i + 8, 2)
+        {
             let mut j = i + 10;
-            if matches!(b.get(j), Some(b'T') | Some(b' ')) && digits(j + 1, 2) && b.get(j + 3) == Some(&b':') && digits(j + 4, 2) {
+            if matches!(b.get(j), Some(b'T') | Some(b' ')) && digits(j + 1, 2) && b.get(j + 3) == Some(&b':') && digits(j + 4, 2)
+            {
                 j += 6;
                 if b.get(j) == Some(&b':') && digits(j + 1, 2) {
                     j += 3;
@@ -469,10 +475,12 @@ mod tests {
     #[test]
     fn html_drops_generated_ids_times_and_ignored_attributes() {
         let ignore = vec!["data-build".to_string()];
-        let a = normalize("<p id=':r1:' data-build='a1'>Built 2026-11-06T03:16:19Z at 03:16</p><a id='home'>x</a>", "html", &ignore)
-            .unwrap();
-        let b = normalize("<p id=':r9:' data-build='b2'>Built 2026-11-07T10:00:00Z at 10:00</p><a id='home'>x</a>", "html", &ignore)
-            .unwrap();
+        let a =
+            normalize("<p id=':r1:' data-build='a1'>Built 2026-11-06T03:16:19Z at 03:16</p><a id='home'>x</a>", "html", &ignore)
+                .unwrap();
+        let b =
+            normalize("<p id=':r9:' data-build='b2'>Built 2026-11-07T10:00:00Z at 10:00</p><a id='home'>x</a>", "html", &ignore)
+                .unwrap();
         assert_eq!(a.text(), b.text());
         assert!(a.text().contains("Built &lt;time&gt; at &lt;time&gt;"), "{}", a.text());
         assert!(a.text().contains("id=\"home\""), "a stable id stays");

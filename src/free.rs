@@ -43,6 +43,19 @@ pub fn line_deleted(id: &str) {
     }
 }
 
+/// Final states of deleted lines that get a complete tree after the command (`keyframe_later`).
+static FINALS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// The thin final state of a deleted line gets a complete tree in the background after this
+/// command (`layr __keyframe ... final`), not in the delete: its copy of the whole tree and the
+/// seal of every entry took seconds under the project lock. `layr gc` makes the ones that a stopped
+/// process left.
+pub fn keyframe_later(state: &str) {
+    if let Ok(mut finals) = FINALS.lock() {
+        finals.insert(state.to_string());
+    }
+}
+
 /// A record moved a line head to `state`.
 pub fn head_moved(state: &str) {
     if let Ok(mut moved) = MOVED.lock() {
@@ -74,9 +87,24 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
+        if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
+            if let Ok(p) = Project::open(store, &name) {
+                let repo = crate::repo::Repo { p, ctx: Some(ctx) };
+                if let Err(error) = crate::objstore::retire_native(&repo) {
+                    eprintln!("layr: native copies of {name} remain for retry: {error:#}");
+                }
+            }
+        }
         if !moved.is_empty() {
             keyframe_heads(store, &name, &moved);
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(dir) = store.project_dir(&name) {
+            for id in finals.iter().filter(|id| dir.join("deltas").join(id).is_dir()) {
+                spawn_keyframe(&store.root, &name, id, true);
+            }
         }
         if !left.is_empty() || !deleted.is_empty() {
             if let Err(e) = drop_derived(store, &name, &left, &deleted) {
@@ -84,10 +112,11 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
             }
         }
         let Ok(dir) = store.project_dir(&name) else { continue };
-        let Ok(conn) = rusqlite::Connection::open_with_flags(
-            crate::store::db_file(&dir),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) else { continue };
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            continue;
+        };
         // Each inspection finishes its autocommit read before expiration can write owners.
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
         if expired_refs(&conn) {
@@ -130,7 +159,7 @@ fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
         for id in moved.iter().filter(|id| p.delta_path(id).is_dir()) {
             if crate::thin::chain_len(&p, id) > max {
-                spawn_keyframe(&store.root, name, id);
+                spawn_keyframe(&store.root, name, id, false);
             }
         }
     }
@@ -138,12 +167,17 @@ fn keyframe_heads(store: &Store, name: &str, moved: &BTreeSet<String>) {
     let _ = (store, name, moved);
 }
 
-/// Start `layr __keyframe <store> <project> <state>` in the background; without it the next command tries again.
+/// Start `layr __keyframe <store> <project> <state> [final]` in the background; without it the next command (or
+/// `gc`, for a final state) tries again.
 #[cfg(target_os = "macos")]
-fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
+fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str, final_state: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
+    let mut args: Vec<&std::ffi::OsStr> = vec!["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()];
+    if final_state {
+        args.push("final".as_ref());
+    }
     let _ = std::process::Command::new(exe)
-        .args(["__keyframe".as_ref(), root.as_os_str(), name.as_ref(), id.as_ref()])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -154,19 +188,25 @@ fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str) {
 /// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
 /// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
 /// free step moves the bases that nothing uses now. One process per project makes complete trees at a time; another
-/// one finds the work done or leaves it to the next save.
+/// one finds the work done or leaves it to the next save. The final state of a deleted line (`final_state`) gets its
+/// complete tree whatever its chain, and waits for a process of another state.
 #[cfg(target_os = "macos")]
-pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str) -> Result<()> {
+pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_state: bool) -> Result<()> {
     let store = Store::open(root)?;
     let p = Project::open(&store, name)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("keyframe.lock"))?;
-    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+    let take = if final_state {
+        rustix::fs::FlockOperation::LockExclusive
+    } else {
+        rustix::fs::FlockOperation::NonBlockingLockExclusive
+    };
+    if rustix::fs::flock(&lock, take).is_err() {
         return Ok(());
     }
     {
         let _lock = p.lock()?;
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
-        if !p.delta_path(id).is_dir() || crate::thin::chain_len(&p, id) <= max {
+        if !p.delta_path(id).is_dir() || (!final_state && crate::thin::chain_len(&p, id) <= max) {
             return Ok(());
         }
         crate::thin::complete_tree(&p, id)?;
@@ -237,11 +277,9 @@ fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
 
 /// True when a project has queued states or pins to release. Reads the database directly.
 fn pending(conn: &rusqlite::Connection) -> bool {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')",
-        [],
-        |r| r.get::<_, bool>(0),
-    )
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM free_queue) OR EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| {
+        r.get::<_, bool>(0)
+    })
     .unwrap_or(false)
 }
 
@@ -251,7 +289,8 @@ fn unchanged_queue(store: &Store, name: &str, conn: &rusqlite::Connection) -> bo
     let Some(left) = LEFT_QUEUED.lock().ok().and_then(|m| m.get(&(store.root.clone(), name.to_string())).cloned()) else {
         return false;
     };
-    let pins = conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| r.get::<_, bool>(0)).unwrap_or(true);
+    let pins =
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='pin')", [], |r| r.get::<_, bool>(0)).unwrap_or(true);
     let Ok(mut st) = conn.prepare("SELECT state FROM free_queue ORDER BY state") else { return false };
     let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) else { return false };
     let now: Vec<String> = rows.flatten().collect();
@@ -400,9 +439,14 @@ struct HolderProcesses(sysinfo::System);
 
 impl HolderProcesses {
     fn new(holders: &[String]) -> Self {
-        let pids: Vec<_> = holders.iter().filter_map(|h| h.split_once(':')?.0.parse::<u32>().ok()).map(sysinfo::Pid::from_u32).collect();
+        let pids: Vec<_> =
+            holders.iter().filter_map(|h| h.split_once(':')?.0.parse::<u32>().ok()).map(sysinfo::Pid::from_u32).collect();
         let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing().without_tasks());
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&pids),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+        );
         Self(system)
     }
 
@@ -434,8 +478,9 @@ fn same_start(stored: &str, observed: Option<u64>, fallback: impl FnOnce() -> Op
     }
 }
 
-fn process_start(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
+pub(crate) fn process_start(pid: u32) -> Option<String> {
+    let out =
+        std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
@@ -546,7 +591,9 @@ mod inspection_tests {
         assert!(expired_refs(&conn));
         assert!(!pending(&conn));
         // Expiration on another connection can release owners and queue states between inspections.
-        db.conn.execute_batch("BEGIN; UPDATE refs SET deleted=1 WHERE name='old'; INSERT INTO free_queue(state) VALUES('dead'); COMMIT;")?;
+        db.conn.execute_batch(
+            "BEGIN; UPDATE refs SET deleted=1 WHERE name='old'; INSERT INTO free_queue(state) VALUES('dead'); COMMIT;",
+        )?;
         assert!(!expired_refs(&conn));
         assert!(pending(&conn));
         LEFT_QUEUED.lock().unwrap().insert((store.root.clone(), "p".into()), vec!["dead".into()]);
@@ -626,7 +673,6 @@ mod pin_tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -638,7 +684,10 @@ mod holder_tests {
         assert!(super::same_start(&matching, Some(timestamp), || panic!("matching lookup must not run ps")));
         for observed in [None, Some(0), Some(timestamp)] {
             let mut called = false;
-            assert!(super::same_start("legacy", observed, || { called = true; Some("legacy".into()) }));
+            assert!(super::same_start("legacy", observed, || {
+                called = true;
+                Some("legacy".into())
+            }));
             assert!(called);
             assert!(!super::same_start("legacy", observed, || Some("reused".into())));
             assert!(super::same_start("legacy", observed, || None));
@@ -659,13 +708,17 @@ mod holder_tests {
         let holder = super::self_holder();
         assert!(super::holder_alive(&holder));
         let pid = std::process::id();
-        assert!(!super::holder_alive(&format!("{pid}:1")));
+        // A sandbox may refuse to run setuid ps. In that case a live PID is
+        // retained because its start time cannot be checked safely.
+        assert_eq!(super::holder_alive(&format!("{pid}:1")), super::process_start(pid).is_none());
         assert!(!super::holder_alive("2147483647:1"));
         let output = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
-        let legacy = String::from_utf8(output.stdout).unwrap();
-        let processes = super::HolderProcesses::new(&[format!("{pid}:")]);
-        let native = processes.start(pid).and_then(super::format_start).unwrap();
-        assert_eq!(native, legacy.trim());
-        assert!(super::holder_alive(&format!("{pid}:{}", legacy.trim())));
+        if output.status.success() {
+            let legacy = String::from_utf8(output.stdout).unwrap();
+            let processes = super::HolderProcesses::new(&[format!("{pid}:")]);
+            let native = processes.start(pid).and_then(super::format_start).unwrap();
+            assert_eq!(native, legacy.trim());
+            assert!(super::holder_alive(&format!("{pid}:{}", legacy.trim())));
+        }
     }
 }

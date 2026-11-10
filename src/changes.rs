@@ -37,6 +37,7 @@ impl Change {
 /// Raw candidate list from the stream, without content checks.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
     let (parent, child) = (folder(parent)?, folder(child)?);
     let entries = btrfs::send_no_data(parent, child)?;
     build(parent, child, entries)
@@ -74,6 +75,7 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
             (None, Some(p)) => {
                 touch(&mut paths, p, None);
                 if let Some(l) = &e.linked_from {
+                    touch(&mut paths, l, None);
                     if deleted.contains(l) {
                         moves.push((l.clone(), p.clone(), e.ranges.clone()));
                     }
@@ -85,10 +87,7 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
     // Content below a moved folder moved too. One walk per outermost moved folder; a folder
     // moved inside it again maps its own files (the longest moved prefix of a path wins).
     let map: BTreeMap<String, String> = moved_dirs.iter().map(|(o, p)| (p.clone(), o.clone())).collect();
-    let roots: Vec<&String> = map
-        .keys()
-        .filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i])))
-        .collect();
+    let roots: Vec<&String> = map.keys().filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i]))).collect();
     for p in roots {
         let mut found: Vec<(String, String)> = Vec::new();
         fsutil::walk(child, p, &mut |rel, _m| {
@@ -160,7 +159,7 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
         return Ok(true);
     }
     if o.is_dir() {
-        return Ok(false);
+        return Ok(!stored_same(parent, child, &c.path));
     }
     // The backend already proved equal data while it built these ranges.
     // APFS also uses kernel clone IDs; live status reads validate generations.
@@ -177,12 +176,18 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
     match (parent.at(path), child.at(path)) {
         (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
-        _ => true,
+        _ => false,
     }
 }
-#[cfg(not(target_os = "macos"))]
-fn stored_same(_: &(impl Src + ?Sized), _: &(impl Src + ?Sized), _: &str) -> bool {
-    true
+#[cfg(target_os = "linux")]
+fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
+    match (parent.at(path), child.at(path)) {
+        (Ok(a), Ok(b)) => match (layr_objects::fsx::xattrs(&a), layr_objects::fsx::xattrs(&b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// File level changes (folders dropped), confirmed by content. A move keeps `old_path`.
@@ -209,6 +214,13 @@ pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)
         let is_dir_only =
             c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
         if is_dir_only {
+            if c.old.as_ref().is_some_and(|m| m.is_dir())
+                && c.new.as_ref().is_some_and(|m| m.is_dir())
+                && c.old_path.is_none()
+                && !stored_same(parent, child, &c.path)
+            {
+                out.push(c);
+            }
             continue;
         }
         // A folder replaced by a file or the reverse: report only the non-folder side.
@@ -355,13 +367,54 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(target_os = "macos")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
     crate::storage::candidates(parent, child)
+}
+
+/// Paths needed for an object import, including time-only changes. A directory whose
+/// only change is its time is dirty, but does not need a full subtree import.
+pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    #[cfg(target_os = "macos")]
+    let (normal, timed) = {
+        let normal = candidates(parent, child)?;
+        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?;
+        (normal, timed)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (normal, timed) = {
+        let normal = candidates(parent, child)?;
+        let timed = normal.clone();
+        (normal, timed)
+    };
+    let known: HashSet<&str> =
+        normal.iter().flat_map(|c| std::iter::once(c.path.as_str()).chain(c.old_path.as_deref())).collect();
+    let (mut changed, mut dirty) = (Vec::new(), Vec::new());
+    for c in &timed {
+        if !known.contains(c.path.as_str())
+            && c.old_path.is_none()
+            && c.old.as_ref().is_some_and(|m| m.is_dir())
+            && c.new.as_ref().is_some_and(|m| m.is_dir())
+        {
+            dirty.push(c.path.as_bytes().to_vec());
+        } else {
+            changed.push(c.path.as_bytes().to_vec());
+            if let Some(old) = &c.old_path {
+                changed.push(old.as_bytes().to_vec());
+            }
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    dirty.sort();
+    dirty.dedup();
+    Ok((changed, dirty))
 }
 
 /// Candidates for a caller that only asks whether content differs: APFS then skips the exact
 /// ranges of changed files. Other backends have the ranges from their stream at no cost.
 #[cfg(target_os = "macos")]
 fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
     crate::storage::candidates_equal(parent, child)
 }
 
@@ -372,6 +425,7 @@ fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
 
 #[cfg(feature = "overlayfs")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
     crate::storage::candidates(folder(parent)?, folder(child)?)
 }
 
@@ -403,6 +457,28 @@ mod tests {
         Meta { ftype: fsutil::FType::File, mode: 0o644, size, ino: 0, uid: 0, gid: 0, mtime: 0 }
     }
 
+    #[test]
+    fn inaccessible_metadata_is_not_treated_as_equal() {
+        let root = Counting(PathBuf::from("/"), AtomicUsize::new(0));
+        assert!(!stored_same(&root, &root, "../outside"));
+    }
+
+    #[test]
+    fn a_new_hard_link_includes_its_existing_source() {
+        let tmp = std::env::temp_dir().join(format!("layr-link-candidates-{}", crate::ids::new_id()));
+        let (parent, child) = (tmp.join("parent"), tmp.join("child"));
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(parent.join("source"), "data").unwrap();
+        std::fs::write(child.join("source"), "data").unwrap();
+        std::fs::hard_link(child.join("source"), child.join("link")).unwrap();
+        let entry = stream::Entry { path: Some("link".into()), linked_from: Some("source".into()), ..Default::default() };
+        let result = build(&parent, &child, vec![entry]).unwrap();
+        assert!(result.iter().any(|c| c.path == "source"));
+        assert!(result.iter().any(|c| c.path == "link"));
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
     /// Exact rename search reads each candidate once, not once per pair of candidates.
     #[test]
     fn exact_renames_read_each_candidate_once() {
@@ -427,4 +503,19 @@ mod tests {
         assert!(reads <= 4 * n + 2, "{reads} reads for {n} + {n} candidates");
         std::fs::remove_dir_all(tmp).unwrap();
     }
+}
+
+/// Object trees have no native inode stream. Enumerate their entries and let the
+/// content comparison reject unchanged candidates without a checkout.
+fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+    let mut entries: BTreeMap<String, (Option<Meta>, Option<Meta>)> = BTreeMap::new();
+    fsutil::walk(parent, "", &mut |path, meta| {
+        entries.entry(path.to_owned()).or_default().0 = Some(meta.clone());
+        Ok(true)
+    })?;
+    fsutil::walk(child, "", &mut |path, meta| {
+        entries.entry(path.to_owned()).or_default().1 = Some(meta.clone());
+        Ok(true)
+    })?;
+    Ok(entries.into_iter().map(|(path, (old, new))| Change { path, old_path: None, old, new, ranges: None }).collect())
 }

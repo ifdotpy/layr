@@ -272,7 +272,15 @@ pub enum Trust<'a> {
     Peer(&'a str, &'a str),
     /// Every machine of the batch (a new replica or a restore).
     All,
+    /// Every machine that a Layr Cloud server serves: its access list decided who writes there. The records and
+    /// their effects come into the project, but a machine that this project does not trust yet cannot change
+    /// local trust (its `machine.trust`, `machine.untrust` and `trust.delegate` records have no effect), so peer
+    /// sync, cache readers and other remotes keep the local trusted set.
+    Server,
 }
+
+/// The record operations that change which machines a project trusts.
+const TRUST_OPS: &[&str] = &["machine.trust", "machine.untrust", "trust.delegate"];
 
 pub struct Project<'a> {
     pub store: &'a Store,
@@ -370,10 +378,7 @@ fn waiting_message(meta: &Path) -> String {
         return PLAIN.to_string();
     }
     let secs = (ids::now_ms() - holder["since_ms"].as_i64().unwrap_or(0)).max(0) / 1000;
-    format!(
-        "layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s",
-        holder["command"].as_str().unwrap_or("")
-    )
+    format!("layr: waiting for the project lock: held by '{}' (pid {pid}) for {secs} s", holder["command"].as_str().unwrap_or(""))
 }
 
 /// True when a process with this pid exists (it may belong to another user).
@@ -431,11 +436,15 @@ impl Drop for Lock {
                 }
                 if EMPTY_TRASH_FULLY.load(std::sync::atomic::Ordering::SeqCst) {
                     let _t = crate::trace::span("empty trash (all)");
-                    if let Err(error) = empty_all(&dir) { eprintln!("layr: cannot empty trash: {error}"); }
+                    if let Err(error) = empty_all(&dir) {
+                        eprintln!("layr: cannot empty trash: {error}");
+                    }
                 } else if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(&dir) {
                     let budget = trash_budget();
                     let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
-                    if let Err(error) = empty_trash(&dir, Some(budget)) { eprintln!("layr: cannot empty trash: {error}"); }
+                    if let Err(error) = empty_trash(&dir, Some(budget)) {
+                        eprintln!("layr: cannot empty trash: {error}");
+                    }
                 }
             }
         }
@@ -564,7 +573,7 @@ pub fn temp_name() -> String {
 }
 
 /// For a name from `temp_name`: whether its creator is gone. None for a name without a pid (an
-/// older layr), which cleanup judges by age.
+/// older layr). Cleanup keeps it because copied timestamps do not prove that it is abandoned.
 pub fn creator_gone(name: &str) -> Option<bool> {
     use rustix::process::{test_kill_process, Pid};
     let pid: i32 = name.rsplit_once('.')?.1.parse().ok().filter(|p| *p > 0)?;
@@ -585,7 +594,9 @@ pub fn kick_trash(dir: &Path) {
     if std::env::var_os("LAYR_TRASH_BUDGET_MS").is_some() || !spawn_trash_emptier(dir) {
         let budget = trash_budget();
         let _t = crate::trace::span(format!("empty trash ({} ms)", budget.as_millis()));
-        if let Err(error) = empty_trash(dir, Some(budget)) { eprintln!("layr: cannot empty trash: {error}"); }
+        if let Err(error) = empty_trash(dir, Some(budget)) {
+            eprintln!("layr: cannot empty trash: {error}");
+        }
     }
 }
 
@@ -639,7 +650,9 @@ pub fn empty_all(dir: &Path) -> Result<Vec<String>, crate::pools::PoolError> {
 /// One pass over the trash, for at most `budget`. Returns the number of trees deleted and a
 /// `path: error` line for each path that stayed.
 pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(usize, Vec<String>), crate::pools::PoolError> {
-    if crate::pools::is_forking_parent() { return Err(crate::pools::PoolError::ForkingParent); }
+    if crate::pools::is_forking_parent() {
+        return Err(crate::pools::PoolError::ForkingParent);
+    }
     let deadline = budget.map(|b| std::time::Instant::now() + b);
     let late = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
     let (mut deleted, mut failed) = (0, Vec::new());
@@ -655,7 +668,12 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(u
 
 /// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
 /// false when the budget ended before `path` was gone.
-fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
+fn empty_tree(
+    path: &Path,
+    late: &(dyn Fn() -> bool + Sync),
+    deleted: &mut usize,
+    failed: &mut Vec<String>,
+) -> Result<bool, crate::pools::PoolError> {
     #[cfg(not(target_os = "macos"))]
     let _ = late;
     #[cfg(target_os = "macos")]
@@ -681,7 +699,9 @@ fn empty_tree(path: &Path, late: &(dyn Fn() -> bool + Sync), deleted: &mut usize
         // Another emptier deleted it, or an entry of it, at the same time: that is no failure. A path that is still
         // here goes in the next pass.
         Err(_) if fs::symlink_metadata(path).is_err() => *deleted += 1,
-        Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
+        Err(e)
+            if e.chain()
+                .any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)) => {}
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     Ok(true)
@@ -695,21 +715,35 @@ const TRASH_PARALLEL_FROM: usize = 64;
 
 /// `empty_tree` of each of `entries`. False when the budget ended first.
 #[cfg(target_os = "macos")]
-fn empty_entries(entries: &[PathBuf], late: &(dyn Fn() -> bool + Sync), deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
+fn empty_entries(
+    entries: &[PathBuf],
+    late: &(dyn Fn() -> bool + Sync),
+    deleted: &mut usize,
+    failed: &mut Vec<String>,
+) -> Result<bool, crate::pools::PoolError> {
     if entries.len() < TRASH_PARALLEL_FROM {
         for e in entries {
-            if late() || !empty_tree(e, late, deleted, failed)? { return Ok(false); }
+            if late() || !empty_tree(e, late, deleted, failed)? {
+                return Ok(false);
+            }
         }
         return Ok(true);
     }
-    let results = crate::pools::run(crate::pools::Priority::Background, crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()), || {
-        use rayon::prelude::*;
-        entries.par_iter().map(|e| {
-            let (mut deleted, mut failed) = (0, Vec::new());
-            let done = if late() { false } else { empty_tree(e, late, &mut deleted, &mut failed)? };
-            Ok((deleted, failed, done))
-        }).collect::<Vec<Result<_, crate::pools::PoolError>>>()
-    })?;
+    let results = crate::pools::run(
+        crate::pools::Priority::Background,
+        crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()),
+        || {
+            use rayon::prelude::*;
+            entries
+                .par_iter()
+                .map(|e| {
+                    let (mut deleted, mut failed) = (0, Vec::new());
+                    let done = if late() { false } else { empty_tree(e, late, &mut deleted, &mut failed)? };
+                    Ok((deleted, failed, done))
+                })
+                .collect::<Vec<Result<_, crate::pools::PoolError>>>()
+        },
+    )?;
     let mut done = true;
     for result in results {
         let (count, errors, complete) = result?;
@@ -1024,6 +1058,7 @@ impl<'a> Project<'a> {
         }
         mkdir_mode(&dir, 0o755)?;
         mkdir_mode(&dir.join("states"), 0o700)?;
+        mkdir_mode(&dir.join("deltas"), 0o700)?;
         mkdir_mode(&dir.join("lines"), 0o711)?;
         mkdir_mode(&dir.join("meta"), 0o700)?;
         for d in ["stage", "scan", "work"] {
@@ -1232,7 +1267,7 @@ impl<'a> Project<'a> {
         self.db.rebuild(only_older, |db| {
             for line in db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
-                if self.refusal(&terms, &s.record)?.is_some() {
+                if self.refusal_in_order(&terms, &s.record)?.is_some() {
                     continue;
                 }
                 db.derive(&s.record, &present, &self.store.machine.id)?;
@@ -1299,6 +1334,7 @@ impl<'a> Project<'a> {
     /// Snapshots must already exist and the caller must hold the project lock.
     pub(crate) fn append_batch(&self, mut records: Vec<Record>, actor: &Actor) -> Result<Vec<Record>> {
         let _t = crate::trace::span("record batch");
+        crate::objstore::record_states(self, &mut records)?;
         let Some(first) = records.first() else { return Ok(records) };
         let m = &self.store.machine;
         let present = self.state_present();
@@ -1364,7 +1400,7 @@ impl<'a> Project<'a> {
     ///
     /// Only records of trusted machines are taken (see `Trust`).
     pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
-        crate::overlay_managers::validate_import(self, lines)?;
+        crate::overlay_managers::validate_import(self, lines, matches!(trust, Trust::Server))?;
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {
@@ -1446,7 +1482,14 @@ impl<'a> Project<'a> {
         // they vouch for nobody.
         let terms = self.trust_terms(&fresh.iter().map(|s| &s.record).collect::<Vec<_>>())?;
         // Trust: known machines, then machines vouched for by trusted ones in this batch.
-        if !matches!(trust, Trust::All) {
+        // Under `Trust::Server`, the machines whose trust records count: trusted here before this batch.
+        let mut locally_trusted: BTreeSet<String> = BTreeSet::from([self.store.machine.id.clone()]);
+        for m in keys.keys() {
+            if self.db.trusted(m)?.is_some_and(|k| Some(&k) == keys.get(m)) {
+                locally_trusted.insert(m.clone());
+            }
+        }
+        if !matches!(trust, Trust::All | Trust::Server) {
             let mut trusted: BTreeSet<String> = BTreeSet::new();
             for m in keys.keys() {
                 if let Some(k) = self.db.trusted(m)? {
@@ -1500,7 +1543,15 @@ impl<'a> Project<'a> {
         self.db.with_tx(|| {
             for s in &fresh {
                 if self.db.insert_record(&s.record, &s.line)? {
-                    if let Some(why) = self.refusal(&terms, &s.record)? {
+                    let server_trust = matches!(trust, Trust::Server)
+                        && TRUST_OPS.contains(&s.record.op.as_str())
+                        && !locally_trusted.contains(&s.record.machine);
+                    let refused = if server_trust {
+                        Some("a trust change by a machine this project does not trust")
+                    } else {
+                        self.refusal_in_order(&terms, &s.record)?
+                    };
+                    if let Some(why) = refused {
                         if std::env::var_os("LAYR_TRACE").is_some() {
                             let (seq, machine, op) = (s.record.seq, crate::ids::short(&s.record.machine), &s.record.op);
                             eprintln!("trace record {seq} of machine {machine} ({op}) has no effect: {why}");
@@ -1552,9 +1603,20 @@ impl<'a> Project<'a> {
         ))
     }
 
+    /// `refusal` for a record that is applied next, after every record before it: a merge machine's record is
+    /// checked against the derived tables as they are now (`layr_store::trust::Terms::refusal_in`).
+    pub fn refusal_in_order(&self, terms: &layr_store::trust::Rules, record: &Record) -> Result<Option<&'static str>> {
+        self.refusal_with(terms, record, true)
+    }
+
     /// Why a record has no effect here (`layr_store::trust::Terms::refusal`); None when it counts. A machine always
-    /// takes its own records.
+    /// takes its own records. Outside an ordered replay a merge machine's record is checked by its shape only, which
+    /// accepts at least what the replay accepts: owners and readers computed this way keep every state it keeps.
     pub fn refusal(&self, terms: &layr_store::trust::Rules, record: &Record) -> Result<Option<&'static str>> {
+        self.refusal_with(terms, record, false)
+    }
+
+    fn refusal_with(&self, terms: &layr_store::trust::Rules, record: &Record, in_order: bool) -> Result<Option<&'static str>> {
         if record.machine == self.store.machine.id {
             return Ok(None);
         }
@@ -1570,11 +1632,26 @@ impl<'a> Project<'a> {
                 Some(machine) => machine == record.machine,
             };
             let name = change.after.as_ref().map(|after| after.name.as_str());
-            lines.push(layr_store::trust::LineMove { id, new: change.before.is_none(), name, own });
+            let renamed = change.before.as_ref().is_some_and(|before| Some(before.name.as_str()) != name);
+            let after = change.after.as_ref();
+            lines.push(layr_store::trust::LineMove {
+                id,
+                new: change.before.is_none(),
+                name,
+                own,
+                renamed,
+                head: after.map(|a| a.head.as_str()),
+                owner: after.map(|a| a.owner),
+                machine: after.map(|a| a.machine.as_str()),
+            });
         }
         let payload = layr_store::trust::Payload { states: record.states.iter().map(|s| s.line.as_deref()).collect(), lines };
         let overlay = self.name.split_once('%').map(|(_, name)| name);
-        Ok(limits.refusal(record.time, &record.op, &record.data, overlay, &payload))
+        if !in_order {
+            return Ok(limits.refusal(record.time, &record.op, &record.data, overlay, &payload));
+        }
+        let current = DbCurrent { project: self, terms };
+        Ok(limits.refusal_in(record.time, &record.op, &record.data, overlay, &payload, &record.machine, &current))
     }
 
     /// The owners that the records with an effect give (`Db::recomputed_owners`).
@@ -1788,7 +1865,7 @@ mod temp_name_tests {
     fn a_temporary_name_tells_its_creator() {
         assert_eq!(creator_gone(&temp_name()), Some(false), "this process is alive");
         assert_eq!(creator_gone("11111111-2222-3333-4444-555555555555.2000000000"), Some(true));
-        assert_eq!(creator_gone("keep"), None, "a name without a pid keeps the age rule");
+        assert_eq!(creator_gone("keep"), None, "a name without a pid has no known creator");
         assert_eq!(creator_gone("prepared-11111111-2222-3333-4444-555555555555"), None);
     }
 }
@@ -1869,5 +1946,60 @@ mod trash_tests {
         assert!(deleted > 0);
         assert!(!tree.exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// The derived tables of a project as the reader of a merge machine's record (`layr_store::trust::Current`). A
+/// database error reads as absent, so the record is refused rather than accepted.
+struct DbCurrent<'a> {
+    project: &'a Project<'a>,
+    terms: &'a layr_store::trust::Rules,
+}
+
+impl layr_store::trust::Current for DbCurrent<'_> {
+    fn line(&self, id: &str) -> Option<(String, u32, String)> {
+        if self.project.db.line_deleted(id).unwrap_or(true) {
+            return None;
+        }
+        self.project.db.line_by_id(id).ok().flatten().map(|line| (line.name, line.owner, line.machine))
+    }
+
+    fn queue_entry(&self, id: &str) -> Option<serde_json::Value> {
+        self.project.db.queue_entry(id).ok().flatten().and_then(|entry| serde_json::to_value(entry).ok())
+    }
+
+    fn ref_target(&self, name: &str) -> Option<String> {
+        self.project.db.ref_value(name, crate::ids::now_ms()).ok().flatten().map(|r| r.target)
+    }
+
+    /// The machine of the records with an effect that set the ref to its current target, in the newest run of
+    /// such records; none when more than one machine is in that run. A database error reads as none, so a merge machine's
+    /// list is refused.
+    fn ref_setter(&self, name: &str) -> Option<String> {
+        let target = self.ref_target(name)?;
+        let needle = serde_json::to_string(name).ok()?;
+        // Newest first.
+        let records = self.project.db.records_naming(&needle, usize::MAX >> 1).ok()?;
+        // Every record of that run must be of one machine: a merge record signed with an old time can sort before
+        // the creator's set of the same target, and must not become the setter of the creator's release.
+        let mut setter: Option<String> = None;
+        for record in records {
+            let change = &record.data["ref_change"];
+            if change["name"] != name || self.project.refusal(self.terms, &record).ok()?.is_some() {
+                continue;
+            }
+            if change["after"]["target"] != target.as_str() {
+                break;
+            }
+            match &setter {
+                Some(machine) if machine != &record.machine => return None,
+                _ => setter = Some(record.machine),
+            }
+        }
+        setter
+    }
+
+    fn now(&self) -> i64 {
+        crate::ids::now_ms()
     }
 }

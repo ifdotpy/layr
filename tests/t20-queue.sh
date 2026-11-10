@@ -87,13 +87,24 @@ cat > "$T/move-head" <<EOF
 if '$LAYR' --root '$LAYR_ROOT' --project p queue run >/dev/null 2>&1; then exit 1; fi
 if [ ! -e '$T/moved-once' ]; then
   touch '$T/moved-once'
-  '$LAYR' --root '$LAYR_ROOT' --project p --line main save --allow-empty -qm concurrent
+  # Linux runs this test as root, which can move protected main. On macOS, the owner
+  # temporarily removes the rule to simulate that privileged writer, then restores it.
+  if [ "\$(uname -s)" = Darwin ]; then
+    '$LAYR' --root '$LAYR_ROOT' --project p protect main --remove >/dev/null || exit 1
+    trap "'$LAYR' --root '$LAYR_ROOT' --project p protect main --check gate >/dev/null" EXIT
+  fi
+  '$LAYR' --root '$LAYR_ROOT' --project p --line main save --allow-empty -qm concurrent || exit 1
+  if [ "\$(uname -s)" = Darwin ]; then
+    '$LAYR' --root '$LAYR_ROOT' --project p protect main --check gate >/dev/null || exit 1
+    trap - EXIT
+  fi
 fi
 EOF
 chmod +x "$T/move-head"
 l config check.gate "$T/move-head"
 MOVE=$(l queue add moved-source --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ok 'a moved target retries and then merges' l queue run --into main
+has 'the moved target keeps its check rule' 'check gate' "$(l protect)"
 eq 'the entry makes two attempts' 2 "$(l queue list --json | python3 -c 'import json,sys; print(next(e["attempts"] for e in json.load(sys.stdin) if e["id"]==sys.argv[1]))' "$MOVE")"
 has 'the concurrent head stays in history' concurrent "$(l log --format=%s)"
 ok 'the queued content reaches the target' test -f moved.txt
@@ -104,12 +115,21 @@ echo churn > churn.txt; l add churn.txt; l save -qm churn
 cd ../main
 cat > "$T/churn-head" <<EOF
 #!/bin/sh
-'$LAYR' --root '$LAYR_ROOT' --project p --line main save --allow-empty -qm concurrent-again
+if [ "\$(uname -s)" = Darwin ]; then
+  '$LAYR' --root '$LAYR_ROOT' --project p protect main --remove >/dev/null || exit 1
+  trap "'$LAYR' --root '$LAYR_ROOT' --project p protect main --check gate >/dev/null" EXIT
+fi
+'$LAYR' --root '$LAYR_ROOT' --project p --line main save --allow-empty -qm concurrent-again || exit 1
+if [ "\$(uname -s)" = Darwin ]; then
+  '$LAYR' --root '$LAYR_ROOT' --project p protect main --check gate >/dev/null || exit 1
+  trap - EXIT
+fi
 EOF
 chmod +x "$T/churn-head"
 l config check.gate "$T/churn-head"
 CHURN=$(l queue add churn-source --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 no 'a second moved head fails the entry' l queue run --into main
+has 'the changed target keeps its check rule' 'check gate' "$(l protect)"
 eq 'a moved head has at most two attempts' 'failed 2' "$(l queue list --json | python3 -c 'import json,sys; e=next(e for e in json.load(sys.stdin) if e["id"]==sys.argv[1]); print(e["status"],e["attempts"])' "$CHURN")"
 no 'a failed CAS does not install the queued file' test -e churn.txt
 # Pending entries keep an otherwise unreachable source through their hold ref.

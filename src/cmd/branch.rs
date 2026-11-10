@@ -35,14 +35,17 @@ pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if sub == "move" {
         return line_move(ctx, rest);
     }
+    if sub == "show" {
+        return crate::views::show(ctx, rest);
+    }
     if !matches!(sub.as_str(), "new" | "list" | "delete" | "rename") {
-        return Err(exit(2, "usage: layr line new/list/delete/rename/move"));
+        return Err(exit(2, "usage: layr line new/list/delete/rename/move/show"));
     }
     line_command(ctx, rest, sub)
 }
 
 /// The checked absolute target of `layr line move <line> <path>`.
-fn move_target(ctx: &Ctx, repo: &crate::repo::Repo, from: &std::path::Path, arg: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn move_target(ctx: &Ctx, repo: &crate::repo::Repo, from: &std::path::Path, arg: &str) -> Result<std::path::PathBuf> {
     use std::os::unix::fs::MetadataExt;
     use std::path::{Component, PathBuf};
     let fail = |m: String| exit(1, format!("error: {m}"));
@@ -79,14 +82,35 @@ fn move_target(ctx: &Ctx, repo: &crate::repo::Repo, from: &std::path::Path, arg:
     let to = parent.join(name);
     let root = ctx.store.root.canonicalize().unwrap_or_else(|_| ctx.store.root.clone());
     if to.starts_with(&root) {
-        return Err(fail(format!("{} is inside the store {}; use 'layr line move <line>' to move a line back", to.display(), root.display())));
+        return Err(fail(format!(
+            "{} is inside the store {}; use 'layr line move <line>' to move a line back",
+            to.display(),
+            root.display()
+        )));
     }
     if to.starts_with(from) {
         return Err(fail("the target is inside the folder of the line".into()));
     }
     let store_dev = std::fs::metadata(repo.p.lines_dir())?.dev();
-    if std::fs::metadata(&parent)?.dev() != store_dev {
-        return Err(fail(format!("{} is on another file system than the store; a line can only move within one file system", parent.display())));
+    let same_device = std::fs::metadata(&parent)?.dev() == store_dev;
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let same_device = if same_device {
+        true
+    } else {
+        // Btrfs gives each subvolume a distinct device number.
+        use std::os::fd::AsFd;
+        let source = std::fs::File::open(repo.p.lines_dir())?;
+        let target = std::fs::File::open(&parent)?;
+        match (crate::sys::filesystem_uuid(source.as_fd()), crate::sys::filesystem_uuid(target.as_fd())) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    };
+    if !same_device {
+        return Err(fail(format!(
+            "{} is on another file system than the store; a line can only move within one file system",
+            parent.display()
+        )));
     }
     if crate::linepaths::index(&ctx.store.root).iter().any(|e| e.path.starts_with(&to) || to.starts_with(&e.path)) {
         return Err(fail(format!("{} overlaps the folder of another moved line", to.display())));
@@ -104,9 +128,18 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let l = repo.line(&a.pos[0])?;
+    if crate::views::of(repo, &l).is_some() {
+        return Err(exit(
+            1,
+            format!("line {} is virtual: use 'layr line show {} --folder <path>' (docs/views.md)", l.name, l.name),
+        ));
+    }
     repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
     if h.line.as_ref().is_some_and(|c| c.id == l.id) {
-        return Err(exit(1, format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name)));
+        return Err(exit(
+            1,
+            format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name),
+        ));
     }
     let _lock = repo.p.lock()?;
     let from = repo.working(&l);
@@ -155,6 +188,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .flag("--path")
         .value("--owner")
         .value("--count")
+        .value("--view")
         .flag("--json")
         .optional("--format")
         .value("--contains")
@@ -211,6 +245,8 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
+            #[cfg(target_os = "macos")]
+            let view = crate::views::of(repo, &l);
             if a.has("-d") && !a.has("-f") {
                 let into = current.as_ref().map(|c| c.head.clone());
                 let merged = match &into {
@@ -222,11 +258,20 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     return Err(exit(1, format!("error: the line '{name}' is not fully merged.\nIf you are sure you want to delete it, run 'layr line delete -D {name}'.")));
                 }
             }
+            // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
+            #[cfg(target_os = "macos")]
+            if let Some(v) = view {
+                crate::views::delete(ctx, repo, &l, &v)?;
+                outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+                continue;
+            }
             // The working state is prepared before the lock; under it the record and the renames only
             // (issue #194). A folder that changed since adds a layer of its changes under the lock; a
             // moved head prepares again, up to three times.
             // A line that this machine never made a folder for (another machine's line that a fetch brought, as a
             // CI line) has no working state to keep: the record alone deletes it.
+            #[cfg(target_os = "linux")]
+            crate::views::ensure_no_pending_move(repo, &l)?;
             let made = repo.working(&l).exists();
             let (_lock, l, last) = if !made {
                 let lock = repo.p.lock()?;
@@ -282,19 +327,23 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                         Ok((crate::repo::FinalState::Moved, fresh)) => {
                             return Err(exit(
                                 1,
-                                format!("line {name} moved during the command (head {} -> {}); run it again", ids::short(&l.head), ids::short(&fresh.head)),
+                                format!(
+                                    "line {name} moved during the command (head {} -> {}); run it again",
+                                    ids::short(&l.head),
+                                    ids::short(&fresh.head)
+                                ),
                             ))
                         }
                     }
                 }
             };
-            // The final state stays in the `deleted` ring. As a thin layer it would keep every
-            // automatic state under it, so it gets a complete tree first (APFS): the line's
-            // automatic states go in this command (docs/ownership.md).
+            // The final state stays in the `deleted` ring. As a thin layer it keeps the states
+            // under it, so it gets a complete tree (APFS), in the background after this command
+            // (docs/ownership.md): the copy of the whole tree and its seal took seconds here.
             #[cfg(target_os = "macos")]
             if let Some(id) = &last {
                 if repo.p.delta_path(id).is_dir() {
-                    crate::thin::make_keyframe(&repo.p, id)?;
+                    crate::free::keyframe_later(id);
                 }
             }
             delete_recorded(ctx, repo, &l, last, made)?;
@@ -310,6 +359,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         };
         crate::store::check_name("line", &new)?;
         let l = repo.line(&old)?;
+        if crate::views::of(repo, &l).is_some() {
+            return Err(exit(
+                1,
+                format!("line {old} is virtual: rename it after 'layr line show {old} --folder' (docs/views.md)"),
+            ));
+        }
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
         let _lock = repo.p.lock()?;
         if repo.p.db.line_by_name(&new)?.is_some() {
@@ -391,7 +446,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         // that work into its own saves and pushes; one with caches only is a warm start.
         let start_state = repo.state(&start)?;
         if start_state.kind == StateKind::Auto && !start_state.parents.is_empty() {
-            let from = start_state.line.as_deref().map(|id| repo.p.db.line_by_id(id)).transpose()?.flatten().map(|l| repo.localize(l)).transpose()?;
+            let from = start_state
+                .line
+                .as_deref()
+                .map(|id| repo.p.db.line_by_id(id))
+                .transpose()?
+                .flatten()
+                .map(|l| repo.localize(l))
+                .transpose()?;
             let mut unsaved = repo.unsaved_paths(&start_state.parents[0], &start_state)?;
             // A later named state of its line may hold that work: then it is saved.
             if let Some(head) = from.as_ref().map(|l| l.head.clone()).filter(|h| *h != start_state.parents[0]) {
@@ -422,6 +484,32 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         }
         if owner == 0 && !ctx.caller.is_root() {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
+        }
+        match a.get("--view") {
+            None | Some("folder") => {}
+            Some("virtual") => {
+                if a.get("--count").is_some() || explicit_view.is_some() {
+                    return Err(exit(2, "--view virtual makes one line from a state (no --count, no views/ start)"));
+                }
+                {
+                    let l = crate::views::create(ctx, repo, name, &start, owner)?;
+                    if a.has("--json") {
+                        outln!(ctx, "{}", line_json(repo, &l));
+                    } else if a.has("--path") {
+                        outln!(ctx, "{}", repo.working(&l).display());
+                    } else if !a.has("-q") {
+                        outln!(
+                            ctx,
+                            "Created virtual line {} at {} from {}",
+                            l.name,
+                            repo.working(&l).display(),
+                            ids::short(&start)
+                        );
+                    }
+                    return Ok(0);
+                }
+            }
+            Some(other) => return Err(exit(2, format!("--view takes folder or virtual, not '{other}'"))),
         }
         // The tree clone, .git folder and caches are made before the lock. Under it the command
         // moves the folders into place and records them.
@@ -569,6 +657,8 @@ pub(crate) fn delete_recorded(
         repo.p.trash(&repo.working(l))?;
     }
     repo.p.set_moved_path(&l.id, None)?;
+    #[cfg(target_os = "linux")]
+    crate::views::forget(repo, &l.id)?;
     repo.drop_stage(l)?;
     repo.set_pending_moves(l, &Default::default())?;
     repo.prune_bases(l, None, 0)?;

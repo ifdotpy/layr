@@ -7,6 +7,9 @@ unset LAYR_TEST_DIRECT_MAIN # lib.sh sets it on macOS; this test checks the defa
 sample "$T/src"
 printf 'read only\n' > "$T/src/readonly.txt"
 chmod 444 "$T/src/readonly.txt"
+mkdir -p "$T/src/acl/sub"
+echo 'native ACL' > "$T/src/acl/sub/file"
+/bin/chmod +a 'everyone allow read' "$T/src/acl/sub/file" || exit 1
 l init local --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/local/lines
 cd "$P/main" || exit 1
@@ -14,6 +17,7 @@ eq "import preserves a read-only file" "read only" "$(cat readonly.txt)"
 no "main remains protected" l save --allow-empty -qm forbidden
 l line new -q topic
 cd "$P/topic" || exit 1
+has "recursive clones preserve native ACLs" 'group:everyone allow read' "$(/bin/ls -le acl/sub/file)"
 printf 'node_modules/\n' >> .gitignore
 printf 'node_modules regenerable\n' > .layrattributes
 l add -A && l save -qm attributes

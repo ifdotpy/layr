@@ -133,6 +133,12 @@ fn retry_locked<T>(mut step: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::R
 }
 
 impl Db {
+    /// A disposable disk-backed database for bounded working sets. It has no durable data.
+    pub fn scratch() -> Result<Connection> {
+        let conn = Connection::open("")?;
+        conn.execute_batch("PRAGMA cache_size=-2048; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;")?;
+        Ok(conn)
+    }
     /// Open the database. Returns it and whether the derived tables must be rebuilt.
     pub fn open(path: &Path) -> Result<Db> {
         let conn = Connection::open(path)?;
@@ -232,6 +238,26 @@ impl Db {
                 }
                 return Ok(false);
             }
+            // Pins and removal reservations belong to running processes, not signed records.
+            // Preserve them in this transaction so a replay cannot expose a reader's tree to GC.
+            let has_owners: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owners')",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut local_owners = Vec::new();
+            if has_owners {
+                let mut query = self.conn.prepare_cached("SELECT state, kind, holder FROM owners WHERE kind=?1")?;
+                for kind in crate::owners::LOCAL_OWNERS {
+                    local_owners.extend(
+                        query
+                            .query_map([kind], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()?,
+                    );
+                }
+            }
             self.conn.execute_batch("DROP TRIGGER IF EXISTS records_index_lines")?;
             for t in DERIVED.iter().chain(RETIRED) {
                 self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
@@ -240,6 +266,10 @@ impl Db {
                 self.conn.execute_batch(&format!("DROP INDEX IF EXISTS {i}"))?;
             }
             self.conn.execute_batch(SCHEMA)?;
+            for (state, kind, holder) in local_owners {
+                self.conn
+                    .execute("INSERT OR IGNORE INTO owners(state,kind,holder) VALUES(?1,?2,?3)", params![state, kind, holder])?;
+            }
             self.conn.execute_batch(r#"
                 INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, rowid, id FROM records WHERE op IN ('push','sync');
                 INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.rowid, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
@@ -275,8 +305,12 @@ impl Db {
     /// Older layr versions copied the database before a schema upgrade (`<name>.schema-<version>.bak`
     /// next to it). The records of such a copy are all in the database, so the copies go.
     fn remove_upgrade_copies(&self) {
-        let Some(db_path) = self.conn.path().map(PathBuf::from) else { return };
-        let (Some(dir), Some(name)) = (db_path.parent(), db_path.file_name()) else { return };
+        let Some(db_path) = self.conn.path().map(PathBuf::from) else {
+            return;
+        };
+        let (Some(dir), Some(name)) = (db_path.parent(), db_path.file_name()) else {
+            return;
+        };
         let prefix = format!("{}.schema-", name.to_string_lossy());
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let file = e.file_name().to_string_lossy().into_owned();
@@ -446,6 +480,17 @@ impl Db {
                 present as i64,
                 rec.machine
             ])?;
+            // A migration record can arrive first, or sort before its source due to clock skew.
+            let mappings: Vec<String> = tx
+                .prepare_cached(
+                    "SELECT raw FROM records WHERE op='state.tree' AND json_type(raw, '$.r.data.states.' || ?1)='object'",
+                )?
+                .query_map(params![s.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for raw in mappings {
+                let envelope: serde_json::Value = serde_json::from_str(&raw)?;
+                self.apply_state_trees(&serde_json::from_value(envelope["r"].clone())?)?;
+            }
             for p in &s.parents {
                 if self.state(p)?.map(|p| p.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("source history cannot have a cache or derived parent");
@@ -717,6 +762,28 @@ impl Db {
             "stash.drop" => {
                 tx.prepare_cached("UPDATE states SET dropped=1 WHERE id=?1")?.execute(params![s("state")])?;
             }
+            layr_model::validation::STATE_TREE_OP => {
+                // The tree and times table of states in the object store (`layr migrate`). The state
+                // keeps its id and its signed save record; the row gets the two fields. The record
+                // with the larger order key wins (`tree_ord` in the row), so the arrival order does
+                // not matter. A record that arrives before the record of its state has no effect
+                // until `layr reindex` replays both.
+                for (st, tree, times) in layr_model::validation::state_trees(d)? {
+                    let raw: Option<String> = tx
+                        .prepare_cached("SELECT rec FROM states WHERE id=?1")?
+                        .query_row(params![st], |r| r.get(0))
+                        .optional()?;
+                    let Some(raw) = raw else { continue };
+                    let mut v: serde_json::Value = serde_json::from_str(&raw)?;
+                    if v.get("tree_ord").and_then(|o| o.as_str()).is_some_and(|o| o >= ord.as_str()) {
+                        continue;
+                    }
+                    v["tree"] = serde_json::json!(tree);
+                    v["times"] = serde_json::json!(times);
+                    v["tree_ord"] = serde_json::json!(ord);
+                    tx.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![st, v.to_string()])?;
+                }
+            }
             _ => {}
         }
         // The overlays a line shows (`stack.<line id>`), from any record that changes them.
@@ -749,6 +816,27 @@ impl Db {
             .prepare_cached("SELECT public_key FROM trusted WHERE machine=?1")?
             .query_row(params![machine], |r| r.get(0))
             .optional()?)
+    }
+
+    fn apply_state_trees(&self, rec: &Record) -> Result<()> {
+        let ord = crate::owners::record_ord(rec);
+        for (state, tree, times) in layr_model::validation::state_trees(&rec.data)? {
+            let raw: Option<String> = self
+                .conn
+                .prepare_cached("SELECT rec FROM states WHERE id=?1")?
+                .query_row(params![state], |row| row.get(0))
+                .optional()?;
+            let Some(raw) = raw else { continue };
+            let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+            if value.get("tree_ord").and_then(|o| o.as_str()).is_some_and(|o| o >= ord.as_str()) {
+                continue;
+            }
+            value["tree"] = serde_json::json!(tree);
+            value["times"] = serde_json::json!(times);
+            value["tree_ord"] = serde_json::json!(ord);
+            self.conn.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![state, value.to_string()])?;
+        }
+        Ok(())
     }
 
     pub fn state(&self, id: &str) -> Result<Option<StateRec>> {
@@ -1351,6 +1439,21 @@ impl Db {
         v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
     }
 
+    /// Copy the newest outcome per request into a temporary database without loading the log.
+    pub fn copy_request_outcomes(&self, scratch: &Connection) -> Result<()> {
+        let mut select = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC")?;
+        let mut rows = select.query([])?;
+        let mut insert = scratch.prepare_cached("INSERT OR IGNORE INTO request_outcomes(id,digest) VALUES(?1,?2)")?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            let record = crate::oplog::parse_line(&raw, None)?.record;
+            if let Some(id) = record.data["request_id"].as_str() {
+                insert.execute(params![id, serde_json::to_string(&record.data["request_digest"])?])?;
+            }
+        }
+        Ok(())
+    }
+
     /// The newest operations visible on a line, or all operations when no line is supplied.
     /// SQLite merges two ordered index ranges and stops at `limit`; only selected rows are
     /// fetched and decoded. Global (`kind=0`) records are never in the line range (`kind=1`).
@@ -1469,10 +1572,86 @@ pub fn need<T>(v: Option<T>, what: &str) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rebuild_preserves_active_reader_and_removal_reservations() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(super::SCHEMA)?;
+        let db = super::Db { conn, stale: false };
+        for (state, kind, holder) in [("read", "pin", "reader"), ("remove", "drop", "collector")] {
+            db.conn.execute("INSERT INTO owners(state,kind,holder) VALUES(?1,?2,?3)", rusqlite::params![state, kind, holder])?;
+        }
+        let before = db.owner_rows()?;
+        assert!(db.rebuild(false, |_| anyhow::bail!("replay failed")).is_err());
+        assert_eq!(db.owner_rows()?, before, "a failed replay preserves the process owners");
+        db.rebuild(false, |_| Ok(()))?;
+        assert!(db.is_pinned("read")?, "a rebuild must not release an active reader");
+        assert!(db.reserve_trees(&["read".into()], "other-collector")?.is_empty());
+        assert!(db.pins_add(&["remove"], "other-reader").is_err(), "an active removal still refuses readers");
+        db.pins_remove(&["read".into()], "reader")?;
+        db.release_trees(&["remove".into()], &[], "collector")?;
+        assert!(!db.is_pinned("read")?);
+        assert!(db.pins_add(&["remove"], "other-reader").is_ok());
+        Ok(())
+    }
+
     use super::*;
     use crate::model::Subject;
     use crate::model::{Author, StateKind, StateRec};
     use layr_hashers::{ContentAddress, Digest};
+
+    #[test]
+    fn request_outcome_copy_preserves_newest_and_json_duplicate_semantics() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        for (n, request, digest) in [(1, "wanted", Some("old")), (2, "wanted", Some("new")), (3, "missing", None)] {
+            let mut record = Record::new("request.refused");
+            record.id = format!("r{n}");
+            record.machine = "machine".into();
+            record.seq = n;
+            record.time = n as i64;
+            record.data = serde_json::json!({"request_id":request,"request_digest":digest});
+            let mut body = serde_json::to_string(&record)?;
+            if n == 2 {
+                body = body.replace(r#""request_id":"wanted""#, r#""request_id":"wrong","request_id":"wanted""#);
+                assert!(body.contains(r#""request_id":"wrong","request_id":"wanted""#));
+            }
+            let line = format!(r#"{{"r":{body},"s":""}}"#);
+            let parsed = crate::oplog::parse_line(&line, None)?.record;
+            db.insert_record(&parsed, &line)?;
+        }
+        let scratch = Db::scratch()?;
+        scratch
+            .execute_batch("CREATE TABLE request_outcomes(id TEXT PRIMARY KEY, digest TEXT NOT NULL) WITHOUT ROWID; BEGIN;")?;
+        db.copy_request_outcomes(&scratch)?;
+        let find = |id: &str| -> Result<Option<String>> {
+            Ok(scratch.query_row("SELECT digest FROM request_outcomes WHERE id=?1", [id], |row| row.get(0)).optional()?)
+        };
+        assert_eq!(find("wanted")?.as_deref(), Some("\"new\""));
+        assert_eq!(find("missing")?.as_deref(), Some("null"));
+        assert_eq!(find("wrong")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn scratch_database_handles_more_data_than_its_cache() -> Result<()> {
+        let scratch = Db::scratch()?;
+        scratch.execute_batch("CREATE TABLE seen(id TEXT PRIMARY KEY) WITHOUT ROWID; BEGIN;")?;
+        {
+            let mut insert = scratch.prepare("INSERT INTO seen(id) VALUES(?1)")?;
+            for n in 0..100_000 {
+                insert.execute([format!("01a1b000-0000-7000-9000-{n:012x}")])?;
+            }
+        }
+        let count: i64 = scratch.query_row("SELECT COUNT(*) FROM seen", [], |row| row.get(0))?;
+        let pages: i64 = scratch.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let size: i64 = scratch.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let cache: i64 = scratch.query_row("PRAGMA cache_size", [], |row| row.get(0))?;
+        assert_eq!(count, 100_000);
+        assert_eq!(cache, -2048);
+        assert!(pages * size > 2 * 1024 * 1024);
+        Ok(())
+    }
 
     #[test]
     fn schema_check_observes_changes_between_opens() -> Result<()> {
@@ -1872,6 +2051,8 @@ mod tests {
             cache_shared: false,
             cache_platform: None,
             cache_of: None,
+            tree: None,
+            times: None,
             cache_key_parts: Default::default(),
         });
         r
@@ -2000,6 +2181,32 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         Db { conn, stale: false }
+    }
+
+    #[test]
+    fn migration_mappings_survive_early_arrival_and_clock_skew() -> Result<()> {
+        let state = "01a12290-0000-7000-8000-00000000c0c0";
+        let source = state_record(10, state, vec![]);
+        let mapping = |seq, digit: &str| {
+            let mut record = state_record(seq, state, vec![]);
+            record.states.clear();
+            record.op = "state.tree".into();
+            record.data = serde_json::json!({"states": {state: {"tree": digit.repeat(64), "times": "a".repeat(64)}}});
+            record
+        };
+        let newer = mapping(3, "3");
+        let older = mapping(2, "2");
+        for records in [vec![newer.clone(), older.clone(), source.clone()], vec![source.clone(), newer.clone(), older.clone()]] {
+            let db = memory();
+            for record in &records {
+                db.insert_record(record, &serde_json::json!({"r": record}).to_string())?;
+                db.derive(record, &|_| true, &source.machine)?;
+            }
+            assert_eq!(db.state(state)?.unwrap().tree, Some("3".repeat(64)));
+            let model = layr_model::Project::from_records("", records, &source.machine)?;
+            assert_eq!(model.states[state].state.tree, Some("3".repeat(64)));
+        }
+        Ok(())
     }
 
     #[test]

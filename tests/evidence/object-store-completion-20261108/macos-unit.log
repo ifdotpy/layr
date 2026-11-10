@@ -1,0 +1,485 @@
+Command: GIT_CONFIG_GLOBAL=/dev/null cargo test --offline -j4 -p layr --bin layr
+Compiler warnings omitted; test output follows.
+     Running unittests src/main.rs (target/debug/deps/layr-d5406a866a4f1ec7)
+
+running 425 tests
+test apfs_commit::tests::clone_keeps_the_stage_and_dropping_removes_the_clone ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::committed_save_survives_reopen_and_finishes ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::publish_moves_the_clone_and_recovery_removes_an_uncommitted_one ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::recovery_keeps_a_temporary_folder_of_a_live_creator_and_removes_a_dead_one ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::recovery_refuses_a_substitute_tree ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::recovery_takes_over_a_reused_pid ... ignored, requires a case-sensitive APFS test volume
+test apfs_commit::tests::reopen_recovers_each_uncommitted_boundary ... ignored, requires a case-sensitive APFS test volume
+test apfs_stream::tests::a_stream_against_a_parent_holds_only_the_differences ... ignored, requires a case-sensitive APFS test volume
+test apfs_stream::tests::receive_cannot_write_through_a_symlink ... ignored, requires a case-sensitive APFS test volume
+test apfs_stream::tests::receive_uses_only_an_authorized_external_clone ... ignored, requires a case-sensitive APFS test volume
+test apfs_stream::tests::transfer_refuses_acl_instead_of_losing_access_rules ... ignored, requires a case-sensitive APFS test volume
+test apfs_stream::tests::transport_preserves_content_and_rejects_damage ... ignored, requires a case-sensitive APFS test volume
+test cache_hook::tests::worker_entry ... ok
+test cache_hook::tests::a_folder_without_an_adapter_is_silent ... ok
+test cache_hook::tests::the_root_owner_is_never_pruned ... ok
+test cache_hook::tests::owner_path_has_the_homebrew_rustup_folder ... ok
+test cache_hook::tests::the_worker_clones_a_whole_tree_in_one_step_on_apfs ... ok
+test access::tests::person_policy_never_inherits_executor_root ... ok
+test cache_hook::tests::a_worker_that_cannot_start_does_not_damage_the_folder ... ok
+test cache_overlay::tests::an_unknown_toolchain_is_no_difference ... ok
+test cache_overlay::tests::folder_paths_and_cache_names ... ok
+test access::tests::roles_deny_and_rules ... ok
+test cache_overlay::tests::the_platform_key_names_the_key_files_and_their_content ... ok
+test cmd::checks::policy_tests::creator_commands_ignore_runner_overrides_and_require_creator ... ok
+test cache_hook::tests::a_named_adapter_prunes_and_its_outcome_is_logged ... ok
+test cache_hook::tests::a_failing_adapter_only_logs_its_reason ... ok
+test cache_hook::tests::none_keeps_the_folder_and_an_unknown_name_is_logged ... ok
+test cmd::history::grep_regression::measure_grep_scaling ... ignored, generated scaling measurement
+test cmd::du::tests::vanished_part_has_no_filesystem ... ok
+test cmd::history::tests::revision_argument_is_named_only_when_nothing_printed ... ok
+test cmd::du::tests::a_removed_path_is_vanished_and_other_errors_are_not ... ok
+touch: test cache_overlay::tests::lru_trim_deletes_the_oldest_files_first ... ok
+/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-sandbox-test-01a1bbd8-59c8-7071-937e-953aaa12f9dd/forbidden: Operation not permitted
+test cmd::migrate::tests::cache_derived_and_freed_states_are_not_moved ... ok
+test cache_hook::tests::a_repair_clears_the_damage_only_when_the_adapter_repaired_the_folder ... ok
+test cmd::migrate::tests::parents_come_before_children_and_older_states_first ... ok
+test cmd::migrate::tests::resume_skips_verified_and_recorded_states ... ok
+test cmd::history::grep_regression::generated_grep_segments_match_previous_output ... ok
+test cmd::overlaycmd::tests::listing_json_distinguishes_uncomputed_and_empty_sizes ... ok
+test cmd::overlaycmd::tests::listing_only_walks_active_caches_when_size_is_requested ... ok
+cat: /var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/layr-sandbox-test-01a1bbd8-59c8-7071-937e-953aaa12f9dd/outside-content: Operation not permitted
+test cmd::migrate::tests::a_bad_table_is_refused ... ok
+test cmd::overlaycmd::tests::operation_output_only_contains_public_fields_and_cli_names ... ok
+Connection to 127.0.0.1 port 59072 [tcp/*] succeeded!
+test cmd::migrate::tests::a_line_cut_by_a_crash_is_left_out_and_removed_by_the_next_append ... ok
+test cmd::park::tests::parked_names_are_read_back_only_for_their_line ... ok
+test cmd::overlaycmd::tests::reader_details_identify_principals_without_key_material ... ok
+test cmd::refs::tests::ttl_is_positive_and_checked ... ok
+test cache_overlay::tests::the_lru_trim_removes_whole_units_and_their_empty_folders ... ok
+test cmd::release_prepare::tests::a_layr_change_links_to_layr_cloud ... ok
+test cmd::remote::tests::omitted_state_summary_counts_each_state_once ... ok
+test cmd::release_prepare::tests::versions_follow_bump_minor_pre_major ... ok
+test cmd::release_prepare::tests::the_sections_of_0_36_and_0_37_come_out_as_release_please_wrote_them ... ok
+test cmd::remote::tests::remote_url_dispatch ... ok
+test cmd::replicate::tests::auxiliary_states_cross_the_peer_protocol ... ignored, requires a root Btrfs fixture and a built peer binary
+test cmd::migrate::tests::the_table_keeps_entries_across_loads ... ok
+test cmd::replicate::tests::deleted_line_snapshots_are_undo_dependencies ... ok
+test cmd::tests::glob_matches ... ok
+test cmd::admin::move_folder_tests::a_copy_keeps_files_links_modes_and_times ... ok
+test cmd::work::status_tests::default_json_keeps_empty_sections ... ok
+test cmd::tests::version_line_names_the_build ... ok
+test cmd::work::status_tests::default_json_keeps_nonempty_nested_key_order ... ok
+test cmd::checks::macos_tests::sandbox_refuses_network_and_writes_outside_work ... ok
+test cmd::work::status_tests::json_path_filters_apply_with_opt_outs ... ok
+test cmd::work::status_tests::status_help_lists_opt_outs ... ok
+test cmd::work::status_tests::json_opt_outs_omit_only_requested_sections ... ok
+test ctx::tests::outln_keeps_each_formatted_line_in_one_print_call ... ok
+test access::tests::overlay_readers_follow_signed_foreign_policy_without_changing_project_policy ... ok
+test cmd::history::renderer_regression::generated_print_diffs_combines_flags_without_changing_bytes ... ok
+test db::tests::a_revoke_does_not_withdraw_another_signers_evidence ... ok
+test ctx::author_tests::author_keeps_environment_precedence_empty_values_and_session ... ok
+test db::tests::a_state_id_cannot_be_named_twice ... ok
+test changes::tests::exact_renames_read_each_candidate_once ... ok
+test ctx::author_tests::author_is_lazy_and_keeps_the_first_identity_for_the_command ... ok
+test cmd::mergecmd::approval_tests::merge_approval_guard_refuses_derived_source_ancestry ... ok
+test db::tests::check_reuse_preserves_argument_boundaries ... ok
+test db::tests::log_records_decode_only_the_requested_records ... ok
+test db::tests::log_records_keep_the_observed_insertion_order_for_fully_tied_records ... ok
+test db::tests::migration_mappings_survive_early_arrival_and_clock_skew ... ok
+test db::tests::a_state_keeps_the_platform_of_its_caches ... ok
+kill: 31699: No such process
+test cache_hook::tests::a_slow_adapter_is_stopped_at_the_time_limit ... ok
+test cmd::requests::tests::executor_verifies_encrypted_inner_signature_and_person_binding ... ok
+test db::tests::opening_a_current_database_takes_no_write_lock ... ok
+test cmd::overlaycmd::tests::listing_settings_reads_public_and_hidden_sources ... ok
+test db::tests::queue_status_replay_is_order_independent ... ok
+test ctx::author_tests::author_keeps_git_duplicate_key_and_missing_value_behavior ... ok
+test db::tests::a_failed_rebuild_keeps_the_old_tables_and_version ... ok
+test db::tests::records_of_the_removed_evidence_ops_are_no_evidence ... ok
+kill: 31692: No such process
+test cmd::admin::op_log_tests::op_log_limits_decoding_in_the_actual_command ... ok
+test cmd::replicate::tests::live_refs_include_auto_ancestry_and_gate_only_cache_states ... ok
+kill: 31700: No such process
+kill: 31701: No such process
+test cache_hook::tests::a_hard_kill_restores_the_folder_from_its_copy ... ok
+test db::tests::records_of_caches_add_to_the_caches_of_a_state ... ok
+test cache_hook::tests::a_hard_kill_that_cannot_restore_reports_the_folder_damaged ... ok
+test db::tests::refs_replay_in_order_and_keep_their_history ... ok
+kill: 31706: No such process
+test db::tests::records_set_the_stack_of_a_line ... ok
+test dedup::tests::a_changed_file_has_another_stamp ... ok
+test dedup::tests::a_dead_run_leaves_no_temporary_clone ... ok
+test dedup::tests::a_source_only_file_is_never_changed_and_no_file_matches_itself ... ok
+test cache_hook::tests::warm_builds_in_the_worker_and_a_timeout_keeps_the_folder_ok ... ok
+test dedup::tests::apfs_replace_keeps_mtime_and_mode ... ok
+test dedup::tests::blocks_match_at_other_offsets_and_merge_into_runs ... ok
+test dedup::tests::candidates_are_groups_of_one_size_with_a_target ... ok
+test db::tests::opening_a_database_that_init_is_creating_keeps_its_tables ... ok
+test dedup::tests::the_block_pass_skips_shared_ranges_and_dry_run_calls_nothing ... ok
+test diff::measurements::measure_renderer_content_allocations ... ignored, generated allocation measurement
+test diff::measurements::measure_shared_edit_allocations ... ignored, generated allocation measurement
+test db::tests::root_revokes_the_evidence_of_every_user_of_its_machine_only ... ok
+test dedup::tests::collect_skips_links_small_files_and_hard_links ... ok
+test diff::regression::generated_combined_renderers_match_previous_bytes ... ok
+test db::tests::restored_states_clear_local_gc_tombstones ... ok
+test db::tests::an_old_database_with_records_is_still_rebuilt ... ok
+test disk::keystore::tests::private_key_input_refuses_links_and_public_files ... ok
+test disk::launch::tests::agent_arguments_are_xml_and_contain_no_paper_key_input ... ok
+test disk::launch::tests::all_store_arguments_round_trip_without_a_secret ... ok
+test disk::launch::tests::one_service_replaces_modes_and_remove_checks_the_mode ... ok
+test db::tests::scoped_declassification_does_not_count_as_subject_approval ... ok
+test disk::launch::tests::remove_all_leaves_a_single_store_agent_untouched ... ok
+test disk::partial_tests::a_failed_put_leaves_no_partial_file ... ok
+test db::tests::duplicate_data_line_uses_last_value_on_insert_and_rebuild ... ok
+test db::tests::other_readers_keep_the_old_rows_until_the_rebuild_commits ... ok
+test disk::partial_tests::open_removes_partial_files_older_than_an_hour ... ok
+test disk::partial_tests::partial_files_count_in_the_size_budget ... ok
+test disk::tests::names_and_links_stay_inside_each_line ... ok
+test dedup::tests::apfs_replace_skips_a_file_that_changed_after_the_scan ... ok
+test db::tests::schema_check_observes_changes_between_opens ... ok
+test disk::webdav::tests::paths_and_hrefs_preserve_encoded_line_names ... ok
+test follow::tests::ssh_and_https_remotes_of_one_repository_match ... ok
+test disk::tests::a_refresh_rejects_another_project_and_keeps_the_previous_view ... ok
+test follow::tests::the_background_prune_limit_holds_inside_and_is_restored_after ... ok
+test disk::tests::cache_checks_hashes_and_enforces_its_size_limit ... ok
+test free::holder_tests::system_lookup_only_retains_and_mismatch_uses_fallback ... ok
+test free::holder_tests::detects_live_reused_and_dead_holders ... ok
+test db::tests::log_records_match_full_history_output ... ok
+test fsutil::range_tests::ranges_merge_and_clip ... ok
+test disk::tests::url_pin_updates_preserve_other_urls_and_refuse_a_conflicting_first_use ... ok
+test fsutil::range_tests::work_queue_finishes_dynamic_jobs_and_propagates_panics ... ok
+test db::tests::opening_main_schema_nine_requires_and_backfills_the_line_index ... ok
+test db::tests::readers_see_the_old_rows_while_the_rebuild_transaction_is_open ... ok
+test fsutil::write_tests::a_written_file_leaves_no_temporary_file ... ok
+test gitbridge::export_tests::export_context_per_commit ... ignored, export context measurement; run in an isolated temporary environment
+test gitbridge::export_tests::export_context_shared ... ignored, export context measurement; run in an isolated temporary environment
+test fsutil::write_tests::a_failed_rename_leaves_no_temporary_file ... ok
+test gitbridge::export_tests::large_object_buffered ... ignored, large-object measurement; run in an isolated temporary environment
+test gitbridge::export_tests::large_object_streamed ... ignored, large-object measurement; run in an isolated temporary environment
+test fsutil::write_tests::a_copy_over_a_hard_link_leaves_the_other_link ... ok
+test fsutil::range_tests::index_copy_keeps_old_file_and_other_links ... ok
+test db::view_tests::saved_descriptors_and_checks_accept_view_subjects ... ok
+test layrfs::find::tests::parses_common_expressions ... ok
+test gitbridge::export_tests::loose_objects_match_buffered_bytes_and_reject_bad_identity ... ok
+test layrfs::index::tests::keys_sort_in_component_order ... ok
+test free::pin_tests::borrowed_pins_release_through_the_reader_database_on_early_error ... ok
+test free::inspection_tests::inspections_see_expiration_and_queue_writes_without_a_snapshot ... ok
+test layrfs::rg::tests::parses_clusters_and_values ... ok
+test layrfs::rg::tests::resolve_rejects_leaving_paths ... ok
+test layrfs::rg::tests::unsupported_flags_fall_back ... ok
+test free::pin_tests::pins_survive_the_reader_connection_and_release_at_command_end ... ok
+test layrfs::index::tests::build_and_refresh_follow_ignore_rules ... ok
+test disk::all::installed_tests::a_single_store_agent_stays_locked_without_a_keychain_item ... ok
+test disk::all::tests::locked_stores_have_one_note_and_distinct_folders ... ok
+test lineops::tests::batch_names_are_numbered_and_validated ... ok
+test merge::derive_tests::derive_cycles_block_dependents ... ok
+test merge::derive_tests::derive_dependencies_override_name_order ... ok
+test merge::merge_sides_tests::shared_sides_preserve_attributes_derives_renames_and_conflict_order ... ok
+test merge::sides_measurements::merge_sides_recomputed ... ignored, candidate-map measurement; excludes filesystem candidate discovery
+test merge::sides_measurements::merge_sides_shared ... ignored, candidate-map measurement; excludes filesystem candidate discovery
+test merge::derive_tests::derive_takes_only_declared_outputs_and_rejects_links ... ok
+test lineops::batch_commit_tests::a_batch_publishes_all_lines_with_contiguous_records_and_full_sync ... ok
+test cmd::overlaycmd::tests::listing_opens_each_overlay_once_and_preserves_visibility ... ok
+test object_tree::tests::corrupt_blob_fails_without_publishing_a_partial_entry ... ok
+test oci::client::tests::challenge_keeps_scope_commas ... ok
+test oci::client::tests::remote_validation ... ok
+test lineops::batch_commit_tests::a_mid_batch_database_failure_rolls_back_every_record_and_published_folder ... ok
+test oci::leak_tests::a_failed_layer_leaves_no_blob ... ok
+test lineops::batch_commit_tests::an_error_after_commit_keeps_the_entire_recorded_batch_and_its_folders ... ok
+test disk::catalog::tests::status_reports_the_keychain_and_service_without_the_identity ... ok
+test oci::tests::schema_errors_are_specific ... ok
+test oci::leak_tests::prune_removes_only_old_unnamed_blobs ... ok
+test oci::tests::tag_mapping_and_semver ... ok
+test oplog::tests::operation_payloads_use_the_existing_signature_envelope ... ok
+test object_tree::tests::direct_read_and_pruned_walk_need_no_native_tree ... ok
+test object_tree::tests::decoded_entries_keep_metadata_and_cross_directory_links ... ok
+test disk::keystore::tests::login_keychain_roundtrip ... ok
+test overlay::tests::properties_parse_store_and_read_back ... ok
+test overlay::tests::the_base_key_names_the_head_and_the_stack ... ok
+test overlay::tests::union_takes_each_unit_whole_from_theirs ... ok
+test overlay::tests::union_takes_every_incoming_file_and_clears_type_changes ... ok
+test overlay::view_tests::malformed_descriptors_and_ids_fail ... ok
+test overlay::view_tests::view_identity_uses_exact_canonical_bytes_and_stack_order ... ok
+test owners::tests::a_deleted_line_releases_its_undo_owner_when_the_deleted_ring_drops_it ... ok
+test oci::tests::chart_binds_the_exact_image ... ok
+test overlay::tests::ops_move_delete_and_copy ... ok
+test owners::tests::a_reserved_tree_refuses_pins_and_a_pinned_tree_is_not_reserved ... ok
+test owners::tests::a_line_delete_releases_its_head_and_auto_ring_and_keeps_the_final_state ... ok
+test oci::tests::symlinks_never_read_their_targets_and_long_links_work ... ok
+test owners::tests::a_ring_change_gives_a_deleted_line_no_undo_of_its_earlier_operations ... ok
+test owners::tests::automatic_saves_without_a_line_pointer_belong_to_the_undo_ring_of_their_line ... ok
+test owners::tests::pin_batches_roll_back_on_a_refused_state ... ok
+test owners::tests::pin_batches_keep_duplicates_safe_and_release_last_owners ... ok
+test owners::tests::pin_release_batches_roll_back_on_failure ... ok
+test pools::tests::build_errors_are_reported ... ok
+test pools::tests::forking_parent_cannot_start_a_pool ... ok
+test object_tree::tests::writing_an_object_source_keeps_tree_times_and_link_groups ... ok
+test pools::tests::width_limits_the_pool_to_available_work ... ok
+test privs::tests::a_command_of_the_caller_finds_its_tools_on_its_own_path ... ok
+test pools::tests::nested_work_stays_in_background_pool ... ok
+test probes::tests::file_diff_reports_hashes_for_binary_and_patches_for_text ... ok
+test probes::tests::metric_diff_applies_noise_and_handles_zero_baselines ... ok
+test probes::tests::private_layer_outputs_require_all_project_readers ... ok
+test probes::tests::queue_limits_reject_only_growth_strictly_over_the_limit ... ok
+test probes::tests::screenshot_settings_keep_existing_definition_identity ... ok
+test probes::tests::schema_requires_safe_outputs_and_argv ... ok
+test probes::tests::structural_json_diff_tracks_keys_arrays_and_null ... ok
+test radar::tests::a_rename_needs_the_direct_compare ... ok
+test radar::tests::a_path_changed_in_both_parts_is_checked_again ... ok
+test radar::tests::combined_changes_do_not_need_a_direct_compare ... ok
+test radar::tests::diverged_empty_saved_diff_is_not_identity_and_missing_live_still_compares ... ok
+test owners::tests::auto_ring_keeps_the_newest_states_and_releases_the_oldest ... ok
+test radar::tests::visible_changes_keep_both_rename_paths_and_filter_hidden_names ... ok
+test recv::tests::checks_streams ... ok
+test radar::tests::identical_states_skip_send_and_cache_even_when_a_cache_entry_exists ... ok
+test owners::tests::the_stored_owners_equal_a_recomputation_in_any_arrival_order ... ok
+test owners::tests::undo_ring_releases_the_states_of_the_oldest_record ... ok
+test recv::tests::extra_clone_sources_require_exact_identity ... ok
+test radar::tests::at_head_reuses_renames_without_a_job_combine_or_send ... ok
+test repo::cache_copy_tests::a_name_that_is_not_utf8_refuses_the_copy_and_changes_nothing ... ok
+test repo::cache_copy_tests::cache_directory_rename_restores_readonly_modes ... ok
+test repo::cache_copy_tests::cache_replacement_fault_child ... ok
+
+running 1 test
+test gitbridge::export_tests::export_commit_identity_parents_and_signing_fallback ... ok
+test repo::cache_copy_tests::a_write_during_the_copy_discards_the_copy ... ok
+test oci::tests::deterministic_fixture ... ok
+test disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock ... ok
+test repo::cache_copy_tests::incomplete_cache_directories_are_private ... ok
+
+running 1 test
+test repo::cache_copy_tests::an_old_folder_that_keeps_changing_is_swapped_back_when_the_copy_got_no_write ... ok
+test repo::cache_copy_tests::an_old_folder_that_keeps_changing_is_kept ... ok
+
+running 1 test
+test repo::cache_copy_tests::replacement_never_touches_foreign_siblings ... ok
+test repo::cache_copy_tests::late_writes_to_the_old_folder_are_carried_over ... ok
+test repo::history_tests::an_auxiliary_state_in_the_walk_gives_no_answer ... ok
+test repo::cache_copy_tests::interrupted_cache_replacement_recovers_every_recorded_boundary ... ok
+test repo::leftover_name_tests::only_the_swap_names_of_a_cache_are_leftovers ... ok
+test repo::leftover_name_tests::the_base_of_a_swap_name_is_any_folder_name ... ok
+test repo::owner_walk_tests::the_walk_is_skipped_only_when_every_condition_holds ... ok
+test repo::regenerable_memo_tests::a_folder_the_walk_cannot_read_is_an_error_not_a_short_list ... ok
+
+running 1 test
+test repo::cache_copy_tests::a_line_lock_taken_again_in_the_same_process_does_not_wait ... ok
+test repo::regenerable_walk_tests::the_walk_finds_the_regenerable_folders_the_ignore_rules_ignore ... ok
+test secrets::tests::whole_file_limit_and_quotes ... ok
+test service::connect_tests::a_refused_connect_names_its_cause ... ok
+test service::disk_full_tests::a_full_disk_is_named_from_io_and_sqlite_errors ... ok
+test secrets::tests::candidates_and_exact_tokens ... ok
+test service::request_tests::a_closed_connection_is_no_request_and_a_short_one_is_bad ... ok
+test service::request_tests::a_large_fragmented_request_retains_its_descriptors ... ok
+test repo::commit_record_tests::a_state_that_the_database_names_keeps_its_snapshot_after_a_failed_commit ... ok
+test service::request_tests::hello_and_command_reuse_frame_storage ... ok
+test service::request_tests::fragmented_headers_and_payloads_are_accepted ... ok
+test overlay::read_open_tests::ls_files_opens_hidden_overlay_once ... ok
+test service::request_tests::request_child ... ok
+test service::request_tests::size_limits_and_truncated_payloads_are_preserved ... ok
+test service::request_tests::typed_command_frames_match_value_encoding ... ok
+test service::tests::socket_identity_comes_from_the_kernel ... ok
+test overlay::read_open_tests::hidden_settings_and_private_paths_reuse_their_project ... ok
+test service::version_tests::a_busy_answer_is_read_when_the_hello_write_fails ... ok
+test service::version_tests::negotiation_checks_the_daemon_before_a_command ... ok
+test service::version_tests::negotiation_refuses_missing_zero_and_different_schemas_before_a_command ... ok
+test service::version_tests::negotiation_refuses_old_and_busy_daemons_without_a_command ... ok
+
+running 1 test
+test service::request_tests::malformed_environment_is_an_error ... ok
+test source_times::tests::a_path_with_spaces_round_trips ... ok
+test repo::cache_platform_tests::auxiliary_states_resolve_but_source_commands_refuse_them ... ok
+test repo::cache_copy_tests::cache_replacement_fault_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 424 filtered out; finished in 0.07s
+
+test service::request_tests::incompatible_client_schemas_are_refused_before_opening_the_store ... ok
+test source_times::tests::an_empty_cache_folder_gets_no_times ... ok
+test service::trash_sweep_tests::periodic_sweep_removes_deferred_trees_on_all_volumes ... ok
+test source_times::times_bench ... ignored
+test storage::tests::bulk_scan_matches_lstat_scan ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::changed_ranges_read_only_unshared_blocks ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::clones_refuse_symlink_components ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::copies_keep_the_times_of_folders ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::hard_links_in_two_folders_stay_links_and_the_other_folders_are_cloned ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::index_copy_breaks_hard_links_and_failed_copy_keeps_original ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::index_replacement_shares_data_and_keeps_destination_metadata ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::kernel_identity_detects_writes_with_restored_mtime ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::live_read_rejects_writes_and_deletes ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::moves_and_block_ranges_survive_clones ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::old_fixed_times_do_not_make_moves ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::populated_cache_conversion_keeps_clone_identity ... ignored, requires an APFS test volume
+test storage::tests::readonly_transitions_preserve_identity_and_modes ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::sealed_trees_clone_writable_without_a_pass ... ignored, requires an APFS test volume
+test storage::tests::snapshot_preserves_files_and_excludes_layers ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::snapshot_preserves_files_without_hard_links_or_layers ... ignored, requires a case-sensitive APFS test volume
+test storage::tests::snapshot_preserves_files_without_layers ... ignored, requires a case-sensitive APFS test volume
+test store::temp_name_tests::a_temporary_name_tells_its_creator ... ok
+test source_times::tests::a_cache_saved_after_a_change_gives_its_time_when_older_caches_saw_other_bytes ... ok
+test layrfs::index::tests::virtual_index_equals_a_folder_with_the_merged_content ... ok
+test store::tests::an_overlay_lives_in_the_private_folder_of_its_project ... ok
+test source_times::tests::equal_bytes_get_the_recorded_time_and_other_bytes_keep_theirs ... ok
+
+running 1 test
+test source_times::tests::other_bytes_with_an_old_time_get_a_time_after_the_save ... ok
+test store_remote::api_tests::a_client_that_the_server_finds_too_old_stops_with_the_minimum_version ... ok
+test source_times::tests::two_caches_that_saw_other_bytes_leave_the_time ... ok
+test service::request_tests::client_trace_is_isolated_and_stdout_stays_json ... ok
+test store::tests::a_store_root_below_a_link_is_resolved_once ... ok
+test store_remote::api_tests::a_write_without_a_token_names_the_login ... ok
+test repo::cache_copy_tests::cache_replacement_fault_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 424 filtered out; finished in 0.12s
+
+test repo::cache_copy_tests::cache_replacement_recovers_process_crashes_and_refuses_name_swaps ... ok
+test repo::commit_record_tests::object_state_survives_commit_error_and_deferred_native_cleanup ... ok
+test store_remote::api_tests::login_polls_until_the_person_signs_in_then_saves_the_session_and_registers_the_machine ... ok
+
+running 1 test
+test store_remote::backend::epoch_tests::a_public_release_file_goes_to_the_root_and_a_release_file_to_the_epoch ... ok
+test repo::history_tests::history_merge_bases_equal_the_reference_walk ... ok
+test store::tests::a_writer_config_record_makes_no_source_state_and_moves_no_line ... ok
+test store_remote::backend::temporary_tests::a_failed_put_leaves_no_temporary_file ... ok
+test store_remote::backend::epoch_tests::historical_states_use_sealed_history_keys_but_slots_never_fall_back ... ok
+test repo::cache_copy_tests::cache_replacement_fault_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 424 filtered out; finished in 0.20s
+
+test store_remote::backend::temporary_tests::stale_temporary_files_go_after_a_day ... ok
+test store_remote::backend::tests::listing_tolerates_only_a_vanished_publication_temporary ... ok
+test store_remote::backend::tests::reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local ... ok
+test store_remote::backend::tests::publication_is_exclusive_and_never_changes_bytes ... ok
+test store_remote::backend::tests::file_listing_visits_only_the_requested_directory_and_refuses_its_links ... ok
+test store_remote::backend::tests::scoped_objects_use_the_same_exclusive_publication_and_stay_in_their_namespace ... ok
+test store_remote::api_tests::records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekeyed_writer_is_refused ... ok
+test repo::cache_copy_tests::overlay_list_does_not_recover_an_active_replacement ... ok
+test store_remote::chunked::tests::grease_worst_case_fits_bound ... ok
+test store_remote::chunked::tests::age_bound_matches_ciphertext_size ... ok
+test store_remote::chunked::tests::oversized_window_pack_is_bounded ... ok
+test store_remote::chunked::tests::prefetch_budget_covers_all_pack_holders ... ok
+test store_remote::chunked::tests::decoded_pack_has_exact_capacity ... ok
+test store_remote::gateway::tests::a_401_on_a_listing_renews_the_proof_once_and_sends_again ... ok
+test store_remote::gateway::tests::a_401_on_a_proof_write_renews_the_proof_once_and_sends_again ... ok
+test store_remote::gateway::tests::a_404_with_a_read_proof_is_not_sent_again ... ok
+test store_remote::gateway::tests::a_busy_gateway_is_asked_again ... ok
+test store_remote::gateway::tests::a_delete_error_names_the_key_and_the_answer ... ok
+test store_remote::gateway::tests::a_missing_project_is_not_a_missing_object ... ok
+test store_remote::gateway::tests::a_read_proof_that_expires_during_a_push_is_renewed_before_the_request ... ok
+test store_remote::chunked::tests::a_pack_without_its_index_is_not_a_place ... ok
+test store_remote::chunked::tests::a_chunk_released_during_a_push_goes_up_again ... ok
+test store_remote::gateway::tests::a_second_401_after_a_renewal_fails_clearly ... ok
+test store_remote::gateway::tests::epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists ... ok
+test store_remote::gateway::tests::explicit_public_access_never_opens_person_keys ... ok
+test store_remote::chunked::tests::incompressible_final_chunk_reaches_pack_limit ... ok
+test store_remote::chunked::tests::release_rewrites_live_chunks_and_is_idempotent ... ok
+test store_remote::gateway::tests::missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants ... ok
+test store_remote::gateway::tests::old_gateways_can_reject_pagination_and_return_a_bounded_legacy_listing ... ok
+test store_remote::gateway::tests::reader_hooks_ignore_write_grants_set_identity_and_check_the_ca_file ... ok
+test store_remote::gateway::tests::token_expiry_tolerates_a_client_clock_behind_the_gateway ... ok
+test store_remote::gateway::tests::token_files_require_owner_private_mode_and_regular_no_follow_file ... ok
+test store_remote::gateway::tests::urls_refuse_credentials_queries_and_path_escapes ... ok
+test store_remote::gateway::tests::listings_follow_pages_above_ten_thousand_and_preserve_access_modes ... ok
+test store_remote::overlays::tests::a_key_record_binds_the_parent_store_overlay_and_signer ... ok
+test store_remote::overlays::tests::a_removed_reader_cannot_substitute_the_layer_recipient ... ignored, invoked by t35 after it removes reader B
+test store_remote::overlays::tests::a_signer_not_trusted_yet_waits_and_another_key_fails ... ok
+test store_remote::overlays::tests::only_an_overlay_that_everyone_reads_goes_to_layr_cloud_plain ... ok
+test store_remote::overlays::tests::overlay_ciphertexts_reject_nonreader_keys ... ignored, invoked by t35 with its actual store and machine keys
+test store_remote::mode_pin_tests::a_pinned_secret_store_rewritten_as_plain_stops_fetch_and_push ... ok
+test store_remote::push_cache::tests::budget_grows_with_payload_and_survives_eviction_and_reopen ... ok
+test store_remote::pin_tests::changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption ... ok
+test store::trash_tests::a_folder_of_many_entries_goes_whole_and_a_spent_budget_deletes_nothing ... ok
+test store_remote::push_cache::tests::subtrees_share_hashes_and_corruption_is_a_cache_miss ... ok
+test store_remote::reader::tests::a_changed_machine_key_is_reported_before_local_history_merge ... ok
+test store_remote::gateway::tests::listings_reject_duplicates_cursor_loops_bad_prefixes_and_excess_totals ... ok
+test store_remote::gateway::tests::a_release_file_goes_again_from_its_start_while_the_gateway_restarts ... ok
+test store_remote::reader::tests::a_gap_does_not_hide_a_contiguous_prefix_and_an_overlap_can_fill_it ... ok
+test store_remote::reader::tests::a_checked_segment_is_not_read_again_and_a_replaced_one_is ... ok
+test store_remote::reader::tests::conflicting_history_rejects_the_complete_machine_set ... ok
+test store_remote::reader::tests::fetch_continues_from_an_existing_verified_prefix ... ok
+test store_remote::restore_tests::a_failed_connect_skips_the_read_and_tries_the_next_remote ... ok
+test store_remote::restore_tests::every_failed_remote_is_named_in_the_error ... ok
+test store_remote::restore_tests::restore_connects_before_it_reads ... ok
+test store_remote::reader::tests::signed_tree_and_file_hash_detect_mutation ... ok
+test store_remote::writer::format_gap_tests::a_plain_tree_has_no_format_gap ... ok
+test store_remote::release::tests::a_plain_store_keeps_release_bytes_and_a_secret_store_encrypts_them ... ok
+test store_remote::writer::tests::a_secret_store_refuses_a_plain_descriptor_and_a_plain_store_an_age_recipient ... ok
+test store_remote::writer::format_gap_tests::an_empty_folder_or_a_hard_link_is_a_gap ... ok
+test store_remote::reader::tests::writers_can_forward_overlapping_segments_of_a_third_machine ... ok
+test store_remote::writer::tests::an_existing_key_file_is_not_reused_without_an_openable_unfinished_slot ... ok
+test store_remote::writer::tests::completion_metadata_is_bounded_and_invalid_metadata_rebuilds ... ok
+test store_remote::writer::tests::crash_push_process ... ignored, subprocess helper for crash_content_hashes
+test store_remote::writer::tests::emit_portable_v2_fixture ... ignored, portable-state fixture invoked by t23-store-portable-peer
+test store_remote::writer::tests::a_private_store_keeps_plain_objects_without_slots_and_reads_them_back ... ok
+test store_remote::writer::tests::collection_keeps_complete_reused_and_young_parts ... ok
+test db::tests::rebuilding_line_index_keeps_interleaved_log_order ... ok
+test cache_hook::tests::a_timed_out_adapter_writes_nothing_after_the_limit ... ok
+test db::tests::a_rebuild_waits_for_another_writer_without_failing ... ok
+test store_remote::gateway::tests::a_restarting_gateway_is_asked_again_for_a_read ... ok
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62f5-744f-83c3-7d320390dfb7/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62f5-744f-83c3-7d320390dfb7/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62f5-744f-83c3-7d320390dfb7/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+test store_remote::api_tests::a_missing_pack_fails_the_read_and_names_the_pack ... ok
+test layrfs::index::tests::stale_finds_changes_without_a_watcher ... ok
+test store_remote::writer::tests::the_old_push_index_is_ignored_and_removed ... ok
+test store_remote::api_tests::an_object_over_64_mib_goes_up_in_parts_and_a_held_object_is_not_sent_again ... ok
+test store_version::race_tests::a_half_made_store_is_not_foreign ... ok
+test store_version::race_tests::report_advertises_api_major ... ok
+test stream::tests::decode_reads_commands_one_by_one ... ok
+test stream::tests::link_then_unlink_is_a_rename ... ok
+test stream::tests::orphan_delete_and_new_file ... ok
+test stream::tests::rename_of_folder_maps_children ... ok
+test sys::limit_tests::check_limits_apply_only_to_child ... ok
+test sys::metadata_tests::attribute_growth_race_retries ... ok
+test store_remote::writer::tests::fresh_push_discards_wal_sidecars_without_their_main_database ... ok
+test sys::metadata_tests::attribute_growth_stops_at_the_size_limit ... ok
+test sys::nss_tests::darwin_filled_capacity_response_grows_and_preserves_memberships ... ok
+test sys::nss_tests::group_lookup_rejects_excessive_counts_and_provider_errors ... ok
+test sys::nss_tests::group_lookup_retries_required_count ... ok
+test sys::nss_tests::passwd_buffer_limit_is_an_explicit_error ... ok
+test sys::nss_tests::passwd_grows_after_erange ... ok
+test thin::tests::a_base_stays_until_its_upper_state_goes ... ignored, requires a case-sensitive APFS test volume
+test thin::tests::a_folder_removed_after_its_scan_is_a_source_change ... ignored, requires a case-sensitive APFS test volume
+test thin::tests::a_missing_destination_fails_the_copy_and_keeps_the_entry ... ignored, requires a case-sensitive APFS test volume
+test thin::tests::copies_succeed_while_files_change ... ignored, requires a case-sensitive APFS test volume
+test thin::tests::gc_removes_old_layers_without_a_record ... ignored, requires a case-sensitive APFS test volume
+test thin::tests::layers_read_and_materialize_like_the_complete_tree ... ignored, requires a case-sensitive APFS test volume
+test sys::metadata_tests::attributes_and_mtime_do_not_follow_symlinks ... ok
+test trace::tests::slowest_steps_are_kept_longest_first_and_reset ... ok
+test usage::tests::only_command_words_are_counted ... ok
+test thin::tests::readonly_directory_metadata_keeps_modes ... ok
+test views::tests::system_folders_are_only_root_names ... ok
+test views::tests::topmost_keeps_only_the_highest_removed_paths ... ok
+test volumes::tests::a_newer_format_is_refused ... ok
+test usage::tests::runs_add_up_per_day_command_and_caller ... ok
+test volumes::tests::a_store_without_files_has_only_main ... ok
+test volumes::tests::a_project_on_a_missing_volume_is_refused_with_its_volume ... ok
+test volumes::tests::a_volume_needs_its_identity ... ok
+test store_remote::writer::tests::initialization_recovers_after_each_publication_and_keeps_the_key_private ... ok
+test store_remote::writer::tests::two_initializers_never_publish_different_slot_identities ... ok
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6aa4-7671-9763-db0b24d1a46a/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+test store_remote::writer::tests::live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option ... ok
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6315-75a2-9dcf-3a8adb69a902/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6315-75a2-9dcf-3a8adb69a902/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6315-75a2-9dcf-3a8adb69a902/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-6315-75a2-9dcf-3a8adb69a902/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+test store_remote::api_tests::a_push_sends_trees_times_and_packs_records_and_one_ref_move_and_a_reader_gets_the_files_back ... ok
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62d7-754c-93a2-296a087bdf82/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62d7-754c-93a2-296a087bdf82/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62d7-754c-93a2-296a087bdf82/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+layr: cannot release the pins of this command: unable to open database file: /private/var/folders/29/8pytxrvn6qlcm4384bmy9n6m0000gn/T/01a1bbd8-62d7-754c-93a2-296a087bdf82/local/projects/p/meta/db/layr.sqlite: Error code 14: Unable to open the database file
+test store_remote::api_tests::a_line_that_moved_on_the_server_fails_the_push_until_a_fetch_reads_it ... ok
+test store_remote::writer::tests::push_reads_changed_content_with_the_same_size_and_mtime ... ok
+test gitbridge::history_tests::filtered_history_counts_blob_requests_and_bytes ... ok
+test store_remote::writer::tests::rolling_back_journal_rows_only_causes_authenticated_reseeding ... ok
+test store_remote::push_cache::tests::cache_eviction_bounds_disk_and_keeps_the_current_tree ... ok
+test store_remote::writer::tests::state_deltas_have_bounded_chains_and_reuse_content_across_lines ... ok
+test store_remote::writer::tests::enospc_after_publication_resumes_with_missing_or_corrupt_cache ... ok
+test gitbridge::history_tests::filtered_history_matches_load_then_filter ... ok
+test store_remote::writer::tests::pending_part_age_survives_double_crash_and_gc_before_publication ... ok
+test store_remote::writer::tests::crash_content_hashes_are_reused_at_each_publication_boundary ... ok
+test gitbridge::history_tests::filtered_history_ignores_only_unselected_damaged_blobs ... ok
+test store::trash_tests::two_emptiers_of_one_trash_report_no_failure ... ok
+
+test result: ok. 375 passed; 0 failed; 50 ignored; 0 measured; 0 filtered out; finished in 9.21s
+

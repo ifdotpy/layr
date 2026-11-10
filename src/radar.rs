@@ -116,7 +116,12 @@ pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), r
 }
 
 /// The test of `compare` for one path: whether the path changed from `base` to `live`.
-pub(crate) fn recheck(base: &(impl Src + ?Sized), live: &(impl Src + ?Sized), rules: &Rules, path: &str) -> Result<Option<Found>> {
+pub(crate) fn recheck(
+    base: &(impl Src + ?Sized),
+    live: &(impl Src + ?Sized),
+    rules: &Rules,
+    path: &str,
+) -> Result<Option<Found>> {
     let old = fsutil::lmeta(base, path);
     let new = fsutil::lmeta(live, path);
     if old.is_none() && new.is_none() {
@@ -291,7 +296,9 @@ impl StateCompare {
 
 /// Run state compares in order, using the current operation's pool when available.
 fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
-    let Some(width) = std::num::NonZeroUsize::new(jobs.len()) else { return Ok(Vec::new()); };
+    let Some(width) = std::num::NonZeroUsize::new(jobs.len()) else {
+        return Ok(Vec::new());
+    };
     crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
         use rayon::prelude::*;
         jobs.par_iter().map(StateCompare::run).collect::<Vec<_>>().into_iter().collect()
