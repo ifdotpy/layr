@@ -6,6 +6,7 @@
 ### Bug Fixes
 
 * **caches:** `clone` and `fetch --caches-of <line>` take the newest cache of this platform saved with a head: a newer cache of another platform (an x86 check runner's after an arm one's) no longer leaves the line cold
+* **gc:** `gc --repair` also removes the temporary folders that a killed process left in the work folder of a cache overlay (a whole copy of `target` each); before, only the project's own were removed
 
 ## [0.41.1](https://github.com/ifdotpy/layr/compare/v0.41.0...v0.41.1) (2026-11-09)
 

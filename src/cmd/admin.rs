@@ -1566,7 +1566,15 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
     crate::store::empty_trash(&repo.p.trash_dir()?, None)?;
     // Temporary objects whose creator is gone, and old ones without a creator pid. A live
     // creator keeps its object: a copy has the times of its source, so its age says nothing.
-    for d in [repo.p.scan_dir(), repo.p.work_dir()] {
+    // Overlay projects have their own: a killed cache save leaves a whole build folder there.
+    let overlays: Vec<_> = repo
+        .overlay_names()
+        .unwrap_or_default()
+        .iter()
+        .filter(|name| repo.p.store.project_dir(&format!("{}%{name}", repo.p.name)).is_ok_and(|d| d.exists()))
+        .filter_map(|name| repo.overlay_project(name).ok())
+        .collect();
+    for (p, d) in std::iter::once(&repo.p).chain(&overlays).flat_map(|p| [(p, p.scan_dir()), (p, p.work_dir())]) {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -1578,7 +1586,7 @@ fn repair_project(ctx: &Ctx, repo: &Repo, dry: bool, quiet: bool, free: bool, ba
                         .unwrap_or(false)
                 });
                 if stale {
-                    let _ = repo.p.trash(&e.path());
+                    let _ = p.trash(&e.path());
                 }
             }
         }

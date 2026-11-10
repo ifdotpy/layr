@@ -66,8 +66,13 @@ l line new warm2 rel >/dev/null
 eq "a new line takes the newest cache" bin3 "$(cat $P/warm2/target/debug/x)"
 
 l line delete -D fromstate >/dev/null 2>&1
+# A killed cache save leaves its copy in the overlay's work folder; a live one keeps its copy.
+W=$O/cache.target/meta/work
+mkdir -p $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e65.2000000000/debug $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e66.$$
 l gc --repair -q >/dev/null 2>&1
 eq "gc drops the cache of a deleted line" 3 "$(states cache.target)"
+ok "gc removes the overlay work folder of a dead process" test ! -e $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e65.2000000000
+ok "gc keeps the overlay work folder of a live process" test -d $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e66.$$
 
 # 5. merge of a line unions its cache into the target.
 cd $P/warm
