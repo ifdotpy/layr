@@ -20,7 +20,7 @@ printf 'other/\n' >> .gitignore
 mkdir -p other
 printf removed > other/result
 l save --caches -q || exit 1
-l overlay remove cache.other >/dev/null || exit 1
+l overlay remove "$(glass other)" >/dev/null || exit 1
 # A replica can know a public overlay descriptor before receiving its project.
 python3 - "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" <<'PYFIXTURE'
 import json, os, sqlite3, sys
@@ -30,11 +30,12 @@ with sqlite3.connect(sys.argv[1]) as db:
                ('overlay.offline', json.dumps(value), 'fixture'))
 PYFIXTURE
 l overlay list --json > "$T/list.json" || exit 1
-ok "overlay list JSON matches the golden fields" python3 - "$T/list.json" <<'PY'
-import json, sys
+ok "overlay list JSON matches the golden fields" env TG="$TG" python3 - "$T/list.json" <<'PY'
+import json, os, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
-assert [r['name'] for r in rows] == ['cache.target', 'offline', 'private', 'public'], rows
+tg = os.environ['TG']
+assert [r['name'] for r in rows] == sorted(['offline', 'private', 'public', tg]), rows
 by_name = {r['name']: r for r in rows}
 for row in rows:
     assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'properties', 'folder', 'state', 'saved'}, row
@@ -45,9 +46,9 @@ assert by_name['private']['hidden'] and by_name['private']['shown'], by_name['pr
 assert by_name['private']['properties'] == {'history': 3, 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
 assert not by_name['public']['hidden'] and by_name['public']['shown'], by_name['public']
 assert by_name['public']['properties'] == {'history': 1, 'quiet': True, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
-cache = by_name['cache.target']
+cache = by_name[tg]
 assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
-assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto'}, cache
+assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto', 'platform': tg.split('.', 1)[1], 'trust': 'protected'}, cache
 assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
 # Fix the measured tree at exactly 12 bytes, excluding the saved source-time metadata.
@@ -55,11 +56,11 @@ rm -f target/.layr-times
 mkdir -p target/nested
 printf payload > target/nested/extra
 l overlay list --json --size > "$T/sized.json" || exit 1
-ok "explicit size measures the cache" python3 - "$T/sized.json" <<'PY_SIZE'
-import json, sys
+ok "explicit size measures the cache" env TG="$TG" python3 - "$T/sized.json" <<'PY_SIZE'
+import json, os, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
-cache = next(r for r in rows if r['name'] == 'cache.target')
+cache = next(r for r in rows if r['name'] == os.environ['TG'])
 assert type(cache['size']) is int and cache['size'] == len(b'cache') + len(b'payload'), cache
 assert all('size' not in r for r in rows if r['folder'] is None), rows
 PY_SIZE
@@ -72,11 +73,11 @@ no "explicit text size is computed" test "$sized" = "$out"
 rm -f target/result target/nested/extra
 rmdir target/nested
 l overlay list --size --json > "$T/empty.json" || exit 1
-ok "measured empty cache is zero" python3 - "$T/empty.json" <<'PY_EMPTY'
-import json, sys
+ok "measured empty cache is zero" env TG="$TG" python3 - "$T/empty.json" <<'PY_EMPTY'
+import json, os, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
-assert next(r for r in rows if r['name'] == 'cache.target')['size'] == 0, rows
+assert next(r for r in rows if r['name'] == os.environ['TG'])['size'] == 0, rows
 PY_EMPTY
-eq "removed cache is absent from text listing" 0 "$(printf '%s\n' "$out" | grep -c cache.other)"
+eq "removed cache is absent from text listing" 0 "$(printf '%s\n' "$out" | grep -c "$(glass other)")"
 finish

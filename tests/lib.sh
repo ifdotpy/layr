@@ -26,6 +26,12 @@ export LAYR_TRASH_BUDGET_MS=${LAYR_TRASH_BUDGET_MS:-2000}
 export LAYR_TEST_CHUNK_GRACE=${LAYR_TEST_CHUNK_GRACE:-0}
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
+# The platform key of this machine as layr names it (`<os>-<arch>`, docs/overlays.md section 1a,
+# slice 3). A cache is the glass of one platform: `glass target` names the glass of the folder
+# `target` (`target.macos-aarch64`), and `TG` is that name.
+HERE_PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$/macos/')-$(uname -m | sed 's/^arm64$/aarch64/')
+glass() { local f=${1//\//.}; echo "$f.${LAYR_TEST_PLATFORM:-$HERE_PLATFORM}"; }
+TG=$(glass target)
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
 
 # Resolve rustup's toolchain in the sudo user's home, where the test owner can read it.

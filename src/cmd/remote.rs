@@ -1047,6 +1047,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     )
     .map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let name = a.pos.first().ok_or_else(|| exit(128, format!("use layr {op} <remote>; Git remotes use layr git {op}")))?;
+    cache_flag_notes(&a, op);
     let mut h = here(ctx)?;
     let url = remote_url(&h.repo, name).map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let remote_kind = kind(&url)?;
@@ -1252,6 +1253,25 @@ fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
     a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
+/// The notes for the cache flags of a transfer (`super::deprecated`); none with `-q` or `--json`.
+fn cache_flag_notes(a: &crate::args::Parsed, op: &str) {
+    if a.has("-q") || a.has("--json") {
+        return;
+    }
+    if a.has("--caches") {
+        super::deprecated(&format!("{op} --caches"), &format!("layr {op} <remote> --line <line> --overlay <glass>"));
+    }
+    if a.has("--no-caches") {
+        super::deprecated(
+            &format!("{op} --no-caches"),
+            &format!("layr {op} <remote> --overlay <glasses> (it names the glasses to take)"),
+        );
+    }
+    if a.get("--caches-of").is_some() {
+        super::deprecated(&format!("{op} --caches-of"), &format!("layr {op} <remote> --line <line> --overlay <glass>"));
+    }
+}
+
 /// The lines of `--caches-of <line>[,<line>]`.
 fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
     a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
@@ -1345,6 +1365,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     )
     .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
     let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr clone <url> [<project>]; Git uses layr git clone"))?;
+    cache_flag_notes(&a, "clone");
     if kind(url).map_err(|e| exit(128, format!("{e}; use layr git clone for Git URLs")))? != Kind::Store {
         bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
     }

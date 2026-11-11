@@ -16,7 +16,7 @@ echo child > target/out
 l save --caches -q
 cd "$P/lines/main"
 db=$P/meta/db/layr.sqlite
-odb=$P/meta/overlays/cache.target/meta/db/layr.sqlite
+odb=$P/meta/overlays/$TG/meta/db/layr.sqlite
 line=$(python3 - "$db" "$T/parent-row.json" <<'PYROW'
 import json, sqlite3, sys
 c = sqlite3.connect(sys.argv[1]); c.row_factory = sqlite3.Row
@@ -38,7 +38,7 @@ before=$(count_lines)
 [ "$before" -gt 0 ] || { echo 'FATAL: overlay fixture has no child line'; exit 1; }
 out=$(l fsck --repair 2>&1); rc=$?
 eq 'fsck repair completes' 0 "$rc"
-has 'fsck checks the cache overlay' 'overlay cache.target:' "$out"
+has 'fsck checks the cache overlay' "overlay $TG:" "$out"
 eq 'fsck repair does not delete an overlay line whose parent row is missing' "$before" "$(count_lines)"
 # Restore the deliberately removed derived row before the normal garbage check.
 python3 - "$db" "$T/parent-row.json" <<'PYROW'

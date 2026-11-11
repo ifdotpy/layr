@@ -6,7 +6,7 @@
 sample $T/src
 l init g --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/g/lines
-cstate() { l overlay list | grep cache.target | cut -f6; }
+cstate() { l overlay list | grep $TG | cut -f6; }
 cd $P/main
 l config regenerable '["target"]'
 l line new -q w
@@ -20,7 +20,7 @@ l save -q --caches
 eq "save --caches makes the cache overlay" "cache" "$(cstate)"
 rm -rf target; mkdir target; echo rebuilt > target/out
 has "a tool replaced the cache with a plain folder" "plain folder" "$(cstate)"
-l overlay repair cache.target >/dev/null; l save -q
+l overlay repair $TG >/dev/null; l save -q
 eq "overlay repair makes it a cache again" "cache" "$(cstate)"
 eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # A live move with warm build output. The first sync sends the state without caches; the next
@@ -75,7 +75,7 @@ ok "trust the peer" l remote trust test-peer "$(echo "$peer_self" | python3 -c '
 b_id=$(env LAYR_ROOT=$T/b/store $LAYR remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 peer_exchange sync g -q --auto -- "${peer_cmd[@]}"
 peer_exchange sync g -q --auto --caches -- "${peer_cmd[@]}"
-has "the sync adds the trusted target to the cache readers" "machine:$b_id" "$(l overlay readers cache.target)"
+has "the sync adds the trusted target to the cache readers" "machine:$b_id" "$(l overlay readers $TG)"
 if [ "$peer_service" = 1 ]; then
     sudo -n sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$T/peer.pid" env LAYR_ROOT="$T/b/store" "$LAYR" daemon --socket "$T/peer.sock" --tick 3600 > "$T/peer-daemon.log" 2>&1 &
     PEER_SUPERVISOR=$!

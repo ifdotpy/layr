@@ -16,7 +16,7 @@ new_fs "$T/peer" 2G
 peer_id=$(env LAYR_ROOT="$T/peer/store" "$LAYR" remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ok "sync without caches trusts the new peer" peer_exchange sync cachemove -q --auto -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachemove
 ok "a later sync transfers caches saved before peer trust" peer_exchange sync cachemove -q --auto --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachemove
-has "the peer is now a cache reader" "machine:$peer_id" "$(l overlay readers cache.target)"
+has "the peer is now a cache reader" "machine:$peer_id" "$(l overlay readers $TG)"
 ok "adopt on the peer" env LAYR_ROOT="$T/peer/store" "$LAYR" --project cachemove adopt moving
 peer_line="$T/peer/store/projects/cachemove/lines/moving"
 ok "adopt restores the saved bytes" cmp target/output "$peer_line/target/output"

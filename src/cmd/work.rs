@@ -1122,7 +1122,21 @@ fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32
 /// A named save (`save -m`, with or without `-a`). Once it made a state, it names the files that
 /// the save left out. The warning runs after the store lock is released.
 pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let code = commit_state(ctx, args)?;
+    let code = commit_state(ctx, args);
+    // Copies of build-output folders made before the lock that no part took (nothing to save, or
+    // an error) go to the trash.
+    #[cfg(target_os = "macos")]
+    {
+        let left = crate::storage::take_prepared();
+        if !left.is_empty() {
+            if let Ok(h) = here(ctx) {
+                for p in left {
+                    let _ = h.repo.p.trash(&p);
+                }
+            }
+        }
+    }
+    let code = code?;
     if code == 0 {
         if let Err(e) = warn_left_out(ctx) {
             eprintln!("warning: cannot list the files this save left out: {e:#}");
@@ -1329,7 +1343,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // Cache folders become layers, and their copies are made, before the lock (rule 90).
     if !stacked {
         h.repo.restore_caches(&line)?;
-        h.repo.prepare_cache_states(&line)?;
+        h.repo.prepare_named_cache_parts(&line)?;
     }
     let nothing = |h: &Here, line: &Line| -> Result<i32> {
         let (mut st2, _s2, _i2, _x2) = h.repo.status(line)?;
@@ -1376,9 +1390,6 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
-    if !stacked {
-        h.repo.save_first_cache_states(ctx, &line)?;
-    }
     if (a.has("-a") || virtual_save) && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, index) = h.repo.status_light(&line)?;
         let mut paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
@@ -1444,6 +1455,11 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some((n, e)) = author {
         state.author.name = n;
         state.author.email = e;
+    }
+    // The part of each build-output glass (docs/overlays.md, section 1a, slice 6): a folder that
+    // changed gets a new part saved with this state; the state names the parts.
+    for (glass, part) in h.repo.save_named_cache_parts(ctx, &line, &state.id) {
+        state.parts.entry(glass).or_insert(part);
     }
     // `named_checks` checked the conflicts and the secrets of this content.
     let mut data = serde_json::json!({"line": line.id});

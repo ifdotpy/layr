@@ -1268,6 +1268,9 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
     if a.has("--caches-only") {
+        if !a.has("-q") {
+            super::deprecated("merge --caches-only", "layr merge <line> (a merge takes the build-output glasses of the line)");
+        }
         return caches_only(ctx, &h.repo, &line, &rev, a.has("-q"));
     }
     let before = line.head.clone();

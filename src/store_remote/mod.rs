@@ -68,6 +68,13 @@ impl Options {
     pub(crate) fn takes_layer(&self, name: &str, cache: bool) -> bool {
         !(cache && self.no_caches) && self.overlays.as_ref().map_or(true, |only| only.contains(name))
     }
+
+    /// Whether a fetch or push leaves out glass `name` because its `platform` is another
+    /// platform's (docs/overlays.md, section 1a, slice 3). `--overlay <name>` takes it all the same.
+    pub(crate) fn other_platform(&self, name: &str, platform: Option<&str>) -> bool {
+        crate::overlay::other_platform_glass(platform)
+            && !self.overlays.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
+    }
 }
 
 #[derive(Debug, Default, Serialize)]

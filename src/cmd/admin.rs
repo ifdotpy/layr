@@ -111,6 +111,9 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             return Err(exit(2, "--keep names one automatic state: use it without -m, --amend, --all-lines and --caches"));
         }
     }
+    if a.has("--caches") && !a.has("-q") && !a.has("--json") {
+        super::deprecated("save --caches", "layr save -m (a named save saves the build-output glasses)");
+    }
     if let Some(target) = a.get("--save-back") {
         return save_back(ctx, &a, target);
     }
@@ -1768,7 +1771,7 @@ fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize
         let orepo = repo.overlay_repo(&name)?;
         let orphans = repo.orphan_cache_lines(&orepo)?;
         let dead = repo.cache_unreachable(&name)?;
-        let size: u64 = dead.iter().map(|id| crate::cache_overlay::tree_size(&orepo.p.state_path(id))).sum();
+        let size: u64 = dead.iter().map(|id| crate::overlay::tree_size(&orepo.p.state_path(id))).sum();
         say(format!(
             "overlay {name}: {} unreachable state(s), {} bytes; {} overlay line(s) of deleted lines",
             dead.len(),
@@ -1779,7 +1782,7 @@ fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize
         bytes += size;
     }
     let old = excess_caches(&repo.p)?;
-    let size: u64 = old.iter().map(|(id, name)| crate::cache_overlay::tree_size(&repo.p.cache_path(id, name))).sum();
+    let size: u64 = old.iter().map(|(id, name)| crate::overlay::tree_size(&repo.p.cache_path(id, name))).sum();
     say(format!("old cache snapshots of states: {}, {} bytes", old.len(), size));
     states += old.len();
     bytes += size;
@@ -2032,6 +2035,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return crate::store_remote::command(ctx, "fsck", args);
     }
     if args.iter().any(|v| v == "--caches") {
+        super::deprecated("fsck --caches", "layr gc (it frees the parts that no line keeps)");
         return fsck_caches(ctx);
     }
     let spec = Spec::new().flag("--repair");

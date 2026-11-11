@@ -22,7 +22,7 @@ eq "the cache keeps its file" cache "$(cat target/x)"
 eq "a foreign target.layr-old is kept" old-backup "$(cat target.layr-old/precious)"
 eq "a foreign target.layr-new is kept" new-backup "$(cat target.layr-new/precious)"
 rm -rf target; mkdir target; echo cache2 > target/y
-l overlay repair cache.target >/dev/null 2>&1
+l overlay repair $TG >/dev/null 2>&1
 eq "overlay repair keeps the new cache file" cache2 "$(cat target/y)"
 eq "overlay repair keeps a foreign target.layr-old" old-backup "$(cat target.layr-old/precious)"
 eq "overlay repair keeps a foreign target.layr-new" new-backup "$(cat target.layr-new/precious)"

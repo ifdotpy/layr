@@ -12,12 +12,12 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `du --volumes [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote> [--line <name>,...] [--overlay <layer>,...] [--caches-of <line>] [--heads [--only-line <line>]]`, `pull <remote>`, `clone <url> [--caches-of <line>] [--heads [--only-line <line>]]`, `login <remote>` (Layr Cloud) |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote> [--line <name>,...] [--overlay <layer>,...] [--heads [--only-line <line>]]`, `pull <remote>`, `clone <url> [--heads [--only-line <line>]]`, `login <remote>` (Layr Cloud) |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--overlay <glass>,...] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state with those glasses; `--folder` writes the files of the view to a new folder; see overlays.md section 1a, slice 5), `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>` (changes the view of the current working folder), `overlay order [<name>,...]` (shows or sets the project order of glasses, the order of the default view of a new line folder), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--folder <path>] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--platform <key>\|any] [--trust protected\|readers]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>` (changes the view of the current working folder), `overlay order [<name>,...]` (shows or sets the project order of glasses, the order of the default view of a new line folder), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
 | refs          | `ref set <name> <rev> [--expect <rev\|none>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>] [-m <conventional title>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
@@ -181,9 +181,26 @@ Named saves also accept these options:
 `save` without `-m`, `-F`, or `--amend` makes an auto state.
 Use `--note <text>` to add an optional note to the auto state.
 If nothing changed since the newest auto state made over the head (or since the head when there is none), no state is made. The output names the existing state: `<line> <state id>`.
-Use `--running`, `--force`, `--caches`, or `-q` with an auto save.
-`--caches --cache <path>` saves only that cache path. A big cache such as build output takes a minute to save; a small one takes a second. It fails when the path is no cache path of the line.
-Owner decision 2026-11-11: a cache is an ordinary overlay, so the cache flags go away (`save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`). They work today; see [cache overlays](cache-overlays.md) section 2. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push` are the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
+Use `--running`, `--force`, or `-q` with an auto save.
+
+A named save also saves the build-output glasses (docs/overlays.md, section 1a, slice 6). A
+`regenerable` folder becomes the glass of this platform (`target.macos-aarch64`) at its first
+named save. A folder that changed since the line's part gets a new part; an unchanged folder keeps
+its part. The new state names the part (`parts`), so `line new <state>` takes it.
+
+A cache is an ordinary glass, so the cache flags go. They still work for one release, and each
+prints one line on stderr that names its replacement (none with `-q`):
+
+| Flag | Use instead |
+| --- | --- |
+| `save --caches [--cache <path>]` | `save -m` |
+| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` | `fetch <remote> --line <line> --overlay <glass>` |
+| `fetch --no-caches` | `fetch <remote> --overlay <glasses>` |
+| `fetch`, `clone` `--caches-of <line>` | `fetch <remote> --line <line> --overlay <glass>` |
+| `merge <line> --caches-only` | `merge <line>` |
+| `fsck --caches` | `gc` |
+
+`layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out a glass whose `platform` is another platform's, unless `--overlay` names it.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 

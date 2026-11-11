@@ -21,7 +21,7 @@ l save --caches -q
 
 ok "an overlay git remote" l overlay remote add notes notes-gh $T/notes.git
 eq "it is listed" "notes-gh	$T/notes.git" "$(l overlay remote list notes)"
-no "a cache never goes to git" l overlay remote add cache.target c $T/notes.git
+no "a cache never goes to git" l overlay remote add $TG c $T/notes.git
 no "a remote needs a URL" l overlay remote add notes broken
 
 out=$(l push --dry-run)
@@ -47,7 +47,7 @@ eq "the overlay history has both states" 3 "$(git --git-dir=$T/notes.git rev-lis
 l remote add archive "file://$T/archive" --paper-key-out $T/paper.txt >/dev/null 2>&1
 out=$(l push --dry-run)
 has "a layr remote takes the repository" "repository	archive	layr" "$out"
-has "and the cache with its platform" "cache.target (target)	archive	layr	1 state" "$out"
+has "and the cache with its platform" "$TG (target)	archive	layr	1 state" "$out"
 ok "overlay remote remove" l overlay remote remove notes notes-gh
 eq "it is gone" "" "$(l overlay remote list notes)"
 

@@ -21,14 +21,14 @@ l line new rel main >/dev/null
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
 out=$(l save --caches)
-has "save --caches names the cache overlay" "target: overlay cache.target" "$out"
+has "save --caches names the cache overlay" "target: overlay $TG" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
-row=$(l overlay list --size | grep cache.target)
+row=$(l overlay list --size | grep $TG)
 eq "overlay list shows the state of the folder" "cache" "$(echo "$row" | cut -f6)"
 has "overlay list shows the size of the cache" "B" "$(echo "$row" | cut -f7)"
 has "overlay list shows the saved overlay state" "saved " "$(echo "$row" | cut -f8)"
 eq "status does not show the cache" "" "$(l status --short)"
-readers=$(l overlay readers cache.target)
+readers=$(l overlay readers $TG)
 has "this machine reads the cache overlay" "machine:$self_id" "$readers"
 eq "not every user" "" "$(echo "$readers" | grep -x '\*')"
 new_fs $T/m2 1G
@@ -38,9 +38,9 @@ other_key=$(echo "$other" | python3 -c 'import json,sys; print(json.load(sys.std
 l remote add test-peer ssh://test/p >/dev/null
 ok "trust another machine" l remote trust test-peer $other_id --public-key $other_key
 l save --caches -q
-has "the next save --caches adds it to the readers" "machine:$other_id" "$(l overlay readers cache.target)"
-no "overlay use refuses a folder overlay" l overlay use --add cache.target
-no "overlay move refuses a folder overlay" l overlay move cache.target notes.txt
+has "the next save --caches adds it to the readers" "machine:$other_id" "$(l overlay readers $TG)"
+no "overlay use refuses a folder overlay" l overlay use --add $TG
+no "overlay move refuses a folder overlay" l overlay move $TG notes.txt
 
 # 2. A new line from the line starts warm (dogfood item 10), and its cache is its own.
 l line new warm rel >/dev/null
@@ -61,16 +61,16 @@ echo bin2 > target/debug/x
 l save --caches -q
 echo bin3 > target/debug/x
 l save --caches -q
-eq "the first state and the heads of rel, warm and fromstate stay" 3 "$(states cache.target)"
+eq "the first state and the heads of rel, warm and fromstate stay" 3 "$(states $TG)"
 l line new warm2 rel >/dev/null
 eq "a new line takes the newest cache" bin3 "$(cat $P/warm2/target/debug/x)"
 
 l line delete -D fromstate >/dev/null 2>&1
 # A killed cache save leaves its copy in the overlay's work folder; a live one keeps its copy.
-W=$O/cache.target/meta/work
+W=$O/$TG/meta/work
 mkdir -p $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e65.2000000000/debug $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e66.$$
 l gc --repair -q >/dev/null 2>&1
-eq "gc drops the cache of a deleted line" 3 "$(states cache.target)"
+eq "gc drops the cache of a deleted line" 3 "$(states $TG)"
 ok "gc removes the overlay work folder of a dead process" test ! -e $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e65.2000000000
 ok "gc keeps the overlay work folder of a live process" test -d $W/01a1c1cc-17e2-7512-9e71-ceeaf1120e66.$$
 
@@ -85,7 +85,7 @@ has "the merge brings the cache" "Merged cache target" "$out"
 # first cache lock is the one that ends before the copy (the save after the copy takes the project lock again).
 eq "the cache copy holds the overlay lock after the project lock is released" "ok" "$(printf '%s\n' "$out" | awk '
   /store lock held: p$/ {p = NR}
-  /store lock taken: p%cache.target$/ && !o {o = NR; pp = p}
+  /store lock taken: p%'"$TG"'$/ && !o {o = NR; pp = p}
   /merge caches$/ {m = NR}
   END {if (pp && o && m && pp < o && o < m) print "ok"}')"
 eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/debug/w | tr '\n' ' ' | sed 's/ $//')"
@@ -97,7 +97,7 @@ head -c 300000 /dev/zero > $P/rel/target/debug/big
 head -c 150000 /dev/zero > $P/rel/target/debug/mid
 touch -t 200001010000 $P/rel/target/debug/x
 touch -t 200101010000 $P/rel/target/debug/mid
-ok "set a size limit" l overlay set cache.target --gc lru:400K
+ok "set a size limit" l overlay set $TG --gc lru:400K
 (cd $P/rel && l save --caches -q >/dev/null 2>&1)
 no "the oldest file went" test -e $P/rel/target/debug/x
 no "the next oldest went until the folder fits" test -e $P/rel/target/debug/mid
@@ -115,7 +115,7 @@ no "an absolute folder fails" l overlay create deps4 --folder /tmp
 no "cache list fails" l cache list
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo tool > target/debug/x
-eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair cache.target)"
+eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair $TG)"
 eq "and keeps its files" "tool" "$(cat target/debug/x)"
 ok "repair of a folder that is no cache path exits 0" l overlay repair deps
 has "repair of a folder that is no cache path is a no-op with its reason" "not a cache path in this line" "$(l overlay repair deps 2>&1)"
@@ -180,7 +180,7 @@ mkdir -p small target/debug
 echo s > small/f
 echo t2 > target/debug/t2
 out=$(l save --caches --cache small)
-has "--cache saves the named cache" "small: overlay cache.small" "$out"
+has "--cache saves the named cache" "small: overlay $(glass small)" "$out"
 eq "--cache leaves the other cache" "" "$(echo "$out" | grep 'target: overlay')"
 no "--cache with a path that is no cache fails" l save --caches --cache nothing
 no "--cache needs --caches" l save --cache small

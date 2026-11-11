@@ -67,7 +67,7 @@ has "then nothing is unreachable" "unreachable cache data: 0 object(s), 0 bytes"
 
 # A reader removal starts a new key epoch. Its push writes the caches there; nothing reads the old
 # epoch now, so the push deletes the cache states in it.
-ov=$(l overlay list 2>/dev/null | awk '{print $1}' | grep -m1 '^cache')
+ov=$TG
 r1=machine:$(uuidgen | tr 'A-Z' 'a-z')
 r2=machine:$(uuidgen | tr 'A-Z' 'a-z')
 l overlay readers "$ov" "$r1" "$r2" >/dev/null 2>&1

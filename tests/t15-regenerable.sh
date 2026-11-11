@@ -79,7 +79,7 @@ as layr-admin sh -c "cd $PV/main && mkdir out && echo bin > out/bin && echo new 
 eq "save --caches says why a folder is no cache" "artifacts: $NOT" "$(in_v layr-admin main save --caches | grep '^artifacts')"
 ok "the other folder is a cache" is_cache $PV/main/out
 no "the folder with versioned files stays a plain folder" is_cache $PV/main/artifacts
-eq "the cache overlay of out is a cache" "cache" "$(in_v layr-admin main overlay list | grep cache.out | cut -f6)"
+eq "the cache overlay of out is a cache" "cache" "$(in_v layr-admin main overlay list | grep "$(glass out)" | cut -f6)"
 eq "its files stay in the working content" "" "$(in_v layr-admin main status -s)"
 as layr-u1 $L --project v line new -q v1 main
 eq "a new line takes the folder from the state" "kept" "$(cat $PV/v1/artifacts/kept.txt)"
@@ -89,7 +89,7 @@ eq "and the other cache warm" "bin" "$(cat $PV/v1/out/bin)"
 
 # 6. overlay repair and the removed cache add leave such a folder plain. One that an older layr made
 #    a cache (a subvolume with the same files) becomes a plain folder again, by save --caches.
-no "overlay repair needs a cache overlay, which the folder has not" in_v layr-admin main overlay repair cache.artifacts
+no "overlay repair needs a cache overlay, which the folder has not" in_v layr-admin main overlay repair "$(glass artifacts)"
 no "and a plain folder" is_cache $PV/main/artifacts
 no "cache add is no command" in_v layr-admin main cache add artifacts
 no "and leaves it a plain folder" is_cache $PV/main/artifacts
@@ -114,7 +114,7 @@ eq "its files in the working content" "" "$(in_v layr-admin main status -s)"
 #    takes the files from its state, not the older cache.
 rm -rf $PV/main/out && mkdir $PV/main/out && echo keep > $PV/main/out/keep.txt && chown -R layr-admin: $PV/main/out
 as layr-admin sh -c "cd $PV/main && $L add -f out/keep.txt && $L save -qm 'keep out'"
-eq "the overlay of out says why" "$NOT" "$(in_v layr-admin main overlay list | grep cache.out | cut -f6)"
+eq "the overlay of out says why" "$NOT" "$(in_v layr-admin main overlay list | grep "$(glass out)" | cut -f6)"
 as layr-u1 $L --project v line new -q v2 main
 eq "a new line takes the versioned file" "keep" "$(cat $PV/v2/out/keep.txt)"
 no "not the older cache" test -e $PV/v2/out/bin

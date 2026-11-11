@@ -70,9 +70,14 @@ Built today (section 9):
 - A state record of the project names the shared tree and, since slice 4, its part on each
   public follow overlay (`parts`). Each overlay keeps the part states in its own project. Shared,
   hidden and cache overlays are not in `parts`.
-- `fetch` takes the whole repository by default. `--no-caches` and `--caches-of` select cache
-  overlays; they are stopgaps and go away. `fetch --line <name> --overlay <layer>` (built
-  2026-11-11) takes the history of those lines on those layers only; `base` names the base.
+- `fetch` takes the whole repository by default. `fetch --line <name> --overlay <layer>` (built
+  2026-11-11) takes the history of those lines on those layers only; `base` names the base. Since
+  slice 6 the old cache flags (`--no-caches`, `--caches-of` and the others) print their
+  replacement and go in the next release.
+- Since slice 3 a glass can have `platform=<key>`; since slice 6 a cache is a folder glass of one
+  platform (`target.macos-aarch64`), and a named save records its part in the state. The cache
+  code (`src/cache_overlay.rs`) still makes and reads those parts, and the parts are still full
+  folder snapshots, not v2 objects (slice 7).
 
 The modes as built:
 
@@ -132,14 +137,16 @@ makes another view. The setting `stack.<line id>` goes.
 
 1. `fetch --line --overlay` (built).
 2. `push --line --overlay` (built).
-3. Glasses per platform; no platform key in names.
+3. Glasses per platform; no platform key in names. Built 2026-11-11; see "Slice 3 as built"
+   below for what differs.
 4. State records name their parts; save, line new, merge and view use them; overlay
    stores keep parts only. Migration of existing stores. Built 2026-11-11 for public follow
    overlays; see "Slice 4 as built" below for what differs.
 5. Views hold the glasses; `stack.<line id>` goes. Built 2026-11-11; see "Slice 5 as built"
    below for what differs.
 6. A cache is an ordinary glass: the cache flags, `src/cache_overlay.rs` and the cache fields of
-   the state record go; `trust` is a glass property.
+   the state record go; `trust` is a glass property. Built 2026-11-11 in part; see "Slice 6 as
+   built" below for what differs.
 7. Parts of folder glasses as v2 objects (the immutable-flag clone fails first, see
    [cache overlays](cache-overlays.md) section 21).
 8. Layr Cloud: a state with parts (`PUT /states/<state>` with one tree per glass).
@@ -225,6 +232,61 @@ makes another view. The setting `stack.<line id>` goes.
   a new folder: a second folder of one line with other glasses. It is a copy, not a working folder.
 - Test: tests/t234-views-hold-glasses.sh.
 
+**Slice 3 as built (2026-11-11).**
+
+- Property. `layr overlay create|set <glass> --platform <key>` sets `overlay.<glass>.platform`
+  (`<os>-<arch>`, for example `macos-aarch64`; `--platform any` clears it). `overlay list` shows
+  `platform=<key>`. The key has no hash of key files: the key parts of a build
+  ([cache overlays](cache-overlays.md) section 6) still decide which part of the glass fits a line.
+- Which commands. The default view of a new line folder leaves out a glass of another platform.
+  Every folder command (`line new`, `save`, `merge`, `status`) uses only the folder glasses of this
+  platform: a glass of another platform has no folder here. `push` and `fetch` to a store remote
+  and to Layr Cloud leave out a glass of another platform and say so (`overlay far: a glass of
+  platform linux-x86_64`), unless `--overlay` names the glass. Peer sync (`layr sync`) does not
+  filter: the peer may be of either platform.
+- Names. A new build-output glass is `<folder>.<platform>` (`/` as `.`), and its overlay lines are
+  `line-<line id>`, with no platform key. One folder can have one glass per platform:
+  `overlay create --folder` refuses a second glass of the same folder and platform, and a glass
+  without a platform clashes with every platform.
+- Old data. A `cache.<folder>` glass (no `platform`) stays the glass of its folder on every
+  platform, with its overlay lines `line-<line id>.<os>-<arch>`. When a glass of this platform
+  exists for the same folder, it wins. Test: tests/t235-cache-is-a-glass.sh.
+
+**Slice 6 as built (2026-11-11).**
+
+- `save -m`. A named save saves the part of each build-output glass of the line: each folder that
+  `regenerable` (`.layrattributes` or `layr config regenerable`) marks and that is a layer. A
+  folder that has no part on the line, or in which a file or folder changed since the part (by
+  modification time, in nanoseconds), gets a new part; an unchanged folder keeps its part, so a
+  named save does not copy big build output each time. The new state names the part in `parts`.
+  The first named save makes the glass of this platform, with `folder`, `quiet`, `history=last`,
+  `merge=union-theirs`, `platform` and `trust=protected`. A failure is a warning; the save goes on.
+- `line new X <state>` takes the part that the state (or its nearest ancestor) names, before the
+  older rules (`cache_of`, the overlay line of the line that made the state). `line new X <line>`
+  takes the line's part, as before.
+- `trust`. `layr overlay create|set <glass> --trust protected|readers`. `protected`: a line takes a
+  part that another user saved only from a protected line. `readers`: any part that the user
+  reads. A folder glass without the property is protected. The state fields `cache_by` and
+  `cache_shared` stay: they record who saved a part and whether the line was protected, and the
+  rule reads them. They have the JSON keys `layer_by` and `layer_shared`.
+- Old flags. `save --caches`, `merge --caches-only`, `fsck --caches`, and `--caches`,
+  `--no-caches`, `--caches-of` on `push`, `fetch`, `pull`, `sync` and `clone` still work for one
+  release. Each prints one line on stderr that names the replacement (not with `-q` or
+  `--json`). The runners (tools/checks, `src/runner.rs`, the follow pass) use them with `-q`.
+- `cache.` prefix. A new glass has no `cache.` prefix. A store keeps its `cache.<folder>` glasses
+  and the old cache fields of its state records; every command reads them as before.
+- Migration of a store: nothing to run. An existing `cache.target` stays the glass of `target`:
+  each named save records its part in the state from then on. To give a store one glass per
+  platform, an admin makes the new glass on each platform and removes the old one when every
+  line has a part on the new glass: `layr overlay remove cache.target` (cache-overlays.md section
+  18), then the next named save of each line makes `target.<platform>`. The parts of the old
+  glass go with it; the next build fills the new glass.
+- What is left of the slice: `src/cache_overlay.rs` keeps the build-output code (glass creation,
+  platform key, part choice, prune, old data); only the general folder glass code moved to
+  `src/overlay.rs`. The `cache` setting (`overlay.<glass>.cache`) still marks a build-output
+  glass, so older layr reads it. The flags go in the next release. Parts are still full folder
+  snapshots (slice 7).
+
 **Open (owner decision needed).**
 
 - Shared mode (`user-<uid>`: one overlay line for all lines of a user) does not fit the model, in
@@ -232,6 +294,11 @@ makes another view. The setting `stack.<line id>` goes.
   data. The owner must decide: drop the mode, or keep it as a glass without history per line.
 - Hidden overlays keep their overlay lines (see above). They need a place for their parts that
   does not show their names, for example a record in the hidden store keyed by the state.
+- Slice 6: should `overlay remove cache.<folder>` happen by itself (for example in `layr migrate`)
+  once each line has a part on the new glass of its platform? Today the admin runs it.
+- Slice 6: the cost of a named save with changed build output is one folder snapshot (on APFS a
+  copy of every file, made before the store lock). Is that acceptable for every `save -m`, or
+  should a project choose that only `save -m` on protected lines saves the part?
 - A save that changes only overlays makes no shared state, so the state record and the stack can
   differ until the next shared save. The model says a state holds its parts; the alternative is a
   new shared state with the same tree for each such save (an empty commit in git).

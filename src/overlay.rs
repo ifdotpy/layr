@@ -104,10 +104,55 @@ pub struct Props {
     pub gc_lru: Option<u64>,
     /// `prune=<name>|none`: the cache adapter that prunes the folder (issue #167). None: detect it.
     pub prune: Option<String>,
+    /// `platform=<key>` (`<os>-<arch>`): the glass is shown and fetched only on that platform
+    /// (docs/overlays.md, section 1a, slice 3). None: every platform.
+    pub platform: Option<String>,
+    /// `trust=protected|readers`: whose parts a line takes (docs/overlays.md, section 1a, slice 6).
+    /// `protected`: a part that another user saved only from a protected line. `readers`: any
+    /// part that the reader may read. None: `protected` for a build-output glass, else `readers`.
+    pub trust: Option<Trust>,
+}
+
+/// The `trust` property of a glass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    Protected,
+    Readers,
+}
+
+impl Trust {
+    pub fn parse(s: &str) -> Option<Trust> {
+        match s {
+            "protected" => Some(Trust::Protected),
+            "readers" => Some(Trust::Readers),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Trust::Protected => "protected",
+            Trust::Readers => "readers",
+        }
+    }
 }
 
 /// The property names, in the order that `overlay list` shows them.
-pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune"];
+pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune", "platform", "trust"];
+
+/// A platform key as `--platform` takes it: lowercase letters, digits, `-` and `_` (for example
+/// `macos-aarch64`, `linux-x86_64`).
+pub fn platform_name(s: &str) -> Option<String> {
+    let ok = !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+    ok.then(|| s.to_string())
+}
+
+/// Whether a glass with `platform=<p>` belongs to another platform than this machine's
+/// (`cache_platform()`, `<os>-<arch>`). A glass with no platform is on every platform.
+pub fn other_platform_glass(platform: Option<&str>) -> bool {
+    let here = crate::model::cache_platform();
+    platform.is_some_and(|p| p != here && !here.starts_with(&format!("{p}-")))
+}
 
 /// The value of `prune=<name>|none`: a lowercase adapter name (letters, digits, `-`), or `none`. An adapter
 /// name is not checked against the adapters here: core has no list of them. An unknown name is logged at prune time.
@@ -168,6 +213,8 @@ impl Props {
             }
             "gc" => self.gc_lru.map(|n| json!(format!("lru:{n}"))).unwrap_or(json!(null)),
             "prune" => self.prune.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
+            "platform" => self.platform.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
+            "trust" => self.trust.map(|t| json!(t.name())).unwrap_or(json!(null)),
             _ => json!(null),
         }
     }
@@ -183,6 +230,8 @@ impl Props {
         p.merge = get("merge").and_then(|v| v.as_str().and_then(MergeKind::parse)).unwrap_or_default();
         p.gc_lru = get("gc").and_then(|v| v.as_str().and_then(parse_gc)).flatten();
         p.prune = get("prune").and_then(|v| v.as_str().and_then(prune_name));
+        p.platform = get("platform").and_then(|v| v.as_str().and_then(platform_name));
+        p.trust = get("trust").and_then(|v| v.as_str().and_then(Trust::parse));
         p
     }
 
@@ -206,17 +255,31 @@ impl Props {
         if let Some(n) = &self.prune {
             out.push(format!("prune={n}"));
         }
+        if let Some(p) = &self.platform {
+            out.push(format!("platform={p}"));
+        }
+        if let Some(t) = self.trust {
+            out.push(format!("trust={}", t.name()));
+        }
         out
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "history": self.history.map(|n| serde_json::json!(n)).unwrap_or(serde_json::json!("all")),
             "quiet": self.quiet,
             "merge": self.merge.name(),
             "gc": self.gc_lru.map(|n| format!("lru:{n}")).unwrap_or_else(|| "none".into()),
             "prune": self.prune.clone().unwrap_or_else(|| "auto".into()),
-        })
+        });
+        // Only when set: older readers of `overlay list --json` see the keys they know.
+        if let Some(p) = &self.platform {
+            v["platform"] = serde_json::json!(p);
+        }
+        if let Some(t) = self.trust {
+            v["trust"] = serde_json::json!(t.name());
+        }
+        v
     }
 }
 
@@ -253,8 +316,11 @@ struct OverlayClean {
 #[derive(Clone, Debug)]
 pub struct Info {
     pub hidden: bool,
-    /// A cache overlay: its lines have an overlay line per platform (`cache_line_name`).
+    /// A build-output glass (`regenerable`): it follows the cache paths of each line. Without a
+    /// `platform`, its lines have an overlay line per platform (`cache_line_name`).
     pub cache: bool,
+    /// `platform=<key>`: the glass of one platform (docs/overlays.md, section 1a, slice 3).
+    pub platform: Option<String>,
     pub owner: u32,
     pub mode: Mode,
     /// The empty first state of the overlay.
@@ -288,7 +354,18 @@ pub fn parts_glass(info: &Info) -> bool {
     info.mode == Mode::Follow && !info.cache && !info.hidden
 }
 
-/// The overlay line of the line `line_id` in a cache overlay: one per platform (`<os>-<arch>`), so a
+/// The overlay line of the line `line_id` in a build-output glass: `line-<id>` in the glass of one
+/// platform (slice 3), else `cache_line_name`.
+pub fn glass_line_name(info: &Info, line_id: &str) -> String {
+    if info.cache && info.platform.is_none() {
+        cache_line_name(line_id)
+    } else {
+        format!("line-{line_id}")
+    }
+}
+
+/// The overlay line of the line `line_id` in a cache overlay without a `platform` (made before
+/// slice 3): one per platform (`<os>-<arch>`), so a
 /// build on another platform does not replace the cache of this one (docs/cache-overlays.md, section 6).
 pub fn cache_line_name(line_id: &str) -> String {
     format!("line-{line_id}.{}", crate::model::cache_platform())
@@ -323,6 +400,73 @@ pub const ORDER_KEY: &str = "overlays.order";
 /// glasses, bottom first.
 pub fn view_data(line_id: &str, glasses: &[String]) -> serde_json::Value {
     serde_json::json!({"line": line_id, "glasses": glasses})
+}
+
+/// A folder path as a folder overlay keeps it: relative, without `.`, `..` or empty parts, not
+/// `.git`.
+pub fn folder_path(s: &str) -> Result<String> {
+    let t = s.trim_end_matches('/');
+    let bad = t.is_empty()
+        || t.starts_with('/')
+        || t.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+        || t == ".git"
+        || t.starts_with(".git/");
+    if bad {
+        return Err(crate::cmd::exit(128, format!("fatal: invalid folder '{s}': use a relative path inside the line")));
+    }
+    Ok(t.to_string())
+}
+
+/// The apparent size of the files below `root` (not following links, not entering other layers).
+pub fn tree_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let _ = fsutil::walk(root, "", &mut |_, m| {
+        if !m.is_dir() {
+            total += m.size;
+        }
+        Ok(true)
+    });
+    total
+}
+
+impl Repo<'_> {
+    /// The folder glasses of the project on this platform: name and folder. A glass with
+    /// `platform=<key>` of another platform is left out (docs/overlays.md, section 1a, slice 3).
+    pub fn folder_overlays(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .all_folder_overlays()?
+            .into_iter()
+            .filter(|(_, _, p)| !crate::overlay::other_platform_glass(p.as_deref()))
+            .map(|(n, f, _)| (n, f))
+            .collect())
+    }
+
+    /// The folder glasses of every platform: name, folder and `platform`.
+    pub fn all_folder_overlays(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut out = Vec::new();
+        for name in self.overlay_names()? {
+            if let Some(f) = self.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
+                let p = self.overlay_setting(&name, "platform")?.and_then(|v| v.as_str().and_then(crate::overlay::platform_name));
+                out.push((name, f, p));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The folder glass of `folder` on this platform. A glass of this platform wins over an older
+    /// glass without a platform (a `cache.<folder>` overlay), which serves every platform.
+    pub fn folder_overlay_of(&self, folder: &str) -> Result<Option<String>> {
+        let mut found: Option<(String, bool)> = None;
+        for (n, f, p) in self.all_folder_overlays()? {
+            if f != folder || crate::overlay::other_platform_glass(p.as_deref()) {
+                continue;
+            }
+            if found.as_ref().is_none_or(|(_, own)| !own && p.is_some()) {
+                found = Some((n, p.is_some()));
+            }
+        }
+        Ok(found.map(|(n, _)| n))
+    }
 }
 
 /// The files (not folders) of a tree, without `.git`.
@@ -686,8 +830,10 @@ impl<'a> Repo<'a> {
             return Ok((None, None));
         }
         let cache_key = format!("overlay.{name}.cache");
+        let platform_key = format!("overlay.{name}.platform");
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
         let mut cache = None;
+        let mut platform = None;
         let mut project = None;
         if value.is_none() {
             project = self.overlay_project(name).ok();
@@ -695,10 +841,12 @@ impl<'a> Repo<'a> {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
                     cache = op.db.overlay_config(&cache_key)?;
+                    platform = op.db.overlay_config(&platform_key)?;
                 }
             }
         } else {
             cache = self.p.db.overlay_config(&cache_key)?;
+            platform = self.p.db.overlay_config(&platform_key)?;
         }
         let v = match value {
             Some(v) if v.is_object() => v,
@@ -708,6 +856,7 @@ impl<'a> Repo<'a> {
             Some(Info {
                 hidden: v["hidden"].as_bool().unwrap_or(false),
                 cache: cache.and_then(|c| c.as_bool()).unwrap_or(false),
+                platform: platform.and_then(|p| p.as_str().and_then(platform_name)),
                 owner: v["owner"].as_u64().unwrap_or(0) as u32,
                 mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
                 root: v["root"].as_str().unwrap_or("").to_string(),
@@ -912,7 +1061,7 @@ impl<'a> Repo<'a> {
     pub fn overlay_line_name(info: &Info, line_id: &str, owner: u32) -> String {
         match info.mode {
             Mode::Shared => format!("user-{owner}"),
-            Mode::Follow if info.cache => cache_line_name(line_id),
+            Mode::Follow if info.cache && info.platform.is_none() => cache_line_name(line_id),
             Mode::Follow => format!("line-{line_id}"),
         }
     }
@@ -1088,15 +1237,13 @@ impl<'a> Repo<'a> {
     /// shows it (`shown`), until caches are ordinary glasses (slice 6).
     pub fn default_glasses(&self, owner: u32, shown: &[String]) -> Result<Vec<String>> {
         let folders: Vec<String> = self.folder_overlays()?.into_iter().map(|(n, _)| n).collect();
-        let platform = crate::model::cache_platform();
         let mut out = Vec::new();
         for name in self.project_order()? {
             let Some(info) = self.overlay_info(&name)? else { continue };
             if folders.contains(&name) || (info.cache && !shown.contains(&name)) {
                 continue;
             }
-            let on = self.overlay_setting(&name, "platform")?.and_then(|v| v.as_str().map(str::to_owned));
-            if on.is_some_and(|p| p != platform && !platform.starts_with(&format!("{p}-"))) {
+            if other_platform_glass(info.platform.as_deref()) {
                 continue;
             }
             if self.layer_root(&Layer { overlay: name.clone(), state: info.root.clone() }).is_none() {
@@ -1175,7 +1322,16 @@ impl<'a> Repo<'a> {
                 order.push(name);
             }
         }
-        Ok(order.into_iter().filter_map(|o| parts.get(&o).map(|s| Layer { overlay: o.clone(), state: s.clone() })).collect())
+        // A build-output glass is a folder, not a glass of the file stack: `line new` places its part.
+        let mut out = Vec::new();
+        for o in order {
+            if let Some(s) = parts.get(&o) {
+                if self.overlay_info(&o)?.is_some_and(|i| parts_glass(&i)) {
+                    out.push(Layer { overlay: o.clone(), state: s.clone() });
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn readable_layers(&self, line: &Line) -> Result<Vec<Layer>> {
@@ -2052,6 +2208,10 @@ pub fn commit_layers(
                     st.author.email = e.clone();
                 }
                 st.parts = parts;
+                // The parts of the build-output glasses (slice 6), as in a save without overlays.
+                for (glass, part) in repo.save_named_cache_parts(ctx, line, &st.id) {
+                    st.parts.entry(glass).or_insert(part);
+                }
                 // Content conflicts stay listed while the committed file has markers.
                 let root = repo.p.state_path(&st.id);
                 for c in &head.conflicts {
@@ -2203,10 +2363,23 @@ mod tests {
             merge: MergeKind::UnionTheirs,
             gc_lru: Some(20 << 30),
             prune: Some("pnpm".into()),
+            platform: Some("linux-x86_64".into()),
+            trust: Some(Trust::Protected),
         };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
-        assert_eq!(p.describe(), ["history=last", "quiet", "merge=union-theirs", "gc=lru:20G", "prune=pnpm"]);
+        assert_eq!(
+            p.describe(),
+            [
+                "history=last",
+                "quiet",
+                "merge=union-theirs",
+                "gc=lru:20G",
+                "prune=pnpm",
+                "platform=linux-x86_64",
+                "trust=protected"
+            ]
+        );
         // Defaults are no settings at all, and unknown values read as defaults.
         assert!(PROPS.iter().all(|k| Props::default().value(k).is_null()));
         let odd = Props::from_settings(|k| Some(serde_json::json!(if k == "history" { "many" } else { "?" })));

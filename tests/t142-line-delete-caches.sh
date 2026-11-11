@@ -9,7 +9,7 @@ sample $T/src
 echo 'target regenerable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
-O=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
+O=$LAYR_ROOT/projects/p/meta/overlays/$TG/states
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 mkdir -p target; echo m > target/out; l save --caches -q

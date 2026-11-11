@@ -50,6 +50,12 @@ pub fn exit(code: i32, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Exit(code, msg.into()))
 }
 
+/// One line on stderr for a cache flag that goes (docs/overlays.md, section 1a, slice 6): a cache
+/// is an ordinary glass. The flag keeps working for one release, so runners have time to change.
+pub fn deprecated(flag: &str, instead: &str) {
+    eprintln!("layr: {flag} is deprecated and goes in the next release; use {instead}");
+}
+
 pub struct Here<'a> {
     pub repo: Repo<'a>,
     pub line: Option<Line>,

@@ -1,6 +1,8 @@
 #!/bin/bash
 # ci: macos overlayfs
-# Remote cache records from other platforms do not promise a local tree.
+# Remote cache records from other platforms do not promise a local tree. The fixture is a
+# `cache.target` glass of an older layr: one glass for every platform, with an overlay line per
+# platform. A new glass has one platform (docs/overlays.md section 1a, slice 3; t138).
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 sample "$T/src"
@@ -8,6 +10,8 @@ echo 'target regenerable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main"
+l overlay create cache.target --folder target --quiet --history last --merge union-theirs -q
+l config overlay.cache.target.cache true >/dev/null
 mkdir -p target
 echo local > target/out.bin
 l save --caches -q

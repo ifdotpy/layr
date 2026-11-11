@@ -94,24 +94,24 @@ base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
 (cd "$P/main" && l save --caches -q)
 # The times are compared before any cargo runs in a line: a cargo run rewrites the files it compiles.
-export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/cache.target/states
+export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/$TG/states
 
 # The union copy alone, with the prune off: the copied times are the source's (cargo compares them).
 new_line other2 main
-ok "the owner sets prune=none for the union check" l overlay set cache.target --prune none
+ok "the owner sets prune=none for the union check" l overlay set $TG --prune none
 (cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
 eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
-ok "the owner sets prune to auto after the union check" l overlay set cache.target --prune auto
+ok "the owner sets prune to auto after the union check" l overlay set $TG --prune auto
 new_line other main
 
 # 1. Stale units in the saved cache of main: prune is off while they are saved.
-ok "the owner sets prune=none on the cache" l overlay set cache.target --prune none
+ok "the owner sets prune=none on the cache" l overlay set $TG --prune none
 cb "$P/main" build --workspace --features extra -q >/dev/null
 stale=$(units $P/main/target)
 [ "$stale" -gt "$base" ] && { PASS=$((PASS + 1)); echo "PASS the feature build made stale units ($base to $stale)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the feature build made stale units ($base to $stale)"; }
 (cd "$P/main" && l save --caches -q)
 eq "prune=none keeps the stale units in the working copy" "$stale" "$(units $P/main/target)"
-ok "the owner sets prune to auto" l overlay set cache.target --prune auto
+ok "the owner sets prune to auto" l overlay set $TG --prune auto
 
 # 2. `line new` takes the cache as it is: no adapter runs, so the stale units come along. The next save prunes them.
 out=$(l line new $OWNER_ARG fresh main 2>&1)
@@ -136,7 +136,7 @@ rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
 # 4. prune=none keeps the folder: a new line from the stale cache keeps its stale units.
-ok "the owner sets prune=none again" l overlay set cache.target --prune none
+ok "the owner sets prune=none again" l overlay set $TG --prune none
 has "overlay list shows prune=none" "prune=none" "$(l overlay list)"
 new_line keep main
 eq "prune=none keeps the stale units" "$stale" "$(units $P/keep/target)"
@@ -149,7 +149,7 @@ if [ "$(id -u)" = 0 ]; then
 fi
 
 # 5. A plain `save --caches` prunes the folder before it saves: the saved cache has no stale units.
-ok "the owner sets prune to auto" l overlay set cache.target --prune auto
+ok "the owner sets prune to auto" l overlay set $TG --prune auto
 cb "$P/main" build --workspace --features extra -q >/dev/null
 eq "the working copy has stale units before the save" "$stale" "$(units $P/main/target)"
 (cd "$P/main" && l save --caches -q)
@@ -158,7 +158,7 @@ new_line after main
 eq "the cache that the save made has no stale units" "$base" "$(units $P/after/target)"
 
 # 6. An unknown adapter name does not fail the command; the log names it.
-ok "the owner sets an adapter name that does not exist" l overlay set cache.target --prune nosuch
+ok "the owner sets an adapter name that does not exist" l overlay set $TG --prune nosuch
 out=$(l line new $OWNER_ARG bad main 2>&1); rc=$?
 eq "line new succeeds with an unknown adapter" "0" "$rc"
 eq "the line is there" "1" "$(l line list | grep -c '^ *bad$' | tr -d ' ')"
@@ -166,11 +166,11 @@ eq "the line is there" "1" "$(l line list | grep -c '^ *bad$' | tr -d ' ')"
 out=$(cd "$P/bad" && l save --caches 2>&1); rc=$?
 eq "save --caches succeeds with an unknown adapter" "0" "$rc"
 has "the log names the unknown adapter" "unknown prune adapter 'nosuch'" "$out"
-ok "the owner sets prune to auto again" l overlay set cache.target --prune auto
+ok "the owner sets prune to auto again" l overlay set $TG --prune auto
 
 # 7. A cargo that the owner cannot run: the adapter names the reason, and the folder is not pruned. (retest finds
 #    a rustup install outside PATH, so the check puts a cargo that fails first on PATH.)
-ok "the owner sets prune to auto for the cargo-missing check" l overlay set cache.target --prune auto
+ok "the owner sets prune to auto for the cargo-missing check" l overlay set $TG --prune auto
 mkdir -p "$T/badcargo" && printf '#!/bin/sh\necho "cargo: not installed" >&2\nexit 127\n' > "$T/badcargo/cargo" && chmod 755 "$T/badcargo" "$T/badcargo/cargo"
 (cd "$P/other" && owned env PATH="$T/badcargo:/usr/bin:/bin" "$LAYR" retest prune target) > "$T/nocargo" 2>&1 || true
 has "a missing cargo prints the reason" "skipped: cargo metadata: cargo failed: cargo: not installed" "$(cat "$T/nocargo")"

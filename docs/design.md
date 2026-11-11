@@ -178,13 +178,20 @@ command reads it.
 
 ## 5. Warm caches
 
-Owner decision 2026-11-11: a cache is an ordinary overlay (a glass), for example `target` with
-`folder=target`, `quiet`, `history=last`, `merge=union-theirs` and `platform`
-([cache overlays](cache-overlays.md) section 2). No cache flags (`save --caches`, `sync --caches`,
-`merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`), no
-`cache.` name prefix, no separate code path. Cache states go into v2 objects like any glass.
-Space comes from layered storage and `history=last`, not from a size cap. This section describes
-the caches as built.
+Owner decision 2026-11-11: a cache is an ordinary overlay (a glass), for example
+`target.macos-aarch64` with `folder=target`, `quiet`, `history=last`, `merge=union-theirs`,
+`platform=macos-aarch64` and `trust=protected` ([cache overlays](cache-overlays.md) section 2).
+Build output of each platform is its own glass. No cache flags, no `cache.` name prefix, no
+separate code path. Space comes from layered storage and `history=last`, not from a size cap.
+
+Built (overlays.md section 1a, slices 3 and 6): a named save saves the part of each build-output
+glass whose folder changed, and the new state names it. The first named save of a `regenerable`
+folder makes the glass of this platform. A glass with `platform` is shown, fetched and pushed only
+on its platform. `trust` is a glass property. The cache flags (`save --caches`, `sync --caches`,
+`merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`) still
+work for one release and print their replacement. A store keeps its `cache.<folder>` glasses:
+each stays the glass of its folder on every platform. Parts are still full folder snapshots,
+not v2 objects. The rest of this section describes the rules that both kinds of glass follow.
 
 A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states and diffs. Every working folder would otherwise build from
@@ -212,8 +219,10 @@ is valid for a state, so it never decides that by itself:
   into a state, on every file system, whether or not `save --caches` ever ran. Any save (automatic
   or named), `line new` and every state-making command first turn each such folder into a layer
   (before the store lock, the copy on btrfs; a marker on APFS). The first save of each cache also
-  saves the first cache state of the line (the cache overlay `cache.<folder>`), so a new line from
-  a state of the line starts warm. Later saves do not copy the cache; `save --caches` refreshes it.
+  saves the first cache state of the line (the glass `<folder>.<platform>`, or an older
+  `cache.<folder>`), so a new line from a state of the line starts warm. A later named save copies
+  the folder again only when a file in it changed, and the new state names that part.
+  Automatic saves do not copy the cache.
 - `save --caches`, the explicit choice of someone who may save the
   line. It first turns the regenerable folders into caches, so their files stay out of the state. On a
   protected line with no changes since its head (ignored files do not count), it gives the caches
@@ -222,7 +231,8 @@ is valid for a state, so it never decides that by itself:
   it; a cache that the state has keeps its first snapshot.
 - A cache made by another user goes to a line only if it was saved on a protected line, because
   a cache holds code that review does not see. Other caches go only to lines of the user who
-  made them.
+  made them. This is the glass property `trust=protected`, the default of a folder glass; a glass
+  with `trust=readers` gives any part to each user who reads it.
 - A cache is build output for one operating system and processor. Each save records its
   platform (`<os>-<arch>`, for example `linux-aarch64` or `macos-aarch64`), and a line takes a
   cache only on the same platform, so a live move (`sync --caches`) between a Mac and a Linux

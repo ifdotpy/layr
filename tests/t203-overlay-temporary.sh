@@ -11,7 +11,7 @@ cd "$P/lines/main"
 mkdir -p target
 echo local > target/out.bin
 l save --caches -q
-O=$P/meta/overlays/cache.target
+O=$P/meta/overlays/$TG
 ok "the fixture has a cache overlay" test -f "$O/meta/db/layr.sqlite"
 old_time=$(date -d '2 hours ago' +%Y%m%d%H%M 2>/dev/null || date -v-2H +%Y%m%d%H%M)
 for root in "$P" "$O"; do

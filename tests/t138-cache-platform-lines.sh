@@ -1,9 +1,10 @@
 #!/bin/bash
 # ci: macos overlayfs
-# A line has one cache overlay line per platform (`line-<line id>.<os>-<arch>`, docs/cache-overlays.md,
-# section 6): a `save --caches` on another platform does not replace this platform's cache, and a new
-# line takes the cache of its own platform. An overlay line of an older layr (`line-<line id>`) gets
-# the platform name of its head at the first write. Test hook: LAYR_TEST_PLATFORM acts as another platform.
+# Build output of each platform is its own glass (docs/overlays.md section 1a, slice 3): a `save` on
+# another platform makes the glass of that platform (`target.<os>-<arch>`) and does not replace this
+# platform's part, and a new line takes the part of its own platform. The overlay lines of a glass
+# have no platform key (`line-<line id>`). An older `cache.<folder>` glass keeps one overlay line per
+# platform (t61). Test hook: LAYR_TEST_PLATFORM acts as another platform.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -19,7 +20,6 @@ LAYR_TEST_PLATFORM=plan9-mips l save --caches -q
 echo built-here-2 > target/out
 l save --caches -q
 
-os=linux; [ "$(uname -s)" = Darwin ] && os=macos
 l line new here main >/dev/null 2>&1
 eq "a new line takes the cache of this platform" built-here-2 "$(cat $P/here/target/out 2>/dev/null)"
 LAYR_TEST_PLATFORM=plan9-mips l line new there main >/dev/null 2>&1
@@ -33,9 +33,10 @@ l save --caches -q
 echo there-own > target/out
 LAYR_TEST_PLATFORM=plan9-mips l save --caches -q
 cd $P/main || exit 1
-odb=$LAYR_ROOT/projects/p/meta/overlays/cache.target/meta/db/layr.sqlite
-names() { python3 -c 'import sqlite3,sys; print(" ".join(sorted(r[0] for r in sqlite3.connect(sys.argv[1]).execute("select name from lines where coalesce(deleted, 0) = 0"))))' "$odb"; }
-eq "the line has an overlay line per platform" "line-$here_id.$os line-$here_id.plan9-mips" "$(names | tr ' ' '\n' | grep "$here_id" | sed "s/\.$os-[a-z0-9_]*/.$os/" | tr '\n' ' ' | sed 's/ $//')"
+names() { python3 -c 'import sqlite3,sys; print(" ".join(sorted(r[0] for r in sqlite3.connect(sys.argv[1]).execute("select name from lines where coalesce(deleted, 0) = 0"))))' "$LAYR_ROOT/projects/p/meta/overlays/$1/meta/db/layr.sqlite"; }
+has "each platform has its glass" "$(glass target) $(LAYR_TEST_PLATFORM=plan9-mips glass target)" "$(l overlay list | awk '{print $1}' | sort | paste -sd' ' -)"
+eq "the glass of this platform has the line without a platform key" "line-$here_id" "$(names "$TG" | tr ' ' '\n' | grep "$here_id")"
+eq "and so has the glass of the other platform" "line-$here_id" "$(names target.plan9-mips | tr ' ' '\n' | grep "$here_id")"
 l line delete -D here >/dev/null
-no "line delete removes the overlay lines of both platforms" grep -q "$here_id" <<<"$(names)"
+no "line delete removes the overlay lines of both glasses" grep -q "$here_id" <<<"$(names "$TG") $(names target.plan9-mips)"
 finish

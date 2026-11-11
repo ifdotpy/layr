@@ -1,13 +1,18 @@
-//! Cache overlays (docs/cache-overlays.md): folder overlays that hold regenerable build output.
+//! Build-output glasses (docs/overlays.md, section 1a, slices 3 and 6; docs/cache-overlays.md).
 //!
-//! A folder overlay owns one folder of the tree. In a working folder that folder is a nested layer
-//! (a nested subvolume on btrfs, a marked folder on APFS), so scans, snapshots and automatic
-//! states of the line never see its files, as for caches. A state of the overlay is one snapshot
-//! of that nested layer; a line shows a state as one writable snapshot at the path. Each line has
-//! its own overlay line (`line-<line id>`, follow mode): a line has caches, not a state.
+//! A cache is an ordinary glass: a folder glass with `quiet`, `history=last`,
+//! `merge=union-theirs`, `platform` and `trust=protected`. The general folder glass code
+//! (`folder_path`, `folder_overlays`) is in `overlay.rs`. This module keeps what build output
+//! still needs and what old data needs:
 //!
-//! `save --caches` makes the cache overlay of each cache path when it is missing (properties:
-//! quiet, history last, merge union-theirs, readers `*`) and saves a state of it for the line.
+//! - The glass of a `regenerable` folder for this platform, made at its first save
+//!   (`ensure_cache_overlay`), and the parts that a named save makes (`save_cache_overlays`).
+//! - The platform key and its parts (`cache_key`): which part fits a line.
+//! - Which part a new line takes (`cache_source`): the part that a state names, else the parts of
+//!   older data (`cache_of`, the overlay line of the source line), with the `trust` rule.
+//! - Overlay lines per platform (`line-<id>.<os>-<arch>`) of a `cache.<folder>` glass that an
+//!   older layr made, and the old cache fields of state records (`cache_by`, `cache_shared`).
+//! - Prune and size limits of the folder, and the cleanup of lines that are gone.
 
 use crate::cmd::exit;
 use crate::ctx::Ctx;
@@ -28,47 +33,30 @@ thread_local! {
     static PRUNE_LIMIT: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(crate::cache_hook::HOOK_LIMIT) };
 }
 
-/// A folder path as a folder overlay keeps it: relative, without `.`, `..` or empty parts, not
-/// `.git`.
-pub fn folder_path(s: &str) -> Result<String> {
-    let t = s.trim_end_matches('/');
-    let bad = t.is_empty()
-        || t.starts_with('/')
-        || t.split('/').any(|c| c.is_empty() || c == "." || c == "..")
-        || t == ".git"
-        || t.starts_with(".git/");
-    if bad {
-        return Err(exit(128, format!("fatal: invalid folder '{s}': use a relative path inside the line")));
-    }
-    Ok(t.to_string())
-}
-
-/// The name of the cache overlay that `save --caches` makes for `folder`: `cache.<folder>` with
-/// `/` as `.`, or a hash when the folder has other characters.
-pub fn cache_overlay_name(folder: &str) -> String {
-    let name = format!("cache.{}", folder.replace('/', "."));
-    if crate::store::check_name("overlay", &name).is_ok() {
+/// The name of the build-output glass of `folder` on `platform` (docs/overlays.md, section 1a,
+/// slices 3 and 6): `<folder>.<platform>` with `/` as `.`, or a hash when the folder has other
+/// characters. Older layr named the one glass of all platforms `cache.<folder>`; such a glass
+/// stays the glass of its folder (`folder_overlay_of`).
+pub fn cache_overlay_name(folder: &str, platform: &str) -> String {
+    let name = format!("{}.{platform}", folder.replace('/', "."));
+    if crate::store::check_name("overlay", &name).is_ok() && !name.starts_with('.') {
         return name;
     }
     use layr_hashers::Digest;
-    format!("cache.{}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
+    format!("folder-{}.{platform}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
 }
 
-/// The properties of a cache overlay (docs/cache-overlays.md, section 2).
+/// The properties of a build-output glass of this platform (docs/cache-overlays.md, section 2).
 pub fn cache_props() -> Props {
-    Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, gc_lru: None, prune: None }
-}
-
-/// The apparent size of the files below `root` (not following links, not entering other layers).
-pub fn tree_size(root: &Path) -> u64 {
-    let mut total = 0u64;
-    let _ = fsutil::walk(root, "", &mut |_, m| {
-        if !m.is_dir() {
-            total += m.size;
-        }
-        Ok(true)
-    });
-    total
+    Props {
+        history: Some(1),
+        quiet: true,
+        merge: MergeKind::UnionTheirs,
+        gc_lru: None,
+        prune: None,
+        platform: Some(crate::model::cache_platform()),
+        trust: Some(crate::overlay::Trust::Protected),
+    }
 }
 
 /// What a folder of a folder overlay is in one line (`FolderIn` in `Repo::folder_kind`).
@@ -194,21 +182,6 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(CacheKey { key: platform_key_of(&parts), parts })
-    }
-
-    /// The folder overlays of the project: name and folder.
-    pub fn folder_overlays(&self) -> Result<Vec<(String, String)>> {
-        let mut out = Vec::new();
-        for name in self.overlay_names()? {
-            if let Some(f) = self.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
-                out.push((name, f));
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn folder_overlay_of(&self, folder: &str) -> Result<Option<String>> {
-        Ok(self.folder_overlays()?.into_iter().find(|(_, f)| f == folder).map(|(n, _)| n))
     }
 
     /// Whether `folder` is a cache path of the working folder `w`: the machine setting names it, or
@@ -373,7 +346,7 @@ impl<'a> Repo<'a> {
             self.sync_cache_readers(ctx, &n);
             return Ok(n);
         }
-        let name = cache_overlay_name(folder);
+        let name = cache_overlay_name(folder, &crate::model::cache_platform());
         if self.overlay_info(&name)?.is_some() {
             bail!("overlay '{name}' exists and does not hold folder {folder}");
         }
@@ -550,13 +523,20 @@ impl<'a> Repo<'a> {
     /// A state of overlay `name` that a line of `uid` may show: on this machine, saved on this
     /// platform, and made by `uid` or on a protected line (a cache holds code that review does not
     /// see). The empty first state is no cache.
-    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey) -> Result<bool> {
+    fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey, protected: bool) -> Result<bool> {
         if id == root || !orepo.p.has_state(id) {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
-        let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid);
+        let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid) || !protected;
         Ok(allowed && key.fits(st.cache_platform.as_deref(), &st.cache_key_parts))
+    }
+
+    /// Whether glass `name` has `trust=protected`: a line takes a part that another user saved
+    /// only from a protected line (docs/overlays.md, section 1a, slice 6). A folder glass without
+    /// the property is protected, as every cache overlay was before the property.
+    pub fn trust_protected(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_props(name)?.trust != Some(crate::overlay::Trust::Readers))
     }
 
     /// Says why a line takes no cache of overlay `name` (folder `folder`) from the line `from`: the
@@ -568,7 +548,7 @@ impl<'a> Repo<'a> {
             let orepo = self.overlay_repo(name)?;
             let Some(ol) = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &l.id, l.owner))? else { return Ok(None) };
             let Some(st) = orepo.p.db.state(&ol.head)? else { return Ok(None) };
-            let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid);
+            let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid) || !self.trust_protected(name)?;
             let same_platform = st.cache_platform.as_deref().is_some_and(|p| !other_platform(Some(p)));
             Ok((ol.head != info.root && allowed && same_platform && !st.cache_key_parts.is_empty())
                 .then_some((ol.head, st.cache_key_parts)))
@@ -594,8 +574,9 @@ impl<'a> Repo<'a> {
     pub fn cache_source(&self, name: &str, from: &Source, uid: u32, key: &CacheKey) -> Result<Option<String>> {
         let info = self.need_overlay(name)?;
         let orepo = self.overlay_repo(name)?;
+        let protected = self.trust_protected(name)?;
         if let Source::ExactState(wanted, target_line, expected) = from {
-            let own_line = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(target_line))?.map(|l| l.id);
+            let own_line = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, target_line))?.map(|l| l.id);
             for (id, of) in orepo.p.db.cache_states()? {
                 if expected.is_some_and(|value| value != id.as_str()) {
                     continue;
@@ -608,7 +589,7 @@ impl<'a> Repo<'a> {
                 {
                     continue;
                 }
-                if !cache.cache_shared || !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
+                if !cache.cache_shared || !self.usable_cache(&orepo, &info.root, &id, uid, key, protected)? {
                     continue;
                 }
                 if of == *wanted {
@@ -641,7 +622,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         let of_line = |line_id: &str| -> Result<Option<String>> {
-            let name = crate::overlay::cache_line_name(line_id);
+            let name = crate::overlay::glass_line_name(&info, line_id);
             // A line that no write moved to its platform name yet (`ensure_overlay_line`) has the old name.
             let ol = match orepo.p.db.line_by_name(&name)? {
                 Some(ol) => ol,
@@ -650,7 +631,7 @@ impl<'a> Repo<'a> {
                     None => return Ok(None),
                 },
             };
-            Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key)?.then_some(ol.head))
+            Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key, protected)?.then_some(ol.head))
         };
         // The newest usable cache saved with each project state. `save --caches` on a line with
         // no named change saves with an automatic state over the head: that cache counts for the
@@ -659,7 +640,7 @@ impl<'a> Repo<'a> {
         // The project states that each usable cache state counts for.
         let mut counts_for: std::collections::HashMap<String, Vec<String>> = Default::default();
         for (id, of) in orepo.p.db.cache_states()? {
-            if !self.usable_cache(&orepo, &info.root, &id, uid, key)? {
+            if !self.usable_cache(&orepo, &info.root, &id, uid, key, protected)? {
                 continue;
             }
             if let Some(st) = self.p.db.state(&of)? {
@@ -698,10 +679,18 @@ impl<'a> Repo<'a> {
             if seen.len() >= SEARCH || !seen.insert(id.clone()) {
                 continue;
             }
+            // The newest part saved with the state: a named save, a check or a CI job of it.
             if let Some(s) = saved_with.get(&id) {
                 return Ok(Some(s.clone()));
             }
             let Some(rec) = self.p.db.state(&id)? else { continue };
+            // The part that the state names on this glass (`save -m`, slice 6): an unchanged
+            // folder names a part saved with an older state.
+            if let Some(part) = rec.parts.get(name) {
+                if self.usable_cache(&orepo, &info.root, part, uid, key, protected)? {
+                    return Ok(Some(part.clone()));
+                }
+            }
             if let Some(l) = &rec.line {
                 if let Some(s) = of_line(l)? {
                     return Ok(Some(s));
@@ -727,7 +716,7 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
-            let ol_name = crate::overlay::cache_line_name(&line.id);
+            let ol_name = crate::overlay::glass_line_name(&self.need_overlay(&name)?, &line.id);
             let ol = match orepo.p.db.line_by_name(&ol_name)? {
                 Some(ol) => Some(ol),
                 None => orepo.unnamed_platform_line(&ol_name)?,
@@ -761,7 +750,9 @@ impl<'a> Repo<'a> {
         match self.overlay_repo(name) {
             Ok(_) => true,
             Err(e) => {
-                eprintln!("layr: no cache for {folder}: overlay {name} is not on this machine ({e:#}); a trusted reader gets it at the next fetch");
+                eprintln!(
+                    "layr: no cache for {folder}: overlay {name} is not on this machine ({e:#}); a trusted reader gets it at the next fetch"
+                );
                 false
             }
         }
@@ -1292,6 +1283,7 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::{folder_path, tree_size};
 
     #[test]
     fn the_lru_trim_removes_whole_units_and_their_empty_folders() {
@@ -1329,11 +1321,12 @@ mod tests {
         for bad in ["", "/abs", "a/../b", "./x", ".git", ".git/x", "a//b"] {
             assert!(folder_path(bad).is_err(), "{bad}");
         }
-        assert_eq!(cache_overlay_name("target"), "cache.target");
-        assert_eq!(cache_overlay_name("web/node_modules"), "cache.web.node_modules");
-        let odd = cache_overlay_name("a b/c");
-        assert!(odd.starts_with("cache.") && odd.len() == 18, "{odd}");
-        assert_eq!(cache_props().describe(), ["history=last", "quiet", "merge=union-theirs"]);
+        assert_eq!(cache_overlay_name("target", "macos-aarch64"), "target.macos-aarch64");
+        assert_eq!(cache_overlay_name("web/node_modules", "linux-x86_64"), "web.node_modules.linux-x86_64");
+        let odd = cache_overlay_name("a b/c", "linux-x86_64");
+        assert!(odd.starts_with("folder-") && odd.ends_with(".linux-x86_64"), "{odd}");
+        let platform = format!("platform={}", crate::model::cache_platform());
+        assert_eq!(cache_props().describe(), ["history=last", "quiet", "merge=union-theirs", &platform, "trust=protected"]);
     }
 
     #[test]

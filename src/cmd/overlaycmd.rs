@@ -32,7 +32,8 @@ const USAGE: &str =
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
        layr overlay migrate-parts [-n|--dry-run] [-q]
-properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none";
+properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none
+            --platform <key>|any  --trust protected|readers";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -109,7 +110,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     check_name("overlay", &name)?;
     repo.require(ctx, "line.create")?;
     let hidden = a.has("--hidden");
-    let folder = a.get("--folder").map(crate::cache_overlay::folder_path).transpose()?;
+    let folder = a.get("--folder").map(crate::overlay::folder_path).transpose()?;
     let mode = match a.get("--mode") {
         Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (shared or follow)")))?,
         None if hidden || folder.is_some() => Mode::Follow,
@@ -126,8 +127,10 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if repo.overlay_info(&name)?.is_some() {
         return Err(exit(128, format!("fatal: overlay '{name}' already exists")));
     }
+    // One folder glass per folder and platform: build output of each platform is its own glass.
     if let Some(f) = &folder {
-        if let Some((other, _)) = repo.folder_overlays()?.into_iter().find(|(_, x)| x == f) {
+        let clash = |p: &Option<String>| p.is_none() || props.platform.is_none() || *p == props.platform;
+        if let Some((other, _, _)) = repo.all_folder_overlays()?.into_iter().find(|(_, x, p)| x == f && clash(p)) {
             return Err(exit(128, format!("fatal: overlay '{other}' already holds folder {f}")));
         }
     }
@@ -257,14 +260,14 @@ pub(crate) fn make_overlay(
     Ok(())
 }
 
-/// A folder overlay is not part of the file stack: `save --caches`, `line new` and `merge` move it (docs/cache-overlays.md, section 3).
+/// A folder overlay is not part of the file stack: `save -m`, `line new` and `merge` move it (docs/cache-overlays.md, section 3).
 fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
     if repo.overlay_info(name)?.is_some() {
         if let Some(f) = repo.overlay_setting(name, "folder")? {
             return Err(exit(
                 1,
                 format!(
-                    "error: overlay '{name}' is the folder overlay of {}; use layr save --caches or layr merge",
+                    "error: overlay '{name}' is the folder overlay of {}; use layr save -m or layr merge",
                     f.as_str().unwrap_or("?")
                 ),
             ));
@@ -282,6 +285,8 @@ fn props_spec(spec: Spec) -> Spec {
         .value("--gc")
         .value("--key-files")
         .value("--prune")
+        .value("--platform")
+        .value("--trust")
 }
 
 /// `--key-files a,b` as the setting value; `none` clears it.
@@ -291,7 +296,7 @@ fn key_files_value(v: &str) -> Result<serde_json::Value> {
     }
     let mut files = Vec::new();
     for f in v.split(',').map(str::trim).filter(|f| !f.is_empty()) {
-        files.push(crate::cache_overlay::folder_path(f)?);
+        files.push(crate::overlay::folder_path(f)?);
     }
     Ok(serde_json::json!(files))
 }
@@ -325,6 +330,21 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
                     .ok_or_else(|| exit(128, format!("fatal: invalid --prune '{v}' (an adapter name, none or auto)")))?,
             ),
         };
+    }
+    if let Some(v) = a.get("--platform") {
+        // `--platform any` clears it: the glass is on every platform.
+        p.platform = match v {
+            "any" => None,
+            _ => Some(crate::overlay::platform_name(v).ok_or_else(|| {
+                exit(128, format!("fatal: invalid --platform '{v}' (a key such as {}, or any)", crate::model::cache_platform()))
+            })?),
+        };
+    }
+    if let Some(v) = a.get("--trust") {
+        p.trust = Some(
+            crate::overlay::Trust::parse(v)
+                .ok_or_else(|| exit(128, format!("fatal: invalid --trust '{v}' (protected or readers)")))?,
+        );
     }
     if let Some(v) = a.get("--gc") {
         p.gc_lru = crate::overlay::parse_gc(v)
@@ -431,9 +451,15 @@ fn folder_in_line(
         (FolderIn::Cache, false) if cp.exists() => format!("plain folder (run layr overlay repair {name})"),
         (FolderIn::Cache, false) => "absent".to_string(),
     };
-    let size = listing_size(with_size, kind, is_layer, || crate::cache_overlay::tree_size(&cp));
-    let saved =
-        op.and_then(|p| p.db.line_by_name(&crate::overlay::cache_line_name(&l.id)).ok().flatten()).map(|ol| ids::short(&ol.head));
+    let size = listing_size(with_size, kind, is_layer, || crate::overlay::tree_size(&cp));
+    // A glass of one platform has `line-<id>`; an older `cache.<folder>` glass one line per platform.
+    let saved = op
+        .and_then(|p| {
+            [crate::overlay::cache_line_name(&l.id), format!("line-{}", l.id)]
+                .iter()
+                .find_map(|n| p.db.line_by_name(n).ok().flatten())
+        })
+        .map(|ol| ids::short(&ol.head));
     InLine { state, size, saved }
 }
 

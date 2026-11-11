@@ -17,7 +17,7 @@ l save --caches -q
 echo second > target/debug/x
 l save --caches -q
 eq "main stays at its head" "$head" "$(l rev-parse main)"
-has "the overlay has the second cache" "saved " "$(l overlay list | grep cache.target)"
+has "the overlay has the second cache" "saved " "$(l overlay list | grep $TG)"
 
 l line new from-line main >/dev/null
 eq "a line from main takes the newest cache" second "$(cat $P/from-line/target/debug/x 2>&1)"

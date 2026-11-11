@@ -14,7 +14,7 @@ cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 mkdir -p target && echo a > target/a && l save --caches -q
-ov=$(l overlay list --json 2>/dev/null | python3 -c 'import json,sys; print([o["name"] for o in json.load(sys.stdin) if o["name"].startswith("cache.")][0])')
+ov=$TG
 plat=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/arm64/aarch64/')
 self() { env LAYR_ROOT="$T/$1/store" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])'; }
 read w_id w_key <<<"$(self w)"

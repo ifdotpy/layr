@@ -28,8 +28,8 @@ for n in a b c; do
 done
 cd $P/main || exit 1
 l gc --repair -q >/dev/null 2>&1
-before_t=$(states cache.target)
-before_b=$(states cache.build)
+before_t=$(states $TG)
+before_b=$(states $(glass build))
 
 # The repair waits after each plan N (planned.N) until the test writes go.N.
 W=$T/wait
@@ -72,13 +72,13 @@ ok "the stale plan is retried outside the project lock" awk '
 l line new -q a2 a >/dev/null
 eq "a new line from a has the newest target cache" a.3 "$(cat $P/a2/target/x)"
 eq "a new line from a has the newest build cache" a.3 "$(cat $P/a2/build/y)"
-eq "the target overlay drops c and keeps one state of a" "$((before_t - 1))" "$(states cache.target)"
-eq "the build overlay drops c and keeps one state of a" "$((before_b - 1))" "$(states cache.build)"
+eq "the target overlay drops c and keeps one state of a" "$((before_t - 1))" "$(states $TG)"
+eq "the build overlay drops c and keeps one state of a" "$((before_b - 1))" "$(states $(glass build))"
 ok "the owners table matches the records" l gc -q
 
 # A second repair with nothing new changes nothing.
 l gc --repair -q >/dev/null 2>&1
-eq "a second repair keeps the target states" "$((before_t - 1))" "$(states cache.target)"
+eq "a second repair keeps the target states" "$((before_t - 1))" "$(states $TG)"
 # Invalidate every attempt. The explicit command must stop after three plans and tell the
 # caller to retry, rather than doing a replay under the lock.
 rm -rf $W && mkdir -p $W

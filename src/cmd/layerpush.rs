@@ -160,7 +160,7 @@ fn pushed_state(repo: &Repo, remote: &str, branch: &str) -> Result<Option<String
 
 fn git_size(repo: &Repo, head: &str, remote: &str, branch: &str) -> Result<String> {
     let n = new_states(repo, head, pushed_state(repo, remote, branch)?.as_deref())?;
-    let bytes = crate::cache_overlay::tree_size(&repo.state_root(head)?);
+    let bytes = crate::overlay::tree_size(&repo.state_root(head)?);
     Ok(format!("{n} new state(s), tree {}", human(bytes)))
 }
 
@@ -312,7 +312,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 if let Some(head) = overlay_head(repo, &line, &overlay)? {
                     let orepo = repo.overlay_repo(&overlay)?;
                     let platform = orepo.p.db.state(&head)?.and_then(|s| s.cache_platform).unwrap_or_default();
-                    let bytes = crate::cache_overlay::tree_size(&orepo.p.state_path(&head));
+                    let bytes = crate::overlay::tree_size(&orepo.p.state_path(&head));
                     rows.push(Row {
                         layer: format!("{overlay} ({folder})"),
                         remote: name.clone(),

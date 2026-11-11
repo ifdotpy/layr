@@ -22,12 +22,12 @@ eq "fsck --caches exits 0" 0 "$rc"
 
 # Old states that a longer history kept become unreachable when the history gets shorter; the next
 # operation deletes them.
-l overlay set cache.target --history all >/dev/null
+l overlay set $TG --history all >/dev/null
 for i in 4 5 6; do echo m$i > target/out; l save --caches -q; done
-l config overlay.cache.target.history 1 >/dev/null
+l config overlay.$TG.history 1 >/dev/null
 out=$(l fsck --caches 2>&1); rc=$?
 eq "fsck --caches exits 1 when it finds some" 1 "$rc"
-has "it names the overlay and the states" "overlay cache.target: 3 unreachable state(s)" "$out"
+has "it names the overlay and the states" "overlay $TG: 3 unreachable state(s)" "$out"
 echo m7 > target/out; l save --caches -q
 has "the next save deletes them" "unreachable cache data: 0 item(s), 0 bytes" "$(l fsck --caches 2>&1)"
 finish

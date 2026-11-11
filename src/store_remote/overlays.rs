@@ -503,6 +503,10 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             report.omitted.push(format!("overlay {name}: not in --overlay"));
             continue;
         }
+        if let Some(p) = repo.overlay_info(&name)?.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
+            report.omitted.push(format!("overlay {name}: a glass of platform {p}"));
+            continue;
+        }
         // A machine trusted since the last cache save reads the caches from this push on, not only
         // after the next save.
         if repo.need_overlay(&name)?.cache {
@@ -860,9 +864,14 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         published.insert(name, key);
     }
     for (name, published) in published {
-        let is_cache = repo.overlay_info(&name).ok().flatten().is_some_and(|info| info.cache);
+        let info = repo.overlay_info(&name).ok().flatten();
+        let is_cache = info.as_ref().is_some_and(|info| info.cache);
         if !opts.takes_layer(&name, is_cache) {
             report.omitted.push(format!("overlay {name}: not in --overlay"));
+            continue;
+        }
+        if let Some(p) = info.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
+            report.omitted.push(format!("overlay {name}: a glass of platform {p}"));
             continue;
         }
         let mut one = || -> Result<()> {
@@ -992,6 +1001,10 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
             report.omitted.push(format!("overlay {name}: not in --overlay"));
             continue;
         }
+        if opts.other_platform(&name, info.platform.as_deref()) {
+            report.omitted.push(format!("overlay {name}: a glass of platform {}", info.platform.as_deref().unwrap_or("")));
+            continue;
+        }
         if info.hidden {
             report.omitted.push(format!("overlay {name}: hidden overlays wait for Secret layers on Layr Cloud"));
             continue;
@@ -1041,6 +1054,9 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             if opts.overlays.is_some() {
                 report.omitted.push(format!("overlay {name}: not in --overlay"));
             }
+            continue;
+        }
+        if opts.other_platform(&name, info.platform.as_deref()) {
             continue;
         }
         let mut one = || -> Result<()> {

@@ -108,11 +108,11 @@ mkdir -p cachedir && echo stale > cachedir/a.bin
 bounded 60 "$LAYR" save --caches -q > "$T/caches-1.log" 2>&1
 eq "save --caches makes the cache overlay" "0" "$?"
 has "the overlay of the folder exists" "folder=cachedir" "$(l overlay list)"
-l overlay set cache.cachedir --prune nosuch >/dev/null
+l overlay set "$(glass cachedir)" --prune nosuch >/dev/null
 echo fresh > cachedir/a.bin
 bounded 60 "$LAYR" save --caches -q > "$T/caches-2.log" 2>&1
 eq "save --caches with an unknown prune adapter finishes" "0" "$?"
-l overlay set cache.cachedir --prune none >/dev/null
+l overlay set "$(glass cachedir)" --prune none >/dev/null
 echo third > cachedir/a.bin
 bounded 60 "$LAYR" save --caches -q > "$T/caches-3.log" 2>&1
 eq "save --caches with prune none finishes" "0" "$?"

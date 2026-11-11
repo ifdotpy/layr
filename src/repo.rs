@@ -2480,7 +2480,7 @@ impl<'a> Repo<'a> {
             }
             let name = match self.folder_overlay_of(&p)? {
                 Some(n) => n,
-                None => crate::cache_overlay::cache_overlay_name(&p),
+                None => crate::cache_overlay::cache_overlay_name(&p, &crate::model::cache_platform()),
             };
             if !self.overlay_line_has_state(&name, line)? {
                 out.push(p);
@@ -2512,16 +2512,6 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// For a command that makes no automatic state (a named save): the first cache states of the
-    /// line, saved with its save base. A failure is a warning. The caller holds the project lock.
-    pub fn save_first_cache_states(&self, ctx: &Ctx, line: &Line) -> Result<()> {
-        let of = self.save_base(line)?;
-        if let Err(e) = self.save_cache_states(ctx, line, &of) {
-            eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
-        }
-        Ok(())
-    }
-
     /// The first cache state of each cache folder of `line` that has none (`unsaved_cache_layers`),
     /// saved with the automatic state `of`. The caller holds the project lock.
     fn save_cache_states(&self, ctx: &Ctx, line: &Line, of: &str) -> Result<()> {
@@ -2537,6 +2527,105 @@ impl<'a> Repo<'a> {
             let _ = self.p.trash(&p);
         }
         made.map(|_| ())
+    }
+
+    /// The build-output glasses of `line` for a named save (docs/overlays.md, section 1a, slice
+    /// 6): each cache path whose folder is a layer and holds no versioned files, with its glass (if
+    /// it has one yet) and whether the save makes a new part. A new part is due when the line has
+    /// no part on the glass yet, or when a file or folder in it changed since the line's part
+    /// (`folder_changed_since`). An unchanged folder keeps its part, so a named save of a line with
+    /// big build output does not copy it again.
+    fn named_cache_glasses(&self, line: &Line) -> Result<Vec<(String, Option<String>, bool)>> {
+        let w = self.working(line);
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let mut head = None;
+        let mut stage = None;
+        let mut out = Vec::new();
+        for p in self.cache_paths(&w)? {
+            let cp = fsutil::safe_join(&w, &p)?;
+            if !btrfs::is_subvolume(&cp) {
+                continue;
+            }
+            if head.is_none() {
+                head = Some(self.state_root(&line.head)?);
+                stage = Some(self.current_stage(line)?);
+            }
+            if holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p)) {
+                continue;
+            }
+            let Some(name) = self.folder_overlay_of(&p)? else {
+                out.push((p, None, true));
+                continue;
+            };
+            let info = self.need_overlay(&name)?;
+            let orepo = self.overlay_repo(&name)?;
+            let current = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, &line.id))?.map(|ol| ol.head);
+            let due = match current.as_deref() {
+                Some(id) if id != info.root && orepo.p.has_state(id) => {
+                    let since = orepo.p.db.state(id)?.map(|st| st.time).unwrap_or(0);
+                    folder_changed_since(&cp, since)
+                }
+                _ => true,
+            };
+            out.push((p, Some(name), due));
+        }
+        Ok(out)
+    }
+
+    /// Before the lock (APFS): the copy of each build-output folder whose part a named save makes
+    /// (`named_cache_glasses`), taken under the lock with one rename (`save_cache_overlays`).
+    pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.working(line);
+            for (p, _, due) in self.named_cache_glasses(line)? {
+                if due {
+                    btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = line;
+        Ok(())
+    }
+
+    /// A named save of `line` that makes the state `of`: the part of each build-output glass of the
+    /// line (docs/overlays.md, section 1a, slice 6). A changed folder gets a new part, saved with
+    /// `of`; the glass is made for this platform when it is missing (`regenerable`). An unchanged
+    /// folder names the part that the line has. Returns the parts for the state record. A failure
+    /// is a warning: the named save goes on without that part. The caller holds the project lock.
+    pub fn save_named_cache_parts(&self, ctx: &Ctx, line: &Line, of: &str) -> BTreeMap<String, String> {
+        let mut parts = BTreeMap::new();
+        let r = (|| -> Result<()> {
+            let glasses = self.named_cache_glasses(line)?;
+            let due: Vec<String> = glasses.iter().filter(|(_, _, due)| *due).map(|(p, _, _)| p.clone()).collect();
+            for (_, name, due) in &glasses {
+                let Some(name) = name.as_ref().filter(|_| !due) else { continue };
+                let info = self.need_overlay(name)?;
+                let orepo = self.overlay_repo(name)?;
+                if let Some(ol) = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, &line.id))? {
+                    parts.insert(name.clone(), ol.head);
+                }
+            }
+            if !due.is_empty() {
+                let shared = self.policy().rule_for(&line.name).is_some();
+                let made = self.save_cache_overlays(ctx, line, &due, shared, of);
+                #[cfg(target_os = "macos")]
+                for p in btrfs::take_prepared() {
+                    let _ = self.p.trash(&p);
+                }
+                for (_, name, id) in made? {
+                    parts.insert(name, id);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            eprintln!("warning: build-output glass of line {} not saved: {e:#}", line.name);
+        }
+        parts
     }
 
     /// The cache paths of a line (`cache_paths`) in two lists: the caches, and the paths whose
@@ -3839,6 +3928,34 @@ pub fn holds_files_in(tree: &Snap, path: &str) -> bool {
 /// Whether the tree at `root` has a file, link or other entry that is not a folder at `path` or
 /// below it (a folder of a state that holds versioned files). A path below such an entry counts;
 /// an error counts too, so that a folder whose files cannot be read never becomes a cache.
+/// Whether a file or folder below `root` (or `root` itself) changed after `since_ms`: its
+/// modification time (in nanoseconds) is not older. A new, changed, deleted or renamed file changes
+/// the time of the file or of its folder. It does not follow links or enter other file systems.
+pub fn folder_changed_since(root: &Path, since_ms: i64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let since = i128::from(since_ms) * 1_000_000;
+    let newer = |m: &std::fs::Metadata| i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()) >= since;
+    let Ok(top) = std::fs::symlink_metadata(root) else { return true };
+    if newer(&top) {
+        return true;
+    }
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { return true };
+        for e in rd {
+            let Ok(e) = e else { return true };
+            let Ok(m) = e.metadata() else { return true };
+            if newer(&m) {
+                return true;
+            }
+            if m.is_dir() && m.dev() == top.dev() {
+                dirs.push(e.path());
+            }
+        }
+    }
+    false
+}
+
 pub fn holds_files(root: &Path, path: &str) -> bool {
     let start = match fsutil::safe_join(root, path) {
         Ok(p) => p,

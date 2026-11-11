@@ -70,7 +70,7 @@ eq "its cache has the build output" "$blob_sum" "$(cksum < $W/target/blob.bin)"
 # Two more new lines from main take the saved cache: no new cache state, and no copy of the cache
 # (OverlayFS mounts the taken state as the lower layer of the line's cache folder).
 cd $P || exit 1
-states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/cache.target/states" | wc -l; }
+states_of_cache() { ls "$LAYR_ROOT/projects/r/meta/overlays/$TG/states" | wc -l; }
 states_before=$(states_of_cache)
 before=$(store_bytes)
 l line new -q warm2 main
