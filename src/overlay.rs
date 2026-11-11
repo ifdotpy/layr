@@ -1344,10 +1344,23 @@ impl<'a> Repo<'a> {
     /// names, in the order of the stack of `line` and then of the project's overlays. Empty for a
     /// state without parts.
     pub fn part_layers(&self, line: Option<&Line>, state: &str) -> Result<Vec<Layer>> {
-        let parts = match self.p.db.state(state)? {
-            Some(s) if !s.parts.is_empty() && !self.p.is_overlay() => s.parts,
-            _ => return Ok(Vec::new()),
-        };
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        let mut parts = self.p.db.state(state)?.map(|s| s.parts).unwrap_or_default();
+        // The hidden glasses that this machine reads: the part that the state recorded in each glass's own records.
+        let mut hidden = BTreeSet::new();
+        for name in self.overlay_names()? {
+            if self.overlay_info(&name)?.is_some_and(|i| i.hidden) {
+                if let Some(part) = self.hidden_part(&name, state)? {
+                    parts.insert(name.clone(), part);
+                    hidden.insert(name);
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut order: Vec<String> = match line {
             Some(l) => self.layers(l)?.into_iter().map(|l| l.overlay).collect(),
             None => Vec::new(),
@@ -1361,7 +1374,7 @@ impl<'a> Repo<'a> {
         let mut out = Vec::new();
         for o in order {
             if let Some(s) = parts.get(&o) {
-                if self.overlay_info(&o)?.is_some_and(|i| parts_glass(&i)) {
+                if hidden.contains(&o) || self.overlay_info(&o)?.is_some_and(|i| parts_glass(&i)) {
                     out.push(Layer { overlay: o.clone(), state: s.clone() });
                 }
             }

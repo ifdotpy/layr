@@ -143,6 +143,12 @@ line inherits the part of its source, so one personal file (`.env`) needs no sha
 on a glass whose readers are its owner. `overlay create --mode shared` fails with exit status 2;
 the default mode is follow. Glasses made in shared mode before keep working.
 
+**Hidden glasses (owner decision 2026-11-11, built partly).** A state of a line records its part
+on each hidden glass in that glass's own records (`hidden.part.<state>`), which a remote copy
+encrypts for the glass's readers; the public state record never names a hidden glass. A view of an
+older state (`layr view <state>`, `layers_at`) shows that part. The head of a line still reads the
+glass's overlay line. Test t238.
+
 **Slices.**
 
 1. `fetch --line --overlay` (built).
