@@ -188,17 +188,17 @@ A named save also saves the build-output glasses (docs/overlays.md, section 1a, 
 named save. A folder that changed since the line's part gets a new part; an unchanged folder keeps
 its part. The new state names the part (`parts`), so `line new <state>` takes it.
 
-A cache is an ordinary glass, so the cache flags go. They still work for one release, and each
-prints one line on stderr that names its replacement (none with `-q`):
+A cache is an ordinary glass, so no flag names caches. Each old flag fails with exit status 2 and
+names its replacement:
 
 | Flag | Use instead |
 | --- | --- |
-| `save --caches [--cache <path>]` | `save -m` |
+| `save --caches [--cache <path>]` (removed, exit 2) | `save --glasses [--folder <path>]`: the parts of the folder glasses, with no named change; a named save (`save -m`) saves them too |
 | `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | nothing: every glass comes unless `--overlay` names fewer |
 | `fetch --no-caches` (removed, exit 2) | `fetch <remote> --overlay base` |
 | `fetch`, `clone` `--caches-of <line>` (removed, exit 2) | `fetch <remote> --line <line>`, `clone <url> --line <line>` |
-| `merge <line> --caches-only` | `merge <line>` |
-| `fsck --caches` | `gc` |
+| `merge <line> --caches-only` (removed, exit 2) | `merge <line> --glasses-only` |
+| `fsck --caches` (removed, exit 2) | `fsck --glasses` |
 
 `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out a glass whose `platform` is another platform's, unless `--overlay` names it.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.

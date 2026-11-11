@@ -14,14 +14,14 @@ cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
 states() { ls "$O/$1/states" | wc -l | tr -d ' '; }
 
-# 1. save --caches makes the cache overlay of the folder and saves a state for the line. Its
+# 1. save --glasses makes the cache overlay of the folder and saves a state for the line. Its
 #    readers are the machines the project trusts, not every user.
 self_id=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l line new rel main >/dev/null
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
-out=$(l save --caches)
-has "save --caches names the cache overlay" "target: overlay $TG" "$out"
+out=$(l save --glasses)
+has "save --glasses names the cache overlay" "target: overlay $TG" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
 row=$(l overlay list --size | grep $TG)
 eq "overlay list shows the state of the folder" "cache" "$(echo "$row" | cut -f6)"
@@ -37,8 +37,8 @@ other_id=$(echo "$other" | python3 -c 'import json,sys; print(json.load(sys.stdi
 other_key=$(echo "$other" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
 l remote add test-peer ssh://test/p >/dev/null
 ok "trust another machine" l remote trust test-peer $other_id --public-key $other_key
-l save --caches -q
-has "the next save --caches adds it to the readers" "machine:$other_id" "$(l overlay readers $TG)"
+l save --glasses -q
+has "the next save --glasses adds it to the readers" "machine:$other_id" "$(l overlay readers $TG)"
 no "overlay use refuses a folder overlay" l overlay use --add $TG
 no "overlay move refuses a folder overlay" l overlay move $TG notes.txt
 
@@ -58,9 +58,9 @@ eq "a new line from a named state of the line has the cache" bin1 "$(cat $P/from
 
 # 4. history=last: each line keeps its newest cache state.
 echo bin2 > target/debug/x
-l save --caches -q
+l save --glasses -q
 echo bin3 > target/debug/x
-l save --caches -q
+l save --glasses -q
 eq "the first state and the heads of rel, warm and fromstate stay" 3 "$(states $TG)"
 l line new warm2 rel >/dev/null
 eq "a new line takes the newest cache" bin3 "$(cat $P/warm2/target/debug/x)"
@@ -77,7 +77,7 @@ ok "gc keeps the overlay work folder of a live process" test -d $W/01a1c1cc-17e2
 # 5. merge of a line unions its cache into the target.
 cd $P/warm
 echo w > target/debug/w
-l save --caches -q
+l save --glasses -q
 cd $P/main
 out=$(LAYR_TRACE=1 l merge warm 2>&1)
 has "the merge brings the cache" "Merged cache target" "$out"
@@ -92,13 +92,13 @@ eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/d
 eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"
 
-# 6. gc lru:<size> trims the cache folder of a line at its save --caches, oldest files first, with no gc.
+# 6. gc lru:<size> trims the cache folder of a line at its save --glasses, oldest files first, with no gc.
 head -c 300000 /dev/zero > $P/rel/target/debug/big
 head -c 150000 /dev/zero > $P/rel/target/debug/mid
 touch -t 200001010000 $P/rel/target/debug/x
 touch -t 200101010000 $P/rel/target/debug/mid
 ok "set a size limit" l overlay set $TG --gc lru:400K
-(cd $P/rel && l save --caches -q >/dev/null 2>&1)
+(cd $P/rel && l save --glasses -q >/dev/null 2>&1)
 no "the oldest file went" test -e $P/rel/target/debug/x
 no "the next oldest went until the folder fits" test -e $P/rel/target/debug/mid
 ok "the newest file stayed" test -e $P/rel/target/debug/big
@@ -128,7 +128,7 @@ l protect main --check unit --no-expect >/dev/null
 l line new pm main >/dev/null
 cd $P/pm
 echo pm1 > target/debug/pm1
-l save --caches -q
+l save --glasses -q
 cd $P/main
 out=$(l merge pm 2>&1)
 has "an up-to-date merge without a passing check carries no cache" "not merged" "$out"
@@ -136,7 +136,7 @@ no "so main has no file of it" test -e target/debug/pm1
 cd $P/pm
 echo code >> notes.txt
 l save -a -m "pm code" -q
-l save --caches -q
+l save --glasses -q
 cd $P/main
 out=$(l merge pm 2>&1)
 has "a merge whose check passed carries the cache" "Merged cache target" "$out"
@@ -144,7 +144,7 @@ ok "main has the file" test -e target/debug/pm1
 l protect main --check unit --approvals 1 --no-expect >/dev/null
 cd $P/pm
 echo pm2 > target/debug/pm2
-l save --caches -q
+l save --glasses -q
 cd $P/main
 out=$(l merge pm 2>&1)
 has "a merge that lacks the approval carries no cache" "not merged" "$out"
@@ -152,7 +152,7 @@ no "so main has no new file" test -e target/debug/pm2
 cd $P/pm
 echo more >> notes.txt
 l save -a -m "pm code 2" -q
-l save --caches -q
+l save --glasses -q
 cd $P/main
 # Root bypasses approvals (the Linux suite runs as root): the merge then succeeds, but it did not
 # meet the protection, so it still carries no cache.
@@ -172,17 +172,17 @@ l save -a -m "no cache" -q
 l line new cold main >/dev/null
 no "a new line does not take it" test -e $P/cold/target/debug/w
 
-# 9. --cache saves one cache path; the other cache is left alone.
+# 9. --folder saves one folder glass; the other cache is left alone.
 cd $P/main
 printf 'target regenerable\nsmall regenerable\n' > .layrattributes
 echo 'small/' >> .gitignore
 mkdir -p small target/debug
 echo s > small/f
 echo t2 > target/debug/t2
-out=$(l save --caches --cache small)
+out=$(l save --glasses --folder small)
 has "--cache saves the named cache" "small: overlay $(glass small)" "$out"
 eq "--cache leaves the other cache" "" "$(echo "$out" | grep 'target: overlay')"
-no "--cache with a path that is no cache fails" l save --caches --cache nothing
-no "--cache needs --caches" l save --cache small
+no "--cache with a path that is no cache fails" l save --glasses --folder nothing
+no "--folder needs --glasses" l save --folder small
 
 finish

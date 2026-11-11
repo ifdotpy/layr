@@ -160,7 +160,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Make overlay `name` of the caller with its empty first state and its records. The caller holds
 /// the project lock and has checked that no overlay has the name. `folder`: a folder overlay;
-/// `cache`: the cache overlay of a cache path (`save --caches`).
+/// `cache`: the cache overlay of a cache path (`save --glasses`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_overlay(
     ctx: &Ctx,

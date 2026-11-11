@@ -1,6 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
-# Failure paths leave no temporary data: a cache copy that fails (save --caches), a forced save,
+# Failure paths leave no temporary data: a cache copy that fails (save --glasses), a forced save,
 # a trash entry that cannot be deleted, saved scans of every gc path, an old cache snapshot
 # (gc), and a temporary clone of a dead dedup run.
 . "$(dirname "$0")/lib.sh"
@@ -16,13 +16,13 @@ work_copies() { ls "$P/meta/work" 2>/dev/null | grep -c "^$1" || true; }
 
 mkdir -p a-cache z-cache; echo one > a-cache/one; echo two > z-cache/two
 echo c1 >> notes.txt; l save -q
-l save --caches -q
+l save --glasses -q
 if [ "$(uname -s)" = Darwin ]; then
     # Copies are made before the store lock on macOS. Root reads a mode 000 file, so the copy
     # succeeds under root: this case needs a user.
     echo three > z-cache/secret; chmod 000 z-cache/secret
     echo c2 >> notes.txt
-    no "a save with caches fails when a cache cannot be copied" sh -c 'cd "$1" && "$2" save --caches -q' _ "$PWD" "$LAYR"
+    no "a save with caches fails when a cache cannot be copied" sh -c 'cd "$1" && "$2" save --glasses -q' _ "$PWD" "$LAYR"
     eq "the failed save leaves no copy in the work folder" "0" "$(work_copies prepared-)"
     chmod 644 z-cache/secret; rm -f z-cache/secret
 fi

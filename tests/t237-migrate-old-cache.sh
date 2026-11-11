@@ -11,11 +11,11 @@ l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
-# An older layr: one `cache.target` glass, saved with `save --caches` (no part in the state).
+# An older layr: one `cache.target` glass whose saves (`save --glasses`) give the state no part.
 l overlay create cache.target --folder target --quiet --history last --merge union-theirs -q
 l config overlay.cache.target.cache true >/dev/null
 mkdir -p target/debug; echo bin1 > target/debug/x
-l save --caches -q 2>/dev/null
+l save --glasses -q 2>/dev/null
 parts() {
     python3 - "$P/meta/db/layr.sqlite" "$1" <<'PY'
 import json, sqlite3, sys

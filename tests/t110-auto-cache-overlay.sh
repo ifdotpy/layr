@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # #174: a folder that .layrattributes marks regenerable, and the ignore rules ignore, is a cache
-# from the first automatic save. Its files stay out of every state without `save --caches`, and
+# from the first automatic save. Its files stay out of every state without `save --glasses`, and
 # the layer is kept by layr itself. A new line from a state still starts warm (the cache overlay
 # is taken), for the same user.
 . "$(dirname "$0")/lib.sh"
@@ -20,7 +20,7 @@ mkdir -p target
 head -c 52428800 /dev/urandom > target/blob.bin
 blob_sum=$(cksum < target/blob.bin)
 
-# 20 automatic saves. Each changes 5 MB in target and one tracked file. No `save --caches`.
+# 20 automatic saves. Each changes 5 MB in target and one tracked file. No `save --glasses`.
 for i in $(seq 1 20); do
     head -c 5242880 /dev/urandom > target/churn.bin
     echo "change $i" >> src/main.rs
@@ -57,7 +57,7 @@ done
 eq "no automatic state holds a target file" 0 "$held"
 no "the head state has no target file" sh -c "$LAYR show $(l rev-parse):target/churn.bin >/dev/null 2>&1"
 
-# The cache overlay exists without save --caches.
+# The cache overlay exists without save --glasses.
 ok "the target cache overlay is made by layr" sh -c "$LAYR overlay list | grep -q cache"
 
 # A new line from an automatic state starts warm: it has the blob of the first overlay state.

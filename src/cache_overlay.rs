@@ -633,7 +633,7 @@ impl<'a> Repo<'a> {
             };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key, protected)?.then_some(ol.head))
         };
-        // The newest usable cache saved with each project state. `save --caches` on a line with
+        // The newest usable cache saved with each project state. `save --glasses` on a line with
         // no named change saves with an automatic state over the head: that cache counts for the
         // head too.
         let mut saved_with: std::collections::HashMap<String, String> = Default::default();
@@ -703,7 +703,7 @@ impl<'a> Repo<'a> {
 
     /// The cache folders of `line` with no cache saved with its head: a cache in the working folder whose
     /// newest saved state on this line's overlay line was saved with another state, or no state was saved.
-    /// `save --caches` with no named change saves with an automatic state over the head: that counts, unless the
+    /// `save --glasses` with no named change saves with an automatic state over the head: that counts, unless the
     /// save ran with no build (`set_unbuilt`). A damaged folder is left out: the save refuses it until a prune of it
     /// succeeds.
     pub fn caches_behind_head(&self, line: &Line) -> Result<Vec<String>> {
@@ -1166,7 +1166,7 @@ impl<'a> Repo<'a> {
     /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
     /// files of the folder that were used least recently (the newer of access and change time)
     /// until the folder is at most the size. Returns the deleted bytes.
-    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --caches`: the folders that a
+    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --glasses`: the folders that a
     /// build may have grown, with no walk of the other lines.
     pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
         let mut freed = 0;

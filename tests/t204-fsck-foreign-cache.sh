@@ -14,9 +14,9 @@ l overlay create cache.target --folder target --quiet --history last --merge uni
 l config overlay.cache.target.cache true >/dev/null
 mkdir -p target
 echo local > target/out.bin
-l save --caches -q
+l save --glasses -q
 echo foreign > target/out.bin
-LAYR_TEST_PLATFORM=plan9-mips l save --caches -q
+LAYR_TEST_PLATFORM=plan9-mips l save --glasses -q
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 l push archive -q >/dev/null
 new_fs "$T/peer" 2G

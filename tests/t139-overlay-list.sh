@@ -13,13 +13,13 @@ l overlay create private --mode follow --hidden --history 3 -q || exit 1
 l overlay use --add public private >/dev/null || exit 1
 mkdir -p target
 printf cache > target/result
-l save --caches -q || exit 1
+l save --glasses -q || exit 1
 # A second cache is removed while its overlay project still exists.
 printf 'other regenerable\n' >> .layrattributes
 printf 'other/\n' >> .gitignore
 mkdir -p other
 printf removed > other/result
-l save --caches -q || exit 1
+l save --glasses -q || exit 1
 l overlay remove "$(glass other)" >/dev/null || exit 1
 # A replica can know a public overlay descriptor before receiving its project.
 python3 - "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" <<'PYFIXTURE'

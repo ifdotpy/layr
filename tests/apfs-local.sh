@@ -23,7 +23,7 @@ printf 'node_modules regenerable\n' > .layrattributes
 l add -A && l save -qm attributes
 mkdir -p node_modules/pkg
 printf 'cache\n' > node_modules/pkg/data
-ok "save converts a regenerable folder" l save -q --caches
+ok "save converts a regenerable folder" l save -q --glasses
 has "the folder is a cache overlay" "folder=node_modules" "$(l overlay list)"
 no "layer data is absent from history" l show head:node_modules/pkg/data
 l line new -q warm 'head@{0}'

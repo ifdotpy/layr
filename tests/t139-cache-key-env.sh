@@ -14,7 +14,7 @@ P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 rm -rf target; mkdir target; echo built > target/out
-MACOSX_DEPLOYMENT_TARGET=11.0 l save --caches -q
+MACOSX_DEPLOYMENT_TARGET=11.0 l save --glasses -q
 
 MACOSX_DEPLOYMENT_TARGET=11.0 l line new same main >/dev/null 2>&1
 eq "the same environment: warm" built "$(cat $P/same/target/out 2>/dev/null)"
@@ -25,13 +25,13 @@ has "the line names the part that differs" "the key differs in env:MACOSX_DEPLOY
 # The project pins the value: the caller's value does not matter.
 printf '[package]\nname = "x"\nversion = "0.1.0"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nenv = { MACOSX_DEPLOYMENT_TARGET = "11.0" }\n' > Cargo.toml
 l save -a -m pin -q
-MACOSX_DEPLOYMENT_TARGET=13.0 l save --caches -q
+MACOSX_DEPLOYMENT_TARGET=13.0 l save --glasses -q
 MACOSX_DEPLOYMENT_TARGET=14.0 l line new pinned main >/dev/null 2>&1
 eq "a pinned value wins over the caller's" built "$(cat $P/pinned/target/out 2>/dev/null)"
 
 # cache.key-env adds a name.
 l config cache.key-env '["LAYR_TEST_BUILD_MODE"]' >/dev/null
-LAYR_TEST_BUILD_MODE=a l save --caches -q
+LAYR_TEST_BUILD_MODE=a l save --glasses -q
 LAYR_TEST_BUILD_MODE=a l line new mode-a main >/dev/null 2>&1
 eq "the added name with the same value: warm" built "$(cat $P/mode-a/target/out 2>/dev/null)"
 err=$(LAYR_TEST_BUILD_MODE=b l line new mode-b main 2>&1 >/dev/null)

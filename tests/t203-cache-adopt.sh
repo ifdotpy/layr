@@ -11,7 +11,7 @@ l line new -q moving
 cd "$LAYR_ROOT/projects/cachemove/lines/moving"
 mkdir -p target
 echo 'saved build output' > target/output
-l save -q --caches
+l save -q --glasses
 new_fs "$T/peer" 2G
 peer_id=$(env LAYR_ROOT="$T/peer/store" "$LAYR" remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ok "sync without caches trusts the new peer" peer_exchange sync cachemove -q --auto -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachemove

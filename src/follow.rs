@@ -407,7 +407,7 @@ impl<'a> Repo<'a> {
         self.take_follow_caches(ctx, line, self.cache_sources(remote)?, Some(before), true)
     }
 
-    /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --caches` does (prune,
+    /// Takes the caches of `sources` (newest first) into `line`, then saves them as `save --glasses` does (prune,
     /// then save). The follow pass and a local merge both use it. `warm`: the adapters build the standard commands
     /// into each cache folder before the prune (the follow pass; a change from the remote may come without a
     /// cache). `before` is the head before the merge: the rule
@@ -490,7 +490,7 @@ impl<'a> Repo<'a> {
         };
         // Prunes each taken folder, then saves the caches of the line.
         // The follow pass runs in the background, so its prune may take long on a loaded machine.
-        let save = || admin::save(ctx, &["--caches".to_string(), "-q".to_string()]);
+        let save = || admin::save(ctx, &["--glasses".to_string(), "-q".to_string()]);
         if warm {
             if let Some(ms) = std::env::var("LAYR_TEST_FOLLOW_BEFORE_PUBLISH_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                 eprintln!("layr: test pause before follow cache publish");
@@ -517,7 +517,7 @@ impl<'a> Repo<'a> {
             }
             self.set_unbuilt(&now, true)?;
             Repo::with_prune_limit(crate::cache_hook::BACKGROUND_PRUNE_LIMIT, || {
-                admin::save_expected_head(ctx, &["--caches".to_string(), "-q".to_string()], Some(&now.head))
+                admin::save_expected_head(ctx, &["--glasses".to_string(), "-q".to_string()], Some(&now.head))
             })?;
             self.set_unbuilt(&now, false)?;
             return Ok((taken, refusal));

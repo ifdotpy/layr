@@ -59,7 +59,7 @@ cd "$P/main" || exit 1
 if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 out=$(cb "$P/main" test --workspace -- --nocapture)
 has "the test reads the binary of main" "BIN=$P/main/target/debug/x" "$out"
-(cd "$P/main" && l save --caches -q)
+(cd "$P/main" && l save --glasses -q)
 
 # A line at another path builds nothing again.
 l line new $OWNER_ARG w main >/dev/null 2>&1

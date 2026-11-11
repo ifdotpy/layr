@@ -11,7 +11,7 @@ cd $P/main || exit 1
 l config regenerable '["target"]'
 # Hard links, as cargo makes them in target/debug.
 rm -rf target; mkdir -p target/debug; echo v1 > target/debug/x; ln target/debug/x target/debug/x-link
-l save --caches --cache target -q >/dev/null 2>&1
+l save --glasses --folder target -q >/dev/null 2>&1
 cache_id() { l overlay list | grep -o 'saved [0-9a-f]*'; }
 saved=$(cache_id)
 eq "main saved its cache" 1 "$(printf '%s\n' "$saved" | grep -c saved)"

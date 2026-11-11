@@ -33,7 +33,7 @@ ok "new client restores an old saved cache" cmp target/old ../read-old-cache/tar
 l config regenerable '["generated"]'
 mkdir -p generated
 printf 'new build output\n' > generated/new
-l save -q --caches
+l save -q --glasses
 "$OLD_LAYR" branch -q read-new-cache
 ok "old client restores a new saved cache" cmp generated/new ../read-new-cache/generated/new
 ok "new client sends caches to old peer" peer_exchange sync compat -q --auto -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat

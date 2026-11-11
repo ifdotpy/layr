@@ -287,8 +287,8 @@ the default mode is follow. Glasses made in shared mode before keep working.
 - Old flags. `--caches`, `--no-caches` and `--caches-of` on `push`, `fetch`, `pull`, `sync` and
   `clone` are removed: each fails with exit status 2 and names `--line` or `--overlay` (owner
   decision 2026-11-11). Every glass comes by default. `save --caches`, `merge --caches-only` and
-  `fsck --caches` still work for one release and print one line that names the replacement (not
-  with `-q` or `--json`); the follow pass and the check save-back still call `save --caches`.
+  `fsck --caches` are `save --glasses`, `merge --glasses-only` and `fsck --glasses` now; the old
+  spellings fail with exit status 2. The follow pass and the check save-back call `save --glasses`.
 - `cache.` prefix. A new glass has no `cache.` prefix. A store keeps its `cache.<folder>` glasses
   and the old cache fields of its state records; every command reads them as before.
 - Migration of a store: nothing to run. An existing `cache.target` stays the glass of `target`:

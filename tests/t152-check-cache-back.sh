@@ -17,7 +17,7 @@ c=$(env LAYR_ROOT="$T/c/store" "$LAYR" remote self --json)
 c_id=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 c_key=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
 l remote trust archive "$c_id" --public-key "$c_key" >/dev/null
-mkdir -p target; echo laptop > target/a; l save --caches -q
+mkdir -p target; echo laptop > target/a; l save --glasses -q
 echo change > change.txt; l add change.txt >/dev/null; l save -qm change
 l protect main >/dev/null 2>&1 || true
 l config check.unit 'test "$(cat target/a)" = laptop && echo runner > target/a' >/dev/null

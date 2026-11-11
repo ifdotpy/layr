@@ -23,12 +23,12 @@ cd $P/old
 echo change >> notes.txt
 l add notes.txt && l save -qm "old work" >/dev/null
 rm -rf target; mkdir -p target/debug; echo old > target/debug/x
-l save --caches -q
+l save --glasses -q
 l git push origin HEAD:refs/heads/main >/dev/null 2>&1
 ok "the old line's commit is on the remote" git -C $T/origin.git rev-parse --verify -q main
 
 # Someone adds a commit on top in Git. Main follows the remote, so its head is a state
-# imported from git whose parent is the old line's state. `save --caches` saves with an
+# imported from git whose parent is the old line's state. `save --glasses` saves with an
 # automatic state over that head.
 git clone -q $T/origin.git $T/work2
 echo more >> $T/work2/README.md
@@ -39,7 +39,7 @@ head=$(l rev-parse origin/main)
 l merge origin/main -q >/dev/null 2>&1 || l merge origin/main --expect "$head" -q >/dev/null
 eq "main is at the imported state" "$head" "$(l rev-parse main)"
 rm -rf target; mkdir -p target/debug; echo new > target/debug/x
-l save --caches -q
+l save --glasses -q
 eq "main stays at the imported state" "$head" "$(l rev-parse main)"
 
 # A line from that state takes main's new cache, not the old line's.

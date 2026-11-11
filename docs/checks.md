@@ -120,7 +120,7 @@ checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <he
 `checks watch --once`), `layr push <remote> --caches`.
 
 A build outside `checks run`, such as a CI job, gives its caches back the same way with
-`layr save --caches --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
+`layr save --glasses --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
 folders of the current line go to `<line>.checks-<os>-<arch>` with the line's head as their source
 state, and no source state is made (a cache writer machine may run it, docs/ci-trust.md). Then
 `layr push <remote> --caches` publishes them.

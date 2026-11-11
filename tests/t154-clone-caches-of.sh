@@ -20,10 +20,10 @@ mkdir -p target; echo main > target/a
 # The cache of main's head comes from another line, as a check runner saves it (main.checks-<platform>), and a newer
 # one of another platform follows (an x86 runner after an arm one): this platform's cache still comes.
 l line new runner main >/dev/null 2>&1
-(cd "$P/runner" && mkdir -p target && echo main > target/a && l save --caches -q \
-    && echo plan9 > target/a && LAYR_TEST_PLATFORM=plan9-mips l save --caches -q)
+(cd "$P/runner" && mkdir -p target && echo main > target/a && l save --glasses -q \
+    && echo plan9 > target/a && LAYR_TEST_PLATFORM=plan9-mips l save --glasses -q)
 l line new other main >/dev/null 2>&1
-(cd "$P/other" && echo other > o.txt && l add o.txt >/dev/null && l save -qm other && echo other > target/a && head -c 300000 /dev/urandom > target/big && l save --caches -q)
+(cd "$P/other" && echo other > o.txt && l add o.txt >/dev/null && l save -qm other && echo other > target/a && head -c 300000 /dev/urandom > target/big && l save --glasses -q)
 l push cloud -q >/dev/null 2>&1
 
 xl() { env LAYR_ROOT="$T/x/store" "$LAYR" "$@"; }
@@ -33,8 +33,8 @@ has "the clone names the caches it leaves on the remote" "not for --line" "$out"
 eq "a new line of main starts warm" main "$(cat "$T/x/store/projects/p/lines/w/target/a" 2>&1)"
 (cd "$T/x/store/projects/p/lines/main" && xl line new w2 other >/dev/null 2>&1)
 no "the other line's cache did not come" test -e "$T/x/store/projects/p/lines/w2/target/big"
-has "fsck of the clone is clean" "0 unreachable state(s)" "$(cd "$T/x/store/projects/p/lines/main" && xl fsck --caches 2>&1)"
-ok "the clone still pushes" sh -c "cd '$T/x/store/projects/p/lines/w' && echo w > target/w && env LAYR_ROOT='$T/x/store' '$LAYR' save --caches -q && env LAYR_ROOT='$T/x/store' '$LAYR' push origin -q"
+has "fsck of the clone is clean" "0 unreachable state(s)" "$(cd "$T/x/store/projects/p/lines/main" && xl fsck --glasses 2>&1)"
+ok "the clone still pushes" sh -c "cd '$T/x/store/projects/p/lines/w' && echo w > target/w && env LAYR_ROOT='$T/x/store' '$LAYR' save --glasses -q && env LAYR_ROOT='$T/x/store' '$LAYR' push origin -q"
 no "an unknown line is refused" env LAYR_ROOT="$T/y2/store" "$LAYR" clone "file://$T/archive" p --line nosuch
 
 sl() { env LAYR_ROOT="$T/s/store" "$LAYR" "$@"; }
@@ -52,7 +52,7 @@ ok "a plain clone takes the caches of every line" test -e "$T/y/store/projects/p
 # A push sweep that deletes a cache state while a clone runs: the clone omits that cache and goes on.
 find "$T/archive/overlays" \( -name '*.data.age' -o -name '*.pack.age' -o -name '*.index.age' \) -delete
 zl() { env LAYR_ROOT="$T/z/store" "$LAYR" "$@"; }
-read zid zkey <<<"$(self z)"; (cd "$P/main" && l remote trust cloud "$zid" --public-key "$zkey" >/dev/null && l save --caches -q && l push cloud -q >/dev/null 2>&1)
+read zid zkey <<<"$(self z)"; (cd "$P/main" && l remote trust cloud "$zid" --public-key "$zkey" >/dev/null && l save --glasses -q && l push cloud -q >/dev/null 2>&1)
 out=$(zl clone "file://$T/archive" p 2>&1); code=$?
 eq "a clone whose caches went away on the remote works" 0 "$code"
 has "and says which cache it did not restore" "not restored" "$out"

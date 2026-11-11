@@ -1209,6 +1209,7 @@ impl Store {
 
 /// The CLI commands use the same named-remote configuration as push and fetch.
 pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
+    let args = &crate::cmd::glass_args(operation, args, &[("--caches", "--glasses")])?;
     let spec = crate::args::Spec::new()
         .value("--remote")
         .flag("--files")

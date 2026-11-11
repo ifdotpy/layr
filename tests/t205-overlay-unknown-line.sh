@@ -9,11 +9,11 @@ P=$LAYR_ROOT/projects/p
 cd "$P/lines/main"
 mkdir -p target
 echo parent > target/out
-l save --caches -q
+l save --glasses -q
 l line new missing main >/dev/null
 cd "$P/lines/missing"
 echo child > target/out
-l save --caches -q
+l save --glasses -q
 cd "$P/lines/main"
 db=$P/meta/db/layr.sqlite
 odb=$P/meta/overlays/$TG/meta/db/layr.sqlite

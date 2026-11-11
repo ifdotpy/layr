@@ -1289,7 +1289,7 @@ impl<'a> Repo<'a> {
         }
         let st = self.save_working(ctx, line, message, running, force)?;
         // A cache folder that has no cache overlay state on this line yet gets its first one
-        // (the cache of the line, as `save --caches` makes it). A failure keeps the state.
+        // (the cache of the line, as `save --glasses` makes it). A failure keeps the state.
         let of = match &st {
             Some(s) => s.id.clone(),
             None => self.save_base(line)?,
@@ -1451,7 +1451,7 @@ impl<'a> Repo<'a> {
         Ok(line.head.clone())
     }
 
-    /// The state that `save --caches` gives a line's caches to: on a protected line with no
+    /// The state that `save --glasses` gives a line's caches to: on a protected line with no
     /// changes since its head, the head, so the next lines made from that head start warm; else a
     /// new automatic state. Only a protected line gives caches to a state that other lines share,
     /// so such a state never holds a cache that only its maker may use. The caller holds the
@@ -1502,7 +1502,7 @@ impl<'a> Repo<'a> {
         Ok(st)
     }
 
-    /// `save --caches` before the project lock (issue #194): the snapshot of the working folder and
+    /// `save --glasses` before the project lock (issue #194): the snapshot of the working folder and
     /// its compare with the head, with the scan of the folder before them. The command holds the
     /// line lock. Off APFS a snapshot costs little under the lock: None.
     pub fn prepare_caches_state(
@@ -2451,7 +2451,7 @@ impl<'a> Repo<'a> {
 
     /// The cache folders of a line that are layers now but have no cache overlay state on this
     /// line yet. `save_cache_states` makes that first state, so a new line from a state of this
-    /// line starts warm, without `save --caches`.
+    /// line starts warm, without `save --glasses`.
     fn unsaved_cache_layers(&self, line: &Line) -> Result<Vec<String>> {
         let w = self.working(line);
         if self.p.is_overlay() {
@@ -2498,7 +2498,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
-    /// under the lock with one rename (`save_cache_overlays`), as `save --caches` makes it.
+    /// under the lock with one rename (`save_cache_overlays`), as `save --glasses` makes it.
     pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -2632,7 +2632,7 @@ impl<'a> Repo<'a> {
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
         // The layers of the head: a complete view of a thin head cost one clone of the whole tree
-        // after every merge (its `save --caches`).
+        // after every merge (its `save --glasses`).
         let head = self.state_src(&line.head)?;
         Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files_in(&head, p)))
     }
@@ -3799,7 +3799,7 @@ fn writes_since(baseline: &Manifest, now: &Manifest, carried: &std::collections:
 }
 
 /// A cache folder that was not made a cache: a process uses it, or it was written while it was
-/// copied. The automatic save skips it; `save --caches` and `overlay repair` report it.
+/// copied. The automatic save skips it; `save --glasses` and `overlay repair` report it.
 #[derive(Debug)]
 pub enum CacheRefused {
     Busy { path: String, user: crate::busy::User },
@@ -4582,7 +4582,7 @@ thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `save --caches` work made before the project lock (`Repo::prepare_caches_state`), APFS only.
+/// `save --glasses` work made before the project lock (`Repo::prepare_caches_state`), APFS only.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct PreparedCaches {
     head: String,

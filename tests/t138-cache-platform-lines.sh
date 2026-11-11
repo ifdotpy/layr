@@ -14,11 +14,11 @@ P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 rm -rf target; mkdir target; echo built-here > target/out
-l save --caches -q
+l save --glasses -q
 echo built-there > target/out
-LAYR_TEST_PLATFORM=plan9-mips l save --caches -q
+LAYR_TEST_PLATFORM=plan9-mips l save --glasses -q
 echo built-here-2 > target/out
-l save --caches -q
+l save --glasses -q
 
 l line new here main >/dev/null 2>&1
 eq "a new line takes the cache of this platform" built-here-2 "$(cat $P/here/target/out 2>/dev/null)"
@@ -29,9 +29,9 @@ eq "a new line on the other platform takes that platform's cache" built-there "$
 cd $P/here || exit 1
 here_id=$(l line list --json 2>/dev/null | python3 -c 'import json,sys; print(next(l["id"] for l in json.load(sys.stdin) if l["name"]=="here"))' 2>/dev/null)
 echo here-own > target/out
-l save --caches -q
+l save --glasses -q
 echo there-own > target/out
-LAYR_TEST_PLATFORM=plan9-mips l save --caches -q
+LAYR_TEST_PLATFORM=plan9-mips l save --glasses -q
 cd $P/main || exit 1
 names() { python3 -c 'import sqlite3,sys; print(" ".join(sorted(r[0] for r in sqlite3.connect(sys.argv[1]).execute("select name from lines where coalesce(deleted, 0) = 0"))))' "$LAYR_ROOT/projects/p/meta/overlays/$1/meta/db/layr.sqlite"; }
 has "each platform has its glass" "$(glass target) $(LAYR_TEST_PLATFORM=plan9-mips glass target)" "$(l overlay list | awk '{print $1}' | sort | paste -sd' ' -)"

@@ -1711,7 +1711,7 @@ impl<'a> Repo<'a> {
     }
 
     /// The present states of cache overlay `name` that nothing keeps: beyond its history limit (all
-    /// states when it has none), not shown by a line, or of a deleted line. `fsck --caches` reports
+    /// states when it has none), not shown by a line, or of a deleted line. `fsck --glasses` reports
     /// them; the operations that make them dead delete them (`apply_history`). It only reads.
     pub fn cache_unreachable(&self, name: &str) -> Result<Vec<String>> {
         let keep_n = self.overlay_props(name)?.history.map_or(usize::MAX, |n| n as usize);

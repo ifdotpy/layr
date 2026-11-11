@@ -48,8 +48,8 @@ Built today:
   `<folder>.<platform>`. `line new <state>` takes the part that the state names.
 - The cache flags of transfers (`--caches`, `--no-caches`, `--caches-of` on push, fetch, pull,
   sync and clone) are removed: each fails with exit status 2 and names `--line` or `--overlay`.
-  `save --caches`, `merge --caches-only` and `fsck --caches` still work for one release and print
-  their replacement ([commands](commands.md), `save`).
+  `save --caches`, `merge --caches-only` and `fsck --caches` are removed too: they are
+  `save --glasses`, `merge --glasses-only` and `fsck --glasses` ([commands](commands.md), `save`).
 - A `cache.<folder>` glass of an older layr stays the glass of its folder on every platform, with
   one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6). A new glass has
   one platform and overlay lines `line-<line id>`. To move a store to one glass per platform, see
@@ -79,7 +79,7 @@ The properties as built:
   only to those machines.
 - **`regenerable`** in `.layrattributes` is a short form: the folder that it marks gets the glass
   of this platform with that folder and the defaults above, the first time a named save (or
-  `layr save --caches`) saves it.
+  `layr save --glasses`) saves it.
   The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
   every line; a new line gets an empty cache of such a path at once.
 - Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
@@ -131,7 +131,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
 | `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
-| `layr save --caches` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
+| `layr save --glasses` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |
 | `layr line new <name> <line>` | The new line takes the newest state of each cache overlay of the source line. |
 | `layr line new <name> <state>` | The new line takes, for each cache overlay, the newest state saved at that state or at its nearest ancestor (the rule of `warm_cache` today). It prints `no cache for <path>` when there is none. |
@@ -462,7 +462,7 @@ A cache is an overlay. The `layr cache` command group is removed, with no hint. 
 | Removed form | Replacement |
 | --- | --- |
 | `layr cache list [-v]` | `layr overlay list` |
-| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --caches` |
+| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --glasses` |
 | `layr cache remove <path>` | `-regenerable` in `.layrattributes`, or `layr config regenerable` without the path |
 | `layr cache repair` | `layr overlay repair <overlay>` |
 | `layr cache pull <line or state>` | `layr line new <name> <line>`, or `layr merge <line>` |
@@ -654,7 +654,7 @@ second prune at take time repeats the cargo listing (up to 120 s) for nothing. S
 
 | Command | Hook | Next step |
 | --- | --- | --- |
-| `layr save --caches` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
+| `layr save --glasses` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
 
 A follow pass ends with `save --caches`, so it prunes the folders it took, through `prepare_caches`.
 A union merge (`merge --caches-only`, or a merge) leaves the units of both sides in the target folder
@@ -739,7 +739,7 @@ build output. A line from a state, a merge and a follow pass write source files 
 the write (as `git checkout` does), so a warm cache looked stale and one or more crates compiled.
 
 - A cache save (`save --caches`, the follow pass, a local merge, the save-back of a passing check and
-  `save --caches --save-back`) writes `.layr-times` into each
+  `save --glasses --save-back`) writes `.layr-times` into each
   cache folder before the snapshot: path, time, size and content hash (git blob id) of each tracked
   file of the working copy (the ignore rules keep it). It runs before the project lock.
 - The file goes with the cache: snapshots, copies and overlay layers carry it, and it goes away

@@ -625,7 +625,7 @@ fn sweep_trash_with(root: &Path, start: impl Fn(&Path) -> bool) {
 }
 
 /// The daily garbage report: for each project of the store at `root`, one line in the service log when
-/// `layr gc` or `layr fsck --caches` would find something. It changes nothing: the operations that make data dead
+/// `layr gc` or `layr fsck --glasses` would find something. It changes nothing: the operations that make data dead
 /// free it, and a report names a gap in them.
 fn garbage_report(root: &Path, caller: Caller) {
     let Ok(store) = Store::open(root) else { return };

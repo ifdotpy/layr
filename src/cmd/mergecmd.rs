@@ -1241,6 +1241,7 @@ fn print_stat(ctx: &Ctx, repo: &Repo, from: &str, to: &str) -> Result<()> {
 }
 
 pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let args = &super::glass_args("merge", args, &[("--caches-only", "--glasses-only")])?;
     let spec = Spec::new()
         .value("-m|--message")
         .flag("--no-ff")
@@ -1268,9 +1269,6 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let rev = a.pos.first().ok_or_else(|| exit(128, "usage: layr merge <rev> [--expect <state>]"))?.clone();
     if a.has("--caches-only") {
-        if !a.has("-q") {
-            super::deprecated("merge --caches-only", "layr merge <line> (a merge takes the build-output glasses of the line)");
-        }
         return caches_only(ctx, &h.repo, &line, &rev, a.has("-q"));
     }
     let before = line.head.clone();
@@ -1353,7 +1351,7 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         orepo.hold(orepo.pin(&[ol.head.as_str()])?);
         let Some(saved) = orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of) else {
             return Ok(Some(format!(
-                "the cache of {} names no project state; run `layr save --caches` in {} first",
+                "the cache of {} names no project state; run `layr save --glasses` in {} first",
                 theirs.name, theirs.name
             )));
         };

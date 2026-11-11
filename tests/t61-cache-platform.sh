@@ -13,10 +13,10 @@ cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
 l config cache.key-files '["Cargo.lock", "rust-toolchain.toml"]'
 rm -rf target; mkdir target; echo built-v1 > target/out
-l save --caches -q
+l save --glasses -q
 has "the cache overlay has the key files" "Cargo.lock" "$(l config overlay.$TG.key-files)"
 
-# 1. Same key files: warm. Changed key files: cold, until a new save --caches.
+# 1. Same key files: warm. Changed key files: cold, until a new save --glasses.
 l line new same main >/dev/null
 eq "same lock file: the line starts warm" built-v1 "$(cat $P/same/target/out 2>/dev/null)"
 echo v2 > Cargo.lock
@@ -24,7 +24,7 @@ l save -a -m "update the lock file" -q
 l line new changed main >/dev/null
 no "another lock file: the line starts cold" test -e $P/changed/target/out
 echo built-v2 > target/out
-l save --caches -q
+l save --glasses -q
 l line new again main >/dev/null
 eq "after a save with the new lock file it is warm again" built-v2 "$(cat $P/again/target/out 2>/dev/null)"
 ok "the key files can be cleared" l overlay set $TG --key-files none
@@ -32,7 +32,7 @@ no "a bad key file path fails" l overlay set $TG --key-files ../x
 
 # 2. A store carries the cache overlay; a clone on the same platform starts warm.
 l overlay set $TG --key-files Cargo.lock >/dev/null
-l save --caches -q
+l save --glasses -q
 l remote add archive "file://$T/archive" --paper-key-out $T/paper.txt >/dev/null 2>&1
 ok "push to the store" l push archive -q
 new_fs $T/b 2G
@@ -49,7 +49,7 @@ c_id=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"]
 c_key=$(echo "$c" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
 cd $P/main
 ok "trust machine c" l remote trust archive $c_id --public-key $c_key
-l save --caches -q
+l save --glasses -q
 has "machine c reads the cache overlay" "machine:$c_id" "$(l overlay readers $TG)"
 ok "push again" l push archive -q
 out=$(env LAYR_ROOT=$T/c/store $LAYR clone "file://$T/archive" p 2>&1)

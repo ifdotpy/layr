@@ -126,7 +126,7 @@ echo 'pub fn extra() -> i32 {' > $P/t2/crates/b/src/extra.rs && echo '    7' >> 
 echo 'mod extra;' >> $P/t2/crates/b/src/lib.rs && echo 'pub use extra::extra;' >> $P/t2/crates/b/src/lib.rs
 (cd $P/t2 && ly add crates/b/src/extra.rs crates/b/src/lib.rs >/dev/null 2>&1 && ly save -m "b: extra" >/dev/null 2>&1) || fail "the save of the change failed"
 std $P/t2
-(cd $P/t2 && ly save --caches >/dev/null 2>&1) || fail "save --caches of t2 failed"
+(cd $P/t2 && ly save --glasses >/dev/null 2>&1) || fail "save --glasses of t2 failed"
 (cd $P/t2 && ly git push origin t2 >/dev/null 2>&1) || fail "push of t2 to the remote failed"
 cd $U && git pull -q origin main
 cp $P/t2/crates/b/src/extra.rs $P/t2/crates/b/src/lib.rs crates/b/src/ && git add crates/b/src && git commit -qm "b: extra (squash of t2)" && git push -q origin main || fail "the squash merge on the remote failed"
@@ -167,7 +167,7 @@ no "the pass after a good build does nothing" sh -c 'echo "$1" | grep -q "caches
 std $P/w >/dev/null
 echo 'Notes of the test line.' > $P/w/NOTES.md
 (cd $P/w && ly add NOTES.md >/dev/null 2>&1 && ly save -m "notes" >/dev/null 2>&1) || fail "the save of NOTES.md failed"
-(cd $P/w && ly save --caches >/dev/null 2>&1) || fail "save --caches of w failed"
+(cd $P/w && ly save --glasses >/dev/null 2>&1) || fail "save --glasses of w failed"
 wh=$(cd $P/w && ly rev-parse head)
 cd $P/main && out=$(LAYR_TRACE=1 ly merge w --expect "$wh" 2>&1) || fail "the local merge of w into main failed"
 [ -n "$out" ] && echo "$out" | grep -iE "cache" | sed "s/^/MERGE TRACE: /" | head -30
@@ -197,11 +197,11 @@ printf 'side/\n' >> .gitignore && printf 'side regenerable\n' >> .layrattributes
 mkdir -p side && echo built > side/out
 std $P/two >/dev/null
 (ly add .gitignore .layrattributes >/dev/null 2>&1 && ly save -m "a side cache" >/dev/null 2>&1) || fail "the save of the side cache rule failed"
-ly save --caches >/dev/null 2>&1 || fail "save --caches of two failed"
+ly save --glasses >/dev/null 2>&1 || fail "save --glasses of two failed"
 echo 'pub fn later() -> i32 {' >> crates/a/src/lib.rs && echo '    4' >> crates/a/src/lib.rs && echo '}' >> crates/a/src/lib.rs
 std $P/two >/dev/null
 (ly save -a -m "a: changed after the side save" >/dev/null 2>&1) || fail "the save of the change in two failed"
-ly save --caches --cache target >/dev/null 2>&1 || fail "save --caches --cache target of two failed"
+ly save --glasses --folder target >/dev/null 2>&1 || fail "save --glasses --folder target of two failed"
 (cd $P/main && ly line new twol two $OWNER_ARG >/dev/null 2>&1)
 eq "a line from a line whose caches were saved at other times compiles 0 crates" 0 "$(compiled $P/twol build --locked)"
 

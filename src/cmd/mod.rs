@@ -52,9 +52,21 @@ pub fn exit(code: i32, msg: impl Into<String>) -> anyhow::Error {
 
 /// One line on stderr for a cache flag that goes (docs/overlays.md, section 1a, slice 6): a cache
 /// is an ordinary glass. The flag keeps working for one release, so runners have time to change.
-pub fn deprecated(flag: &str, instead: &str) {
-    eprintln!("layr: {flag} is deprecated and goes in the next release; use {instead}");
+/// The glass flags of a command (owner decision 2026-11-11: a cache is an ordinary glass, so no flag names caches).
+/// Each old spelling in `renames` (old, new) fails with exit status 2 and names the new one; the new spelling maps to
+/// the old one, which the command's code still reads.
+pub fn glass_args(op: &str, args: &[String], renames: &[(&str, &str)]) -> Result<Vec<String>> {
+    for (old, new) in renames {
+        if args.iter().any(|a| a == old || a.starts_with(&format!("{old}="))) {
+            return Err(exit(2, format!("layr {op} {old} was removed: a cache is an ordinary glass. Use layr {op} {new}")));
+        }
+    }
+    Ok(args
+        .iter()
+        .map(|a| renames.iter().find(|(_, new)| a == new).map(|(old, _)| old.to_string()).unwrap_or_else(|| a.clone()))
+        .collect())
 }
+
 
 pub struct Here<'a> {
     pub repo: Repo<'a>,

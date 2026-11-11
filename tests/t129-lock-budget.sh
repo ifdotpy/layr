@@ -20,7 +20,7 @@ P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 mkdir -p target/release; for i in $(seq 1 200); do echo $i > target/release/f$i; done
-l save --caches -q
+l save --glasses -q
 for n in a b c; do l line new -q $n main >/dev/null; done
 
 # held <command...>: run it with the trace; print and return the longest hold of the project lock.
@@ -55,6 +55,6 @@ within line delete -D d
 within rev-parse head
 within overlay list
 echo bin2 > target/release/f1
-within save --caches
+within save --glasses
 within gc --repair -q
 finish

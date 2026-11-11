@@ -24,7 +24,7 @@ rm -rf target; mkdir -p target/debug
 head -c 600000 /dev/urandom > target/debug/same.o
 head -c 600000 /dev/urandom > target/debug/other.o
 mkdir -p out2; head -c 600000 /dev/urandom > out2/x.o
-l save --caches -q
+l save --glasses -q
 l line new b a >/dev/null
 cd $P/b
 # Not cp or cat: GNU cp and cat clone the file on btrfs and APFS. dd reads and writes.

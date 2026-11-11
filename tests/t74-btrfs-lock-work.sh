@@ -64,7 +64,7 @@ eq "git status is clean after a save of another file" "" "$(git status --short 2
 # 3. A line delete finds the nested subvolumes without a search.
 cd $P/rel
 rm -rf target; mkdir -p target/debug; echo bin > target/debug/x
-l save --caches -q
+l save --glasses -q
 cd $P/main
 LAYR_TRACE=1 l line delete -D rel 2> $T/delete.trace >/dev/null
 ok "the line folder is gone" test ! -e $P/rel

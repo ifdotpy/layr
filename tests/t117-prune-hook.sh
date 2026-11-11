@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # The cache adapter hook (issue #167, docs/cache-overlays.md section 19). The hook prunes the cache folders
-# that `line new`, `merge --caches-only`, a merge, a follow pass and `save --caches` take, to the live set of the
+# that `line new`, `merge --glasses-only`, a merge, a follow pass and `save --glasses` take, to the live set of the
 # cargo adapter, before the next step. `prune=none` keeps a folder. An unknown adapter name is logged and does
 # not fail the command.
 #
@@ -92,14 +92,14 @@ if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 cb "$P/main" build --workspace -q >/dev/null
 base=$(units $P/main/target)
 [ "$base" -gt 0 ] && { PASS=$((PASS + 1)); echo "PASS the standard build made units ($base)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the standard build made no units: the owner cannot build"; cb "$P/main" build --workspace 2>&1 | tail -20; }
-(cd "$P/main" && l save --caches -q)
+(cd "$P/main" && l save --glasses -q)
 # The times are compared before any cargo runs in a line: a cargo run rewrites the files it compiles.
 export LAYR_CACHE_STATES=$LAYR_ROOT/projects/p/meta/overlays/$TG/states
 
 # The union copy alone, with the prune off: the copied times are the source's (cargo compares them).
 new_line other2 main
 ok "the owner sets prune=none for the union check" l overlay set $TG --prune none
-(cd "$P/other2" && l merge main --caches-only -q >/dev/null 2>&1)
+(cd "$P/other2" && l merge main --glasses-only -q >/dev/null 2>&1)
 eq "the union copy keeps the times without a prune" "0" "$(times_mismatch $P/main/target $P/other2/target)"
 ok "the owner sets prune to auto after the union check" l overlay set $TG --prune auto
 new_line other main
@@ -109,7 +109,7 @@ ok "the owner sets prune=none on the cache" l overlay set $TG --prune none
 cb "$P/main" build --workspace --features extra -q >/dev/null
 stale=$(units $P/main/target)
 [ "$stale" -gt "$base" ] && { PASS=$((PASS + 1)); echo "PASS the feature build made stale units ($base to $stale)"; } || { FAIL=$((FAIL + 1)); echo "FAIL the feature build made stale units ($base to $stale)"; }
-(cd "$P/main" && l save --caches -q)
+(cd "$P/main" && l save --glasses -q)
 eq "prune=none keeps the stale units in the working copy" "$stale" "$(units $P/main/target)"
 ok "the owner sets prune to auto" l overlay set $TG --prune auto
 
@@ -117,21 +117,21 @@ ok "the owner sets prune to auto" l overlay set $TG --prune auto
 out=$(l line new $OWNER_ARG fresh main 2>&1)
 no "line new prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$out"
 eq "line new takes the stale units (no prune at take)" "$stale" "$(units $P/fresh/target)"
-(cd "$P/fresh" && l save --caches -q)
-eq "save --caches of the new line prunes its cache" "$base" "$(units $P/fresh/target)"
+(cd "$P/fresh" && l save --glasses -q)
+eq "save --glasses of the new line prunes its cache" "$base" "$(units $P/fresh/target)"
 rebuilt=$(cb "$P/fresh" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build of the new line compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build of the new line compiles nothing" ;; esac
 
-# 3. `merge --caches-only` takes the units of main into `other` (union), with no prune. The next save of `other`
+# 3. `merge --glasses-only` takes the units of main into `other` (union), with no prune. The next save of `other`
 # prunes the union to the live set: the saved cache has only the units of the standard build.
-out=$(cd "$P/other" && l merge main --caches-only 2>&1)
-no "merge --caches-only prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$out"
+out=$(cd "$P/other" && l merge main --glasses-only 2>&1)
+no "merge --glasses-only prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$out"
 merged=$(units $P/other/target)
 mismatch=$(times_mismatch $P/main/target $P/other/target)
-eq "merge --caches-only keeps the units of both sides until the next save" "$stale" "$merged"
+eq "merge --glasses-only keeps the units of both sides until the next save" "$stale" "$merged"
 eq "the union merge keeps the times of the cache" "0" "$mismatch"
-(cd "$P/other" && l save --caches -q)
-eq "save --caches after the union merge keeps only the live units" "$base" "$(units $P/other/target)"
+(cd "$P/other" && l save --glasses -q)
+eq "save --glasses after the union merge keeps only the live units" "$base" "$(units $P/other/target)"
 rebuilt=$(cb "$P/other" build --workspace)
 case "$rebuilt" in *Compiling*) FAIL=$((FAIL + 1)); echo "FAIL the next build after the union merge compiled" ;; *) PASS=$((PASS + 1)); echo "PASS the next build after the union merge compiles nothing" ;; esac
 
@@ -143,17 +143,17 @@ eq "prune=none keeps the stale units" "$stale" "$(units $P/keep/target)"
 if [ "$(id -u)" = 0 ]; then
     # Root: a root-owned line is never pruned, by save either.
     rootout=$(l line new rootline main 2>&1)
-    rootsave=$(cd "$P/rootline" && l save --caches -q 2>&1)
+    rootsave=$(cd "$P/rootline" && l save --glasses -q 2>&1)
     eq "a root-owned line keeps the stale units (root is never pruned)" "$stale" "$(units $P/rootline/target)"
     no "a root-owned line prints no prune line" sh -c "echo \"\$1\" | grep -q 'layr: prune'" _ "$rootsave$rootout"
 fi
 
-# 5. A plain `save --caches` prunes the folder before it saves: the saved cache has no stale units.
+# 5. A plain `save --glasses` prunes the folder before it saves: the saved cache has no stale units.
 ok "the owner sets prune to auto" l overlay set $TG --prune auto
 cb "$P/main" build --workspace --features extra -q >/dev/null
 eq "the working copy has stale units before the save" "$stale" "$(units $P/main/target)"
-(cd "$P/main" && l save --caches -q)
-eq "save --caches prunes the working copy first" "$base" "$(units $P/main/target)"
+(cd "$P/main" && l save --glasses -q)
+eq "save --glasses prunes the working copy first" "$base" "$(units $P/main/target)"
 new_line after main
 eq "the cache that the save made has no stale units" "$base" "$(units $P/after/target)"
 
@@ -163,8 +163,8 @@ out=$(l line new $OWNER_ARG bad main 2>&1); rc=$?
 eq "line new succeeds with an unknown adapter" "0" "$rc"
 eq "the line is there" "1" "$(l line list | grep -c '^ *bad$' | tr -d ' ')"
 # The hook runs at the save: the log names the unknown adapter, and the save still succeeds.
-out=$(cd "$P/bad" && l save --caches 2>&1); rc=$?
-eq "save --caches succeeds with an unknown adapter" "0" "$rc"
+out=$(cd "$P/bad" && l save --glasses 2>&1); rc=$?
+eq "save --glasses succeeds with an unknown adapter" "0" "$rc"
 has "the log names the unknown adapter" "unknown prune adapter 'nosuch'" "$out"
 ok "the owner sets prune to auto again" l overlay set $TG --prune auto
 

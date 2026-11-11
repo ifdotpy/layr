@@ -207,7 +207,7 @@ has() { # has <description> <needle> <haystack>
 
 # No garbage is left (docs/ownership.md): data goes in the operation that makes it dead, with no gc. At the end of
 # each test the owners of every project of the test store equal the replay of its records with no leaked state
-# (`layr gc`, a check), and no cache data is unreachable (`fsck --caches`). A test that makes garbage on purpose (a
+# (`layr gc`, a check), and no cache data is unreachable (`fsck --glasses`). A test that makes garbage on purpose (a
 # crash, a leak) sets LAYR_TEST_GARBAGE_OK=1.
 garbage_check() {
     [ -n "${LAYR_TEST_GARBAGE_OK:-}" ] && return 0
@@ -221,8 +221,8 @@ garbage_check() {
         if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" gc 2>&1); then
             FAIL=$((FAIL+1)); echo "FAIL no garbage is left in project $name (layr gc)"; echo "$out" | sed 's/^/  /' | head -8
         fi
-        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --caches 2>&1); then
-            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --caches)"; echo "$out" | sed 's/^/  /' | head -8
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --glasses 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --glasses)"; echo "$out" | sed 's/^/  /' | head -8
         fi
     done
 }

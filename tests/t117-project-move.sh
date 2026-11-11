@@ -100,7 +100,7 @@ cd $P/lines/b || exit 1
 echo "wip" > wip.txt; l park -q >/dev/null 2>&1
 cd $P/lines/main || exit 1
 mkdir -p target && head -c 20971520 /dev/urandom > target/big.bin
-l save --caches -q >/dev/null
+l save --glasses -q >/dev/null
 ok "the 20 MB cache is an overlay" sh -c "$LAYR overlay list | grep -q target"
 ok "the lines have git objects" test -f $P/lines/main/.git/objects/info/alternates
 

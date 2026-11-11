@@ -22,8 +22,8 @@ l line new a main >/dev/null
 cd $P/a
 echo '.layr-retest regenerable' > .layrattributes
 mkdir -p .layr-retest && echo cached > .layr-retest/out.bin
-out=$(l save --caches)
-has "save --caches names the folder overlay" ".layr-retest: overlay" "$out"
+out=$(l save --glasses)
+has "save --glasses names the folder overlay" ".layr-retest: overlay" "$out"
 name=$(name_of)
 eq "line a has the cache" "cache" "$(state_of)"
 
@@ -39,7 +39,7 @@ has "main: overlay repair says the folder is no cache path" "not a cache path in
 eq "main: status is clean" "" "$(l status --short)"
 echo more >> notes.txt
 ok "main: a named save works" l save -a -m "main change" -q
-ok "main: save --caches works" l save --caches -q
+ok "main: save --glasses works" l save --glasses -q
 eq "main: the cache overlay of line a is still there for line a" "cache" "$(cd $P/a && state_of)"
 
 # 3. A versioned overlay is refused by remove, with a reason.
@@ -65,10 +65,10 @@ ok "the overlay had states to free" test "$states_before" -gt 1
 l gc --repair -q >/dev/null
 eq "gc frees the states of the removed overlay" "1" "$(ls "$O/$name/states" | wc -l | tr -d ' ')"
 
-# 7. A new save --caches of the folder makes a cache overlay again.
+# 7. A new save --glasses of the folder makes a cache overlay again.
 cd $P/a
-out=$(l save --caches)
-has "save --caches makes the overlay again" ".layr-retest: overlay" "$out"
+out=$(l save --glasses)
+has "save --glasses makes the overlay again" ".layr-retest: overlay" "$out"
 eq "line a shows the new cache" "cache" "$(state_of)"
 
 finish

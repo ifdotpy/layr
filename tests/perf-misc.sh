@@ -15,7 +15,7 @@ cd $P/rel
 # 1. The snapshot of a line with a big nested cache layer clones around it.
 rm -rf target; mkdir -p target/debug
 for i in $(seq 1 3000); do echo $i > target/debug/f$i; done
-l save --caches -q
+l save --glasses -q
 echo more >> notes.txt
 # A save with nothing staged still takes the scan copy of the line.
 trace=$(LAYR_TRACE=1 l save -m two 2>&1)

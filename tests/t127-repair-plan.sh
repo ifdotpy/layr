@@ -22,9 +22,9 @@ for n in a b c; do
     cd $P/$n || exit 1
     mkdir -p target build
     echo $n.1 > target/x; echo $n.1 > build/y
-    l save --caches -q
+    l save --glasses -q
     echo $n.2 > target/x; echo $n.2 > build/y
-    l save --caches -q
+    l save --glasses -q
 done
 cd $P/main || exit 1
 l gc --repair -q >/dev/null 2>&1
@@ -45,7 +45,7 @@ pid=$!
 planned 1
 cd $P/a || exit 1
 echo a.3 > target/x; echo a.3 > build/y
-l save --caches -q
+l save --glasses -q
 cd $P/main || exit 1
 l line delete -D c >/dev/null 2>&1
 ok "the save and the line delete finish while the repair waits" kill -0 $pid

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
-# `save --caches --cache a --cache b` saves every named cache path, not only the last one.
+# `save --glasses --folder a --folder b` saves every named cache path, not only the last one.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -11,7 +11,7 @@ l init p --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/p/lines/main
 # init leaves ignored folders out: the build makes them in the line.
 mkdir -p target/debug node_modules/pkg; echo bin > target/debug/x; echo m > node_modules/pkg/index.js
-out=$(l save --caches --cache target --cache node_modules 2>&1)
+out=$(l save --glasses --folder target --folder node_modules 2>&1)
 has "target is saved" "target: overlay" "$out"
 has "node_modules is saved" "node_modules: overlay" "$out"
 has "the target overlay is saved" "saved " "$(l overlay list | grep 'folder=target')"
@@ -19,8 +19,8 @@ has "the node_modules overlay is saved" "saved " "$(l overlay list | grep 'folde
 l line new verify main >/dev/null 2>&1
 eq "a new line receives the selected target bytes" "bin" "$(cat "$LAYR_ROOT/projects/p/lines/verify/target/debug/x" 2>/dev/null)"
 eq "a new line receives the selected node_modules bytes" "m" "$(cat "$LAYR_ROOT/projects/p/lines/verify/node_modules/pkg/index.js" 2>/dev/null)"
-out=$(l save --caches --cache target --cache nope 2>&1); rc=$?
+out=$(l save --glasses --folder target --folder nope 2>&1); rc=$?
 eq "an unknown cache path fails" 1 "$rc"
 has "the error names the unknown path" "'nope' is no cache path" "$out"
-no "--cache without --caches fails" l save --cache target
+no "--folder without --glasses fails" l save --folder target
 finish

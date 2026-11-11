@@ -16,8 +16,8 @@ head -c 20000000 /dev/urandom > target/big.bin; echo src >> notes.txt
 l save -q
 eq "automatic states do not hold the cache content" "" "$(l show head@{0}:target | tail -n +3)"
 eq "status ignores the cache" " M notes.txt" "$(l status -s)"
-l save -q --caches
-eq "save --caches makes the cache overlay" "cache" "$(cstate)"
+l save -q --glasses
+eq "save --glasses makes the cache overlay" "cache" "$(cstate)"
 rm -rf target; mkdir target; echo rebuilt > target/out
 has "a tool replaced the cache with a plain folder" "plain folder" "$(cstate)"
 l overlay repair $TG >/dev/null; l save -q
@@ -66,7 +66,7 @@ head -c 1000000 /dev/urandom > target/warm.bin
 # The regenerable setting belongs to this machine: .layrattributes makes target a cache on the peer too.
 echo 'target regenerable' > .layrattributes
 l add .layrattributes; l save -q -m "target is a cache"
-l save -q --caches
+l save -q --glasses
 # Caches go only to machines the project trusts (docs/cache-overlays.md).
 peer_self=$(env LAYR_ROOT=$T/b/store $LAYR remote self --json)
 l remote add test-peer ssh://test/g >/dev/null

@@ -189,7 +189,8 @@ glass whose folder changed, and the new state names it. The first named save of 
 folder makes the glass of this platform. A glass with `platform` is shown, fetched and pushed only
 on its platform. `trust` is a glass property. The cache flags of transfers (`--caches`,
 `--no-caches`, `--caches-of`) are removed; `--line` and `--overlay` choose. `save --caches`,
-`merge --caches-only` and `fsck --caches` still work for one release and print their replacement. A store keeps its `cache.<folder>` glasses:
+`merge --caches-only` and `fsck --caches` are now `save --glasses`, `merge --glasses-only` and
+`fsck --glasses`; the old spellings fail with exit status 2. A store keeps its `cache.<folder>` glasses:
 each stays the glass of its folder on every platform. Parts are still full folder snapshots,
 not v2 objects. The rest of this section describes the rules that both kinds of glass follow.
 

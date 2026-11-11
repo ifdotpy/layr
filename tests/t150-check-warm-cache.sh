@@ -18,7 +18,7 @@ mkdir -p target/debug/deps target/debug/.fingerprint/p-aaa; echo warm > target/b
 printf '%s/target/debug/deps/p-aaa.d: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=%s\n' "$PWD" "$PWD" > target/debug/deps/p-aaa.d
 # A registry crate built from a CARGO_HOME that this machine does not have.
 printf '%s/target/debug/deps/serde-eee.d: /nowhere/.cargo/registry/src/idx/serde/lib.rs\n' "$PWD" > target/debug/deps/serde-eee.d
-l save --caches -q
+l save --glasses -q
 # The checked head has no cache of its own: it takes the cache of its parent, as `line new` does.
 echo change > change.txt; l add change.txt >/dev/null; l save -qm change
 l protect main >/dev/null 2>&1 || true
@@ -39,9 +39,9 @@ has "the check gives its caches back on its own line" "main.checks-$plat" "$(l l
 head=$(l rev-parse main)
 l line new w "$head" >/dev/null 2>&1
 eq "a new line from the checked head takes the check's caches" more "$(cat "$LAYR_ROOT/projects/p/lines/w/target/new" 2>&1)"
-has "the old cache states of that line go at once" "0 unreachable state(s)" "$(l fsck --caches 2>&1)"
+has "the old cache states of that line go at once" "0 unreachable state(s)" "$(l fsck --glasses 2>&1)"
 no "the check's state is not in the line" grep -qx "target/built" <<<"$(l ls-files)"
-has "the check copy leaves no overlay line behind" "0 overlay line(s) of deleted lines" "$(l fsck --caches 2>&1)"
+has "the check copy leaves no overlay line behind" "0 overlay line(s) of deleted lines" "$(l fsck --glasses 2>&1)"
 
 # `checks run --state`: the jobs of one exact state, such as a Git commit that CI fetched.
 l config checks.changes '["unit"]' >/dev/null

@@ -24,7 +24,7 @@ for d in range(100):
             h.write("x")
 PY
 mkdir vendor && git -C vendor init -q && echo v > vendor/a.txt
-l save --caches -m "cache and nested repo" -q
+l save --glasses -m "cache and nested repo" -q
 for n in a b c d; do
     l line new $n main >/dev/null
     (cd $P/$n && echo "$n" > $n.txt && l save -a -m "$n" -q)

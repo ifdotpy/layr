@@ -134,7 +134,7 @@ ATTRS=$(l rev-parse head)
 l line new -q cached "$ATTRS"
 cd $M/cached || exit 1
 mkdir -p node_modules && echo cache > node_modules/pkg.js
-l save -q --caches >/dev/null
+l save -q --glasses >/dev/null
 echo changed-cache > notes.txt
 l save -qam cached-change >/dev/null
 CACHED=$(l rev-parse head)

@@ -135,7 +135,7 @@ pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Re
     }
     let mut out = BTreeSet::new();
     for name in lines {
-        let line = repo.line(name).with_context(|| format!("--caches-of: no line {name}"))?;
+        let line = repo.line(name).with_context(|| format!("--line: no line {name}"))?;
         if let Some(own) = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(&line.id))? {
             out.insert(own.head);
         }
@@ -520,7 +520,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
         };
         // The overlay's project lock covers its key records only. The upload (minutes for the first push of a cache)
-        // and the sweep run under the lock of the remote folder, so `line new` and `save --caches` do not wait.
+        // and the sweep run under the lock of the remote folder, so `line new` and `save --glasses` do not wait.
         let lock = orepo.p.lock()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
