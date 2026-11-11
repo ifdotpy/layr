@@ -27,4 +27,26 @@ eq "the entry is still pending" pending "$(l queue list --into main --json | pyt
 l config checks.platforms "{\"gate\":\"$here\"}" >/dev/null
 ok "with only this platform the entry merges" l queue run --into main
 eq "the entry is done" done "$(l queue list --into main --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["status"])')"
+
+# A failed run on the other platform fails the entry with the reason: no runner runs that exact check again, so the
+# entry would otherwise stay pending for good. The run is this machine's, recorded as the other platform.
+if in_check_sandbox && ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+    echo "(the failed-elsewhere case runs a nested check sandbox: skipped here)"
+else
+    l config check.gate "exit 3" >/dev/null
+    l config checks.platforms "{\"gate\":\"$other\"}" >/dev/null
+    l config checks.changes '["gate"]' >/dev/null
+    l config --local checks.runner true >/dev/null
+    HEAD=$(l rev-parse head)
+    cd ../topic || exit 1
+    echo two > two.txt; l add two.txt; l save -qm two; S=$(l rev-parse head); l approve head -q
+    l queue add topic >/dev/null
+    LAYR_TEST_PLATFORM=$other l checks run --state "$S" --json >/dev/null 2>&1
+    cd ../main || exit 1
+    rc=0; out=$(l queue run --into main 2>&1) || rc=$?
+    eq "a failed run on the other platform fails the queue run" 1 "$rc"
+    has "the reason names the check, its exit and the platform" "check 'gate' failed (exit 3) on $other" "$out"
+    eq "the entry is failed, not pending" failed "$(l queue list --into main --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["status"])')"
+    eq "main stays where it was" "$HEAD" "$(l rev-parse head)"
+fi
 finish

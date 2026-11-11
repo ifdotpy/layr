@@ -1030,12 +1030,18 @@ fn run_line_checks(
                     if super::checks::passing_required(repo, candidate, name, &argv, Some(want))? {
                         continue;
                     }
+                    if let Some(code) = failed_on(repo, candidate, &argv, want)? {
+                        return Err(failed_elsewhere(name, want, code, candidate, line, head));
+                    }
                     return Err(anyhow::Error::from(ChecksWaiting(format!(
                         "check '{name}' has no passing executor run on {want}"
                     ))));
                 }
                 if passed_on(repo, candidate, &argv, want)? {
                     continue;
+                }
+                if let Some(code) = failed_on(repo, candidate, &argv, want)? {
+                    return Err(failed_elsewhere(name, want, code, candidate, line, head));
                 }
                 if !super::checks::meets(want, &here) {
                     return Err(anyhow::Error::from(ChecksWaiting(format!(
@@ -1408,6 +1414,33 @@ impl std::fmt::Display for ChecksWaiting {
 impl std::error::Error for ChecksWaiting {}
 
 /// Whether an active check attestation of `state` with `argv` passed on a platform that meets `want`.
+/// The exit code of an active, failed run of `argv` on `state` on a platform that meets `want`, when no run there
+/// passed (callers ask `passed_on` first). A queue entry then fails with the reason instead of waiting: no runner
+/// runs that exact check again on its own, so the entry would stay pending for good.
+fn failed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<Option<i64>> {
+    let subject = crate::model::Subject { kind: "state".into(), id: state.to_owned() };
+    Ok(crate::probes::active_checks(repo, &subject)?.into_values().find_map(|(_, r)| {
+        let check = &r.data["check"];
+        (check["argv"] == serde_json::json!(argv)
+            && check["platform"].as_str().is_some_and(|have| super::checks::meets(want, have)))
+        .then(|| check["exit"].as_i64())
+        .flatten()
+        .filter(|code| *code != 0)
+    }))
+}
+
+fn failed_elsewhere(name: &str, want: &str, code: i64, candidate: &str, line: &Line, head: &str) -> anyhow::Error {
+    exit(
+        1,
+        format!(
+            "error: check '{name}' failed (exit {code}) on {want} for {}, the state '{}' would take; the line stays at {}; queue it again after a fix, or after its runner revokes the result",
+            ids::short(candidate),
+            line.name,
+            ids::short(head)
+        ),
+    )
+}
+
 fn passed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<bool> {
     let subject = crate::model::Subject { kind: "state".into(), id: state.to_owned() };
     Ok(crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {

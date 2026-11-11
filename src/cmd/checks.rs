@@ -87,7 +87,8 @@ const PLATFORMS: [&str; 6] = ["linux", "macos", "linux-x86_64", "linux-aarch64",
 
 /// The platform of this machine in a check attestation: `<os>-<arch>`, as `macos-aarch64`.
 pub fn platform() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    // The same test hook as cache platforms (`LAYR_TEST_PLATFORM`): a check result of another platform.
+    crate::model::cache_platform()
 }
 
 /// Whether the platform `have` (`<os>-<arch>`) meets the entry `want` of `checks.platforms`.
