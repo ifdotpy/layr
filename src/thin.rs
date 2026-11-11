@@ -527,12 +527,19 @@ fn same(a: &ScanEntry, b: &ScanEntry, link: impl Fn() -> Result<bool>) -> Result
 /// True when two entries of equal type carry the same extended attributes and ACL. Extended
 /// attributes and ACLs are not part of the scan: `same` runs first and this runs on entries
 /// that look equal. A change of them keeps the modification time.
+/// The extended attribute that macOS stamps on files written by a quarantined program.
+#[cfg(target_os = "macos")]
+const OS_MARKER: &[u8] = b"com.apple.provenance";
+
 #[cfg(target_os = "macos")]
 pub(crate) fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
-    // The system stamps `com.apple.provenance` on a file and no user sets it; its value costs
-    // a slow system call on every file, so only its presence counts.
-    let read = |name: &[u8]| name != b"com.apple.provenance";
-    let (mut xa, mut xb) = (crate::sys::apfs_xattrs_where(a, read)?, crate::sys::apfs_xattrs_where(b, read)?);
+    // The system stamps `com.apple.provenance` on a file and no user sets it, so it does not
+    // count (as in `fsx::xattrs`). Its value also costs a slow system call on every file.
+    let read = |name: &[u8]| name != OS_MARKER;
+    let list = |p: &Path| -> Result<Vec<_>> {
+        Ok(crate::sys::apfs_xattrs_where(p, read)?.into_iter().filter(|(name, _)| name != OS_MARKER).collect())
+    };
+    let (mut xa, mut xb) = (list(a)?, list(b)?);
     xa.sort();
     xb.sort();
     Ok(xa == xb && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
