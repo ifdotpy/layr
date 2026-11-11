@@ -56,6 +56,18 @@ impl Published {
     }
 }
 
+/// The push options of the overlay `orepo`: with `--line`, only the states that those lines show and the caches they
+/// start from.
+fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options> {
+    let mut selected = opts.clone();
+    if !opts.lines.is_empty() {
+        let mut keep = states_of_lines(repo, orepo, &opts.lines, false)?;
+        keep.extend(caches_of_lines(repo, orepo, &opts.lines)?);
+        selected.only_states = Some(keep);
+    }
+    Ok(selected)
+}
+
 /// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
 /// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
 pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
@@ -465,6 +477,10 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         store.pin.as_ref().and_then(|pin| pin.paper_recipient.clone())
     };
     for name in repo.visible_overlay_names(ctx)? {
+        if !opts.takes_layer(&name, false) {
+            report.omitted.push(format!("overlay {name}: not in --overlay"));
+            continue;
+        }
         // A machine trusted since the last cache save reads the caches from this push on, not only
         // after the next save.
         if repo.need_overlay(&name)?.cache {
@@ -591,7 +607,8 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         if let Some(ms) = std::env::var("LAYR_TEST_OVERLAY_PUSH_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        merge(report, writer::push_locked(&scoped, ctx, &orepo, opts)?, &name, "push");
+        let selected = layer_selection(repo, &orepo, opts)?;
+        merge(report, writer::push_locked(&scoped, ctx, &orepo, &selected)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
         if !opts.no_cache_sweep && repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
             let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
@@ -949,6 +966,10 @@ fn api_layer(store: &Store, name: &str, project: &str) -> Result<Store> {
 pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
     for name in repo.visible_overlay_names(ctx)? {
         let info = repo.need_overlay(&name)?;
+        if !opts.takes_layer(&name, false) {
+            report.omitted.push(format!("overlay {name}: not in --overlay"));
+            continue;
+        }
         if info.hidden {
             report.omitted.push(format!("overlay {name}: hidden overlays wait for Secret layers on Layr Cloud"));
             continue;
@@ -972,7 +993,8 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
         let scoped = api_layer(store, &name, &orepo.p.id)?;
         scoped.private_dir()?;
         let _push = writer::push_folder_lock(&scoped.dir)?;
-        let mut pushed = writer::push_locked(&scoped, ctx, &orepo, opts)?;
+        let selected = layer_selection(repo, &orepo, opts)?;
+        let mut pushed = writer::push_locked(&scoped, ctx, &orepo, &selected)?;
         super::push_refs(&scoped, &orepo, &mut pushed)?;
         merge(report, pushed, &name, "push");
     }

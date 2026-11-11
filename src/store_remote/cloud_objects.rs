@@ -82,6 +82,7 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let scope = store.api_scope();
     let lines: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
     let required = reader::required_states(repo, &lines, opts)?;
+    let selection = reader::push_selection(repo, &lines, opts)?;
     // Open once: loading pack indexes once per migrated state makes a large history expensive to push.
     let objects = crate::objstore::exists(&repo.p).then(|| open(repo)).transpose()?;
     let mut candidates = Vec::new();
@@ -96,6 +97,9 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
         }
         if !reader::wanted(&state, opts) && !required.contains(&id) {
             report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
+            continue;
+        }
+        if selection.as_ref().is_some_and(|keep| !keep.contains(&id)) {
             continue;
         }
         candidates.push(state);

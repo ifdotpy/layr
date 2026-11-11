@@ -80,6 +80,63 @@ The modes as built:
 In this file a **layer** is the shared set or an overlay of a stack (a glass of a view in the new
 model).
 
+## 1a. The model in code (owner decision 2026-11-11, target)
+
+This section turns section 1 into data and commands. Each part below is one slice; section 1
+"Built today" says what the code does until the slice lands.
+
+**Records.**
+
+- A state of a line names its part on each glass: `layers: {<glass>: <part id>}` in the state
+  record. The base part is the state itself (its tree and times table). A glass with no part in a
+  state is clear for it: the view shows the glasses below.
+- A part lives in the store of its glass (`<project>%<glass>`), encrypted for the readers of the
+  glass, with the ids of that glass (plain or keyed, docs/objects.md section 2). A part has no
+  line and no parents of its own; its delta base is the part of the first parent state.
+- History belongs to the line: parents, merges and undo are the parents of the states. Overlay
+  stores keep no lines (today `line-<line id>` and `user-<uid>`). So a line has the same name on
+  every glass, because there is one line.
+- Properties of a glass: `folder`, `quiet`, `history`, `merge`, `platform`, readers, and
+  `trust` (a part that another user saved is taken only from a protected line; today
+  `cache_by` and `cache_shared`).
+
+**Platforms.** A glass with `platform=<key>` is shown and fetched only on that platform. Build
+output of two platforms is two glasses (`target.macos-aarch64`, `target.linux-x86_64`); a
+platform key is no part of a line name.
+
+**Views.** A view is f(line, glasses): an ordered list of glasses over one state of a line. The
+working folder of a line is its default view: every glass that the caller reads and whose
+platform is this machine's, in the project order of glasses. `layr view <line> --overlay a,b`
+makes another view. The setting `stack.<line id>` goes.
+
+**Commands.**
+
+| Command | Effect |
+| --- | --- |
+| `save -m` | Saves the changed parts of every glass of the view. A quiet glass (a cache) is saved with it. |
+| `merge <line>` | Merges per glass with the glass's `merge` property, as one operation. |
+| `line new X <line>` | X starts at the state of `<line>` with all its parts. |
+| `fetch <remote> --line L --overlay G` | The states of L, and only their parts on G (built, slice 1). |
+| `push <remote> --line L --overlay G` | The same selection for a push. |
+| `gc` | A part outside `history` of its glass is dropped; the state keeps its record. |
+
+`save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches/--no-caches/--caches-of`,
+`fsck --caches` and the `cache.` name prefix go. Caches are stored as v2 objects like any part.
+
+**Slices.**
+
+1. `fetch --line --overlay` (built).
+2. `push --line --overlay` (built).
+3. Glasses per platform; no platform key in names.
+4. State records name their parts (`layers`); save, line new, merge and view use them; overlay
+   stores keep parts only. Migration of existing stores.
+5. Views hold the glasses; `stack.<line id>` goes.
+6. A cache is an ordinary glass: the cache flags, `src/cache_overlay.rs` and the cache fields of
+   the state record go; `trust` is a glass property.
+7. Parts of folder glasses as v2 objects (the immutable-flag clone fails first, see
+   [cache overlays](cache-overlays.md) section 21).
+8. Layr Cloud: a state with parts (`PUT /states/<state>` with one tree per glass).
+
 ## 2. Commands
 
 | Command                                         | Effect                                                         |

@@ -557,6 +557,17 @@ fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Opt
     Ok(Some(keep))
 }
 
+/// The states that `push --line` and `--overlay` send, or None for every state: on the base as for a fetch, in an
+/// overlay the selection of its layer (`only_states`).
+pub(super) fn push_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
+    if repo.p.is_overlay() {
+        return Ok(opts.only_states.clone());
+    }
+    let mut base = opts.clone();
+    base.heads = false;
+    base_selection(repo, records, &base)
+}
+
 pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
     let kind = serde_json::to_value(state.kind).unwrap_or_default();
     match kind.as_str() {

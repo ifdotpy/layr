@@ -514,7 +514,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     let mut remote_records = None;
     drop(stage);
     let stage = crate::trace::span("store select history");
-    let required = reader::required_states(repo, &repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>(), opts)?;
+    let record_lines = repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>();
+    let required = reader::required_states(repo, &record_lines, opts)?;
+    let selection = reader::push_selection(repo, &record_lines, opts)?;
     let mut states = Vec::new();
     let mut recovered = Vec::new();
     for (id, deleted) in repo.p.db.present_states()? {
@@ -524,6 +526,9 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let state = repo.state(&id)?;
         if !reader::wanted(&state, opts) && !required.contains(&id) {
             report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
+            continue;
+        }
+        if selection.as_ref().is_some_and(|keep| !keep.contains(&id)) {
             continue;
         }
         if !blind_layer {

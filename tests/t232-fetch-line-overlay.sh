@@ -1,6 +1,6 @@
 #!/bin/bash
 # ci: macos
-# `fetch --line <name> --overlay <layer>` (docs/overlays.md section 1): a fetch takes the history of the chosen lines,
+# `fetch` and `push` with `--line <name> --overlay <layer>` (docs/overlays.md section 1a): a fetch takes the history of the chosen lines,
 # only on the chosen layers. The states of other lines stay on the remote and come on first read. Without `base` in
 # `--overlay`, no state of the base comes.
 . "$(dirname "$0")/lib.sh"
@@ -49,6 +49,19 @@ has "and says so" "restored on first read" "$out"
 yl fetch origin >/dev/null 2>&1
 ok "a plain fetch takes the states of side" has_state "$side_head"
 
-no "--line needs fetch" yl push origin --line main -q
+# `push --line`: the states of that line go up; another line's new states stay here.
+cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
+echo m3 > m3.txt; l add m3.txt >/dev/null; l save -qm m3
+main_new=$(l log --json 2>/dev/null | python3 -c 'import json,sys; print([json.loads(l) for l in sys.stdin][0]["id"])')
+cd "$LAYR_ROOT/projects/p/lines/side" || exit 1
+echo s3 > s3.txt; l add s3.txt >/dev/null; l save -qm s3
+side_new=$(l log --json 2>/dev/null | python3 -c 'import json,sys; print([json.loads(l) for l in sys.stdin][0]["id"])')
+l push cloud --line main -q >/dev/null 2>&1
+eq "a push of one line works" 0 "$?"
+ok "it sends the new state of main" test -d "$T/archive/states/$main_new"
+no "it keeps the new state of side here" test -d "$T/archive/states/$side_new"
+l push cloud -q >/dev/null 2>&1
+ok "a plain push sends it" test -d "$T/archive/states/$side_new"
+no "--line needs fetch or push" l pull cloud --line main -q
 no "--overlay and --no-caches do not go together" yl fetch origin --overlay base --no-caches
 finish

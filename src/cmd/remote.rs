@@ -1059,8 +1059,8 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
     }
-    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (op != "fetch" || remote_kind != Kind::Store) {
-        bail!("--line and --overlay require layr fetch from a store remote");
+    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store) {
+        bail!("--line and --overlay require layr fetch or layr push with a store remote");
     }
     if a.get("--overlay").is_some() && a.has("--no-caches") {
         bail!("--overlay names the layers to take; leave out --no-caches");
