@@ -187,7 +187,8 @@ There are two kinds of remote:
   `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
   those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
   head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
-  of a server queue). `--heads` restores only the heads of the lines (and what an
+  of a server queue). `layr fetch <Layr Cloud remote> --no-caches` reads no cache overlay at all: a merge
+  machine builds nothing, and every new cache of the check runners was gigabytes per fetch. `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it
   from there. A plain clone restores the whole history and works offline. A cache state that a push removes while a fetch runs, and a

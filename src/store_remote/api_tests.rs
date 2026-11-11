@@ -820,6 +820,24 @@ fn a_first_api_cache_fetch_selects_after_importing_metadata() {
     }
 }
 
+#[test]
+fn a_fetch_without_caches_skips_the_cache_overlays() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, _, _) = project(&ctx);
+    let opts = Options { no_caches: true, heads: true, ..Default::default() };
+    let before = fake.count("GET /api/v1/projects/p/");
+    check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
+    assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
+    assert!(fake.count("GET /api/v1/projects/p/") >= before);
+    crate::free::finish(&ctx);
+    drop(repo);
+    delete_cache_fixture(&root);
+}
+
 fn check_first_cache_fetch(
     root: &Path,
     ctx: &Ctx,
@@ -879,6 +897,11 @@ fn check_first_cache_fetch(
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
     super::overlays::api_fetch(store, ctx, repo, opts, &mut report).unwrap();
+    if opts.no_caches {
+        assert_eq!((report.states, report.records), (0, 0), "--no-caches reads nothing of a cache overlay");
+        assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
+        return;
+    }
     assert!(
         report
             .omitted

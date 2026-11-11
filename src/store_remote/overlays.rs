@@ -964,7 +964,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     for name in repo.overlay_names()? {
         let Some(info) = repo.overlay_info(&name)? else { continue };
-        if info.hidden {
+        if info.hidden || (info.cache && opts.no_caches) {
             continue;
         }
         let mut one = || -> Result<()> {

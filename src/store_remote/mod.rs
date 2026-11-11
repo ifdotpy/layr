@@ -35,6 +35,9 @@ pub struct Options {
     pub public: bool,
     pub auto: bool,
     pub caches: bool,
+    /// `fetch --no-caches`: leave the cache overlays out (a merge machine builds nothing; their new states were
+    /// gigabytes per fetch). Layr Cloud remotes only.
+    pub no_caches: bool,
     /// Leave ordinary cache cleanup to a later push or daemon sweep.
     pub no_cache_sweep: bool,
     pub paper_key: Option<String>,
@@ -968,6 +971,9 @@ impl Store {
             if !self.public_clone {
                 repo.require(ctx, "records")?;
             }
+        }
+        if opts.no_caches && !self.is_api() {
+            bail!("--no-caches requires a Layr Cloud remote");
         }
         self.connect(ctx)?;
         let mut report = reader::fetch(self, ctx, repo, opts)?;

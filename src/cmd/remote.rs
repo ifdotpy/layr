@@ -1029,6 +1029,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             .flag("--index")
             .flag("--auto")
             .flag("--caches")
+            .flag("--no-caches")
             .flag("--no-cache-sweep")
             .value("--caches-of")
             .flag("--heads")
@@ -1049,6 +1050,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     let remote_kind = kind(&url)?;
     if a.has("--no-cache-sweep") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--no-cache-sweep requires layr push to a store remote");
+    }
+    if a.has("--no-caches") && (op != "fetch" || remote_kind != Kind::Store || a.has("--caches") || a.get("--caches-of").is_some()) {
+        bail!("--no-caches requires layr fetch from a store remote, without --caches or --caches-of");
     }
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
@@ -1125,6 +1129,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             let opts = store_remote::Options {
                 auto: a.has("--auto"),
                 caches: a.has("--caches"),
+                no_caches: a.has("--no-caches"),
                 no_cache_sweep: a.has("--no-cache-sweep"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 public: false,
@@ -1347,6 +1352,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             public: a.has("--public"),
             auto: a.has("--auto"),
             caches: a.has("--caches"),
+            no_caches: false,
             no_cache_sweep: false,
             paper_key: a.get("--paper-key").map(str::to_owned),
             caches_of: caches_of(&a),
