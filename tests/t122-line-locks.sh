@@ -25,9 +25,11 @@ echo b > b.txt && l add b.txt && l save -qm b1
 # merge in line a waits for the first one.
 stamp() { date +%s.%N; }
 cd "$P/a" || exit 1
-( LAYR_TEST_LINE_LOCK_MS=6000 "$LAYR" merge -q x > "$T/merge1.log" 2>&1; stamp > "$T/merge1.end" ) &
+( LAYR_TRACE=1 LAYR_TEST_LINE_LOCK_MS=6000 "$LAYR" merge -q x > "$T/merge1.log" 2>&1; stamp > "$T/merge1.end" ) &
 M1=$!
-sleep 1
+# Go on only when the first merge holds the lock of line a: a fixed sleep raced with a slow start.
+for _ in $(seq 300); do grep -q "line lock taken: a$" "$T/merge1.log" 2>/dev/null && break; sleep 0.1; done
+ok "the first merge holds the lock of line a" grep -q "line lock taken: a$" "$T/merge1.log"
 cd "$P/b" || exit 1
 echo bb >> notes.txt
 ( "$LAYR" save -qa -m b2 > "$T/save-b.log" 2>&1; stamp > "$T/save-b.end" ) &
