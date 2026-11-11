@@ -158,7 +158,7 @@ openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-ca-
 openssl(['req','-new','-newkey','rsa:2048','-nodes','-keyout',str(root/'tls-key.pem'),'-out',str(root/'tls.csr'),'-subj','/CN=localhost'])
 (root/'tls-ext.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n')
 openssl(['x509','-req','-in',str(root/'tls.csr'),'-CA',str(root/'tls-ca.pem'),'-CAkey',str(root/'tls-ca-key.pem'),'-CAcreateserial','-out',str(root/'tls-cert.pem'),'-days','1','-extfile',str(root/'tls-ext.cnf')])
-requests=[]
+requests=[];missed=[]
 class PublicFiles(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
@@ -168,13 +168,13 @@ class PublicFiles(http.server.BaseHTTPRequestHandler):
   name=parsed.path[len(prefix):]
   if name=='objects':
    query=urllib.parse.parse_qs(parsed.query);wanted=query.get('prefix',[''])[0]
-   if not wanted.startswith(('records/','states/','keys/')): self.send_error(404);return
+   if not wanted.startswith(('records/','states/','keys/','objects/')): missed.append(self.path);self.send_error(404);return
    body=json.dumps({'objects':[{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)]}).encode()
-  elif name in ['store.json','public.json','slots/public.age'] or name.startswith(('records/','states/','keys/')):
+  elif name in ['store.json','public.json','slots/public.age'] or name.startswith(('records/','states/','keys/','objects/')):
    path=root/'archive'/name
-   if '..' in pathlib.PurePosixPath(name).parts or not path.is_file(): self.send_error(404);return
+   if '..' in pathlib.PurePosixPath(name).parts or not path.is_file(): missed.append(self.path);self.send_error(404);return
    body=path.read_bytes()
-  else: self.send_error(404);return
+  else: missed.append(self.path);self.send_error(404);return
   self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_PUT(self): requests.append((self.command,self.path,None));self.send_error(405)
  def do_POST(self): requests.append((self.command,self.path,None));self.send_error(405)
@@ -193,7 +193,8 @@ try:
   # Diagnostics for a run where the clone leaves main without the newest file.
   print('DIAG clone stdout+stderr:',output.stdout[-3000:],output.stderr[-3000:],flush=True)
   print('DIAG main folder:',sorted(p.name for p in (nproject/'lines/main').iterdir()) if (nproject/'lines/main').is_dir() else 'missing',flush=True)
-  for args in (['--project','network','log','-n','5'],['--project','network','line','list','--json'],['--project','network','--line','main','status']):
+  print('DIAG 404 paths:',missed[:40],flush=True)
+  for args in (['--project','network','--line','main','log','-n','5'],['--project','network','line','list','--json'],['--project','network','--line','main','status']):
    d=run(args,network,False);print('DIAG',args,d.returncode,d.stdout[-2000:],d.stderr[-2000:],flush=True)
  check((nproject/'lines/main/future.txt').read_text()=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
  network['LAYR_PROJECT']='network'
