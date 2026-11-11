@@ -496,6 +496,9 @@ const PERIODIC_CHECKS: &str = "periodic-checks.json";
 /// the operations that make data dead free it, and the daily garbage report (`garbage_report`) names a gap. A user
 /// daemon (`user_mode`, the macOS LaunchAgent) runs the requests and the queue of its own store as its user; the
 /// automatic states and the git store access stay with the root service.
+/// How old a state without an owner must be before the hourly pass frees it.
+const LEAK_AGE_MS: i64 = 3_600_000;
+
 fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
@@ -539,6 +542,14 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
             }
             if let Err(error) = crate::cmd::queue::run_configured(&ctx, &repo, None) {
                 eprintln!("layr queue ({name}): {error:#}");
+            }
+        }
+        if hourly {
+            // States left without an owner (a replay, a crash) go now, not at a `gc --repair`.
+            match repo.p.db.free_old_leaks(now - LEAK_AGE_MS) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("layr free ({name}): {n} state(s) without an owner for over an hour are freed"),
+                Err(error) => eprintln!("layr free ({name}): {error:#}"),
             }
         }
         if hourly && user_mode.is_none() {

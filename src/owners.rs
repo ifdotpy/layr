@@ -727,6 +727,24 @@ impl Db {
         Ok(all.into_iter().filter(|s| !named.contains(s.as_str())).collect())
     }
 
+    /// Mark dead the present states that no owner names and that were made before `before_ms`. A command
+    /// gives each state it records an owner within that command; a state without one for longer is left
+    /// by a replay (`fill_only`) or a crash. The daemon runs this hourly, so leaks need no `gc --repair`.
+    /// The free step of the next command moves their storage. Returns how many states it marked.
+    pub fn free_old_leaks(&self, before_ms: i64) -> Result<usize> {
+        let old: Vec<String> = {
+            let mut st = self.cached(
+                "SELECT id FROM states WHERE present=1 AND deleted=0 AND time<?1 AND id NOT IN (SELECT state FROM owners) ORDER BY id",
+            )?;
+            let v = st.query_map(params![before_ms], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            v
+        };
+        if !old.is_empty() {
+            self.free_leaks(&old)?;
+        }
+        Ok(old.len())
+    }
+
     /// Mark present states dead (`gc --repair`: their owners are gone).
     pub fn free_leaks(&self, states: &[String]) -> Result<()> {
         self.with_tx(|| {
@@ -923,6 +941,29 @@ mod tests {
         r.seq = seq;
         r.time = seq as i64;
         r
+    }
+
+    #[test]
+    fn old_leaks_are_freed_and_young_or_owned_states_stay() {
+        let db = memory();
+        for (sid, time) in [("old", 1_000i64), ("young", 9_000), ("owned", 1_000)] {
+            db.conn
+                .execute(
+                    "INSERT INTO states(id, display, kind, time, present) VALUES(?1, ?1, 'commit', ?2, 1)",
+                    params![sid, time],
+                )
+                .unwrap();
+        }
+        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES('owned', 'head', 'x')", []).unwrap();
+        assert_eq!(db.free_old_leaks(5_000).unwrap(), 1);
+        let row = |sid: &str| -> (i64, i64) {
+            db.conn.query_row("SELECT present, deleted FROM states WHERE id=?1", [sid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        assert_eq!(row("old"), (0, 1), "a state without an owner past the age is dead");
+        assert_eq!(row("young"), (1, 0), "a young state may still get its owner from a running command");
+        assert_eq!(row("owned"), (1, 0));
+        let queued: i64 = db.conn.query_row("SELECT count(*) FROM free_queue WHERE state='old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(queued, 1, "the free step moves its storage");
     }
 
     fn head(h: &str) -> LineState {

@@ -605,6 +605,30 @@ pub fn kick_trash(dir: &Path) {
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
 /// Start `layr __empty-trash <dir>` in the background when the trash holds something: true when
 /// it started (or nothing waits). The child deletes everything; one child per trash at a time.
+/// At most one emptier start per `TRASH_KICK_MS` from `Project::trash` in one process.
+const TRASH_KICK_MS: u64 = 30_000;
+static LAST_TRASH_KICK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// True when the trash emptier should start at `now_ms`: the first time, then every `TRASH_KICK_MS`.
+fn trash_kick_due(last_kick: &std::sync::atomic::AtomicU64, now_ms: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let last = last_kick.load(Ordering::SeqCst);
+    (last == 0 || now_ms.saturating_sub(last) >= TRASH_KICK_MS)
+        && last_kick.compare_exchange(last, now_ms.max(1), Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
+#[cfg(test)]
+mod trash_kick_tests {
+    #[test]
+    fn the_emptier_starts_at_most_once_per_interval() {
+        let last = std::sync::atomic::AtomicU64::new(0);
+        assert!(super::trash_kick_due(&last, 1_000_000));
+        assert!(!super::trash_kick_due(&last, 1_000_001), "a second move at once starts no second emptier");
+        assert!(!super::trash_kick_due(&last, 1_000_000 + super::TRASH_KICK_MS - 1));
+        assert!(super::trash_kick_due(&last, 1_000_000 + super::TRASH_KICK_MS), "the next interval starts it again");
+    }
+}
+
 pub(crate) fn spawn_trash_emptier(dir: &Path) -> bool {
     if fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
         return true;
@@ -814,7 +838,14 @@ impl<'a> Project<'a> {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
             match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| crate::storage::move_tree(path, &to)) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // A long command holds the lock for hours (a migration): the trash would wait for its end and
+                    // fill the disk. Start the emptier now and then; it takes the trash lock, not the project lock.
+                    if trash_kick_due(&LAST_TRASH_KICK_MS, crate::ids::now_ms().max(0) as u64) {
+                        spawn_trash_emptier(&dir);
+                    }
+                    return Ok(());
+                }
                 Err(e) => {
                     let _t = crate::trace::span(format!("delete in place ({e:#}) {}", path.display()));
                 }
@@ -1120,7 +1151,23 @@ impl<'a> Project<'a> {
                 let _lock = p.lock()?;
             }
         }
+        p.remove_dead_temporaries();
         Ok(p)
+    }
+
+    /// Temporary copies whose creator process is gone (a crash, a kill, a stopped migration): each
+    /// names its pid (`<id>.<pid>`). Every command that opens the project moves them to the trash, so
+    /// they do not wait for `gc --repair`. A copy without a pid, or of a live pid, stays.
+    fn remove_dead_temporaries(&self) {
+        let _t = crate::trace::span("dead temporaries");
+        for dir in [self.scan_dir(), self.work_dir()] {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                if creator_gone(&entry.file_name().to_string_lossy()) == Some(true) {
+                    let _ = self.trash(&entry.path());
+                }
+            }
+        }
     }
 
     /// Take the project id from the records (after a replica or a restore received them).

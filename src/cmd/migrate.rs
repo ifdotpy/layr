@@ -191,7 +191,13 @@ fn counted_differences<'d>(repo: &Repo, id: &str, differences: &'d [String]) -> 
 }
 
 /// How many migrated states pass between two releases of trees that Git built.
-const BUILT_RELEASE_EVERY: usize = 100;
+const BUILT_RELEASE_EVERY: usize = 20;
+
+/// True when `path` (as a comparison names it: "the root folder" or a relative path) is a folder of `root`.
+fn folder_in(root: &Path, path: &str) -> bool {
+    let full = if path == "the root folder" { root.to_path_buf() } else { root.join(path) };
+    std::fs::symlink_metadata(full).is_ok_and(|m| m.is_dir())
+}
 
 fn table_dir(repo: &Repo) -> PathBuf {
     repo.p.meta_dir().join("migrate")
@@ -539,7 +545,8 @@ fn deletable(repo: &Repo) -> Result<Vec<String>> {
     keep.extend(crate::views::protected_states(&repo.p));
     let mut out = Vec::new();
     for c in candidates(repo, Some(&store))? {
-        if !c.recorded || keep.contains(&c.id) || !repo.p.has_state(&c.id) {
+        // A tree that Git builds is a build cache of an imported state, not old storage: the built-tree rules free it.
+        if !c.recorded || c.freed || keep.contains(&c.id) || !repo.p.has_state(&c.id) || crate::gitbridge::buildable(repo, &c.id) {
             continue;
         }
         out.push(c.id);
@@ -567,7 +574,13 @@ fn delete_old(ctx: &Ctx, h: &Here, delete: bool, dry: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let left = plan(&candidates(repo, Some(&crate::objstore::open(&repo.p)?))?, &BTreeMap::new());
+    let mut left = plan(&candidates(repo, Some(&crate::objstore::open(&repo.p)?))?, &BTreeMap::new());
+    // The states left unavailable by request (`--leave-missing`) have no tree on purpose.
+    let unavailable: BTreeSet<String> = std::fs::read(table_dir(repo).join("unavailable.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    left.todo.retain(|id| !unavailable.contains(id));
     if !left.todo.is_empty() {
         bail!("{} state(s) are not migrated yet: the old snapshots stay", left.todo.len());
     }
@@ -581,8 +594,19 @@ fn delete_old(ctx: &Ctx, h: &Here, delete: bool, dry: bool) -> Result<()> {
             times: Id::parse(state.times.as_deref().context("missing migrated times")?)?,
         };
         let (_, comparison, _, _) = super::objects::compare_checkout(&h, &store, id, &r)?;
-        if !comparison.differences.is_empty() {
-            bail!("state {} cannot replace its old snapshot: {}", ids::short(id), comparison.differences.join("; "));
+        // The object tree was compared with this snapshot when it was migrated. A folder time that moved since is
+        // a change of the snapshot, not of the objects: the objects keep the time the migration verified.
+        let snapshot = repo.p.state_path(id);
+        let differences: Vec<&String> = counted_differences(repo, id, &comparison.differences)
+            .into_iter()
+            .filter(|d| !d.strip_prefix("time differs: ").is_some_and(|path| folder_in(&snapshot, path)))
+            .collect();
+        if !differences.is_empty() {
+            bail!(
+                "state {} cannot replace its old snapshot: {}",
+                ids::short(id),
+                differences.iter().map(|d| d.as_str()).collect::<Vec<_>>().join("; ")
+            );
         }
     }
     let gone = super::admin::drop_trees(repo, &ids)?;

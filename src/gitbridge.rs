@@ -1155,6 +1155,8 @@ fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
     let bases: BTreeSet<String> = p.db.present_layer_bases()?.into_iter().collect();
     let mut drop = Vec::new();
     for (_, id) in stamps.into_iter().skip(max) {
+        // A base of a live layer keeps its mark: once the layer goes, a later build drops it here. Without the
+        // mark nothing would look at the tree again, and only `gc --repair` would free it.
         if id == state || bases.contains(&id) {
             continue;
         }

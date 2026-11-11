@@ -421,6 +421,9 @@ Old person keys retain access to data that they could already read.
 ## Store disks
 
 `layr mount` serves a read-only WebDAV disk on the loopback address.
+Each line folder of the disk shows the newest state of that line on any machine, automatic saves included.
+A clone checks out the creator's head of each line instead (or the main head of `queue.merge-machine`).
+A save that another machine made on its own copy of a line is visible in the mount, and a clone reads it by its id.
 Each line has a folder. The `.layr` folder contains state metadata.
 On macOS, the login Keychain keeps each store identity after its first mount.
 The Keychain account is the SHA-256 of the store URL.
