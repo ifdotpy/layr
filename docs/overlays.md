@@ -157,7 +157,7 @@ the default mode is follow. Glasses made in shared mode before keep working.
 6. A cache is an ordinary glass (default view shows cache glasses like any glass; transfer cache flags removed): the cache flags, `src/cache_overlay.rs` and the cache fields of
    the state record go; `trust` is a glass property. Built 2026-11-11 in part; see "Slice 6 as
    built" below for what differs.
-7. Parts of folder glasses as v2 objects (built, partly): in a project with `objects.enabled`, a
+7. (migrate-parts also gives line heads their parts on folder glasses and sets the platform of an old `cache.<folder>` glass whose states have one platform; t237.) Parts of folder glasses as v2 objects (built, partly): in a project with `objects.enabled`, a
    part of a glass goes to the glass's own object store (`meta/overlays/<glass>/meta/objects`),
    written incrementally against the part before it (`objstore::enabled`, `record_states`). The
    immutable flag of sealed files is handled by the store's clone hook. Left: the native copy of a

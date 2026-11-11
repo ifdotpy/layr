@@ -1038,6 +1038,20 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !repo.is_admin(ctx) {
         return Err(exit(1, "error: only an admin of the project can migrate its states to parts"));
     }
+    // A `cache.<folder>` glass of an older layr gets the platform of its states, so it is the glass of that platform.
+    // `overlay set` takes the project lock itself, so this comes before the lock below.
+    let platforms = old_cache_platforms(repo)?;
+    if !a.has("-n") {
+        for (glass, platform) in &platforms {
+            set(ctx, &[glass.clone(), "--platform".into(), platform.clone()])?;
+        }
+    }
+    if !a.has("-q") {
+        let verb = if a.has("-n") { "would set" } else { "set" };
+        for (glass, platform) in &platforms {
+            outln!(ctx, "{verb} platform {platform} on {glass}");
+        }
+    }
     let _lock = repo.p.lock()?;
     let mut lines = repo.lines()?;
     let mut saved_by = BTreeMap::new();
@@ -1059,7 +1073,11 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 continue;
             }
         };
-        let parts = repo.parts_of(&layers)?;
+        let mut parts = repo.parts_of(&layers)?;
+        // The folder glasses (build output): the head of the line's overlay line of this platform.
+        for (glass, part) in folder_parts(repo, l)? {
+            parts.entry(glass).or_insert(part);
+        }
         let entry = states.entry(l.head.clone()).or_default();
         for (glass, part) in parts {
             if !st.parts.contains_key(&glass) && !entry.contains_key(&glass) {
@@ -1089,6 +1107,47 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{verb} parts to {} state(s) of {} line(s)", states.len(), moved.len());
     }
     Ok(0)
+}
+
+/// The parts of line `l` on the folder glasses of this platform: the head of its overlay line (`line-<id>`, or the
+/// older `line-<id>.<platform>`), when that is not the empty first state.
+fn folder_parts(repo: &Repo, l: &crate::model::Line) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (glass, _) in repo.folder_overlays()? {
+        let (Some(info), Ok(orepo)) = (repo.overlay_info(&glass)?, repo.overlay_repo(&glass)) else { continue };
+        let names = [format!("line-{}", l.id), crate::overlay::cache_line_name(&l.id)];
+        for name in names {
+            if let Some(ol) = orepo.p.db.line_by_name(&name)? {
+                if ol.head != info.root {
+                    out.insert(glass.clone(), ol.head);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `cache.<folder>` glasses with no `platform` whose saved states all have one platform: glass and platform.
+/// A glass with states of two platforms keeps no platform (`fetch` and `line new` filter its states one by one).
+fn old_cache_platforms(repo: &Repo) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for (glass, _, platform) in repo.all_folder_overlays()? {
+        if platform.is_some() || !glass.starts_with("cache.") {
+            continue;
+        }
+        let Ok(orepo) = repo.overlay_repo(&glass) else { continue };
+        let mut seen = BTreeSet::new();
+        for (id, _) in orepo.p.db.cache_states()? {
+            if let Some(st) = orepo.p.db.state(&id)? {
+                seen.extend(st.cache_platform);
+            }
+        }
+        if seen.len() == 1 {
+            out.push((glass, seen.into_iter().next().unwrap_or_default()));
+        }
+    }
+    Ok(out)
 }
 
 /// The layer of overlay `name` for a line of `owner`: its overlay line, made when missing (a
