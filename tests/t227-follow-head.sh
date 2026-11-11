@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # A local save after a follow build must cause a rebuild for the new head.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "its cache worker runs cargo with the OS home"
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup} CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 mkdir -p "$T/home" "$T/src/src"
 owner_args=""

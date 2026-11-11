@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # Candidate preparation records an exact result without running checks or moving the target.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 sample "$T/src"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"

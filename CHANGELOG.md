@@ -15,7 +15,9 @@
 * **checks:** keep the macOS check skips and skip the gateway fixture test without its fixture
 * **checks:** the macOS check skips the loopback TCP tests of api_tests and runner, which the Linux unit check runs
 * **migrate:** a state imported from Git may differ only in file times, which each Git build sets anew
+* **cache:** the cargo listing copy calls /bin/cp on macOS, not a GNU cp from PATH
 * **migrate:** a state in the free queue without an owner counts as freed
+* **migrate:** free the trees that Git built every 100 states, so a run over Git history does not fill the disk
 * **migrate:** preserve absent unowned records after replay
 
 ## [0.41.2](https://github.com/ifdotpy/layr/compare/v0.41.1...v0.41.2) (2026-11-10)

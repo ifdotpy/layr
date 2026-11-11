@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # V1 discovery can use an existing legacy store, but cannot turn a denial or a missing project into a write.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "it serves a fake Layr Cloud over loopback TCP"
 set -e
 sample "$T/source"
 l init p --from "$T/source" -q >/dev/null

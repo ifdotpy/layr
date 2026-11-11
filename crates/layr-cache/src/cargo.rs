@@ -549,7 +549,8 @@ fn list_snapshot(
             bail!("cannot safely list a target that is a symbolic link");
         }
         check_tree(target)?;
-        let mut cp = host.command("cp").context("cannot run cp")?;
+        // macOS: the system cp by path. A PATH with GNU coreutils first (a check sandbox) has a cp without `-c`.
+        let mut cp = host.command(if cfg!(target_os = "macos") { "/bin/cp" } else { "cp" }).context("cannot run cp")?;
         #[cfg(target_os = "macos")]
         cp.args(["-cRp"]);
         #[cfg(not(target_os = "macos"))]

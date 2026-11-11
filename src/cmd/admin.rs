@@ -1970,7 +1970,7 @@ fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
 /// Rounds of freeing: a round frees the states that no owner keeps and no present layer uses as
 /// its base. A base is freed in a later round, after its layers went. A tree that git built lately
 /// stays, as in the free step (`gitbridge::keep_newest_built`).
-fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
+pub(crate) fn drop_built_imports(repo: &Repo, dry: bool) -> Result<Vec<String>> {
     let mut freed = Vec::new();
     loop {
         let kept: BTreeSet<String> = repo

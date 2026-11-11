@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # A head move before cache publication must leave the cache unbuilt for the next pass.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "its cache worker runs cargo with the OS home"
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup} CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 mkdir -p "$T/home" "$T/src/src"
 owner_args=""

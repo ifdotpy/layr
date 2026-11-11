@@ -5,6 +5,7 @@
 # (the server access list decides who writes). A ref that moved on the server fails the push until a fetch, a
 # missing object fails a clone, and a server that needs a newer client stops the command with the version.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "it serves a fake Layr Cloud over loopback TCP"
 
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/tls-key.pem" -out "$T/tls-cert.pem" -days 1 \
     -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \

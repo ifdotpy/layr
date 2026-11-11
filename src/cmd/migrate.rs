@@ -190,6 +190,9 @@ fn counted_differences<'d>(repo: &Repo, id: &str, differences: &'d [String]) -> 
     differences.iter().filter(|d| !(git_built && d.starts_with("time differs"))).collect()
 }
 
+/// How many migrated states pass between two releases of trees that Git built.
+const BUILT_RELEASE_EVERY: usize = 100;
+
 fn table_dir(repo: &Repo) -> PathBuf {
     repo.p.meta_dir().join("migrate")
 }
@@ -483,6 +486,15 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if pending.len() >= RECORD_BATCH {
             record(&mut pending, &table)?;
+        }
+        // A state imported from Git is read as a tree that Git builds; each stays until something frees it. A
+        // long run over Git history would fill the disk with these trees: free them as the run goes.
+        if (n + 1) % BUILT_RELEASE_EVERY == 0 {
+            let freed = super::admin::drop_built_imports(repo, false)?;
+            if !freed.is_empty() {
+                repo.prune_all_bases()?;
+                let _ = crate::store::empty_trash(&repo.p.trash_dir()?, None);
+            }
         }
     }
     record(&mut pending, &table)?;

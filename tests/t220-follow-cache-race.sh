@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # A head change after the follow build must not be recorded as a warm cache for the new head.
 . "$(dirname "$0")/lib.sh"
+skip_in_check_sandbox "its cache worker runs cargo with the OS home"
 [ "$(id -u)" != 0 ] || { echo 'This test needs a non-root user'; exit 1; }
 mkdir -p "$T/home" "$T/src/src" "$T/barrier"
 if [ "$(uname -s)" = Darwin ]; then export HOME="$T/home"; else export LAYR_SOCKET="$T/service.sock"; fi

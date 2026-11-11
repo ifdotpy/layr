@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # An explicit check restores its source after a heads-only clone.
 . "$(dirname "$0")/lib.sh"
+needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 sample "$T/src"
 l init p --from "$T/src" -q >/dev/null
