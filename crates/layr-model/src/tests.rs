@@ -34,6 +34,7 @@ pub(super) fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
         tree: None,
         times: None,
         cache_key_parts: Default::default(),
+        parts: Default::default(),
     }
 }
 fn line(head: &str, machine: &str) -> LineChange {

@@ -172,9 +172,10 @@ impl Repo<'_> {
                     self.prepare_view_layers(ctx, line, view)?;
                     view.layers.clone()
                 } else {
-                    match source {
-                        Some(s) if !self.p.is_overlay() => self.inherit_layers(ctx, s, &line.id, owner)?,
-                        _ => Vec::new(),
+                    if self.p.is_overlay() {
+                        Vec::new()
+                    } else {
+                        self.inherit_layers(ctx, source, start, &line.id, owner)?
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;

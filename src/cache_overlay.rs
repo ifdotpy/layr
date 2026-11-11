@@ -531,6 +531,7 @@ impl<'a> Repo<'a> {
                     cache_shared: shared,
                     cache_platform: Some(key),
                     cache_key_parts: parts,
+                    parts: Default::default(),
                     cache_of: Some(project_state.to_string()),
                     tree: None,
                     times: None,

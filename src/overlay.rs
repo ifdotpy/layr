@@ -278,6 +278,14 @@ impl ListedOverlay<'_> {
     }
 }
 
+/// A glass whose parts the state records name (`StateRec::parts`, docs/overlays.md section 1a): a
+/// public follow overlay that is no cache. Its overlay store gets no overlay lines for new lines; a
+/// line's part on it lives in the line's stack and in the state records. Shared, hidden and cache
+/// overlays keep their overlay lines (slices 5 and 6).
+pub fn parts_glass(info: &Info) -> bool {
+    info.mode == Mode::Follow && !info.cache && !info.hidden
+}
+
 /// The overlay line of the line `line_id` in a cache overlay: one per platform (`<os>-<arch>`), so a
 /// build on another platform does not replace the cache of this one (docs/cache-overlays.md, section 6).
 pub fn cache_line_name(line_id: &str) -> String {
@@ -597,6 +605,9 @@ impl<'a> Repo<'a> {
         self.check_stack(line, &view.layers)?;
         for layer in &view.layers {
             let info = self.need_overlay(&layer.overlay)?;
+            if parts_glass(&info) {
+                continue;
+            }
             let repo = self.overlay_repo(&layer.overlay)?;
             let _lock = repo.p.lock()?;
             repo.ensure_overlay_line(ctx, &Self::overlay_line_name(&info, &line.id, line.owner), &layer.state, line.owner)?;
@@ -959,6 +970,60 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(layers)
+    }
+
+    /// The parts that a new state of a line with `layers` names: the state of each glass that
+    /// keeps parts (`parts_glass`).
+    pub fn parts_of(&self, layers: &[Layer]) -> Result<BTreeMap<String, String>> {
+        let mut out = BTreeMap::new();
+        for l in layers {
+            if self.overlay_info(&l.overlay)?.is_some_and(|i| parts_glass(&i)) {
+                out.insert(l.overlay.clone(), l.state.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// The layers of `line` when it shows its state `state`: the line's stack, each glass that
+    /// keeps parts at the part that `state` names. A state with parts that names no part on such a
+    /// glass is clear on it (the empty first state). A state without parts (saved before them, or
+    /// without overlays) and the head itself keep the stack as it is.
+    pub fn layers_at(&self, line: &Line, state: &str) -> Result<Vec<Layer>> {
+        let mut layers = self.layers(line)?;
+        if self.p.is_overlay() || state == line.head || layers.is_empty() {
+            return Ok(layers);
+        }
+        let parts = match self.p.db.state(state)? {
+            Some(s) if !s.parts.is_empty() => s.parts,
+            _ => return Ok(layers),
+        };
+        for l in layers.iter_mut() {
+            let Some(info) = self.overlay_info(&l.overlay)? else { continue };
+            if parts_glass(&info) {
+                l.state = parts.get(&l.overlay).cloned().unwrap_or(info.root);
+            }
+        }
+        Ok(layers)
+    }
+
+    /// The glasses of the view of a state (docs/overlays.md, section 1a): the parts that the state
+    /// names, in the order of the stack of `line` and then of the project's overlays. Empty for a
+    /// state without parts.
+    pub fn part_layers(&self, line: Option<&Line>, state: &str) -> Result<Vec<Layer>> {
+        let parts = match self.p.db.state(state)? {
+            Some(s) if !s.parts.is_empty() && !self.p.is_overlay() => s.parts,
+            _ => return Ok(Vec::new()),
+        };
+        let mut order: Vec<String> = match line {
+            Some(l) => self.layers(l)?.into_iter().map(|l| l.overlay).collect(),
+            None => Vec::new(),
+        };
+        for name in self.overlay_names()? {
+            if !order.contains(&name) {
+                order.push(name);
+            }
+        }
+        Ok(order.into_iter().filter_map(|o| parts.get(&o).map(|s| Layer { overlay: o.clone(), state: s.clone() })).collect())
     }
 
     pub fn readable_layers(&self, line: &Line) -> Result<Vec<Layer>> {
@@ -1408,6 +1473,20 @@ impl<'a> Repo<'a> {
                 keep.insert(l.state.clone());
             }
         }
+        // A glass that keeps parts: the parts of the newest `history` states of each line.
+        if !cache {
+            for line in lines {
+                let mut at = Some(line.head.clone());
+                for _ in 0..keep_n {
+                    let Some(id) = at.take() else { break };
+                    let Some(st) = self.p.db.state(&id)? else { break };
+                    if let Some(part) = st.parts.get(name) {
+                        keep.insert(part.clone());
+                    }
+                    at = st.parents.first().cloned();
+                }
+            }
+        }
         Ok(Some(keep))
     }
 
@@ -1509,15 +1588,46 @@ impl<'a> Repo<'a> {
     /// The layers a new line of `owner` takes from the line it starts from: the overlays of the
     /// source that the owner reads. A follow overlay gets a new overlay line at the source's
     /// state; a shared one uses the owner's line (made at the source's state when missing).
-    pub fn inherit_layers(&self, ctx: &Ctx, source: &Line, line_id: &str, owner: u32) -> Result<Vec<Layer>> {
+    ///
+    /// A glass that keeps parts (`parts_glass`) gets no overlay line: the new line shows the part
+    /// that the start state names (docs/overlays.md, section 1a), or the source's state of the glass
+    /// when the start is the source's head or a state without parts. Without a source line, the
+    /// glasses are the parts of the start state, in the order of the project's overlays.
+    pub fn inherit_layers(&self, ctx: &Ctx, source: Option<&Line>, start: &str, line_id: &str, owner: u32) -> Result<Vec<Layer>> {
+        let start_parts = match source {
+            Some(s) if s.head == start => BTreeMap::new(),
+            _ => self.p.db.state(start)?.map(|s| s.parts).unwrap_or_default(),
+        };
+        let stack = match source {
+            Some(s) => self.layers(s)?,
+            None => {
+                let mut stack = Vec::new();
+                for name in self.overlay_names()? {
+                    if let Some(part) = start_parts.get(&name) {
+                        stack.push(Layer { overlay: name, state: part.clone() });
+                    }
+                }
+                stack
+            }
+        };
         let mut out = Vec::new();
-        for l in self.layers(source)? {
+        for mut l in stack {
+            let parts = self.overlay_info(&l.overlay)?.is_some_and(|i| parts_glass(&i));
+            if parts {
+                if let Some(part) = start_parts.get(&l.overlay) {
+                    l.state = part.clone();
+                }
+            }
             // An overlay that is not on this machine (a restored project) is left out.
             let info = match self.overlay_info(&l.overlay)? {
                 Some(i) if self.layer_root(&l).is_some() => i,
                 _ => continue,
             };
             if !self.owner_reads(&l.overlay, owner)? {
+                continue;
+            }
+            if parts {
+                out.push(l);
                 continue;
             }
             let orepo = self.overlay_repo(&l.overlay)?;
@@ -1578,6 +1688,7 @@ pub fn next_state(
         tree: None,
         times: None,
         cache_key_parts: Default::default(),
+        parts: Default::default(),
     })
 }
 
@@ -1654,6 +1765,16 @@ pub fn move_overlay_line(orepo: &Repo, ctx: &Ctx, op: &str, ol: &Line, head: &st
     Ok(())
 }
 
+/// A record in an overlay that keeps new parts (`parts_glass`) of the project line `line_id`. It
+/// moves no overlay line: the state records of the line and its stack name the parts.
+pub fn record_part(orepo: &Repo, ctx: &Ctx, op: &str, line_id: &str, states: Vec<StateRec>) -> Result<()> {
+    let mut rec = Record::new(op);
+    rec.states = states;
+    rec.data = serde_json::json!({"project_line": line_id});
+    orepo.commit_record(ctx, rec)?;
+    Ok(())
+}
+
 /// What a commit in a line with overlays made.
 pub struct Committed {
     pub shared: Option<StateRec>,
@@ -1706,8 +1827,8 @@ pub fn commit_layers(
         repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
     }
     let own = repo.own(line);
-    let mut made: Vec<(usize, StateRec, Line)> = Vec::new();
-    let discard = |made: &[(usize, StateRec, Line)], orepos: &[Repo]| {
+    let mut made: Vec<(usize, StateRec, Option<Line>)> = Vec::new();
+    let discard = |made: &[(usize, StateRec, Option<Line>)], orepos: &[Repo]| {
         for (i, st, _) in made {
             orepos[*i].discard_states(std::slice::from_ref(st));
         }
@@ -1719,12 +1840,13 @@ pub fn commit_layers(
         let l = &layers[i];
         let info = repo.need_overlay(&l.overlay)?;
         let orepo = &orepos[i];
-        let ol = orepo
-            .p
-            .db
-            .line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?
-            .ok_or_else(|| anyhow!("line '{}' has no line in overlay '{}'", line.name, l.overlay))?;
-        if ol.head != l.state {
+        // A glass that keeps parts moves an overlay line only where an older layr made one.
+        let ol = match orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
+            Some(ol) => Some(ol),
+            None if parts_glass(&info) => None,
+            None => bail!("line '{}' has no line in overlay '{}'", line.name, l.overlay),
+        };
+        if ol.as_ref().is_some_and(|ol| ol.head != l.state) {
             discard(&made, &orepos);
             return Err(crate::cmd::exit(
                 1,
@@ -1735,8 +1857,9 @@ pub fn commit_layers(
                 ),
             ));
         }
+        let ol_id = ol.as_ref().map(|ol| ol.id.clone());
         let mut st =
-            match next_state(orepo, ctx, &l.state, &new_tree.path, ops, own, vec![l.state.clone()], message, Some(&ol.id)) {
+            match next_state(orepo, ctx, &l.state, &new_tree.path, ops, own, vec![l.state.clone()], message, ol_id.as_deref()) {
                 Ok(st) => st,
                 Err(e) => {
                     discard(&made, &orepos);
@@ -1758,6 +1881,18 @@ pub fn commit_layers(
         }
         made.push((i, st, ol));
     }
+    // The stack after the save; a new shared state names its parts from it.
+    let mut new_layers = layers.to_vec();
+    for (i, st, _) in &made {
+        new_layers[*i].state = st.id.clone();
+    }
+    let parts = match repo.parts_of(&new_layers) {
+        Ok(p) => p,
+        Err(e) => {
+            discard(&made, &orepos);
+            return Err(e);
+        }
+    };
     let head = repo.state(&line.head)?;
     let shared = if s.shared.is_empty() && !(allow_empty && made.is_empty()) {
         None
@@ -1769,6 +1904,7 @@ pub fn commit_layers(
                     st.author.name = n.clone();
                     st.author.email = e.clone();
                 }
+                st.parts = parts;
                 // Content conflicts stay listed while the committed file has markers.
                 let root = repo.p.state_path(&st.id);
                 for c in &head.conflicts {
@@ -1795,13 +1931,14 @@ pub fn commit_layers(
     }
     // The overlays first: a lost main record leaves an overlay line ahead of the stack, which the
     // next commit reports, never a stack that names a missing state.
-    let mut new_layers = layers.to_vec();
     let mut overlays = Vec::new();
     for (i, st, ol) in made {
         let orepo = &orepos[i];
         let _lock = orepo.p.lock()?;
-        move_overlay_line(orepo, ctx, "commit", &ol, &st.id, vec![st.clone()])?;
-        new_layers[i].state = st.id.clone();
+        match &ol {
+            Some(ol) => move_overlay_line(orepo, ctx, "commit", ol, &st.id, vec![st.clone()])?,
+            None => record_part(orepo, ctx, "commit", &line.id, vec![st.clone()])?,
+        }
         overlays.push((layers[i].overlay.clone(), st));
     }
     let new_head = shared.as_ref().map(|s| s.id.clone()).unwrap_or(line.head.clone());

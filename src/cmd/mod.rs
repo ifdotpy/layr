@@ -85,16 +85,31 @@ impl<'a> Here<'a> {
     }
 }
 
+thread_local! {
+    /// A head without a line for the reading commands of `layr overlay log|show|diff|grep|ls-files`
+    /// on a glass that keeps parts (docs/overlays.md, section 1a): the project and the line, whose
+    /// head is the part that the current line shows. Only `overlaycmd::read` sets it.
+    static DETACHED: std::cell::RefCell<Option<(String, Line)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `line` as the line of the commands in `project` that name no line.
+pub(crate) fn with_detached<T>(project: &str, line: Line, f: impl FnOnce() -> T) -> T {
+    DETACHED.with(|d| *d.borrow_mut() = Some((project.to_string(), line)));
+    let out = f();
+    DETACHED.with(|d| *d.borrow_mut() = None);
+    out
+}
+
 pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     let loc = ctx.locate()?;
     crate::store::set_holder_line(loc.line.as_deref());
     let repo = Repo::open(ctx, &loc.project)?;
     let line = match &loc.line {
         Some(n) => Some(repo.line(n)?),
-        None => None,
+        None => DETACHED.with(|d| d.borrow().as_ref().filter(|(p, _)| *p == loc.project).map(|(_, l)| l.clone())),
     };
     // The local ignore file of the line applies also where a command scans a copy of the folder.
-    if let Some(l) = &line {
+    if let Some(l) = line.as_ref().filter(|_| loc.line.is_some()) {
         crate::ignore_rules::set_line_exclude(Some(repo.working(l).join(crate::ignore_rules::LOCAL_EXCLUDE)));
     }
     Ok(Here { repo, line, loc })

@@ -275,8 +275,9 @@ fn discard_prepared(repo: &Repo) {
 pub struct OverlayMerge {
     /// The stack of the line after the merge.
     layers: Vec<Layer>,
-    /// Overlay, its line of the merged line, the new head, the new state (none for a fast-forward).
-    moves: Vec<(String, Line, String, Option<StateRec>)>,
+    /// Overlay, its line of the merged line (none for a glass that keeps parts), the new head, the
+    /// new state (none for a fast-forward).
+    moves: Vec<(String, Option<Line>, String, Option<StateRec>)>,
     messages: Vec<String>,
     conflicts: usize,
 }
@@ -299,27 +300,59 @@ impl OverlayMerge {
     }
 
     /// The records in the overlays, before the record of the line.
-    fn record(&self, ctx: &Ctx, repo: &Repo) -> Result<()> {
+    fn record(&self, ctx: &Ctx, repo: &Repo, line_id: &str) -> Result<()> {
         for (name, ol, head, st) in &self.moves {
             let o = repo.overlay_repo(name)?;
             let _lock = o.p.lock()?;
-            crate::overlay::move_overlay_line(&o, ctx, "merge", ol, head, st.iter().cloned().collect())?;
+            match ol {
+                Some(ol) => crate::overlay::move_overlay_line(&o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
+                None => {
+                    if let Some(st) = st {
+                        crate::overlay::record_part(&o, ctx, "merge", line_id, vec![st.clone()])?;
+                    }
+                }
+            }
         }
         Ok(())
     }
 }
 
 /// Merge the follow overlays of `theirs` into those of `line`: a fast-forward, or a three-way merge
-/// in the overlay (states written, no records yet).
-fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, label: &str, message: &str) -> Result<OverlayMerge> {
+/// in the overlay (states written, no records yet). Without a line of `theirs`, the parts that the
+/// state `theirs_state` names (docs/overlays.md, section 1a) are the other side.
+#[allow(clippy::too_many_arguments)]
+fn plan_overlays(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    theirs: Option<&Line>,
+    theirs_state: Option<&str>,
+    label: &str,
+    message: &str,
+) -> Result<OverlayMerge> {
     let ours = repo.layers(line)?;
     let mut m = OverlayMerge { layers: ours.clone(), ..Default::default() };
-    let theirs = match theirs {
-        Some(t) => t,
-        None => return Ok(m),
+    let (their_layers, theirs_name) = match theirs {
+        Some(t) => (repo.layers(t)?, t.name.clone()),
+        None => {
+            let parts = match theirs_state {
+                Some(st) => repo.p.db.state(st)?.map(|s| s.parts).unwrap_or_default(),
+                None => Default::default(),
+            };
+            // A state takes part only on the glasses that the line shows.
+            let layers: Vec<Layer> = parts
+                .into_iter()
+                .filter(|(overlay, _)| ours.iter().any(|l| &l.overlay == overlay))
+                .map(|(overlay, state)| Layer { overlay, state })
+                .collect();
+            (layers, label.to_string())
+        }
     };
+    if their_layers.is_empty() {
+        return Ok(m);
+    }
     let r = (|| -> Result<()> {
-        for tl in repo.layers(theirs)? {
+        for tl in their_layers {
             let info = match repo.overlay_info(&tl.overlay)? {
                 Some(i) if i.mode == Mode::Follow => i,
                 _ => continue,
@@ -327,7 +360,7 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
             if !repo.reads_overlay(&tl.overlay, ctx.caller.uid, ctx.caller.gid)? {
                 return Err(exit(
                     1,
-                    format!("error: merging line '{}' needs the read right of its overlay '{}'", theirs.name, tl.overlay),
+                    format!("error: merging line '{}' needs the read right of its overlay '{}'", theirs_name, tl.overlay),
                 ));
             }
             let i = match ours.iter().position(|l| l.overlay == tl.overlay) {
@@ -337,7 +370,7 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
                         1,
                         format!(
                             "error: line '{}' shows overlay '{}' (follow mode), which line '{}' does not use; run 'layr overlay use --add {}' in '{}' first",
-                            theirs.name, tl.overlay, line.name, tl.overlay, line.name
+                            theirs_name, tl.overlay, line.name, tl.overlay, line.name
                         ),
                     ))
                 }
@@ -347,17 +380,33 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
             if tl.state == ours_s || o.is_ancestor(&tl.state, &ours_s)? {
                 continue;
             }
-            let ol =
-                o.p.db
-                    .line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?
-                    .ok_or_else(|| exit(1, format!("error: line '{}' has no line in overlay '{}'", line.name, tl.overlay)))?;
+            let ol = match o.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
+                Some(ol) => Some(ol),
+                None if crate::overlay::parts_glass(&info) => None,
+                None => return Err(exit(1, format!("error: line '{}' has no line in overlay '{}'", line.name, tl.overlay))),
+            };
+            // A glass that keeps parts has no overlay line: the new part belongs to no line of the overlay.
+            let part_line = || Line {
+                id: crate::ids::new_id(),
+                name: line.name.clone(),
+                head: ours_s.clone(),
+                owner: line.owner,
+                machine: line.machine.clone(),
+            };
+            let write_line = ol.clone().unwrap_or_else(part_line);
+            let detach = |mut st: StateRec| {
+                if ol.is_none() {
+                    st.line = None;
+                }
+                st
+            };
             if o.is_ancestor(&ours_s, &tl.state)? {
                 m.layers[i].state = tl.state.clone();
                 m.moves.push((tl.overlay.clone(), ol, tl.state.clone(), None));
                 continue;
             }
             if repo.overlay_props(&tl.overlay)?.merge == MergeKind::UnionTheirs {
-                let st = crate::overlay::union_state(&o, ctx, &ol, &ours_s, &tl.state, message)?;
+                let st = detach(crate::overlay::union_state(&o, ctx, &write_line, &ours_s, &tl.state, message)?);
                 m.layers[i].state = st.id.clone();
                 m.moves.push((tl.overlay.clone(), ol, st.id.clone(), Some(st)));
                 continue;
@@ -376,8 +425,18 @@ fn plan_overlays(ctx: &Ctx, repo: &Repo, line: &Line, theirs: Option<&Line>, lab
                     ),
                 ));
             }
-            let (st, out) =
-                merge_states(ctx, &o, &ol, &base, &ours_s, &tl.state, label, vec![ours_s.clone(), tl.state.clone()], message)?;
+            let (st, out) = merge_states(
+                ctx,
+                &o,
+                &write_line,
+                &base,
+                &ours_s,
+                &tl.state,
+                label,
+                vec![ours_s.clone(), tl.state.clone()],
+                message,
+            )?;
+            let st = detach(st);
             m.conflicts += out.conflicts.len();
             m.messages.extend(out.messages.iter().map(|x| format!("overlay {}: {x}", tl.overlay)));
             m.layers[i].state = st.id.clone();
@@ -539,6 +598,13 @@ fn finish(
         Some(o) if o.changed() => o.layers.clone(),
         _ => repo.layers(line)?,
     };
+    // A new state names its parts on the glasses (docs/overlays.md, section 1a).
+    if !layers.is_empty() {
+        let parts = repo.parts_of(&layers)?;
+        for st in pending.states.iter_mut().filter(|s| s.id == new_head) {
+            st.parts = parts.clone();
+        }
+    }
     let trees = crate::trace::span("finish: trees");
     // Without overlays both trees are read in their layers: a complete view of a thin state
     // cost one clone of the whole tree, also for a fast-forward that changes one file.
@@ -581,7 +647,7 @@ fn finish(
             }
         }
         if let Some(o) = ovl.filter(|o| o.changed()) {
-            o.record(ctx, repo)?;
+            o.record(ctx, repo, &line.id)?;
         }
         repo.commit_record(ctx, rec)?;
         Ok(())
@@ -1694,7 +1760,9 @@ fn merge_rev_inner(
     let mut local = local_paths(repo, line, &st)?;
     let quiet = a.has("-q");
     // The follow overlays merge with the line: all of them or none.
-    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), &label, &message)?;
+    // A queued merge takes no overlays: its state comes without a line.
+    let theirs_parts = if queue.is_none() { Some(theirs.as_str()) } else { None };
+    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message)?;
     if queue.is_some() && ovl.conflicts > 0 {
         let paths: Vec<_> = ovl
             .moves
@@ -2499,6 +2567,7 @@ mod approval_tests {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         };
         let base = state(StateKind::Commit, vec![]);
         let derived = state(StateKind::Derived, vec![]);

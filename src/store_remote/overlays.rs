@@ -70,11 +70,32 @@ fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options>
 
 /// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
 /// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
+/// A glass that keeps parts (docs/overlays.md, section 1a) adds the part that each line shows and the parts that the
+/// states of the line name, with the history of each part.
 pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
+    let glass = orepo.p.name.rsplit_once('%').map(|(_, g)| g.to_string());
     let mut ids = Vec::new();
+    let mut parts = Vec::new();
     for name in lines {
         let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
         ids.push(format!("line-{}", line.id));
+        let Some(glass) = &glass else { continue };
+        // Every machine's head of the line and its stack there (a remote moves the line ahead of this machine).
+        let mut tips = vec![line.head.clone()];
+        let mut stacks = repo.layers(&line).unwrap_or_default();
+        for (machine, head) in repo.p.db.line_heads(&line.id)? {
+            tips.push(head);
+            if let Some(v) = repo.p.config_value(&format!("{}@{machine}", crate::overlay::stack_key(&line.id)))? {
+                stacks.extend(serde_json::from_value::<Vec<crate::overlay::Layer>>(v).unwrap_or_default());
+            }
+        }
+        parts.extend(stacks.into_iter().filter(|l| &l.overlay == glass).map(|l| l.state));
+        let states = if heads { tips } else { reader::state_ancestries(repo, tips)? };
+        for id in states {
+            if let Some(part) = repo.p.db.state(&id)?.and_then(|st| st.parts.get(glass).cloned()) {
+                parts.push(part);
+            }
+        }
     }
     let tips: Vec<String> = orepo
         .p
@@ -83,6 +104,7 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
         .into_iter()
         .filter(|l| l.name.starts_with("user-") || ids.iter().any(|id| l.name == *id || l.name.starts_with(&format!("{id}."))))
         .map(|l| l.head)
+        .chain(parts)
         .collect();
     if heads {
         return Ok(tips.into_iter().collect());

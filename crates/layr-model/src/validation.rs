@@ -2,6 +2,7 @@
 use crate::types::*;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub fn check_name(kind: &str, name: &str) -> Result<()> {
     if matches!(kind, "line" | "tag" | "ref") && matches!(name, "HEAD" | "head") {
@@ -117,6 +118,35 @@ pub fn is_ref(s: &str) -> bool {
 /// (docs/objects.md, section 13): `{"states": {"<state id>": {"times": "<id>", "tree": "<id>"}}}`.
 pub const STATE_TREE_OP: &str = "state.tree";
 
+/// The operation of a record that gives existing states their parts (`layr overlay migrate-parts`,
+/// docs/overlays.md section 1a): `{"states": {"<state id>": {"<overlay>": "<part id>"}}}`. A part
+/// that the state already names stays: the record only adds glasses.
+pub const STATE_PARTS_OP: &str = "state.parts";
+
+/// The (state, parts) entries of a `state.parts` record, checked: ids are ids, glasses are names.
+pub fn state_parts(data: &serde_json::Value) -> anyhow::Result<Vec<(String, BTreeMap<String, String>)>> {
+    let Some(states) = data.get("states").and_then(|v| v.as_object()) else {
+        anyhow::bail!("a state.parts record names no states");
+    };
+    let mut out = Vec::with_capacity(states.len());
+    for (state, v) in states {
+        let Some(parts) = v.as_object() else { anyhow::bail!("state.parts: state {state:?} has no parts") };
+        if !is_uuid(state) {
+            anyhow::bail!("state.parts: bad state {state:?}");
+        }
+        let mut map = BTreeMap::new();
+        for (glass, part) in parts {
+            let part = part.as_str().unwrap_or("");
+            if !is_name(glass) || !is_uuid(part) {
+                anyhow::bail!("state.parts: bad entry for state {state:?}");
+            }
+            map.insert(glass.clone(), part.to_string());
+        }
+        out.push((state.clone(), map));
+    }
+    Ok(out)
+}
+
 /// An object id of docs/objects.md: 64 lowercase hex digits.
 pub fn is_object_id(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
@@ -151,6 +181,9 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
     }
     if r.op == STATE_TREE_OP {
         state_trees(&r.data)?;
+    }
+    if r.op == STATE_PARTS_OP {
+        state_parts(&r.data)?;
     }
     if r.states.iter().any(|s| s.tree.is_some() != s.times.is_some()) {
         bail!("record {}: a state names a tree without a times table, or the reverse", r.seq);
@@ -203,6 +236,12 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             if !is_cache_name(snap, &s.id) {
                 bail!("record {}: bad cache name {snap:?}", r.seq);
             }
+        }
+        for (glass, part) in &s.parts {
+            if !is_name(glass) {
+                bail!("record {}: bad overlay name {glass:?}", r.seq);
+            }
+            uuid("part", part)?;
         }
         for c in &s.conflicts {
             layr_store::paths::check_rel(&c.path)?;
@@ -580,7 +619,42 @@ mod tests {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         }
+    }
+
+    #[test]
+    fn parts_are_optional_checked_and_kept_apart_from_caches() {
+        let id = "01a12290-0000-7000-8000-000000000003";
+        let part = "01a12290-0000-7000-8000-000000000004";
+        let mut st = state(id);
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(!json.contains("parts"), "a state without parts writes no key: {json}");
+        let old: StateRec = serde_json::from_str(&json).unwrap();
+        assert!(old.parts.is_empty(), "an older record reads with no parts");
+        st.parts.insert("notes".into(), part.into());
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(json.contains(&format!(r#""parts":{{"notes":"{part}"}}"#)), "{json}");
+        let back: StateRec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.parts, st.parts);
+        assert!(back.caches.is_empty(), "parts are not caches (the `layers` key)");
+        let mut r = Record::new("commit");
+        r.id = id.into();
+        r.machine = id.into();
+        r.states = vec![st.clone()];
+        assert!(validate(&r).is_ok());
+        r.states[0].parts.insert("../x".into(), part.into());
+        assert!(validate(&r).is_err(), "a glass is a name");
+        r.states[0].parts = BTreeMap::from([("notes".to_string(), "../x".to_string())]);
+        assert!(validate(&r).is_err(), "a part is an id");
+        let mut m = Record::new(STATE_PARTS_OP);
+        m.id = id.into();
+        m.machine = id.into();
+        m.data = serde_json::json!({"states": {id: {"notes": part}}});
+        assert!(validate(&m).is_ok());
+        assert_eq!(state_parts(&m.data).unwrap(), vec![(id.to_string(), st.parts.clone())]);
+        m.data = serde_json::json!({"states": {id: {"notes": "x"}}});
+        assert!(validate(&m).is_err());
     }
 
     #[test]

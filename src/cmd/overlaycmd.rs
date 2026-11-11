@@ -30,6 +30,7 @@ const USAGE: &str =
        layr overlay show <name> --json
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
+       layr overlay migrate-parts [-n|--dry-run] [-q]
 properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -48,6 +49,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "move" => move_cmd(ctx, &rest),
         "repair" => repair(ctx, &rest),
         "remove" => remove(ctx, &rest),
+        "migrate-parts" => migrate_parts(ctx, &rest),
         "show" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--json") => show_json(ctx, &rest),
         "log" if rest.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--ops") => operations(ctx, &rest),
         "log" | "show" | "diff" | "grep" | "ls-files" | "blame" | "rev-parse" => read(ctx, sub, &rest),
@@ -204,6 +206,7 @@ pub(crate) fn make_overlay(
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         };
         let mut rec = Record::new("commit");
         rec.states.push(st);
@@ -980,6 +983,75 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// `layr overlay migrate-parts` (docs/overlays.md, section 1a): the head of each line names its
+/// parts on the glasses that keep parts, from the line's stack (the heads of its overlay lines). One
+/// `state.parts` record adds them; the signed save records stay as they are. A state that two lines
+/// show takes the parts of the line that saved it, else of the first line by name. Older states
+/// keep no parts: their overlay lines stay for reading.
+fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet");
+    let a = parse(&spec, args)?;
+    if !a.pos.is_empty() {
+        return Err(exit(128, USAGE));
+    }
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    if !repo.is_admin(ctx) {
+        return Err(exit(1, "error: only an admin of the project can migrate its states to parts"));
+    }
+    let _lock = repo.p.lock()?;
+    let mut lines = repo.lines()?;
+    let mut saved_by = BTreeMap::new();
+    for l in &lines {
+        if let Some(st) = repo.p.db.state(&l.head)? {
+            saved_by.insert(l.head.clone(), st);
+        }
+    }
+    // The line that saved a state goes first, then the lines by name.
+    lines.sort_by_key(|l| (saved_by.get(&l.head).and_then(|s| s.line.as_deref()) != Some(l.id.as_str()), l.name.clone()));
+    let mut states: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut moved = BTreeSet::new();
+    for l in &lines {
+        let Some(st) = saved_by.get(&l.head) else { continue };
+        let layers = match repo.layers(l) {
+            Ok(layers) => layers,
+            Err(e) => {
+                eprintln!("warning: line '{}' keeps its overlay lines: {e:#}", l.name);
+                continue;
+            }
+        };
+        let parts = repo.parts_of(&layers)?;
+        let entry = states.entry(l.head.clone()).or_default();
+        for (glass, part) in parts {
+            if !st.parts.contains_key(&glass) && !entry.contains_key(&glass) {
+                entry.insert(glass, part);
+                moved.insert(l.name.clone());
+            }
+        }
+    }
+    states.retain(|_, parts| !parts.is_empty());
+    if states.is_empty() {
+        if !a.has("-q") {
+            outln!(ctx, "no state to migrate: every line head names its parts");
+        }
+        return Ok(0);
+    }
+    if !a.has("-n") {
+        let mut rec = Record::new(layr_model::validation::STATE_PARTS_OP);
+        rec.data = serde_json::json!({ "states": states });
+        repo.commit_record(ctx, rec)?;
+    }
+    if !a.has("-q") {
+        for (state, parts) in &states {
+            let list: Vec<String> = parts.iter().map(|(g, p)| format!("{g}={}", ids::short(p))).collect();
+            outln!(ctx, "{} {}", ids::short(state), list.join(" "));
+        }
+        let verb = if a.has("-n") { "would give" } else { "gave" };
+        outln!(ctx, "{verb} parts to {} state(s) of {} line(s)", states.len(), moved.len());
+    }
+    Ok(0)
+}
+
 /// The layer of overlay `name` for a line of `owner`: its overlay line, made when missing (a
 /// follow line starts empty; a shared line of another user starts at the owner's).
 fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> Result<Layer> {
@@ -987,6 +1059,12 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     let gid = crate::ctx::Caller::from_uid(line.owner).gid;
     if !repo.reads_overlay(name, line.owner, gid)? {
         return Err(exit(1, format!("error: the owner of line '{}' does not read overlay '{name}'", line.name)));
+    }
+    // A glass that keeps parts gets no overlay line: the line shows the glass from its empty first
+    // state, or from the state of its own old overlay line.
+    if crate::overlay::parts_glass(&info) {
+        let ol = repo.overlay_project(name)?.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?;
+        return Ok(Layer { overlay: name.to_string(), state: ol.map(|l| l.head).unwrap_or(info.root) });
     }
     let orepo = repo.overlay_repo(name)?;
     let _lock = orepo.p.lock()?;
@@ -1233,6 +1311,20 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     // The overlay's own policy decides: a user who does not read it is refused here.
     let orepo = Repo::open(ctx, &pname)?;
     let olname = overlay_line(ctx, &h.repo, h.line.as_ref(), &info, &name, &orepo)?.map(|l| l.name);
+    // A glass that keeps parts has no overlay line: the commands read from the part that the
+    // current line shows, as a head without a line.
+    let detached = match (&olname, h.line.as_ref()) {
+        (None, Some(l)) if crate::overlay::parts_glass(&info) => {
+            h.repo.layers(l)?.into_iter().find(|x| x.overlay == name).map(|x| crate::model::Line {
+                id: ids::new_id(),
+                name: l.name.clone(),
+                head: x.state,
+                owner: l.owner,
+                machine: l.machine.clone(),
+            })
+        }
+        _ => None,
+    };
     let mut env = ctx.env.clone();
     env.insert("LAYR_PROJECT".into(), pname);
     match olname {
@@ -1251,7 +1343,13 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     };
     let mut argv = vec![cmd.to_string()];
     argv.extend(args[1..].iter().cloned());
-    let r = super::run(&sub, &argv);
+    let r = match detached {
+        Some(l) => {
+            let project = sub.env("LAYR_PROJECT").unwrap_or_default().to_string();
+            super::with_detached(&project, l, || super::run(&sub, &argv))
+        }
+        None => super::run(&sub, &argv),
+    };
     let _ = sub.out.borrow_mut().flush();
     r
 }

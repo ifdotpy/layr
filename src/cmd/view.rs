@@ -26,7 +26,19 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
         h.repo.view_of(&line)?
     } else {
-        crate::revs::resolve_view(&h.repo, current.as_ref(), rest.first().map(String::as_str).unwrap_or("head"))?
+        let rev = rest.first().map(String::as_str).unwrap_or("head");
+        let mut view = crate::revs::resolve_view(&h.repo, current.as_ref(), rev)?;
+        // The view of a state is the state with its parts (docs/overlays.md, section 1a).
+        let state_rev = !matches!(rev, "" | "head" | "@")
+            && !rev.starts_with("views/")
+            && !rev.starts_with("attestations/")
+            && h.repo.p.db.line_by_name(rev)?.is_none();
+        if state_rev && view.layers.is_empty() {
+            view.layers = h.repo.part_layers(current.as_ref(), &view.shared)?;
+            view.validate()?;
+            h.repo.check_view_collected(&view)?;
+        }
+        view
     };
     if show
         && view.layers.iter().any(|layer| {

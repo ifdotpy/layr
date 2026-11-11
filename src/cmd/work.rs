@@ -1945,8 +1945,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
     repo.check_move(ctx, &line, &target)?;
-    // A line with overlays moves to the target with its overlays in place.
-    let layers = repo.layers(&line)?;
+    // A line with overlays moves to the target with its overlays in place. A hard reset to a state
+    // with parts shows its parts (docs/overlays.md, section 1a); the other modes keep the stack.
+    let current = repo.layers(&line)?;
+    let layers = if a.has("--hard") && !a.has("--soft") { repo.layers_at(&line, &target)? } else { current.clone() };
     let target_view = if layers.is_empty() { None } else { Some(repo.assemble(&line, &target, &layers)?) };
     let target_root = match &target_view {
         Some(v) => v.path.clone(),
@@ -1991,7 +1993,15 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => false,
     };
     let head = line.head.clone();
-    let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), serde_json::json!({"mode": mode}));
+    let mut data = serde_json::json!({"mode": mode});
+    if layers != current {
+        data["line"] = serde_json::json!(line.id);
+        data["stack"] = repo.public_stack_data(&line.id, &layers)?;
+        let changed: Vec<&str> =
+            layers.iter().zip(&current).filter(|(n, o)| n.state != o.state).map(|(n, _)| n.overlay.as_str()).collect();
+        data["overlays"] = serde_json::json!(changed);
+    }
+    let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), data);
     let committed = rec.and_then(|rec| {
         let states = rec.states.clone();
         repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {

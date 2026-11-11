@@ -491,6 +491,17 @@ impl Db {
                 let envelope: serde_json::Value = serde_json::from_str(&raw)?;
                 self.apply_state_trees(&serde_json::from_value(envelope["r"].clone())?)?;
             }
+            // A `state.parts` record of `layr overlay migrate-parts` can arrive first too.
+            let parts: Vec<String> = tx
+                .prepare_cached(
+                    "SELECT raw FROM records WHERE op='state.parts' AND json_type(raw, '$.r.data.states.' || ?1)='object'",
+                )?
+                .query_map(params![s.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for raw in parts {
+                let envelope: serde_json::Value = serde_json::from_str(&raw)?;
+                self.apply_state_parts(&serde_json::from_value::<Record>(envelope["r"].clone())?.data)?;
+            }
             for p in &s.parents {
                 if self.state(p)?.map(|p| p.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("source history cannot have a cache or derived parent");
@@ -784,6 +795,11 @@ impl Db {
                     tx.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![st, v.to_string()])?;
                 }
             }
+            layr_model::validation::STATE_PARTS_OP => {
+                // The parts of states saved before parts (docs/overlays.md, section 1a). The state
+                // keeps its signed save record; the row gets the glasses it did not name.
+                self.apply_state_parts(d)?;
+            }
             _ => {}
         }
         // The overlays a line shows (`stack.<line id>`), from any record that changes them.
@@ -834,6 +850,31 @@ impl Db {
             value["tree"] = serde_json::json!(tree);
             value["times"] = serde_json::json!(times);
             value["tree_ord"] = serde_json::json!(ord);
+            self.conn.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![state, value.to_string()])?;
+        }
+        Ok(())
+    }
+
+    /// Add the parts of a `state.parts` record to the rows of its states. A glass that a state
+    /// names already keeps its part; a state that is not here yet gets them when it arrives.
+    fn apply_state_parts(&self, data: &serde_json::Value) -> Result<()> {
+        for (state, parts) in layr_model::validation::state_parts(data)? {
+            let raw: Option<String> = self
+                .conn
+                .prepare_cached("SELECT rec FROM states WHERE id=?1")?
+                .query_row(params![state], |row| row.get(0))
+                .optional()?;
+            let Some(raw) = raw else { continue };
+            let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+            let mut all = value.get("parts").and_then(|x| x.as_object()).cloned().unwrap_or_default();
+            let before = all.len();
+            for (glass, part) in parts {
+                all.entry(glass).or_insert(serde_json::json!(part));
+            }
+            if all.len() == before {
+                continue;
+            }
+            value["parts"] = serde_json::Value::Object(all);
             self.conn.prepare_cached("UPDATE states SET rec=?2 WHERE id=?1")?.execute(params![state, value.to_string()])?;
         }
         Ok(())
@@ -2054,6 +2095,7 @@ mod tests {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         });
         r
     }

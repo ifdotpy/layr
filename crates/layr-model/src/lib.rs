@@ -268,6 +268,15 @@ impl Project {
                 }
             }
         }
+        for rec in records.iter().filter(|rec| rec.op == validation::STATE_PARTS_OP) {
+            for (id, parts) in validation::state_parts(&rec.data)? {
+                if let Some(state) = p.states.get_mut(&id) {
+                    for (glass, part) in parts {
+                        state.state.parts.entry(glass).or_insert(part);
+                    }
+                }
+            }
+        }
         p.records = records;
         Ok(p)
     }

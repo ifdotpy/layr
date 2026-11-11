@@ -724,6 +724,7 @@ impl<'a> Repo<'a> {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         }
     }
 
@@ -842,6 +843,7 @@ impl<'a> Repo<'a> {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         })
     }
 
@@ -2178,10 +2180,8 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-        let layers = match source {
-            Some(s) if !self.p.is_overlay() => self.inherit_layers(ctx, s, &line.id, owner)?,
-            _ => Vec::new(),
-        };
+        let layers =
+            if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line.id, owner)? };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
@@ -4425,6 +4425,7 @@ mod cache_platform_tests {
                 tree: None,
                 times: None,
                 cache_key_parts: Default::default(),
+                parts: Default::default(),
             });
             p.append(rec, &ctx.actor()).unwrap();
             let repo = Repo::open(&ctx, "p").unwrap();
@@ -4621,6 +4622,7 @@ mod commit_record_tests {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         });
         if objects {
             rec.lines.insert(ids::new_id(), crate::model::LineChange {

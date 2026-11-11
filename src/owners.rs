@@ -930,6 +930,7 @@ mod tests {
             tree: None,
             times: None,
             cache_key_parts: Default::default(),
+            parts: Default::default(),
         }
     }
 
