@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.0](https://github.com/ifdotpy/layr/compare/v0.42.0...v0.43.0) (2026-11-11)
+
+
+### Features
+
+* **free:** free dead temporary copies, trash, leaked states and Git-built trees on time; migrate --delete-old fixes
+
 ## [0.42.0](https://github.com/ifdotpy/layr/compare/v0.41.2...v0.42.0) (2026-11-11)
 
 
