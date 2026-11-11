@@ -438,6 +438,23 @@ fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
     Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, String::new())).collect())
 }
 
+/// The state trees of a store, for `restore_states`. A command that restores many states (migrate)
+/// calls it once per state, so the list is kept for the process and read again only when a state
+/// that it must restore is not in it.
+fn restore_attempts(store: &Store, repo: &Repo, ids: &[String]) -> Result<BTreeMap<String, String>> {
+    static KNOWN: std::sync::Mutex<BTreeMap<std::path::PathBuf, BTreeMap<String, String>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    let wanted = |states: &BTreeMap<String, String>| ids.iter().all(|id| repo.p.has_state(id) || states.contains_key(id));
+    if let Some(states) = KNOWN.lock().ok().and_then(|known| known.get(&store.dir).filter(|s| wanted(s)).cloned()) {
+        return Ok(states);
+    }
+    let states = attempts(&store.backend)?;
+    if let Ok(mut known) = KNOWN.lock() {
+        known.insert(store.dir.clone(), states.clone());
+    }
+    Ok(states)
+}
+
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
     let mut states = BTreeMap::new();
     for object in backend.list("states/")? {
@@ -619,7 +636,7 @@ pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Resu
             hex::decode(&hex_key)?.try_into().map_err(|_| anyhow::anyhow!("trusted key of {machine} is not 32 bytes"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }
-    let states = attempts(&store.backend)?;
+    let states = restore_attempts(store, repo, ids)?;
     let mut reader = Reader::new(&store.backend, &identity, &keys);
     let mut files = 0;
     for id in ids {
