@@ -237,8 +237,10 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         store.set_state(&state.id, &refs)?;
         state.tree = Some(refs.tree.hex());
         state.times = Some(refs.times.hex());
-        // A glass keeps the native copy of its part: the overlay code reads parts as folders.
-        if !p.is_overlay() {
+        // A part of a build-output glass (`cache_of`) gives up its native copy too: the cache code reads it through
+        // `state_root`, which builds the copy again from these objects. Other glasses keep theirs for now: their
+        // code reads parts as folders.
+        if !p.is_overlay() || state.cache_of.is_some() {
             queue_native(p, &state.id)?;
         }
     }
@@ -367,4 +369,15 @@ pub fn retire_native(repo: &Repo) -> Result<()> {
     let gone = crate::cmd::admin::drop_trees(repo, &ids)?;
     for id in gone { std::fs::remove_file(dir.join(id))?; }
     Ok(())
+}
+
+/// Drop from the object store of `p` what its kept states do not reach (`Store::prune`), under the project lock, so no
+/// save publishes a state while the walk runs. None when `p` has no object store.
+pub fn prune(p: &Project) -> Result<Option<layr_objects::store::PruneReport>> {
+    if !exists(p) {
+        return Ok(None);
+    }
+    let _lock = (!p.holds_lock()).then(|| p.lock()).transpose()?;
+    let keep = p.db.kept_state_ids()?;
+    Ok(Some(open(p)?.prune(&keep)?))
 }

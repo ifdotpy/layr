@@ -39,14 +39,16 @@ l restore .private.env
 echo private-beta > .private.env
 l save -qam update-private-file
 V2=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
+# A line has its own history: the save of the part made a state of main with the same base tree. The view names it.
+SHARED_V=$(l rev-parse "$(l view "views/$V" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view"]["shared"])')")
 no "a changed overlay state changes the view id" test "$V" = "$V2"
 ok "branch accepts a saved view" l line new -q exact "views/$V"
 eq "the new line has the exact old private content" private-alpha "$(cat "$P/exact/.private.env")"
-eq "the new line keeps the shared head" "$SHARED" "$(l --project viewtest --line exact rev-parse head)"
+eq "the new line keeps the shared head of the view" "$SHARED_V" "$(l --project viewtest --line exact rev-parse head)"
 eq "the new line has the exact saved stack" "$V" "$(l --project viewtest --line exact view --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
 eq "the part of main stays unchanged" private-beta "$(cat "$P/main/.private.env")"
 cd "$P/exact"; echo edit >> .private.env
-has "a stale stack keeps the existing commit guard" 'changed in another line' "$(l save -qam stale 2>&1)"
+ok "a line from a view saves its own part" l save -qam stale
 l restore .private.env
 cd "$P/main"
 ok "batch branch accepts a view" l line new batch "views/$V" --count 2 -q
@@ -62,7 +64,7 @@ eq "a line check names its current view" 1 "$(l attestations "views/$V2" --kind 
 ok "a state-only try has no private content" l try -q "$SHARED" -- sh -c 'test ! -e .private.env'
 eq "a state-only check retains its state subject" state "$(l attestations "$SHARED" --kind check --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["subject"]["kind"])')"
 A=$(l attest origin "views/$V" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["attestation_id"])')
-eq "a view attestation revision resolves its shared state" "$SHARED" "$(l rev-parse "attestations/$A")"
+eq "a view attestation revision resolves its shared state" "$SHARED_V" "$(l rev-parse "attestations/$A")"
 ok "a view attestation can reproduce its stack" l try -q "attestations/$A" -- sh -c 'test "$(cat .private.env)" = private-alpha'
 ok "branch from a view attestation preserves layers" l line new -q from-attestation "attestations/$A"
 eq "attestation branch content" private-alpha "$(cat "$P/from-attestation/.private.env")"
@@ -80,7 +82,7 @@ PEER=$T/peer/store
 l remote add view-peer ssh://test/viewtest >/dev/null
 ok "sync transfers saved view records" l sync view-peer -q --command -- env LAYR_ROOT="$PEER" "$LAYR" serve-peer viewtest
 B() { env LAYR_ROOT="$PEER" "$LAYR" --project viewtest "$@"; }
-eq "the peer resolves the shared view revision" "$SHARED" "$(B rev-parse "views/$V")"
+eq "the peer resolves the shared view revision" "$SHARED_V" "$(B rev-parse "views/$V")"
 eq "the peer reads the exact descriptor" "$V" "$(B view show "$V" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
 no "the peer cannot materialize an unavailable private layer" B try -q "views/$V" -- true
 

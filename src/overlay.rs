@@ -1049,6 +1049,17 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// The new state `to` names the same parts of the hidden glasses as `from` (a replayed state).
+    pub fn copy_hidden_parts(&self, ctx: &Ctx, from: &str, to: &str) -> Result<()> {
+        let mut layers = Vec::new();
+        for name in self.overlay_names()? {
+            if let Some(part) = self.hidden_part(&name, from)? {
+                layers.push(Layer { overlay: name, state: part });
+            }
+        }
+        self.record_hidden_parts(ctx, to, &layers)
+    }
+
     /// The part of the hidden glass `name` that the state `state` named when it was saved, if this machine reads it.
     pub fn hidden_part(&self, name: &str, state: &str) -> Result<Option<String>> {
         let Ok(op) = self.overlay_project(name) else { return Ok(None) };
@@ -1782,7 +1793,10 @@ impl<'a> Repo<'a> {
         let Some(keep) = self.history_kept(orepo, name, keep_n, lines, stacks)? else {
             return Ok(Vec::new());
         };
-        Ok(orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).filter(|id| !keep.contains(id)).collect())
+        // A part that is here only as objects (its native copy retired) counts too, so history=last drops it.
+        let mut all: Vec<String> = orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
+        all.extend(orepo.p.db.object_only_states()?);
+        Ok(all.into_iter().filter(|id| !keep.contains(id)).collect())
     }
 
     /// The states of cache overlay `name` that its records keep, on every machine and platform (the
@@ -1850,9 +1864,12 @@ impl<'a> Repo<'a> {
     /// record it. The caller holds the overlay project's lock.
     fn delete_excess(ctx: &Ctx, orepo: &Repo, keep_n: usize, excess: Vec<String>) -> Result<Vec<String>> {
         let present: BTreeSet<String> = orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
+        let objects_only: BTreeSet<String> = orepo.p.db.object_only_states()?.into_iter().collect();
         let mut deleted = Vec::new();
         for id in excess {
-            if present.contains(&id) && orepo.p.delete_state(&id)? {
+            // A part that is here only as objects has no tree to delete: the gc record marks it deleted, and the next
+            // object store prune gives its objects back.
+            if objects_only.contains(&id) || (present.contains(&id) && orepo.p.delete_state(&id)?) {
                 deleted.push(id);
             }
         }

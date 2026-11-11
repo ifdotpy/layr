@@ -965,6 +965,13 @@ impl Db {
             .optional()?)
     }
 
+    /// The states that the project still keeps (not deleted): what an object store prune keeps.
+    pub fn kept_state_ids(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut st = self.conn.prepare_cached("SELECT id FROM states WHERE deleted=0")?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        Ok(v)
+    }
+
     /// The states that are here only as objects (`layr migrate` retired their native copy): not present, not deleted,
     /// and their record names a tree.
     pub fn object_only_states(&self) -> Result<Vec<String>> {

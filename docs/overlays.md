@@ -149,6 +149,16 @@ encrypts for the glass's readers; the public state record never names a hidden g
 older state (`layr view <state>`, `layers_at`) shows that part. The head of a line still reads the
 glass's overlay line. Test t238.
 
+**Local space and history of parts (owner decision 2026-11-11, built).** A part of a build-output glass
+gives up its native copy once its objects are durable; the cache code reads it through
+`state_root`, which builds the copy again from the objects. `history=last` also drops parts that
+are here only as objects, and `layr gc` prunes each object store (the base and every glass): the
+records of states that no kept state needs, and the loose objects and hot blobs that kept trees,
+times tables, delta bases and chunk lists do not reach. Packed objects stay until a pack rewrite.
+`replay` keeps the parts of each state it replays; a mount of an older state shows its parts; a
+merge brings a glass that the incoming line shows into the view of the target line. Tests t236,
+t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`.
+
 **Slices.**
 
 1. `fetch --line --overlay` (built).
@@ -170,7 +180,12 @@ glass's overlay line. Test t238.
    part stays (the overlay code reads parts as folders), so the space gain is in pushes and in
    dedup, not yet on the local disk; history=last drops the part record, and its objects wait for
    a repack that walks reachability. Test t236.
-8. Layr Cloud: a state with parts (`PUT /states/<state>` with one tree per glass).
+8. Layr Cloud: a state with parts needs no API change (checked 2026-11-12 against layr-cloud
+   `crates/layr-gateway`). Each glass is already its own layer scope (`overlays/<name>/`) with
+   its own `PUT /states/<state>` of one tree and times table, so a part is a state of its glass's
+   scope. The signed records carry `parts` and `state.parts` as opaque lines: the gateway
+   validates only manifest and job-output records, and `StateRec` in its vendored `layr-model`
+   accepts unknown fields.
 
 **Slice 4 as built (2026-11-11).**
 

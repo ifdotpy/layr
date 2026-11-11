@@ -143,8 +143,19 @@ fn overlays(
             if let Some(record) = records.iter().find(|r| r.op == "overlay.key") {
                 row["epoch"] = record.data["epoch"].clone();
             }
-            let paths: BTreeSet<_> =
-                overlay.line_list().iter().filter_map(|l| files.get(&l.head)).flat_map(|f| f.keys().cloned()).collect();
+            // The states that the glass shows: the heads of its own lines (hidden glasses keep them), the states that
+            // the project's lines show on it (their stacks), and the parts that their heads name (docs/overlays.md
+            // section 1a: a glass that keeps parts has no lines).
+            let mut heads: BTreeSet<String> = overlay.line_list().into_iter().map(|l| l.head).collect();
+            for line in project.line_list() {
+                if let Ok(layers) = model.layers(&project.id, &line) {
+                    heads.extend(layers.into_iter().filter(|l| l.overlay == name).map(|l| l.state));
+                }
+                if let Some(part) = project.state(&line.head).and_then(|s| s.parts.get(name).cloned()) {
+                    heads.insert(part);
+                }
+            }
+            let paths: BTreeSet<_> = heads.iter().filter_map(|h| files.get(h)).flat_map(|f| f.keys().cloned()).collect();
             row["history"] = json!(records);
             row["epochs"] = json!(records
                 .iter()
@@ -158,12 +169,11 @@ fn overlays(
                 })
                 .collect::<Vec<_>>());
             row["reader_details"] = json!(readers.iter().map(|principal| json!({"principal":principal})).collect::<Vec<_>>());
-            row["files"] = json!(overlay
-                .line_list()
+            row["files"] = json!(heads
                 .iter()
-                .flat_map(|line| files.get(&line.head).into_iter().flat_map(move |files| files.iter().map(
+                .flat_map(|head| files.get(head).into_iter().flat_map(move |files| files.iter().map(
                     move |(path, bytes)| {
-                        let mut value = json!({"state":line.head,"path":path,"size":bytes.len()});
+                        let mut value = json!({"state":head,"path":path,"size":bytes.len()});
                         if let Some(text) = text(bytes, 64 << 10) {
                             value["text"] = json!(text);
                         }

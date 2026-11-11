@@ -288,6 +288,17 @@ impl Browse {
             let stack_machine = if state.id == line.head { &line.machine } else { &machine };
             let stack = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
             let mut stack: Vec<crate::overlay::Layer> = stack.map(serde_json::from_value).transpose()?.unwrap_or_default();
+            // A state that names its parts shows them (docs/overlays.md section 1a), also an older state of the line.
+            for l in stack.iter_mut() {
+                if let Some(part) = state.parts.get(&l.overlay) {
+                    l.state = part.clone();
+                }
+            }
+            for (glass, part) in &state.parts {
+                if !stack.iter().any(|l| &l.overlay == glass) {
+                    stack.push(crate::overlay::Layer { overlay: glass.clone(), state: part.clone() });
+                }
+            }
             let mut hidden = Vec::new();
             for (name, _, overlay) in &hidden_stacks {
                 let selection = overlay.overlay_config(&format!("hidden.stack.{}", line.id))?;
@@ -296,9 +307,14 @@ impl Browse {
                 }
                 // A cache overlay has an overlay line per platform; this machine shows its own.
                 let own = crate::overlay::cache_line_name(&line.id);
-                if let Some(ol) = overlay.line_by_name(&own)?.or(overlay.line_by_name(&format!("line-{}", line.id))?) {
+                let saved = overlay.overlay_config(&format!("hidden.part.{}", state.id))?.and_then(|v| v.as_str().map(str::to_owned));
+                let head = match saved {
+                    Some(part) => Some(part),
+                    None => overlay.line_by_name(&own)?.or(overlay.line_by_name(&format!("line-{}", line.id))?).map(|ol| ol.head),
+                };
+                if let Some(head) = head {
                     let position = selection.as_ref().and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX);
-                    hidden.push((position, crate::overlay::Layer { overlay: name.clone(), state: ol.head }));
+                    hidden.push((position, crate::overlay::Layer { overlay: name.clone(), state: head }));
                 }
             }
             hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));

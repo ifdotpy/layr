@@ -46,7 +46,19 @@ if [ -n "$p2" ] && [ "$p2" != "$p1" ]; then
 fi
 ok "a part of the same build adds under 100 KB" test $(( second - first )) -lt 100
 
-# A new line from that state shows the build output.
+# The native copy of a build-output part goes once its objects are durable (docs/overlays.md section 1a, slice 7).
+cur=${p2:-$p1}
+no "the part of the head has no native copy" test -d "$P/meta/overlays/$G/states/$cur"
+ok "its objects are in the glass store" test -f "$P/meta/overlays/$G/meta/objects/states/$cur"
+
+# history=last dropped the first part; gc gives its objects back.
+if [ -n "$p2" ] && [ "$p2" != "$p1" ]; then
+  l gc -q >/dev/null 2>&1
+  no "gc removes the object record of the dropped part" test -f "$P/meta/overlays/$G/meta/objects/states/$p1"
+  ok "and keeps the one of the head's part" test -f "$P/meta/overlays/$G/meta/objects/states/$p2"
+fi
+
+# A new line from that state shows the build output: the copy comes back from the objects.
 l line new other main >/dev/null 2>&1
 ok "a new line has the build output" test -f "$P/lines/other/target/debug/unit50.rlib"
 

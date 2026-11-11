@@ -284,8 +284,22 @@ def push(db):
 parent=push(parent_db)
 overlays=[push(db) for db in overlay_dbs]
 parent_ids=set(parent['data']['state_ids_sent'])
-for name,db,overlay in zip(['secrets','hidden-golden'],overlay_dbs,overlays):
+def glass_heads(name, db):
+    # The heads of a glass: its overlay lines (hidden glasses keep them), and the parts that the heads of the
+    # project's lines name (docs/overlays.md section 1a: a glass that keeps parts has no lines).
     heads={row[0] for row in db.execute('select head from lines where deleted=0')}
+    for rec, in parent_db.execute('select rec from states where id in (select head from lines where deleted=0)'):
+        part=json.loads(rec).get('parts',{}).get(name)
+        if part:
+            heads.add(part)
+    # A protected line keeps an overlay-only save in its stack.
+    for value, in parent_db.execute("select value from config where key like 'stack.%'"):
+        for layer in json.loads(value):
+            if layer.get('overlay')==name:
+                heads.add(layer['state'])
+    return heads
+for name,db,overlay in zip(['secrets','hidden-golden'],overlay_dbs,overlays):
+    heads=glass_heads(name, db)
     overlay_ids=set(overlay['data']['state_ids_sent'])
     assert heads and heads <= overlay_ids
     assert not parent_ids & overlay_ids
@@ -399,7 +413,17 @@ for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
     assert keys and show['epochs'] == [dict(number=i, id=r['data']['epoch'], time=r['time'], machine=r['machine'],
         **({'reason': r['data']['reason']} if 'reason' in r['data'] else {})) for i, r in enumerate(keys, 1)]
     assert show['patterns'] == [] and show['peers'] is None
-    assert show['state'] in {head for head, in db.execute('select head from lines where deleted=0')}
+    parent_db = sqlite3.connect((project / 'meta/db/layr.sqlite').as_uri() + '?mode=ro&immutable=1', uri=True)
+    heads = {head for head, in db.execute('select head from lines where deleted=0')}
+    for rec, in parent_db.execute('select rec from states where id in (select head from lines where deleted=0)'):
+        part = json.loads(rec).get('parts', {}).get(name)
+        if part:
+            heads.add(part)
+    for value, in parent_db.execute("select value from config where key like 'stack.%'"):
+        for layer in json.loads(value):
+            if layer.get('overlay') == name:
+                heads.add(layer['state'])
+    assert show['state'] in heads
     names = {'commit': 'state', 'stash': 'park', 'cherry-pick': 'pick', 'rebase': 'replay', 'revert': 'invert'}
     def plain(op):
         head, dot, tail = op.partition('.')

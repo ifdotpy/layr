@@ -392,7 +392,7 @@ layr objects checkout <tree or rev> <folder>
   writes into the caller's folder (`tests/t201-objects-service.sh`).
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
-Open questions: sharded trees (section 11); a repack that merges small packs; garbage collection of
+Garbage collection: `layr gc` prunes the store before the repack (`Store::prune`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
 objects that no state names.
 
 ### Migration

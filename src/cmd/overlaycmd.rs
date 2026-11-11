@@ -894,7 +894,16 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
             h.repo.p.config_value(&key)
         }
     };
-    let state = overlay_line(ctx, &h.repo, h.line.as_ref(), &info, name, &orepo)?.map(|l| l.head).unwrap_or(info.root);
+    // The state that the current line shows on the glass (its view), which is the newest also when an overlay-only
+    // save on a protected line keeps it in the stack; else the head of the glass's line.
+    let shown = match h.line.as_ref() {
+        Some(line) => h.repo.layers(line)?.into_iter().find(|l| &l.overlay == name).map(|l| l.state),
+        None => None,
+    };
+    let state = match shown {
+        Some(s) => s,
+        None => overlay_line(ctx, &h.repo, h.line.as_ref(), &info, name, &orepo)?.map(|l| l.head).unwrap_or(info.root.clone()),
+    };
     let value = serde_json::json!({
         "name":name,"hidden":info.hidden,"readers":readers,"access_mode":crate::store_remote::epochs::overlay_mode(&orepo)?,
         "managers":crate::overlay_managers::of(&h.repo, name)?.machines,

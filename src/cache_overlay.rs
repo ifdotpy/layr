@@ -524,7 +524,8 @@ impl<'a> Repo<'a> {
     /// platform, and made by `uid` or on a protected line (a cache holds code that review does not
     /// see). The empty first state is no cache.
     fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey, protected: bool) -> Result<bool> {
-        if id == root || !orepo.p.has_state(id) {
+        // A part whose native copy was retired is here as objects: a read builds the copy again (`state_root`).
+        if id == root || !(orepo.p.has_state(id) || crate::objstore::verified(&orepo.p, id)?.is_some()) {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
@@ -836,7 +837,7 @@ impl<'a> Repo<'a> {
                 fsutil::remove_entry(w, &folder)?;
             }
             fsutil::make_parents(w, &folder, Some((uid, gid)))?;
-            let uniform = btrfs::cache_snapshot(&orepo.p.state_path(&sid), &cp)?;
+            let uniform = btrfs::cache_snapshot(&orepo.state_root(&sid)?, &cp)?;
             let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
             crate::repo::give_cache_tree(&cp, uniform, source_owner, uid, gid)?;
             taken.push((name, folder, sid));
@@ -885,7 +886,7 @@ impl<'a> Repo<'a> {
                     if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         return Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")));
                     }
-                    let src = orepo.p.state_path(&sid);
+                    let src = orepo.state_root(&sid)?;
                     if cp.symlink_metadata().is_err() {
                         fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
                         btrfs::snapshot(&src, &cp, false)?;
@@ -911,7 +912,7 @@ impl<'a> Repo<'a> {
                         (st.id.clone(), vec![st])
                     };
                     // The working folder first: a failure leaves the overlay line where it was.
-                    let src = orepo.p.state_path(&sid);
+                    let src = orepo.state_root(&sid)?;
                     let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")))

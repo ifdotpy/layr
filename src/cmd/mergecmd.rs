@@ -363,19 +363,16 @@ fn plan_overlays(
                     format!("error: merging line '{}' needs the read right of its overlay '{}'", theirs_name, tl.overlay),
                 ));
             }
-            let i = match ours.iter().position(|l| l.overlay == tl.overlay) {
+            // A line does not know glasses (owner decision 2026-11-11): a glass that the incoming line shows and this
+            // line does not comes into this line's view, from its empty first state.
+            let i = match m.layers.iter().position(|l| l.overlay == tl.overlay) {
                 Some(i) => i,
                 None => {
-                    return Err(exit(
-                        1,
-                        format!(
-                            "error: line '{}' shows overlay '{}' (follow mode), which line '{}' does not use; run 'layr overlay use --add {}' in '{}' first",
-                            theirs_name, tl.overlay, line.name, tl.overlay, line.name
-                        ),
-                    ))
+                    m.layers.push(Layer { overlay: tl.overlay.clone(), state: info.root.clone() });
+                    m.layers.len() - 1
                 }
             };
-            let ours_s = ours[i].state.clone();
+            let ours_s = m.layers[i].state.clone();
             let o = repo.overlay_repo(&tl.overlay)?;
             if tl.state == ours_s || o.is_ancestor(&tl.state, &ours_s)? {
                 continue;
@@ -2467,6 +2464,9 @@ fn replay_locked(
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
         s.author = c.author.clone();
         s.change_id = c.change_id.clone();
+        // A replayed state moves the base change onto the new upstream; its parts on the glasses stay those of the
+        // state it replays (docs/overlays.md section 1a).
+        s.parts = c.parts.clone();
         conflicts += out.conflicts.len();
         for m in &out.messages {
             outln!(ctx, "{m}");
@@ -2484,6 +2484,7 @@ fn replay_locked(
             crate::repo::discard_unrecorded(repo, &step_states);
             return Err(e);
         }
+        repo.copy_hidden_parts(ctx, p, &s.id)?;
         states.push(s);
     }
     let local = st.local_paths();

@@ -141,6 +141,15 @@ pub struct EvictReport {
     pub bytes: u64,
 }
 
+/// What `Store::prune` removed: state records, loose objects and hot blobs, and their bytes.
+#[derive(Debug, Default)]
+pub struct PruneReport {
+    pub states: u64,
+    pub objects: u64,
+    pub blobs: u64,
+    pub bytes: u64,
+}
+
 /// What `Store::pack` did.
 #[derive(Debug, Default)]
 pub struct PackReport {
@@ -993,6 +1002,100 @@ impl Store {
         Ok(EvictReport { blobs: done.len() as u64, bytes: done.iter().sum() })
     }
 
+    /// Remove what no state of `keep` reaches (docs/objects.md, "Garbage collection"): the state records of other
+    /// states, then the loose objects and hot blobs that the kept trees, times tables, delta bases and chunk lists do
+    /// not reach. Objects in packs stay (a later repack that rewrites packs can drop them). Run it before `pack`, so
+    /// unreachable loose objects never go into a pack.
+    pub fn prune(&self, keep: &std::collections::BTreeSet<String>) -> Result<PruneReport> {
+        let mut report = PruneReport::default();
+        let mut roots = Vec::new();
+        let states = self.root.join("states");
+        for entry in fs::read_dir(&states)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if keep.contains(&name) {
+                if let Some(r) = self.state_ref(&name)? {
+                    roots.push(r);
+                }
+            } else {
+                report.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                fs::remove_file(entry.path())?;
+                report.states += 1;
+            }
+        }
+        // The logical objects of the kept states, then what their stored forms need.
+        let mut reach: HashSet<Id> = HashSet::new();
+        for r in &roots {
+            for (id, _) in crate::transfer::reachable(self, &r.tree)? {
+                reach.insert(id);
+            }
+            for id in crate::transfer::reachable_times(self, &r.times)? {
+                reach.insert(id);
+            }
+        }
+        let mut work: Vec<Id> = reach.iter().copied().collect();
+        while let Some(id) = work.pop() {
+            if self.fan("blobs", &id).exists() {
+                continue;
+            }
+            let Ok(p) = self.payload(&id) else { continue };
+            if p.kind != Kind::Blob {
+                continue;
+            }
+            let mut next = Vec::new();
+            match p.form {
+                pack::RAW => {}
+                pack::CHUNKED => {
+                    let mut r = Reader::new(&p.bytes);
+                    for _ in 0..r.varint()? {
+                        next.push(r.id()?);
+                        r.varint()?;
+                    }
+                }
+                _ if p.bytes.len() > 33 => next.push(Id(p.bytes[1..33].try_into().expect("32 bytes"))),
+                _ => {}
+            }
+            for n in next {
+                if reach.insert(n) {
+                    work.push(n);
+                }
+            }
+        }
+        for (folder, hot) in [("objects", false), ("blobs", true)] {
+            let dir = self.root.join(folder);
+            if !dir.is_dir() {
+                continue;
+            }
+            for fan in fan_folders(&dir)? {
+                let prefix = fan.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                for entry in fs::read_dir(&fan)? {
+                    let entry = entry?;
+                    let Ok(id) = Id::parse(&format!("{prefix}{}", entry.file_name().to_string_lossy())) else { continue };
+                    if reach.contains(&id) {
+                        continue;
+                    }
+                    report.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let path = entry.path();
+                    if fs::remove_file(&path).is_err() {
+                        // A hot blob may carry the immutable flag of the state it was cloned from.
+                        if let Some(hook) = self.clone_hook {
+                            if let Ok(f) = fs::File::open(&path) {
+                                let _ = hook(std::os::fd::AsFd::as_fd(&f));
+                            }
+                        }
+                        fs::remove_file(&path)?;
+                    }
+                    if hot {
+                        report.blobs += 1;
+                    } else {
+                        report.objects += 1;
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Record the tree and the times table of an imported state:
     /// `{"times":"<id>","tree":"<id>"}` (docs/objects.md, "States").
     pub fn set_state(&self, state: &str, r: &StateRef) -> Result<()> {
@@ -1449,6 +1552,40 @@ mod tests {
     use super::*;
     use crate::testutil::{noise, scratch};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn prune_keeps_what_kept_states_reach_and_drops_the_rest() {
+        let dir = scratch("prune");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let write = |name: &str, files: &[(&str, &[u8])], previous: Option<Id>| {
+            let src = dir.join(name);
+            fs::create_dir_all(&src).unwrap();
+            for (f, data) in files {
+                fs::write(src.join(f), data).unwrap();
+            }
+            let opts = crate::WriteOptions { temperature: Temperature::Cold, previous, exclude: Vec::new(), similar: false };
+            let r = crate::write_tree(&store, &src, &opts).unwrap();
+            let refs = StateRef { tree: r.tree.unwrap(), times: r.times.unwrap() };
+            store.set_state(name, &refs).unwrap();
+            refs
+        };
+        let big: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let mut big2 = big.clone();
+        big2[100] ^= 1;
+        let a = write("a", &[("kept", b"kept bytes"), ("big", &big)], None);
+        let b = write("b", &[("gone", b"only in b"), ("big", &big2)], Some(a.tree));
+        let gone = Keying::Plain.id(Kind::Blob, b"only in b");
+        assert!(store.has(&gone));
+        let report = store.prune(&["a".to_string()].into()).unwrap();
+        assert_eq!(report.states, 1, "the record of b goes");
+        assert!(store.state_ref("b").unwrap().is_none());
+        assert!(!store.has(&gone), "a blob that only b reaches goes");
+        assert!(!store.has(&b.tree), "the tree of b goes");
+        assert_eq!(store.read_blob(&Keying::Plain.id(Kind::Blob, b"kept bytes")).unwrap(), b"kept bytes");
+        assert_eq!(store.read_blob(&Keying::Plain.id(Kind::Blob, &big)).unwrap(), big, "a's blobs still read");
+        let again = store.prune(&["a".to_string()].into()).unwrap();
+        assert_eq!((again.states, again.objects, again.blobs), (0, 0, 0), "a second prune finds nothing");
+    }
 
     #[test]
     fn writes_are_idempotent() {
