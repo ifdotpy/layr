@@ -143,7 +143,7 @@ makes another view. The setting `stack.<line id>` goes.
    overlays; see "Slice 4 as built" below for what differs.
 5. Views hold the glasses; `stack.<line id>` goes. Built 2026-11-11; see "Slice 5 as built"
    below for what differs.
-6. A cache is an ordinary glass: the cache flags, `src/cache_overlay.rs` and the cache fields of
+6. A cache is an ordinary glass (default view shows cache glasses like any glass; transfer cache flags removed): the cache flags, `src/cache_overlay.rs` and the cache fields of
    the state record go; `trust` is a glass property. Built 2026-11-11 in part; see "Slice 6 as
    built" below for what differs.
 7. Parts of folder glasses as v2 objects (built, partly): in a project with `objects.enabled`, a

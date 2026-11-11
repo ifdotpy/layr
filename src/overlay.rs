@@ -1233,14 +1233,14 @@ impl<'a> Repo<'a> {
 
     /// The glasses of the default view of a new line folder of `owner`: every glass that the owner
     /// reads and whose `platform` (if set) is this machine's, in the project order. Folder
-    /// overlays are no glass of the file stack. A cache glass comes only when the source line
-    /// shows it (`shown`), until caches are ordinary glasses (slice 6).
-    pub fn default_glasses(&self, owner: u32, shown: &[String]) -> Result<Vec<String>> {
+    /// overlays are no glass of the file stack (a line takes their parts as folders). A cache glass
+    /// is an ordinary glass (owner decision 2026-11-11): it comes like any other.
+    pub fn default_glasses(&self, owner: u32, _shown: &[String]) -> Result<Vec<String>> {
         let folders: Vec<String> = self.folder_overlays()?.into_iter().map(|(n, _)| n).collect();
         let mut out = Vec::new();
         for name in self.project_order()? {
             let Some(info) = self.overlay_info(&name)? else { continue };
-            if folders.contains(&name) || (info.cache && !shown.contains(&name)) {
+            if folders.contains(&name) {
                 continue;
             }
             if other_platform_glass(info.platform.as_deref()) {
