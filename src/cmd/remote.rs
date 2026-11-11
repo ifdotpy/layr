@@ -1162,7 +1162,12 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
-                return Ok(2);
+                // A line whose head tree is not on the remote yet fails the fetch only when the caller asked for that
+                // line (`--line`, `--only-line`): another writer's line comes on a later fetch.
+                let asked: Vec<&String> = opts.lines.iter().chain(opts.only_line.iter()).collect();
+                if asked.iter().any(|name| report.missing_lines.iter().any(|m| m.starts_with(&format!("line {name}:")))) {
+                    return Ok(2);
+                }
             }
             // A transfer record names the states that the remote holds now (their `store` owners). A push that sent
             // no state writes none: it would be the only news of the next push, and every idle push would make one.
@@ -1284,11 +1289,12 @@ fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_o
             outln!(ctx, "overlapping record segments: {}", report.overlaps);
         }
     }
-    if !json_output {
-        for line in &report.missing_lines {
-            outln!(ctx, "{line}");
-        }
+    // The lines that wait for their head go to stderr, also with --json and -q: a caller that reads only stdout or
+    // only the exit status still sees them.
+    for line in &report.missing_lines {
+        eprintln!("layr: {line}");
     }
+    let _ = json_output;
     Ok(())
 }
 

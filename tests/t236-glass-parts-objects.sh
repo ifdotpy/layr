@@ -49,4 +49,11 @@ ok "a part of the same build adds under 100 KB" test $(( second - first )) -lt 1
 # A new line from that state shows the build output.
 l line new other main >/dev/null 2>&1
 ok "a new line has the build output" test -f "$P/lines/other/target/debug/unit50.rlib"
+
+# A state that is here only as objects (its native copy retired) still goes to a store remote.
+hid=$(sqlite3 "$P/meta/db/layr.sqlite" "select id from states where display='$(l rev-parse head)'")
+l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
+no "the head has no native copy" test -d "$P/states/$hid"
+ok "a push" l push cloud -q
+ok "the remote has the head that is only objects here" test -d "$T/archive/states/$hid"
 finish

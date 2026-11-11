@@ -10,6 +10,8 @@ Layr starts `ssh host layr serve-peer project`.
 The internal peer command does not appear in help.
 Use `--auto --caches` to include automatic states and saved caches.
 Owner decision 2026-11-11: a cache is an ordinary overlay, and the cache flags go away. `fetch` then takes lines and overlays: the history of the chosen lines, and only their parts on the chosen overlays ([overlays](overlays.md) section 1). Without `--line` and `--overlay`, `fetch` takes the whole repository, and `--caches`, `--caches-of` and `--no-caches` select caches. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push` are the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
+
+A fetch that finds a line whose head tree is not on the remote yet prints `layr: line <name>: head state <id> is not in the store yet` on stderr and goes on with exit status 0. It fails with exit status 2 only when the caller asked for that line (`--line`, `--only-line`). A push to a store remote also sends a state that is here only as objects (its native copy retired after `layr migrate`).
 The final snapshot of a deleted line always travels, because `undo` needs it.
 
 - `layr push work` sends records and states to the peer.

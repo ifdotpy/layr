@@ -519,7 +519,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     let selection = reader::push_selection(repo, &record_lines, opts)?;
     let mut states = Vec::new();
     let mut recovered = Vec::new();
-    for (id, deleted) in repo.p.db.present_states()? {
+    // A state that is here only as objects (its native copy retired after `layr migrate`) goes too: reading its tree
+    // builds the copy again for this command (`objstore::build_state`). Before, such a state never left this store,
+    // and a remote line could name a head whose tree no remote had.
+    let mut candidates = repo.p.db.present_states()?;
+    for id in repo.p.db.object_only_states()? {
+        if !present.contains_key(&id) && crate::objstore::verified(&repo.p, &id)?.is_some() {
+            candidates.push((id, false));
+        }
+    }
+    for (id, deleted) in candidates {
         if deleted || present.contains_key(&id) {
             continue;
         }

@@ -1028,6 +1028,33 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    /// The parts of a state on the hidden glasses that the caller reads (`layers` at that state): each goes to the
+    /// records of its own glass as `hidden.part.<state>`, so the public state record never names a hidden glass, and
+    /// the remote copy of the glass encrypts it for the glass's readers (docs/overlays.md section 1a).
+    pub fn record_hidden_parts(&self, ctx: &Ctx, state: &str, layers: &[Layer]) -> Result<()> {
+        for l in layers {
+            if !self.overlay_info(&l.overlay)?.is_some_and(|i| i.hidden) || !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
+                continue;
+            }
+            let orepo = self.overlay_repo(&l.overlay)?;
+            let key = format!("hidden.part.{state}");
+            if orepo.p.db.overlay_config(&key)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() == Some(l.state.as_str()) {
+                continue;
+            }
+            let _lock = orepo.p.lock()?;
+            let mut record = Record::new("overlay.use");
+            record.data = serde_json::json!({"config":{key:l.state}});
+            orepo.commit_record(ctx, record)?;
+        }
+        Ok(())
+    }
+
+    /// The part of the hidden glass `name` that the state `state` named when it was saved, if this machine reads it.
+    pub fn hidden_part(&self, name: &str, state: &str) -> Result<Option<String>> {
+        let Ok(op) = self.overlay_project(name) else { return Ok(None) };
+        Ok(op.db.overlay_config(&format!("hidden.part.{state}"))?.and_then(|v| v.as_str().map(str::to_owned)))
+    }
+
     /// The internal project of an overlay.
     pub fn overlay_project(&self, name: &str) -> Result<Project<'a>> {
         Project::open(self.p.store, &format!("{}%{name}", self.p.name))
@@ -1291,6 +1318,14 @@ impl<'a> Repo<'a> {
         let mut layers = self.layers(line)?;
         if self.p.is_overlay() || state == line.head || layers.is_empty() {
             return Ok(layers);
+        }
+        // A hidden glass: the part that the state recorded in the glass's own records.
+        for l in layers.iter_mut() {
+            if self.overlay_info(&l.overlay)?.is_some_and(|i| i.hidden) {
+                if let Some(part) = self.hidden_part(&l.overlay, state)? {
+                    l.state = part;
+                }
+            }
         }
         let parts = match self.p.db.state(state)? {
             Some(s) if !s.parts.is_empty() => s.parts,
@@ -2269,6 +2304,9 @@ pub fn commit_layers(
     let states: Vec<StateRec> = shared.iter().cloned().collect();
     if shared.is_some() || overlays.iter().any(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true)) {
         repo.move_head(ctx, "commit", line, &new_head, states, None, data)?;
+    }
+    if let Some(state) = &shared {
+        repo.record_hidden_parts(ctx, &state.id, &new_layers)?;
     }
     let fds = if summary { crate::diff::file_diffs(&base, &new_tree.path, &s.list)? } else { Vec::new() };
     repo.install_base(line, new_tree, &new_head, &new_layers)?;

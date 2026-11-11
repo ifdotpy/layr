@@ -965,6 +965,16 @@ impl Db {
             .optional()?)
     }
 
+    /// The states that are here only as objects (`layr migrate` retired their native copy): not present, not deleted,
+    /// and their record names a tree.
+    pub fn object_only_states(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT id FROM states WHERE present=0 AND deleted=0 AND json_extract(rec, '$.tree') IS NOT NULL",
+        )?;
+        let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
     pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
         let mut st = self.conn.prepare_cached("SELECT id, deleted FROM states WHERE present=1")?;
         let v = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<Vec<_>, _>>()?;
