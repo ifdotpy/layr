@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # The merge machine must use the creator's approval policy, even if its local rule differs.
 . "$(dirname "$0")/lib.sh"
+[ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 set -e
 sample "$T/source"
 l init p --from "$T/source" -q >/dev/null

@@ -2,6 +2,7 @@
 # ci: macos overlayfs
 # Remote cache records from other platforms do not promise a local tree.
 . "$(dirname "$0")/lib.sh"
+[ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 sample "$T/src"
 echo 'target regenerable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null

@@ -189,6 +189,12 @@ try:
  output=run(['clone',url,'network','--mode','secret','--public','--json'],network)
  check(clean(output.stdout+output.stderr,ids),'HTTP public clone has no hidden trace')
  nproject=pathlib.Path(network['LAYR_ROOT'])/'projects/network'
+ if not (nproject/'lines/main/future.txt').exists():
+  # Diagnostics for a run where the clone leaves main without the newest file.
+  print('DIAG clone stdout+stderr:',output.stdout[-3000:],output.stderr[-3000:],flush=True)
+  print('DIAG main folder:',sorted(p.name for p in (nproject/'lines/main').iterdir()) if (nproject/'lines/main').is_dir() else 'missing',flush=True)
+  for args in (['--project','network','log','-n','5'],['--project','network','line','list','--json'],['--project','network','--line','main','status']):
+   d=run(args,network,False);print('DIAG',args,d.returncode,d.stdout[-2000:],d.stderr[-2000:],flush=True)
  check((nproject/'lines/main/future.txt').read_text()=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
  network['LAYR_PROJECT']='network'
  run(['fetch','origin','-q'],network)

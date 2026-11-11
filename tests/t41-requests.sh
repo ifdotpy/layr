@@ -14,7 +14,7 @@ l remote add origin "file://$T/archive" --paper-key-out "$T/store-paper" >/dev/n
 l push origin -q
 export REQUEST_TEST_ROOT="$T" REQUEST_TEST_BINARY="$LAYR"
 python3 - <<'PY'
-import json, os, pathlib, subprocess, time, uuid, hashlib
+import json, os, pathlib, shutil, subprocess, time, uuid, hashlib
 root = pathlib.Path(os.environ['REQUEST_TEST_ROOT'])
 binary = os.environ['REQUEST_TEST_BINARY']
 base = os.environ.copy()
@@ -35,6 +35,12 @@ def run(args, env=base, success=True):
 
 def data(args, env=base):
     return json.loads(run(args, env).stdout)
+
+def waiting(args, env=base):
+    # `requests apply` exits 2 while a claim of another machine waits (docs/review.md).
+    p = run(args, env, success=False)
+    assert p.returncode == 2, (args, p.returncode, p.stderr)
+    return json.loads(p.stdout)
 
 def person(login):
     env = dict(base, LAYR_PERSON_DIR=str(root / login), LAYR_PERSON_LOGIN=login)
@@ -186,7 +192,18 @@ body = json.loads((root / 'archive' / 'requests' / (untrusted + '.json')).read_t
 claim_path = root / 'archive' / 'requests' / 'claims' / (untrusted + '.json')
 # The fresh executor makes a real, valid claim with its own key. The original project
 # has not trusted that machine. Its missing person pin prevents any comment there too.
-data(['--project', 'replica', 'requests', 'apply', '--json'], replica)
+# A pass stops at the first claim of another machine (docs/review.md), and the original
+# executor claimed the earlier requests: the replica claims this request in a copy of the
+# store that holds only it, and its claim object is copied back, as its own write would land.
+isolated = root / 'archive-untrusted'
+shutil.copytree(root / 'archive', isolated)
+for other_request in (isolated / 'requests').glob('*.json'):
+    if other_request.stem != untrusted:
+        other_request.unlink()
+shutil.rmtree(isolated / 'requests' / 'claims', ignore_errors=True)
+run(['--project', 'replica', 'remote', 'add', 'isolated', 'file://' + str(isolated)], replica)
+data(['--project', 'replica', 'requests', 'apply', '--remote', 'isolated', '--json'], replica)
+claim_path.write_bytes((isolated / 'requests' / 'claims' / (untrusted + '.json')).read_bytes())
 check(json.loads(claim_path.read_text())['r']['machine'] != record['machine'], 'untrusted claim is signed by a separate real machine')
 result = apply(untrusted, 'refused')
 check(result['reason'] == 'claimed by an untrusted machine' and outcome(untrusted)['op'] == 'request.refused', 'untrusted claim gets a signed terminal refusal')
@@ -198,7 +215,7 @@ check((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).exists(), '
 claim = json.loads((root / 'archive' / 'requests' / 'claims' / (entry + '.json')).read_text())
 check(claim['r']['request'] == entry and claim['s'], 'claim binds machine, project and request with a signature')
 
-other = data(['--project', 'replica', 'requests', 'apply', '--json'], replica)
+other = waiting(['--project', 'replica', 'requests', 'apply', '--json'], replica)
 check(other and all(row['status'] == 'claimed' or (row['id'] in (untrusted, bad_claim) and row['status'] in ('refused', 'ignored')) for row in other), 'a second trusted machine cannot apply claimed requests')
 check(not data(['--project', 'replica', 'queue', 'list', '--json'], replica), 'second machine creates no duplicate queue effects')
 

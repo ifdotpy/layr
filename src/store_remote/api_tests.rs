@@ -929,6 +929,10 @@ fn delete_cache_fixture(root: &Path) {
     }
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     open_subvolumes(root);
+    // OverlayFS deletes only the trees of its own registry; the fixture root is a plain test folder.
+    #[cfg(all(target_os = "linux", feature = "overlayfs"))]
+    let _ = std::fs::remove_dir_all(root);
+    #[cfg(not(all(target_os = "linux", feature = "overlayfs")))]
     crate::storage::delete_tree(root).unwrap();
 }
 
