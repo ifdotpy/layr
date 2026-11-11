@@ -12,7 +12,7 @@ After migration, source states remain usable without native state snapshots.
 Status, diff, and file reads use object trees directly.
 Operations that require native folders can create temporary copies.
 New saves write objects before they publish the state record.
-Cache and derived states keep their native format. Owner decision 2026-11-11: a cache is an
+Derived states keep their native format. A part of a glass (a cache too) goes to the glass's own object store when its project has `objects.enabled`; its native copy stays for now (docs/overlays.md section 1a, slice 7). Owner decision 2026-11-11: a cache is an
 ordinary overlay (a glass), and its states go into v2 objects like any glass; a state record then
 names one tree and one times table per glass ([cache overlays](cache-overlays.md) section 2).
 Remote compatibility is separate (section 13 and `docs/remote-format.md`).

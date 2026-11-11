@@ -775,8 +775,9 @@ real `target` cache states of this repository.
 | `01a1b9a9` (the same build) | `01a1b9a8` | | | import | 1.0 s | 3 new objects, 1.9 KB |
 | `01a1ca61` (after a real rebuild) | `01a1b8bd` | 35,096 | 19.4 GB | import | 15.2 s | 84,390 new objects, 2.34 GB |
 
-- Hot import (clones) failed. The state files carry the immutable flag (`uchg`), so the clone into
-  `blobs/` fails with EPERM. This needs a fix before a cache glass can use hot blobs.
+- Hot import (clones) failed in `objects-bench` only. The state files carry the immutable flag
+  (`uchg`), and a clone keeps it. layr itself clears it: the project object store sets
+  `clone_hook` (`sys::apfs_unseal_fd`, src/objstore.rs). The example tool sets no hook.
 - Today each cache state is a full native folder. `du` reports about 15 GB for each; APFS clones
   share blocks, so `du` overstates the real use.
 

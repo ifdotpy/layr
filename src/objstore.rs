@@ -177,10 +177,27 @@ impl layr_objects::write::Source for SnapshotSource<'_> {
     }
 }
 
+/// Whether new states of `p` go to its object store. An overlay (a glass) follows its project: a part of a glass
+/// is stored as objects like a state of the base (docs/overlays.md section 1a, slice 7), in the glass's own store.
+pub fn enabled(p: &Project) -> Result<bool> {
+    let on = |v: Option<serde_json::Value>| v.and_then(|v| v.as_bool()) == Some(true);
+    let Some((project, _)) = p.name.split_once('%') else {
+        return Ok(on(p.config_value(ENABLED)?));
+    };
+    if on(p.config_value(ENABLED)?) {
+        return Ok(true);
+    }
+    let path = crate::store::db_file(&p.store.project_dir(project)?);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    Ok(on(crate::db::Db::open(&path)?.config(ENABLED)?))
+}
+
 /// Attach durable objects before signing each new source state. Native copies remain until
 /// command cleanup, so callers can finish with the paths they already hold.
 pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Result<()> {
-    if p.is_overlay() || p.config_value(ENABLED)?.and_then(|v| v.as_bool()) != Some(true) {
+    if !enabled(p)? {
         return Ok(());
     }
     let store = open(p)?;
@@ -220,7 +237,10 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         store.set_state(&state.id, &refs)?;
         state.tree = Some(refs.tree.hex());
         state.times = Some(refs.times.hex());
-        queue_native(p, &state.id)?;
+        // A glass keeps the native copy of its part: the overlay code reads parts as folders.
+        if !p.is_overlay() {
+            queue_native(p, &state.id)?;
+        }
     }
     Ok(())
 }

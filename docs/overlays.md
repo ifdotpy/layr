@@ -147,8 +147,13 @@ makes another view. The setting `stack.<line id>` goes.
 6. A cache is an ordinary glass: the cache flags, `src/cache_overlay.rs` and the cache fields of
    the state record go; `trust` is a glass property. Built 2026-11-11 in part; see "Slice 6 as
    built" below for what differs.
-7. Parts of folder glasses as v2 objects (the immutable-flag clone fails first, see
-   [cache overlays](cache-overlays.md) section 21).
+7. Parts of folder glasses as v2 objects (built, partly): in a project with `objects.enabled`, a
+   part of a glass goes to the glass's own object store (`meta/overlays/<glass>/meta/objects`),
+   written incrementally against the part before it (`objstore::enabled`, `record_states`). The
+   immutable flag of sealed files is handled by the store's clone hook. Left: the native copy of a
+   part stays (the overlay code reads parts as folders), so the space gain is in pushes and in
+   dedup, not yet on the local disk; history=last drops the part record, and its objects wait for
+   a repack that walks reachability. Test t236.
 8. Layr Cloud: a state with parts (`PUT /states/<state>` with one tree per glass).
 
 **Slice 4 as built (2026-11-11).**
