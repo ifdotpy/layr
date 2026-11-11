@@ -28,7 +28,7 @@ no "an unknown overlay is refused" l remote trust cloud "$r_id" --public-key "$r
 l remote trust cloud "$r_id" --public-key "$r_key" --expires 1h >/dev/null
 l remote trust cloud "$e_id" --public-key "$e_key" --expires 6s --role writer >/dev/null
 trusted_at=$(date +%s)
-l push cloud -q --caches >/dev/null 2>&1
+l push cloud -q >/dev/null 2>&1
 
 # A merge machine: a full machine narrowed to the merge role. Its release ref counts; another ref and a new line
 # do not. A broker cannot hand out the role.
@@ -54,12 +54,12 @@ has "a broker cannot delegate the merge role" "use reader or writer" \
 
 # The writer: a cache on its save-back line counts; a source state, another line and a trust do not.
 wl() { env LAYR_ROOT="$T/w/store" "$LAYR" "$@"; }
-(cd "$T" && wl clone "file://$T/archive" p --caches-of main >/dev/null 2>&1)
+(cd "$T" && wl clone "file://$T/archive" p --line main >/dev/null 2>&1)
 W=$T/w/store/projects/p/lines
 (cd "$W/main" && wl line new "main.checks-$plat" main >/dev/null 2>&1)
 (cd "$W/main.checks-$plat" && echo w > target/w && wl save --caches -q)
 (cd "$W/main" && wl line new wx main >/dev/null 2>&1 && cd "$W/wx" && echo w > w.txt && wl add w.txt >/dev/null && wl save -qm "a source state of the writer")
-(cd "$W/main" && wl push origin -q --caches >/dev/null 2>&1)
+(cd "$W/main" && wl push origin -q >/dev/null 2>&1)
 l fetch cloud -q >/dev/null 2>&1
 lines=$(l line list 2>&1)
 has "the save-back line of the writer arrives" "main.checks-$plat" "$lines"

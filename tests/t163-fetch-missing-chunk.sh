@@ -16,7 +16,7 @@ mkdir -p target/debug/deps
 python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(3 << 20))' target/debug/deps/libbig.rlib
 l save --caches -q
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
-ok "push the cache to the store" l push archive -q --caches
+ok "push the cache to the store" l push archive -q
 
 mkdir -p "$T/b"
 B() { env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" "$@"; }
@@ -26,7 +26,7 @@ ok "the clone has the project" test -d "$Q"
 cd "$P/main" || exit 1
 python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/deps/libmore.rlib
 l save --caches -q
-ok "push a newer cache" l push archive -q --caches
+ok "push a newer cache" l push archive -q
 # The packs of the cache go, as a broken sweep or a stopped push would leave them; the tree still names the chunks.
 find "$T/archive" -path '*/chunks/*' -name '*.age' -exec rm -f {} +
 cd "$Q" || exit 1
@@ -38,7 +38,7 @@ has "the next fetch does not try it again" "it failed before, and the remote did
 cd "$P/main" || exit 1
 echo again > target/debug/again
 l save --caches -q
-l push archive -q --caches
+l push archive -q
 cd "$Q" || exit 1
 out=$(B fetch origin 2>&1)
 no "after a push changed the packs it is tried again" grep -q "it failed before" <<<"$out"

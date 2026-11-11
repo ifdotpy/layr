@@ -187,9 +187,9 @@ separate code path. Space comes from layered storage and `history=last`, not fro
 Built (overlays.md section 1a, slices 3 and 6): a named save saves the part of each build-output
 glass whose folder changed, and the new state names it. The first named save of a `regenerable`
 folder makes the glass of this platform. A glass with `platform` is shown, fetched and pushed only
-on its platform. `trust` is a glass property. The cache flags (`save --caches`, `sync --caches`,
-`merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`) still
-work for one release and print their replacement. A store keeps its `cache.<folder>` glasses:
+on its platform. `trust` is a glass property. The cache flags of transfers (`--caches`,
+`--no-caches`, `--caches-of`) are removed; `--line` and `--overlay` choose. `save --caches`,
+`merge --caches-only` and `fsck --caches` still work for one release and print their replacement. A store keeps its `cache.<folder>` glasses:
 each stays the glass of its folder on every platform. Parts are still full folder snapshots,
 not v2 objects. The rest of this section describes the rules that both kinds of glass follow.
 

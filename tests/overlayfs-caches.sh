@@ -41,7 +41,7 @@ peer_id=$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.s
 peer_key=$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')
 l remote add test-peer ssh://test/cachetest >/dev/null
 ok "trust the peer" l remote trust test-peer "$peer_id" --public-key "$peer_key"
-ok "sync transfers saved caches" peer_exchange sync cachetest -q --caches -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
+ok "sync transfers saved caches" peer_exchange sync cachetest -q -- env LAYR_ROOT="$T/peer/store" "$LAYR" serve-peer cachetest
 env LAYR_ROOT="$T/peer/store" "$LAYR" --project cachetest adopt main >/dev/null
 eq "the peer restores the saved cache" rebuilt "$(cat "$T/peer/store/projects/cachetest/lines/main/target/output")"
 ok "the peer cache is a mount over the saved state" mountpoint -q "$T/peer/store/projects/cachetest/lines/main/target"

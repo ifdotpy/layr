@@ -71,9 +71,8 @@ Built today (section 9):
   public follow overlay (`parts`). Each overlay keeps the part states in its own project. Shared,
   hidden and cache overlays are not in `parts`.
 - `fetch` takes the whole repository by default. `fetch --line <name> --overlay <layer>` (built
-  2026-11-11) takes the history of those lines on those layers only; `base` names the base. Since
-  slice 6 the old cache flags (`--no-caches`, `--caches-of` and the others) print their
-  replacement and go in the next release.
+  2026-11-11) takes the history of those lines on those layers only; `base` names the base. The old
+  cache flags of transfers (`--caches`, `--no-caches`, `--caches-of`) are removed (exit 2).
 - Since slice 3 a glass can have `platform=<key>`; since slice 6 a cache is a folder glass of one
   platform (`target.macos-aarch64`), and a named save records its part in the state. The cache
   code (`src/cache_overlay.rs`) still makes and reads those parts, and the parts are still full
@@ -274,10 +273,11 @@ makes another view. The setting `stack.<line id>` goes.
   reads. A folder glass without the property is protected. The state fields `cache_by` and
   `cache_shared` stay: they record who saved a part and whether the line was protected, and the
   rule reads them. They have the JSON keys `layer_by` and `layer_shared`.
-- Old flags. `save --caches`, `merge --caches-only`, `fsck --caches`, and `--caches`,
-  `--no-caches`, `--caches-of` on `push`, `fetch`, `pull`, `sync` and `clone` still work for one
-  release. Each prints one line on stderr that names the replacement (not with `-q` or
-  `--json`). The runners (tools/checks, `src/runner.rs`, the follow pass) use them with `-q`.
+- Old flags. `--caches`, `--no-caches` and `--caches-of` on `push`, `fetch`, `pull`, `sync` and
+  `clone` are removed: each fails with exit status 2 and names `--line` or `--overlay` (owner
+  decision 2026-11-11). Every glass comes by default. `save --caches`, `merge --caches-only` and
+  `fsck --caches` still work for one release and print one line that names the replacement (not
+  with `-q` or `--json`); the follow pass and the check save-back still call `save --caches`.
 - `cache.` prefix. A new glass has no `cache.` prefix. A store keeps its `cache.<folder>` glasses
   and the old cache fields of its state records; every command reads them as before.
 - Migration of a store: nothing to run. An existing `cache.target` stays the glass of `target`:

@@ -25,7 +25,7 @@ has "the owner delegates to the broker" '"max_hours":2' "$out"
 no "a delegation needs a trusted machine" l access grant machine:01a1aaaa-0000-7000-8000-000000000000 trust --max-hours 2
 mid=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l overlay managers "$ov" "machine:$mid" "machine:$b_id" >/dev/null 2>&1
-l push cloud -q --caches >/dev/null 2>&1
+l push cloud -q >/dev/null 2>&1
 
 bl() { env LAYR_ROOT="$T/b/store" "$LAYR" "$@"; }
 (cd "$T" && bl clone "file://$T/archive" p >/dev/null 2>&1)
@@ -35,15 +35,15 @@ no "nor one longer than its delegation" bl remote trust origin "$j_id" --public-
 no "nor one for a name without the prefix" bl remote trust origin "$j_id" --public-key "$j_key" --name job-1 --expires 1h --role writer --overlays "$ov"
 out=$(bl remote trust origin "$j_id" --public-key "$j_key" --name "$j_name" --expires 1h --role writer --overlays "$ov" --json)
 has "the broker trusts the job inside its delegation" '"role":"writer"' "$out"
-bl push origin -q --caches >/dev/null 2>&1
+bl push origin -q >/dev/null 2>&1
 
 jl() { env LAYR_ROOT="$T/j/store" "$LAYR" "$@"; }
-(cd "$T" && jl clone "file://$T/archive" p --caches-of main >/dev/null 2>&1)
+(cd "$T" && jl clone "file://$T/archive" p --line main >/dev/null 2>&1)
 J=$T/j/store/projects/p/lines
 (cd "$J/main" && jl line new w main >/dev/null 2>&1)
 ok "the job reads the cache of main" test -f "$J/w/target/a"
 (cd "$J/main" && jl line new "main.checks-$plat" main >/dev/null 2>&1)
-(cd "$J/main.checks-$plat" && echo j > target/j && jl save --caches -q && jl push origin -q --caches >/dev/null 2>&1)
+(cd "$J/main.checks-$plat" && echo j > target/j && jl save --caches -q && jl push origin -q >/dev/null 2>&1)
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l fetch cloud -q >/dev/null 2>&1
 has "the job's save-back line reaches the owner" "main.checks-$plat" "$(l line list 2>&1)"

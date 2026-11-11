@@ -22,7 +22,7 @@ echo change > change.txt; l add change.txt >/dev/null; l save -qm change
 l protect main >/dev/null 2>&1 || true
 l config check.unit 'test "$(cat target/a)" = laptop && echo runner > target/a' >/dev/null
 l config checks.lines '{"main":["unit"]}' >/dev/null
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 head=$(l rev-parse main)
 
 cl() { env LAYR_ROOT="$T/c/store" "$LAYR" "$@"; }
@@ -31,7 +31,7 @@ cd "$T/c/store/projects/p/lines/main" || exit 1
 cl config --local checks.runner true >/dev/null
 out=$(cl checks run --state main --json 2>/dev/null)
 has "the runner checks main's head warm" '"exit":0' "$out"
-cl push origin -q --caches >/dev/null 2>&1
+cl push origin -q >/dev/null 2>&1
 
 cd "$P/main" || exit 1
 l fetch archive -q >/dev/null 2>&1

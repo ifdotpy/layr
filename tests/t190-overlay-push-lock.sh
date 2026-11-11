@@ -13,7 +13,7 @@ P=$LAYR_ROOT/projects/p/lines
 cd "$P/main" || exit 1
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 mkdir -p target && echo built > target/out && l save --caches -q
-LAYR_TEST_OVERLAY_PUSH_MS=6000 "$LAYR" push archive --caches -q > "$T/push.log" 2>&1 &
+LAYR_TEST_OVERLAY_PUSH_MS=6000 "$LAYR" push archive -q > "$T/push.log" 2>&1 &
 PUSH=$!
 sleep 2
 start=$(date +%s)

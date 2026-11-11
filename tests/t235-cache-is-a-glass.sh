@@ -92,16 +92,21 @@ has "and the folder glass of another platform" "target.other-arch: a glass of pl
 fetch=$(l fetch r 2>&1)
 eq "fetch takes no glass of another platform" "" "$(echo "$fetch" | grep -E 'far|other-arch' | grep -v 'a glass of platform')"
 
-# 7. The old cache flags print their replacement and keep working.
+# 7. The old cache flags of a save, fsck and merge print their replacement and keep working.
 echo bin3 > target/debug/x
 out=$(l save --caches 2>&1)
 has "save --caches names save -m" "save --caches is deprecated" "$out"
 has "and it still saves the glass" "target: overlay $G" "$out"
 eq "save --caches -q prints nothing" "" "$(l save --caches -q 2>&1)"
 has "fsck --caches names gc" "fsck --caches is deprecated" "$(l fsck --caches 2>&1)"
-has "fetch --no-caches names --overlay" "fetch --no-caches is deprecated" "$(l fetch r --no-caches 2>&1)"
-has "fetch --caches-of names --line and --overlay" "--line <line> --overlay <glass>" "$(l fetch r --caches-of main 2>&1)"
-ok "fetch --caches-of -q still works" l fetch r --caches-of main -q
+# The cache flags of transfers are gone (owner decision 2026-11-11): exit status 2 and the replacement.
+out=$(l fetch r --no-caches 2>&1); code=$?
+eq "fetch --no-caches fails with status 2" 2 "$code"
+has "and names --overlay" "--overlay base" "$out"
+out=$(l fetch r --caches-of main -q 2>&1); code=$?
+eq "fetch --caches-of fails with status 2" 2 "$code"
+has "and names --line" "--line <line>" "$out"
+eq "push --caches fails with status 2" 2 "$(l push r --caches -q >/dev/null 2>&1; echo $?)"
 cd "$P/lines/warm" || exit 1
 has "merge --caches-only names merge" "merge --caches-only is deprecated" "$(l merge main --caches-only 2>&1)"
 

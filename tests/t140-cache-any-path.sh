@@ -73,7 +73,7 @@ has "its test reads its own folder" "DIR=$P/w" "$out"
 # of the clone's lines here.
 if [ "$(id -u)" != 0 ]; then
     l remote add archive "file://$T/archive" --paper-key-out $T/paper.txt >/dev/null 2>&1
-    l push archive -q --caches >/dev/null 2>&1
+    l push archive -q >/dev/null 2>&1
     mkdir -p $T/b
     env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR clone "file://$T/archive" p >/dev/null 2>&1
     Q=$T/b/store/projects/p/lines

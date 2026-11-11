@@ -194,9 +194,9 @@ prints one line on stderr that names its replacement (none with `-q`):
 | Flag | Use instead |
 | --- | --- |
 | `save --caches [--cache <path>]` | `save -m` |
-| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` | `fetch <remote> --line <line> --overlay <glass>` |
-| `fetch --no-caches` | `fetch <remote> --overlay <glasses>` |
-| `fetch`, `clone` `--caches-of <line>` | `fetch <remote> --line <line> --overlay <glass>` |
+| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | nothing: every glass comes unless `--overlay` names fewer |
+| `fetch --no-caches` (removed, exit 2) | `fetch <remote> --overlay base` |
+| `fetch`, `clone` `--caches-of <line>` (removed, exit 2) | `fetch <remote> --line <line>`, `clone <url> --line <line>` |
 | `merge <line> --caches-only` | `merge <line>` |
 | `fsck --caches` | `gc` |
 

@@ -930,7 +930,7 @@ fn check_first_cache_fetch(
         report
             .omitted
             .iter()
-            .all(|item| item.contains("not for --caches-of")),
+            .all(|item| item.contains("not for --line")),
         "cache fetch errors: {:?}",
         report.omitted
     );

@@ -406,7 +406,7 @@ fn run_project_inner(root: &Path, config: &Config, project: &str) -> Result<Valu
     let store = crate::store::Store::open(root)?;
     if !store.project_names()?.iter().any(|p| p == project) {
         let url = format!("layr+{}/{project}", config.url);
-        let (code, out) = layr(root, &["clone", &url, project, "--heads", "--caches-of", "main", "-q"])?;
+        let (code, out) = layr(root, &["clone", &url, project, "--heads", "--line", "main", "-q"])?;
         if code != 0 && code != 2 {
             // A private project opens only after the owner trusts this machine (its machine slot).
             return Ok(json!({"status": "waiting", "summary": format!("clone: {}", tail(&out))}));
@@ -434,7 +434,7 @@ fn run_project_inner(root: &Path, config: &Config, project: &str) -> Result<Valu
         if push != 0 {
             bail!("push: {}", tail(&out));
         }
-        let _ = layr(root, &["--project", project, "push", "origin", "--caches"]);
+        let _ = layr(root, &["--project", project, "push", "origin"]);
     }
     let checks = result["checks"].as_array().cloned().unwrap_or_default();
     let summary: Vec<String> = checks

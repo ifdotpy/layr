@@ -25,7 +25,7 @@ packs() { find "$T/archive" -path '*/chunks/*.pack.age' | sort; }
 bytes() { python3 -c 'import os,sys; print(sum(os.path.getsize(p) for p in sys.argv[1:]))' "$@"; }
 
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
-ok "push the cache to the store" l push archive -q --caches
+ok "push the cache to the store" l push archive -q
 first=$(packs)
 ok "the cache layer has chunk packs" test -n "$first"
 eq "each pack has its index" "$(find "$T/archive" -path '*/chunks/*.index.age' | wc -l | tr -d ' ')" "$(echo "$first" | wc -l | tr -d ' ')"
@@ -52,7 +52,7 @@ open(os.path.join(d, "libbig-2222222222222222.rlib"), "wb").write(data[:middle] 
 os.remove(old)
 EOF
 l save --caches -q
-ok "push the changed cache" l push archive -q --caches
+ok "push the changed cache" l push archive -q
 new=$(comm -13 <(echo "$first") <(packs))
 added=$(bytes $new)
 # Only the chunks around the insertion are new: at most a few 256 KiB chunks, never the 3 MiB file.
@@ -68,7 +68,7 @@ ok "and the removed file is gone" test ! -e "$R/far/target/debug/deps/libbig-111
 # are read and hashed; matching content reuses its chunks.
 echo more >> "$P/main/target/debug/out"
 l save --caches -q
-l push archive -q --caches
+l push archive -q
 mkdir -p "$T/d"
 env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 (cd "$T/d/store/projects/p/lines/main" && env LAYR_ROOT="$T/d/store" "$LAYR" line new far main >/dev/null 2>&1)
@@ -84,10 +84,10 @@ has "and no tree misses a chunk" "0 tree(s) with missing chunks" "$out"
 # A line with a cache file of its own: its chunks go with the line.
 before=$(packs | wc -l | tr -d ' ')
 l line new z main >/dev/null 2>&1
-(cd "$P/z" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/zonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+(cd "$P/z" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/zonly && l save --caches -q && l push archive -q >/dev/null 2>&1)
 ok "the line's push adds a pack" test "$(packs | wc -l | tr -d ' ')" -gt "$before"
 l line delete -D z >/dev/null
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 out=$(l fsck --caches --remote archive 2>&1); rc=$?
 eq "after the line delete and a push nothing is unreachable" 0 "$rc"
 has "no chunk of the line is left" "0 unreachable chunk(s)" "$out"
@@ -96,10 +96,10 @@ eq "its pack is gone" "$before" "$(packs | wc -l | tr -d ' ')"
 # With a wait: a sweep releases a dead chunk only when an earlier pass found it dead long enough before, so a push
 # of another machine that reused it meanwhile names it in its tree first.
 l line new y main >/dev/null 2>&1
-(cd "$P/y" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/yonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+(cd "$P/y" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/yonly && l save --caches -q && l push archive -q >/dev/null 2>&1)
 with_y=$(packs | wc -l | tr -d ' ')
 l line delete -D y >/dev/null
-LAYR_TEST_CHUNK_GRACE=3600 l push archive -q --caches >/dev/null 2>&1
+LAYR_TEST_CHUNK_GRACE=3600 l push archive -q >/dev/null 2>&1
 eq "a chunk found dead for the first time stays" "$with_y" "$(packs | wc -l | tr -d ' ')"
 marks=$(find "$LAYR_ROOT" -name dead-chunks | head -1)
 ok "the pass marks it" test -s "$marks"

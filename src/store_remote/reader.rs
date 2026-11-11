@@ -864,7 +864,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
         // a cache that no line takes here: nothing else needs its files.
         if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
-            report.omitted.push(format!("cache state {}: not for --caches-of", crate::ids::short(id)));
+            report.omitted.push(format!("cache state {}: not for --line", crate::ids::short(id)));
             continue;
         }
         // `--line`: a state of an overlay that no chosen line shows stays on the remote.

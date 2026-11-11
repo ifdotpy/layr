@@ -17,21 +17,21 @@ mkdir -p target
 trees() { find "$T/archive/overlays" -name '*.tree.age' 2>/dev/null | wc -l | tr -d ' '; }
 parts() { find "$T/archive/overlays" -name '*.data.age' 2>/dev/null | wc -l | tr -d ' '; }
 # Each save makes a new file, so each state has a part of its own.
-for i in 1 2 3; do head -c 20000 /dev/urandom > target/big$i; l save --caches -q; l push archive -q --caches >/dev/null 2>&1; done
+for i in 1 2 3; do head -c 20000 /dev/urandom > target/big$i; l save --caches -q; l push archive -q >/dev/null 2>&1; done
 eq "the remote keeps the newest cache state of main and the empty first state" 2 "$(trees)"
 first_parts=$(parts)
 
 l line new x main >/dev/null 2>&1
 cd "$P/x" || exit 1
 head -c 20000 /dev/urandom > target/xonly; l save --caches -q
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 eq "a line's cache state is in the remote" 3 "$(trees)"
 cd "$P/main" || exit 1
 l line delete -D x >/dev/null
 no "fetch does not accept a push-only cleanup option" l fetch archive --no-cache-sweep
 ok "a checkpoint push defers cache cleanup" l push archive -q --no-cache-sweep
 eq "the checkpoint keeps the deleted line's cache" 3 "$(trees)"
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 eq "after the line delete and a push its cache state is gone from the remote" 2 "$(trees)"
 eq "and its data part too" "$first_parts" "$(parts)"
 
@@ -42,7 +42,7 @@ mkdir -p "$dir/01a1aaaa-0000-7000-8000-000000000001" "$dir/01a1aaaa-0000-7000-80
 echo old > "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
 touch -t 202101010000.00 "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
 echo young > "$dir/01a1aaaa-0000-7000-8000-000000000002/deadbeef.0000.data.age"
-head -c 20000 /dev/urandom > target/big3; l save --caches -q; l push archive -q --caches >/dev/null 2>&1
+head -c 20000 /dev/urandom > target/big3; l save --caches -q; l push archive -q >/dev/null 2>&1
 no "the sweep deletes an old part that no tree names" test -e "$dir/01a1aaaa-0000-7000-8000-000000000001/deadbeef.0000.data.age"
 ok "and keeps a young one" test -e "$dir/01a1aaaa-0000-7000-8000-000000000002/deadbeef.0000.data.age"
 rm -rf "$dir/01a1aaaa-0000-7000-8000-000000000001" "$dir/01a1aaaa-0000-7000-8000-000000000002"
@@ -50,10 +50,10 @@ rm -rf "$dir/01a1aaaa-0000-7000-8000-000000000001" "$dir/01a1aaaa-0000-7000-8000
 # fsck --caches --remote reports dead cache states that a push has not deleted yet; the daemon's
 # pass deletes them in a remote that nobody pushes to.
 for i in 4 5; do head -c 20000 /dev/urandom > target/big$i; l save --caches -q; done
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 echo changed > target/big5; l save --caches -q
 l line new y main >/dev/null 2>&1
-(cd "$P/y" && head -c 20000 /dev/urandom > target/yonly && l save --caches -q && l push archive -q --caches >/dev/null 2>&1)
+(cd "$P/y" && head -c 20000 /dev/urandom > target/yonly && l save --caches -q && l push archive -q >/dev/null 2>&1)
 l line delete -D y >/dev/null
 out=$(l fsck --caches --remote archive 2>&1); rc=$?
 eq "fsck --caches --remote exits 1 with dead states" 1 "$rc"
@@ -71,11 +71,11 @@ ov=$TG
 r1=machine:$(uuidgen | tr 'A-Z' 'a-z')
 r2=machine:$(uuidgen | tr 'A-Z' 'a-z')
 l overlay readers "$ov" "$r1" "$r2" >/dev/null 2>&1
-l push archive -q --caches >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
 epochs() { find "$T/archive/overlays" -path '*/epochs/*' -name '*.tree.age' | sed 's|.*/epochs/\([^/]*\)/.*|\1|' | sort -u | wc -l | tr -d ' '; }
 eq "one epoch has cache states before the key change" 1 "$(epochs)"
 l overlay readers "$ov" "$r2" >/dev/null 2>&1
-out=$(l push archive -q --caches --no-cache-sweep 2>&1)
+out=$(l push archive -q --no-cache-sweep 2>&1)
 has "the push names the deleted states of the old epoch" "of older key epochs" "$out"
 eq "only the new epoch has cache states" 1 "$(epochs)"
 eq "and it has the kept states" 2 "$(trees)"

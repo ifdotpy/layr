@@ -1047,24 +1047,18 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     )
     .map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let name = a.pos.first().ok_or_else(|| exit(128, format!("use layr {op} <remote>; Git remotes use layr git {op}")))?;
-    cache_flag_notes(&a, op);
+    refuse_cache_flags(&a, op)?;
     let mut h = here(ctx)?;
     let url = remote_url(&h.repo, name).map_err(|e| exit(128, format!("{e}; Git forms use layr git {op}")))?;
     let remote_kind = kind(&url)?;
     if a.has("--no-cache-sweep") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--no-cache-sweep requires layr push to a store remote");
     }
-    if a.has("--no-caches") && (op != "fetch" || remote_kind != Kind::Store || a.has("--caches") || a.get("--caches-of").is_some()) {
-        bail!("--no-caches requires layr fetch from a store remote, without --caches or --caches-of");
-    }
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
     }
     if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store) {
         bail!("--line and --overlay require layr fetch or layr push with a store remote");
-    }
-    if a.get("--overlay").is_some() && a.has("--no-caches") {
-        bail!("--overlay names the layers to take; leave out --no-caches");
     }
     if let Some(line) = a.get("--only-line") {
         crate::store::check_name("line", line)?;
@@ -1113,7 +1107,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 &command,
                 if op == "pull" { "fetch" } else { op },
                 a.has("--auto"),
-                a.has("--caches"),
+                true,
                 a.has("-q") || (op == "pull" && a.has("--json")),
                 a.has("--json") && op != "pull",
             )?;
@@ -1137,12 +1131,12 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let opts = store_remote::Options {
                 auto: a.has("--auto"),
-                caches: a.has("--caches"),
-                no_caches: a.has("--no-caches"),
+                caches: true,
+                no_caches: false,
                 no_cache_sweep: a.has("--no-cache-sweep"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 public: false,
-                caches_of: caches_of(&a),
+                caches_of: Vec::new(),
                 caches_of_state: None,
                 only_caches: None,
                 heads: a.has("--heads"),
@@ -1253,29 +1247,24 @@ fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
     a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// The notes for the cache flags of a transfer (`super::deprecated`); none with `-q` or `--json`.
-fn cache_flag_notes(a: &crate::args::Parsed, op: &str) {
-    if a.has("-q") || a.has("--json") {
-        return;
-    }
-    if a.has("--caches") {
-        super::deprecated(&format!("{op} --caches"), &format!("layr {op} <remote> --line <line> --overlay <glass>"));
-    }
-    if a.has("--no-caches") {
-        super::deprecated(
-            &format!("{op} --no-caches"),
-            &format!("layr {op} <remote> --overlay <glasses> (it names the glasses to take)"),
-        );
-    }
-    if a.get("--caches-of").is_some() {
-        super::deprecated(&format!("{op} --caches-of"), &format!("layr {op} <remote> --line <line> --overlay <glass>"));
+/// The cache flags of a transfer are gone: a cache is an ordinary glass, and `--line` and `--overlay` choose what
+/// comes (docs/overlays.md section 1a). Each old form fails with exit status 2 and names its replacement.
+fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
+    let replacement = if a.has("--no-caches") {
+        Some(("--no-caches", format!("layr {op} <remote> --overlay base (--overlay names the glasses to take)")))
+    } else if a.get("--caches-of").is_some() {
+        Some(("--caches-of", format!("layr {op} <remote> --line <line>")))
+    } else if a.has("--caches") {
+        Some(("--caches", format!("layr {op} <remote> (every glass comes unless --overlay names fewer)")))
+    } else {
+        None
+    };
+    match replacement {
+        Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary glass. Use {instead}"))),
+        None => Ok(()),
     }
 }
 
-/// The lines of `--caches-of <line>[,<line>]`.
-fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
-    a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
-}
 
 fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_output: bool, quiet: bool) -> Result<()> {
     if json_output {
@@ -1357,6 +1346,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .flag("--auto")
             .flag("--caches")
             .value("--caches-of")
+            .flag("--no-caches")
+            .value("--line")
             .flag("--heads")
             .value("--only-line")
             .flag("--json")
@@ -1364,8 +1355,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         args,
     )
     .map_err(|e| exit(128, format!("{e}; Git forms use layr git clone")))?;
+    refuse_cache_flags(&a, "clone")?;
     let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr clone <url> [<project>]; Git uses layr git clone"))?;
-    cache_flag_notes(&a, "clone");
     if kind(url).map_err(|e| exit(128, format!("{e}; use layr git clone for Git URLs")))? != Kind::Store {
         bail!("clone requires a file://, s3:// or layr+https:// store; Git uses layr git clone");
     }
@@ -1391,11 +1382,12 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let opts = store_remote::Options {
             public: a.has("--public"),
             auto: a.has("--auto"),
-            caches: a.has("--caches"),
+            caches: true,
             no_caches: false,
             no_cache_sweep: false,
             paper_key: a.get("--paper-key").map(str::to_owned),
-            caches_of: caches_of(&a),
+            // `--line`: the caches that a new line from those lines starts from, as the fetch takes them.
+            caches_of: list_value(&a, "--line"),
             caches_of_state: None,
             only_caches: None,
             lines: Vec::new(),

@@ -158,7 +158,7 @@ user daemon LaunchAgent (`ws.layr.daemon`) when it is missing. No sudo is used.
 
 The daemon (`src/service.rs`) keeps one long-lived child for the runner (`src/runner.rs`): a
 WebSocket to `/v1/runners/connect`, authenticated by the runner token. The gateway pushes work that
-names a project only. The runner clones the project once (`--heads --caches-of main`, then
+names a project only. The runner clones the project once (`--heads --line main`, then
 `config --local checks.runner true`), fetches it, runs `checks watch --once --json` and pushes the
 results and caches with the runner token. The commands come only from the project's check
 settings; the gateway never sends a command. A job reports pass, fail, error or waiting (the

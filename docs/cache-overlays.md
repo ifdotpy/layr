@@ -46,9 +46,10 @@ Built today:
 - `save -m` saves the part of each build-output glass that changed, and the state names it
   (`parts`). The first named save of a `regenerable` folder makes the glass of this platform,
   `<folder>.<platform>`. `line new <state>` takes the part that the state names.
-- The cache flags (`save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches`,
-  `--no-caches`, `--caches-of`, `fsck --caches`) still work for one release and print their
-  replacement ([commands](commands.md), `save`).
+- The cache flags of transfers (`--caches`, `--no-caches`, `--caches-of` on push, fetch, pull,
+  sync and clone) are removed: each fails with exit status 2 and names `--line` or `--overlay`.
+  `save --caches`, `merge --caches-only` and `fsck --caches` still work for one release and print
+  their replacement ([commands](commands.md), `save`).
 - A `cache.<folder>` glass of an older layr stays the glass of its folder on every platform, with
   one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6). A new glass has
   one platform and overlay lines `line-<line id>`. To move a store to one glass per platform, see
@@ -222,11 +223,11 @@ There are two kinds of remote:
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
   imports a cache state only for its own platform, and only a state that a line here can take
-  (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
-  `layr fetch <remote> --caches-of ...` (stopgaps; owner decision 2026-11-11: `fetch` takes lines and glasses, section 2) restore only the caches that `line new X <line>` takes for
+  (`usable_cache`: shared, or of the caller). `layr clone <url> --line <line>[,<line>]` and
+  `layr fetch <remote> --line ...` (the old `--caches-of` is removed) restore only the caches that `line new X <line>` takes for
   those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
   head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
-  of a server queue). `layr fetch <Layr Cloud remote> --no-caches` (a stopgap that goes away, section 2) reads no cache overlay at all: a merge
+  of a server queue). `layr fetch <remote> --overlay base` (the old `--no-caches` is removed) reads no cache overlay at all: a merge
   machine builds nothing, and every new cache of the check runners was gigabytes per fetch. `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it

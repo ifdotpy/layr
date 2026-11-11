@@ -24,7 +24,7 @@ l overlay repair $TG >/dev/null; l save -q
 eq "overlay repair makes it a cache again" "cache" "$(cstate)"
 eq "and keeps its content" "rebuilt" "$(cat target/out)"
 # A live move with warm build output. The first sync sends the state without caches; the next
-# sync with --caches must still send them. Caches go only to machines the project trusts: the
+# sync with must still send them. Caches go only to machines the project trusts: the
 # target gets trusted by the syncs, after the cache save, so the sync adds it to the readers. The
 # regenerable setting belongs to this machine: a .layrattributes file makes target a cache there too.
 new_fs $T/b 4G
@@ -74,7 +74,7 @@ ok "trust the peer" l remote trust test-peer "$(echo "$peer_self" | python3 -c '
     --public-key "$(echo "$peer_self" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')"
 b_id=$(env LAYR_ROOT=$T/b/store $LAYR remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 peer_exchange sync g -q --auto -- "${peer_cmd[@]}"
-peer_exchange sync g -q --auto --caches -- "${peer_cmd[@]}"
+peer_exchange sync g -q --auto -- "${peer_cmd[@]}"
 has "the sync adds the trusted target to the cache readers" "machine:$b_id" "$(l overlay readers $TG)"
 if [ "$peer_service" = 1 ]; then
     sudo -n sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$T/peer.pid" env LAYR_ROOT="$T/b/store" "$LAYR" daemon --socket "$T/peer.sock" --tick 3600 > "$T/peer-daemon.log" 2>&1 &

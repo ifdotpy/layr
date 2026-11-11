@@ -36,7 +36,7 @@ printf 'new build output\n' > generated/new
 l save -q --caches
 "$OLD_LAYR" branch -q read-new-cache
 ok "old client restores a new saved cache" cmp generated/new ../read-new-cache/generated/new
-ok "new client sends caches to old peer" peer_exchange sync compat -q --auto --caches -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat
+ok "new client sends caches to old peer" peer_exchange sync compat -q --auto -- env LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" serve-peer compat
 LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" --project compat adopt main >/dev/null
 ok "old peer restores the new cache content" cmp generated/new "$T/peer-old/store/projects/compat/lines/main/generated/new"
 ok "old client sends caches to new peer" "$OLD_LAYR" sync -q --auto --layers -- env LAYR_ROOT=$T/peer-new/store "$LAYR" serve-peer compat
