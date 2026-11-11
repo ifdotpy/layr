@@ -1762,12 +1762,30 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             } else {
                 commit_tree(repo, &export, &rec, base.as_ref(), &parents, None, &history_ref(&s))?
             };
+            // A state that changed only the parts of glasses has the tree of its parent: git gets
+            // no empty commit, the state maps to its parent's commit (docs/overlays.md section 1a).
+            let c = match (rec.parents.as_slice(), base.as_ref()) {
+                ([parent], Some((_, parent_commit)))
+                    if !rec.parts.is_empty() && repo.state(parent)?.parts != rec.parts && same_tree(&export.store, &c, parent_commit) =>
+                {
+                    parent_commit.clone()
+                }
+                _ => c,
+            };
             known.insert(s.clone(), c.clone());
             made.push((s, c));
         }
     }
     let tip = known.get(state).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state)))?;
     Ok((tip, made))
+}
+
+/// Whether two commits of the git store have the same tree.
+fn same_tree(store: &Path, a: &str, b: &str) -> bool {
+    match (git_out(store, &["rev-parse", &format!("{a}^{{tree}}")]), git_out(store, &["rev-parse", &format!("{b}^{{tree}}")])) {
+        (Ok(x), Ok(y)) => x.trim() == y.trim(),
+        _ => false,
+    }
 }
 
 /// Store and signing configuration shared by all commits in one export attempt.

@@ -136,11 +136,12 @@ ok "it takes the part of the new state of main" has_part "$main_part"
 no "it leaves the part of line a on the remote" has_part "$a_part"
 cd "$P/lines/main" || exit 1
 
-# 6. A store saved before parts: an overlay-only save leaves the head without parts.
+# 6. A store saved before parts: on a protected line (which moves only through merges) an
+#    overlay-only save still leaves the head without parts, as every save did before parts.
 l init q --from "$T/src" -q >/dev/null
 Q=$LAYR_ROOT/projects/q
 cd "$Q/lines/main" || exit 1
-l protect main --remove >/dev/null 2>&1 || true
+l protect main >/dev/null 2>&1 || true
 l overlay create keys --mode follow -q
 echo k1 > keys.txt
 l overlay move keys keys.txt >/dev/null
@@ -160,5 +161,21 @@ ok "a line from the migrated state" l line new -q at "$qh"
 eq "it has the part that the migration named" k1 "$(cat "$Q/lines/at/keys.txt")"
 ok "a line from main" l line new -q now main
 eq "it has the part that main shows now" k2 "$(cat "$Q/lines/now/keys.txt")"
+
+# 7. A line has its own history: on a line that is not protected an overlay-only save makes a
+#    state of the line with the base tree of its parent and the new part. Git gets no empty commit.
+cd "$Q/lines/now" || exit 1
+before=$(head_of head)
+echo k3 > keys.txt
+ok "an overlay-only save on a free line" l save -qam "keys 3"
+after=$(head_of head)
+no "it moves the head" test "$before" = "$after"
+eq "the new head names the new part" "keys=$(part_of keys)" "$(parts "$after")"
+git init -q --bare "$T/q.git"
+ok "a git remote" l git remote add gq "$T/q.git"
+ok "a git push of the line" l git push -q gq now
+git_of() { l log -n 1 "$1" 2>/dev/null | sed -n 's/^Git: *//p'; }
+no "the parent has a commit" test -z "$(git_of "$before")"
+eq "the new state has the commit of its parent" "$(git_of "$before")" "$(git_of "$after")"
 
 finish

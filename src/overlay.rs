@@ -2197,7 +2197,14 @@ pub fn commit_layers(
         }
     };
     let head = repo.state(&line.head)?;
-    let shared = if s.shared.is_empty() && !(allow_empty && made.is_empty()) {
+    // A line has its own history (owner decision 2026-11-11): a save that changes only glasses
+    // that keep parts makes a state of the line with the same base tree and the new parts. A
+    // protected line moves only through merges, so there the parts wait in the stack as before.
+    let parts_only = s.shared.is_empty()
+        && made.iter().any(|(i, _, _)| repo.overlay_info(&layers[*i].overlay).ok().flatten().is_some_and(|info| parts_glass(&info)))
+        && parts != head.parts
+        && repo.authorize_line(ctx, line, crate::repo::LineOp::Direct).is_ok();
+    let shared = if s.shared.is_empty() && !(allow_empty && made.is_empty()) && !parts_only {
         None
     } else {
         match next_state(repo, ctx, &line.head, &new_tree.path, &s.shared, own, vec![line.head.clone()], message, Some(&line.id))

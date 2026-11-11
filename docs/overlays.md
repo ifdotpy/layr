@@ -132,6 +132,12 @@ makes another view. The setting `stack.<line id>` goes.
 `save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches/--no-caches/--caches-of`,
 `fsck --caches` and the `cache.` name prefix go. Caches are stored as v2 objects like any part.
 
+**Overlay-only saves (owner decision 2026-11-11, built).** A line has its own history: a save
+that changes only glasses that keep parts makes a state of the line with the base tree of its
+parent and the new parts. In git that state maps to its parent's commit, so git gets no empty
+commit. A protected line moves only through merges, so there such a save keeps the part in the
+stack as before. Test t233 section 7.
+
 **Slices.**
 
 1. `fetch --line --overlay` (built).
