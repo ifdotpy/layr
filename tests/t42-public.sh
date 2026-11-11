@@ -189,21 +189,10 @@ try:
  output=run(['clone',url,'network','--mode','secret','--public','--json'],network)
  check(clean(output.stdout+output.stderr,ids),'HTTP public clone has no hidden trace')
  nproject=pathlib.Path(network['LAYR_ROOT'])/'projects/network'
- if not (nproject/'lines/main/future.txt').exists():
-  # Diagnostics for a run where the clone leaves main without the newest file.
-  print('DIAG clone stdout+stderr:',output.stdout[-3000:],output.stderr[-3000:],flush=True)
-  print('DIAG main folder:',sorted(p.name for p in (nproject/'lines/main').iterdir()) if (nproject/'lines/main').is_dir() else 'missing',flush=True)
-  print('DIAG 404 paths:',missed[:40],flush=True)
-  print('DIAG requests:',[(m,pth) for m,pth,_ in requests][:80],flush=True)
-  print('DIAG future id:',future,flush=True)
-  keys=sorted(str(q.relative_to(root/'archive')) for q in (root/'archive').rglob('*') if q.is_file())
-  print('DIAG archive keys:',len(keys),[k for k in keys if k.startswith(('records/','public','store','refs'))][:60],flush=True)
-  print('DIAG keys naming future:',[k for k in keys if future in k or future.replace('-','') in k][:20],flush=True)
-  for k in keys:
-   if k.startswith('records/'): print('DIAG record key',k,(root/'archive'/k).stat().st_size,int((root/'archive'/k).stat().st_mtime*1000),flush=True)
-  for args in (['--project','network','--line','main','log','-n','5'],['--project','network','line','list','--json'],['--project','network','--line','main','status']):
-   d=run(args,network,False);print('DIAG',args,d.returncode,d.stdout[-2000:],d.stderr[-2000:],flush=True)
- check((nproject/'lines/main/future.txt').read_text()=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
+ # A clone takes the creator's head of main (store_remote clone_head_tests); W's later save is read by its id, as the
+ # file reader above reads it.
+ check((nproject/'lines/main/public.txt').read_text()=='public version one\n','HTTP public clone checks out the creator head of main')
+ check(run(['--line','main','show',future+':future.txt'],dict(network,LAYR_PROJECT='network')).stdout=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
  network['LAYR_PROJECT']='network'
  run(['fetch','origin','-q'],network)
  check(True,'HTTP public fetch reads through /p/')
@@ -216,7 +205,7 @@ try:
  check(not (root/f'archive/slots/machine-{machine}.age').exists(),'HTTP public clone creates no machine slot')
  requests.clear()
  output=run(['clone',url,'network-auto','--mode','secret','--json'],network)
- check(clean(output.stdout+output.stderr,ids) and (pathlib.Path(network['LAYR_ROOT'])/'projects/network-auto/lines/main/future.txt').read_text()=='future public bytes\n','automatic HTTP clone discovers a public store after its private descriptor is unavailable')
+ check(clean(output.stdout+output.stderr,ids) and run(['--line','main','show',future+':future.txt'],dict(network,LAYR_PROJECT='network-auto')).stdout=='future public bytes\n','automatic HTTP clone discovers a public store after its private descriptor is unavailable')
  check([path for _,path,_ in requests if not path.startswith('/p/project/')]==['/v1/p/project/store.json'],'automatic HTTP discovery probes only the private descriptor before switching to /p/')
  check(all(method=='GET' and auth is None for method,_,auth in requests),'automatic HTTP discovery sends no credential, read proof or write')
 finally: server.shutdown();server.server_close();thread.join(timeout=10)
