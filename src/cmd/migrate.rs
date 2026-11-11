@@ -183,6 +183,13 @@ pub(crate) fn plan(states: &[Candidate], table: &BTreeMap<String, StateRef>) -> 
     p
 }
 
+/// The differences that count for `id`. A state imported from Git is built again on each read, with the times of
+/// that build (Git has no file times): only its times may differ; content, modes and links must match.
+fn counted_differences<'d>(repo: &Repo, id: &str, differences: &'d [String]) -> Vec<&'d String> {
+    let git_built = crate::gitbridge::buildable(repo, id);
+    differences.iter().filter(|d| !(git_built && d.starts_with("time differs"))).collect()
+}
+
 fn table_dir(repo: &Repo) -> PathBuf {
     repo.p.meta_dir().join("migrate")
 }
@@ -404,11 +411,12 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 // A resumed run must not trust a journal whose objects were lost or changed.
                 if p.unrecorded.contains(id) {
                     let (_, comparison, _, _) = super::objects::compare_checkout(&h, &store, id, r)?;
-                    if !comparison.differences.is_empty() {
+                    let differences = counted_differences(repo, id, &comparison.differences);
+                    if !differences.is_empty() {
                         bail!(
                             "state {} no longer matches its migration journal: {}",
                             ids::short(id),
-                            comparison.differences.join("; ")
+                            differences.iter().map(|d| d.as_str()).collect::<Vec<_>>().join("; ")
                         );
                     }
                 }
@@ -434,9 +442,10 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let r = StateRef { tree: i.tree, times: i.times };
         let (_, cmp, checkout_s, compare_s) =
             super::objects::compare_checkout(&h, &store, id, &r).with_context(|| format!("verify state {}", ids::short(id)))?;
-        if !cmp.differences.is_empty() {
+        let differences = counted_differences(repo, id, &cmp.differences);
+        if !differences.is_empty() {
             outln!(ctx, "state {}: the checkout of tree {} differs from the snapshot:", ids::short(id), r.tree);
-            for d in cmp.differences.iter().take(20) {
+            for d in differences.iter().take(20) {
                 outln!(ctx, "\t{d}");
             }
             record(&mut pending, &table)?;
@@ -445,7 +454,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 format!(
                     "layr migrate stopped at state {}: {} difference(s). Nothing was deleted; {} state(s) before it are verified. Report this, then continue with `layr migrate --resume`.",
                     ids::short(id),
-                    cmp.differences.len(),
+                    differences.len(),
                     n
                 ),
             ));

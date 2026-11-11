@@ -13,6 +13,8 @@
 
 * **checks:** an older head's check keeps a newer head's caches; checks of states without rust-toolchain.toml use the prepared Rust
 * **checks:** keep the macOS check skips and skip the gateway fixture test without its fixture
+* **checks:** the macOS check skips the loopback TCP tests of api_tests and runner, which the Linux unit check runs
+* **migrate:** a state imported from Git may differ only in file times, which each Git build sets anew
 * **migrate:** a state in the free queue without an owner counts as freed
 * **migrate:** preserve absent unowned records after replay
 

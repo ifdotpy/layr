@@ -16,7 +16,8 @@ assert p.get("FilesystemType")=="apfs" and p.get("MountPoint")==sys.argv[1], p
 done
 python3 tests/test_run_harness.py
 cargo build --locked --offline
-# The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec.
+# The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec. It also refuses
+# loopback TCP (no network namespace on macOS): the fake-server tests of api_tests and runner run in the Linux unit check.
 # ci.yml's macos job runs them outside a sandbox.
 cargo test --locked --offline -- --include-ignored \
     --skip apfs_commit::tests::recovery_takes_over_a_reused_pid \
@@ -28,7 +29,14 @@ cargo test --locked --offline -- --include-ignored \
     --skip cmd::checks::macos_tests::sandbox_refuses_network_and_writes_outside_work \
     --skip disk::catalog::tests::status_reports_the_keychain_and_service_without_the_identity \
     --skip disk::keystore::tests::login_keychain_roundtrip \
-    --skip disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock
+    --skip disk::tests::keychain_lock_hides_files_and_blocks_webdav_until_unlock \
+    --skip store_remote::api_tests:: \
+    --skip runner::tests::work_runs_the_project_and_reports_done_with_the_cursor \
+    --skip runner::tests::a_scan_that_outlives_its_connection_reports_on_the_next_one \
+    --skip runner::tests::webtransport_carries_the_same_protocol_and_close_codes \
+    --skip runner::tests::a_blocked_webtransport_endpoint_falls_back_to_the_websocket \
+    --skip runner::tests::a_welcome_naming_another_host_gets_no_webtransport_connection \
+    --skip runner::tests::an_expired_token_asks_for_renewal
 export LAYR="$PWD/target/debug/layr"
 python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
