@@ -103,6 +103,10 @@ Fact: a line already shows a stack, the shared head plus an ordered list of over
 `{overlay, state}` (`src/overlay.rs` `Layer`, setting `stack.<line id>`), and the base key is a
 hash of exactly that (`base_key`). A view is that stack made addressable.
 
+Owner decision 2026-11-11 (`docs/overlays.md` section 1): a line holds no stack; a view is a
+function of a line and a set of overlays, and the setting `stack.<line id>` goes. The text of this
+section describes the code as built.
+
 - `ViewId` = full SHA-256 hex of the canonical JSON
   `{"format":1,"shared":"<state>","layers":[{"overlay":"<name>","state":"<state>"},…]}` in stack
   order. Access policy is not part of it (RFC 3.1). A line without overlays has the view

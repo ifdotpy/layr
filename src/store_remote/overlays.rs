@@ -56,6 +56,28 @@ impl Published {
     }
 }
 
+/// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
+/// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
+pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
+    let mut ids = Vec::new();
+    for name in lines {
+        let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
+        ids.push(format!("line-{}", line.id));
+    }
+    let tips: Vec<String> = orepo
+        .p
+        .db
+        .lines()?
+        .into_iter()
+        .filter(|l| l.name.starts_with("user-") || ids.iter().any(|id| l.name == *id || l.name.starts_with(&format!("{id}."))))
+        .map(|l| l.head)
+        .collect();
+    if heads {
+        return Ok(tips.into_iter().collect());
+    }
+    Ok(reader::state_ancestries(orepo, tips)?.into_iter().collect())
+}
+
 /// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
 /// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
 /// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
@@ -800,6 +822,10 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     }
     for (name, published) in published {
         let is_cache = repo.overlay_info(&name).ok().flatten().is_some_and(|info| info.cache);
+        if !opts.takes_layer(&name, is_cache) {
+            report.omitted.push(format!("overlay {name}: not in --overlay"));
+            continue;
+        }
         let mut one = || -> Result<()> {
             if store.is_public_reader() && published.key.access_mode != layr_store::epochs::Mode::Public {
                 return Ok(());
@@ -873,8 +899,8 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
-            let fetched = if is_cache {
-                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+            let fetched = if is_cache || !opts.lines.is_empty() {
+                reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
             };
@@ -964,7 +990,13 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     for name in repo.overlay_names()? {
         let Some(info) = repo.overlay_info(&name)? else { continue };
-        if info.hidden || (info.cache && opts.no_caches) {
+        if info.hidden {
+            continue;
+        }
+        if !opts.takes_layer(&name, info.cache) {
+            if opts.overlays.is_some() {
+                report.omitted.push(format!("overlay {name}: not in --overlay"));
+            }
             continue;
         }
         let mut one = || -> Result<()> {
@@ -989,8 +1021,8 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let mut orepo = Repo { p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
-            let mut fetched = if info.cache {
-                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+            let mut fetched = if info.cache || !opts.lines.is_empty() {
+                reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
             };

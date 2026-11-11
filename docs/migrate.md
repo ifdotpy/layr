@@ -247,6 +247,7 @@ A successful migration enables `objects.enabled`. New source states include a tr
 named and automatic saves. Objects are complete before the signed record becomes visible.
 The command then removes its native source copies, after readers release their pins.
 A retry marker preserves this cleanup after a crash. Cache and derived states retain their native format.
+Owner decision 2026-11-11: a cache is an ordinary overlay, and its states will go into v2 objects like any overlay ([cache overlays](cache-overlays.md) section 2). Today they keep the native format.
 You do not need to repeat the migration for new saves.
 
 Before `--delete-old` removes any snapshot, it checks the object checkout of every candidate

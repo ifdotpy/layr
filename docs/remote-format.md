@@ -94,6 +94,7 @@ Live line heads and live refs require their target states and ancestors, includi
 For an imported state the Git pack (section "Git packs") replaces its tree. Trees are required for
 states that layr made (named saves, automatic states, merges, and the other kinds that are not imports).
 Cache states require `--caches`, even when a live ref targets them. An omitted target is named in the report.
+Owner decision 2026-11-11: a cache is an ordinary overlay with no cache flag, and a fetch names the lines and overlays it takes ([overlays](overlays.md) section 1). The rule above is what is built.
 Derived states travel as ordinary states.
 Readers validate the contiguous sequence prefix, project identity, signatures, and local trust before they import records.
 Readers validate tree signatures and each restored file's size and SHA-256.

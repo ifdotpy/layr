@@ -10,6 +10,12 @@ Every push and sync carries every overlay of the project. Visibility follows the
 readers (`layr overlay readers`), as it does on one machine today. Nobody without read access
 gets plaintext, on any machine or in any store.
 
+Owner decision 2026-11-11: `fetch` takes lines and overlays, not the whole repository: the
+history of the chosen lines, and only their parts on the chosen glasses (for a merge runner: the
+line `main` with the base and the `target` glass). The read rule below stays. Built today: push
+and sync carry every overlay, and fetch takes every overlay that a slot opens
+([overlays](overlays.md) section 1).
+
 ## Peer remotes (`ssh://`)
 
 The peer is a Layr service that enforces the same signed access rules. Peer sync sends overlay

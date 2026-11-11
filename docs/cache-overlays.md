@@ -21,7 +21,36 @@ in the Studio project found these problems:
 
 ## 2. Model
 
-A cache is an ordinary overlay with properties. No separate cache concept remains in the model.
+Owner decision 2026-11-11. A cache is an ordinary overlay: a glass of the model in
+[overlays](overlays.md) section 1. No special cache concept remains: no cache flags, no `cache.`
+name prefix, no separate code path. The code does not build this yet; "Built today" below says
+how the code differs.
+
+- A cache is a glass such as `target` with `folder=target`, `quiet`, `history=last`,
+  `merge=union-theirs` and `platform`. Lines and glasses are independent: a line does not own a
+  cache, and a cache does not own lines.
+- A line has the same name on every glass. One state of a line holds its part on each glass,
+  the cache glass too. A view joins a line and a set of glasses.
+- `history=last` on a glass: older states of a line keep their parts on other glasses; their
+  part on this glass is dropped.
+- `fetch` takes lines and glasses: for example, a merge runner takes the line `main` with the
+  base and the `target` glass.
+- Storage: cache glasses go into v2 objects ([objects](objects.md)) like any glass. A state
+  record names one tree and one times table per glass.
+- Space: layered storage and the cleanup of old layers (`history=last`) save space. No size cap
+  applies to a cache: the owner rejects `gc lru:<size>` for caches.
+
+Built today:
+
+- Cache flags exist: `save --caches`, `sync --caches`, `merge --caches-only`,
+  `fetch --caches`, `--no-caches`, `--caches-of` and `fsck --caches`. They go away with the model.
+- `save --caches` names a cache overlay `cache.<folder>` (section 12), and
+  `src/cache_overlay.rs` is a separate code path.
+- Overlay lines have their own names (`line-<line id>.<os>-<arch>`, below), not the line's name.
+- A state record names one tree and one times table. Cache states keep their native format
+  (full folder snapshots, section 21), not v2 objects.
+
+The properties as built:
 
 - An overlay has **properties**. Each property has a default that keeps the behaviour of section 9
   of [overlays](overlays.md):
@@ -31,7 +60,7 @@ A cache is an ordinary overlay with properties. No separate cache concept remain
   | `history` | `all`, `last`, `<N>` | `all` | How many states each overlay line keeps. `last` is `1`. Older states of the line are deleted at the next state of the line and by `gc`. |
   | `quiet` | on or off | off | The overlay files are not in `status`, `diff` and `add`. Their changes go into the overlay without the index (section 4). |
   | `merge` | `three-way`, `union-theirs` | `three-way` | How a merge of a line combines the follow overlay. `union-theirs`: the result has every file of both sides; on the same path the incoming line wins; no conflicts. |
-  | `gc` | `none`, `lru:<size>` | `none` | `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
+  | `gc` | `none`, `lru:<size>` | `none` | Built, but not for caches (owner decision 2026-11-11: no size cap for caches). `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
   | `folder` | a path | none | A **folder overlay**: the overlay is the whole folder at that path (section 3). |
   | `platform` | on or off | off | Each state records its platform key; a line takes a state only from its own platform (section 6). |
 
@@ -64,7 +93,8 @@ snapshots of the line stop at the nested layer, as they do for caches today. A f
 quiet by construction. The edges of section 6 of [overlays](overlays.md) apply (`rename()` across
 the edge gives EXDEV). For a build output folder that is not a problem: tools write inside it.
 
-A folder overlay is not part of the file stack of a line (`stack.<line id>`). Its files never
+A folder overlay is not part of the file stack of a line (`stack.<line id>`; the owner decision
+2026-11-11 removes this setting). Its files never
 enter the base, the split of a named save or an assembled tree. The state that a line shows is
 the head of the line's overlay line.
 
@@ -184,10 +214,10 @@ There are two kinds of remote:
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
   imports a cache state only for its own platform, and only a state that a line here can take
   (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
-  `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
+  `layr fetch <remote> --caches-of ...` (stopgaps; owner decision 2026-11-11: `fetch` takes lines and glasses, section 2) restore only the caches that `line new X <line>` takes for
   those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
   head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
-  of a server queue). `layr fetch <Layr Cloud remote> --no-caches` reads no cache overlay at all: a merge
+  of a server queue). `layr fetch <Layr Cloud remote> --no-caches` (a stopgap that goes away, section 2) reads no cache overlay at all: a merge
   machine builds nothing, and every new cache of the check runners was gigabytes per fetch. `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it
@@ -276,7 +306,8 @@ Each slice is one pull request that leaves `main` green.
 3. **Toolchain in the platform key.** layr hashes the files that `key-files` names. A toolchain
    that no file names (a system compiler) is not in the key.
 4. **LRU on APFS.** macOS updates access times lazily; `lru` uses the access time and the
-   modification time, whichever is newer.
+   modification time, whichever is newer. Owner decision 2026-11-11: no size cap for caches;
+   `history=last` and layered storage save space.
 
 ## 11. Built: slice a
 
@@ -478,6 +509,9 @@ the new file equals the old one. `layr gc --dedup` shares such content again, on
   pass ends without a change.
 
 ## 17. `merge <line> --caches-only`
+
+Built today. Owner decision 2026-11-11: the flag goes away; a merge takes the cache glass like any
+other glass (section 2).
 
 `layr merge <line> --caches-only` brings the caches of a line into the current line. It runs only
 the cache step of `merge`: no file changes, no merge commit, and the head does not move. The
@@ -717,3 +751,25 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
 - Cost: one walk and one hash of the tracked files per save and per take (Studio, about 4,100
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
   differs, and the files that two caches recorded with other bytes.
+
+## 21. Measurement 2026-11-11: a cache glass in v2 objects
+
+The question: what does a cache glass cost in v2 objects ([objects](objects.md))? Tool: the
+example `objects-bench` of `crates/layr-objects`, a release build, an Apple Silicon Mac (Lumina),
+real `target` cache states of this repository.
+
+| State | Previous state | Files | Logical size | Step | Time | Result |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| `01a1b99e` | none | 25,828 (1,763 folders) | 11.33 GB | cold import, zstd level 3, all files | 9.2 s | 2.55 GB of loose objects |
+| `01a1b99e` | none | 25,828 | 11.33 GB | repack, zstd level 19, blocks of 4 MiB | 99 s | 1.86 GB of packs |
+| `01a1b9a8` (the same build) | `01a1b99e` | | | import | 1.06 s | 88 new objects, 86 KB |
+| `01a1b9a9` (the same build) | `01a1b9a8` | | | import | 1.0 s | 3 new objects, 1.9 KB |
+| `01a1ca61` (after a real rebuild) | `01a1b8bd` | 35,096 | 19.4 GB | import | 15.2 s | 84,390 new objects, 2.34 GB |
+
+- Hot import (clones) failed. The state files carry the immutable flag (`uchg`), so the clone into
+  `blobs/` fails with EPERM. This needs a fix before a cache glass can use hot blobs.
+- Today each cache state is a full native folder. `du` reports about 15 GB for each; APFS clones
+  share blocks, so `du` overstates the real use.
+
+Result: one cache state with a new build costs about 2.3 to 2.6 GB compressed (1.9 GB packed). A
+state with the same build costs kilobytes.

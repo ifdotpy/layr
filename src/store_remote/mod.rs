@@ -51,6 +51,23 @@ pub struct Options {
     pub only_line: Option<String>,
     /// The cache states of `caches_of` in one cache overlay, set by the overlay fetch (None: every usable one).
     pub only_caches: Option<std::collections::BTreeSet<String>>,
+    /// `fetch --line <name>`: only the history of these lines (docs/overlays.md, a view is f(line, overlays)).
+    /// Empty: every line.
+    pub lines: Vec<String>,
+    /// `fetch --overlay <name>`: only these layers; `base` names the base. None: every layer.
+    pub overlays: Option<std::collections::BTreeSet<String>>,
+    /// The states of one overlay that `lines` need, set by the overlay fetch (None: every state).
+    pub(crate) only_states: Option<std::collections::BTreeSet<String>>,
+}
+
+/// The name of the base layer in `fetch --overlay`.
+pub const BASE_LAYER: &str = "base";
+
+impl Options {
+    /// Whether `fetch --overlay` (and `--no-caches` for a cache overlay) takes the layer `name`.
+    pub(crate) fn takes_layer(&self, name: &str, cache: bool) -> bool {
+        !(cache && self.no_caches) && self.overlays.as_ref().map_or(true, |only| only.contains(name))
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
