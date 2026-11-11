@@ -26,7 +26,7 @@ no "an unknown view id fails" l rev-parse "views/$(printf '%064d' 0)"
 
 # A saved stack pins exact overlay states, including an old shared-mode state.
 echo private-alpha > .private.env
-l overlay create private --mode shared -q
+l overlay create private -q
 l overlay move private .private.env >/dev/null
 l save -qm add-private-file
 V=$(l view save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')
@@ -44,7 +44,7 @@ ok "branch accepts a saved view" l line new -q exact "views/$V"
 eq "the new line has the exact old private content" private-alpha "$(cat "$P/exact/.private.env")"
 eq "the new line keeps the shared head" "$SHARED" "$(l --project viewtest --line exact rev-parse head)"
 eq "the new line has the exact saved stack" "$V" "$(l --project viewtest --line exact view --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_id"])')"
-eq "the existing shared overlay line stays unchanged" private-beta "$(l overlay show private user-0:.private.env)"
+eq "the part of main stays unchanged" private-beta "$(cat "$P/main/.private.env")"
 cd "$P/exact"; echo edit >> .private.env
 has "a stale stack keeps the existing commit guard" 'changed in another line' "$(l save -qam stale 2>&1)"
 l restore .private.env

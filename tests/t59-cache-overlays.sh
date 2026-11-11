@@ -108,7 +108,7 @@ ok "a line under the limit keeps its files" test -e $P/main/target/debug/w
 ok "overlay create --folder" l overlay create deps --folder vendor/cache -q
 has "it is a follow folder overlay" "folder=vendor/cache" "$(l overlay list)"
 no "a second overlay for the same folder fails" l overlay create deps2 --folder vendor/cache
-no "a folder overlay is not shared" l overlay create deps3 --folder x --mode shared
+no "the shared mode is gone" l overlay create deps3 --folder x --mode shared
 no "an absolute folder fails" l overlay create deps4 --folder /tmp
 
 # 8b. The removed cache command is unknown; overlay repair makes a cache again.

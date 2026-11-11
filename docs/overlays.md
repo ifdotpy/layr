@@ -138,6 +138,11 @@ parent and the new parts. In git that state maps to its parent's commit, so git 
 commit. A protected line moves only through merges, so there such a save keeps the part in the
 stack as before. Test t233 section 7.
 
+**Shared mode (owner decision 2026-11-11, built).** A glass has a part per line, and a new
+line inherits the part of its source, so one personal file (`.env`) needs no shared mode: put it
+on a glass whose readers are its owner. `overlay create --mode shared` fails with exit status 2;
+the default mode is follow. Glasses made in shared mode before keep working.
+
 **Slices.**
 
 1. `fetch --line --overlay` (built).
@@ -628,7 +633,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 
 | Command                                                     | Effect                                                                                    |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `layr overlay create <name> [--readers <principals>] [--mode shared\|follow]` | Makes an overlay. The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. The default mode is `shared`. Needs the writer role. |
+| `layr overlay create <name> [--readers <principals>]` | Makes an overlay (a glass). The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. Each line has its part; a new line inherits the part of its source. `--mode shared` was removed (owner decision 2026-11-11, exit 2); old shared glasses keep working. Needs the writer role. |
 | `layr overlay list [--json] [--size]`                        | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
 | `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
 | `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |

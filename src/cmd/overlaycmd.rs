@@ -111,10 +111,18 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.require(ctx, "line.create")?;
     let hidden = a.has("--hidden");
     let folder = a.get("--folder").map(crate::overlay::folder_path).transpose()?;
+    // A line has its own part on each glass, and a new line inherits the part of its source (owner decision
+    // 2026-11-11): the shared mode (one overlay line for all lines of a user) is gone for new glasses. Old shared
+    // glasses keep working.
     let mode = match a.get("--mode") {
-        Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (shared or follow)")))?,
-        None if hidden || folder.is_some() => Mode::Follow,
-        None => Mode::Shared,
+        Some("shared") => {
+            return Err(exit(
+                2,
+                "layr overlay create --mode shared was removed: each line has its part of a glass and a new line inherits it. Leave out --mode",
+            ))
+        }
+        Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (follow)")))?,
+        None => Mode::Follow,
     };
     if hidden && mode != Mode::Follow {
         return Err(exit(128, "hidden overlays require follow mode"));
