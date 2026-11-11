@@ -194,6 +194,7 @@ impl Repo<'_> {
                     self.install_base(line, base, start, &layers)?;
                     if !self.public_layers(&layers)?.is_empty() {
                         rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
+                        rec.data["folder_view"] = self.public_view_data(&line.id, &layers)?;
                     }
                 }
                 rec.lines.insert(

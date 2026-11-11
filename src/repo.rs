@@ -2200,6 +2200,7 @@ impl<'a> Repo<'a> {
             if !layers.is_empty() {
                 if !self.public_layers(&layers)?.is_empty() {
                     rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
+                    rec.data["folder_view"] = self.public_view_data(&line.id, &layers)?;
                 }
             }
             self.p.append(rec, &ctx.actor())

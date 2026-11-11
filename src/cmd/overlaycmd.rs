@@ -24,6 +24,7 @@ const USAGE: &str =
        layr overlay readers <name> [<principal>...]
        layr overlay managers <name> [machine:<id>...]
        layr overlay use [--add|--remove] <name>... | --none
+       layr overlay order [<name>,...]
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay repair <overlay>
        layr overlay remove <cache overlay>
@@ -46,6 +47,7 @@ pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "managers" => managers(ctx, &rest),
         "mode" => access_mode(ctx, &rest),
         "use" => use_cmd(ctx, &rest),
+        "order" => order(ctx, &rest),
         "move" => move_cmd(ctx, &rest),
         "repair" => repair(ctx, &rest),
         "remove" => remove(ctx, &rest),
@@ -621,7 +623,10 @@ fn remove(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if layers.iter().any(|l| l.overlay == name) {
             let kept: Vec<Layer> = layers.into_iter().filter(|l| l.overlay != name).collect();
             let mut rec = Record::new("overlay.use");
-            rec.data = serde_json::json!({"stack": repo.public_stack_data(&line.id, &kept)?});
+            rec.data = serde_json::json!({
+                "stack": repo.public_stack_data(&line.id, &kept)?,
+                "folder_view": repo.public_view_data(&line.id, &kept)?,
+            });
             repo.commit_record(ctx, rec)?;
         }
         if line.machine == ctx.store.machine.id {
@@ -1060,11 +1065,10 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     if !repo.reads_overlay(name, line.owner, gid)? {
         return Err(exit(1, format!("error: the owner of line '{}' does not read overlay '{name}'", line.name)));
     }
-    // A glass that keeps parts gets no overlay line: the line shows the glass from its empty first
-    // state, or from the state of its own old overlay line.
+    // A glass that keeps parts gets no overlay line: the folder shows the part that the head of
+    // the line names, else the state of its own old overlay line, else the empty first state.
     if crate::overlay::parts_glass(&info) {
-        let ol = repo.overlay_project(name)?.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?;
-        return Ok(Layer { overlay: name.to_string(), state: ol.map(|l| l.head).unwrap_or(info.root) });
+        return repo.glass_layer(Some(line), &line.head, name)?.ok_or_else(|| exit(1, format!("error: no overlay '{name}'")));
     }
     let orepo = repo.overlay_repo(name)?;
     let _lock = orepo.p.lock()?;
@@ -1076,7 +1080,47 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     Ok(Layer { overlay: name.to_string(), state: ol.head })
 }
 
-/// Set the stack of the current line. The owner's choice: the line's overlay files come and go.
+/// `layr overlay order [<name>,...]`: show or set the project order of glasses (setting
+/// `overlays.order`). A new line folder shows its glasses in this order (docs/overlays.md, section
+/// 1a, slice 5); glasses that the list does not name follow in the order of their creation.
+fn order(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    let a = parse(&Spec::new(), args)?;
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    if repo.p.is_overlay() {
+        return Err(exit(1, "error: an overlay has no overlays"));
+    }
+    let names: Vec<String> =
+        a.pos.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    if names.is_empty() {
+        for name in repo.project_order()? {
+            let hidden = repo.need_overlay(&name).map(|i| i.hidden).unwrap_or(true);
+            if !hidden || repo.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+                outln!(ctx, "{name}");
+            }
+        }
+        return Ok(0);
+    }
+    repo.require(ctx, "config")?;
+    let _lock = repo.p.lock()?;
+    for (i, name) in names.iter().enumerate() {
+        let info = repo.overlay_info(name)?.ok_or_else(|| exit(1, format!("error: no overlay '{name}'")))?;
+        // The order is a public setting: a hidden name would show to every reader of the project.
+        if info.hidden {
+            return Err(exit(1, format!("error: overlay '{name}' is hidden; a hidden overlay keeps the order of its creation")));
+        }
+        if names[..i].contains(name) {
+            return Err(exit(128, format!("error: overlay '{name}' is named twice")));
+        }
+    }
+    let mut rec = Record::new("config");
+    rec.data = serde_json::json!({"config": {crate::overlay::ORDER_KEY: names}});
+    repo.commit_record(ctx, rec)?;
+    Ok(0)
+}
+
+/// Set the view of the working folder of the current line: the glasses it shows and their order
+/// (`view.<line id>`, slice 5). The owner's choice: the line's overlay files come and go.
 fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--add").flag("--remove").flag("--none").flag("-f|--force").flag("-q|--quiet");
     let a = parse(&spec, args)?;

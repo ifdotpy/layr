@@ -148,6 +148,20 @@ Details: [benchmarks/views-20261107](../benchmarks/views-20261107/README.md).
 The states that both lines saved are equal. Line operations no longer depend on the size of the tree.
 Bulk reads of file content through the mount are slow: `rg` over the whole tree took 12 times as long.
 
+## Views of glasses
+
+A view is a line (or a state) with an ordered list of glasses (overlays) above it
+([overlays](overlays.md) section 1). The working folder of a line is its default view. Since slice 5
+(overlays.md section 1a) the view, not the line, holds the glasses:
+
+- A new line folder shows every glass that its owner reads, in the project order of glasses
+  (`layr overlay order`). A glass with a `platform` that is not this machine's is left out.
+- `layr overlay use <names>` changes the view of the current working folder only. The line keeps
+  its parts on the other glasses: a save does not clear them.
+- `layr view <line or state> --overlay a,b` prints another view of the same line or state, with
+  those glasses. `--folder <dir>` writes its files to a new folder (on the volume of the store).
+  That folder is a copy to read or build in, not a working folder: it has no status and no save.
+
 ## Open items
 
 - Read path: a read of a file whose descriptor is not cached opens it again (one `openat` per read), and the

@@ -26,8 +26,8 @@ Short result:
 
 ## 1. Model
 
-Owner decision 2026-11-11. The model below replaces the stack model of this file. The code does
-not build it yet; "Built today" after the list says how the code differs.
+Owner decision 2026-11-11. The model below replaces the stack model of this file. The code builds
+it in slices (section 1a); "Built today" after the list says how the code differs.
 
 - A **line** has its own history. Lines form a tree, as branches in git. A line does not know
   about overlays.
@@ -63,8 +63,10 @@ Built today (section 9):
   name on every glass. Since slice 4 (section 1a) a public follow overlay that is no cache gets no
   new `line-<line id>` lines: the state records name its parts. Shared, hidden and cache overlays
   still use their overlay lines.
-- A line holds its stack in the setting `stack.<line id>` (overlay names and the state of each).
-  In the new model a line holds no stack; the view joins a line and glasses.
+- Since slice 5 (section 1a) the view of the working folder (setting `view.<line id>`) chooses the
+  glasses that the folder shows and their order. The setting `stack.<line id>` still holds the
+  state that the folder shows on each glass (an overlay-only save makes no state record yet), and a
+  line made before views, without a view, shows its stack as before.
 - A state record of the project names the shared tree and, since slice 4, its part on each
   public follow overlay (`parts`). Each overlay keeps the part states in its own project. Shared,
   hidden and cache overlays are not in `parts`.
@@ -134,7 +136,8 @@ makes another view. The setting `stack.<line id>` goes.
 4. State records name their parts; save, line new, merge and view use them; overlay
    stores keep parts only. Migration of existing stores. Built 2026-11-11 for public follow
    overlays; see "Slice 4 as built" below for what differs.
-5. Views hold the glasses; `stack.<line id>` goes.
+5. Views hold the glasses; `stack.<line id>` goes. Built 2026-11-11; see "Slice 5 as built"
+   below for what differs.
 6. A cache is an ordinary glass: the cache flags, `src/cache_overlay.rs` and the cache fields of
    the state record go; `trust` is a glass property.
 7. Parts of folder glasses as v2 objects (the immutable-flag clone fails first, see
@@ -185,6 +188,42 @@ makes another view. The setting `stack.<line id>` goes.
 - History before the migration: older states keep no parts. Their overlay lines stay, and every
   command reads them as before (`line new`, `reset` and `merge` of such a state use the stack of
   the line). No old data is deleted.
+
+**Slice 5 as built (2026-11-11).**
+
+- Storage. The view of a working folder is the setting `view.<line id>`: the names of its public
+  glasses, bottom first. A line has one working folder on each machine, so the key is the line id;
+  the view of a folder on another machine is `view.<line id>@<machine>`, as for stacks. Records
+  set it with `folder_view: {line, glasses}` (`line.create`, `overlay.use`, `line.adopt`, and
+  `overlay remove`). The key is not `view`: the records of saved views (`view.save`) use that key.
+  Hidden glasses keep their place in their own store (`hidden.stack.<line id>`), so the public
+  setting never names them. The line record names no glass.
+- What stays. `stack.<line id>` still holds the state that the folder shows on each glass of its
+  view. An overlay-only save makes no shared state (open item below), so a state record cannot
+  hold that part yet. The view chooses the glasses and their order; the stack gives the states. A
+  glass of the view that the stack does not name shows the part of the head, else the overlay line
+  of the line, else its empty first state.
+- Compatibility. A line without `view.<line id>` (made before slice 5) shows its stack as before.
+  Its first `overlay use` gives it a view. Older layr ignores `folder_view` and reads the stack,
+  which every record still writes.
+- Default view. `line new` (and `init`) gives the new folder every glass that the owner reads, in
+  the project order: the names of the setting `overlays.order` (`layr overlay order a,b,c`), then
+  the other glasses in the order of their creation (the time of their empty first state), then by
+  name. The order refuses hidden names (it is public). Left out: folder overlays (no glass of the
+  file stack), a glass whose `platform` setting is not this machine's (no command sets `platform`
+  until slice 3), a glass that is not on this machine, and a cache glass that the source line does
+  not show (until slice 6 makes caches ordinary glasses). The part on each glass: the part that the
+  start state names, or the source's state when the start is the source's head; else the empty
+  first state.
+- `overlay use <names>` changes the view of the current folder. A glass that comes back shows the
+  part that the head names.
+- `save -m` and `merge` act on the glasses of the view. The new state also keeps the parts of the
+  head on the glasses that the view does not show, so a folder that shows fewer glasses does not
+  clear them.
+- `view <line or state> --overlay a,b` prints another view of the same line or state with those
+  glasses, in that order (`base` is always below). `--folder <dir>` writes the files of a view to
+  a new folder: a second folder of one line with other glasses. It is a copy, not a working folder.
+- Test: tests/t234-views-hold-glasses.sh.
 
 **Open (owner decision needed).**
 

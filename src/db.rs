@@ -813,6 +813,17 @@ impl Db {
                 .execute(params![key, layers.to_string(), ord])?;
             }
         }
+        // The glasses that the working folder of a line shows (`view.<line id>`, slice 5).
+        if let Some(v) = d.get("folder_view") {
+            if let (Some(line), Some(glasses)) = (v.get("line").and_then(|v| v.as_str()), v.get("glasses")) {
+                let key = if foreign { format!("view.{line}@{}", rec.machine) } else { format!("view.{line}") };
+                tx.prepare_cached(
+                    "INSERT INTO config(key, value, ord) VALUES(?1,?2,?3)
+                     ON CONFLICT(key) DO UPDATE SET value=?2, ord=?3 WHERE excluded.ord > config.ord",
+                )?
+                .execute(params![key, glasses.to_string(), ord])?;
+            }
+        }
         self.owners_after(rec, &ord, foreign)?;
         Ok(())
     }

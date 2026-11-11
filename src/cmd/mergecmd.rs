@@ -600,7 +600,8 @@ fn finish(
     };
     // A new state names its parts on the glasses (docs/overlays.md, section 1a).
     if !layers.is_empty() {
-        let parts = repo.parts_of(&layers)?;
+        let mut parts = repo.parts_of(&layers)?;
+        repo.carry_parts(&mut parts, &line.head, &layers)?;
         for st in pending.states.iter_mut().filter(|s| s.id == new_head) {
             st.parts = parts.clone();
         }
