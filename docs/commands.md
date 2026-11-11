@@ -12,7 +12,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `du --volumes [--json]`, `fsck`, `reindex` |
 | Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
-| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote> [--caches-of <line>] [--heads [--only-line <line>]]`, `pull <remote>`, `clone <url> [--caches-of <line>] [--heads [--only-line <line>]]`, `login <remote>` (Layr Cloud) |
+| remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote> [--line <name>,...] [--overlay <layer>,...] [--caches-of <line>] [--heads [--only-line <line>]]`, `pull <remote>`, `clone <url> [--caches-of <line>] [--heads [--only-line <line>]]`, `login <remote>` (Layr Cloud) |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
@@ -183,6 +183,7 @@ Use `--note <text>` to add an optional note to the auto state.
 If nothing changed since the newest auto state made over the head (or since the head when there is none), no state is made. The output names the existing state: `<line> <state id>`.
 Use `--running`, `--force`, `--caches`, or `-q` with an auto save.
 `--caches --cache <path>` saves only that cache path. A big cache such as build output takes a minute to save; a small one takes a second. It fails when the path is no cache path of the line.
+Owner decision 2026-11-11: a cache is an ordinary overlay, so the cache flags go away (`save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`). They work today; see [cache overlays](cache-overlays.md) section 2. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` is the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 
@@ -447,6 +448,8 @@ a reviewer sees only what changed after their review. With `--person <login>` it
 person approved through a signed request (`layr request approve --person`).
 The `files` array gives each changed file patch, its status, and added and removed line counts.
 Each version is compared with its own first parent. Changes to the base stay out of the interdiff.
+
+The overlay commands below work on the stack model as built: a line holds its stack, and an overlay has its own lines. Owner decision 2026-11-11: lines and overlays are independent, and a view joins a line and a set of overlays ([overlays](overlays.md) section 1).
 
 Hidden overlays use follow mode. Only their readers see them in lists and reports.
 Use `layr overlay show-to-project <name>` to make one visible to project readers.

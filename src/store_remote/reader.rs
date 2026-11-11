@@ -499,7 +499,7 @@ fn walk_ancestry(
     Ok(order)
 }
 
-fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
+pub(super) fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
     walk_ancestry(tips, |id| {
         Ok(repo.p.db.state(id)?.map(|state| state.parents.into_iter().chain(state.derived_from).collect()).unwrap_or_default())
     })
@@ -521,6 +521,40 @@ pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> 
     }
     required.extend(state_ancestries(repo, tips)?);
     Ok(required)
+}
+
+/// The base states that `fetch --line` and `--overlay` take, or None for every state. Without `base` in `--overlay`
+/// no base state comes; with `--line`, the history of those lines (only their heads with `--heads`) and what an undo of
+/// a line delete needs.
+fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
+    if repo.p.is_overlay() {
+        return Ok(None);
+    }
+    let mut tips = Vec::new();
+    for name in &opts.lines {
+        let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
+        tips.push(line.head.clone());
+        // Every machine's head of the line: a server queue can move it ahead of this machine's head.
+        for (_, head) in repo.p.db.line_heads(&line.id)? {
+            tips.push(head);
+        }
+    }
+    if let Some(only) = &opts.overlays {
+        for name in only.iter().filter(|name| *name != super::BASE_LAYER) {
+            if repo.overlay_info(name)?.is_none() {
+                bail!("--overlay: no overlay '{name}' in project {}", repo.p.name);
+            }
+        }
+    }
+    if !opts.takes_layer(super::BASE_LAYER, false) {
+        return Ok(Some(BTreeSet::new()));
+    }
+    if opts.lines.is_empty() {
+        return Ok(None);
+    }
+    let mut keep: BTreeSet<String> = if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
+    keep.extend(deletion_dependencies(records)?);
+    Ok(Some(keep))
 }
 
 pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
@@ -682,7 +716,8 @@ pub(super) fn fetch(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     fetch_inner(store, ctx, repo, opts, None)
 }
 
-pub(super) fn fetch_cache(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: &Repo) -> Result<Report> {
+/// The fetch of an overlay layer: `parent` is the project, for the selections that name its lines.
+pub(super) fn fetch_layer(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: &Repo) -> Result<Report> {
     fetch_inner(store, ctx, repo, opts, Some(parent))
 }
 
@@ -732,6 +767,12 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             selected.only_caches = Some(super::overlays::caches_of_state(parent, repo, state)?);
         } else if !opts.caches_of.is_empty() {
             selected.only_caches = Some(super::overlays::caches_of_lines(parent, repo, &opts.caches_of)?);
+        } else if !opts.lines.is_empty() {
+            // `--line`: the caches that these lines start from, and the history of their own overlay lines.
+            selected.only_caches = Some(super::overlays::caches_of_lines(parent, repo, &opts.lines)?);
+        }
+        if !opts.lines.is_empty() {
+            selected.only_states = Some(super::overlays::states_of_lines(parent, repo, &opts.lines, opts.heads)?);
         }
     }
     let opts = &selected;
@@ -754,6 +795,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         required.extend(state_ancestries(repo, lines.iter().map(|line| line.head.clone()))?);
     }
     // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
+    let lines_keep = base_selection(repo, &records.lines, opts)?;
     let heads: Option<BTreeSet<String>> = opts
         .heads
         .then(|| -> Result<BTreeSet<String>> {
@@ -770,6 +812,8 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             Ok(keep)
         })
         .transpose()?;
+    // `--line` and `--overlay` on the base: the other states stay on the remote, as with `--heads`.
+    let heads = lines_keep.or(heads);
     let mut left = Vec::new();
     let api = store.backend.api();
     let states = if api.is_some() { api_states(repo)? } else { attempts(&store.backend)? };
@@ -812,6 +856,15 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             report.omitted.push(format!("cache state {}: not for --caches-of", crate::ids::short(id)));
             continue;
         }
+        // `--line`: a state of an overlay that no chosen line shows stays on the remote.
+        if repo.p.is_overlay()
+            && state.cache_of.is_none()
+            && opts.only_states.as_ref().is_some_and(|only| !only.contains(id))
+            && !repo.p.has_state(id)
+        {
+            report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
+            continue;
+        }
         // A cache of another user's unprotected line is never taken here (`usable_cache`): its data stays on the
         // remote, so a clone downloads only the caches that its lines can start from.
         if repo.p.is_overlay()
@@ -850,7 +903,8 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         let mut all: BTreeSet<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
         all.extend(left.iter().cloned());
         crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
-        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read (--heads)", left.len()));
+        let why = if opts.lines.is_empty() && opts.overlays.is_none() { "--heads" } else { "--line, --overlay" };
+        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read ({why})", left.len()));
     }
     // Cache states that failed to restore, with the packs of the remote then (`<state> <packs>` lines): one is tried
     // again only when a push or a release changed the packs, so an idle fetch does not download it each time.

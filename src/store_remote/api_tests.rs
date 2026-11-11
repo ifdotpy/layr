@@ -780,7 +780,8 @@ fn a_push_sends_trees_times_and_packs_records_and_one_ref_move_and_a_reader_gets
 
 #[test]
 fn a_first_api_cache_fetch_selects_after_importing_metadata() {
-    for (exact_state, selected) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (form, selected) in [(0, false), (1, false), (2, false), (0, true), (1, true), (2, true)] {
+        let exact_state = form == 1;
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
@@ -790,6 +791,13 @@ fn a_first_api_cache_fetch_selects_after_importing_metadata() {
         let opts = if exact_state {
             Options {
                 caches_of_state: Some(parent_states[2].clone()),
+                heads: true,
+                ..Default::default()
+            }
+        } else if form == 2 {
+            // `fetch --line main`: the same caches as `--caches-of main`.
+            Options {
+                lines: vec!["main".into()],
                 heads: true,
                 ..Default::default()
             }
@@ -818,6 +826,22 @@ fn a_first_api_cache_fetch_selects_after_importing_metadata() {
         drop(repo);
         delete_cache_fixture(&root);
     }
+}
+
+#[test]
+fn a_fetch_of_the_base_layer_skips_the_other_overlays() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, _, _) = project(&ctx);
+    let opts = Options { overlays: Some([super::BASE_LAYER.to_string()].into()), heads: true, ..Default::default() };
+    check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
+    assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
+    crate::free::finish(&ctx);
+    drop(repo);
+    delete_cache_fixture(&root);
 }
 
 #[test]
@@ -897,8 +921,8 @@ fn check_first_cache_fetch(
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
     super::overlays::api_fetch(store, ctx, repo, opts, &mut report).unwrap();
-    if opts.no_caches {
-        assert_eq!((report.states, report.records), (0, 0), "--no-caches reads nothing of a cache overlay");
+    if !opts.takes_layer(name, true) {
+        assert_eq!((report.states, report.records), (0, 0), "a layer left out reads nothing of the overlay");
         assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
         return;
     }

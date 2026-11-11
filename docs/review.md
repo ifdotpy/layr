@@ -339,6 +339,7 @@ layr attestations views/<id> --kind check --json
 `views/<id>` resolves after that record reaches the local machine.
 Commands that need a state use the shared state. `line new` and `try` use the complete stack.
 `try main` and `try head` also use the line's current stack.
+Owner decision 2026-11-11: a line holds no stack; a view joins a line and a set of overlays ([overlays](overlays.md) section 1). The stack rules above are what is built.
 An explicit state revision has no layers.
 
 A line from a view preserves its exact layer states, including older states of shared-mode overlays.

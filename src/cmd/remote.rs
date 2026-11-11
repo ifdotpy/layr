@@ -1032,6 +1032,8 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             .flag("--no-caches")
             .flag("--no-cache-sweep")
             .value("--caches-of")
+            .value("--line")
+            .value("--overlay")
             .flag("--heads")
             .value("--only-line")
             .flag("-q|--quiet")
@@ -1056,6 +1058,12 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     }
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
+    }
+    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (op != "fetch" || remote_kind != Kind::Store) {
+        bail!("--line and --overlay require layr fetch from a store remote");
+    }
+    if a.get("--overlay").is_some() && a.has("--no-caches") {
+        bail!("--overlay names the layers to take; leave out --no-caches");
     }
     if let Some(line) = a.get("--only-line") {
         crate::store::check_name("line", line)?;
@@ -1138,7 +1146,13 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 only_caches: None,
                 heads: a.has("--heads"),
                 only_line: a.get("--only-line").map(str::to_owned),
+                lines: list_value(&a, "--line"),
+                overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
+                only_states: None,
             };
+            for line in &opts.lines {
+                crate::store::check_name("line", line)?;
+            }
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
             {
@@ -1231,6 +1245,11 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     let conflicts = h.repo.state(&head)?.conflicts.len();
     outln!(ctx, "{}", json!({"operation": "pull", "target": target, "head": head, "conflicts": conflicts, "exit": code}));
     Ok(code)
+}
+
+/// The names of `<flag> <name>[,<name>]`.
+fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
+    a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
 /// The lines of `--caches-of <line>[,<line>]`.
@@ -1358,6 +1377,9 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             caches_of: caches_of(&a),
             caches_of_state: None,
             only_caches: None,
+            lines: Vec::new(),
+            overlays: None,
+            only_states: None,
             heads: a.has("--heads"),
             only_line: a.get("--only-line").map(str::to_owned),
         };

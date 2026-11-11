@@ -124,6 +124,9 @@ A build outside `checks run`, such as a CI job, gives its caches back the same w
 folders of the current line go to `<line>.checks-<os>-<arch>` with the line's head as their source
 state, and no source state is made (a cache writer machine may run it, docs/ci-trust.md). Then
 `layr push <remote> --caches` publishes them.
+Owner decision 2026-11-11: a cache is an ordinary overlay (glass), so these cache flags
+(`--caches`, `--caches-of`) go away; a fetch and a push name lines and glasses
+([overlays](overlays.md) section 1). The commands above are what is built.
 
 The referenced derived state contains `check.log`.
 The ref retains logs through GC and syncs with ordinary project refs/states. Read

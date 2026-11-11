@@ -29,6 +29,8 @@ All of them run without a prompt; `--json` prints one object.
 - `layr save --caches --save-back <line> [--json]` saves the caches of the current line to the
   save-back line of `<line>` (`<line>.checks-<os>-<arch>`, as `checks run` does) and makes no source
   state (docs/checks.md).
+- Owner decision 2026-11-11: a cache is an ordinary overlay, so `--caches` and `save --caches`
+  go away (docs/cache-overlays.md section 2). The commands above are what is built.
 - `LAYR_MACHINE_NAME` names a new machine (store creation); without it the name is the host name.
 
 ## Rules

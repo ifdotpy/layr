@@ -9,6 +9,7 @@ Run `layr sync work` to exchange signed records and missing states in both direc
 Layr starts `ssh host layr serve-peer project`.
 The internal peer command does not appear in help.
 Use `--auto --caches` to include automatic states and saved caches.
+Owner decision 2026-11-11: a cache is an ordinary overlay, and the cache flags go away. `fetch` then takes lines and overlays: the history of the chosen lines, and only their parts on the chosen overlays ([overlays](overlays.md) section 1). Without `--line` and `--overlay`, `fetch` takes the whole repository, and `--caches`, `--caches-of` and `--no-caches` select caches. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` is the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
 The final snapshot of a deleted line always travels, because `undo` needs it.
 
 - `layr push work` sends records and states to the peer.
