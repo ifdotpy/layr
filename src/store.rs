@@ -605,6 +605,9 @@ pub fn kick_trash(dir: &Path) {
 /// for it too. Two processes may work on one tree: an entry that is gone is not an error.
 /// Start `layr __empty-trash <dir>` in the background when the trash holds something: true when
 /// it started (or nothing waits). The child deletes everything; one child per trash at a time.
+/// False while a command only reports (`fsck`, `-n`, `--dry-run`): `Project::open` then removes no temporary copy.
+pub static SWEEP_TEMPORARIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// At most one emptier start per `TRASH_KICK_MS` from `Project::trash` in one process.
 const TRASH_KICK_MS: u64 = 30_000;
 static LAST_TRASH_KICK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1159,6 +1162,9 @@ impl<'a> Project<'a> {
     /// names its pid (`<id>.<pid>`). Every command that opens the project moves them to the trash, so
     /// they do not wait for `gc --repair`. A copy without a pid, or of a live pid, stays.
     fn remove_dead_temporaries(&self) {
+        if !SWEEP_TEMPORARIES.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let _t = crate::trace::span("dead temporaries");
         for dir in [self.scan_dir(), self.work_dir()] {
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };

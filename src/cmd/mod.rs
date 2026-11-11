@@ -271,6 +271,9 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
             return Ok(1);
         }
     };
+    // A dry run and a check only report: they leave the temporary copies of dead processes to the next command.
+    let reports_only = cmd == "fsck" || rest.iter().any(|a| a == "-n" || a == "--dry-run");
+    crate::store::SWEEP_TEMPORARIES.store(!reports_only, std::sync::atomic::Ordering::SeqCst);
     // An overlay (`<project>%<overlay>`) is read through layr only: its history, by its readers.
     if ctx.env("LAYR_PROJECT").map(|p| p.contains('%')).unwrap_or(false) {
         let reading = OVERLAY_READS.contains(&cmd)
