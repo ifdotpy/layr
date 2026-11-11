@@ -194,6 +194,13 @@ try:
   print('DIAG clone stdout+stderr:',output.stdout[-3000:],output.stderr[-3000:],flush=True)
   print('DIAG main folder:',sorted(p.name for p in (nproject/'lines/main').iterdir()) if (nproject/'lines/main').is_dir() else 'missing',flush=True)
   print('DIAG 404 paths:',missed[:40],flush=True)
+  print('DIAG requests:',[(m,pth) for m,pth,_ in requests][:80],flush=True)
+  print('DIAG future id:',future,flush=True)
+  keys=sorted(str(q.relative_to(root/'archive')) for q in (root/'archive').rglob('*') if q.is_file())
+  print('DIAG archive keys:',len(keys),[k for k in keys if k.startswith(('records/','public','store','refs'))][:60],flush=True)
+  print('DIAG keys naming future:',[k for k in keys if future in k or future.replace('-','') in k][:20],flush=True)
+  for k in keys:
+   if k.startswith('records/'): print('DIAG record key',k,(root/'archive'/k).stat().st_size,int((root/'archive'/k).stat().st_mtime*1000),flush=True)
   for args in (['--project','network','--line','main','log','-n','5'],['--project','network','line','list','--json'],['--project','network','--line','main','status']):
    d=run(args,network,False);print('DIAG',args,d.returncode,d.stdout[-2000:],d.stderr[-2000:],flush=True)
  check((nproject/'lines/main/future.txt').read_text()=='future public bytes\n','HTTP public clone reads state and file objects from the /p/ layout')
