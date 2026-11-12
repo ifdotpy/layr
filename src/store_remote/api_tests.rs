@@ -490,6 +490,31 @@ fn a_write_without_a_token_names_the_login() {
     assert!(error.contains("HTTP 401") && error.contains("layr login"), "{error}");
 }
 
+#[test]
+fn only_a_server_that_does_not_answer_is_unreachable() {
+    // Nothing listens on the port: the request does not reach a server, and `remote add` adds the remote anyway.
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let refused = reqwest::blocking::Client::new()
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .map_err(|e| super::gateway::send_error("Layr Cloud", e))
+        .unwrap_err();
+    assert!(super::gateway::unreachable(&refused), "{refused:#}");
+    assert!(refused.to_string().starts_with("Layr Cloud: error sending request"), "{refused}");
+    // A server that answers that it has no such project: a definite answer, so `remote add` refuses.
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(None);
+    let mut store = api_store_with(&root, &ctx, Api::for_test(&fake.origin, "nosuch", Some(TOKEN)));
+    // A known mode: no probe of the older gateway protocol at the test's made-up URL.
+    store.mode = Some(super::Mode::Private);
+    let answered = store.configure(&ctx, &super::ConfigureOptions::default()).err().expect("no project is an error");
+    assert!(answered.to_string().contains("has no project"), "{answered:#}");
+    assert!(!super::gateway::unreachable(&answered), "{answered:#}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn context(root: &Path) -> Ctx {
     Ctx {
         store: crate::store::Store::open(&root.join("local")).unwrap(),
@@ -588,8 +613,12 @@ fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String
 }
 
 fn move_line(project: &crate::store::Project, ctx: &Ctx, line: &str, before: Option<&str>, head: &str) {
+    move_named_line(project, ctx, line, "main", before, head)
+}
+
+fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name: &str, before: Option<&str>, head: &str) {
     let state = |head: &str| LineState {
-        name: "main".into(),
+        name: name.into(),
         head: head.into(),
         owner: ctx.caller.uid,
         machine: ctx.store.machine.id.clone(),
@@ -599,7 +628,7 @@ fn move_line(project: &crate::store::Project, ctx: &Ctx, line: &str, before: Opt
         line.into(),
         LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
     );
-    record.data = serde_json::json!({"name":"main"});
+    record.data = serde_json::json!({"name":name});
     project.append(record, &ctx.actor()).unwrap();
 }
 
@@ -904,7 +933,8 @@ fn check_first_cache_fetch(
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "cache_of":cache_of.map(str::to_owned).unwrap_or_else(crate::ids::new_id),"cache_by":ctx.caller.uid,"time":crate::ids::now_ms()})).unwrap());
     cache.append(saved, &ctx.actor()).unwrap();
-    move_line(&cache, &ctx, &crate::ids::new_id(), None, &state);
+    // The cache is on an overlay line of another line: the overlay line `main` would be main's own cache line.
+    move_named_line(&cache, &ctx, &crate::ids::new_id(), "other", None, &state);
     let mut layer = api_store_with(root, ctx, store.backend.api().unwrap().clone());
     layer.backend = layer.backend.scoped(&format!("overlays/{name}")).unwrap();
     layer.project = project_id;

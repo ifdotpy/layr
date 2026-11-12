@@ -68,6 +68,36 @@ fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options>
     Ok(selected)
 }
 
+/// The fetch options of the overlay `name`. A plain fetch of a cache overlay takes its records and only the
+/// caches that new lines from the shared lines start from (`shared_cache_lines`); the other cache states stay on
+/// the remote until `fetch --overlay <name>` or `--line` asks for them. Each line can have a cache of gigabytes.
+fn fetch_selection(repo: &Repo, name: &str, opts: &Options) -> Result<Options> {
+    let mut selected = opts.clone();
+    if repo.cache_data_overlay(name)? && !opts.takes_cache_states(name) {
+        selected.plain_cache_fetch = true;
+        selected.lines = shared_cache_lines(repo)?;
+        // No shared line: no cache state comes (`--line` sets these selections from the lines).
+        selected.only_caches = Some(BTreeSet::new());
+        selected.only_states = Some(BTreeSet::new());
+    }
+    Ok(selected)
+}
+
+/// The lines whose caches a plain fetch takes: `main`, the lines that this machine protects, and the save-back lines
+/// of checks and CI jobs (`<line>.checks-<os>-<arch>`, docs/checks.md), which give the caches of reviewed heads back
+/// to every machine. Protection is a setting of each machine, so `main` counts on every machine.
+fn shared_cache_lines(repo: &Repo) -> Result<Vec<String>> {
+    let policy = repo.policy();
+    Ok(repo
+        .p
+        .db
+        .lines()?
+        .into_iter()
+        .map(|line| line.name)
+        .filter(|name| name == "main" || policy.rule_for(name).is_some() || name.contains(".checks-"))
+        .collect())
+}
+
 /// The states of the overlay `orepo` that the project lines `lines` show: the history of each line on the overlay
 /// (the same name and id, or a name of layr before 0.44: `line-<line id>`, with any platform suffix) and of the
 /// shared lines (`user-<uid>`), only the heads with `heads`. It adds the part that each line shows and the parts
@@ -140,8 +170,11 @@ pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Re
     let mut out = BTreeSet::new();
     for name in lines {
         let line = repo.line(name).with_context(|| format!("--line: no line {name}"))?;
-        if let Some(own) = orepo.p.db.line_by_name(&crate::overlay::cache_line_name(&line.id))? {
-            out.insert(own.head);
+        // The line on the overlay: its own name or id, or a name of layr before 0.44 (`line-<id>.<platform>`).
+        if let Some(own) = crate::overlay::find_follow_line(&orepo.p.db, &line)? {
+            if !orepo.p.db.state(&own.head)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
+                out.insert(own.head);
+            }
         }
         // Every machine's head of the line: a check runner's own main can be an old head while a server
         // queue moved main on its merge machine, and the runner checks states made from that newer head.
@@ -971,6 +1004,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
+            let opts = &fetch_selection(repo, &name, opts)?;
             let fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
@@ -1106,6 +1140,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let mut orepo = Repo { p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
+            let opts = &fetch_selection(repo, &name, opts)?;
             let mut fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {

@@ -841,6 +841,9 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     let mut asked = Vec::new();
+    // A plain fetch of a cache overlay: the cache states that no shared line takes stay on the remote, counted.
+    let plain_cache = opts.plain_cache_fetch && repo.p.is_overlay();
+    let mut stay = 0;
     for id in states.keys() {
         // A tree whose record this fetch did not read: a push published both after this fetch read the records
         // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
@@ -874,7 +877,11 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
         // a cache that no line takes here: nothing else needs its files.
         if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
-            report.omitted.push(format!("cache state {}: not for --line", crate::ids::short(id)));
+            if plain_cache {
+                stay += usize::from(!repo.p.has_state(id));
+            } else {
+                report.omitted.push(format!("cache state {}: not for --line", crate::ids::short(id)));
+            }
             continue;
         }
         // `--line`: a state of an overlay that no chosen line shows stays on the remote.
@@ -883,16 +890,11 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             && opts.only_states.as_ref().is_some_and(|only| !only.contains(id))
             && !repo.p.has_state(id)
         {
-            report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
-            continue;
-        }
-        // `--line`: a state of an overlay that no chosen line shows stays on the remote.
-        if repo.p.is_overlay()
-            && state.cache_of.is_none()
-            && opts.only_states.as_ref().is_some_and(|only| !only.contains(id))
-            && !repo.p.has_state(id)
-        {
-            report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
+            if plain_cache {
+                stay += 1;
+            } else {
+                report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
+            }
             continue;
         }
         // A cache of another user's unprotected line is never taken here (`usable_cache`): its data stays on the
@@ -912,6 +914,10 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         } else {
             missing.push(state);
         }
+    }
+    if stay > 0 {
+        let name = repo.p.name.rsplit_once('%').map_or(repo.p.name.as_str(), |(_, name)| name);
+        report.omitted.push(format!("{stay} cache state(s) stay on the remote; fetch --overlay {name} takes them"));
     }
     if let Some(api) = api {
         // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).

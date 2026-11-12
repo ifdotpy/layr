@@ -109,7 +109,8 @@ saves the cache folders of the copy as cache states saved with that head, on the
 the line at its head, and its head stays there. Each line keeps its newest cache (`history=last`),
 and the next push deletes the older cache states on the remote. Another machine of the platform then
 starts warm from that head (`layr line new X <state>`, and `layr line new X main` when main's own
-cache is of an older head): one build per head warms the next check and every machine. A protected
+cache is of an older head): one build per head warms the next check and every machine. A plain
+`layr fetch <remote>` on that machine takes the caches of save-back lines ([remotes](remotes.md)). A protected
 head is reviewed code built in the sandbox, so these caches count as caches of a protected line for
 other users. A pending fast-forward entry of the queue into such a line counts as its next head: a server
 queue (Layr Cloud) merges an entry only after its checks passed, so no check runs on the head it becomes, and the

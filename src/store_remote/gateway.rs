@@ -131,6 +131,36 @@ fn absent<T>(response: Response) -> Result<Option<T>> {
 /// Tries of a request that the gateway refuses as busy (503 or 429) before the error goes to the caller.
 const BUSY_TRIES: u32 = 8;
 
+/// A request that did not reach the server: no connection, no address for the name, or no answer in time.
+/// The message is the one that the caller showed before.
+#[derive(Debug)]
+pub struct Unreachable(pub String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// The error of a request that `send` gave: a request that did not reach the server is `Unreachable`.
+pub(crate) fn send_error(what: &str, e: reqwest::Error) -> anyhow::Error {
+    if e.is_connect() || e.is_timeout() {
+        anyhow::Error::new(Unreachable(format!("{what}: {e}")))
+    } else {
+        anyhow::anyhow!("{what}: {e}")
+    }
+}
+
+/// Whether `e` says that the server could not be reached (connection, name or time), not that it answered.
+pub fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause.downcast_ref::<Unreachable>().is_some()
+            || cause.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout())
+    })
+}
+
 /// Sends with `send` again while the gateway answers busy (503, 429): it waits `Retry-After` (at most 30 s) or a
 /// doubling backoff from 0.5 s to 8 s, at most `BUSY_TRIES` times. A refused request did nothing on the gateway, so
 /// a GET, a conditional PUT and a DELETE may go again. Other answers return at once.

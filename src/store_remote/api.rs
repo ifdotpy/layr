@@ -410,7 +410,7 @@ impl Api {
     /// Sends a request again while the server is busy (and on a lost connection for an idempotent one), then
     /// turns `426` into the minimum version the server needs.
     fn send(&self, idempotent: bool, build: impl Fn() -> RequestBuilder) -> Result<Response> {
-        let response = super::gateway::send_again(idempotent, || build().send().map_err(|e| anyhow!("Layr Cloud: {e}")))?;
+        let response = super::gateway::send_again(idempotent, || build().send().map_err(|e| super::gateway::send_error("Layr Cloud", e)))?;
         if let Some(version) = response.headers().get("layr-server").and_then(|v| v.to_str().ok()) {
             if let Ok(mut server) = self.server.lock() {
                 *server = Some(version.to_string());

@@ -55,6 +55,12 @@ pub struct Options {
     pub overlays: Option<std::collections::BTreeSet<String>>,
     /// The states of one overlay that `lines` need, set by the overlay fetch (None: every state).
     pub(crate) only_states: Option<std::collections::BTreeSet<String>>,
+    /// Take the states of every cache overlay that no selection names (a plain clone). Without it a plain fetch
+    /// takes the records of such an overlay and only the caches of the shared lines (`takes_cache_states`).
+    pub all_caches: bool,
+    /// A plain fetch of one cache overlay, set by the overlay fetch: only the caches of `lines` (the shared lines)
+    /// come, and the fetch names the count of the others that stay on the remote.
+    pub(crate) plain_cache_fetch: bool,
 }
 
 /// The name of the base layer in `fetch --overlay`.
@@ -71,6 +77,18 @@ impl Options {
     pub(crate) fn other_platform(&self, name: &str, platform: Option<&str>) -> bool {
         crate::overlay::other_platform_overlay(platform)
             && !self.overlays.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
+    }
+
+    /// Whether a fetch takes the states of the cache overlay `name` (`Repo::cache_data_overlay`) as the caller
+    /// chose them: `--overlay` names it, `--line` or a cache selection asks for the caches of lines, or the caller
+    /// takes every cache (a plain clone). Else it is a plain fetch: only the caches of the shared lines come
+    /// (docs/remotes.md).
+    pub(crate) fn takes_cache_states(&self, name: &str) -> bool {
+        self.all_caches
+            || self.overlays.as_ref().is_some_and(|only| only.contains(name))
+            || !self.lines.is_empty()
+            || !self.caches_of.is_empty()
+            || self.caches_of_state.is_some()
     }
 }
 

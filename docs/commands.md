@@ -194,13 +194,13 @@ names its replacement:
 | Flag | Use instead |
 | --- | --- |
 | `save --caches [--cache <path>]` (removed, exit 2) | `save --overlays [--folder <path>]`: the parts of the folder overlays, with no named change; a named save (`save -m`) saves them too |
-| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | nothing: every overlay comes unless `--overlay` names fewer |
+| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | `push`, `sync` and `clone`: nothing, every overlay comes unless `--overlay` names fewer; `fetch` and `pull`: `--overlay base,<cache>` (a plain fetch takes only the caches of `main`, the protected lines and the save-back lines) |
 | `fetch --no-caches` (removed, exit 2) | `fetch <remote> --overlay base` |
 | `fetch`, `clone` `--caches-of <line>` (removed, exit 2) | `fetch <remote> --line <line>`, `clone <url> --line <line>` |
 | `merge <line> --caches-only` (removed, exit 2) | `merge <line> --overlays-only` |
 | `fsck --caches` (removed, exit 2) | `fsck --overlays` |
 
-`layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out an overlay whose `platform` is another platform's, unless `--overlay` names it.
+`layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out an overlay whose `platform` is another platform's, unless `--overlay` names it. A plain fetch (no `--line`, no `--overlay`) takes the records of a cache overlay and only the caches of `main`, the protected lines and the save-back lines; the other cache states stay on the remote. `fetch <remote> --line <name>` or `--overlay <cache>` takes them, and a plain `clone` takes the usable caches of this platform ([remotes](remotes.md)). `remote add` of a server that cannot be reached adds the remote with a warning; the first fetch or push checks it.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 

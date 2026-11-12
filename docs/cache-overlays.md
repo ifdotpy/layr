@@ -73,7 +73,7 @@ The properties as built:
   | `merge` | `three-way`, `union-theirs` | `three-way` | How a merge of a line combines the follow overlay. `union-theirs`: the result has every file of both sides; on the same path the incoming line wins; no conflicts. |
   | `gc` | `none`, `lru:<size>` | `none` | Built, but not for caches (owner decision 2026-11-11: no size cap for caches). `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
   | `folder` | a path | none | A **folder overlay**: the overlay is the whole folder at that path (section 3). |
-  | `platform` | a platform key (`<os>-<arch>`) or none | none | The overlay of one platform (overlays.md section 1a, slice 3): shown, fetched and pushed only on that platform. Each part also records the key of its build (section 6); a line takes a part only when that key fits. |
+  | `platform` | a platform key (`<os>-<arch>`) or none | none | The overlay of one platform (overlays.md section 1a, slice 3): shown, fetched and pushed only on that platform; a plain fetch takes only the caches of `main`, the protected lines and the save-back lines. Each part also records the key of its build (section 6); a line takes a part only when that key fits. |
   | `trust` | `protected`, `readers` | `protected` for a folder overlay | `protected`: a part that another user saved is taken only from a protected line (design.md section 5). `readers`: any part that the user reads. |
 
 - A **cache overlay** is an overlay with `folder=<path>`, `quiet`, `history=last`,
@@ -223,7 +223,10 @@ There are two kinds of remote:
 
 - A **layr remote** (a store: `file://`, `s3://`, `layr+https://`; or a peer: `ssh://`) takes the
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
-  [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
+  [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A plain `layr fetch <remote>`
+  takes the records of a cache overlay and only the caches of `main`, the protected lines and the
+  save-back lines; `fetch --overlay <cache>`, `fetch --line <line>` and a clone take the others
+  ([remotes](remotes.md)). A receiving machine
   imports a cache state only for its own platform, and only a state that a line here can take
   (`usable_cache`: shared, or of the caller). `layr clone <url> --line <line>[,<line>]` and
   `layr fetch <remote> --line ...` (the old `--caches-of` is removed) restore only the caches that `line new X <line>` takes for
