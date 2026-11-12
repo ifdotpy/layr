@@ -1732,7 +1732,8 @@ pub fn restore_impl(
     theirs: bool,
     clean: bool,
 ) -> Result<i32> {
-    let (_line_lock, w) = begin_line(ctx, &h.repo, line, crate::repo::LineOp::Direct)?;
+    // Restore changes the working folder and the stage, never the head: a protected line allows it.
+    let (_line_lock, w) = begin_line(ctx, &h.repo, line, crate::repo::LineOp::Working)?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
     if ours || theirs {
@@ -1889,8 +1890,8 @@ fn working_record(
 fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<bool> {
     let _t = crate::trace::span("reset same tree");
     let _line_lock = repo.line_lock(line)?;
-    repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
     let line = repo.line(&line.id)?;
+    repo.authorize_line(ctx, &line, reset_op(&line, target))?;
     if repo.current_stage(&line)?.is_some() {
         return Ok(false);
     }
@@ -1919,6 +1920,17 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ()))?;
     repo.after_head_moved(&line, target);
     Ok(true)
+}
+
+/// The kind of change a reset to `target` is. A reset to the head moves no head: it changes only
+/// the working folder and the stage, which a protected line allows. Any other target moves the
+/// head, which a protected line refuses.
+fn reset_op(line: &Line, target: &str) -> crate::repo::LineOp<'static> {
+    if target == line.head {
+        crate::repo::LineOp::Working
+    } else {
+        crate::repo::LineOp::Direct
+    }
 }
 
 pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1963,9 +1975,11 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     #[cfg(not(target_os = "macos"))]
     let prepared: Option<(Temp, Vec<Change>)> = None;
-    let (_, w) = begin_line(ctx, &h.repo, &line, crate::repo::LineOp::Direct)?;
+    let (_, w) = begin_line(ctx, &h.repo, &line, reset_op(&line, &target))?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
+    // The head may have moved before the lock: check again with the head read under it.
+    repo.authorize_line(ctx, &line, reset_op(&line, &target))?;
     repo.check_move(ctx, &line, &target)?;
     // A line with overlays moves to the target with its overlays in place. A hard reset to a state
     // with parts shows its parts (docs/overlays.md, section 1a); the other modes keep the stack.
@@ -2134,7 +2148,8 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     h.repo.prepare_status(&line)?;
     let r = (|| -> Result<i32> {
-        let (_lock, w) = begin_change(ctx, &h.repo, &line)?;
+        // Clean changes only the working folder: a protected line allows it.
+        let (_lock, w) = begin(ctx, &h.repo, &line, crate::repo::LineOp::Working)?;
         let line = h.repo.line(&line.id)?;
         let (st, scan, _it, index) = h.repo.locked_status(&line)?;
         let targets = targets(&st, &scan.path, &index);

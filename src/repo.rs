@@ -195,6 +195,10 @@ pub enum LineOp<'a> {
     /// Commit, reset, add, apply, stash and the other work commands: the owner, and only if the
     /// line is not protected or its rule allows direct changes.
     Direct,
+    /// A change of the working folder or the stage only, with the head in place (restore, clean,
+    /// a reset to the head): the owner. Protection is about the history of the line, so a
+    /// protected line allows it.
+    Working,
     /// A merge into the line: the owner; for a protected line the rule's update role.
     /// `hint` is the ready command the refusal of a protected line names.
     Merge { expect: bool, hint: Option<&'a str> },
@@ -298,7 +302,7 @@ impl<'a> Repo<'a> {
         let owner = ctx.caller.uid == line.owner;
         let not_owner = || anyhow::anyhow!("permission denied: line '{name}' belongs to another user");
         match op {
-            LineOp::Save => {
+            LineOp::Save | LineOp::Working => {
                 if !owner {
                     return Err(not_owner());
                 }
