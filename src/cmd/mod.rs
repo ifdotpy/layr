@@ -277,6 +277,7 @@ pub fn matches(specs: &[String], path: &str) -> bool {
 }
 
 pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json]
+   schema [<name>] (JSON Schemas of --json output), store remove <path> [--force]
 
 Work in a line:
    status [--json] [--no-overlaps] [--no-ignored]

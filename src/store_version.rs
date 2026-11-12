@@ -121,6 +121,12 @@ fn has_layout(root: &Path) -> Result<bool> {
     }
 }
 
+/// True when `root` holds a layr store of any format: the version marker, or the machine identity of
+/// a store from before the marker (format 0). Reads only; an invalid marker file is an error.
+pub fn is_store(root: &Path) -> Result<bool> {
+    Ok(marker(root)?.is_some() || has_layout(root)?)
+}
+
 /// A folder that is not a layr store: not empty, no machine identity and no marker. The marker
 /// is read again here: a concurrent first open writes it and then starts the machine folder, so a
 /// caller that found no marker a moment ago can see that half-made store.

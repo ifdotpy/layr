@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, ErrorKind};
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use zerocopy::byteorder::{little_endian as le, native_endian as ne};
@@ -30,29 +29,7 @@ pub struct Plan {
 }
 
 fn mount_points(data: &[u8]) -> io::Result<Vec<PathBuf>> {
-    data.split(|&b| b == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let field = line.split(|&b| b == b' ').filter(|v| !v.is_empty()).nth(4).ok_or_else(invalid)?;
-            let mut decoded = Vec::with_capacity(field.len());
-            let mut i = 0;
-            while i < field.len() {
-                if field[i] == b'\\' {
-                    let digits = field.get(i + 1..i + 4).ok_or_else(invalid)?;
-                    if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
-                        return Err(invalid());
-                    }
-                    let value = u16::from(digits[0] - b'0') * 64 + u16::from(digits[1] - b'0') * 8 + u16::from(digits[2] - b'0');
-                    decoded.push(u8::try_from(value).map_err(|_| invalid())?);
-                    i += 4;
-                } else {
-                    decoded.push(field[i]);
-                    i += 1;
-                }
-            }
-            Ok(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
-        })
-        .collect()
+    sys::mountinfo_points(data)
 }
 
 pub fn nested_mount(parts: &[PathBuf]) -> io::Result<Option<PathBuf>> {

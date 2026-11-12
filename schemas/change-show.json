@@ -1,0 +1,355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:change-show",
+  "version": 1,
+  "title": "layr change show <id> --json",
+  "description": "One logical change: each version with its state and evidence, the behavior of the newest version, and the comments.",
+  "type": "object",
+  "required": ["behavior", "change_id", "comments", "versions"],
+  "additionalProperties": true,
+  "properties": {
+    "change_id": {
+      "description": "The full id of the change. The command also takes a unique prefix of it.",
+      "$ref": "#/$defs/id"
+    },
+    "versions": {
+      "description": "The versions of the change, oldest first (v1, v2, ...).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/version" }
+    },
+    "behavior": {
+      "description": "The probe comparison of the newest version with its merge base on the target line (the line upstream, else main). A queue entry with stored probe results gives the comparison of the queue instead.",
+      "anyOf": [
+        { "$ref": "#/$defs/behavior" },
+        { "$ref": "#/$defs/behavior_unavailable" }
+      ]
+    },
+    "comments": {
+      "description": "The comments on the change, in the order they were recorded.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/comment" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "A layr id in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "time": {
+      "description": "A time in milliseconds since the Unix epoch.",
+      "type": "integer"
+    },
+    "actor": {
+      "description": "The user who recorded an operation on its machine.",
+      "type": "object",
+      "required": ["name", "uid"],
+      "additionalProperties": true,
+      "properties": {
+        "uid": {
+          "description": "The user id (uid) on the machine of the record.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "description": "The user name on the machine of the record.",
+          "type": "string"
+        },
+        "session": {
+          "description": "The LAYR_SESSION label of the process (a terminal, a CI job, an agent). Free text. Absent when it was not set.",
+          "type": "string"
+        }
+      }
+    },
+    "version": {
+      "description": "One version of the change.",
+      "type": "object",
+      "required": ["attestations", "checks", "state", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "version": {
+          "description": "The label of the version: 'v1' for the first. The revision 'changes/<change_id>/<label>' resolves to its state.",
+          "type": "string",
+          "pattern": "^v[1-9][0-9]*$"
+        },
+        "state": { "$ref": "#/$defs/state" },
+        "attestations": {
+          "description": "The attestations of the state, in the form of 'layr attestations --json'.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/attestation" }
+        },
+        "checks": {
+          "description": "The results of the check attestations of the state that are not revoked, in record order. A failed command is a result too (see 'exit').",
+          "type": "array",
+          "items": { "$ref": "#/$defs/check" }
+        },
+        "operation": { "$ref": "#/$defs/operation" }
+      }
+    },
+    "state": {
+      "description": "The state of the version.",
+      "type": "object",
+      "required": ["author", "id", "kind", "parents", "subvol", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "description": "The id of the state.",
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "description": "The kind of state: 'commit' (a named save), 'auto' (an automatic state), 'stash' (parked work), 'import' (from a git commit), 'cache' or 'derived' (data outside source history).",
+          "type": "string",
+          "examples": ["commit", "auto", "stash", "import", "cache", "derived"]
+        },
+        "change_id": {
+          "description": "The id of the change of the state.",
+          "$ref": "#/$defs/id"
+        },
+        "derived_from": {
+          "description": "For a derived state: the id of the state it was computed from.",
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "description": "For a derived state: the name of the computation, for example 'check-v1'.",
+          "type": "string"
+        },
+        "parents": {
+          "description": "The ids of the parent states. Two or more for a merge.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "line": {
+          "description": "The id of the line that made the state.",
+          "$ref": "#/$defs/id"
+        },
+        "subvol": {
+          "description": "The id of the snapshot of the state on the machine that made it.",
+          "type": "string"
+        },
+        "author": {
+          "description": "The author of the state.",
+          "type": "object",
+          "required": ["email", "name"],
+          "additionalProperties": true,
+          "properties": {
+            "name": { "description": "The author name.", "type": "string" },
+            "email": { "description": "The author email address.", "type": "string" },
+            "uid": { "description": "The user id (uid) on the machine that made the state.", "type": "integer", "minimum": 0 },
+            "session": { "description": "The LAYR_SESSION label of the process that made the state. Absent when it was not set.", "type": "string" }
+          }
+        },
+        "message": {
+          "description": "The full message of the state.",
+          "type": "string"
+        },
+        "time": { "$ref": "#/$defs/time" },
+        "running": {
+          "description": "True when the state was taken while processes ran in the line (crash-consistent only). Absent when false.",
+          "type": "boolean"
+        },
+        "conflicts": {
+          "description": "The conflicts that the state holds. Absent when it has none.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/conflict" }
+        },
+        "layers": {
+          "description": "The cache snapshots of the state: the cache path to the snapshot name. Absent when there are none.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "layer_by": {
+          "description": "The user id (uid) of the user who made the cache snapshots.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "layer_shared": {
+          "description": "True when lines of other users may take the cache snapshots. Absent when false.",
+          "type": "boolean"
+        },
+        "layer_platform": {
+          "description": "The platform of the cache snapshots, for example 'macos-aarch64'.",
+          "type": "string"
+        },
+        "cache_key_parts": {
+          "description": "The parts of the cache key by name, each a short hash of its value.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "parts": {
+          "description": "The part of the state on each overlay: the overlay name to the id of its state in the overlay store.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "cache_of": {
+          "description": "For a cache snapshot: the id of the project state whose working folder it was taken with.",
+          "$ref": "#/$defs/id"
+        },
+        "tree": {
+          "description": "The root tree of the state in the object store of the project, as 64 hex digits.",
+          "type": "string"
+        },
+        "times": {
+          "description": "The id of the times table that goes with 'tree'.",
+          "type": "string"
+        }
+      }
+    },
+    "conflict": {
+      "description": "One path with a merge conflict.",
+      "type": "object",
+      "required": ["kind", "path"],
+      "additionalProperties": true,
+      "properties": {
+        "path": { "description": "The path of the conflict.", "type": "string" },
+        "kind": {
+          "description": "The kind of conflict.",
+          "type": "string",
+          "examples": ["content", "add/add", "modify/delete", "delete/modify", "rename/delete"]
+        },
+        "base": { "description": "The id of the merge base state.", "$ref": "#/$defs/id" },
+        "ours": { "description": "The id of the state of the line in the merge.", "$ref": "#/$defs/id" },
+        "theirs": { "description": "The id of the state that was merged in.", "$ref": "#/$defs/id" }
+      }
+    },
+    "attestation": {
+      "description": "One attestation. The schema 'attestations' describes the same object.",
+      "type": "object",
+      "required": ["attestation_id", "format", "kind", "payload_digest", "signer", "subject", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "format": { "description": "The format version of the attestation record.", "type": "integer", "minimum": 1 },
+        "attestation_id": { "description": "The id of the attestation.", "$ref": "#/$defs/id" },
+        "subject": {
+          "description": "What the attestation is about.",
+          "type": "object",
+          "required": ["id", "kind"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": { "description": "The kind of subject: 'state' or 'view'.", "type": "string", "examples": ["state", "view"] },
+            "id": { "description": "The id of the state, or the id of the view.", "type": "string" }
+          }
+        },
+        "change_id": { "description": "The id of the change of the subject state.", "$ref": "#/$defs/id" },
+        "kind": {
+          "description": "The kind of attestation.",
+          "type": "string",
+          "examples": ["check", "approval", "origin", "import", "quarantine", "revoke", "bisect"]
+        },
+        "payload_digest": { "description": "The SHA-256 digest of the payload, as 64 lowercase hex digits.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "payload_ref": { "description": "Where the payload is kept, when it is kept apart from the record.", "type": "string" },
+        "signer": { "description": "Who signed the record: the id of a machine, or 'person:<login>' for a person key ('layr request').", "type": "string" },
+        "time": { "$ref": "#/$defs/time" }
+      }
+    },
+    "check": {
+      "description": "The result of one check. 'layr try' writes command, argv, exit and seconds. A check of the check runner also writes name, state, privileged, executor, platform, log_ref, output_state, truncated, duration_ms and limits. A probe run also writes probe fields. A check attestation that 'layr attest check' made by hand has no result: its item is the record data (the 'attestation' member).",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "command": { "description": "The command as one string.", "type": "string" },
+        "argv": { "description": "The command as its arguments.", "type": "array", "items": { "type": "string" } },
+        "exit": { "description": "The exit status of the command. 0 is a pass.", "type": "integer" },
+        "seconds": { "description": "The run time in seconds ('layr try').", "type": "number" },
+        "name": { "description": "The name of the check (check.<name>).", "type": "string" },
+        "state": { "description": "The id of the checked state.", "$ref": "#/$defs/id" },
+        "privileged": { "description": "True when the check ran as root.", "type": "boolean" },
+        "executor": { "description": "True when the check runner ran the check.", "type": "boolean" },
+        "platform": { "description": "The platform the check ran on.", "type": "string" },
+        "log_ref": { "description": "The ref of the derived state that holds the check log.", "type": "string" },
+        "output_state": { "description": "The id of the derived state that holds the output.", "$ref": "#/$defs/id" },
+        "truncated": { "description": "True when the log was cut at its size limit.", "type": "boolean" },
+        "duration_ms": { "description": "The run time in milliseconds.", "type": "integer", "minimum": 0 },
+        "limits": { "description": "The resource limits of the run.", "type": "object" },
+        "attestation": { "description": "The attestation, for a check attestation without a result.", "type": "object" }
+      }
+    },
+    "operation": {
+      "description": "How the version was made. Absent for states that older layr versions made.",
+      "type": "object",
+      "required": ["actor", "id", "kind", "machine", "source", "state", "target_head", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "state": { "description": "The id of the state of the version.", "$ref": "#/$defs/id" },
+        "kind": {
+          "description": "The operation that made the version, for example 'amend', 'pick' or 'replay'.",
+          "type": "string",
+          "examples": ["amend", "pick", "replay"]
+        },
+        "source": { "description": "The id of the state the operation started from.", "$ref": "#/$defs/id" },
+        "target_line": { "description": "The id of the line the operation wrote to. Null when there was none.", "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "target_head": { "description": "The id of the head of the target line before the operation.", "$ref": "#/$defs/id" },
+        "id": { "description": "The id of the operation record.", "$ref": "#/$defs/id" },
+        "machine": { "description": "The id of the machine that recorded the operation.", "$ref": "#/$defs/id" },
+        "time": { "$ref": "#/$defs/time" },
+        "actor": { "$ref": "#/$defs/actor" }
+      }
+    },
+    "behavior": {
+      "description": "The probe comparison. 'probes' is empty when the project has no probes.",
+      "type": "object",
+      "required": ["probes"],
+      "additionalProperties": true,
+      "properties": {
+        "base": { "description": "The id of the base state.", "$ref": "#/$defs/id" },
+        "head": { "description": "The id of the head state.", "$ref": "#/$defs/id" },
+        "base_source": { "description": "Whether the probe definitions of the base are available, for example 'available'.", "type": "string" },
+        "head_source": { "description": "Whether the probe definitions of the head are available, for example 'available'.", "type": "string" },
+        "base_views": { "description": "Saved views of the base with probe results, when the base state itself has none.", "type": "array", "items": { "type": "string" } },
+        "head_views": { "description": "Saved views of the head with probe results, when the head state itself has none.", "type": "array", "items": { "type": "string" } },
+        "probes": {
+          "description": "One row per probe.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/probe_row" }
+        }
+      }
+    },
+    "behavior_unavailable": {
+      "description": "The comparison could not be made, for example because the change and the target line have no common state.",
+      "type": "object",
+      "required": ["reason", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "status": { "description": "Always 'unavailable'.", "const": "unavailable" },
+        "reason": { "description": "Why, in words for people.", "type": "string" }
+      }
+    },
+    "probe_row": {
+      "description": "The comparison of one probe.",
+      "type": "object",
+      "required": ["probe", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "probe": { "description": "The name of the probe.", "type": "string" },
+        "status": {
+          "description": "The result of the comparison.",
+          "type": "string",
+          "examples": ["unchanged", "changed", "not run", "kind changed"]
+        },
+        "base_run": { "description": "For 'not run': true when the base has a result.", "type": "boolean" },
+        "head_run": { "description": "For 'not run': true when the head has a result.", "type": "boolean" },
+        "base": { "description": "The probe run of the base.", "type": "object" },
+        "head": { "description": "The probe run of the head.", "type": "object" },
+        "exit_changed": { "description": "True when the exit status of the probe changed.", "type": "boolean" },
+        "changes": { "description": "The changed outputs of the probe.", "type": "array" },
+        "limit_reasons": { "description": "For a screenshot probe: why a change is over its limit.", "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "comment": {
+      "description": "One comment.",
+      "type": "object",
+      "required": ["actor", "change_id", "id", "text", "time", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "description": "The id of the comment. 'layr comment --reply-to <id>' answers it.", "type": "string" },
+        "change_id": { "description": "The id of the change.", "$ref": "#/$defs/id" },
+        "version": { "description": "The id of the state of the version that the comment is about.", "$ref": "#/$defs/id" },
+        "path": { "description": "The file the comment is about. Absent for a comment on the whole change.", "type": "string" },
+        "line": { "description": "The line number in 'path'.", "type": "integer", "minimum": 0 },
+        "text": { "description": "The text of the comment.", "type": "string" },
+        "reply_to": { "description": "The id of the comment that this one answers.", "type": "string" },
+        "actor": { "$ref": "#/$defs/actor" },
+        "time": { "$ref": "#/$defs/time" }
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:queue-list",
+  "version": 1,
+  "title": "layr queue list --json",
+  "description": "The entries of the merge queue, oldest first. With --into <line>, only the entries for that target line. 'layr queue run --json' writes the entries it ran in the same form, and 'layr queue add --json' writes one entry.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/entry" },
+  "$defs": {
+    "id": {
+      "description": "A layr id in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "entry": {
+      "description": "One queue entry: an exact state to merge into a target line.",
+      "type": "object",
+      "required": ["added_by", "attempts", "id", "into", "state", "status", "target_line", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "description": "The id of the entry. 'layr queue remove <id>' removes it.",
+          "$ref": "#/$defs/id"
+        },
+        "into": {
+          "description": "The name of the target line when the entry was added.",
+          "type": "string"
+        },
+        "target_line": {
+          "description": "The id of the target line. It stays the same when the line is renamed.",
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "description": "The id of the exact state to merge. A later save in the source line does not change it.",
+          "$ref": "#/$defs/id"
+        },
+        "change_id": {
+          "description": "The id of the change of the state. Absent when the state has no change id.",
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "description": "The Conventional Commit title from 'queue add -m'. The queue then merges the entry as one state with this message. Absent without -m.",
+          "type": "string"
+        },
+        "added_by": {
+          "description": "The user id (uid) of the user who added the entry.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "time": {
+          "description": "When the entry was added, in milliseconds since the Unix epoch.",
+          "type": "integer"
+        },
+        "status": {
+          "description": "The status of the entry: 'pending' waits for 'queue run', 'done' is merged, 'failed' did not merge (see 'reason').",
+          "type": "string",
+          "examples": ["pending", "done", "failed"]
+        },
+        "attempts": {
+          "description": "How many times 'queue run' tried the entry.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "result": {
+          "description": "The id of the state that the target line got from the merge. Present when the status is 'done'.",
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "description": "Why the entry failed, in words for people (a conflict, a failed check). Present when the status is 'failed'.",
+          "type": "string"
+        },
+        "probes": {
+          "description": "The probe results of the merge result, when the project has probes ('layr probe'). Its 'behavior' member has the form of 'behavior' in 'layr change show --json'.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "status": {
+              "description": "'passed' or 'failed': failed when a probe went over its limit.",
+              "type": "string",
+              "examples": ["passed", "failed"]
+            },
+            "probes": {
+              "description": "One result per probe.",
+              "type": "array",
+              "items": { "type": "object" }
+            },
+            "behavior": {
+              "description": "The comparison of the target head with the merge result.",
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

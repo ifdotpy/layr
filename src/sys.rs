@@ -2216,6 +2216,65 @@ pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
     acl.set_path(&path)
 }
 
+/// The mount points of this machine (`getmntinfo`).
+#[cfg(target_os = "macos")]
+pub fn mount_points() -> io::Result<Vec<std::path::PathBuf>> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut entries: *mut libc::statfs = std::ptr::null_mut();
+    // SAFETY: getmntinfo points `entries` at `count` records in a buffer it owns; they are read before
+    // the next call. MNT_NOWAIT reads the kernel's list without asking each file system.
+    let count = unsafe { libc::getmntinfo(&mut entries, libc::MNT_NOWAIT) };
+    if count <= 0 || entries.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above; `count` is positive.
+    let entries = unsafe { std::slice::from_raw_parts(entries, count as usize) };
+    Ok(entries
+        .iter()
+        .map(|e| {
+            // SAFETY: f_mntonname is a NUL-terminated C string in a fixed array.
+            let name = unsafe { CStr::from_ptr(e.f_mntonname.as_ptr()) };
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()))
+        })
+        .collect())
+}
+
+/// The mount points of this process's mount namespace.
+#[cfg(target_os = "linux")]
+pub fn mount_points() -> io::Result<Vec<std::path::PathBuf>> {
+    mountinfo_points(&std::fs::read("/proc/self/mountinfo")?)
+}
+
+/// The mount points (field 5) of the lines of `/proc/<pid>/mountinfo`, with their octal escapes decoded.
+#[cfg(target_os = "linux")]
+pub fn mountinfo_points(data: &[u8]) -> io::Result<Vec<std::path::PathBuf>> {
+    use std::os::unix::ffi::OsStringExt;
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid mountinfo line");
+    data.split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let field = line.split(|&b| b == b' ').filter(|v| !v.is_empty()).nth(4).ok_or_else(invalid)?;
+            let mut decoded = Vec::with_capacity(field.len());
+            let mut i = 0;
+            while i < field.len() {
+                if field[i] == b'\\' {
+                    let digits = field.get(i + 1..i + 4).ok_or_else(invalid)?;
+                    if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                        return Err(invalid());
+                    }
+                    let value = u16::from(digits[0] - b'0') * 64 + u16::from(digits[1] - b'0') * 8 + u16::from(digits[2] - b'0');
+                    decoded.push(u8::try_from(value).map_err(|_| invalid())?);
+                    i += 4;
+                } else {
+                    decoded.push(field[i]);
+                    i += 1;
+                }
+            }
+            Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+        })
+        .collect()
+}
+
 // ----- OverlayFS mount and metadata operations -----
 #[cfg(feature = "overlayfs")]
 pub fn overlay_mount(
