@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify thin APFS states: commits, automatic states, lines, views, gc, and merges."""
-import argparse, os, shutil, sqlite3, stat, subprocess, tempfile
+import argparse, os, shutil, sqlite3, stat, subprocess, tempfile, time
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -221,7 +221,19 @@ try:
     run(work, 'fsck')
     print('PASS a merge of thin states matches the line, and fsck passes', flush=True)
 finally:
-    subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=True)
+    # A trash emptier of the last command may still delete files under the store while this runs: a file
+    # that is gone needs no cleanup, so these steps do not fail on it. The rmtree at the end still must work.
+    subprocess.run(['chflags', '-R', 'nouchg', str(root)], check=False)
     # Thin layers can contain dangling links; clear ACLs without following them.
-    subprocess.run(['/usr/bin/find', str(root), '-exec', '/bin/chmod', '-h', '-N', '{}', '+'], check=True)
-    shutil.rmtree(root)
+    subprocess.run(['/usr/bin/find', str(root), '-exec', '/bin/chmod', '-h', '-N', '{}', '+'], check=False,
+                   stderr=subprocess.DEVNULL)
+    for attempt in range(5):
+        try:
+            shutil.rmtree(root)
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(1)
