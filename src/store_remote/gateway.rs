@@ -859,18 +859,26 @@ impl Gateway {
                 }
                 let names: Vec<&str> = chunk.iter().map(|(_, k)| *k).collect();
                 let body = serde_json::to_vec(&serde_json::json!({"epoch": epoch, "keys": names}))?;
-                let response = self.proof_request(Method::POST, "batch", &[], Some(body))?;
-                let status = response.status().as_u16();
-                if matches!(status, 404 | 405) {
-                    self.batch_off.store(true, Ordering::SeqCst);
-                    break;
-                }
-                if status != 200 {
-                    continue;
-                }
-                let reply = bytes(response, BATCH_LIMIT)?;
-                for ((i, _), object) in chunk.iter().zip(batch_objects(&reply, chunk.len())?) {
-                    out[*i] = object;
+                // A batch only saves requests: any failure (a gateway without the route answers 404, 405, or 401
+                // before its routing) turns batches off for the rest of the command, and the keys are read alone.
+                let reply = self
+                    .proof_request(Method::POST, "batch", &[], Some(body))
+                    .and_then(|response| match response.status().as_u16() {
+                        200 => bytes(response, BATCH_LIMIT),
+                        status => Err(anyhow!("HTTP {status}")),
+                    })
+                    .and_then(|reply| batch_objects(&reply, chunk.len()));
+                match reply {
+                    Ok(objects) => {
+                        for ((i, _), object) in chunk.iter().zip(objects) {
+                            out[*i] = object;
+                        }
+                    }
+                    Err(e) => {
+                        drop(crate::trace::named(|| format!("gateway batch off: {e:#}")));
+                        self.batch_off.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
         }
@@ -1988,6 +1996,22 @@ mod tests {
         let log = quit(&address, server);
         assert_eq!(log[0], "POST /v1/p/project/batch old.proof");
         assert_eq!(log.len(), 3, "after the 404 each object is read alone: {log:?}");
+        assert!(gateway.batch_off.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn get_many_reads_one_by_one_when_the_gateway_refuses_the_batch() {
+        // A gateway that checks the proof of a POST before its routing (or any other refusal) answers 401 twice.
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, _| match request {
+            "POST /v1/p/project/batch" => ("401 Unauthorized", r#"{"error":"no write grant"}"#.into()),
+            _ => ("200 OK", "x".into()),
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        let got = gateway.get_many(&["states/ab".into(), "states/cd".into()]).unwrap();
+        assert_eq!(got, vec![Some(b"x".to_vec()), Some(b"x".to_vec())]);
+        let log = quit(&address, server);
+        assert_eq!(log.iter().filter(|r| r.starts_with("GET /v1/p/project/objects/")).count(), 2, "{log:?}");
         assert!(gateway.batch_off.load(Ordering::SeqCst));
     }
 
