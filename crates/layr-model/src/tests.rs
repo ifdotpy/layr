@@ -241,6 +241,35 @@ fn queue_outcomes_keep_probes_and_removal() {
     assert!(fold(vec![b, a]).queue_list(None).is_empty());
 }
 #[test]
+fn line_names_stand_next_to_line_ids() {
+    let mut first = record(1, "commit");
+    first.states.push(state("s1", StateKind::Commit, &[]));
+    first.lines.insert("line".into(), line("s1", "a"));
+    let entry = json!({"id":"q","into":"main","target_line":"line","state":"s1","added_by":10,"time":1,"status":"pending"});
+    let mut queued = record(2, "queue.add");
+    queued.data = json!({"queue_change":{"id":"q","before":null,"after":entry}});
+    let mut gone = json!({"id":"g","into":"old","target_line":"gone","state":"s1","added_by":10,"time":2,"status":"pending"});
+    let mut queued_gone = record(3, "queue.add");
+    queued_gone.data = json!({"queue_change":{"id":"g","before":null,"after":gone.clone()}});
+    // A line that only its delete record names: the name comes from the record.
+    let mut deleted = record(4, "line.delete");
+    deleted.lines.insert("gone".into(), LineChange { before: None, after: None, working_before: None, working_after: None });
+    deleted.data = json!({"name":"old","final_state":null,"staged_state":null});
+    let p = fold(vec![first, queued, queued_gone, deleted]);
+    assert_eq!(p.line_name("line").as_deref(), Some("main"));
+    assert_eq!(p.line_name("gone").as_deref(), Some("old"));
+    assert_eq!(p.line_name("unknown"), None);
+    let queue = p.queue_list_json(None).unwrap();
+    assert_eq!(queue[0]["target_line"], "line");
+    assert_eq!(queue[0]["target_line_name"], "main");
+    gone["attempts"] = json!(0);
+    gone["target_line_name"] = json!("old");
+    assert_eq!(queue[1], gone);
+    let show = p.change_show("change", &probes::Context::default()).unwrap();
+    assert_eq!(show["versions"][0]["state"]["line"], "line");
+    assert_eq!(show["versions"][0]["state"]["line_name"], "main");
+}
+#[test]
 fn overlays_stay_separate_and_unknown_records_stay_in_log() {
     let mut parent = record(1, "future.op");
     parent.data = json!({"unknown":{"field":1}});

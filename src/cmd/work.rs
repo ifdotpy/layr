@@ -139,6 +139,8 @@ struct StatusJson<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     ignored: Option<Vec<&'a String>>,
     line: &'a str,
+    /// The id of `line` (a name): JSON of other commands names lines by id.
+    line_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     overlaps: Option<Vec<StatusOverlap<'a>>>,
     staged: Vec<StatusChange<'a>>,
@@ -150,6 +152,7 @@ impl<'a> StatusJson<'a> {
     fn new(line: &'a Line, st: &'a Status, specs: &[String], overlaps: &'a [Overlap], options: &StatusOptions) -> Self {
         Self {
             line: &line.name,
+            line_id: &line.id,
             head: &line.head,
             staged: st.staged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
             unstaged: st.unstaged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
@@ -1285,8 +1288,12 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--no-edit")
         .flag("--allow-conflict-markers")
         .value("--author")
-        .flag("-s|--signoff");
+        .flag("-s|--signoff")
+        .flag("--json");
     let a = parse(&spec, args)?;
+    // `--json` prints one object in place of the text (docs/commands.md, "save --json").
+    let json = a.has("--json");
+    let quiet = a.has("-q") || json;
     let h = here(ctx)?;
     let line = h.line()?.clone();
     let mut message: String = a.all("-m").join("\n\n");
@@ -1315,7 +1322,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
             return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
         }
-        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"));
+        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"), json);
     }
     #[cfg(target_os = "linux")]
     let virtual_save = {
@@ -1346,6 +1353,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.prepare_named_cache_parts(&line)?;
     }
     let nothing = |h: &Here, line: &Line| -> Result<i32> {
+        if json {
+            outln!(ctx, "{}", nothing_json(line));
+            return Ok(1);
+        }
         let (mut st2, _s2, _i2, _x2) = h.repo.status(line)?;
         st2.drop_paths(&h.repo.quiet_paths(line)?);
         outln!(ctx, "On line {}", line.name);
@@ -1406,7 +1417,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .get("--author")
         .and_then(|au| au.split_once('<').map(|(n, e)| (n.trim().to_string(), e.trim_end_matches('>').trim().to_string())));
     if stacked {
-        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), a.has("-q"), author, nothing);
+        let out = if json {
+            Output::Json
+        } else if quiet {
+            Output::Quiet
+        } else {
+            Output::Text
+        };
+        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
@@ -1510,7 +1528,14 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _t = crate::trace::span("finish save");
         pc.finish()?;
     }
-    if !a.has("-q") {
+    if json {
+        #[cfg(target_os = "macos")]
+        let new_root = h.repo.state_src(&state.id)?;
+        let staged = changes::with_renames(&head_root, &new_root, staged);
+        let mut out = saved_json(&line, &state, &diff::file_diffs(&head_root, &new_root, &staged)?);
+        out["amend"] = serde_json::json!(a.has("--amend"));
+        outln!(ctx, "{out}");
+    } else if !quiet {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));
         // `publish` moved the clone into the state folder: read the saved state.
@@ -1594,7 +1619,7 @@ fn commit_stacked(
     message: &str,
     all: bool,
     allow_empty: bool,
-    quiet: bool,
+    out: Output,
     author: Option<(String, String)>,
     nothing: impl Fn(&Here, &Line) -> Result<i32>,
 ) -> Result<i32> {
@@ -1626,13 +1651,33 @@ fn commit_stacked(
     } else {
         repo.temp_snapshot(&src, true)?
     };
-    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, !quiet)? {
+    let summary = out != Output::Quiet;
+    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
         Some(d) => d,
         None => return nothing(h, line),
     };
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
-    if !quiet {
+    if out == Output::Json {
+        let overlays: Vec<_> = done
+            .overlays
+            .iter()
+            .map(|(n, s)| serde_json::json!({"overlay": n, "state": s.id, "short": ids::short(&s.id)}))
+            .collect();
+        // Only overlays changed: the line has no new state of its own.
+        let mut value = match &done.shared {
+            Some(s) => saved_json(line, s, &done.fds),
+            None => {
+                let (changed, insertions, deletions) = diff::totals(&done.fds);
+                serde_json::json!({"saved": true, "state": null, "short": null, "line": line_json(line), "message": message,
+                    "parents": [], "conflicts": 0,
+                    "files": {"changed": changed, "insertions": insertions, "deletions": deletions}})
+            }
+        };
+        value["amend"] = serde_json::json!(false);
+        value["overlays"] = serde_json::json!(overlays);
+        outln!(ctx, "{value}");
+    } else if out == Output::Text {
         let subject = message.lines().next().unwrap_or("");
         match &done.shared {
             Some(s) => outln!(ctx, "[{} {}] {subject}", line.name, ids::short(&s.id)),
@@ -1649,6 +1694,41 @@ fn commit_stacked(
         print_fds(ctx, &done.fds);
     }
     Ok(0)
+}
+
+/// What a named save prints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Text,
+    Quiet,
+    Json,
+}
+
+/// A line in the JSON of a save.
+pub(crate) fn line_json(line: &Line) -> serde_json::Value {
+    serde_json::json!({"id": line.id, "name": line.name})
+}
+
+/// The JSON of a named save (`layr save -m --json`, docs/commands.md): the new state, its line, message
+/// and parents, the numbers of the text summary (`fds`: the changes from the old head), and the number of
+/// files that still have conflict markers.
+pub(crate) fn saved_json(line: &Line, state: &crate::model::StateRec, fds: &[diff::FileDiff]) -> serde_json::Value {
+    let (changed, insertions, deletions) = diff::totals(fds);
+    serde_json::json!({
+        "saved": true,
+        "state": state.id,
+        "short": ids::short(&state.id),
+        "line": line_json(line),
+        "message": state.message,
+        "parents": state.parents,
+        "conflicts": state.conflicts.len(),
+        "files": {"changed": changed, "insertions": insertions, "deletions": deletions},
+    })
+}
+
+/// The JSON of a named save that found nothing to save (exit status 1, as the text).
+pub(crate) fn nothing_json(line: &Line) -> serde_json::Value {
+    serde_json::json!({"saved": false, "state": null, "short": null, "line": line_json(line), "reason": "nothing to save"})
 }
 
 fn parents_empty(s: &crate::model::StateRec) -> bool {
@@ -2263,7 +2343,7 @@ mod status_tests {
         let output = StatusJson::new(&line, &st, &[], &[], &options);
         assert_eq!(
             serde_json::to_string(&output).unwrap(),
-            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","overlaps":[],"staged":[],"unstaged":[],"untracked":[]}"#
+            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[],"staged":[],"unstaged":[],"untracked":[]}"#
         );
     }
 
@@ -2288,7 +2368,7 @@ mod status_tests {
         let output = StatusJson::new(&line, &st, &[], &overlaps, &options);
         assert_eq!(
             serde_json::to_string(&output).unwrap(),
-            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"base","kind":"content","ours":"ours","path":"other.txt","theirs":"theirs"}],"head":"state","ignored":[],"line":"topic","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
+            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"base","kind":"content","ours":"ours","path":"other.txt","theirs":"theirs"}],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
         );
     }
 
@@ -2332,7 +2412,7 @@ mod status_tests {
         let output = StatusJson::new(&line, &st, &["new.txt".into()], &[], &options);
         assert_eq!(
             serde_json::to_string(&output).unwrap(),
-            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","staged":[],"unstaged":[],"untracked":["new.txt"]}"#
+            r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","line_id":"id","staged":[],"unstaged":[],"untracked":["new.txt"]}"#
         );
     }
 }

@@ -124,6 +124,15 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
     if ["--allow-empty", "--no-verify", "-v", "--no-edit", "--author", "-s"].iter().any(|flag| a.has(flag)) {
         return Err(exit(2, "These options require a named state. Use 'layr save -m <message>'."));
     }
+    // `--json`: one object per line on stdout; notes that the text prints go to stderr.
+    let json = a.has("--json");
+    let note = |msg: String| {
+        if json {
+            eprintln!("{msg}");
+        } else if !a.has("-q") {
+            outln!(ctx, "{msg}");
+        }
+    };
     let h = here(ctx)?;
     let repo = &h.repo;
     // Virtual lines save their upper layer; cache overlays still require folder lines.
@@ -234,9 +243,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             // A folder that an interrupted prune left damaged is not saved until a prune of it succeeds.
             let damaged = repo.damaged_folders(&l)?;
             for p in caches.iter().filter(|p| damaged.contains(*p)) {
-                if !a.has("-q") {
-                    outln!(ctx, "{p}: skipped: damaged by an interrupted prune; run layr save --overlays again to prune it");
-                }
+                note(format!("{p}: skipped: damaged by an interrupted prune; run layr save --overlays again to prune it"));
             }
             caches.retain(|p| !damaged.contains(p));
         }
@@ -248,11 +255,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             let (u, g) = repo.owner_ids(&l);
             for p in &versioned {
                 match crate::repo::uncache(&repo.working(&l), p, u, g) {
-                    Ok(again) => {
-                        if !a.has("-q") {
-                            outln!(ctx, "{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED });
-                        }
-                    }
+                    Ok(again) => note(format!("{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED })),
                     Err(e) => refuse(e, &mut refusals)?,
                 }
             }
@@ -276,7 +279,9 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             };
             repo.p.db.keep_set(&l.id, name, &kept)?;
         }
-        match st {
+        let mut overlays = Vec::new();
+        let saved = st.is_some();
+        let state = match st {
             Some(s) => {
                 if a.has("--caches") {
                     // Caches saved on a protected line may warm other users' lines.
@@ -284,7 +289,9 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
                     for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
-                        if !a.has("-q") {
+                        if json {
+                            overlays.push(serde_json::json!({"path": p, "overlay": name, "state": id, "short": ids::short(&id)}));
+                        } else if !a.has("-q") {
                             outln!(ctx, "{p}: overlay {name} {}", ids::short(&id));
                         }
                     }
@@ -295,16 +302,20 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                         eprintln!("warning: cache size limits not applied: {e:#}");
                     }
                 }
-                if !a.has("-q") {
-                    outln!(ctx, "{} {}", l.name, ids::display(&s.id));
-                }
+                s.id
             }
-            None => {
-                if !a.has("-q") {
-                    // The state that equals the working content, in the format of a new state.
-                    outln!(ctx, "{} {}", l.name, ids::display(&repo.save_base(&l)?));
-                }
-            }
+            // The state that equals the working content, in the format of a new state.
+            None => repo.save_base(&l)?,
+        };
+        if json {
+            let line = super::work::line_json(&l);
+            outln!(
+                ctx,
+                "{}",
+                serde_json::json!({"saved": saved, "state": state, "short": ids::short(&state), "line": line, "overlays": overlays})
+            );
+        } else if !a.has("-q") {
+            outln!(ctx, "{} {}", l.name, ids::display(&state));
         }
         // Layers and snapshots that the save did not take (an unchanged folder, or --force).
         repo.discard_prepared();

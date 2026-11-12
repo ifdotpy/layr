@@ -510,7 +510,7 @@ fn main() -> Result<()> {
     write(&args[2], "change", project.change_show(&request.change, &context)?)?;
     write(&args[2], "refs", project.ref_list("", now))?;
     write(&args[2], "ref-log", project.ref_log(&request.reference))?;
-    write(&args[2], "queue", project.queue_list(None))?;
+    write(&args[2], "queue", project.queue_list_json(None)?)?;
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
     let probe_base = subject(request.probe_base);

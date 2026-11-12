@@ -550,7 +550,7 @@ fn write_state(
 }
 
 /// `layr save -m <message>` of a virtual line: every change of the view becomes the new head.
-pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bool) -> Result<i32> {
+pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bool, json: bool) -> Result<i32> {
     let repo = &h.repo;
     repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
     let _line_lock = repo.line_lock(line)?;
@@ -558,7 +558,11 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
     let t = trees(repo, &line, v)?;
     let list = file_changes(&t, v)?;
     if list.is_empty() {
-        outln!(ctx, "On line {}\nnothing to save, working tree clean", line.name);
+        if json {
+            outln!(ctx, "{}", crate::cmd::work::nothing_json(&line));
+        } else {
+            outln!(ctx, "On line {}\nnothing to save, working tree clean", line.name);
+        }
         return Ok(1);
     }
     let head = repo.state(&line.head)?;
@@ -575,7 +579,13 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
         repo.discard_states(std::slice::from_ref(&st));
         return Err(e);
     }
-    if !quiet {
+    if json {
+        let new_root = repo.state_src(&st.id)?;
+        let fds = crate::diff::file_diffs(&t.head, &new_root, &changes::with_renames(&t.head, &new_root, list))?;
+        let mut out = crate::cmd::work::saved_json(&line, &st, &fds);
+        out["amend"] = serde_json::json!(false);
+        outln!(ctx, "{out}");
+    } else if !quiet {
         outln!(ctx, "[{} {}] {}", line.name, ids::short(&st.id), message.lines().next().unwrap_or(""));
         let new_root = repo.state_src(&st.id)?;
         for c in changes::with_renames(&t.head, &new_root, list) {

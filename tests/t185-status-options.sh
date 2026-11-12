@@ -52,7 +52,7 @@ root = pathlib.Path(sys.argv[1])
 def load(name):
     return json.loads((root / (name + '.json')).read_text())
 default = load('default')
-assert set(default) == {'line', 'head', 'staged', 'unstaged', 'untracked', 'ignored', 'conflicts', 'overlaps'}
+assert set(default) == {'line', 'line_id', 'head', 'staged', 'unstaged', 'untracked', 'ignored', 'conflicts', 'overlaps'}
 assert default['ignored'] == ['debug.log']
 assert default['untracked'] == ['new.txt']
 assert [c['path'] for c in default['staged']] == ['staged.txt']

@@ -560,6 +560,35 @@ impl Project {
         out.sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
         out
     }
+    /// CLI `queue list --json`: each entry with `target_line_name`, the name of its target line.
+    pub fn queue_list_json(&self, target: Option<&str>) -> Result<Value> {
+        let mut out = Vec::new();
+        for entry in self.queue_list(target) {
+            let mut value = serde_json::to_value(&entry)?;
+            value["target_line_name"] = serde_json::json!(self.line_name(&entry.target_line));
+            out.push(value);
+        }
+        Ok(Value::Array(out))
+    }
+    /// The name of line `id`, also of a deleted line: the last name the line had, or the name in
+    /// its `line.delete` record. None when no record names it (CLI `LineNames`).
+    pub fn line_name(&self, id: &str) -> Option<String> {
+        if let Some(view) = self.lines.get(id).filter(|v| !v.line.name.is_empty()) {
+            return Some(view.line.name.clone());
+        }
+        self.records
+            .iter()
+            .rev()
+            .find(|r| r.op == "line.delete" && r.lines.contains_key(id))
+            .and_then(|r| r.data["name"].as_str())
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+    }
+    /// Add `<key>_name` next to the line id `key` of `value` when it has that key (CLI `LineNames::add`).
+    fn add_line_name(&self, value: &mut Value, key: &str) {
+        let Some(id) = value.get(key).map(|v| v.as_str().map(str::to_owned)) else { return };
+        value[format!("{key}_name")] = serde_json::json!(id.and_then(|id| self.line_name(&id)));
+    }
     pub fn changes(&self) -> Vec<String> {
         self.states.values().filter_map(|s| s.state.change_id.clone()).collect::<BTreeSet<_>>().into_iter().collect()
     }
@@ -756,7 +785,9 @@ impl Project {
             .map(|(i, s)| {
                 let mut row =
                     serde_json::json!({"version":format!("v{}",i+1),"state":s,"attestations":self.attestations(&s.id,None),"checks":self.checks(&s.id)});
-                if let Some(version) = self.version_info(&s.id) {
+                self.add_line_name(&mut row["state"], "line");
+                if let Some(mut version) = self.version_info(&s.id) {
+                    self.add_line_name(&mut version, "target_line");
                     row["operation"] = version;
                 }
                 row

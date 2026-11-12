@@ -174,13 +174,19 @@ pub fn shortstat_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
     if files.is_empty() {
         return String::new();
     }
-    let (mut a, mut d) = (0, 0);
-    for f in files {
-        let (x, y) = f.counts();
-        a += x;
-        d += y;
-    }
+    let (a, d) = line_totals(files);
     summary(files.len(), a, d)
+}
+
+/// The inserted and deleted lines of all files.
+fn line_totals(files: &[AnalyzedDiff<'_>]) -> (usize, usize) {
+    files.iter().map(AnalyzedDiff::counts).fold((0, 0), |(a, d), (x, y)| (a + x, d + y))
+}
+
+/// The numbers of `shortstat`: changed files, inserted lines and deleted lines.
+pub fn totals(files: &[FileDiff]) -> (usize, usize, usize) {
+    let (a, d) = line_totals(&files.iter().map(AnalyzedDiff::new).collect::<Vec<_>>());
+    (files.len(), a, d)
 }
 
 pub fn numstat_analyzed(files: &[AnalyzedDiff<'_>]) -> String {

@@ -6,7 +6,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 
 | Group         | Commands                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------- |
-| work          | `status [--json] [--no-overlaps] [--no-ignored]`, `diff [-z] [--exclude-standard]`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend]`, `save [--note <text>] [--keep <name>]`, `keep [list [--json] \| drop <name>... \| drop --all]`, `restore [--clean]`, `reset`, `park`, `clean` |
+| work          | `status [--json] [--no-overlaps] [--no-ignored]`, `diff [-z] [--exclude-standard]`, `add`, `rm`, `mv`, `apply [--cached]`, `save -m <message> [-a] [--amend] [--json]`, `save [--note <text>] [--keep <name>] [--json]`, `keep [list [--json] \| drop <name>... \| drop --all]`, `restore [--clean]`, `reset`, `park`, `clean` |
 | history       | `log [--json]`, `show`, `blame`, `grep`, `ls-files`, `rev-parse`, `merge-base`                        |
 | lines         | `line new <name> [<rev>] [--count N] [--json] [--view virtual]`, `line show <line> --none\|--virtual\|--folder [<path>]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
@@ -19,11 +19,11 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | views         | `view [<rev or line>] [--overlay <overlay>,...] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state with those overlays; `--folder` writes the files of the view to a new folder; see overlays.md section 1a, slice 5), `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--folder <path>] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--platform <key>\|any] [--trust protected\|readers]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>` (changes the view of the current working folder), `overlay order [<name>,...]` (shows or sets the project order of overlays, the order of the default view of a new line folder), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
 | refs          | `ref set <name> <rev> [--expect <rev\|none>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
-| queue         | `queue add <rev> [--into <line>] [-m <conventional title>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
+| queue         | `queue add <rev> [--into <line>] [-m <conventional title>] [--json]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
-| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN\|--since-review [--person <login>]] [--to vM]` |
+| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list [--json]`, `change show <id> [--json]`, `change log <id>`, `change diff <id> [--from vN\|--since-review [--person <login>]] [--to vM]` |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
@@ -509,3 +509,52 @@ own log, newest first. JSON writes an array of `op`, `actor`, `time` (millisecon
 Both commands require overlay read access. A hidden overlay is indistinguishable from an
 absent overlay to a non-reader, including errors and exit status. Neither command prints
 key material or operation payloads. Without these flags, the existing state history output applies.
+
+## JSON for tools
+
+The JSON of `save`, and the line names in the JSON of `change`, `queue` and `status`.
+
+### save --json
+
+`layr save -m <message> --json` (also with `-a`, `--amend`, `-F <file>`) writes one JSON object in place of
+the text. The files that the save left out are still named on stderr.
+
+```json
+{"saved": true, "state": "<state uuid>", "short": "a1b2c3d", "line": {"id": "<line uuid>", "name": "w"},
+ "message": "feat: one", "parents": ["<state uuid>"], "amend": false, "conflicts": 0,
+ "files": {"changed": 1, "insertions": 1, "deletions": 0}}
+```
+
+- `state` is the state UUID, as in other JSON output. `short` is the short id of the text output.
+- `files` gives the numbers of the text summary. `conflicts` counts the files that still have
+  conflict markers.
+- With nothing to save, the object is `{"saved": false, "state": null, "short": null, "line": {...},
+  "reason": "nothing to save"}` and the exit status is 1, as in text.
+- In a line with overlays, the object also has `overlays`: `[{"overlay": "<name>", "state": "<uuid>",
+  "short": "<id>"}]`. When only overlays changed, `state` is null and `saved` is true.
+
+`layr save --json` and `layr save --overlays --json` write one object per line (one line of output for
+each line; `--all-lines` writes several):
+
+```json
+{"saved": true, "state": "<state uuid>", "short": "a1b2c3d", "line": {"id": "<line uuid>", "name": "w"},
+ "overlays": [{"path": "target", "overlay": "<overlay>", "state": "<uuid>", "short": "<id>"}]}
+```
+
+`state` is the state equal to the working folder. `saved` is false when the folder did not change: then
+`state` is the existing state. `overlays` lists the cache overlays that `--overlays` saved (empty
+without it). Notes that the text prints, for example a skipped folder, go to stderr.
+
+### Line names in JSON
+
+Where JSON gives a line id, a sibling field gives the line name. The id field does not change.
+
+- `change show --json`: `versions[].state.line_name` next to `line`, and
+  `versions[].operation.target_line_name` next to `target_line`.
+- `change list --json`: each row has `line` (the line id of the newest version, or null) and `line_name`.
+- `queue add --json`, `queue list --json` and `queue run --json`: `target_line_name` next to
+  `target_line`. `into` keeps the name that the entry got when it was added.
+- `status --json`: `line` is the line name; `line_id` gives its id.
+
+The name is the current name of the line. A deleted line keeps its last name. The name is null when
+the project has no record of the line.
