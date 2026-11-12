@@ -909,6 +909,12 @@ impl<'a> Repo<'a> {
         Ok(self.overlay_info(name)?.is_some_and(|i| i.platform.is_some()))
     }
 
+    /// Whether overlay `name` holds build output (a cache): an overlay of one platform, or a folder overlay
+    /// (`cache.<folder>` of layr before 0.44). A plain fetch takes only its records (docs/remotes.md).
+    pub fn cache_data_overlay(&self, name: &str) -> Result<bool> {
+        Ok(self.regenerable_overlay(name)? || self.chunked_overlay(name)?)
+    }
+
     /// Whether overlay `name` keeps one line per platform for each line: a folder overlay without
     /// `platform` (a `cache.<folder>` overlay of layr before 0.44), which holds the build output of
     /// every platform (`line-<line id>.<os>-<arch>`, docs/cache-overlays.md section 6).

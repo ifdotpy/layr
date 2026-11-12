@@ -741,10 +741,24 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         layr_store::format::Mode::Private
                     }),
                 };
-                let configured = store.configure(ctx, &opts)?;
-                store.save_pin(ctx, repo, name)?;
-                set_config(ctx, repo, &format!("cloud.remote.{name}.mode"), json!(store.store_mode()?.name()))?;
-                configured.recovery_key_file
+                // A remote that cannot be reached now is added without the check; the first fetch or push makes
+                // it (the same `configure` and pin). A new store (`--paper-key-*`) and a required `--mode` need the
+                // answer, and a definite answer (no such project, no access) still refuses.
+                let explicit = a.has("--mode") || a.has("--paper-key-out") || a.has("--paper-key-tty");
+                match store.configure(ctx, &opts) {
+                    Err(e) if !explicit && store_remote::gateway::unreachable(&e) => {
+                        eprintln!(
+                            "warning: remote {name}: cannot reach {url} ({e:#}); added without a check, the first fetch or push checks it"
+                        );
+                        None
+                    }
+                    configured => {
+                        let configured = configured?;
+                        store.save_pin(ctx, repo, name)?;
+                        set_config(ctx, repo, &format!("cloud.remote.{name}.mode"), json!(store.store_mode()?.name()))?;
+                        configured.recovery_key_file
+                    }
+                }
             } else {
                 if a.has("--mode") {
                     bail!("--mode requires a store remote");
@@ -1143,6 +1157,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 lines: list_value(&a, "--line"),
                 overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
                 only_states: None,
+                // A plain fetch takes only the records of the cache overlays; `--overlay` or `--line` takes data.
+                all_caches: false,
+                plain_cache_fetch: false,
             };
             for line in &opts.lines {
                 crate::store::check_name("line", line)?;
@@ -1401,6 +1418,9 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             only_states: None,
             heads: a.has("--heads"),
             only_line: a.get("--only-line").map(str::to_owned),
+            // A plain clone starts warm and works offline: it takes the usable caches of this platform.
+            all_caches: true,
+            plain_cache_fetch: false,
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         store_remote::backend::trace_requests();
