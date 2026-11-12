@@ -20,6 +20,7 @@ pub mod policy;
 pub mod probes;
 pub mod protection;
 pub mod release;
+pub mod review;
 pub mod screenshots;
 pub mod types;
 pub mod validation;
@@ -832,20 +833,10 @@ impl Project {
         }
         common.into_iter().find(|c| !below.contains(c))
     }
-    /// Signed discussion records, in stable record order, with actor and timestamp.
+    /// Signed discussion records, in stable record order, with actor and timestamp. A comment on a line range
+    /// also has `line_end` (review.rs).
     pub fn comments(&self, change: &str) -> Vec<Value> {
-        self.records
-            .iter()
-            .filter_map(|record| {
-                let mut comment = record.data.get("comment")?.clone();
-                if comment["change_id"].as_str() != Some(change) {
-                    return None;
-                }
-                comment["actor"] = serde_json::to_value(&record.actor).ok()?;
-                comment["time"] = serde_json::json!(record.time);
-                Some(comment)
-            })
-            .collect()
+        self.comment_records(change).into_iter().map(|(_, comment)| comment).collect()
     }
 
     /// CLI `change show --json`, including versions, all evidence, and stored queue behavior.
@@ -874,11 +865,25 @@ impl Project {
             Ok(None) => serde_json::json!({"probes":[]}),
             Err(error) => serde_json::json!({"status":"unavailable","reason":format!("{error:#}")}),
         };
+<<<<<<< head
         let mut out = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)});
         if let Some(view) = self.change_view(id) {
             changes::add_view_fields(&mut out, &view);
         }
         Ok(out)
+||||||| base
+        Ok(serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)}))
+=======
+        let mut show = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)});
+        Self::add_review(&mut show, self.review(id));
+        Ok(show)
+    }
+    /// Add the keys of `review` (threads, reactions, reviewers) to a `change show` object.
+    pub fn add_review(show: &mut Value, review: Value) {
+        if let (Some(show), Value::Object(review)) = (show.as_object_mut(), review) {
+            show.extend(review);
+        }
+>>>>>>> feat-review
     }
     fn change_behavior(&self, state: &StateRec, context: &probes::Context) -> Result<Value> {
         for entry in self.queue_list(None).iter().rev() {

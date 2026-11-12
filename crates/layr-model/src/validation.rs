@@ -380,6 +380,7 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
         }
     }
+    crate::review::validate(r)?;
     if r.op == "request.refused"
         && (d["reason"].as_str().is_none_or(|s| s.trim().is_empty())
             || !layr_store::request::request_id(d["request_id"].as_str().unwrap_or("")))
