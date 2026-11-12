@@ -156,7 +156,7 @@ try:
   time.sleep(.05)
  os.chmod(root,0o755);os.chmod(pathlib.Path(C['LAYR_ROOT']),0o755)
  for user,allowed in [('layr-ov-reader',True),('layr-ov-other',False)]:
-  p=subprocess.run(['runuser','-u',user,'--','env','LAYR_SOCKET='+str(csocket),'LAYR_PROJECT=project',str(root/'layr'),'overlay','show','secrets','user-0:.env'],capture_output=True,text=True,cwd='/')
+  p=subprocess.run(['runuser','-u',user,'--','env','LAYR_SOCKET='+str(csocket),'LAYR_PROJECT=project',str(root/'layr'),'overlay','show','secrets','main:.env'],capture_output=True,text=True,cwd='/')
   check((p.returncode==0)==allowed,'C service enforces overlay readers for '+user)
 finally:
  daemon.terminate();daemon.wait(timeout=10);daemonlog.close()
@@ -189,7 +189,7 @@ check(not (newepoch/f"slots/machine-{b['id']}.age").exists(),'the removed reader
 check(all(hashes().get(path)==digest for path,digest in old.items()),'rotation preserves all earlier objects')
 report=json.loads(run(['--project','project','fetch','origin','--json'],B).stdout)
 check('overlay secrets: no key on this machine' in report['omitted'],'B cannot fetch the new epoch')
-check(run(['--project','project','overlay','show','secrets','user-0:.env'],B).stdout.endswith('private-epoch-one\n'),'B retains only data from its earlier epoch')
+check(run(['--project','project','overlay','show','secrets','main:.env'],B).stdout.endswith('private-epoch-one\n'),'B retains only data from its earlier epoch')
 # A removed reader can still sign project writes, but it cannot replace the layer recipient.
 (line/'.env').write_text('PRIVATE_TEST_VALUE=private-after-forgery\n')
 run(['--line','main','save','-am','Data after the removed reader','-q'])
