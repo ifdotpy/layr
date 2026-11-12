@@ -1353,6 +1353,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--caches-of")
             .flag("--no-caches")
             .value("--line")
+            .value("--overlay")
             .flag("--heads")
             .value("--only-line")
             .flag("--json")
@@ -1395,7 +1396,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             caches_of_state: None,
             only_caches: None,
             lines: Vec::new(),
-            overlays: None,
+            // `--overlay <layer>[,<layer>]`: only those layers (`base` is the base), as for a fetch.
+            overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
             only_states: None,
             heads: a.has("--heads"),
             only_line: a.get("--only-line").map(str::to_owned),

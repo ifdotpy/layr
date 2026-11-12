@@ -52,4 +52,10 @@ no "the build overlay exists" test -z "$TGO"
 eq "no cache flag" "" "$(sqlite3 "$P/meta/db/layr.sqlite" "SELECT value FROM config WHERE key='overlay.$TGO.cache'")"
 has "its properties say what it is" "platform=$HERE_PLATFORM trust=protected" "$(l overlay list)"
 eq "the build overlay holds main too" "main $(id_of main)" "$(lines_of "$TGO")"
+# A clone takes only the layers that --overlay names (a merge machine needs no build output).
+l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
+ok "a push" l push cloud -q
+ok "a clone of the base only" env LAYR_ROOT="$T/c/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p --heads --only-line main --overlay base -q
+eq "it has no state of an overlay" "" "$(ls "$T/c/store/projects/p/meta/overlays/$TGO/states" 2>/dev/null | grep -v '^$' | head -1)"
+ok "and has main" test -d "$T/c/store/projects/p/lines/main"
 finish
