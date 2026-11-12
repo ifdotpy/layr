@@ -135,7 +135,7 @@ fn main() {
         match argv.get(1).map(String::as_str) {
             Some(tool) if layrfs::TOOLS.contains(&tool) => std::process::exit(layrfs::run_tool(tool, &argv[2..])),
             Some("--help" | "-h") => {
-                print!("{}", cmd::HELP);
+                println!("usage: layr tool <{}> [<args>]", layrfs::TOOLS.join("|"));
                 return;
             }
             _ => {
@@ -208,12 +208,15 @@ fn main() {
             _ => break,
         }
     }
-    // grep already uses -h to omit filenames. Its long help flag remains available.
-    let short_help = argv.first().map(String::as_str) != Some("grep");
-    if argv.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == "--help" || (short_help && arg == "-h"))
-        || argv.first().map(String::as_str) == Some("help")
-    {
-        print!("{}", cmd::HELP);
+    // `layr help`, `layr help <command>`, `layr <command> ... --help` (cmd/help.rs).
+    if let Some(asked) = cmd::help::wanted(&argv) {
+        match cmd::help::text(&asked) {
+            Some(text) => print!("{text}"),
+            None => {
+                eprintln!("layr: '{}' is not a layr command. See 'layr help'.", asked[0]);
+                std::process::exit(1);
+            }
+        }
         return;
     }
     match argv.first().map(String::as_str) {

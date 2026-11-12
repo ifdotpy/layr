@@ -7,6 +7,7 @@ pub mod branch;
 pub mod change;
 pub mod checks;
 pub mod du;
+pub mod help;
 pub mod followcmd;
 pub mod history;
 pub mod layerpush;
