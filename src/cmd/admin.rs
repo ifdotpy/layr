@@ -458,6 +458,13 @@ const NOT_UNDOABLE: &[&str] = &[
     "config",
     "overlay.create",
     "overlay.use",
+    // Review records have their own reverse commands (comment unresolve, react --remove, review cancel).
+    "comment.resolve",
+    "comment.unresolve",
+    "reaction.add",
+    "reaction.remove",
+    "review.request",
+    "review.cancel",
 ];
 
 /// True when `layr undo` reverses the operation. An automatic save is one only when it names the

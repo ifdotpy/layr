@@ -429,21 +429,92 @@ Encoded or split secrets are not detected.
 This check adds protection to private overlays and does not replace them.
 
 
-## Comments on changes
+## Review threads, reactions and reviewers
 
-A comment belongs to a change and one exact version of that change.
-A comment can also name a file, a positive line number, and an earlier comment to reply to.
-The signed record includes the author and the time.
+A comment belongs to a change and to one exact version of that change.
+A comment can name a file and a line or a line range of that version.
+A comment that replies to no other comment starts a thread.
+A reply belongs to the thread of the comment that it answers, also when it answers another reply.
+Each comment is a signed record with its author and time.
 
 ```sh
-layr comment <change-id> 'Explain this condition.' --version v2 --path src/main.rs --line 42
-layr comment <change-id> 'The condition prevents a repeated write.' --reply-to <comment-id>
-layr change show <change-id> --json
+layr comment <change> -m 'Why four lines?' --file src/main.rs --line 40-43 --state <rev>
+layr comment reply <comment> -m 'They keep the write atomic.'
+layr comment resolve <comment>
+layr comment unresolve <comment>
+layr react <comment> +1
+layr react <change> heart --remove
+layr review request <change> person:ann@example.com alice machine:ci-runner
+layr review cancel <change> alice
+layr change show <change> --json
 ```
 
-Without `--version`, `comment` uses the newest version of the change.
-`change show` lists all comments, including comments on older versions.
-The shared model returns the same comments as the CLI.
+- Without `--state` or `--version`, `comment` uses the newest version of the change. `--state` takes any
+  revision of a version of the change. `--version v2` names the second version.
+- `--file` is the same option as `--path`. `--line 40-43` names lines 40 to 43. A range needs a file.
+- The text can also be the argument after the change (`layr comment <change> '<text>'`), as before.
+- `comment reply`, `resolve` and `unresolve` take a comment id or the first characters of one (4 at least).
+  Resolve and unresolve act on the thread of that comment.
+- A reaction name has 1 to 32 characters from `a-z`, `0-9`, `_`, `+` and `-`, for example `+1`, `heart` or `eyes`.
+  A writer has at most one reaction of a name on a comment or a change. `--remove` takes it away.
+- A reviewer is `person:<login>`, `user:<name or uid>`, a local user name, or `machine:<name or id>`
+  of a machine that wrote records in the project.
+- A command that changes nothing (a resolved thread resolved again, a reaction that is already there, a reviewer
+  who is already requested) writes no record and says so.
+- These commands need the `try` permission, as `comment` does. `layr undo` skips their records; use the reverse
+  command.
+
+`change show` lists the threads, the reactions to the change, and the requested reviewers. Its JSON adds these keys:
+
+- `threads`: one object per thread, in the order of the first comments. Keys: `id` (the first comment),
+  `version` (state id), `version_label` (`v1`, ...), `path`, `line`, `line_end`, `resolved`, `resolved_by`
+  (actor), `resolved_time`, `comment` and `replies`. A missing value is `null`.
+- `reactions`: reaction name to count for the change. Each comment in `threads` also has `reactions`.
+- `reviewers`: one object per active request, sorted by reviewer. Keys: `reviewer`, `status`,
+  `approved_version`, `commented`, `requested_by` (actor) and `requested_time`.
+
+The `comments` key stays: it lists every comment in record order. A comment on a range also has `line_end`.
+
+A reviewer has one of these statuses:
+
+- `approved`: the reviewer has an active approval of the newest version. The approval completes the request.
+  No other record is written.
+- `outdated`: the reviewer approved an older version only. `approved_version` names it.
+- `commented`: the reviewer wrote a comment on the change and approved no version.
+- `pending`: neither.
+
+An approval counts as `layr approve` and `layr request approve --person` write it. For `user:<uid>`, the
+approval and the comments must come from a machine of the project perspective, as for protection rules.
+For `machine:<id>`, any user of that machine counts. For `person:<login>`, only records with the pinned key of
+that person count.
+
+### Records and concurrent writes
+
+Machines can write review records at the same time and sync later. Each machine gets the same result from the same
+records, in any arrival order.
+
+| Operation                                 | Data key         | Fields                                                    |
+|-------------------------------------------|------------------|-----------------------------------------------------------|
+| `comment`                                 | `comment`        | the comment; `line_end` next to it for a range            |
+| `comment.resolve`, `comment.unresolve`    | `thread_status`  | `change_id`, `thread`, `resolved`, `prev`                 |
+| `reaction.add`, `reaction.remove`         | `reaction`       | `change_id`, `target` (comment or change id), `name`, `on` |
+| `review.request`, `review.cancel`         | `review_request` | `change_id`, `reviewer`, `active`, `prev`                 |
+
+- A thread status and a reviewer request use `prev`: the ids of the records of the same thread, or the same
+  change and reviewer, that the writer saw. The records that no other record names are the heads.
+  When the heads agree, they give the value. When they disagree, two machines wrote at the same time:
+  the thread stays open and the request stays active. The next record names all heads and decides.
+  The record time does not decide, so a machine with a wrong clock cannot hide a later change.
+- A reaction belongs to its writer: a person with a pinned key, else one user of one machine.
+  The newest record of that writer for the target and the name decides. A machine writes in sequence,
+  so its sequence number orders its records.
+- A reply to a comment that has not arrived yet starts its own thread until that comment arrives.
+- The range end is next to the comment and not in it, so layr versions without ranges still read the comment
+  (as a comment on the first line).
+- Person requests (`layr request comment --person`) make comments and replies. Resolve, reactions and reviewer
+  requests are machine records only.
+
+The shared model (`layr_model::Project::review` and `change_show`) returns the same keys as the CLI.
 
 ## Person signing keys
 

@@ -25,6 +25,7 @@ pub mod release_prepare;
 pub mod remote;
 pub mod replicate;
 pub mod requests;
+pub mod review;
 pub mod transfer;
 pub mod view;
 pub mod volume;
@@ -257,6 +258,10 @@ Lines and states:
    tag, merge, pick, invert, replay, undo, op, try, bisect run, adopt
    ref set/list/log/delete, release attach/files/get, attest, attestations, change list/show/log/diff
    view [<rev or line>] [--json], view save [<line>], view show <id>
+Review changes:
+   comment <change> -m <text> [--file <path> --line <a>[-<b>]] [--state <rev>]
+   comment reply <comment> -m <text>, comment resolve <comment>, comment unresolve <comment>
+   react <comment or change> <name> [--remove], review request <change> <reviewer>..., review cancel <change> <reviewer>...
 Remotes:
    person keys, show, accept
    remote add, list, self, remove, trust, grant; sync, fetch, pull, push, clone; login
@@ -288,7 +293,7 @@ pub const COMMANDS: &[&str] = &[
     "help", "--help", "-h", "version", "--version", "status", "diff", "show", "log", "rev-parse", "merge-base", "blame",
     "index", "grep", "ls-files", "add", "rm", "mv", "apply", "restore", "reset", "retest", "park", "clean", "line", "tag", "adopt",
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
-    "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "probe", "gc", "du",
+    "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "react", "review", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
     "usage", "keep", "objects",
@@ -370,7 +375,9 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "attest" => attest::attest(ctx, rest),
         "attestations" => attest::attestations(ctx, rest),
         "change" => change::change(ctx, rest),
-        "comment" => change::comment(ctx, rest),
+        "comment" => review::comment(ctx, rest),
+        "react" => review::react(ctx, rest),
+        "review" => review::review(ctx, rest),
         "probe" => probe::probe(ctx, rest),
         "gc" => admin::gc(ctx, rest),
         "du" => du::du(ctx, rest),
