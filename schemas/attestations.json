@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:attestations",
+  "version": 1,
+  "title": "layr attestations <rev> --json",
+  "description": "The signed attestations (evidence) of one state or view, in the order they were recorded. With --kind <kind>, only attestations of that kind. A revoked attestation stays in the list; its revoke is an attestation of kind 'revoke'.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/attestation" },
+  "$defs": {
+    "id": {
+      "description": "A layr id in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "attestation": {
+      "description": "One attestation.",
+      "type": "object",
+      "required": ["attestation_id", "format", "kind", "payload_digest", "signer", "subject", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "format": {
+          "description": "The format version of the attestation record.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "attestation_id": {
+          "description": "The id of the attestation. The revision 'attestations/<id>' resolves to its subject.",
+          "$ref": "#/$defs/id"
+        },
+        "subject": {
+          "description": "What the attestation is about.",
+          "type": "object",
+          "required": ["id", "kind"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "description": "The kind of subject: 'state' or 'view'.",
+              "type": "string",
+              "examples": ["state", "view"]
+            },
+            "id": {
+              "description": "The id of the state, or the id of the view.",
+              "type": "string"
+            }
+          }
+        },
+        "change_id": {
+          "description": "The id of the change of the subject state. Absent when it has none.",
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "description": "The kind of attestation.",
+          "type": "string",
+          "examples": ["check", "approval", "origin", "import", "quarantine", "revoke", "bisect"]
+        },
+        "payload_digest": {
+          "description": "The SHA-256 digest of the payload, as 64 lowercase hex digits.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "payload_ref": {
+          "description": "Where the payload is kept, when it is kept apart from the record.",
+          "type": "string"
+        },
+        "signer": {
+          "description": "Who signed the record: the id of a machine, or 'person:<login>' for a person key ('layr request').",
+          "type": "string"
+        },
+        "time": {
+          "description": "When the attestation was recorded, in milliseconds since the Unix epoch.",
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

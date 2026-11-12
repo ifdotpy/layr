@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:status",
+  "version": 1,
+  "title": "layr status --json",
+  "description": "The state of the working folder of the current line, compared with the line head. Paths are relative to the line root and use '/'. Path arguments of the command filter every list except 'overlaps'.",
+  "type": "object",
+  "required": ["conflicts", "head", "line", "staged", "unstaged", "untracked"],
+  "additionalProperties": true,
+  "properties": {
+    "line": {
+      "description": "The name of the current line.",
+      "type": "string"
+    },
+    "head": {
+      "description": "The id of the state at the head of the line.",
+      "$ref": "#/$defs/id"
+    },
+    "staged": {
+      "description": "Changes that 'layr add' or 'layr rm' marked for the next save.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "unstaged": {
+      "description": "Changes in the working folder that are not marked for the next save.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "untracked": {
+      "description": "Files that the line does not track and that no ignore rule matches.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ignored": {
+      "description": "Files that an ignore rule matches. Absent with --no-ignored.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "conflicts": {
+      "description": "Paths with an open merge conflict. Empty when the head has no conflicts.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/conflict" }
+    },
+    "overlaps": {
+      "description": "Paths that this line and another live line both changed. Absent with --no-overlaps. Empty for a virtual line or a filtered view.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/overlap" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "A layr id (a state, line, change or machine) in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "change": {
+      "description": "One changed path.",
+      "type": "object",
+      "required": ["old_path", "path", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "description": "The path of the file after the change.",
+          "type": "string"
+        },
+        "old_path": {
+          "description": "The path before a rename. Null when the file did not move.",
+          "type": ["string", "null"]
+        },
+        "status": {
+          "description": "The kind of change, as in git: A added, D deleted, M modified, R renamed, T type changed (for example a file became a link).",
+          "enum": ["A", "D", "M", "R", "T"]
+        }
+      }
+    },
+    "conflict": {
+      "description": "One path with an open merge conflict.",
+      "type": "object",
+      "required": ["kind", "path"],
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "description": "The path of the conflict.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The kind of conflict.",
+          "type": "string",
+          "examples": ["content", "add/add", "modify/delete", "delete/modify", "rename/delete"]
+        },
+        "base": {
+          "description": "The id of the merge base state. Absent when there is none.",
+          "$ref": "#/$defs/id"
+        },
+        "ours": {
+          "description": "The id of the state of this line in the merge.",
+          "$ref": "#/$defs/id"
+        },
+        "theirs": {
+          "description": "The id of the state that was merged in.",
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "overlap": {
+      "description": "A path that another live line also changed.",
+      "type": "object",
+      "required": ["changed_at", "line", "owner", "path"],
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "description": "The path that both lines changed.",
+          "type": "string"
+        },
+        "line": {
+          "description": "The name of the other line.",
+          "type": "string"
+        },
+        "owner": {
+          "description": "The user id (uid) of the owner of the other line.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "changed_at": {
+          "description": "When the other line changed the path, in milliseconds since the Unix epoch.",
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

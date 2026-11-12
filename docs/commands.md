@@ -28,6 +28,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
+| store         | `store remove <path> [--force] [-q]` (deletes a whole store folder; see [Remove a store](#remove-a-store)), `store-version [--json]` ([store version](local-store-version.md)) |
+| JSON schemas  | `schema` (lists the schemas), `schema <name>` (prints one; see [JSON output](json.md)) |
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
@@ -343,6 +345,29 @@ content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` 
 folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
 folder. A path that the exported commit does not have fails with exit 128.
 
+## Remove a store
+
+Layr seals the files of a store: on macOS each state has the immutable flag (`uchg`) and a deny entry in its ACL,
+and on btrfs each state is a read-only subvolume. Thus `rm -rf <store>` fails. Use this command:
+
+```sh
+layr store remove /tmp/test-store
+```
+
+The command does these steps:
+
+1. It refuses a folder that is not a layr store. A store has `store-version.json` or `machine/id`. On macOS it also
+   takes what `rm -rf` left of a store: only sealed entries below `projects/`, and the folders that hold them.
+2. It refuses the store of this shell (`LAYR_ROOT`, or the default store). Add `--force` to remove it.
+3. It refuses a store that a layr command or daemon has open, or whose trash a layr process empties. Stop that
+   process, then run the command again.
+4. It unmounts each file system that is mounted below the store (for example a virtual line). The store folder
+   itself must not be a mount point.
+5. It opens each sealed entry and deletes the folder.
+
+Volumes and moved line folders of the store are in other folders. The command keeps them and names each one.
+The command does not open the store, so it works with a store of another layr version too.
+
 ## Workflow
 
 1. A writer makes a line (`layr line new topic-1 main`), or a maintainer makes one for a user
@@ -455,6 +480,9 @@ undoes the git change); then the command can run again.
 A `.git` folder that the line owner made instead is left alone.
 
 `layr log --json` writes one state JSON object per line. History filters and `--auto` apply before output.
+
+The `--json` output of `status`, `line list`, `queue list`, `change list`, `change show` and `attestations` has a
+JSON Schema. `layr schema <name>` prints the schema of the installed version. See [JSON output](json.md).
 
 `layr line list --json` writes an array of local lines. Each line includes its ID, name, head, owner, machine, and local path.
 A name pattern filters the array. JSON output does not support `--all` or `--remotes`.

@@ -58,6 +58,7 @@ mod repo;
 mod revs;
 mod rootcheck;
 mod runner;
+mod schemas;
 mod secrets;
 #[cfg(target_os = "linux")]
 mod send_cache;
@@ -74,6 +75,7 @@ mod storage;
 mod storage;
 mod store;
 mod store_remote;
+mod store_remove;
 mod store_version;
 mod stream;
 #[allow(unsafe_code)]
@@ -230,6 +232,21 @@ fn main() {
             Err(error) => {
                 eprintln!("layr store-version: {error:#}");
                 std::process::exit(128);
+            }
+        },
+        // Neither opens a store: `schema` prints a built-in file, and `store remove` deletes a store folder.
+        Some("schema") => match schemas::run(&argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr schema: {error:#}");
+                std::process::exit(128);
+            }
+        },
+        Some("store") => match store_remove::run(&argv[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("layr store: {error:#}");
+                std::process::exit(1);
             }
         },
         _ => {}

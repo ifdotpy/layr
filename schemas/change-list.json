@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:change-list",
+  "version": 1,
+  "title": "layr change list --json",
+  "description": "The logical changes of the project. A change is a sequence of versions (states) with one change id, for example a state and its amended forms.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/change" },
+  "$defs": {
+    "id": {
+      "description": "A layr id in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "change": {
+      "description": "One change, described by its newest version.",
+      "type": "object",
+      "required": ["change_id", "message", "state", "versions"],
+      "additionalProperties": true,
+      "properties": {
+        "change_id": {
+          "description": "The id of the change. 'layr change show <change_id>' shows it.",
+          "$ref": "#/$defs/id"
+        },
+        "versions": {
+          "description": "The number of versions of the change.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "description": "The id of the state of the newest version.",
+          "$ref": "#/$defs/id"
+        },
+        "message": {
+          "description": "The full message of the newest version.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

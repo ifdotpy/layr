@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:line-list",
+  "version": 1,
+  "title": "layr line list --json",
+  "description": "The local lines of the project, sorted by name. A name pattern argument filters the list. 'layr line new --json' writes one item of this list (with --count, an array of them).",
+  "type": "array",
+  "items": { "$ref": "#/$defs/line" },
+  "$defs": {
+    "id": {
+      "description": "A layr id (a state, line or machine) in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "line": {
+      "description": "One line.",
+      "type": "object",
+      "required": ["head", "id", "machine", "name", "owner", "path"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "description": "The id of the line. It stays the same when the line is renamed.",
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "description": "The name of the line.",
+          "type": "string"
+        },
+        "head": {
+          "description": "The id of the state at the head of the line.",
+          "$ref": "#/$defs/id"
+        },
+        "owner": {
+          "description": "The user id (uid) of the owner of the line.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "machine": {
+          "description": "The id of the machine that holds the working folder of the line.",
+          "$ref": "#/$defs/id"
+        },
+        "path": {
+          "description": "The absolute path of the working folder of the line on this machine. The folder can be absent, for example for a line of another machine.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}
