@@ -2,8 +2,9 @@
 # ci: macos
 # State records name their parts (docs/overlays.md section 1a, slice 4): a named save records the
 # part of each follow overlay in the new state, `line new` and a hard reset take the parts of their
-# state, a merge combines the parts overlay by overlay, `view <state>` shows them, the overlay store gets
-# no overlay line for them, and `overlay migrate-parts` gives parts to a head saved before them.
+# state, a merge combines the parts overlay by overlay, `view <state>` shows them, the overlay store has
+# each line under its own name (docs/overlays.md section 1), and `overlay migrate-parts` gives parts to a
+# head saved before them.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -25,11 +26,11 @@ def short(u):
 print(" ".join(f"{k}={short(v)}" for k, v in sorted(json.loads(row[0]).get("parts", {}).items())) if row else "missing")
 PY
 }
-# overlay_lines <overlay>: the number of lines of the overlay store.
+# overlay_lines <overlay>: the names of the lines of the overlay store.
 overlay_lines() {
     python3 - "$P/meta/overlays/$1/meta/db/layr.sqlite" <<'PY'
 import sqlite3, sys
-print(sqlite3.connect(sys.argv[1]).execute("SELECT COUNT(*) FROM lines WHERE deleted=0").fetchone()[0])
+print(" ".join(r[0] for r in sqlite3.connect(sys.argv[1]).execute("SELECT name FROM lines WHERE deleted=0 ORDER BY name")))
 PY
 }
 head_of() { l rev-parse "$1"; }
@@ -46,7 +47,7 @@ h1=$(head_of head)
 p1=$(part_of notes)
 eq "the state names the part that the line shows" "notes=$p1" "$(parts "$h1")"
 no "the shared state has no overlay file" l show head:notes.md
-eq "the overlay store has no overlay line for main" 0 "$(overlay_lines notes)"
+eq "the overlay store has the line main under its own name" main "$(overlay_lines notes)"
 eq "the overlay reads its file at the line's part" n1 "$(l overlay show notes head:notes.md)"
 eq "and lists its history" "notes 1|overlay notes" "$(l overlay log notes --format=%s | paste -sd'|' -)"
 
@@ -59,7 +60,7 @@ p2=$(part_of notes)
 no "the line shows a new part" test "$p2" = "$p1"
 eq "the new state names it" "notes=$p2" "$(parts "$h2")"
 eq "the first state keeps its part" "notes=$p1" "$(parts "$h1")"
-eq "still no overlay line" 0 "$(overlay_lines notes)"
+eq "still the one line" main "$(overlay_lines notes)"
 
 # 2. line new takes the parts of its start state.
 ok "a line from main" l line new -q a main
@@ -67,7 +68,7 @@ eq "it has the newest notes" n2 "$(cat "$P/lines/a/notes.md")"
 ok "a line from the first state" l line new -q old "$h1"
 eq "it has the notes of that state" n1 "$(cat "$P/lines/old/notes.md")"
 eq "and is clean" "" "$(cd "$P/lines/old" && l status --porcelain)"
-eq "line new made no overlay lines" 0 "$(overlay_lines notes)"
+eq "line new made the new lines on the overlay, with their names" "a main old" "$(overlay_lines notes)"
 
 # 3. view and reset read the parts of a state.
 eq "the view of the first state names its part" "notes" "$(l view "$h1" --json | python3 -c 'import json,sys; print(" ".join(x["overlay"] for x in json.load(sys.stdin)["view"]["layers"]))')"
@@ -98,7 +99,7 @@ hm=$(head_of head)
 no "the merge made a new part" test "$(part_of notes)" = "$p2"
 eq "the merge state names the merged part" "notes=$(part_of notes)" "$(parts "$hm")"
 eq "the merged part reads back" "top|n2|bottom" "$(l overlay show notes head:notes.md | paste -sd'|' -)"
-eq "the merge made no overlay line" 0 "$(overlay_lines notes)"
+eq "the merge made no other line" "a main old" "$(overlay_lines notes)"
 
 # 5. fetch --line takes the parts that the states of the line name, and no part of another line.
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1

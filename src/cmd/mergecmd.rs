@@ -306,11 +306,7 @@ impl OverlayMerge {
             let _lock = o.p.lock()?;
             match ol {
                 Some(ol) => crate::overlay::move_overlay_line(&o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
-                None => {
-                    if let Some(st) = st {
-                        crate::overlay::record_part(&o, ctx, "merge", line_id, vec![st.clone()])?;
-                    }
-                }
+                None => anyhow::bail!("line {line_id} has no line in overlay '{name}'"),
             }
         }
         Ok(())
@@ -365,38 +361,36 @@ fn plan_overlays(
             }
             // A line does not know overlays (owner decision 2026-11-11): an overlay that the incoming line shows and this
             // line does not comes into this line's view, from its empty first state.
+            // An overlay that only the incoming line shows: this line's own state there (its line on the
+            // overlay, else the part of its head). The overlay comes into the view only when the merge
+            // brings something.
+            let o = repo.overlay_repo(&tl.overlay)?;
             let i = match m.layers.iter().position(|l| l.overlay == tl.overlay) {
                 Some(i) => i,
                 None => {
-                    m.layers.push(Layer { overlay: tl.overlay.clone(), state: info.root.clone() });
+                    let own = repo
+                        .overlay_layer(Some(line), &line.head, &tl.overlay)?
+                        .map(|l| l.state)
+                        .unwrap_or(info.root.clone());
+                    if tl.state == own || o.is_ancestor(&tl.state, &own)? {
+                        continue;
+                    }
+                    m.layers.push(Layer { overlay: tl.overlay.clone(), state: own });
                     m.layers.len() - 1
                 }
             };
             let ours_s = m.layers[i].state.clone();
-            let o = repo.overlay_repo(&tl.overlay)?;
             if tl.state == ours_s || o.is_ancestor(&tl.state, &ours_s)? {
                 continue;
             }
-            let ol = match o.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
-                Some(ol) => Some(ol),
-                None if crate::overlay::parts_overlay(&info) => None,
-                None => return Err(exit(1, format!("error: line '{}' has no line in overlay '{}'", line.name, tl.overlay))),
+            // The line of this line on the overlay, made at the state that this line shows when missing.
+            let ol = {
+                let _lock = o.p.lock()?;
+                o.ensure_overlay_line(ctx, &info, line, &ours_s)?
             };
-            // An overlay that keeps parts has no overlay line: the new part belongs to no line of the overlay.
-            let part_line = || Line {
-                id: crate::ids::new_id(),
-                name: line.name.clone(),
-                head: ours_s.clone(),
-                owner: line.owner,
-                machine: line.machine.clone(),
-            };
-            let write_line = ol.clone().unwrap_or_else(part_line);
-            let detach = |mut st: StateRec| {
-                if ol.is_none() {
-                    st.line = None;
-                }
-                st
-            };
+            let write_line = ol.clone();
+            let ol = Some(ol);
+            let detach = |st: StateRec| st;
             if o.is_ancestor(&ours_s, &tl.state)? {
                 m.layers[i].state = tl.state.clone();
                 m.moves.push((tl.overlay.clone(), ol, tl.state.clone(), None));
@@ -620,7 +614,6 @@ fn finish(
     pending.write = Some(crate::repo::WorkingWrite::new(repo, wdir, own, old_root, new_root, view));
     let mut data = data;
     if let Some(o) = ovl.filter(|o| o.changed()) {
-        data["stack"] = repo.public_stack_data(&line.id, &layers)?;
         data["line"] = serde_json::json!(line.id);
         data["overlays"] = serde_json::json!(o
             .names()
@@ -1342,7 +1335,7 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         // The newest cache of the source line: the head of its overlay line (`cache_source`).
         let info = repo.need_overlay(&name)?;
         let orepo = repo.overlay_repo(&name)?;
-        let Some(ol) = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &theirs.id, theirs.owner))? else {
+        let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, theirs)? else {
             continue;
         };
         orepo.hold(orepo.pin(&[ol.head.as_str()])?);

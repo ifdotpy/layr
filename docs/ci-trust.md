@@ -123,7 +123,7 @@ release ref's target to be of the merge machine; a retry beside another machine'
 A root-owned target line has two effects on machines other than its home, as with a root merge job of full
 trust before this role: a non-root user there cannot merge into the line (`authorize_line` refuses every non-root
 user on a root-owned line), and the overlay checks of the line (`project_reads`, `readable_layers`,
-`check_stack`) use root's read rights, so the hidden overlay lines named for owner 0 belong to its stack. Users
+`check_stack`) use root's read rights, so the hidden overlays that owner 0 reads are among its layers. Users
 still see only the overlays they read.
 
 Known limit: a full machine that adopts a line can still give its owner uid, which is a user of that machine, line

@@ -546,7 +546,7 @@ fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Opt
             }
         }
     }
-    if !opts.takes_layer(super::BASE_LAYER, false) {
+    if !opts.takes_layer(super::BASE_LAYER) {
         return Ok(Some(BTreeSet::new()));
     }
     if opts.lines.is_empty() {

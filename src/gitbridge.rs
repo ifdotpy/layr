@@ -1768,6 +1768,9 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
                 ([parent], Some((_, parent_commit)))
                     if !rec.parts.is_empty() && repo.state(parent)?.parts != rec.parts && same_tree(&export.store, &c, parent_commit) =>
                 {
+                    // The history ref of the state names the parent's commit too, so a later export
+                    // (`history_commit`) gives the same commit as this one.
+                    git_out(&export.store, &["update-ref", &history_ref(&s), parent_commit])?;
                     parent_commit.clone()
                 }
                 _ => c,

@@ -774,28 +774,31 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         let lid = r.data["line"].as_str().unwrap_or("").to_string();
         let line = repo.line(&lid)?;
-        let after: Vec<crate::overlay::Layer> = serde_json::from_value(r.data["stack"]["layers"].clone())?;
-        if repo.layers(&line)? != after && !force {
-            return Err(exit(
-                1,
-                "error: the overlays of the line changed after this state; undo the later operations first, or use --force",
-            ));
-        }
-        let mut before = after.clone();
-        for l in before.iter_mut().filter(|l| changed.contains(&l.overlay)) {
+        // The states that the save made on its overlays (`made`; layr before 0.44 wrote the whole
+        // stack of the line instead).
+        let made: Vec<crate::overlay::Layer> = match r.data.get("made") {
+            Some(v) => serde_json::from_value(v.clone())?,
+            None => serde_json::from_value::<Vec<crate::overlay::Layer>>(r.data["stack"]["layers"].clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| changed.contains(&l.overlay))
+                .collect(),
+        };
+        for l in &made {
             let o = repo.overlay_repo(&l.overlay)?;
             let parent =
                 o.parents(&l.state)?.first().cloned().ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
             let info = repo.need_overlay(&l.overlay)?;
-            if let Some(ol) = o.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
-                if ol.head == l.state {
-                    overlay_back.push((l.overlay.clone(), ol, parent.clone()));
-                }
+            let Some(ol) = crate::overlay::find_overlay_line(&o.p.db, &info, &line)? else { continue };
+            if ol.head != l.state && !force {
+                return Err(exit(
+                    1,
+                    "error: the overlays of the line changed after this state; undo the later operations first, or use --force",
+                ));
             }
-            l.state = parent;
+            overlay_back.push((l.overlay.clone(), ol, parent));
         }
         rec.data["line"] = serde_json::json!(lid);
-        rec.data["stack"] = repo.public_stack_data(&lid, &before)?;
     }
     // Tags.
     match r.op.as_str() {
@@ -1760,7 +1763,7 @@ fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize
     let _lock = repo.p.lock()?;
     let (mut states, mut bytes) = (0usize, 0u64);
     for name in repo.overlay_names()? {
-        if !repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !repo.limited_history(&name)? {
             continue;
         }
         if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
@@ -2204,10 +2207,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
                     continue;
                 }
                 problems += 1;
-                let deleted = match crate::overlay::line_of_overlay_line(&l.name) {
-                    Some(id) => repo.p.db.line_deleted(id)?,
-                    None => false,
-                };
+                let deleted = crate::overlay::orphan_overlay_line(&l, &repo.p.db)?;
                 let note = if deleted { " (of a deleted line)" } else { "" };
                 outln!(ctx, "overlay {name}: the head of line {}{note} is missing", l.name);
             }

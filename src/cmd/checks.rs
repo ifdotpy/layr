@@ -947,8 +947,7 @@ fn newer_cache_given_back(
         }
         let info = repo.need_overlay(&name)?;
         let orepo = repo.overlay_repo(&name)?;
-        let line_name = Repo::overlay_line_name(&info, &checks_line.id, checks_line.owner);
-        let Some(ol) = orepo.p.db.line_by_name(&line_name)? else { continue };
+        let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, checks_line)? else { continue };
         let Some(head) = orepo.p.db.state(&ol.head)? else { continue };
         if let Some(of) = head.cache_of {
             if of != state && repo.is_ancestor(state, &of)? {

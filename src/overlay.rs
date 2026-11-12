@@ -316,9 +316,6 @@ struct OverlayClean {
 #[derive(Clone, Debug)]
 pub struct Info {
     pub hidden: bool,
-    /// A build-output overlay (`regenerable`): it follows the cache paths of each line. Without a
-    /// `platform`, its lines have an overlay line per platform (`cache_line_name`).
-    pub cache: bool,
     /// `platform=<key>`: the overlay of one platform (docs/overlays.md, section 1a, slice 3).
     pub platform: Option<String>,
     pub owner: u32,
@@ -346,49 +343,91 @@ impl ListedOverlay<'_> {
     }
 }
 
-/// An overlay whose parts the state records name (`StateRec::parts`, docs/overlays.md section 1a): a
-/// public follow overlay that is no cache. Its overlay store gets no overlay lines for new lines; a
-/// line's part on it lives in the line's stack and in the state records. Shared, hidden and cache
-/// overlays keep their overlay lines (slices 5 and 6).
+/// An overlay whose parts the state records name (`StateRec::parts`, docs/overlays.md section 1a): every
+/// public follow overlay. A hidden overlay records the parts in its own records (`hidden.part.<state>`).
 pub fn parts_overlay(info: &Info) -> bool {
-    info.mode == Mode::Follow && !info.cache && !info.hidden
+    info.mode == Mode::Follow && !info.hidden
 }
 
-/// The overlay line of the line `line_id` in a build-output overlay: `line-<id>` in the overlay of one
-/// platform (slice 3), else `cache_line_name`.
-pub fn part_line_name(info: &Info, line_id: &str) -> String {
-    if info.cache && info.platform.is_none() {
-        cache_line_name(line_id)
-    } else {
-        format!("line-{line_id}")
+/// The name of a line on an overlay: the line's own name (docs/overlays.md section 1). An overlay of
+/// the old shared mode keeps one line per user (`user-<uid>`).
+pub fn overlay_line_name(info: &Info, line: &Line) -> String {
+    match info.mode {
+        Mode::Shared => format!("user-{}", line.owner),
+        Mode::Follow => line.name.clone(),
     }
 }
 
-/// The overlay line of the line `line_id` in a cache overlay without a `platform` (made before
-/// slice 3): one per platform (`<os>-<arch>`), so a
-/// build on another platform does not replace the cache of this one (docs/cache-overlays.md, section 6).
+/// The name that layr before 0.44 gave the line `line_id` in a cache overlay of one folder for all
+/// platforms: one overlay line per platform (`<os>-<arch>`).
 pub fn cache_line_name(line_id: &str) -> String {
     format!("line-{line_id}.{}", crate::model::cache_platform())
 }
 
-/// The project line of a follow overlay line: `line-<id>`, or `line-<id>.<platform>` in a cache overlay.
-pub fn line_of_overlay_line(name: &str) -> Option<&str> {
-    name.strip_prefix("line-").map(|s| s.split('.').next().unwrap_or(s))
+/// The line of `line` on an overlay whose project database is `db`: the line of the same name, else
+/// the line of the same id (a line that took a new name), else a line with a name of layr before
+/// 0.44 (`line-<id>.<platform>`, then `line-<id>` when its head was made on this platform). The
+/// caller gives such a line the name of `line` at its next write (`ensure_overlay_line`).
+pub fn find_overlay_line(db: &crate::db::Db, info: &Info, line: &Line) -> Result<Option<Line>> {
+    if let Some(l) = db.line_by_name(&overlay_line_name(info, line))? {
+        return Ok(Some(l));
+    }
+    if info.mode == Mode::Shared {
+        return Ok(None);
+    }
+    if let Some(l) = db.line_by_id(&line.id)?.filter(|l| !db.line_deleted(&l.id).unwrap_or(true)) {
+        return Ok(Some(l));
+    }
+    let platform_name = cache_line_name(&line.id);
+    if let Some(l) = db.line_by_name(&platform_name)? {
+        return Ok(Some(l));
+    }
+    let Some(l) = db.line_by_name(&format!("line-{}", line.id))? else { return Ok(None) };
+    let platform = crate::model::cache_platform();
+    let made_on = db.state(&l.head)?.and_then(|s| s.cache_platform);
+    Ok(made_on.is_none_or(|p| p == platform || p.starts_with(&format!("{platform}-"))).then_some(l))
 }
 
-/// The settings key of the stack of a line.
-pub fn stack_key(line_id: &str) -> String {
-    format!("stack.{line_id}")
+/// The line of `line` on a follow overlay whose project database is `db` (`find_overlay_line`).
+pub fn find_follow_line(db: &crate::db::Db, line: &Line) -> Result<Option<Line>> {
+    let info = Info { hidden: false, platform: None, owner: line.owner, mode: Mode::Follow, root: String::new() };
+    find_overlay_line(db, &info, line)
 }
 
-/// Record data that sets the stack of a line.
-pub fn stack_data(line_id: &str, layers: &[Layer]) -> serde_json::Value {
-    serde_json::json!({"line": line_id, "layers": layers})
+/// Whether the overlay line `ol` belongs to a line of the project that is deleted (`db` is the
+/// database of the project). A line that the project does not know (a line of another machine that
+/// did not come here) is no proof of a delete: it stays. A line of the old shared mode
+/// (`user-<uid>`) always stays.
+pub fn orphan_overlay_line(ol: &Line, db: &crate::db::Db) -> Result<bool> {
+    let name = ol.name.as_str();
+    if name.starts_with("user-") {
+        return Ok(false);
+    }
+    if db.line_by_id(&ol.id)?.is_some() {
+        return db.line_deleted(&ol.id);
+    }
+    if let Some(id) = name.strip_prefix("line-").map(|s| s.split('.').next().unwrap_or(s)) {
+        return db.line_deleted(id);
+    }
+    // A line of the overlay made with a fresh id: its line of the project by name.
+    if db.line_by_name(name)?.is_some() {
+        return Ok(false);
+    }
+    Ok(db.lines_deleted_named(name)?)
+}
+
+/// The place of a hidden overlay in the view of the line `line_id` (`{"enabled", "position"}`), in the
+/// records of the overlay. layr before 0.44 named the setting `hidden.stack.<line id>`.
+pub fn hidden_view(op: &Project, line_id: &str) -> Result<Option<serde_json::Value>> {
+    match op.db.overlay_config(&format!("hidden.view.{line_id}"))? {
+        Some(v) => Ok(Some(v)),
+        None => op.db.overlay_config(&format!("hidden.stack.{line_id}")),
+    }
 }
 
 /// The settings key of the view of the working folder of a line (docs/overlays.md, section 1a,
 /// slice 5): the overlays that the folder shows, bottom first. It names overlays only; the part on
-/// each overlay comes from the line (its stack and its state records).
+/// each overlay comes from the line (its line on the overlay and its state records).
 pub fn view_key(line_id: &str) -> String {
     format!("view.{line_id}")
 }
@@ -765,16 +804,7 @@ impl<'a> Repo<'a> {
     pub(crate) fn prepare_view_layers(&self, ctx: &Ctx, line: &Line, view: &View) -> Result<()> {
         self.check_view_read(ctx, view)?;
         self.check_stack(line, &view.layers)?;
-        for layer in &view.layers {
-            let info = self.need_overlay(&layer.overlay)?;
-            if parts_overlay(&info) {
-                continue;
-            }
-            let repo = self.overlay_repo(&layer.overlay)?;
-            let _lock = repo.p.lock()?;
-            repo.ensure_overlay_line(ctx, &Self::overlay_line_name(&info, &line.id, line.owner), &layer.state, line.owner)?;
-        }
-        Ok(())
+        self.point_overlay_lines(ctx, line, &view.layers, "view")
     }
 
     pub fn create_line_view(&self, ctx: &Ctx, name: &str, view: &View, owner: u32) -> Result<Line> {
@@ -829,10 +859,8 @@ impl<'a> Repo<'a> {
         if self.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some() {
             return Ok((None, None));
         }
-        let cache_key = format!("overlay.{name}.cache");
         let platform_key = format!("overlay.{name}.platform");
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
-        let mut cache = None;
         let mut platform = None;
         let mut project = None;
         if value.is_none() {
@@ -840,12 +868,10 @@ impl<'a> Repo<'a> {
             if let Some(op) = &project {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
-                    cache = op.db.overlay_config(&cache_key)?;
                     platform = op.db.overlay_config(&platform_key)?;
                 }
             }
         } else {
-            cache = self.p.db.overlay_config(&cache_key)?;
             platform = self.p.db.overlay_config(&platform_key)?;
         }
         let v = match value {
@@ -855,7 +881,6 @@ impl<'a> Repo<'a> {
         Ok((
             Some(Info {
                 hidden: v["hidden"].as_bool().unwrap_or(false),
-                cache: cache.and_then(|c| c.as_bool()).unwrap_or(false),
                 platform: platform.and_then(|p| p.as_str().and_then(platform_name)),
                 owner: v["owner"].as_u64().unwrap_or(0) as u32,
                 mode: v["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Shared),
@@ -863,6 +888,55 @@ impl<'a> Repo<'a> {
             }),
             project,
         ))
+    }
+
+    /// Whether overlay `name` shares with the machines that the project trusts (property `trust`):
+    /// its readers follow the trusted machines, and the paper key need not open it.
+    pub fn shares_with_machines(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_props(name)?.trust.is_some())
+    }
+
+    /// Whether overlay `name` keeps a limited history (property `history`): a fetch takes only the
+    /// states that its records keep, and a push deletes the others on a store remote.
+    pub fn limited_history(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_props(name)?.history.is_some())
+    }
+
+    /// Whether overlay `name` holds build output that a build makes again: an overlay of one platform
+    /// (property `platform`). `overlay remove` takes only such an overlay, and a store remote deletes
+    /// its states of older key epochs.
+    pub fn regenerable_overlay(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_info(name)?.is_some_and(|i| i.platform.is_some()))
+    }
+
+    /// Whether overlay `name` keeps one line per platform for each line: a folder overlay without
+    /// `platform` (a `cache.<folder>` overlay of layr before 0.44), which holds the build output of
+    /// every platform (`line-<line id>.<os>-<arch>`, docs/cache-overlays.md section 6).
+    pub fn per_platform_lines(&self, name: &str) -> Result<bool> {
+        Ok(self.chunked_overlay(name)? && self.overlay_info(name)?.is_some_and(|i| i.platform.is_none()))
+    }
+
+    /// The line of `line` on the build-output overlay `name` (project `orepo`), made at `start` when
+    /// missing: its line of this platform in an overlay of every platform (`per_platform_lines`),
+    /// else its line (`ensure_overlay_line`). The caller holds the lock of `orepo`.
+    pub fn ensure_build_line(&self, ctx: &Ctx, orepo: &Repo, name: &str, info: &Info, line: &Line, start: &str) -> Result<Line> {
+        if !self.per_platform_lines(name)? {
+            return orepo.ensure_overlay_line(ctx, info, line, start);
+        }
+        let own = cache_line_name(&line.id);
+        if let Some(l) = orepo.p.db.line_by_name(&own)? {
+            return Ok(l);
+        }
+        // `line-<id>` of layr 0.24 and older, made on this platform: it takes the platform name.
+        if let Some(l) = find_overlay_line(&orepo.p.db, info, line)?.filter(|l| l.name == format!("line-{}", line.id)) {
+            return orepo.overlay_line_rename(ctx, l, &own);
+        }
+        orepo.overlay_line_create(ctx, &own, start, line.owner, None)
+    }
+
+    /// Whether a store remote keeps the files of overlay `name` in chunks: a folder overlay.
+    pub fn chunked_overlay(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_setting(name, "folder")?.is_some_and(|v| !v.is_null()))
     }
 
     pub fn need_overlay(&self, name: &str) -> Result<Info> {
@@ -995,10 +1069,6 @@ impl<'a> Repo<'a> {
         Ok(public)
     }
 
-    pub fn public_stack_data(&self, line: &str, layers: &[Layer]) -> Result<serde_json::Value> {
-        Ok(stack_data(line, &self.public_layers(layers)?))
-    }
-
     /// Record data that sets the view of the working folder of `line` to the public overlays of
     /// `layers` (`view_key`). Hidden overlays keep their place in their own project
     /// (`record_hidden_selection`).
@@ -1016,7 +1086,7 @@ impl<'a> Repo<'a> {
             let orepo = self.overlay_repo(&name)?;
             let position = layers.iter().position(|l| l.overlay == name);
             let value = serde_json::json!({"enabled":position.is_some(),"position":position});
-            let key = format!("hidden.stack.{line}");
+            let key = format!("hidden.view.{line}");
             if orepo.p.db.overlay_config(&key)?.as_ref() == Some(&value) {
                 continue;
             }
@@ -1095,24 +1165,16 @@ impl<'a> Repo<'a> {
         owner == 0 || Policy::load(op).check(&Who::of(owner, gid), "read").is_ok()
     }
 
-    /// The name of the overlay line that a line of `owner` uses.
-    pub fn overlay_line_name(info: &Info, line_id: &str, owner: u32) -> String {
-        match info.mode {
-            Mode::Shared => format!("user-{owner}"),
-            Mode::Follow if info.cache && info.platform.is_none() => cache_line_name(line_id),
-            Mode::Follow => format!("line-{line_id}"),
-        }
-    }
+    // ----- the layers of a line -----
 
-    // ----- the stack of a line -----
-
-    /// The overlays a line shows, bottom first.
+    /// The overlays a line shows, bottom first: the overlays of its view, each at the head of the
+    /// line on that overlay (docs/overlays.md section 1).
     pub fn layers(&self, line: &Line) -> Result<Vec<Layer>> {
         let hidden = self.hidden_overlays()?;
         self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))
     }
 
-    /// The stacks of many lines (line id to layers). The overlays are read once, not once per line.
+    /// The layers of many lines (line id to layers). The overlays are read once, not once per line.
     pub fn stacks(&self, lines: &[Line]) -> Result<BTreeMap<String, Vec<Layer>>> {
         let hidden = self.hidden_overlays()?;
         lines
@@ -1151,7 +1213,52 @@ impl<'a> Repo<'a> {
     where
         'a: 'b,
     {
-        let key = stack_key(&line.id);
+        if self.p.is_overlay() {
+            return Ok(Vec::new());
+        }
+        // The view of the working folder chooses the public overlays and their order. A line
+        // without a view (made before views) shows the overlays of its old stack.
+        let names = match self.folder_view(line)? {
+            Some(names) => names,
+            None => self.old_stack(line)?.into_iter().map(|l| l.overlay).collect(),
+        };
+        let mut layers = Vec::new();
+        for name in names {
+            if let Some(l) = self.overlay_layer(Some(line), &line.head, &name)? {
+                layers.push(l);
+            }
+        }
+        // A hidden overlay keeps its place in the view in its own records (`hidden.view.<line id>`).
+        let mut hidden = Vec::new();
+        for (name, info, op) in hidden_overlays {
+            if !Self::project_reads(op, line.owner) {
+                continue;
+            }
+            let selection = hidden_view(op, &line.id)?;
+            if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
+                continue;
+            }
+            let state = match find_overlay_line(&op.db, info, line)? {
+                Some(ol) => ol.head,
+                None => match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned)) {
+                    Some(part) => part,
+                    None => continue,
+                },
+            };
+            let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
+            hidden.push((position, Layer { overlay: name.to_string(), state }));
+        }
+        hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+        for (position, layer) in hidden {
+            layers.insert((position as usize).min(layers.len()), layer);
+        }
+        Ok(layers)
+    }
+
+    /// The layers that layr before 0.44 kept for `line` in the setting `stack.<line id>`. Only
+    /// `overlay migrate-parts` and a line that it did not move yet read them.
+    pub fn old_stack(&self, line: &Line) -> Result<Vec<Layer>> {
+        let key = format!("stack.{}", line.id);
         let value = if line.machine == self.p.store.machine.id {
             self.p.config_value(&key)?
         } else {
@@ -1161,46 +1268,7 @@ impl<'a> Repo<'a> {
             Some(value) => Some(value),
             None => self.p.db.overlay_config(&key)?,
         };
-        let mut layers: Vec<Layer> = value.map(serde_json::from_value).transpose()?.unwrap_or_default();
-        // The view of the working folder chooses the overlays and their order (slice 5). A line
-        // without a view (made before views) shows its stack as before.
-        if !self.p.is_overlay() {
-            if let Some(overlays) = self.folder_view(line)? {
-                let mut shown = Vec::new();
-                for name in overlays {
-                    match layers.iter().find(|l| l.overlay == name) {
-                        Some(l) => shown.push(l.clone()),
-                        None => {
-                            if let Some(l) = self.overlay_layer(Some(line), &line.head, &name)? {
-                                shown.push(l);
-                            }
-                        }
-                    }
-                }
-                layers = shown;
-            }
-        }
-        if !self.p.is_overlay() {
-            let mut hidden = Vec::new();
-            for (name, info, op) in hidden_overlays {
-                if !Self::project_reads(op, line.owner) {
-                    continue;
-                }
-                let selection = op.db.overlay_config(&format!("hidden.stack.{}", line.id))?;
-                if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
-                    continue;
-                }
-                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(info, &line.id, line.owner))? {
-                    let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
-                    hidden.push((position, Layer { overlay: name.to_string(), state: ol.head }));
-                }
-            }
-            hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
-            for (position, layer) in hidden {
-                layers.insert((position as usize).min(layers.len()), layer);
-            }
-        }
-        Ok(layers)
+        Ok(value.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default())
     }
 
     /// The view of the working folder of `line`: the names of the public overlays it shows,
@@ -1219,23 +1287,33 @@ impl<'a> Repo<'a> {
         Ok(value.filter(|v| !v.is_null()).map(serde_json::from_value).transpose()?)
     }
 
-    /// The layer of overlay `name` over `state` when the stack of the line names no state for it:
-    /// the part that `state` names on an overlay that keeps parts, else the overlay line of `line`,
-    /// else the empty first state of the overlay. None for an overlay that is not on this machine.
+    /// The layer of overlay `name` for `line` at `state`. At the head of the line: the head of the
+    /// line on the overlay, else the part that the head names. At an older state: the part that the
+    /// state names. Else the empty first state of the overlay. None for an overlay that is not on
+    /// this machine.
     pub fn overlay_layer(&self, line: Option<&Line>, state: &str, name: &str) -> Result<Option<Layer>> {
         let Some(info) = self.overlay_info(name)? else { return Ok(None) };
-        if parts_overlay(&info) {
-            if let Some(part) = self.p.db.state(state)?.and_then(|s| s.parts.get(name).cloned()) {
-                return Ok(Some(Layer { overlay: name.to_string(), state: part }));
-            }
-        }
         let mut layer = Layer { overlay: name.to_string(), state: info.root.clone() };
-        if let Some(line) = line {
+        if let Some(line) = line.filter(|l| l.head == state) {
             if let Ok(op) = self.overlay_project(name) {
-                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(&info, &line.id, line.owner))? {
+                if let Some(ol) = find_overlay_line(&op.db, &info, line)? {
                     layer.state = ol.head;
+                    return Ok(Some(layer));
                 }
             }
+            // A line of layr before 0.44 that `overlay migrate-parts` did not move yet: the state that
+            // its old stack names.
+            if let Some(l) = self.old_stack(line)?.into_iter().find(|l| l.overlay == name) {
+                return Ok(Some(l));
+            }
+        }
+        let part = if info.hidden {
+            self.hidden_part(name, state)?
+        } else {
+            self.p.db.state(state)?.and_then(|s| s.parts.get(name).cloned())
+        };
+        if let Some(part) = part {
+            layer.state = part;
         }
         Ok(Some(layer))
     }
@@ -1544,7 +1622,7 @@ impl<'a> Repo<'a> {
             };
             let mut states = vec![l.state.clone()];
             if let Some(info) = info {
-                if let Some(ol) = op.db.line_by_name(&Self::overlay_line_name(info, &line.id, line.owner))? {
+                if let Some(ol) = find_overlay_line(&op.db, info, line)? {
                     states.push(ol.head);
                 }
             }
@@ -1690,10 +1768,13 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// Records in an overlay: a new line `name` of `owner` at `start`.
-    fn overlay_line_create(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
+    /// Records in an overlay: a new line `name` of `owner` at `start`, with the id of the line of the
+    /// project (`id`) when it has one: the same line on every overlay.
+    pub(crate) fn overlay_line_create(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, id: Option<&str>) -> Result<Line> {
+        // A line of the project that came back (an undo of its delete) finds its old overlay line deleted: a new id.
+        let id = id.filter(|id| self.p.db.line_by_id(id).ok().flatten().is_none());
         let line = Line {
-            id: ids::new_id(),
+            id: id.map(str::to_owned).unwrap_or_else(ids::new_id),
             name: name.to_string(),
             head: start.to_string(),
             owner,
@@ -1709,30 +1790,59 @@ impl<'a> Repo<'a> {
         Ok(line)
     }
 
-    /// The overlay line that a line uses for overlay `info`, made at `start` when missing (only
-    /// in an overlay's own repository).
-    pub fn ensure_overlay_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
-        if let Some(l) = self.p.db.line_by_name(name)? {
-            return Ok(l);
-        }
-        match self.unnamed_platform_line(name)? {
-            Some(l) => self.overlay_line_rename(ctx, l, name),
-            None => self.overlay_line_create(ctx, name, start, owner),
+    /// The line of `line` on this overlay (an overlay's own repository), made at `start` when
+    /// missing. A line with a name of layr before 0.44 takes the name of `line`.
+    pub fn ensure_overlay_line(&self, ctx: &Ctx, info: &Info, line: &Line, start: &str) -> Result<Line> {
+        let name = overlay_line_name(info, line);
+        match find_overlay_line(&self.p.db, info, line)? {
+            Some(l) if l.name == name => Ok(l),
+            Some(l) => self.overlay_line_rename(ctx, l, &name),
+            None => self.overlay_line_create(ctx, &name, start, line.owner, (info.mode == Mode::Follow).then_some(line.id.as_str())),
         }
     }
 
-    /// The overlay line `line-<id>` of a cache overlay that layr made before the overlay lines had a
-    /// platform, when its head was saved on the platform that `name` (`line-<id>.<platform>`) names.
-    /// `ensure_overlay_line` renames it: the migration of each line happens at its first write.
-    pub fn unnamed_platform_line(&self, name: &str) -> Result<Option<Line>> {
-        let Some((old, platform)) = name.split_once('.') else { return Ok(None) };
-        let Some(l) = self.p.db.line_by_name(old)? else { return Ok(None) };
-        let made_on = self.p.db.state(&l.head)?.and_then(|s| s.cache_platform);
-        let same = made_on.is_none_or(|p| p == platform || p.starts_with(&format!("{platform}-")));
-        Ok(same.then_some(l))
+    /// Point the line of `line` on each overlay of `layers` at the state of the layer (made when
+    /// missing): the line shows these states from now on. The caller holds the project lock and
+    /// no lock of an overlay.
+    pub fn point_overlay_lines(&self, ctx: &Ctx, line: &Line, layers: &[Layer], op: &str) -> Result<()> {
+        for l in layers {
+            let Some(info) = self.overlay_info(&l.overlay)? else { continue };
+            if info.mode == Mode::Shared {
+                continue;
+            }
+            let Ok(orepo) = self.overlay_repo(&l.overlay) else { continue };
+            let _lock = orepo.p.lock()?;
+            let ol = orepo.ensure_overlay_line(ctx, &info, line, &l.state)?;
+            if ol.head != l.state {
+                move_overlay_line(&orepo, ctx, op, &ol, &l.state, Vec::new())?;
+            }
+        }
+        Ok(())
     }
 
-    fn overlay_line_rename(&self, ctx: &Ctx, l: Line, name: &str) -> Result<Line> {
+    /// A line of the project takes a new name: its line on each overlay of this machine takes it
+    /// too. The caller holds the project lock.
+    pub fn rename_overlay_lines(&self, ctx: &Ctx, line: &Line, name: &str) -> Result<()> {
+        if self.p.is_overlay() {
+            return Ok(());
+        }
+        let renamed = Line { name: name.to_string(), ..line.clone() };
+        for overlay in self.overlay_names()? {
+            let Some(info) = self.overlay_info(&overlay)? else { continue };
+            // An overlay of every platform keeps one line per platform, named by the line id.
+            if info.mode == Mode::Shared || self.per_platform_lines(&overlay)? {
+                continue;
+            }
+            let Ok(orepo) = self.overlay_repo(&overlay) else { continue };
+            let _lock = orepo.p.lock()?;
+            if let Some(ol) = find_overlay_line(&orepo.p.db, &info, line)? {
+                orepo.overlay_line_rename(ctx, ol, &overlay_line_name(&info, &renamed))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn overlay_line_rename(&self, ctx: &Ctx, l: Line, name: &str) -> Result<Line> {
         let mut after = self.line_state(&l, &l.head);
         after.name = name.to_string();
         let mut rec = Record::new("line.rename");
@@ -1824,11 +1934,9 @@ impl<'a> Repo<'a> {
             return Ok(None);
         };
         let mut keep: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
-        // A cache overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
-        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-        let live: BTreeSet<&str> = lines.iter().map(|l| l.id.as_str()).collect();
+        // An overlay keeps nothing for a line that is gone (docs/cache-overlays.md).
         for ol in orepo.p.db.lines()? {
-            if cache && !line_of_overlay_line(&ol.name).is_some_and(|id| live.contains(id)) {
+            if orphan_overlay_line(&ol, &self.p.db)? {
                 continue;
             }
             let mut at = Some(ol.head.clone());
@@ -1843,18 +1951,15 @@ impl<'a> Repo<'a> {
                 keep.insert(l.state.clone());
             }
         }
-        // An overlay that keeps parts: the parts of the newest `history` states of each line.
-        if !cache {
-            for line in lines {
-                let mut at = Some(line.head.clone());
-                for _ in 0..keep_n {
-                    let Some(id) = at.take() else { break };
-                    let Some(st) = self.p.db.state(&id)? else { break };
-                    if let Some(part) = st.parts.get(name) {
-                        keep.insert(part.clone());
-                    }
-                    at = st.parents.first().cloned();
-                }
+        // The parts that the newest `history` states of each line name.
+        for line in lines {
+            let mut at = Some(line.head.clone());
+            for _ in 0..keep_n {
+                let Some(id) = at.take() else { break };
+                let Some(st) = self.p.db.state(&id)? else { break };
+                let part = if info.hidden { self.hidden_part(name, &id)? } else { st.parts.get(name).cloned() };
+                keep.extend(part);
+                at = st.parents.first().cloned();
             }
         }
         Ok(Some(keep))
@@ -1911,8 +2016,8 @@ impl<'a> Repo<'a> {
         }
         let orepo = self.overlay_repo(name)?;
         let mark = orepo.p.db.records_mark()?;
-        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-        let orphans = if cache { self.orphan_cache_lines(&orepo)? } else { Vec::new() };
+        let follow = self.overlay_info(name)?.is_some_and(|i| i.mode == Mode::Follow);
+        let orphans = if follow { self.orphan_cache_lines(&orepo)? } else { Vec::new() };
         let keep_n = self.overlay_props(name)?.history.map(|n| n as usize);
         let excess = match keep_n {
             Some(n) => self.history_excess(&orepo, name, n, lines, stacks)?,
@@ -1958,16 +2063,12 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The layers of the working folder of a new line of `owner`: its default view (slice 5,
-    /// `default_overlays`), every overlay that the owner reads in the project order.
-    ///
-    /// The part on each overlay: an overlay that keeps parts (`parts_overlay`) shows the part that the
-    /// start state names, or the source's state of the overlay when the start is the source's head
-    /// (an unsaved part of an overlay-only save) or names no part; else the empty first state. It
-    /// gets no overlay line. Another overlay gets an overlay line: a follow overlay at the source's
-    /// state (else its empty first state), a shared one the owner's line (made at the source's
-    /// state, or the head of the overlay owner's line, when missing).
-    pub fn inherit_layers(&self, ctx: &Ctx, source: Option<&Line>, start: &str, line_id: &str, owner: u32) -> Result<Vec<Layer>> {
+    /// The layers of the new line `line` that starts at `start`, from the line `source` when it
+    /// has one: each overlay of the default view at the part that the start state names, or the
+    /// source's state of the overlay when the start is the source's head (the source may have
+    /// changed the overlay since its last state), else the empty first state. The new line gets
+    /// its line on each overlay at that state (docs/overlays.md section 1).
+    pub fn inherit_layers(&self, ctx: &Ctx, source: Option<&Line>, start: &str, line: &Line) -> Result<Vec<Layer>> {
         let start_parts = self.p.db.state(start)?.map(|s| s.parts).unwrap_or_default();
         let at_head = source.is_some_and(|s| s.head == start);
         let source_layers = match source {
@@ -1976,34 +2077,41 @@ impl<'a> Repo<'a> {
         };
         let shown: Vec<String> = source_layers.iter().map(|l| l.overlay.clone()).collect();
         let mut out = Vec::new();
-        for name in self.default_overlays(owner, &shown)? {
+        for name in self.default_overlays(line.owner, &shown)? {
             let Some(info) = self.overlay_info(&name)? else { continue };
             let from_source = source_layers.iter().find(|l| l.overlay == name).map(|l| l.state.clone());
-            if parts_overlay(&info) {
-                let named = start_parts.get(&name).cloned();
-                let state = if at_head { from_source.or(named) } else { named.or(from_source) };
-                let l = Layer { overlay: name, state: state.unwrap_or(info.root) };
-                if self.layer_root(&l).is_some() {
-                    out.push(l);
-                }
-                continue;
-            }
             let orepo = self.overlay_repo(&name)?;
             let _lock = orepo.p.lock()?;
-            let begin = match (from_source, info.mode) {
-                (Some(s), _) => s,
-                (None, Mode::Follow) => info.root.clone(),
-                (None, Mode::Shared) => {
-                    orepo.p.db.line_by_name(&format!("user-{}", info.owner))?.map(|l| l.head).unwrap_or(info.root.clone())
+            let begin = match info.mode {
+                Mode::Follow => {
+                    let named = if info.hidden { self.hidden_part(&name, start)? } else { start_parts.get(&name).cloned() };
+                    let state = if at_head { from_source.or(named) } else { named.or(from_source) };
+                    state.unwrap_or(info.root.clone())
                 }
+                Mode::Shared => match from_source {
+                    Some(s) => s,
+                    None => orepo
+                        .p
+                        .db
+                        .line_by_name(&format!("user-{}", info.owner))?
+                        .map(|l| l.head)
+                        .unwrap_or(info.root.clone()),
+                },
             };
             if self.layer_root(&Layer { overlay: name.clone(), state: begin.clone() }).is_none() {
                 continue;
             }
-            let ol = orepo.ensure_overlay_line(ctx, &Self::overlay_line_name(&info, line_id, owner), &begin, owner)?;
+            let ol = orepo.ensure_overlay_line(ctx, &info, line, &begin)?;
+            // A line of the same name that an earlier line left starts again at the new line's state.
+            let ol = if info.mode == Mode::Follow && ol.head != begin {
+                move_overlay_line(&orepo, ctx, "line.create", &ol, &begin, Vec::new())?;
+                Line { head: begin, ..ol }
+            } else {
+                ol
+            };
             out.push(Layer { overlay: name, state: ol.head });
         }
-        self.record_hidden_selection(ctx, line_id, &out)?;
+        self.record_hidden_selection(ctx, &line.id, &out)?;
         Ok(out)
     }
 }
@@ -2133,16 +2241,6 @@ pub fn move_overlay_line(orepo: &Repo, ctx: &Ctx, op: &str, ol: &Line, head: &st
     Ok(())
 }
 
-/// A record in an overlay that keeps new parts (`parts_overlay`) of the project line `line_id`. It
-/// moves no overlay line: the state records of the line and its stack name the parts.
-pub fn record_part(orepo: &Repo, ctx: &Ctx, op: &str, line_id: &str, states: Vec<StateRec>) -> Result<()> {
-    let mut rec = Record::new(op);
-    rec.states = states;
-    rec.data = serde_json::json!({"project_line": line_id});
-    orepo.commit_record(ctx, rec)?;
-    Ok(())
-}
-
 /// What a commit in a line with overlays made.
 pub struct Committed {
     pub shared: Option<StateRec>,
@@ -2208,11 +2306,16 @@ pub fn commit_layers(
         let l = &layers[i];
         let info = repo.need_overlay(&l.overlay)?;
         let orepo = &orepos[i];
-        // An overlay that keeps parts moves an overlay line only where an older layr made one.
-        let ol = match orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
-            Some(ol) => Some(ol),
-            None if parts_overlay(&info) => None,
-            None => bail!("line '{}' has no line in overlay '{}'", line.name, l.overlay),
+        // The line of `line` on the overlay, made at the state that the folder shows when missing.
+        let ol = {
+            let _lock = orepo.p.lock()?;
+            match orepo.ensure_overlay_line(ctx, &info, line, &l.state) {
+                Ok(ol) => Some(ol),
+                Err(e) => {
+                    discard(&made, &orepos);
+                    return Err(e);
+                }
+            }
         };
         if ol.as_ref().is_some_and(|ol| ol.head != l.state) {
             discard(&made, &orepos);
@@ -2316,7 +2419,7 @@ pub fn commit_layers(
         let _lock = orepo.p.lock()?;
         match &ol {
             Some(ol) => move_overlay_line(orepo, ctx, "commit", ol, &st.id, vec![st.clone()])?,
-            None => record_part(orepo, ctx, "commit", &line.id, vec![st.clone()])?,
+            None => bail!("line '{}' has no line in overlay '{}'", line.name, layers[i].overlay),
         }
         overlays.push((layers[i].overlay.clone(), st));
     }
@@ -2324,12 +2427,11 @@ pub fn commit_layers(
     let public = repo.public_layers(&new_layers)?;
     let mut data = serde_json::json!({"line":line.id});
     if !public.is_empty() {
-        data["stack"] = stack_data(&line.id, &public);
-        data["overlays"] = serde_json::json!(overlays
-            .iter()
-            .filter(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true))
-            .map(|(n, _)| n.clone())
-            .collect::<Vec<_>>());
+        // The states that the save made on the public overlays: `undo` moves the line back from them.
+        let made: Vec<&(String, StateRec)> =
+            overlays.iter().filter(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true)).collect();
+        data["overlays"] = serde_json::json!(made.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>());
+        data["made"] = serde_json::json!(made.iter().map(|(n, st)| serde_json::json!({"overlay": n, "state": st.id})).collect::<Vec<_>>());
     }
     let states: Vec<StateRec> = shared.iter().cloned().collect();
     if shared.is_some() || overlays.iter().any(|(n, _)| !repo.need_overlay(n).map(|i| i.hidden).unwrap_or(true)) {
@@ -2340,7 +2442,14 @@ pub fn commit_layers(
     }
     let fds = if summary { crate::diff::file_diffs(&base, &new_tree.path, &s.list)? } else { Vec::new() };
     repo.install_base(line, new_tree, &new_head, &new_layers)?;
-    for (name, _) in &overlays {
+    let mut moved: BTreeSet<&String> = overlays.iter().map(|(name, _)| name).collect();
+    // The history limit of each overlay counts the parts of the new head: a part of the old head
+    // that no state keeps now goes.
+    moved.extend(shared.iter().flat_map(|s| s.parts.keys()));
+    if shared.is_some() {
+        moved.extend(head.parts.keys());
+    }
+    for name in moved {
         repo.after_overlay_move(ctx, name);
     }
     Ok(Some(Committed { shared, overlays, fds }))
@@ -2361,11 +2470,13 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
     let mut rec = Record::new(op);
     rec.data = serde_json::json!({
         "line": line.id,
-        "stack": repo.public_stack_data(&line.id, layers)?,
         "folder_view": repo.public_view_data(&line.id, layers)?,
     });
+    repo.point_overlay_lines(ctx, line, layers, op)?;
     repo.record_hidden_selection(ctx, &line.id, layers)?;
-    if repo.public_layers(&repo.layers(line)?)? != repo.public_layers(layers)? {
+    let shown: Vec<String> = repo.public_layers(&repo.layers(line)?)?.into_iter().map(|l| l.overlay).collect();
+    let want: Vec<String> = repo.public_layers(layers)?.into_iter().map(|l| l.overlay).collect();
+    if shown != want || repo.folder_view(line)?.is_none() {
         repo.commit_record(ctx, rec)?;
     }
     repo.drop_stage(line)?;

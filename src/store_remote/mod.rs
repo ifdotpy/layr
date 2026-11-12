@@ -35,9 +35,6 @@ pub struct Options {
     pub public: bool,
     pub auto: bool,
     pub caches: bool,
-    /// `fetch --no-caches`: leave the cache overlays out (a merge machine builds nothing; their new states were
-    /// gigabytes per fetch). Layr Cloud remotes only.
-    pub no_caches: bool,
     /// Leave ordinary cache cleanup to a later push or daemon sweep.
     pub no_cache_sweep: bool,
     pub paper_key: Option<String>,
@@ -64,9 +61,9 @@ pub struct Options {
 pub const BASE_LAYER: &str = "base";
 
 impl Options {
-    /// Whether `fetch --overlay` (and `--no-caches` for a cache overlay) takes the layer `name`.
-    pub(crate) fn takes_layer(&self, name: &str, cache: bool) -> bool {
-        !(cache && self.no_caches) && self.overlays.as_ref().map_or(true, |only| only.contains(name))
+    /// Whether `fetch --overlay` takes the layer `name`.
+    pub(crate) fn takes_layer(&self, name: &str) -> bool {
+        self.overlays.as_ref().map_or(true, |only| only.contains(name))
     }
 
     /// Whether a fetch or push leaves out overlay `name` because its `platform` is another
@@ -996,9 +993,6 @@ impl Store {
                 repo.require(ctx, "records")?;
             }
         }
-        if opts.no_caches && !self.is_api() {
-            bail!("--no-caches requires a Layr Cloud remote");
-        }
         self.connect(ctx)?;
         let mut report = reader::fetch(self, ctx, repo, opts)?;
         if self.is_api() {
@@ -1097,7 +1091,6 @@ impl Store {
                 );
                 let shown = repo.readable_layers(&local)?;
                 record.data = serde_json::json!({
-                    "stack": repo.public_stack_data(&local.id, &shown)?,
                     "folder_view": repo.public_view_data(&local.id, &shown)?,
                 });
                 repo.commit_record(ctx, record)?;

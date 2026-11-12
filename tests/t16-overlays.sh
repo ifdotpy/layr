@@ -2,7 +2,8 @@
 # ci: overlayfs
 # Overlays (docs/overlays.md): files with their own readers and history, shown in the lines of
 # their readers and nowhere else. A private loader of one user, a project key for a group,
-# follow mode with branch and merge, the commit split by layer.
+# follow mode with branch and merge, the commit split by layer. Every overlay is follow: a line is the
+# same line on every overlay, with its own history there (docs/overlays.md section 1).
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -41,7 +42,7 @@ ok "the owner makes an overlay" in_line layr-o1 main overlay create keychain -q
 root_state=$(l --project sap config overlay.keychain | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')
 details=$(in_line layr-o1 main overlay show keychain --json)
 ok "an unused overlay reports its root state and no epochs" python3 -c 'import json,sys; row=json.loads(sys.argv[1]); assert row["state"]==sys.argv[2] and row["epochs"]==[] and len(row["managers"])==1 and not row["hidden"]' "$details" "$root_state"
-eq "it lists with its mode and reader" "keychain	shared	owner layr-o1	readers layr-o1" "$(in_line layr-o1 main overlay list | sed 's/^ *//')"
+eq "it lists with its mode and reader" "keychain	follow	owner layr-o1	readers layr-o1" "$(in_line layr-o1 main overlay list | sed 's/^ *//')"
 out=$(in_line layr-o1 main overlay move keychain .codex-keychain.envrc)
 has "move names the next commit" "move to overlay keychain at the next state: .codex-keychain.envrc" "$out"
 has "status shows the move" "keychain: .codex-keychain.envrc" "$(in_line layr-o1 main status)"
@@ -75,10 +76,10 @@ no "nor its index" in_line layr-o3 main diff --cached
 has "a non-reader cannot read the overlay's log" "may not read project sap%keychain" "$(in_line layr-o3 t3 overlay log keychain 2>&1)"
 no "a visible overlay still refuses metadata to a non-reader" in_line layr-o3 t3 overlay show keychain --json
 no "a visible overlay still refuses operations to a non-reader" in_line layr-o3 t3 overlay log keychain --ops --json
-no "nor show its files" in_line layr-o3 t3 overlay show keychain user-$(id -u layr-o1):.codex-keychain.envrc
+no "nor show its files" in_line layr-o3 t3 overlay show keychain main:.codex-keychain.envrc
 no "nor list its paths" in_line layr-o3 t3 overlay ls-files keychain
-no "nor through its project name" as layr-o3 $L --project sap%keychain --line user-$(id -u layr-o1) log
-no "an overlay takes reading commands only" as layr-o1 $L --project sap%keychain --line user-$(id -u layr-o1) access grant layr-o3 reader
+no "nor through its project name" as layr-o3 $L --project sap%keychain --line main log
+no "an overlay takes reading commands only" as layr-o1 $L --project sap%keychain --line main access grant layr-o3 reader
 no "a non-reader cannot use the overlay" in_line layr-o3 t3 overlay use keychain
 no "a project name with % is refused" l init 'sap%keychain' --from $T/src -q
 # Automatic states of main leave the overlay files out.
@@ -108,7 +109,7 @@ l --project sap git remote add origin $T/r.git
 ok "push main" in_line layr-o1 main git push -q origin main
 eq "the git remote has no trace of the path" "0" "$(git --git-dir=$T/r.git log --all -p --format=%B | grep -c 'keychain\|KEYCHAIN')"
 eq "nor of the secret" "0" "$(git --git-dir=$T/r.git log --all -p | grep -c $SECRET)"
-# 5. The owner's other lines show it (shared mode: one overlay line for all lines of a user).
+# 5. A line from main shows it: the new line starts at main's part, then has its own history there.
 ok "the owner makes a line from main" in_line layr-o1 main line new -q o1t main
 eq "it has the file" "export KEYCHAIN=$SECRET" "$(sh_in layr-o1 o1t head -1 .codex-keychain.envrc)"
 eq "its status is clean" "" "$(in_line layr-o1 o1t status --porcelain)"
@@ -123,15 +124,13 @@ ok "the overlay has the new name" in_line layr-o1 o1t overlay show keychain head
 sh_in layr-o1 o1t "echo w >> notes.txt"
 eq "diff against another state leaves the overlay files out" "notes.txt|public.txt" "$(in_line layr-o1 o1t diff --name-only main | paste -sd'|')"
 sh_in layr-o1 o1t "$L restore notes.txt"
-# main shows the overlay state it took; a commit there of an older state is refused.
+# main keeps its own part: the rename of o1t stays in o1t, and main saves its part on its own.
+ok "main keeps the old name" test -e $P/main/.codex-keychain.envrc
+no "and does not get the rename of o1t" test -e $P/main/.kc-renamed
 sh_in layr-o1 main "echo extra >> .codex-keychain.envrc"
-has "a stale overlay refuses the commit" "changed in another line" "$(in_line layr-o1 main save -qam stale 2>&1)"
-sh_in layr-o1 main "sed -i '\$d' .codex-keychain.envrc"
-eq "a refused commit -a leaves the index" "" "$(in_line layr-o1 main status --porcelain)"
-ok "overlay use takes the newest state" in_line layr-o1 main overlay use -q keychain
-ok "the renamed file comes to main" test -e $P/main/.kc-renamed
-no "the old name goes" test -e $P/main/.codex-keychain.envrc
+ok "main saves its own part" in_line layr-o1 main save -qam "main key"
 eq "main is clean" "" "$(in_line layr-o1 main status --porcelain)"
+no "o1t keeps its part" grep -q extra $P/o1t/.kc-renamed
 
 # 6. A merge into main keeps the overlay in place.
 in_line layr-o2 main line new -q t2 main
@@ -139,7 +138,7 @@ sh_in layr-o2 t2 "echo work >> notes.txt && $L save -qam 'o2 work'"
 S2=$(in_line layr-o2 t2 rev-parse head)
 ok "the owner merges a reviewed line into main" in_line layr-o1 main merge -q t2 --expect $S2
 eq "main has the change" "work" "$(sh_in layr-o1 main tail -1 notes.txt)"
-ok "and its overlay file" test -e $P/main/.kc-renamed
+ok "and its overlay file" test -e $P/main/.codex-keychain.envrc
 eq "and is clean" "" "$(in_line layr-o1 main status --porcelain)"
 eq "fsck is clean" "0 problem(s)" "$(l --project sap fsck | tail -1)"
 
@@ -169,13 +168,16 @@ no "a reader cannot set the readers" in_line layr-o2 g2 overlay readers zulip @l
 ok "the owner can" in_line layr-o1 main overlay readers zulip @layr-sap layr-o3
 ok "the new reader reads the history" in_line layr-o3 g3 overlay log zulip
 ok "and can use the overlay" in_line layr-o3 g3 overlay use zulip
-eq "the new reader's line gets the owner's key" "ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY" "$(sh_in layr-o3 g3 cat .zulip.env)"
-ok "a line can stop showing it" in_line layr-o3 g3 overlay use --none
-no "the file leaves the folder" test -e $P/g3/.zulip.env
-sh_in layr-o3 g3 "echo MY_OWN_KEY=1 > .zulip.env"
-has "use does not overwrite a local ignored file" "would be overwritten" "$(in_line layr-o3 g3 overlay use --add zulip 2>&1)"
-eq "the user's file stays" "MY_OWN_KEY=1" "$(sh_in layr-o3 g3 cat .zulip.env)"
-sh_in layr-o3 g3 "rm .zulip.env"
+# g3 began before its owner read the overlay: it has no part there yet. A new line from main has main's.
+no "the older line has no part of it" test -e $P/g3/.zulip.env
+ok "the new reader makes a line from main" in_line layr-o3 main line new -q g4 main
+eq "the new line gets the owner's key" "ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY" "$(sh_in layr-o3 g4 cat .zulip.env)"
+ok "a line can stop showing it" in_line layr-o3 g4 overlay use --none
+no "the file leaves the folder" test -e $P/g4/.zulip.env
+sh_in layr-o3 g4 "echo MY_OWN_KEY=1 > .zulip.env"
+has "use does not overwrite a local ignored file" "would be overwritten" "$(in_line layr-o3 g4 overlay use --add zulip 2>&1)"
+eq "the user's file stays" "MY_OWN_KEY=1" "$(sh_in layr-o3 g4 cat .zulip.env)"
+sh_in layr-o3 g4 "rm .zulip.env"
 
 # 8. Follow mode: the overlay line branches with the line; a merge of lines merges it.
 in_line layr-o1 main line new -q f1 main
@@ -209,11 +211,13 @@ eq "status lists the conflict" "UU private/notes.md" "$(in_line layr-o1 f1 statu
 sh_in layr-o1 f1 "printf 'top\nnote 1 (both)\nnote 2\nnote 3\n' > private/notes.md && $L save -qam resolved"
 eq "the resolution clears it" "" "$(in_line layr-o1 f1 status --porcelain)"
 eq "the overlay has the resolution" "note 1 (both)" "$(in_line layr-o1 f1 overlay show notes head:private/notes.md | sed -n 2p)"
-# A merge of a line with a follow overlay: the target shows it, and the merger reads it.
+# A merge of a line with a follow overlay brings the overlay into the view of the target; the
+# merger must read it.
 in_line layr-o1 main line new -q m1 main
-has "a merge needs the overlay in the target" "does not use" "$(in_line layr-o1 m1 merge f2 2>&1)"
+ok "a merge brings the overlay into the target" in_line layr-o1 m1 merge -q f2
+has "the target shows it now" "notes" "$(in_line layr-o1 m1 overlay use)"
 in_line layr-o2 main line new -q m2 main
-has "and a merger who reads it" "needs the read right of its overlay 'notes'" "$(in_line layr-o2 m2 merge f2 2>&1)"
+has "a merger who does not read an overlay of the line is refused" "needs the read right of its overlay" "$(in_line layr-o2 m2 merge f2 2>&1)"
 
 # 9. Undo of an overlay commit moves the overlay line back.
 sh_in layr-o1 f1 "echo 'note 4' >> private/notes.md && $L save -qam 'note 4'"
@@ -288,5 +292,5 @@ eq "main still shows its overlays after gc" "" "$(in_line layr-o1 main status --
 eq "fsck is clean at the end" "0 problem(s)" "$(l --project sap fsck | tail -1)"
 ok "reindex" l --project sap reindex
 eq "fsck after reindex" "0 problem(s)" "$(l --project sap fsck | tail -1)"
-eq "the stacks survive the reindex" "keychain zulip" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
+eq "the views survive the reindex" "keychain zulip" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
 finish

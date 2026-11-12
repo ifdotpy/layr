@@ -46,7 +46,7 @@ eq "main: the cache overlay of line a is still there for line a" "cache" "$(cd $
 l overlay create keys -q >/dev/null
 no "overlay remove refuses a versioned overlay" l overlay remove keys
 out=$(l overlay remove keys 2>&1)
-has "the refusal says the overlay is versioned" "versioned overlay" "$out"
+has "the refusal says the overlay holds history" "has no platform: remove takes only an overlay of build output" "$out"
 
 # 4. Remove the cache overlay: the folder stays in line a as a plain folder with its files.
 states_before=$(ls "$O/$name/states" | wc -l | tr -d ' ')

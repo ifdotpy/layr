@@ -388,6 +388,11 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         );
         rec.data = serde_json::json!({"from": old, "to": new});
         repo.commit_record(ctx, rec)?;
+        // The line has the same name on every overlay. A failure here is no loss: the overlay finds
+        // the line by its id, and its next write gives it the new name.
+        if let Err(e) = repo.rename_overlay_lines(ctx, &l, &new) {
+            eprintln!("layr: warning: the overlays keep the old name of line {old} until their next write: {e:#}");
+        }
         outln!(ctx, "Renamed line {old} to {new}: {}", repo.p.line_path(&new).display());
         return Ok(0);
     }
@@ -722,7 +727,6 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     rec.data = serde_json::json!({
         "name": l.name,
         "from_state": start,
-        "stack": repo.public_stack_data(&l.id, &shown)?,
         "folder_view": repo.public_view_data(&l.id, &shown)?,
     });
     repo.commit_record(ctx, rec)?;

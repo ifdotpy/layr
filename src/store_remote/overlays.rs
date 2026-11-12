@@ -68,28 +68,28 @@ fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options>
     Ok(selected)
 }
 
-/// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
-/// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
-/// An overlay that keeps parts (docs/overlays.md, section 1a) adds the part that each line shows and the parts that the
-/// states of the line name, with the history of each part.
+/// The states of the overlay `orepo` that the project lines `lines` show: the history of each line on the overlay
+/// (the same name and id, or a name of layr before 0.44: `line-<line id>`, with any platform suffix) and of the
+/// shared lines (`user-<uid>`), only the heads with `heads`. It adds the part that each line shows and the parts
+/// that the states of the line name, with the history of each part.
 pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
     let overlay = orepo.p.name.rsplit_once('%').map(|(_, g)| g.to_string());
     let mut ids = Vec::new();
+    let mut line_ids = Vec::new();
     let mut parts = Vec::new();
     for name in lines {
         let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
+        // The line on the overlay: its own name, or a name of layr before 0.44 (`line-<id>`, `line-<id>.<platform>`).
+        line_ids.push(line.id.clone());
+        ids.push(line.name.clone());
         ids.push(format!("line-{}", line.id));
         let Some(overlay) = &overlay else { continue };
-        // Every machine's head of the line and its stack there (a remote moves the line ahead of this machine).
+        // Every machine's head of the line (a remote moves the line ahead of this machine).
         let mut tips = vec![line.head.clone()];
-        let mut stacks = repo.layers(&line).unwrap_or_default();
-        for (machine, head) in repo.p.db.line_heads(&line.id)? {
+        parts.extend(repo.layers(&line).unwrap_or_default().into_iter().filter(|l| &l.overlay == overlay).map(|l| l.state));
+        for (_machine, head) in repo.p.db.line_heads(&line.id)? {
             tips.push(head);
-            if let Some(v) = repo.p.config_value(&format!("{}@{machine}", crate::overlay::stack_key(&line.id)))? {
-                stacks.extend(serde_json::from_value::<Vec<crate::overlay::Layer>>(v).unwrap_or_default());
-            }
         }
-        parts.extend(stacks.into_iter().filter(|l| &l.overlay == overlay).map(|l| l.state));
         let states = if heads { tips } else { reader::state_ancestries(repo, tips)? };
         for id in states {
             if let Some(part) = repo.p.db.state(&id)?.and_then(|st| st.parts.get(overlay).cloned()) {
@@ -102,7 +102,11 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
         .db
         .lines()?
         .into_iter()
-        .filter(|l| l.name.starts_with("user-") || ids.iter().any(|id| l.name == *id || l.name.starts_with(&format!("{id}."))))
+        .filter(|l| {
+            l.name.starts_with("user-")
+                || line_ids.contains(&l.id)
+                || ids.iter().any(|id| l.name == *id || (id.starts_with("line-") && l.name.starts_with(&format!("{id}."))))
+        })
         .map(|l| l.head)
         .chain(parts)
         .collect();
@@ -499,7 +503,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         store.pin.as_ref().and_then(|pin| pin.paper_recipient.clone())
     };
     for name in repo.visible_overlay_names(ctx)? {
-        if !opts.takes_layer(&name, false) {
+        if !opts.takes_layer(&name) {
             report.omitted.push(format!("overlay {name}: not in --overlay"));
             continue;
         }
@@ -509,7 +513,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         }
         // A machine trusted since the last cache save reads the caches from this push on, not only
         // after the next save.
-        if repo.need_overlay(&name)?.cache {
+        if repo.shares_with_machines(&name)? {
             repo.sync_cache_readers(ctx, &name);
         }
         let orepo = match repo.overlay_repo(&name) {
@@ -607,7 +611,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         };
         drop(lock);
         let identity = layer_identity(store, &orepo.p.id, &published)?;
-        let scoped = layer(store, &published, identity.clone(), repo.need_overlay(&name)?.cache)?;
+        let scoped = layer(store, &published, identity.clone(), repo.chunked_overlay(&name)?)?;
         if let Some(identity) = &identity {
             for principal in readers.keys() {
                 if let Some(machine) = principal.strip_prefix("machine:") {
@@ -623,8 +627,8 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             if let Some(recipient) = &paper_recipient {
                 scoped.backend.put_new("slots/paper.age", keys::seal_slot(identity, recipient)?)?;
-            } else if !repo.need_overlay(&name)?.cache {
-                // A cache is regenerable: the paper key need not open it.
+            } else if !repo.shares_with_machines(&name)? {
+                // An overlay that the trusted machines share is regenerable: the paper key need not open it.
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
@@ -636,7 +640,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         let selected = layer_selection(repo, &orepo, opts)?;
         merge(report, writer::push_locked(&scoped, ctx, &orepo, &selected)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
-        if !opts.no_cache_sweep && repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !opts.no_cache_sweep && repo.limited_history(&name)? {
             let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
             if !swept.trees.is_empty() || !swept.packs.is_empty() {
                 eprintln!(
@@ -684,7 +688,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         };
         store.backend.put_new(&published.object(), body)?;
         // The key of this epoch is published: the caches of the older epochs have no reader now.
-        if repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+        if repo.regenerable_overlay(&name)? {
             let swept = sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false)?;
             if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
                 eprintln!(
@@ -801,7 +805,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
     let mut objects = Vec::new();
     let mut names = Vec::new();
     for name in repo.visible_overlay_names(ctx)? {
-        if !repo.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !repo.regenerable_overlay(&name)? {
             continue;
         }
         if let Ok(overlay) = repo.overlay_repo(&name) {
@@ -822,7 +826,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
             out.push((name.clone(), old));
             continue;
         };
-        let scoped = layer(store, published, Some(identity), repo.need_overlay(&name)?.cache)?;
+        let scoped = layer(store, published, Some(identity), repo.chunked_overlay(&name)?)?;
         let _push = writer::push_folder_lock(&scoped.dir)?;
         let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
         swept.trees.extend(old.trees);
@@ -865,8 +869,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     }
     for (name, published) in published {
         let info = repo.overlay_info(&name).ok().flatten();
-        let is_cache = info.as_ref().is_some_and(|info| info.cache);
-        if !opts.takes_layer(&name, is_cache) {
+        if !opts.takes_layer(&name) {
             report.omitted.push(format!("overlay {name}: not in --overlay"));
             continue;
         }
@@ -947,7 +950,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
-            let fetched = if is_cache || !opts.lines.is_empty() {
+            let fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
@@ -959,8 +962,9 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             Ok(())
         };
         match one() {
-            // A cache is regenerable: its overlay omits, and the clone or fetch of the rest goes on.
-            Err(e) if is_cache => report.omitted.push(format!("overlay {name}: {e:#}")),
+            // An overlay that the fetch did not name fails alone: the fetch reports it, and the clone or fetch of
+            // the rest goes on.
+            Err(e) if opts.overlays.is_none() => report.omitted.push(format!("overlay {name}: {e:#}")),
             r => r?,
         }
     }
@@ -997,7 +1001,7 @@ fn api_layer(store: &Store, name: &str, project: &str) -> Result<Store> {
 pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
     for name in repo.visible_overlay_names(ctx)? {
         let info = repo.need_overlay(&name)?;
-        if !opts.takes_layer(&name, false) {
+        if !opts.takes_layer(&name) {
             report.omitted.push(format!("overlay {name}: not in --overlay"));
             continue;
         }
@@ -1009,7 +1013,7 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
             report.omitted.push(format!("overlay {name}: hidden overlays wait for Secret layers on Layr Cloud"));
             continue;
         }
-        if info.cache {
+        if repo.shares_with_machines(&name)? {
             repo.sync_cache_readers(ctx, &name);
         }
         let Ok(orepo) = repo.overlay_repo(&name) else {
@@ -1050,7 +1054,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
         if info.hidden {
             continue;
         }
-        if !opts.takes_layer(&name, info.cache) {
+        if !opts.takes_layer(&name) {
             if opts.overlays.is_some() {
                 report.omitted.push(format!("overlay {name}: not in --overlay"));
             }
@@ -1081,7 +1085,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let mut orepo = Repo { p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
-            let mut fetched = if info.cache || !opts.lines.is_empty() {
+            let mut fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
@@ -1092,7 +1096,8 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             Ok(())
         };
         match one() {
-            Err(e) if info.cache => report.omitted.push(format!("overlay {name}: {e:#}")),
+            // An overlay that the fetch did not name fails alone: the fetch reports it and goes on.
+            Err(e) if opts.overlays.is_none() => report.omitted.push(format!("overlay {name}: {e:#}")),
             r => r?,
         }
     }

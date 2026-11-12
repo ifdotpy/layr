@@ -59,18 +59,17 @@ it in slices (section 1a); "Built today" after the list says how the code differ
 
 Built today (section 9):
 
-- Each overlay has its own lines with other names: `line-<line id>` (follow mode, one per line
-  of the project) and `user-<uid>` (shared mode, one per user). The new model uses the line's own
-  name on every overlay. Since slice 4 (section 1a) a public follow overlay that is no cache gets no
-  new `line-<line id>` lines: the state records name its parts. Shared, hidden and cache overlays
-  still use their overlay lines.
-- Since slice 5 (section 1a) the view of the working folder (setting `view.<line id>`) chooses the
-  overlays that the folder shows and their order. The setting `stack.<line id>` still holds the
-  state that the folder shows on each overlay (an overlay-only save makes no state record yet), and a
-  line made before views, without a view, shows its stack as before.
-- A state record of the project names the shared tree and, since slice 4, its part on each
-  public follow overlay (`parts`). Each overlay keeps the part states in its own project. Shared,
-  hidden and cache overlays are not in `parts`.
+- A line is the same line on every overlay: the store of each overlay holds it with the same id
+  and the same name (`main` on the base and `main` on `target.macos-aarch64`). Its head there is
+  the drawing of the line on that overlay. Built 2026-11-12; see "Lines on overlays as built"
+  below. Overlays of the old shared mode keep one line per user (`user-<uid>`).
+- The view of the working folder (setting `view.<line id>`) chooses the overlays that the folder
+  shows and their order; the head of the line on each overlay gives the state. The setting
+  `stack.<line id>` is gone: layr reads it only for a line of layr before 0.44 that
+  `overlay migrate-parts` did not move yet.
+- A state record of the project names the shared tree and its part on each public overlay
+  (`parts`), build output included. A hidden overlay records the part in its own records
+  (`hidden.part.<state>`), so the public record never names it.
 - `fetch` takes the whole repository by default. `fetch --line <name> --overlay <layer>` (built
   2026-11-11) takes the history of those lines on those layers only; `base` names the base. The old
   cache flags of transfers (`--caches`, `--no-caches`, `--caches-of`) are removed (exit 2).
@@ -101,11 +100,13 @@ This section turns section 1 into data and commands. Each part below is one slic
   record. The base part is the state itself (its tree and times table). An overlay with no part in a
   state is clear for it: the view shows the overlays below.
 - A part lives in the store of its overlay (`<project>%<overlay>`), encrypted for the readers of the
-  overlay, with the ids of that overlay (plain or keyed, docs/objects.md section 2). A part has no
-  line and no parents of its own; its delta base is the part of the first parent state.
-- History belongs to the line: parents, merges and undo are the parents of the states. Overlay
-  stores keep no lines (today `line-<line id>` and `user-<uid>`). So a line has the same name on
-  every overlay, because there is one line.
+  overlay, with the ids of that overlay (plain or keyed, docs/objects.md section 2). Its delta base
+  is the part of the first parent state.
+- History belongs to the line: parents, merges and undo are the parents of the states. The store of
+  an overlay holds the same line, with the same id and name, so a line has the same name on every
+  overlay because there is one line. Its head on an overlay can be ahead of the part that its head
+  state names: a protected line moves only through merges, so a change of only an overlay there
+  moves the line on that overlay and makes no state of the line.
 - Properties of an overlay: `folder`, `quiet`, `history`, `merge`, `platform`, readers, and
   `trust` (a part that another user saved is taken only from a protected line; today
   `cache_by` and `cache_shared`).
@@ -117,7 +118,7 @@ platform key is no part of a line name.
 **Views.** A view is f(line, overlays): an ordered list of overlays over one state of a line. The
 working folder of a line is its default view: every overlay that the caller reads and whose
 platform is this machine's, in the project order of overlays. `layr view <line> --overlay a,b`
-makes another view. The setting `stack.<line id>` goes.
+makes another view. There is no `stack.<line id>` (built 2026-11-12).
 
 **Commands.**
 
@@ -188,6 +189,38 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
    validates only manifest and job-output records, and `StateRec` in its vendored `layr-model`
    accepts unknown fields.
 
+**Lines on overlays as built (2026-11-12).** This replaces what the notes of slices 4 to 6 below
+say about overlay lines, the stack and the `cache` flag.
+
+- Names. The line of `main` on an overlay is `main`, with the id of `main`. A command finds it by
+  name, then by id (a line that took a new name), then by a name of layr before 0.44
+  (`line-<line id>.<os>-<arch>`, then `line-<line id>`), and gives it the name of the line at its
+  next write. `line rename` renames it on every overlay of the machine. `line new`, a save, a
+  merge and a folder that takes a cache make it when it is missing. A line that is gone loses its
+  lines on the overlays (`gc`, `fsck --overlays --repair`), on every overlay, not only on caches.
+- Layers. The layers of a line folder are the overlays of its view, each at the head of the line
+  on that overlay, else at the part that the head state names, else at the empty first state. An
+  older state shows the parts that it names. `reset --hard`, `overlay use`, a view in a new folder
+  and `undo` of a save move the line on the overlays; a record of the project names no stack.
+  A save record names the parts it made (`made: [{overlay, state}]`) for `undo`.
+- No `cache` flag. A build-output overlay is an ordinary overlay with properties. Each rule that
+  read the flag reads a property now:
+
+  | Rule | Property |
+  | --- | --- |
+  | The folder takes part only where the line marks it `regenerable` | `platform` |
+  | `overlay remove` takes it; a store remote deletes its states of older key epochs | `platform` |
+  | Its readers follow the trusted machines; the paper key need not open it | `trust` |
+  | A fetch takes only the states that its records keep; a push deletes the others on the remote; `fsck --overlays` counts the others | `history` |
+  | A store remote keeps its files in chunks | `folder` |
+
+  A fetch of an overlay that `--overlay` did not name reports a failure of that overlay and goes on.
+- Migration. `layr overlay migrate-parts` also moves each line of layr before 0.44: its old stack
+  becomes the view of its folder and the heads of its lines on the overlays, its overlay lines take
+  its name, and the `cache` flag of each overlay goes (`trust` becomes `protected` where it was
+  unset). Until then a line with no view shows its old stack, and the old names are found.
+- Tests: t233 (lines with the line's name), t234 (an old stack and its migration), t59, t110, t144.
+
 **Slice 4 as built (2026-11-11).**
 
 - Records. A state record has `parts: {<overlay>: <part id>}`. The key is `parts`, not `layers`:
@@ -240,13 +273,11 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
   the view of a folder on another machine is `view.<line id>@<machine>`, as for stacks. Records
   set it with `folder_view: {line, overlays}` (`line.create`, `overlay.use`, `line.adopt`, and
   `overlay remove`). The key is not `view`: the records of saved views (`view.save`) use that key.
-  Hidden overlays keep their place in their own store (`hidden.stack.<line id>`), so the public
-  setting never names them. The line record names no overlay.
-- What stays. `stack.<line id>` still holds the state that the folder shows on each overlay of its
-  view. An overlay-only save makes no shared state (open item below), so a state record cannot
-  hold that part yet. The view chooses the overlays and their order; the stack gives the states. A
-  overlay of the view that the stack does not name shows the part of the head, else the overlay line
-  of the line, else its empty first state.
+  Hidden overlays keep their place in their own store (`hidden.view.<line id>`; layr before 0.44
+  wrote `hidden.stack.<line id>`), so the public setting never names them. The line record names no overlay.
+- What stayed until 2026-11-12. `stack.<line id>` held the state that the folder showed on each
+  overlay of its view. Since 2026-11-12 the head of the line on each overlay holds it (see "Lines on
+  overlays as built").
 - Compatibility. A line without `view.<line id>` (made before slice 5) shows its stack as before.
   Its first `overlay use` gives it a view. Older layr ignores `folder_view` and reads the stack,
   which every record still writes.
@@ -321,8 +352,8 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
   overlay go with it; the next build fills the new overlay.
 - What is left of the slice: `src/cache_overlay.rs` keeps the build-output code (overlay creation,
   platform key, part choice, prune, old data); only the general folder overlay code moved to
-  `src/overlay.rs`. The `cache` setting (`overlay.<overlay>.cache`) still marks a build-output
-  overlay, so older layr reads it. The flags go in the next release. Parts are still full folder
+  `src/overlay.rs`. The `cache` setting (`overlay.<overlay>.cache`) is gone since 2026-11-12; see
+  "Lines on overlays as built". Parts are still full folder
   snapshots (slice 7).
 
 **Open (owner decision needed).**

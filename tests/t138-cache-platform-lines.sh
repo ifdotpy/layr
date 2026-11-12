@@ -2,8 +2,8 @@
 # ci: macos overlayfs
 # Build output of each platform is its own overlay (docs/overlays.md section 1a, slice 3): a `save` on
 # another platform makes the overlay of that platform (`target.<os>-<arch>`) and does not replace this
-# platform's part, and a new line takes the part of its own platform. The overlay lines of an overlay
-# have no platform key (`line-<line id>`). An older `cache.<folder>` overlay keeps one overlay line per
+# platform's part, and a new line takes the part of its own platform. A line is the same line on each
+# overlay, with its own name and id and no platform key (docs/overlays.md section 1a). An older `cache.<folder>` overlay keeps one overlay line per
 # platform (t61). Test hook: LAYR_TEST_PLATFORM acts as another platform.
 . "$(dirname "$0")/lib.sh"
 
@@ -33,10 +33,10 @@ l save --overlays -q
 echo there-own > target/out
 LAYR_TEST_PLATFORM=plan9-mips l save --overlays -q
 cd $P/main || exit 1
-names() { python3 -c 'import sqlite3,sys; print(" ".join(sorted(r[0] for r in sqlite3.connect(sys.argv[1]).execute("select name from lines where coalesce(deleted, 0) = 0"))))' "$LAYR_ROOT/projects/p/meta/overlays/$1/meta/db/layr.sqlite"; }
+names() { python3 -c 'import sqlite3,sys; print(" ".join(sorted(r[0] + ":" + r[1] for r in sqlite3.connect(sys.argv[1]).execute("select name, id from lines where coalesce(deleted, 0) = 0"))))' "$LAYR_ROOT/projects/p/meta/overlays/$1/meta/db/layr.sqlite"; }
 has "each platform has its overlay" "$(overlay target) $(LAYR_TEST_PLATFORM=plan9-mips overlay target)" "$(l overlay list | awk '{print $1}' | sort | paste -sd' ' -)"
-eq "the overlay of this platform has the line without a platform key" "line-$here_id" "$(names "$TG" | tr ' ' '\n' | grep "$here_id")"
-eq "and so has the overlay of the other platform" "line-$here_id" "$(names target.plan9-mips | tr ' ' '\n' | grep "$here_id")"
+eq "the overlay of this platform has the line, with its name and id" "here:$here_id" "$(names "$TG" | tr ' ' '\n' | grep "$here_id")"
+eq "and so has the overlay of the other platform" "here:$here_id" "$(names target.plan9-mips | tr ' ' '\n' | grep "$here_id")"
 l line delete -D here >/dev/null
 no "line delete removes the overlay lines of both overlays" grep -q "$here_id" <<<"$(names "$TG") $(names target.plan9-mips)"
 finish

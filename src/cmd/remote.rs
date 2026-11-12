@@ -1132,7 +1132,6 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             let opts = store_remote::Options {
                 auto: a.has("--auto"),
                 caches: true,
-                no_caches: false,
                 no_cache_sweep: a.has("--no-cache-sweep"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 public: false,
@@ -1389,7 +1388,6 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             public: a.has("--public"),
             auto: a.has("--auto"),
             caches: true,
-            no_caches: false,
             no_cache_sweep: false,
             paper_key: a.get("--paper-key").map(str::to_owned),
             // `--line`: the caches that a new line from those lines starts from, as the fetch takes them.

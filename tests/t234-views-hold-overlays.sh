@@ -5,7 +5,7 @@
 # overlay that the caller reads, in the project order), `overlay order` sets that order,
 # `overlay use` changes the view of one folder, `view <line> --overlay` makes another view of the
 # same line (and `--folder` gives it a folder), a save keeps the parts of overlays that the folder
-# does not show, and a line from before views keeps its stack.
+# does not show, and a line of layr before 0.44 shows its old stack until `overlay migrate-parts`.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -72,15 +72,20 @@ ok "main shows keys again" l overlay use --add keys -q
 eq "keys has the part of the line" k1 "$(cat keys.txt)"
 eq "main shows both again" "notes keys" "$(shown)"
 
-# 5. A line from before views: no view setting, only its stack. It keeps showing its stack.
+# 5. A line of layr before 0.44: no view, only its old stack (`stack.<line id>`). It shows its stack,
+# and `overlay migrate-parts` gives it a view and its lines on the overlays.
 cd "$P/lines/a" || exit 1
 id_a=$(l line list --json | python3 -c 'import json,sys; print(next(x["id"] for x in json.load(sys.stdin) if x["name"]=="a"))')
+stack=$(l view a --json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["view"]["layers"]))')
+ok "the old stack of a" l config "stack.$id_a" "$stack"
 ok "the view of a goes (as a line made before views)" l config --unset "view.$id_a"
 eq "line a shows its stack" "keys notes" "$(shown)"
+ok "the migration" l overlay migrate-parts -q
+eq "a has a view now" "keys notes" "$(l config "view.$id_a" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')"
 echo k2 > keys.txt
 ok "a save in the old line" l save -qam "keys 2"
-eq "the save keeps the stack" "keys notes" "$(shown)"
-ok "overlay use gives the old line a view" l overlay use notes -q
+eq "the save keeps the overlays" "keys notes" "$(shown)"
+ok "overlay use changes the view" l overlay use notes -q
 eq "line a shows notes" "notes" "$(shown)"
 no "keys left its folder" test -e keys.txt
 

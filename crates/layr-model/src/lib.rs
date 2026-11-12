@@ -89,14 +89,49 @@ impl Model {
             .collect()
     }
 
-    /// Follow hidden overlay lines without adding metadata to the parent project.
+    /// The line of `line` on an overlay project: the line of the same name, else of the same id (a
+    /// line that took a new name), else a name of layr before 0.44 (`line-<id>`, `line-<id>.<platform>`).
+    fn overlay_line(overlay: &Project, line: &Line) -> Option<Line> {
+        let lines = overlay.line_list();
+        let old = format!("line-{}", line.id);
+        lines
+            .iter()
+            .find(|l| l.name == line.name)
+            .or_else(|| lines.iter().find(|l| l.id == line.id))
+            .or_else(|| lines.iter().find(|l| l.name == old || l.name.starts_with(&format!("{old}."))))
+            .cloned()
+    }
+
+    /// The layers of a line (docs/overlays.md section 1): the overlays of its view (setting
+    /// `view.<line id>`, else the overlay names of its old stack), each at the head of the line on
+    /// that overlay, else at the part that the head names, else at the state of the old stack. Hidden
+    /// overlays keep their place in their own records (`hidden.view.<line id>`), so the parent project
+    /// names no hidden overlay.
     pub fn layers(&self, parent: &str, line: &Line) -> Result<Vec<validation::Layer>> {
         let project = self.projects.get(parent).context("unknown parent project")?;
-        let key = format!("stack.{}", line.id);
-        let value = project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(&key));
-        let mut layers: Vec<validation::Layer> = value.cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        let at = |key: &str| project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(key));
+        let old: Vec<validation::Layer> =
+            at(&format!("stack.{}", line.id)).cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        let names: Vec<String> = match at(&format!("view.{}", line.id)).filter(|v| !v.is_null()) {
+            Some(v) => serde_json::from_value(v.clone())?,
+            None => old.iter().map(|l| l.overlay.clone()).collect(),
+        };
+        let overlays = self.overlay_projects(parent);
+        let by_name = |name: &str| overlays.iter().find(|o| o.overlay_setting("overlay").is_some_and(|v| v["name"] == name));
+        let head = project.state(&line.head);
+        let mut layers = Vec::new();
+        for name in names {
+            let state = by_name(&name)
+                .and_then(|o| Self::overlay_line(o, line))
+                .map(|ol| ol.head)
+                .or_else(|| old.iter().find(|l| l.overlay == name).map(|l| l.state.clone()))
+                .or_else(|| head.and_then(|h| h.parts.get(&name).cloned()));
+            if let Some(state) = state {
+                layers.push(validation::Layer { overlay: name, state });
+            }
+        }
         let mut hidden = Vec::new();
-        for overlay in self.overlay_projects(parent) {
+        for overlay in overlays {
             let Some(info) = overlay.overlay_setting("overlay") else {
                 continue;
             };
@@ -104,14 +139,19 @@ impl Model {
                 continue;
             }
             let name = info["name"].as_str().context("hidden overlay has no name")?;
-            let selection = overlay.overlay_setting(&format!("hidden.stack.{}", line.id));
+            let selection = overlay
+                .overlay_setting(&format!("hidden.view.{}", line.id))
+                .or_else(|| overlay.overlay_setting(&format!("hidden.stack.{}", line.id)));
             if selection.is_some_and(|v| v["enabled"] == false) {
                 continue;
             }
-            if let Some(ol) = overlay.line_list().into_iter().find(|l| l.name == format!("line-{}", line.id)) {
+            let state = Self::overlay_line(overlay, line).map(|ol| ol.head).or_else(|| {
+                overlay.overlay_setting(&format!("hidden.part.{}", line.head)).and_then(|v| v.as_str().map(String::from))
+            });
+            if let Some(state) = state {
                 hidden.push((
                     selection.and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX),
-                    validation::Layer { overlay: name.into(), state: ol.head },
+                    validation::Layer { overlay: name.into(), state },
                 ));
             }
         }
@@ -439,10 +479,17 @@ impl Project {
             }
             _ => {}
         }
+        // The stack of a line (layr before 0.44): read only for a line that has no view yet.
         if let Some(stack) = d.get("stack") {
             if let (Some(line), Some(layers)) = (stack["line"].as_str(), stack.get("layers")) {
                 let key = if foreign { format!("stack.{line}@{}", r.machine) } else { format!("stack.{line}") };
                 self.config.insert(key, layers.clone());
+            }
+        }
+        if let Some(view) = d.get("folder_view") {
+            if let (Some(line), Some(overlays)) = (view["line"].as_str(), view.get("overlays")) {
+                let key = if foreign { format!("view.{line}@{}", r.machine) } else { format!("view.{line}") };
+                self.config.insert(key, overlays.clone());
             }
         }
         Ok(())

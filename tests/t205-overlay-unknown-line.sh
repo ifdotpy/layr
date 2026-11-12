@@ -31,7 +31,7 @@ count_lines() {
     python3 - "$odb" "$line" <<'PYLINES'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-print(c.execute('SELECT COUNT(*) FROM lines WHERE deleted=0 AND name LIKE ?', ('line-' + sys.argv[2] + '%',)).fetchone()[0])
+print(c.execute('SELECT COUNT(*) FROM lines WHERE deleted=0 AND (id=? OR name LIKE ?)', (sys.argv[2], 'line-' + sys.argv[2] + '%')).fetchone()[0])
 PYLINES
 }
 before=$(count_lines)

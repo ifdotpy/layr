@@ -1489,6 +1489,12 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
     rec?;
+    // The history limit of each overlay counts the parts of the new head: a part of the old head
+    // that no state keeps now goes.
+    let named: std::collections::BTreeSet<&String> = state.parts.keys().chain(head.parts.keys()).collect();
+    for name in named {
+        h.repo.after_overlay_move(ctx, name);
+    }
     crate::store::failpoint("after-record");
     {
         let _t = crate::trace::span("drop stage");
@@ -2012,7 +2018,6 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut data = serde_json::json!({"mode": mode});
     if layers != current {
         data["line"] = serde_json::json!(line.id);
-        data["stack"] = repo.public_stack_data(&line.id, &layers)?;
         let changed: Vec<&str> =
             layers.iter().zip(&current).filter(|(n, o)| n.state != o.state).map(|(n, _)| n.overlay.as_str()).collect();
         data["overlays"] = serde_json::json!(changed);
@@ -2029,6 +2034,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
             put_back(repo, &line, w.as_deref());
         }
         return Err(e);
+    }
+    // The line on each overlay follows: it shows the parts of the target from now on.
+    if layers != current {
+        repo.point_overlay_lines(ctx, &line, &layers, "reset")?;
     }
     repo.after_head_moved(&line, &target);
     // The stage follows the head. Its states are kept until the head moved.

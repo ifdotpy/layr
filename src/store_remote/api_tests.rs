@@ -845,14 +845,14 @@ fn a_fetch_of_the_base_layer_skips_the_other_overlays() {
 }
 
 #[test]
-fn a_fetch_without_caches_skips_the_cache_overlays() {
+fn a_fetch_of_other_overlays_skips_the_cache_overlay() {
     let root = std::env::temp_dir().join(crate::ids::new_id());
     std::fs::create_dir_all(&root).unwrap();
     let ctx = context(&root);
     let fake = Fake::start(Some(PROJECT));
     let store = api_store(&root, &ctx, &fake);
     let (repo, _, _) = project(&ctx);
-    let opts = Options { no_caches: true, heads: true, ..Default::default() };
+    let opts = Options { overlays: Some([super::BASE_LAYER.to_string()].into()), heads: true, ..Default::default() };
     let before = fake.count("GET /api/v1/projects/p/");
     check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
     assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
@@ -874,7 +874,8 @@ fn check_first_cache_fetch(
     let mut declaration = Record::new("overlay.create");
     declaration.data = serde_json::json!({"name":name,"config":{
             format!("overlay.{name}"):{"owner":ctx.caller.uid,"root":"target","mode":"follow"},
-            format!("overlay.{name}.cache"):true}});
+            format!("overlay.{name}.history"):1,
+            format!("overlay.{name}.trust"):"protected"}});
     repo.p.append(declaration, &ctx.actor()).unwrap();
     let dir = ctx.store.project_dir(&format!("p%{name}")).unwrap();
     std::fs::create_dir_all(dir.join("meta/db")).unwrap();
@@ -921,7 +922,7 @@ fn check_first_cache_fetch(
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
     super::overlays::api_fetch(store, ctx, repo, opts, &mut report).unwrap();
-    if !opts.takes_layer(name, true) {
+    if !opts.takes_layer(name) {
         assert_eq!((report.states, report.records), (0, 0), "a layer left out reads nothing of the overlay");
         assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
         return;

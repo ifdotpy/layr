@@ -50,13 +50,16 @@ Built today:
   sync and clone) are removed: each fails with exit status 2 and names `--line` or `--overlay`.
   `save --caches`, `merge --caches-only` and `fsck --caches` are removed too: they are
   `save --overlays`, `merge --overlays-only` and `fsck --overlays` ([commands](commands.md), `save`).
-- A `cache.<folder>` overlay of an older layr stays the overlay of its folder on every platform, with
-  one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6). A new overlay has
-  one platform and overlay lines `line-<line id>`. To move a store to one overlay per platform, see
-  [overlays](overlays.md) section 1a, "Slice 6 as built".
-- `src/cache_overlay.rs` is still a separate code path for build-output overlays, and the setting
-  `overlay.<overlay>.cache` marks them. A part is a full native folder snapshot (section 21), not v2
-  objects.
+- A line is the same line on every overlay: the overlay store holds `main` with the id and name of
+  `main` ([overlays](overlays.md) section 1a, "Lines on overlays as built"). A `cache.<folder>` overlay
+  of an older layr stays the overlay of its folder on every platform, with its old line names
+  (`line-<line id>.<os>-<arch>`, section 6) until each line writes it again or `overlay
+  migrate-parts` runs. To move a store to one overlay per platform, see [overlays](overlays.md)
+  section 1a, "Slice 6 as built".
+- No setting marks a build-output overlay: the `cache` flag is gone (2026-11-12). Its rules read
+  the properties `platform`, `trust`, `history` and `folder` ([overlays](overlays.md) section 1a).
+  `src/cache_overlay.rs` keeps the build-output code: which part a line takes, and the key parts of
+  a build.
 
 The properties as built:
 
@@ -82,9 +85,8 @@ The properties as built:
   `layr save --overlays`) saves it.
   The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
   every line; a new line gets an empty cache of such a path at once.
-- Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
-  caches**, not a state: `line new X <line>` takes the newest cache of that line. A cache overlay
-  has one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6).
+- Each line is a line of the overlay too, with its own name. So **a line has caches**, not only a
+  state: `line new X <line>` takes the newest cache of that line, the head of the line on the overlay.
 
 ## 3. Folder overlays
 
@@ -103,10 +105,9 @@ snapshots of the line stop at the nested layer, as they do for caches today. A f
 quiet by construction. The edges of section 6 of [overlays](overlays.md) apply (`rename()` across
 the edge gives EXDEV). For a build output folder that is not a problem: tools write inside it.
 
-A folder overlay is not part of the file stack of a line (`stack.<line id>`; the owner decision
-2026-11-11 removes this setting). Its files never
-enter the base, the split of a named save or an assembled tree. The state that a line shows is
-the head of the line's overlay line.
+A folder overlay is not one of the overlays of the view of a line folder. Its files never enter
+the base, the split of a named save or an assembled tree. The state that a line shows is the head
+of the line on the overlay.
 
 A folder overlay must be ignored by the ignore rules and must not hold files of the line's head
 state, as for caches today (`design.md` section 5). A folder that holds versioned files stays a
@@ -202,7 +203,8 @@ layr has no parts; its key differs once.
 
 - `line new` and merges take a state only when its key equals the key of the target
   line (computed in that line at that time).
-- A line has one overlay line per platform: `line-<line id>.<os>-<arch>`. A `save --caches` on
+- Before 0.44, a line had one overlay line per platform in a `cache.<folder>` overlay:
+  `line-<line id>.<os>-<arch>`. A `save --caches` on
   one platform makes a state of that platform's overlay line, so it does not replace the cache of
   another platform, and `history` applies per platform. `line new`, merges and follow passes read
   the overlay line of their own platform. An overlay line of layr 0.24 and older (`line-<line id>`)
@@ -350,8 +352,8 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   overlay per folder). `overlay list` shows `folder=<path>`. `overlay use` and `overlay move`
   refuse a folder overlay.
 - `save --caches` makes the cache overlay `cache.<folder>` (`/` as `.`) of each cache path when it
-  is missing: folder overlay, readers: the trusted machines, `history=last`, `quiet`, `merge=union-theirs`, and the
-  setting `overlay.<name>.cache = true`. It then saves one snapshot of the folder as a state of the
+  is missing: folder overlay, readers: the trusted machines, `history=last`, `quiet`, `merge=union-theirs`, and (before
+  0.44) the setting `overlay.<name>.cache = true`. It then saves one snapshot of the folder as a state of the
   line's overlay line. Each state records the user, the platform (`<os>-<arch>`) and whether the
   line is protected, with the rules of `design.md` section 5 for who may take it.
 - `line new X <line>` takes the newest cache state of that line (dogfood item 10). When that cache
@@ -388,8 +390,8 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   them; it exits 1 when it finds some. It only reads.
 - `save --caches` applies `gc=lru:<size>` to the folders it saves (before, only `gc` did), and `gc` applies it to the folder of each line (the newer of access and change time;
   apparent sizes) and deletes the cache states of deleted lines.
-- `line delete` also deletes the cache overlay lines (`line-<id>.<platform>`, all platforms) of the
-  line, and their states at once (the overlay's `history` keeps only the heads of the overlay lines
+- `line delete` also deletes the lines of the line on the overlays (each overlay; before 0.44 only
+  the cache overlay lines `line-<id>.<platform>`), and their states at once (the overlay's `history` keeps only the heads of the overlay lines
   that stay and the states that lines show). `undo` of that delete restores the line but not its
   cache overlay lines: the next `save --caches` makes new ones. `gc` and `fsck --repair` remove cache
   overlay lines of deleted lines that older versions left behind.

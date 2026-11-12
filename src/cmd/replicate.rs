@@ -843,7 +843,7 @@ fn exchange_overlays<R: Read, W: Write>(
                 for name in repo.visible_overlay_names(ctx)? {
                     // A machine trusted since the last cache save gets the caches from this sync on, as with a store
                     // push, not only after the next save.
-                    if caches && repo.need_overlay(&name)?.cache {
+                    if caches && repo.shares_with_machines(&name)? {
                         repo.sync_cache_readers(ctx, &name);
                     }
                     if repo.overlay_repo(&name).is_err() {

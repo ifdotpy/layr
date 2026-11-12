@@ -192,11 +192,12 @@ impl<'a> Repo<'a> {
             || (Rules::attribute(w, "regenerable").ignored(folder, true) && Rules::new(w).ignored(folder, true))
     }
 
-    /// Whether folder overlay `name` takes part in the working folder `w`. A cache overlay only
-    /// where its folder is a cache path of the line; other folder overlays always do.
+    /// Whether folder overlay `name` takes part in the working folder `w`. A folder overlay of one
+    /// platform (property `platform`) holds build output: only where its folder is a cache path of
+    /// the line. Other folder overlays always do.
     pub fn applies_in(&self, name: &str, folder: &str, w: &Path) -> Result<bool> {
-        let cache = self.overlay_setting(name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false);
-        Ok(!cache || self.is_cache_path(folder, w))
+        let platform = self.overlay_info(name)?.is_some_and(|i| i.platform.is_some());
+        Ok(!platform || self.is_cache_path(folder, w))
     }
 
     /// What `folder` is in `line`: a cache path, a cache path that holds versioned files in the head
@@ -273,7 +274,7 @@ impl<'a> Repo<'a> {
         }
         self.free_removed_overlays(ctx)?;
         for name in self.overlay_names()? {
-            if !self.overlay_setting(&name, "cache")?.and_then(|v| v.as_bool()).unwrap_or(false) {
+            if self.overlay_info(&name)?.is_none_or(|i| i.mode != crate::overlay::Mode::Follow) {
                 continue;
             }
             // An overlay that is not on this machine has no lines to delete here.
@@ -305,17 +306,15 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The lines of the cache overlay project `orepo` whose project line is deleted. It only reads.
+    /// The lines of the overlay project `orepo` whose line of the project is gone. It only reads.
     pub fn orphan_cache_lines(&self, orepo: &Repo) -> Result<Vec<Line>> {
-        let mut orphans = Vec::new();
+        let mut out = Vec::new();
         for ol in orepo.p.db.lines()? {
-            if let Some(id) = crate::overlay::line_of_overlay_line(&ol.name) {
-                if self.p.db.line_deleted(id)? {
-                    orphans.push(ol);
-                }
+            if crate::overlay::orphan_overlay_line(&ol, &self.p.db)? {
+                out.push(ol);
             }
         }
-        Ok(orphans)
+        Ok(out)
     }
 
     /// Delete these lines of the overlay project `orepo`. Returns the overlay and line names. The
@@ -361,7 +360,6 @@ impl<'a> Repo<'a> {
             false,
             &cache_props(),
             Some(folder),
-            true,
             key_files.as_ref(),
         )?;
         Ok(name)
@@ -470,12 +468,7 @@ impl<'a> Repo<'a> {
             let id = ids::new_id();
             {
                 let _lock = orepo.p.lock()?;
-                let ol = orepo.ensure_overlay_line(
-                    ctx,
-                    &Repo::overlay_line_name(&info, &line.id, line.owner),
-                    &info.root,
-                    line.owner,
-                )?;
+                let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &info.root)?;
                 let dst = orepo.p.state_path(&id);
                 let made = btrfs::snapshot(&cp, &dst, true).and_then(|_| btrfs::subvol_info(&dst));
                 let sub = match made {
@@ -547,7 +540,7 @@ impl<'a> Repo<'a> {
         let found = (|| -> Result<Option<(String, BTreeMap<String, String>)>> {
             let info = self.need_overlay(name)?;
             let orepo = self.overlay_repo(name)?;
-            let Some(ol) = orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &l.id, l.owner))? else { return Ok(None) };
+            let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, l)? else { return Ok(None) };
             let Some(st) = orepo.p.db.state(&ol.head)? else { return Ok(None) };
             let allowed = uid == 0 || st.cache_shared || st.cache_by == Some(uid) || !self.trust_protected(name)?;
             let same_platform = st.cache_platform.as_deref().is_some_and(|p| !other_platform(Some(p)));
@@ -577,7 +570,10 @@ impl<'a> Repo<'a> {
         let orepo = self.overlay_repo(name)?;
         let protected = self.trust_protected(name)?;
         if let Source::ExactState(wanted, target_line, expected) = from {
-            let own_line = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, target_line))?.map(|l| l.id);
+            let own_line = match self.p.db.line_by_id(target_line)? {
+                Some(l) => crate::overlay::find_overlay_line(&orepo.p.db, &info, &l)?.map(|ol| ol.id),
+                None => None,
+            };
             for (id, of) in orepo.p.db.cache_states()? {
                 if expected.is_some_and(|value| value != id.as_str()) {
                     continue;
@@ -623,15 +619,8 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         let of_line = |line_id: &str| -> Result<Option<String>> {
-            let name = crate::overlay::part_line_name(&info, line_id);
-            // A line that no write moved to its platform name yet (`ensure_overlay_line`) has the old name.
-            let ol = match orepo.p.db.line_by_name(&name)? {
-                Some(ol) => ol,
-                None => match orepo.unnamed_platform_line(&name)? {
-                    Some(ol) => ol,
-                    None => return Ok(None),
-                },
-            };
+            let Some(line) = self.p.db.line_by_id(line_id)? else { return Ok(None) };
+            let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, &line)? else { return Ok(None) };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key, protected)?.then_some(ol.head))
         };
         // The newest usable cache saved with each project state. `save --overlays` on a line with
@@ -717,11 +706,7 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
-            let ol_name = crate::overlay::part_line_name(&self.need_overlay(&name)?, &line.id);
-            let ol = match orepo.p.db.line_by_name(&ol_name)? {
-                Some(ol) => Some(ol),
-                None => orepo.unnamed_platform_line(&ol_name)?,
-            };
+            let ol = crate::overlay::find_overlay_line(&orepo.p.db, &self.need_overlay(&name)?, line)?;
             let of = match ol {
                 Some(ol) => orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of),
                 None => None,
@@ -765,7 +750,11 @@ impl<'a> Repo<'a> {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let _lock = orepo.p.lock()?;
-            orepo.ensure_overlay_line(ctx, &Repo::overlay_line_name(&info, &line.id, line.owner), &sid, line.owner)?;
+            let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &sid)?;
+            // A line of the same name that an earlier line left starts again at the cache it takes.
+            if ol.head != sid {
+                crate::overlay::move_overlay_line(&orepo, ctx, "line.create", &ol, &sid, Vec::new())?;
+            }
             taken.push(folder);
         }
         // The new files have the time of the checkout; the ones the caches were built from get their time back.
@@ -877,10 +866,9 @@ impl<'a> Repo<'a> {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
-            let ol_name = Repo::overlay_line_name(&info, &line.id, line.owner);
             let made = {
                 let _lock = orepo.p.lock()?;
-                let ol = orepo.ensure_overlay_line(ctx, &ol_name, &info.root, line.owner)?;
+                let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &info.root)?;
                 let cp = fsutil::safe_join(&w, &folder)?;
                 if ol.head == sid && matches!(from, Source::ExactState(_, _, _)) {
                     if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {

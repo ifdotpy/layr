@@ -175,7 +175,7 @@ impl Repo<'_> {
                     if self.p.is_overlay() {
                         Vec::new()
                     } else {
-                        self.inherit_layers(ctx, source, start, &line.id, owner)?
+                        self.inherit_layers(ctx, source, start, &line)?
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
@@ -193,7 +193,6 @@ impl Repo<'_> {
                     let base = self.temp_snapshot(tmp, true)?;
                     self.install_base(line, base, start, &layers)?;
                     if !self.public_layers(&layers)?.is_empty() {
-                        rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
                         rec.data["folder_view"] = self.public_view_data(&line.id, &layers)?;
                     }
                 }

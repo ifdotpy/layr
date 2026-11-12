@@ -466,7 +466,7 @@ person approved through a signed request (`layr request approve --person`).
 The `files` array gives each changed file patch, its status, and added and removed line counts.
 Each version is compared with its own first parent. Changes to the base stay out of the interdiff.
 
-The overlay commands below work on the stack model as built: a line holds its stack, and an overlay has its own lines. Owner decision 2026-11-11: lines and overlays are independent, and a view joins a line and a set of overlays ([overlays](overlays.md) section 1).
+The overlay commands below work on the model of [overlays](overlays.md) section 1: lines and overlays are independent, a line is the same line (same id and name) on every overlay, and the view of a line folder joins the line with a set of overlays. `layr overlay migrate-parts` moves a store of layr before 0.44 (old stacks, `line-<line id>` names, the `cache` flag).
 
 Hidden overlays use follow mode. Only their readers see them in lists and reports.
 Use `layr overlay show-to-project <name>` to make one visible to project readers.

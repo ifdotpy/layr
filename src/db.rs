@@ -1032,6 +1032,12 @@ impl Db {
             .optional()?)
     }
 
+    /// True when a deleted line of the project had the name `name` and no live line has it.
+    pub fn lines_deleted_named(&self, name: &str) -> Result<bool> {
+        let n: i64 = self.conn.prepare_cached("SELECT COUNT(*) FROM lines WHERE name=?1 AND deleted=1")?.query_row(params![name], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
     /// True when the project line `id` is deleted (its row is kept with the deleted flag).
     pub fn line_deleted(&self, id: &str) -> Result<bool> {
         let deleted: Option<i64> =

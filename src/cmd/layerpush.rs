@@ -181,12 +181,11 @@ fn human(n: u64) -> String {
 /// The state of overlay `name` that line `line` shows or saved: its overlay line's head.
 fn overlay_head(repo: &Repo, line: &Line, name: &str) -> Result<Option<String>> {
     let info = repo.need_overlay(name)?;
-    let ol = repo.overlay_project(name)?.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?;
+    let ol = crate::overlay::find_overlay_line(&repo.overlay_project(name)?.db, &info, line)?;
     let head = match ol {
         Some(l) => Some(l.head),
-        // An overlay that keeps parts: the part that the line shows.
-        None if crate::overlay::parts_overlay(&info) => repo.layers(line)?.into_iter().find(|l| l.overlay == name).map(|l| l.state),
-        None => None,
+        // A line that wrote nothing on the overlay yet: the part that the line shows.
+        None => repo.layers(line)?.into_iter().find(|l| l.overlay == name).map(|l| l.state),
     };
     Ok(head.filter(|h| *h != info.root))
 }

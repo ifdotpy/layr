@@ -2181,7 +2181,7 @@ impl<'a> Repo<'a> {
             machine: self.p.store.machine.id.clone(),
         };
         let layers =
-            if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line.id, owner)? };
+            if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line)? };
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
@@ -2199,7 +2199,6 @@ impl<'a> Repo<'a> {
             rec.data = serde_json::json!({"name": name, "start": start});
             if !layers.is_empty() {
                 if !self.public_layers(&layers)?.is_empty() {
-                    rec.data["stack"] = self.public_stack_data(&line.id, &layers)?;
                     rec.data["folder_view"] = self.public_view_data(&line.id, &layers)?;
                 }
             }
@@ -2493,8 +2492,7 @@ impl<'a> Repo<'a> {
     fn overlay_line_has_state(&self, name: &str, line: &Line) -> Result<bool> {
         let Some(info) = self.overlay_info(name)? else { return Ok(false) };
         let orepo = self.overlay_repo(name)?;
-        let line_name = Repo::overlay_line_name(&info, &line.id, line.owner);
-        Ok(orepo.p.db.line_by_name(&line_name)?.is_some_and(|ol| ol.head != info.root))
+        Ok(crate::overlay::find_overlay_line(&orepo.p.db, &info, line)?.is_some_and(|ol| ol.head != info.root))
     }
 
     /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
@@ -2561,7 +2559,7 @@ impl<'a> Repo<'a> {
             };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let current = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, &line.id))?.map(|ol| ol.head);
+            let current = crate::overlay::find_overlay_line(&orepo.p.db, &info, line)?.map(|ol| ol.head);
             let due = match current.as_deref() {
                 Some(id) if id != info.root && orepo.p.has_state(id) => {
                     let since = orepo.p.db.state(id)?.map(|st| st.time).unwrap_or(0);
@@ -2605,7 +2603,7 @@ impl<'a> Repo<'a> {
                 let Some(name) = name.as_ref().filter(|_| !due) else { continue };
                 let info = self.need_overlay(name)?;
                 let orepo = self.overlay_repo(name)?;
-                if let Some(ol) = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, &line.id))? {
+                if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, line)? {
                     parts.insert(name.clone(), ol.head);
                 }
             }
