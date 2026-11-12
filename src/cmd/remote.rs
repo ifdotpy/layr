@@ -1054,11 +1054,23 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.has("--no-cache-sweep") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--no-cache-sweep requires layr push to a store remote");
     }
+    if a.has("--no-caches") && (op != "fetch" || remote_kind != Kind::Store || a.has("--caches") || a.get("--caches-of").is_some()) {
+        bail!("--no-caches requires layr fetch from a store remote, without --caches or --caches-of");
+    }
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
     }
+<<<<<<< head
     if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store) {
         bail!("--line and --overlay require layr fetch or layr push with a store remote");
+||||||| base
+=======
+    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (op != "fetch" || remote_kind != Kind::Store) {
+        bail!("--line and --overlay require layr fetch from a store remote");
+    }
+    if a.get("--overlay").is_some() && a.has("--no-caches") {
+        bail!("--overlay names the layers to take; leave out --no-caches");
+>>>>>>> d598433
     }
     if let Some(line) = a.get("--only-line") {
         crate::store::check_name("line", line)?;
@@ -1131,7 +1143,14 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let opts = store_remote::Options {
                 auto: a.has("--auto"),
+<<<<<<< head
                 caches: true,
+||||||| base
+                caches: a.has("--caches"),
+=======
+                caches: a.has("--caches"),
+                no_caches: a.has("--no-caches"),
+>>>>>>> d598433
                 no_cache_sweep: a.has("--no-cache-sweep"),
                 paper_key: a.get("--paper-key").map(str::to_owned),
                 public: false,
@@ -1251,6 +1270,7 @@ fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
     a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
+<<<<<<< head
 /// The cache flags of a transfer are gone: a cache is an ordinary overlay, and `--line` and `--overlay` choose what
 /// comes (docs/overlays.md section 1a). Each old form fails with exit status 2 and names its replacement.
 fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
@@ -1267,6 +1287,15 @@ fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
         Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}"))),
         None => Ok(()),
     }
+||||||| base
+/// The lines of `--caches-of <line>[,<line>]`.
+fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
+    a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
+=======
+/// The lines of `--caches-of <line>[,<line>]`.
+fn caches_of(a: &crate::args::Parsed) -> Vec<String> {
+    a.get("--caches-of").map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
+>>>>>>> d598433
 }
 
 
@@ -1387,7 +1416,14 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let opts = store_remote::Options {
             public: a.has("--public"),
             auto: a.has("--auto"),
+<<<<<<< head
             caches: true,
+||||||| base
+            caches: a.has("--caches"),
+=======
+            caches: a.has("--caches"),
+            no_caches: false,
+>>>>>>> d598433
             no_cache_sweep: false,
             paper_key: a.get("--paper-key").map(str::to_owned),
             // `--line`: the caches that a new line from those lines starts from, as the fetch takes them.

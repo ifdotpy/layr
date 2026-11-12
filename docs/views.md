@@ -171,7 +171,14 @@ A view is a line (or a state) with an ordered list of overlays (overlays) above 
 - A thin lower tree (the layers of a state) instead of one complete tree, so that a virtual line of a thin state
   costs no clone.
 - Cache overlays as native folders, linked from the view. Owner decision 2026-11-11: a cache is an ordinary
+<<<<<<< head
   overlay in v2 objects, and a view joins a line and a set of overlays (docs/overlays.md section 1), so the
   view shows a cache overlay as it shows any overlay.
+||||||| base
+- Cache overlays as native folders, linked from the view.
+=======
+  overlay (glass) in v2 objects, and a view joins a line and a set of glasses (docs/overlays.md section 1), so the
+  view shows a cache glass as it shows any glass.
+>>>>>>> d598433
 - More commands: `restore`, `reset`, `merge`.
 - Replace the lower tree under a mounted line. Git pull and replay currently apply changes to the upper folder.

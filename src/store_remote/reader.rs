@@ -438,6 +438,23 @@ fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
     Ok(repo.p.db.state_auxiliary()?.into_iter().map(|(id, _)| (id, String::new())).collect())
 }
 
+/// The state trees of a store, for `restore_states`. A command that restores many states (migrate)
+/// calls it once per state, so the list is kept for the process and read again only when a state
+/// that it must restore is not in it.
+fn restore_attempts(store: &Store, repo: &Repo, ids: &[String]) -> Result<BTreeMap<String, String>> {
+    static KNOWN: std::sync::Mutex<BTreeMap<std::path::PathBuf, BTreeMap<String, String>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    let wanted = |states: &BTreeMap<String, String>| ids.iter().all(|id| repo.p.has_state(id) || states.contains_key(id));
+    if let Some(states) = KNOWN.lock().ok().and_then(|known| known.get(&store.dir).filter(|s| wanted(s)).cloned()) {
+        return Ok(states);
+    }
+    let states = attempts(&store.backend)?;
+    if let Ok(mut known) = KNOWN.lock() {
+        known.insert(store.dir.clone(), states.clone());
+    }
+    Ok(states)
+}
+
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
     let mut states = BTreeMap::new();
     for object in backend.list("states/")? {
@@ -546,6 +563,7 @@ fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Opt
             }
         }
     }
+<<<<<<< head
     if !opts.takes_layer(super::BASE_LAYER) {
         return Ok(Some(BTreeSet::new()));
     }
@@ -566,6 +584,18 @@ pub(super) fn push_selection(repo: &Repo, records: &[String], opts: &Options) ->
     let mut base = opts.clone();
     base.heads = false;
     base_selection(repo, records, &base)
+||||||| base
+=======
+    if !opts.takes_layer(super::BASE_LAYER, false) {
+        return Ok(Some(BTreeSet::new()));
+    }
+    if opts.lines.is_empty() {
+        return Ok(None);
+    }
+    let mut keep: BTreeSet<String> = if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
+    keep.extend(deletion_dependencies(records)?);
+    Ok(Some(keep))
+>>>>>>> d598433
 }
 
 pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
@@ -664,7 +694,7 @@ pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Resu
             hex::decode(&hex_key)?.try_into().map_err(|_| anyhow::anyhow!("trusted key of {machine} is not 32 bytes"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }
-    let states = attempts(&store.backend)?;
+    let states = restore_attempts(store, repo, ids)?;
     let mut reader = Reader::new(&store.backend, &identity, &keys);
     let mut files = 0;
     for id in ids {
@@ -865,6 +895,15 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         // a cache that no line takes here: nothing else needs its files.
         if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
             report.omitted.push(format!("cache state {}: not for --line", crate::ids::short(id)));
+            continue;
+        }
+        // `--line`: a state of an overlay that no chosen line shows stays on the remote.
+        if repo.p.is_overlay()
+            && state.cache_of.is_none()
+            && opts.only_states.as_ref().is_some_and(|only| !only.contains(id))
+            && !repo.p.has_state(id)
+        {
+            report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
             continue;
         }
         // `--line`: a state of an overlay that no chosen line shows stays on the remote.

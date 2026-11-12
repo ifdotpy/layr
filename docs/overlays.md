@@ -26,6 +26,7 @@ Short result:
 
 ## 1. Model
 
+<<<<<<< head
 Owner decision 2026-11-11. The model below replaces the stack model of this file. The code builds
 it in slices (section 1a); "Built today" after the list says how the code differs.
 
@@ -47,11 +48,42 @@ it in slices (section 1a); "Built today" after the list says how the code differ
 - `fetch` takes lines and overlays: the history of the chosen lines, only their parts on the
   chosen overlays. Example: a merge runner fetches the line `main` with the base and the `target`
   overlay.
+||||||| base
+- An **overlay** is its own file tree. It has an owner, readers and its own history of states.
+- The **shared set** is also an overlay. Its readers are everyone who reads the project. It is
+  the only overlay that `layr git push` sends to the git remote.
+- A **line is a stack**: the shared set at the bottom, overlays above it. For the same path the
+  upper overlay wins, as in overlayfs. The same path (for example `.env`) can be in many
+  overlays.
+- **New files go to the shared set.** A file goes to an overlay by an explicit command
+=======
+Owner decision 2026-11-11. The model below replaces the stack model of this file. The code does
+not build it yet; "Built today" after the list says how the code differs.
+
+- A **line** has its own history. Lines form a tree, as branches in git. A line does not know
+  about overlays.
+- An **overlay** is a glass. Glasses stack. An overlay has an owner, readers and properties
+  (`folder`, `quiet`, `history`, `merge`, `platform`, id keying; see
+  [cache overlays](cache-overlays.md)). An overlay does not own lines. Lines and overlays are
+  independent entities.
+- The **base** (the project itself, called the shared set below) is also an overlay: the bottom
+  glass. Its readers are everyone who reads the project. It is the only glass that
+  `layr git push` sends to the git remote.
+- A line is a drawing across the glasses. One state of a line holds its part on each glass. A
+  line has the same name on every glass.
+- A **view** is a function of a line and a set of overlays. Only the view joins a line and a
+  set of glasses. For the same path the upper glass wins, as in overlayfs. The same path (for
+  example `.env`) can be on many glasses.
+- `fetch` takes lines and overlays: the history of the chosen lines, only their parts on the
+  chosen glasses. Example: a merge runner fetches the line `main` with the base and the `target`
+  glass.
+>>>>>>> d598433
 - A cache is an ordinary overlay ([cache overlays](cache-overlays.md) section 2).
 - **New files go to the base.** A file goes to an overlay by an explicit command
   (`layr overlay move`) or by a routing pattern of the overlay. The patterns are in the
   overlay's metadata in the project database, not in a file of the tree, so a change of the
   tree cannot change where a file goes.
+<<<<<<< head
 - **A merge is atomic across the overlays** that the merge takes. The user who merges must be a
   reader of all of them. The checks run on the full result, with all overlays in place.
 - **Encryption.** In remote copies and in remote vaults, an overlay can be stored encrypted for its
@@ -77,6 +109,27 @@ Built today (section 9):
   platform (`target.macos-aarch64`), and a named save records its part in the state. The cache
   code (`src/cache_overlay.rs`) still makes and reads those parts, and the parts are still full
   folder snapshots, not v2 objects (slice 7).
+||||||| base
+- **Overlays have their own lines.** In a stack, each overlay has one of three modes:
+=======
+- **A merge is atomic across the glasses** that the merge takes. The user who merges must be a
+  reader of all of them. The checks run on the full result, with all glasses in place.
+- **Encryption.** In remote copies and in remote vaults, an overlay can be stored encrypted for its
+  readers with age.
+
+Built today (section 9):
+
+- Each overlay has its own lines with other names: `line-<line id>` (follow mode, one per line
+  of the project) and `user-<uid>` (shared mode, one per user). The new model uses the line's own
+  name on every glass.
+- A line holds its stack in the setting `stack.<line id>` (overlay names and the state of each).
+  In the new model a line holds no stack; the view joins a line and glasses.
+- A state record of the project names the shared tree only. Each overlay keeps its own states
+  in its own project.
+- `fetch` takes the whole repository by default. `--no-caches` and `--caches-of` select cache
+  overlays; they are stopgaps and go away. `fetch --line <name> --overlay <layer>` (built
+  2026-11-11) takes the history of those lines on those layers only; `base` names the base.
+>>>>>>> d598433
 
 The modes as built:
 
@@ -86,6 +139,7 @@ The modes as built:
   | shared    | one overlay line for all lines of the user              |
   | ephemeral | not built: gets a new line with the source line, and is deleted when it merges |
 
+<<<<<<< head
 In this file a **layer** is the shared set or an overlay of a stack (an overlay of a view in the new
 model).
 
@@ -371,6 +425,20 @@ say about overlay lines, the stack and the `cache` flag.
 - A save that changes only overlays makes no shared state, so the state record and the stack can
   differ until the next shared save. The model says a state holds its parts; the alternative is a
   new shared state with the same tree for each such save (an empty commit in git).
+||||||| base
+  | ephemeral | gets a new line with the source line, and is deleted when it merges   |
+
+  The owner of the overlay sets the default mode. A line can override it.
+- **A merge is atomic across the follow overlays.** The user who merges must be a reader of
+  all of them. The checks run on the full result, with all layers in place.
+- **Encryption.** In remote copies and in remote vaults, an overlay can be stored encrypted for its
+  readers with age.
+
+In this file a **layer** is the shared set or an overlay of a stack.
+=======
+In this file a **layer** is the shared set or an overlay of a stack (a glass of a view in the new
+model).
+>>>>>>> d598433
 
 ## 2. Commands
 
@@ -717,13 +785,26 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
   is its admin; its readers have the reader role. Owning a line of an overlay does not give the
   read right, unlike in a project.
 - Its lines have no working folders: `user-<uid>` in shared mode (one per user) and
+<<<<<<< head
   `line-<line id>` in follow mode (one per line). The first state is empty. Since slice 4
   (section 1a) a public follow overlay that is no cache gets no new `line-<line id>`. Owner decision
   2026-11-11: a line has the same name on every overlay, so these names go (section 1).
+||||||| base
+  `line-<line id>` in follow mode (one per line). The first state is empty.
+=======
+  `line-<line id>` in follow mode (one per line). The first state is empty. Owner decision
+  2026-11-11: a line has the same name on every glass, so these names go (section 1).
+>>>>>>> d598433
 - The project records `overlay.<name>` (owner, mode, first state) and, for each line,
   `stack.<line id>`: the overlays the line shows and the state of each. A record that changes a
   stack carries `stack` in its data; `reindex` rebuilds the stacks from the records. Owner
+<<<<<<< head
   decision 2026-11-11: a line holds no stack; a view joins a line and overlays (section 1).
+||||||| base
+  stack carries `stack` in its data; `reindex` rebuilds the stacks from the records.
+=======
+  decision 2026-11-11: a line holds no stack; a view joins a line and glasses (section 1).
+>>>>>>> d598433
 - The base of a line with overlays is `meta/base/<line id>@<key>`: a read-only snapshot of the
   head with the overlay files in place, the key a hash of the head and the stack. It is derived:
   made again when missing. `fsck` compares it with a new assembly.

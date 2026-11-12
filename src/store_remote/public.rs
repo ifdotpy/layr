@@ -9,10 +9,23 @@ pub(super) fn identity(backend: &Backend, descriptor: &Descriptor) -> Result<Opt
     let slot = backend.get("slots/public.age")?.context("public store has no public slot; its owner must finish publication")?;
     let identity = manifest.open(&slot)?;
     backend.unlock_reader(&identity)?;
+    // The signer check reads every record of the project. A command that restores many states
+    // (migrate) opens the store once per state, so the check of the same manifest and slot runs
+    // once per process.
+    let key = [descriptor.project.as_bytes(), b"\0", &bytes, b"\0", &slot].concat();
+    if VERIFIED.lock().map(|v| v.contains(&key)).unwrap_or(false) {
+        return Ok(Some(identity));
+    }
     let records = reader::records(backend, &identity, &descriptor.project)?;
     manifest.verify_signer(&trusted_writers(&descriptor.project, &records.lines)?)?;
+    if let Ok(mut v) = VERIFIED.lock() {
+        v.insert(key);
+    }
     Ok(Some(identity))
 }
+
+/// Public manifests (with their project and slot) whose signer this process checked.
+static VERIFIED: std::sync::Mutex<std::collections::BTreeSet<Vec<u8>>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 impl Store {
     /// Current admins can publish only through their own existing trusted writer slot.

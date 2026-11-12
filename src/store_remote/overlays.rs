@@ -56,6 +56,7 @@ impl Published {
     }
 }
 
+<<<<<<< head
 /// The push options of the overlay `orepo`: with `--line`, only the states that those lines show and the caches they
 /// start from.
 fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options> {
@@ -109,6 +110,24 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
         })
         .map(|l| l.head)
         .chain(parts)
+||||||| base
+=======
+/// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
+/// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
+pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
+    let mut ids = Vec::new();
+    for name in lines {
+        let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
+        ids.push(format!("line-{}", line.id));
+    }
+    let tips: Vec<String> = orepo
+        .p
+        .db
+        .lines()?
+        .into_iter()
+        .filter(|l| l.name.starts_with("user-") || ids.iter().any(|id| l.name == *id || l.name.starts_with(&format!("{id}."))))
+        .map(|l| l.head)
+>>>>>>> d598433
         .collect();
     if heads {
         return Ok(tips.into_iter().collect());
@@ -868,6 +887,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         published.insert(name, key);
     }
     for (name, published) in published {
+<<<<<<< head
         let info = repo.overlay_info(&name).ok().flatten();
         if !opts.takes_layer(&name) {
             report.omitted.push(format!("overlay {name}: not in --overlay"));
@@ -875,6 +895,13 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
         }
         if let Some(p) = info.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
             report.omitted.push(format!("overlay {name}: an overlay of platform {p}"));
+||||||| base
+        let is_cache = repo.overlay_info(&name).ok().flatten().is_some_and(|info| info.cache);
+=======
+        let is_cache = repo.overlay_info(&name).ok().flatten().is_some_and(|info| info.cache);
+        if !opts.takes_layer(&name, is_cache) {
+            report.omitted.push(format!("overlay {name}: not in --overlay"));
+>>>>>>> d598433
             continue;
         }
         let mut one = || -> Result<()> {
@@ -950,7 +977,14 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
+<<<<<<< head
             let fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
+||||||| base
+            let fetched = if is_cache {
+                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+=======
+            let fetched = if is_cache || !opts.lines.is_empty() {
+>>>>>>> d598433
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
@@ -1054,6 +1088,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
         if info.hidden {
             continue;
         }
+<<<<<<< head
         if !opts.takes_layer(&name) {
             if opts.overlays.is_some() {
                 report.omitted.push(format!("overlay {name}: not in --overlay"));
@@ -1061,6 +1096,13 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             continue;
         }
         if opts.other_platform(&name, info.platform.as_deref()) {
+||||||| base
+=======
+        if !opts.takes_layer(&name, info.cache) {
+            if opts.overlays.is_some() {
+                report.omitted.push(format!("overlay {name}: not in --overlay"));
+            }
+>>>>>>> d598433
             continue;
         }
         let mut one = || -> Result<()> {
@@ -1085,7 +1127,14 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let mut orepo = Repo { p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
+<<<<<<< head
             let mut fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
+||||||| base
+            let mut fetched = if info.cache {
+                reader::fetch_cache(&mut scoped, ctx, &mut orepo, opts, repo)?
+=======
+            let mut fetched = if info.cache || !opts.lines.is_empty() {
+>>>>>>> d598433
                 reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
             } else {
                 reader::fetch(&mut scoped, ctx, &mut orepo, opts)?

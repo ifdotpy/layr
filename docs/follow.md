@@ -70,8 +70,14 @@
 
 A failed cache step does not undo the merge. Its text is part of the result.
 
+<<<<<<< head
 Owner decision 2026-11-11: a cache is an ordinary overlay with no cache flags, so the
 pass will save and take the cache overlay as part of the line, not through `save --caches` and
+||||||| base
+=======
+Owner decision 2026-11-11: a cache is an ordinary overlay (glass) with no cache flags, so the
+pass will save and take the cache glass as part of the line, not through `save --caches` and
+>>>>>>> d598433
 `pull_caches` ([cache overlays](cache-overlays.md) section 2). The steps above are what is built.
 
 ## Daemon

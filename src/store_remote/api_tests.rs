@@ -845,6 +845,7 @@ fn a_fetch_of_the_base_layer_skips_the_other_overlays() {
 }
 
 #[test]
+<<<<<<< head
 fn a_fetch_of_other_overlays_skips_the_cache_overlay() {
     let root = std::env::temp_dir().join(crate::ids::new_id());
     std::fs::create_dir_all(&root).unwrap();
@@ -853,6 +854,17 @@ fn a_fetch_of_other_overlays_skips_the_cache_overlay() {
     let store = api_store(&root, &ctx, &fake);
     let (repo, _, _) = project(&ctx);
     let opts = Options { overlays: Some([super::BASE_LAYER.to_string()].into()), heads: true, ..Default::default() };
+||||||| base
+=======
+fn a_fetch_without_caches_skips_the_cache_overlays() {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let store = api_store(&root, &ctx, &fake);
+    let (repo, _, _) = project(&ctx);
+    let opts = Options { no_caches: true, heads: true, ..Default::default() };
+>>>>>>> d598433
     let before = fake.count("GET /api/v1/projects/p/");
     check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
     assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
@@ -922,7 +934,12 @@ fn check_first_cache_fetch(
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
     super::overlays::api_fetch(store, ctx, repo, opts, &mut report).unwrap();
+<<<<<<< head
     if !opts.takes_layer(name) {
+||||||| base
+=======
+    if !opts.takes_layer(name, true) {
+>>>>>>> d598433
         assert_eq!((report.states, report.records), (0, 0), "a layer left out reads nothing of the overlay");
         assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
         return;

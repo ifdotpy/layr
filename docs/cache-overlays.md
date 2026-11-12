@@ -21,6 +21,7 @@ in the Studio project found these problems:
 
 ## 2. Model
 
+<<<<<<< head
 Owner decision 2026-11-11. A cache is an ordinary overlay: an overlay of the model in
 [overlays](overlays.md) section 1. No special cache concept remains: no cache flags, no `cache.`
 name prefix, no separate code path. Slices 3 and 6 of [overlays](overlays.md) section 1a build most
@@ -60,6 +61,38 @@ Built today:
   the properties `platform`, `trust`, `history` and `folder` ([overlays](overlays.md) section 1a).
   `src/cache_overlay.rs` keeps the build-output code: which part a line takes, and the key parts of
   a build.
+||||||| base
+A cache is an ordinary overlay with properties. No separate cache concept remains in the model.
+=======
+Owner decision 2026-11-11. A cache is an ordinary overlay: a glass of the model in
+[overlays](overlays.md) section 1. No special cache concept remains: no cache flags, no `cache.`
+name prefix, no separate code path. The code does not build this yet; "Built today" below says
+how the code differs.
+
+- A cache is a glass such as `target` with `folder=target`, `quiet`, `history=last`,
+  `merge=union-theirs` and `platform`. Lines and glasses are independent: a line does not own a
+  cache, and a cache does not own lines.
+- A line has the same name on every glass. One state of a line holds its part on each glass,
+  the cache glass too. A view joins a line and a set of glasses.
+- `history=last` on a glass: older states of a line keep their parts on other glasses; their
+  part on this glass is dropped.
+- `fetch` takes lines and glasses: for example, a merge runner takes the line `main` with the
+  base and the `target` glass.
+- Storage: cache glasses go into v2 objects ([objects](objects.md)) like any glass. A state
+  record names one tree and one times table per glass.
+- Space: layered storage and the cleanup of old layers (`history=last`) save space. No size cap
+  applies to a cache: the owner rejects `gc lru:<size>` for caches.
+
+Built today:
+
+- Cache flags exist: `save --caches`, `sync --caches`, `merge --caches-only`,
+  `fetch --caches`, `--no-caches`, `--caches-of` and `fsck --caches`. They go away with the model.
+- `save --caches` names a cache overlay `cache.<folder>` (section 12), and
+  `src/cache_overlay.rs` is a separate code path.
+- Overlay lines have their own names (`line-<line id>.<os>-<arch>`, below), not the line's name.
+- A state record names one tree and one times table. Cache states keep their native format
+  (full folder snapshots, section 21), not v2 objects.
+>>>>>>> d598433
 
 The properties as built:
 
@@ -105,9 +138,20 @@ snapshots of the line stop at the nested layer, as they do for caches today. A f
 quiet by construction. The edges of section 6 of [overlays](overlays.md) apply (`rename()` across
 the edge gives EXDEV). For a build output folder that is not a problem: tools write inside it.
 
+<<<<<<< head
 A folder overlay is not one of the overlays of the view of a line folder. Its files never enter
 the base, the split of a named save or an assembled tree. The state that a line shows is the head
 of the line on the overlay.
+||||||| base
+A folder overlay is not part of the file stack of a line (`stack.<line id>`). Its files never
+enter the base, the split of a named save or an assembled tree. The state that a line shows is
+the head of the line's overlay line.
+=======
+A folder overlay is not part of the file stack of a line (`stack.<line id>`; the owner decision
+2026-11-11 removes this setting). Its files never
+enter the base, the split of a named save or an assembled tree. The state that a line shows is
+the head of the line's overlay line.
+>>>>>>> d598433
 
 A folder overlay must be ignored by the ignore rules and must not hold files of the line's head
 state, as for caches today (`design.md` section 5). A folder that holds versioned files stays a
@@ -225,11 +269,25 @@ There are two kinds of remote:
   whole repository: the shared set and every overlay, each overlay encrypted for its readers, as
   [overlay sync](overlay-sync-design.md) decides. Cache overlays travel too. A receiving machine
   imports a cache state only for its own platform, and only a state that a line here can take
+<<<<<<< head
   (`usable_cache`: shared, or of the caller). `layr clone <url> --line <line>[,<line>]` and
   `layr fetch <remote> --line ...` (the old `--caches-of` is removed) restore only the caches that `line new X <line>` takes for
+||||||| base
+  (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
+  `layr fetch <remote> --caches-of ...` restore only the caches that `line new X <line>` takes for
+=======
+  (`usable_cache`: shared, or of the caller). `layr clone <url> --caches-of <line>[,<line>]` and
+  `layr fetch <remote> --caches-of ...` (stopgaps; owner decision 2026-11-11: `fetch` takes lines and glasses, section 2) restore only the caches that `line new X <line>` takes for
+>>>>>>> d598433
   those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
   head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
+<<<<<<< head
   of a server queue). `layr fetch <remote> --overlay base` (the old `--no-caches` is removed) reads no cache overlay at all: a merge
+||||||| base
+  of a server queue). `--heads` restores only the heads of the lines (and what an
+=======
+  of a server queue). `layr fetch <Layr Cloud remote> --no-caches` (a stopgap that goes away, section 2) reads no cache overlay at all: a merge
+>>>>>>> d598433
   machine builds nothing, and every new cache of the check runners was gigabytes per fetch. `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it
@@ -522,8 +580,14 @@ the new file equals the old one. `layr gc --dedup` shares such content again, on
 
 ## 17. `merge <line> --caches-only`
 
+<<<<<<< head
 Built today. Owner decision 2026-11-11: the flag goes away; a merge takes the cache overlay like any
 other overlay (section 2).
+||||||| base
+=======
+Built today. Owner decision 2026-11-11: the flag goes away; a merge takes the cache glass like any
+other glass (section 2).
+>>>>>>> d598433
 
 `layr merge <line> --caches-only` brings the caches of a line into the current line. It runs only
 the cache step of `merge`: no file changes, no merge commit, and the head does not move. The
@@ -764,6 +828,7 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
   differs, and the files that two caches recorded with other bytes.
 
+<<<<<<< head
 ## 21. Measurement 2026-11-11: a cache overlay in v2 objects
 
 The question: what does a cache overlay cost in v2 objects ([objects](objects.md))? Tool: the
@@ -781,6 +846,25 @@ real `target` cache states of this repository.
 - Hot import (clones) failed in `objects-bench` only. The state files carry the immutable flag
   (`uchg`), and a clone keeps it. layr itself clears it: the project object store sets
   `clone_hook` (`sys::apfs_unseal_fd`, src/objstore.rs). The example tool sets no hook.
+||||||| base
+=======
+## 21. Measurement 2026-11-11: a cache glass in v2 objects
+
+The question: what does a cache glass cost in v2 objects ([objects](objects.md))? Tool: the
+example `objects-bench` of `crates/layr-objects`, a release build, an Apple Silicon Mac (Lumina),
+real `target` cache states of this repository.
+
+| State | Previous state | Files | Logical size | Step | Time | Result |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| `01a1b99e` | none | 25,828 (1,763 folders) | 11.33 GB | cold import, zstd level 3, all files | 9.2 s | 2.55 GB of loose objects |
+| `01a1b99e` | none | 25,828 | 11.33 GB | repack, zstd level 19, blocks of 4 MiB | 99 s | 1.86 GB of packs |
+| `01a1b9a8` (the same build) | `01a1b99e` | | | import | 1.06 s | 88 new objects, 86 KB |
+| `01a1b9a9` (the same build) | `01a1b9a8` | | | import | 1.0 s | 3 new objects, 1.9 KB |
+| `01a1ca61` (after a real rebuild) | `01a1b8bd` | 35,096 | 19.4 GB | import | 15.2 s | 84,390 new objects, 2.34 GB |
+
+- Hot import (clones) failed. The state files carry the immutable flag (`uchg`), so the clone into
+  `blobs/` fails with EPERM. This needs a fix before a cache glass can use hot blobs.
+>>>>>>> d598433
 - Today each cache state is a full native folder. `du` reports about 15 GB for each; APFS clones
   share blocks, so `du` overstates the real use.
 

@@ -11,8 +11,14 @@ readers (`layr overlay readers`), as it does on one machine today. Nobody withou
 gets plaintext, on any machine or in any store.
 
 Owner decision 2026-11-11: `fetch` takes lines and overlays, not the whole repository: the
+<<<<<<< head
 history of the chosen lines, and only their parts on the chosen overlays (for a merge runner: the
 line `main` with the base and the `target` overlay). The read rule below stays. Built today: push
+||||||| base
+=======
+history of the chosen lines, and only their parts on the chosen glasses (for a merge runner: the
+line `main` with the base and the `target` glass). The read rule below stays. Built today: push
+>>>>>>> d598433
 and sync carry every overlay, and fetch takes every overlay that a slot opens
 ([overlays](overlays.md) section 1).
 
