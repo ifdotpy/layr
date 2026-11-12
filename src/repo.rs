@@ -603,7 +603,8 @@ impl<'a> Repo<'a> {
         btrfs::snapshot(&self.state_root(id)?, dst, readonly)
     }
 
-    /// The working folder of a line: its recorded path (`layr line move`), else `lines/<name>`.
+    /// The working folder of a line: its recorded path (`layr line move`, or the folder that
+    /// `line rename` kept), else `lines/<name>`.
     pub fn working(&self, line: &Line) -> PathBuf {
         self.p.moved_path(&line.id).unwrap_or_else(|| self.p.default_line_path(&line.name))
     }

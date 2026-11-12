@@ -917,7 +917,8 @@ impl<'a> Project<'a> {
     pub fn has_state(&self, id: &str) -> bool {
         self.state_path(id).exists() || self.delta_path(id).exists()
     }
-    /// The working folder of a line: the path recorded by `layr line move`, else `lines/<name>`.
+    /// The working folder of a line: the path recorded by `layr line move`, the folder that
+    /// `line rename` kept, else `lines/<name>`.
     pub fn line_path(&self, name: &str) -> PathBuf {
         if let Some(path) = self.db.line_by_name(name).ok().flatten().and_then(|l| self.moved_path(&l.id)) {
             return path;

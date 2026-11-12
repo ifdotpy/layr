@@ -32,7 +32,8 @@ ok "a save in feat" l save -qam two
 has "the overlay holds feat with its id" "feat $(id_of feat)" "$(lines_of notes)"
 ok "a rename" l line rename feat feat2
 has "the line on the overlay takes the new name" "feat2 $(id_of feat2)" "$(lines_of notes)"
-cd "$P/lines/feat2" || exit 1
+no "the rename keeps the folder" test -e "$P/lines/feat2"
+cd "$P/lines/feat" || exit 1
 eq "the folder still shows its part" n2 "$(cat notes.md)"
 echo n3 > notes.md
 ok "a save after the rename" l save -qam three

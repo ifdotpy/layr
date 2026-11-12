@@ -198,7 +198,8 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         bail!("a line named '{name}' already exists");
     }
     let at = repo.p.line_path(name);
-    if at.symlink_metadata().is_ok() {
+    // A folder that `line rename` kept for another line counts as taken, also when it is gone.
+    if at.symlink_metadata().is_ok() || repo.p.kept_folder_line(name).is_some() {
         bail!("{} already exists", at.display());
     }
     repo.source_state(start)?;

@@ -370,10 +370,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
-        // A line moved to a chosen path keeps its folder.
-        if repo.p.moved_path(&l.id).is_none() {
-            crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.default_line_path(&new))?;
-        }
+        // The folder stays where it is: programs that work in it (a shell, an editor, an agent)
+        // keep their folder. `line move <line>` gives it the folder of the new name.
+        let folder_before = repo.p.keep_folder(&l.id, &l.name, &new)?;
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
         let mut rec = Record::new("line.rename");
@@ -387,13 +386,18 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             },
         );
         rec.data = serde_json::json!({"from": old, "to": new});
-        repo.commit_record(ctx, rec)?;
+        if let Err(e) = repo.commit_record(ctx, rec) {
+            if let Err(b) = repo.p.restore_folder(&l.id, folder_before.as_deref()) {
+                return Err(e.context(format!("the folder record of line {old} could not go back: {b:#}")));
+            }
+            return Err(e);
+        }
         // The line has the same name on every overlay. A failure here is no loss: the overlay finds
         // the line by its id, and its next write gives it the new name.
         if let Err(e) = repo.rename_overlay_lines(ctx, &l, &new) {
             eprintln!("layr: warning: the overlays keep the old name of line {old} until their next write: {e:#}");
         }
-        outln!(ctx, "Renamed line {old} to {new}: {}", repo.p.line_path(&new).display());
+        outln!(ctx, "Renamed line {old} to {new}; its folder stays at {}", repo.p.line_path(&new).display());
         return Ok(0);
     }
     if !a.pos.is_empty() && !a.has("-l") {

@@ -20,7 +20,8 @@ rm dir/file
 [ "$(cat ../main/file)" = base ]
 [ "$(cat ../main/dir/file)" = nested ]
 "$LAYR" line rename topic renamed
-cd ../renamed
+# The rename keeps the folder of the old name.
+[ ! -e ../renamed ]
 [ "$(cat file)" = changed ]
 [ ! -e dir/file ]
 "$LAYR" fsck
@@ -28,7 +29,7 @@ cd ../renamed
 cd /
 findmnt -rn -o TARGET | awk -v p="$LAYR_ROOT/" 'index($0,p)==1' | sort -r | while read -r m; do umount "$m"; done
 "$LAYR" --root "$LAYR_ROOT" --project check --line renamed log -1
-cd "$LAYR_ROOT/projects/check/lines/renamed"
+cd "$LAYR_ROOT/projects/check/lines/topic"
 [ "$(cat file)" = changed ]
 [ ! -e dir/file ]
 "$LAYR" fsck
