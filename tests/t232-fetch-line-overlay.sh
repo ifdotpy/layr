@@ -63,5 +63,5 @@ no "it keeps the new state of side here" test -d "$T/archive/states/$side_new"
 l push cloud -q >/dev/null 2>&1
 ok "a plain push sends it" test -d "$T/archive/states/$side_new"
 no "--line needs fetch or push" l pull cloud --line main -q
-eq "--no-caches is gone: --overlay names the glasses" 2 "$(yl fetch origin --no-caches >/dev/null 2>&1; echo $?)"
+eq "--no-caches is gone: --overlay names the overlays" 2 "$(yl fetch origin --no-caches >/dev/null 2>&1; echo $?)"
 finish

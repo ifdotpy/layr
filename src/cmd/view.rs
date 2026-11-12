@@ -12,7 +12,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let show = a.pos.first().map(String::as_str) == Some("show");
     let rest = if save || show { &a.pos[1..] } else { &a.pos[..] };
     if rest.len() > 1 || a.dashdash {
-        bail!("usage: layr view [save [<line>]|show <id>|<rev or line>] [--overlay <glass>,...] [--folder <dir>] [--json]");
+        bail!("usage: layr view [save [<line>]|show <id>|<rev or line>] [--overlay <overlay>,...] [--folder <dir>] [--json]");
     }
     if show && (a.get("--overlay").is_some() || a.get("--folder").is_some()) {
         bail!("view show takes no --overlay or --folder");
@@ -43,7 +43,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         view
     };
-    // Another view of the same line or state: the glasses that --overlay names, in that order
+    // Another view of the same line or state: the overlays that --overlay names, in that order
     // (docs/overlays.md, section 1a, slice 5). `base` names the base, which is always below.
     if let Some(list) = a.get("--overlay") {
         let line = match rest.first().map(String::as_str) {
@@ -62,7 +62,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Some(l) => l.clone(),
                 None => h
                     .repo
-                    .glass_layer(line.as_ref(), &view.shared, name)?
+                    .overlay_layer(line.as_ref(), &view.shared, name)?
                     .ok_or_else(|| anyhow::anyhow!("unknown overlay '{name}'"))?,
             };
             layers.push(layer);

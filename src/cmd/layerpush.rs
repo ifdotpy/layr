@@ -184,8 +184,8 @@ fn overlay_head(repo: &Repo, line: &Line, name: &str) -> Result<Option<String>> 
     let ol = repo.overlay_project(name)?.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))?;
     let head = match ol {
         Some(l) => Some(l.head),
-        // A glass that keeps parts: the part that the line shows.
-        None if crate::overlay::parts_glass(&info) => repo.layers(line)?.into_iter().find(|l| l.overlay == name).map(|l| l.state),
+        // An overlay that keeps parts: the part that the line shows.
+        None if crate::overlay::parts_overlay(&info) => repo.layers(line)?.into_iter().find(|l| l.overlay == name).map(|l| l.state),
         None => None,
     };
     Ok(head.filter(|h| *h != info.root))

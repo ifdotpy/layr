@@ -69,10 +69,10 @@ impl Options {
         !(cache && self.no_caches) && self.overlays.as_ref().map_or(true, |only| only.contains(name))
     }
 
-    /// Whether a fetch or push leaves out glass `name` because its `platform` is another
+    /// Whether a fetch or push leaves out overlay `name` because its `platform` is another
     /// platform's (docs/overlays.md, section 1a, slice 3). `--overlay <name>` takes it all the same.
     pub(crate) fn other_platform(&self, name: &str, platform: Option<&str>) -> bool {
-        crate::overlay::other_platform_glass(platform)
+        crate::overlay::other_platform_overlay(platform)
             && !self.overlays.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
     }
 }
@@ -1209,7 +1209,7 @@ impl Store {
 
 /// The CLI commands use the same named-remote configuration as push and fetch.
 pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
-    let args = &crate::cmd::glass_args(operation, args, &[("--caches", "--glasses")])?;
+    let args = &crate::cmd::overlay_args(operation, args, &[("--caches", "--overlays")])?;
     let spec = crate::args::Spec::new()
         .value("--remote")
         .flag("--files")

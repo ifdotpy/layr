@@ -1,16 +1,16 @@
-//! Build-output glasses (docs/overlays.md, section 1a, slices 3 and 6; docs/cache-overlays.md).
+//! Build-output overlays (docs/overlays.md, section 1a, slices 3 and 6; docs/cache-overlays.md).
 //!
-//! A cache is an ordinary glass: a folder glass with `quiet`, `history=last`,
-//! `merge=union-theirs`, `platform` and `trust=protected`. The general folder glass code
+//! A cache is an ordinary overlay: a folder overlay with `quiet`, `history=last`,
+//! `merge=union-theirs`, `platform` and `trust=protected`. The general folder overlay code
 //! (`folder_path`, `folder_overlays`) is in `overlay.rs`. This module keeps what build output
 //! still needs and what old data needs:
 //!
-//! - The glass of a `regenerable` folder for this platform, made at its first save
+//! - The overlay of a `regenerable` folder for this platform, made at its first save
 //!   (`ensure_cache_overlay`), and the parts that a named save makes (`save_cache_overlays`).
 //! - The platform key and its parts (`cache_key`): which part fits a line.
 //! - Which part a new line takes (`cache_source`): the part that a state names, else the parts of
 //!   older data (`cache_of`, the overlay line of the source line), with the `trust` rule.
-//! - Overlay lines per platform (`line-<id>.<os>-<arch>`) of a `cache.<folder>` glass that an
+//! - Overlay lines per platform (`line-<id>.<os>-<arch>`) of a `cache.<folder>` overlay that an
 //!   older layr made, and the old cache fields of state records (`cache_by`, `cache_shared`).
 //! - Prune and size limits of the folder, and the cleanup of lines that are gone.
 
@@ -33,10 +33,10 @@ thread_local! {
     static PRUNE_LIMIT: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(crate::cache_hook::HOOK_LIMIT) };
 }
 
-/// The name of the build-output glass of `folder` on `platform` (docs/overlays.md, section 1a,
+/// The name of the build-output overlay of `folder` on `platform` (docs/overlays.md, section 1a,
 /// slices 3 and 6): `<folder>.<platform>` with `/` as `.`, or a hash when the folder has other
-/// characters. Older layr named the one glass of all platforms `cache.<folder>`; such a glass
-/// stays the glass of its folder (`folder_overlay_of`).
+/// characters. Older layr named the one overlay of all platforms `cache.<folder>`; such an overlay
+/// stays the overlay of its folder (`folder_overlay_of`).
 pub fn cache_overlay_name(folder: &str, platform: &str) -> String {
     let name = format!("{}.{platform}", folder.replace('/', "."));
     if crate::store::check_name("overlay", &name).is_ok() && !name.starts_with('.') {
@@ -46,7 +46,7 @@ pub fn cache_overlay_name(folder: &str, platform: &str) -> String {
     format!("folder-{}.{platform}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
 }
 
-/// The properties of a build-output glass of this platform (docs/cache-overlays.md, section 2).
+/// The properties of a build-output overlay of this platform (docs/cache-overlays.md, section 2).
 pub fn cache_props() -> Props {
     Props {
         history: Some(1),
@@ -533,8 +533,8 @@ impl<'a> Repo<'a> {
         Ok(allowed && key.fits(st.cache_platform.as_deref(), &st.cache_key_parts))
     }
 
-    /// Whether glass `name` has `trust=protected`: a line takes a part that another user saved
-    /// only from a protected line (docs/overlays.md, section 1a, slice 6). A folder glass without
+    /// Whether overlay `name` has `trust=protected`: a line takes a part that another user saved
+    /// only from a protected line (docs/overlays.md, section 1a, slice 6). A folder overlay without
     /// the property is protected, as every cache overlay was before the property.
     pub fn trust_protected(&self, name: &str) -> Result<bool> {
         Ok(self.overlay_props(name)?.trust != Some(crate::overlay::Trust::Readers))
@@ -577,7 +577,7 @@ impl<'a> Repo<'a> {
         let orepo = self.overlay_repo(name)?;
         let protected = self.trust_protected(name)?;
         if let Source::ExactState(wanted, target_line, expected) = from {
-            let own_line = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, target_line))?.map(|l| l.id);
+            let own_line = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, target_line))?.map(|l| l.id);
             for (id, of) in orepo.p.db.cache_states()? {
                 if expected.is_some_and(|value| value != id.as_str()) {
                     continue;
@@ -623,7 +623,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         let of_line = |line_id: &str| -> Result<Option<String>> {
-            let name = crate::overlay::glass_line_name(&info, line_id);
+            let name = crate::overlay::part_line_name(&info, line_id);
             // A line that no write moved to its platform name yet (`ensure_overlay_line`) has the old name.
             let ol = match orepo.p.db.line_by_name(&name)? {
                 Some(ol) => ol,
@@ -634,7 +634,7 @@ impl<'a> Repo<'a> {
             };
             Ok(self.usable_cache(&orepo, &info.root, &ol.head, uid, key, protected)?.then_some(ol.head))
         };
-        // The newest usable cache saved with each project state. `save --glasses` on a line with
+        // The newest usable cache saved with each project state. `save --overlays` on a line with
         // no named change saves with an automatic state over the head: that cache counts for the
         // head too.
         let mut saved_with: std::collections::HashMap<String, String> = Default::default();
@@ -685,7 +685,7 @@ impl<'a> Repo<'a> {
                 return Ok(Some(s.clone()));
             }
             let Some(rec) = self.p.db.state(&id)? else { continue };
-            // The part that the state names on this glass (`save -m`, slice 6): an unchanged
+            // The part that the state names on this overlay (`save -m`, slice 6): an unchanged
             // folder names a part saved with an older state.
             if let Some(part) = rec.parts.get(name) {
                 if self.usable_cache(&orepo, &info.root, part, uid, key, protected)? {
@@ -704,7 +704,7 @@ impl<'a> Repo<'a> {
 
     /// The cache folders of `line` with no cache saved with its head: a cache in the working folder whose
     /// newest saved state on this line's overlay line was saved with another state, or no state was saved.
-    /// `save --glasses` with no named change saves with an automatic state over the head: that counts, unless the
+    /// `save --overlays` with no named change saves with an automatic state over the head: that counts, unless the
     /// save ran with no build (`set_unbuilt`). A damaged folder is left out: the save refuses it until a prune of it
     /// succeeds.
     pub fn caches_behind_head(&self, line: &Line) -> Result<Vec<String>> {
@@ -717,7 +717,7 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
-            let ol_name = crate::overlay::glass_line_name(&self.need_overlay(&name)?, &line.id);
+            let ol_name = crate::overlay::part_line_name(&self.need_overlay(&name)?, &line.id);
             let ol = match orepo.p.db.line_by_name(&ol_name)? {
                 Some(ol) => Some(ol),
                 None => orepo.unnamed_platform_line(&ol_name)?,
@@ -1167,7 +1167,7 @@ impl<'a> Repo<'a> {
     /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
     /// files of the folder that were used least recently (the newer of access and change time)
     /// until the folder is at most the size. Returns the deleted bytes.
-    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --glasses`: the folders that a
+    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --overlays`: the folders that a
     /// build may have grown, with no walk of the other lines.
     pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
         let mut freed = 0;

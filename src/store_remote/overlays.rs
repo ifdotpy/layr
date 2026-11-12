@@ -70,16 +70,16 @@ fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options>
 
 /// The states of the overlay `orepo` that the project lines `lines` show: the history of their overlay lines
 /// (`line-<line id>`, with any platform suffix) and of the shared lines (`user-<uid>`), only the heads with `heads`.
-/// A glass that keeps parts (docs/overlays.md, section 1a) adds the part that each line shows and the parts that the
+/// An overlay that keeps parts (docs/overlays.md, section 1a) adds the part that each line shows and the parts that the
 /// states of the line name, with the history of each part.
 pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
-    let glass = orepo.p.name.rsplit_once('%').map(|(_, g)| g.to_string());
+    let overlay = orepo.p.name.rsplit_once('%').map(|(_, g)| g.to_string());
     let mut ids = Vec::new();
     let mut parts = Vec::new();
     for name in lines {
         let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
         ids.push(format!("line-{}", line.id));
-        let Some(glass) = &glass else { continue };
+        let Some(overlay) = &overlay else { continue };
         // Every machine's head of the line and its stack there (a remote moves the line ahead of this machine).
         let mut tips = vec![line.head.clone()];
         let mut stacks = repo.layers(&line).unwrap_or_default();
@@ -89,10 +89,10 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
                 stacks.extend(serde_json::from_value::<Vec<crate::overlay::Layer>>(v).unwrap_or_default());
             }
         }
-        parts.extend(stacks.into_iter().filter(|l| &l.overlay == glass).map(|l| l.state));
+        parts.extend(stacks.into_iter().filter(|l| &l.overlay == overlay).map(|l| l.state));
         let states = if heads { tips } else { reader::state_ancestries(repo, tips)? };
         for id in states {
-            if let Some(part) = repo.p.db.state(&id)?.and_then(|st| st.parts.get(glass).cloned()) {
+            if let Some(part) = repo.p.db.state(&id)?.and_then(|st| st.parts.get(overlay).cloned()) {
                 parts.push(part);
             }
         }
@@ -504,7 +504,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             continue;
         }
         if let Some(p) = repo.overlay_info(&name)?.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
-            report.omitted.push(format!("overlay {name}: a glass of platform {p}"));
+            report.omitted.push(format!("overlay {name}: an overlay of platform {p}"));
             continue;
         }
         // A machine trusted since the last cache save reads the caches from this push on, not only
@@ -520,7 +520,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
         };
         // The overlay's project lock covers its key records only. The upload (minutes for the first push of a cache)
-        // and the sweep run under the lock of the remote folder, so `line new` and `save --glasses` do not wait.
+        // and the sweep run under the lock of the remote folder, so `line new` and `save --overlays` do not wait.
         let lock = orepo.p.lock()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
@@ -871,7 +871,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             continue;
         }
         if let Some(p) = info.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
-            report.omitted.push(format!("overlay {name}: a glass of platform {p}"));
+            report.omitted.push(format!("overlay {name}: an overlay of platform {p}"));
             continue;
         }
         let mut one = || -> Result<()> {
@@ -1002,7 +1002,7 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
             continue;
         }
         if opts.other_platform(&name, info.platform.as_deref()) {
-            report.omitted.push(format!("overlay {name}: a glass of platform {}", info.platform.as_deref().unwrap_or("")));
+            report.omitted.push(format!("overlay {name}: an overlay of platform {}", info.platform.as_deref().unwrap_or("")));
             continue;
         }
         if info.hidden {

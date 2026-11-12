@@ -294,9 +294,9 @@ impl Browse {
                     l.state = part.clone();
                 }
             }
-            for (glass, part) in &state.parts {
-                if !stack.iter().any(|l| &l.overlay == glass) {
-                    stack.push(crate::overlay::Layer { overlay: glass.clone(), state: part.clone() });
+            for (overlay, part) in &state.parts {
+                if !stack.iter().any(|l| &l.overlay == overlay) {
+                    stack.push(crate::overlay::Layer { overlay: overlay.clone(), state: part.clone() });
                 }
             }
             let mut hidden = Vec::new();

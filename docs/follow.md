@@ -61,7 +61,7 @@
      change that came without a cache (a branch that no line here pushed) is built here. If the
      head moves during the build, the pass retries, at most three times. A failed build or a head
      that keeps moving leaves the line marked for the next pass. It does not save the cache.
-   - `layr save --glasses` for the line: it prunes each folder first (the adapter's `prune`). The
+   - `layr save --overlays` for the line: it prunes each folder first (the adapter's `prune`). The
      line lock keeps the checked head unchanged until the cache is saved and the mark is cleared. A separate
      cache build lock prevents a cache save from overlapping the build. An ordinary head save
      can proceed during the build; follow then builds the new head again. Cache operations take
@@ -70,8 +70,8 @@
 
 A failed cache step does not undo the merge. Its text is part of the result.
 
-Owner decision 2026-11-11: a cache is an ordinary overlay (glass) with no cache flags, so the
-pass will save and take the cache glass as part of the line, not through `save --caches` and
+Owner decision 2026-11-11: a cache is an ordinary overlay with no cache flags, so the
+pass will save and take the cache overlay as part of the line, not through `save --caches` and
 `pull_caches` ([cache overlays](cache-overlays.md) section 2). The steps above are what is built.
 
 ## Daemon

@@ -16,7 +16,7 @@ l protect main --remove >/dev/null 2>&1 || true
 mkdir -p target/debug
 echo old > target/debug/dep; touch -t 202101010000.00 target/debug/dep
 echo new > target/debug/out; touch -t 202101010000.01 target/debug/out
-l save --glasses -q
+l save --overlays -q
 mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
 
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1

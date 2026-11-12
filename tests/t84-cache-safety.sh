@@ -1,6 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
-# A folder becomes a cache by a copy (save --glasses, overlay repair). The copy never deletes a
+# A folder becomes a cache by a copy (save --overlays, overlay repair). The copy never deletes a
 # folder it did not make, and never copies a name that is not UTF-8 wrongly.
 . "$(dirname "$0")/lib.sh"
 
@@ -17,7 +17,7 @@ rm -rf target; mkdir target; echo cache > target/x
 mkdir target.layr-old target.layr-new
 echo old-backup > target.layr-old/precious
 echo new-backup > target.layr-new/precious
-l save --glasses --folder target -q >/dev/null 2>&1
+l save --overlays --folder target -q >/dev/null 2>&1
 eq "the cache keeps its file" cache "$(cat target/x)"
 eq "a foreign target.layr-old is kept" old-backup "$(cat target.layr-old/precious)"
 eq "a foreign target.layr-new is kept" new-backup "$(cat target.layr-new/precious)"
@@ -35,7 +35,7 @@ else
     rm -rf target target.layr-*; mkdir target
     printf 'one\n' > "target/bad$(printf '\xff')"
     printf 'two\n' > "target/bad$(printf '\xef\xbf\xbd')"
-    l save --glasses --folder target -q >/dev/null 2>&1
+    l save --overlays --folder target -q >/dev/null 2>&1
     eq "both odd names remain" 2 "$(ls target | wc -l | tr -d ' ')"
     eq "the 0xff name keeps its data" one "$(cat "target/bad$(printf '\xff')")"
     eq "the U+FFFD name keeps its data" two "$(cat "target/bad$(printf '\xef\xbf\xbd')")"

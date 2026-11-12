@@ -59,11 +59,11 @@
 
 - Version control на Btrfs: `line` — writable snapshot, `state` — read-only snapshot плюс подписанная запись, diff/status основаны на metadata-send; merge использует reflinks. Есть Git bridge, операции с ролями, защита веток, auto states, копия проекта в папку с восстановлением, peer sync.
 - Оверлеи: отдельные истории файлов с собственными readers; `shared` видим всем читателям проекта, другие слои видимы их readers. Рабочая директория остаётся **обычным writable Btrfs subvolume**, слои физически собираются при смене stack; это **не OverlayFS**.
-- Кэши (`regenerable`): nested subvolumes вне основной истории и diff. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --glasses`.
+- Кэши (`regenerable`): nested subvolumes вне основной истории и diff. Новая линия может получить reflink-копию прогретого кэша ближайшего предка. Явное сохранение через `layr save --overlays`.
 - Backends: btrfs на Linux, APFS на macOS, OverlayFS на ext4/XFS; все равноправны (решение пользователя 23.10.2026). Форматы store и signed record совместимы между backends (`README.md`). Полного паритета у экспериментальных backends нет. Поэтому формат remote не должен зависеть от backend.
 - Signed record сейчас подписывает ключ машины. `Author.session` является свободным текстом из `LAYR_SESSION`: Layr его показывает, но не проверяет (`src/model.rs`).
 - Текущие ограничения overlays: нет полной реализации route-patterns, полноценного составного идентификатора stack для approvals, encryption/replication приватных overlays и некоторых режимов из дизайн-документа. Нужно сверять статус с конкретным коммитом перед разработкой.
-- Owner decision 2026-11-11 (overlay model, `docs/overlays.md` section 1): a line has its own history and the same name on every overlay; an overlay (glass) does not own lines; the base is the bottom overlay; a view joins a line and a set of overlays; `fetch` takes lines and overlays. A cache is an ordinary overlay (`docs/cache-overlays.md` section 2): no cache flags (`save --caches`, `fetch --caches-of`, `--no-caches`, ...), no size cap. The statements above about stacks and `save --caches` describe the code as built.
+- Owner decision 2026-11-11 (overlay model, `docs/overlays.md` section 1): a line has its own history and the same name on every overlay; an overlay does not own lines; the base is the bottom overlay; a view joins a line and a set of overlays; `fetch` takes lines and overlays. A cache is an ordinary overlay (`docs/cache-overlays.md` section 2): no cache flags (`save --caches`, `fetch --caches-of`, `--no-caches`, ...), no size cap. The statements above about stacks and `save --caches` describe the code as built.
 
 ### 1.2. LAYR Studio / codex-studio [СУЩ]
 

@@ -53,7 +53,7 @@ echo "in w1" >> notes.txt
 l save -a -qm "w1 work" >/dev/null
 cd $P/lines/main || exit 1
 mkdir -p target && head -c 52428800 /dev/urandom > target/big.bin
-l save --glasses -q >/dev/null
+l save --overlays -q >/dev/null
 ok "the 50 MB cache is an overlay" l overlay list
 
 j() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }

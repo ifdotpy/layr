@@ -32,15 +32,15 @@ pub(super) fn operation_name(op: &str) -> String {
     }
 }
 
-/// `save --glasses --save-back <line>` (docs/ci-trust.md): the caches of the current line go to the save-back line of
+/// `save --overlays --save-back <line>` (docs/ci-trust.md): the caches of the current line go to the save-back line of
 /// `<line>` (`<line>.checks-<os>-<arch>`), as a passing `checks run` gives them back, with the head of the current
 /// line as their source state. No source state is made, so a cache writer machine (a CI job) may run it.
 fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
     if !a.has("--caches") {
-        return Err(exit(2, "--save-back saves the parts of glasses: use it with --glasses"));
+        return Err(exit(2, "--save-back saves the parts of overlays: use it with --overlays"));
     }
     if ["-m", "-F", "--amend", "--all-lines", "--cache", "--running", "--force"].iter().any(|f| a.has(f) || a.get(f).is_some()) {
-        return Err(exit(2, "--save-back takes only --glasses, --json and -q"));
+        return Err(exit(2, "--save-back takes only --overlays, --json and -q"));
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return Err(exit(1, "--save-back needs Linux or macOS"));
@@ -82,7 +82,7 @@ pub fn save(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Save a cache only if the line still has the head used by the build.
 pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Option<&str>) -> Result<i32> {
-    let args = &super::glass_args("save", args, &[("--caches", "--glasses"), ("--cache", "--folder")])?;
+    let args = &super::overlay_args("save", args, &[("--caches", "--overlays"), ("--cache", "--folder")])?;
     let spec = Spec::new()
         .value("-m|--message")
         .value("--note")
@@ -109,7 +109,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
     if let Some(name) = a.get("--keep") {
         valid_keep_name(name)?;
         if a.has("--all-lines") || a.has("--caches") || a.has("-m") || a.has("-F") || a.has("--amend") {
-            return Err(exit(2, "--keep names one automatic state: use it without -m, --amend, --all-lines and --glasses"));
+            return Err(exit(2, "--keep names one automatic state: use it without -m, --amend, --all-lines and --overlays"));
         }
     }
     if let Some(target) = a.get("--save-back") {
@@ -143,7 +143,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
     // costs a minute to save.
     let only: Vec<String> = a.all("--cache").iter().map(|p| p.trim_matches('/').to_string()).collect();
     if !only.is_empty() && !a.has("--caches") {
-        return Err(exit(2, "--folder selects a folder glass for --glasses."));
+        return Err(exit(2, "--folder selects a folder overlay for --overlays."));
     }
     // Folders that a process uses (or that changed while copied): refused, the others go on.
     let mut refusals: Vec<String> = Vec::new();
@@ -235,7 +235,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             let damaged = repo.damaged_folders(&l)?;
             for p in caches.iter().filter(|p| damaged.contains(*p)) {
                 if !a.has("-q") {
-                    outln!(ctx, "{p}: skipped: damaged by an interrupted prune; run layr save --glasses again to prune it");
+                    outln!(ctx, "{p}: skipped: damaged by an interrupted prune; run layr save --overlays again to prune it");
                 }
             }
             caches.retain(|p| !damaged.contains(p));
@@ -402,7 +402,7 @@ fn cleanup_abandoned_cache_copies(repo: &Repo) -> Result<()> {
     Ok(())
 }
 
-/// The cache paths that `save --glasses` gives `caches_state` under the lock, read before it:
+/// The cache paths that `save --overlays` gives `caches_state` under the lock, read before it:
 /// the cache paths of the line (or `only`), without damaged and refused folders. Then the
 /// state of the folder (`Repo::prepare_caches_state`).
 fn prepared_caches_state(
@@ -1496,7 +1496,7 @@ fn absent_after_delete(repo: &Repo, ids: &[String]) -> Vec<String> {
     repo.p.delete_states(ids).into_iter().filter(|id| !repo.p.has_state(id)).collect()
 }
 
-/// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --glasses` would find, in
+/// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --overlays` would find, in
 /// one line, or None when both are clean. It only reads. The operations that make data dead free it, so a report
 /// names a gap in them (docs/ownership.md).
 pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
@@ -1738,7 +1738,7 @@ fn repair_project_temporary(ctx: &Ctx, project: &Project, dry: bool, quiet: bool
     Ok(())
 }
 
-/// `layr fsck --glasses`: the cache data of this project that nothing keeps, by reason, with its bytes
+/// `layr fsck --overlays`: the cache data of this project that nothing keeps, by reason, with its bytes
 /// (apparent sizes). The operations that make cache data dead delete it, so after them the report is
 /// 0 (docs/cache-overlays.md). It only reads. Exit code 1 when it finds any.
 fn fsck_caches(ctx: &Ctx) -> Result<i32> {
@@ -1750,7 +1750,7 @@ fn fsck_caches(ctx: &Ctx) -> Result<i32> {
     Ok(if states == 0 { 0 } else { 1 })
 }
 
-/// The cache data of this project that nothing keeps: items and bytes (`fsck --glasses`).
+/// The cache data of this project that nothing keeps: items and bytes (`fsck --overlays`).
 fn cache_garbage(repo: &Repo) -> Result<(usize, u64)> {
     cache_garbage_with(repo, &mut |_| {})
 }
@@ -1905,7 +1905,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
     // without one is not touched.
-    // First what no kept state reaches leaves each object store (the base and every glass): a dropped part of a glass
+    // First what no kept state reaches leaves each object store (the base and every overlay): a dropped part of an overlay
     // with `history=last` gives its objects back here (docs/overlays.md section 1a, slice 7).
     if !a.has("-n") {
         let mut stores = vec![("base".to_string(), crate::objstore::prune(&h.repo.p))];
@@ -2056,7 +2056,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
         return crate::store_remote::command(ctx, "fsck", args);
     }
-    let args = &super::glass_args("fsck", args, &[("--caches", "--glasses")])?;
+    let args = &super::overlay_args("fsck", args, &[("--caches", "--overlays")])?;
     if args.iter().any(|v| v == "--caches") {
         return fsck_caches(ctx);
     }
@@ -2718,7 +2718,7 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Ok(())
     };
     if !caches.is_empty() {
-        if let Err(e) = run(&w, &["save", "--glasses", "-q"]) {
+        if let Err(e) = run(&w, &["save", "--overlays", "-q"]) {
             eprintln!("warning: the caches stay plain folders of the line: {e:#}");
         }
     }
@@ -3440,7 +3440,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// Why a cache path is no cache (`save --glasses`, `overlay list`, `overlay repair`): its folder holds
+/// Why a cache path is no cache (`save --overlays`, `overlay list`, `overlay repair`): its folder holds
 /// files of the head state, and a cache would hide them from the states that follow.
 pub(crate) const VERSIONED: &str = "not a cache: has versioned files; remove them from history first";
 /// A folder with versioned files that an older layr made a cache, after it became plain again.

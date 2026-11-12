@@ -13,14 +13,14 @@ l overlay create private --mode follow --hidden --history 3 -q || exit 1
 l overlay use --add public private >/dev/null || exit 1
 mkdir -p target
 printf cache > target/result
-l save --glasses -q || exit 1
+l save --overlays -q || exit 1
 # A second cache is removed while its overlay project still exists.
 printf 'other regenerable\n' >> .layrattributes
 printf 'other/\n' >> .gitignore
 mkdir -p other
 printf removed > other/result
-l save --glasses -q || exit 1
-l overlay remove "$(glass other)" >/dev/null || exit 1
+l save --overlays -q || exit 1
+l overlay remove "$(overlay other)" >/dev/null || exit 1
 # A replica can know a public overlay descriptor before receiving its project.
 python3 - "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" <<'PYFIXTURE'
 import json, os, sqlite3, sys
@@ -79,5 +79,5 @@ with open(sys.argv[1]) as f:
     rows = json.load(f)
 assert next(r for r in rows if r['name'] == os.environ['TG'])['size'] == 0, rows
 PY_EMPTY
-eq "removed cache is absent from text listing" 0 "$(printf '%s\n' "$out" | grep -c "$(glass other)")"
+eq "removed cache is absent from text listing" 0 "$(printf '%s\n' "$out" | grep -c "$(overlay other)")"
 finish

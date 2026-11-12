@@ -2,7 +2,7 @@
 # ci: macos
 # State records name their parts (docs/overlays.md section 1a, slice 4): a named save records the
 # part of each follow overlay in the new state, `line new` and a hard reset take the parts of their
-# state, a merge combines the parts glass by glass, `view <state>` shows them, the overlay store gets
+# state, a merge combines the parts overlay by overlay, `view <state>` shows them, the overlay store gets
 # no overlay line for them, and `overlay migrate-parts` gives parts to a head saved before them.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -13,7 +13,7 @@ P=$LAYR_ROOT/projects/p
 cd "$P/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 
-# parts <state>: the parts of a state record as `glass=part` pairs, each part as the short id that
+# parts <state>: the parts of a state record as `overlay=part` pairs, each part as the short id that
 # `layr overlay use` prints.
 parts() {
     python3 - "$P/meta/db/layr.sqlite" "$1" <<'PY'

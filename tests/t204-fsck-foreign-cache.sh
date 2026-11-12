@@ -1,8 +1,8 @@
 #!/bin/bash
 # ci: macos overlayfs
 # Remote cache records from other platforms do not promise a local tree. The fixture is a
-# `cache.target` glass of an older layr: one glass for every platform, with an overlay line per
-# platform. A new glass has one platform (docs/overlays.md section 1a, slice 3; t138).
+# `cache.target` overlay of an older layr: one overlay for every platform, with an overlay line per
+# platform. A new overlay has one platform (docs/overlays.md section 1a, slice 3; t138).
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 sample "$T/src"
@@ -14,9 +14,9 @@ l overlay create cache.target --folder target --quiet --history last --merge uni
 l config overlay.cache.target.cache true >/dev/null
 mkdir -p target
 echo local > target/out.bin
-l save --glasses -q
+l save --overlays -q
 echo foreign > target/out.bin
-LAYR_TEST_PLATFORM=plan9-mips l save --glasses -q
+LAYR_TEST_PLATFORM=plan9-mips l save --overlays -q
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 l push archive -q >/dev/null
 new_fs "$T/peer" 2G

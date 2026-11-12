@@ -81,7 +81,7 @@ eq "the saved state has the merged file" "a" "$(l show head:a.txt)"
 eq "the saved state has the user's edit" "local edit" "$(l show head:notes.txt | tail -1)"
 eq "the saved state has the added file" "mine" "$(l show head:mine.txt)"
 
-# 4. The cache hook takes the line lock of its line. `save --glasses` with a prune adapter set, and with
+# 4. The cache hook takes the line lock of its line. `save --overlays` with a prune adapter set, and with
 # prune=none, finishes: the hook does not wait for a second file lock of the same line.
 # bounded <seconds> <command...>: the exit code of the command, or 124 when it runs longer.
 bounded() {
@@ -105,16 +105,16 @@ printf 'cachedir/\n' >> .gitignore
 printf 'cachedir regenerable\n' > .layrattributes
 l add -A && l save -qm attributes
 mkdir -p cachedir && echo stale > cachedir/a.bin
-bounded 60 "$LAYR" save --glasses -q > "$T/caches-1.log" 2>&1
-eq "save --glasses makes the cache overlay" "0" "$?"
+bounded 60 "$LAYR" save --overlays -q > "$T/caches-1.log" 2>&1
+eq "save --overlays makes the cache overlay" "0" "$?"
 has "the overlay of the folder exists" "folder=cachedir" "$(l overlay list)"
-l overlay set "$(glass cachedir)" --prune nosuch >/dev/null
+l overlay set "$(overlay cachedir)" --prune nosuch >/dev/null
 echo fresh > cachedir/a.bin
-bounded 60 "$LAYR" save --glasses -q > "$T/caches-2.log" 2>&1
-eq "save --glasses with an unknown prune adapter finishes" "0" "$?"
-l overlay set "$(glass cachedir)" --prune none >/dev/null
+bounded 60 "$LAYR" save --overlays -q > "$T/caches-2.log" 2>&1
+eq "save --overlays with an unknown prune adapter finishes" "0" "$?"
+l overlay set "$(overlay cachedir)" --prune none >/dev/null
 echo third > cachedir/a.bin
-bounded 60 "$LAYR" save --glasses -q > "$T/caches-3.log" 2>&1
-eq "save --glasses with prune none finishes" "0" "$?"
+bounded 60 "$LAYR" save --overlays -q > "$T/caches-3.log" 2>&1
+eq "save --overlays with prune none finishes" "0" "$?"
 eq "prune none keeps the folder content" "third" "$(cat cachedir/a.bin)"
 finish

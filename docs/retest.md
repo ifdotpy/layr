@@ -656,14 +656,14 @@ says its load). Times are seconds. "Before" is the binary of layr d730ca3 with s
 | run selected tests | 0.0 | 1.3 | 1.8 |
 | export coverage | 0.2 | 3.8 | 6.3 |
 | record | 0.5 to 1.0 | 0.8 | 2.0 |
-| `layr save --glasses` | 52 to 73 | 161 | 0 (not called without `--save`) |
+| `layr save --overlays` | 52 to 73 | 161 | 0 (not called without `--save`) |
 | total | 66 to 83 | 180 | 29.1 |
 | plain `cargo nextest run`, same change | 19 to 24 | 29 | 26 |
 
 What the numbers say:
 
 - The first version did not lose its time in two builds. A warm no-change run spent 1.3 to 2.1 s in
-  `cargo`, and 52 to 73 s in `layr save --glasses`, which saves every cache of the line (the 19.6 GiB
+  `cargo`, and 52 to 73 s in `layr save --overlays`, which saves every cache of the line (the 19.6 GiB
   `target` too). That was 80 % of the run.
 - `layr save --caches --cache .layr-retest` saves the record folder only, but it still makes a state of
   the line: 75 s in this line (load 28). So the save is off by default and `--save` runs it
@@ -919,7 +919,7 @@ So the baseline search reads the whole line log, not only the ancestors of the c
    (`cache.<hash>`, folder `.layr-retest`).
 
 With `--save`, `run` calls `layr save --caches --cache .layr-retest` after it writes the record. The `--cache`
-option saves only that cache path: `layr save --glasses` alone also saves every other cache of the line,
+option saves only that cache path: `layr save --overlays` alone also saves every other cache of the line,
 and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. A layr without
 `--cache` makes this call fail; the run then prints a warning and keeps the record files. The call
 saves the folder as the newest

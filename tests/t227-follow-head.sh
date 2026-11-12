@@ -32,7 +32,7 @@ l init p --from "$T/src" $owner_args -q >/dev/null || exit 1
 cd "$LAYR_ROOT/projects/p/lines/main"
 l remote add origin "file://$T/archive" --paper-key-out "$T/paper" >/dev/null || exit 1
 owner_cargo build --locked -q || exit 1
-l save --glasses -q || exit 1
+l save --overlays -q || exit 1
 l push origin -q || exit 1
 l follow origin/main >/dev/null 2>&1 || exit 1
 printf 'fn main() { println!("first"); }\n' > src/main.rs

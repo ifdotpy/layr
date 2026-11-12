@@ -148,18 +148,18 @@ Details: [benchmarks/views-20261107](../benchmarks/views-20261107/README.md).
 The states that both lines saved are equal. Line operations no longer depend on the size of the tree.
 Bulk reads of file content through the mount are slow: `rg` over the whole tree took 12 times as long.
 
-## Views of glasses
+## Views of overlays
 
-A view is a line (or a state) with an ordered list of glasses (overlays) above it
+A view is a line (or a state) with an ordered list of overlays (overlays) above it
 ([overlays](overlays.md) section 1). The working folder of a line is its default view. Since slice 5
-(overlays.md section 1a) the view, not the line, holds the glasses:
+(overlays.md section 1a) the view, not the line, holds the overlays:
 
-- A new line folder shows every glass that its owner reads, in the project order of glasses
-  (`layr overlay order`). A glass with a `platform` that is not this machine's is left out.
+- A new line folder shows every overlay that its owner reads, in the project order of overlays
+  (`layr overlay order`). An overlay with a `platform` that is not this machine's is left out.
 - `layr overlay use <names>` changes the view of the current working folder only. The line keeps
-  its parts on the other glasses: a save does not clear them.
+  its parts on the other overlays: a save does not clear them.
 - `layr view <line or state> --overlay a,b` prints another view of the same line or state, with
-  those glasses. `--folder <dir>` writes its files to a new folder (on the volume of the store).
+  those overlays. `--folder <dir>` writes its files to a new folder (on the volume of the store).
   That folder is a copy to read or build in, not a working folder: it has no status and no save.
 
 ## Open items
@@ -171,7 +171,7 @@ A view is a line (or a state) with an ordered list of glasses (overlays) above i
 - A thin lower tree (the layers of a state) instead of one complete tree, so that a virtual line of a thin state
   costs no clone.
 - Cache overlays as native folders, linked from the view. Owner decision 2026-11-11: a cache is an ordinary
-  overlay (glass) in v2 objects, and a view joins a line and a set of glasses (docs/overlays.md section 1), so the
-  view shows a cache glass as it shows any glass.
+  overlay in v2 objects, and a view joins a line and a set of overlays (docs/overlays.md section 1), so the
+  view shows a cache overlay as it shows any overlay.
 - More commands: `restore`, `reset`, `merge`.
 - Replace the lower tree under a mounted line. Git pull and replay currently apply changes to the upper folder.

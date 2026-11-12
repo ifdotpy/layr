@@ -32,10 +32,10 @@ l init p --from "$T/src" $owner_args -q >/dev/null || exit 1
 cd "$LAYR_ROOT/projects/p/lines/main"
 l remote add origin "file://$T/archive" --paper-key-out "$T/paper" >/dev/null || exit 1
 owner_cargo build --locked -q || exit 1
-l save --glasses -q || exit 1
+l save --overlays -q || exit 1
 before=$(l op log --all --json -n 1000 | wc -l | tr -d ' ')
 work_before=$(find "$LAYR_ROOT/projects/p/meta/work" -mindepth 1 -maxdepth 1 -print | sort)
-wrong=$(LAYR_TEST_SAVE_EXPECTED_HEAD=not-the-head l save --glasses -q 2>&1); wrong_rc=$?
+wrong=$(LAYR_TEST_SAVE_EXPECTED_HEAD=not-the-head l save --overlays -q 2>&1); wrong_rc=$?
 ok "a cache save refuses a different expected head" test "$wrong_rc" -ne 0
 has "the refusal names the moved line" "moved before the cache save" "$wrong"
 eq "the refused save writes no record" "$before" "$(l op log --all --json -n 1000 | wc -l | tr -d ' ')"

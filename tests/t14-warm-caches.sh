@@ -1,7 +1,7 @@
 #!/bin/bash
 # Warm caches: a new line takes the build output of its nearest ancestor that has one; build
 # output of another user only from a protected line; caches come only from an explicit
-# save --glasses, never from a check; the caches live in cache overlays, never as snapshots of states.
+# save --overlays, never from a check; the caches live in cache overlays, never as snapshots of states.
 . "$(dirname "$0")/lib.sh"
 
 chmod 755 $T $LAYR_ROOT
@@ -40,7 +40,7 @@ no "a passing check keeps no build output" sh -c "ls $LAYR_ROOT/projects/w/state
 # 3. The owner of main builds there and keeps the output on purpose: the head of main gets it.
 as layr-admin sh -c "cd $P/main && mkdir -p target && echo 1 > target/count && echo built > target/out && head -c 1048576 /dev/zero > target/big.bin"
 head_before=$(tip layr-admin main)
-ok "save --glasses on a clean main" in_line layr-admin main save -q --glasses
+ok "save --overlays on a clean main" in_line layr-admin main save -q --overlays
 eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
 no "the build output goes to the cache overlay, not to a snapshot of the state" sh -c "ls $LAYR_ROOT/projects/w/states | grep -q @"
 
@@ -59,7 +59,7 @@ eq "a new line gets the saved output, not the check's" "1" "$(cat $P/a3/target/c
 
 # 6. A user's own build output goes to that user's lines only; a line that is not protected
 #    saves a new state for it, so the head it shares with main gets nothing.
-cd $P/a3 && as layr-u1 sh -c "echo mine > target/mine && $L save -q --glasses" && cd /tmp
+cd $P/a3 && as layr-u1 sh -c "echo mine > target/mine && $L save -q --overlays" && cd /tmp
 as layr-u1 $L --project w line new -q c1 main
 no "the head of main does not take the caches of another line" test -e $P/c1/target/mine
 in_line layr-u1 a3 line new -q b1 'head@{0}'
@@ -69,7 +69,7 @@ no "to another user it does not" test -e $P/b2/target/mine
 eq "who gets the shared output of the nearest ancestor instead" "1" "$(cat $P/b2/target/count)"
 
 # 7. A new save keeps the caches in the overlay; a new line from main takes the newest.
-ok "main keeps its build output at its new head" in_line layr-admin main save -q --glasses
+ok "main keeps its build output at its new head" in_line layr-admin main save -q --overlays
 as layr-u2 $L --project w line delete -D -q a1
 l --project w gc --repair -q
 as layr-u1 $L --project w line new -q a4 main

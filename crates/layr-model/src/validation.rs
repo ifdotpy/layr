@@ -120,10 +120,10 @@ pub const STATE_TREE_OP: &str = "state.tree";
 
 /// The operation of a record that gives existing states their parts (`layr overlay migrate-parts`,
 /// docs/overlays.md section 1a): `{"states": {"<state id>": {"<overlay>": "<part id>"}}}`. A part
-/// that the state already names stays: the record only adds glasses.
+/// that the state already names stays: the record only adds overlays.
 pub const STATE_PARTS_OP: &str = "state.parts";
 
-/// The (state, parts) entries of a `state.parts` record, checked: ids are ids, glasses are names.
+/// The (state, parts) entries of a `state.parts` record, checked: ids are ids, overlays are names.
 pub fn state_parts(data: &serde_json::Value) -> anyhow::Result<Vec<(String, BTreeMap<String, String>)>> {
     let Some(states) = data.get("states").and_then(|v| v.as_object()) else {
         anyhow::bail!("a state.parts record names no states");
@@ -135,12 +135,12 @@ pub fn state_parts(data: &serde_json::Value) -> anyhow::Result<Vec<(String, BTre
             anyhow::bail!("state.parts: bad state {state:?}");
         }
         let mut map = BTreeMap::new();
-        for (glass, part) in parts {
+        for (overlay, part) in parts {
             let part = part.as_str().unwrap_or("");
-            if !is_name(glass) || !is_uuid(part) {
+            if !is_name(overlay) || !is_uuid(part) {
                 anyhow::bail!("state.parts: bad entry for state {state:?}");
             }
-            map.insert(glass.clone(), part.to_string());
+            map.insert(overlay.clone(), part.to_string());
         }
         out.push((state.clone(), map));
     }
@@ -237,9 +237,9 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
                 bail!("record {}: bad cache name {snap:?}", r.seq);
             }
         }
-        for (glass, part) in &s.parts {
-            if !is_name(glass) {
-                bail!("record {}: bad overlay name {glass:?}", r.seq);
+        for (overlay, part) in &s.parts {
+            if !is_name(overlay) {
+                bail!("record {}: bad overlay name {overlay:?}", r.seq);
             }
             uuid("part", part)?;
         }
@@ -644,7 +644,7 @@ mod tests {
         r.states = vec![st.clone()];
         assert!(validate(&r).is_ok());
         r.states[0].parts.insert("../x".into(), part.into());
-        assert!(validate(&r).is_err(), "a glass is a name");
+        assert!(validate(&r).is_err(), "an overlay is a name");
         r.states[0].parts = BTreeMap::from([("notes".to_string(), "../x".to_string())]);
         assert!(validate(&r).is_err(), "a part is an id");
         let mut m = Record::new(STATE_PARTS_OP);

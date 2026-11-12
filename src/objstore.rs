@@ -177,8 +177,8 @@ impl layr_objects::write::Source for SnapshotSource<'_> {
     }
 }
 
-/// Whether new states of `p` go to its object store. An overlay (a glass) follows its project: a part of a glass
-/// is stored as objects like a state of the base (docs/overlays.md section 1a, slice 7), in the glass's own store.
+/// Whether new states of `p` go to its object store. An overlay (an overlay) follows its project: a part of an overlay
+/// is stored as objects like a state of the base (docs/overlays.md section 1a, slice 7), in the overlay's own store.
 pub fn enabled(p: &Project) -> Result<bool> {
     let on = |v: Option<serde_json::Value>| v.and_then(|v| v.as_bool()) == Some(true);
     let Some((project, _)) = p.name.split_once('%') else {
@@ -237,8 +237,8 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         store.set_state(&state.id, &refs)?;
         state.tree = Some(refs.tree.hex());
         state.times = Some(refs.times.hex());
-        // A part of a build-output glass (`cache_of`) gives up its native copy too: the cache code reads it through
-        // `state_root`, which builds the copy again from these objects. Other glasses keep theirs for now: their
+        // A part of a build-output overlay (`cache_of`) gives up its native copy too: the cache code reads it through
+        // `state_root`, which builds the copy again from these objects. Other overlays keep theirs for now: their
         // code reads parts as folders.
         if !p.is_overlay() || state.cache_of.is_some() {
             queue_native(p, &state.id)?;

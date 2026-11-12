@@ -284,9 +284,9 @@ def push(db):
 parent=push(parent_db)
 overlays=[push(db) for db in overlay_dbs]
 parent_ids=set(parent['data']['state_ids_sent'])
-def glass_heads(name, db):
-    # The heads of a glass: its overlay lines (hidden glasses keep them), and the parts that the heads of the
-    # project's lines name (docs/overlays.md section 1a: a glass that keeps parts has no lines).
+def overlay_heads(name, db):
+    # The heads of an overlay: its overlay lines (hidden overlays keep them), and the parts that the heads of the
+    # project's lines name (docs/overlays.md section 1a: an overlay that keeps parts has no lines).
     heads={row[0] for row in db.execute('select head from lines where deleted=0')}
     for rec, in parent_db.execute('select rec from states where id in (select head from lines where deleted=0)'):
         part=json.loads(rec).get('parts',{}).get(name)
@@ -299,7 +299,7 @@ def glass_heads(name, db):
                 heads.add(layer['state'])
     return heads
 for name,db,overlay in zip(['secrets','hidden-golden'],overlay_dbs,overlays):
-    heads=glass_heads(name, db)
+    heads=overlay_heads(name, db)
     overlay_ids=set(overlay['data']['state_ids_sent'])
     assert heads and heads <= overlay_ids
     assert not parent_ids & overlay_ids

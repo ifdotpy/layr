@@ -18,7 +18,7 @@ git init -q --bare "$T/origin.git" || exit 1
 l git remote add origin "$T/origin.git" || exit 1
 l git push -q origin main || exit 1
 cargo build --offline -q || exit 1
-l save --glasses -q || exit 1
+l save --overlays -q || exit 1
 l follow origin/main > "$T/first.log" 2>&1 || { cat "$T/first.log"; exit 1; }
 l line new other main -q || exit 1
 printf 'fn main() { println!("two"); }\n' > src/main.rs
@@ -57,7 +57,7 @@ has "the next follow pass rebuilds after the head changes" 'caches saved with th
 eq "the cache binary reflects the new head" three "$(target/debug/follow-cache-race)"
 # A prepared cache save and a follow build on one line must not publish out of order.
 mkdir -p "$T/cache-save-barrier"
-LAYR_TEST_CACHE_SAVE_BARRIER="$T/cache-save-barrier" "$LAYR" save --glasses -q > "$T/cache-save.log" 2>&1 &
+LAYR_TEST_CACHE_SAVE_BARRIER="$T/cache-save-barrier" "$LAYR" save --overlays -q > "$T/cache-save.log" 2>&1 &
 CACHE_SAVE=$!
 for _ in $(seq 1 300); do
     [ -f "$T/cache-save-barrier/ready" ] && break
@@ -87,7 +87,7 @@ eq "a new line receives the latest cache" four "$("$LAYR_ROOT/projects/race/line
 printf 'fn main() { println!("five"); }\n' > src/main.rs
 l save -a -q -m five || exit 1
 mkdir -p "$T/cache-save-before-follow"
-LAYR_TEST_CACHE_SAVE_BARRIER="$T/cache-save-before-follow" "$LAYR" save --glasses -q > "$T/old-cache.log" 2>&1 &
+LAYR_TEST_CACHE_SAVE_BARRIER="$T/cache-save-before-follow" "$LAYR" save --overlays -q > "$T/old-cache.log" 2>&1 &
 OLD_CACHE=$!
 for _ in $(seq 1 300); do
     [ -f "$T/cache-save-before-follow/ready" ] && break
@@ -146,7 +146,7 @@ printf 'live' > "$live_work/sentinel"
 printf 'unknown' > "$unknown_work/sentinel"
 work_before=$(find "$LAYR_ROOT/projects/race/meta/work" -mindepth 1 -maxdepth 1 -print | sort)
 mkdir -p "$T/killed-cache-barrier"
-LAYR_TEST_CACHE_SAVE_BARRIER="$T/killed-cache-barrier" "$LAYR" save --glasses -q > "$T/killed-cache.log" 2>&1 &
+LAYR_TEST_CACHE_SAVE_BARRIER="$T/killed-cache-barrier" "$LAYR" save --overlays -q > "$T/killed-cache.log" 2>&1 &
 KILLED_CACHE=$!
 for _ in $(seq 1 300); do
     [ -f "$T/killed-cache-barrier/ready" ] && break
@@ -158,10 +158,10 @@ if [ ! -f "$T/killed-cache-barrier/ready" ]; then
 fi
 kill -KILL "$KILLED_CACHE"
 wait "$KILLED_CACHE" 2>/dev/null
-ok "cache save succeeds after a killed save" l save --glasses -q
+ok "cache save succeeds after a killed save" l save --overlays -q
 l line new recovered main -q || exit 1
 eq "the recovered cache retains the latest executable" six "$("$LAYR_ROOT/projects/race/lines/recovered/target/debug/follow-cache-race" 2>/dev/null)"
-ok "cache verification succeeds after a killed save" l fsck --glasses
+ok "cache verification succeeds after a killed save" l fsck --overlays
 eq "a killed cache save leaves no additional work files" "$work_before" "$(find "$LAYR_ROOT/projects/race/meta/work" -mindepth 1 -maxdepth 1 -print | sort)"
 eq "a live creator's work is kept" live "$(cat "$live_work/sentinel")"
 eq "work without a creator is kept" unknown "$(cat "$unknown_work/sentinel")"

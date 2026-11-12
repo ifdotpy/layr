@@ -1,6 +1,6 @@
 #!/bin/bash
 # .layrattributes: the folders that it makes regenerable (gitignore patterns) become caches on
-# save --glasses, if the ignore rules ignore them; a new line takes the nearest saved copy while
+# save --overlays, if the ignore rules ignore them; a new line takes the nearest saved copy while
 # the attribute is still set; a folder whose files are in history never becomes a cache, also
 # when the ignore rules ignore it, and one that an older layr made a cache becomes plain again.
 . "$(dirname "$0")/lib.sh"
@@ -28,12 +28,12 @@ l --project r protect main --direct
 cd /tmp || exit 1
 tip() { in_line $1 $2 rev-parse head; }
 
-# 1. A build in main makes plain folders; save --glasses turns the named ones into caches. The
+# 1. A build in main makes plain folders; save --overlays turns the named ones into caches. The
 #    ignored data/ folder that is not named changes too, but it is not a change of main.
 as layr-admin sh -c "cd $P/main && mkdir -p node_modules/pkg web/node_modules/x .venv/bin data && echo 1 > node_modules/pkg/index.js && echo 2 > web/node_modules/x/i.js && echo py > .venv/bin/python && echo d > data/d"
 mkdir -p $T/outside/node_modules && as layr-admin ln -s $T/outside $P/main/data/linked
 head_before=$(tip layr-admin main)
-ok "save --glasses on main" in_line layr-admin main save -q --glasses
+ok "save --overlays on main" in_line layr-admin main save -q --overlays
 eq "the head of main did not move" "$head_before" "$(tip layr-admin main)"
 eq "the named folders are caches, none behind a link" "$(printf 'cache\ncache\ncache')" "$(in_line layr-admin main overlay list | awk -F'\t' '{print $6}')"
 ok "a nested named folder is a subvolume" sh -c "btrfs subvolume show $P/main/web/node_modules >/dev/null"
@@ -61,7 +61,7 @@ no "a folder that is no longer named does not" test -e $P/a3/.venv/bin/python
 
 # 5. An ignored, regenerable folder whose files are in the head state (added with add -f, or
 #    kept by an import with --include-ignored) holds versioned files: it is no cache.
-#    save --glasses says so and leaves it a plain folder, so its files stay in history.
+#    save --overlays says so and leaves it a plain folder, so its files stay in history.
 V=$T/v
 rm -rf $V && mkdir -p $V/artifacts
 echo code > $V/a.txt && echo kept > $V/artifacts/kept.txt
@@ -76,10 +76,10 @@ is_cache() { btrfs subvolume show "$1" >/dev/null 2>&1; }
 NOT="not a cache: has versioned files; remove them from history first"
 AGAIN="not a cache: has versioned files; a plain folder again"
 as layr-admin sh -c "cd $PV/main && mkdir out && echo bin > out/bin && echo new > artifacts/new.bin"
-eq "save --glasses says why a folder is no cache" "artifacts: $NOT" "$(in_v layr-admin main save --glasses | grep '^artifacts')"
+eq "save --overlays says why a folder is no cache" "artifacts: $NOT" "$(in_v layr-admin main save --overlays | grep '^artifacts')"
 ok "the other folder is a cache" is_cache $PV/main/out
 no "the folder with versioned files stays a plain folder" is_cache $PV/main/artifacts
-eq "the cache overlay of out is a cache" "cache" "$(in_v layr-admin main overlay list | grep "$(glass out)" | cut -f6)"
+eq "the cache overlay of out is a cache" "cache" "$(in_v layr-admin main overlay list | grep "$(overlay out)" | cut -f6)"
 eq "its files stay in the working content" "" "$(in_v layr-admin main status -s)"
 as layr-u1 $L --project v line new -q v1 main
 eq "a new line takes the folder from the state" "kept" "$(cat $PV/v1/artifacts/kept.txt)"
@@ -88,8 +88,8 @@ no "as a plain folder" is_cache $PV/v1/artifacts
 eq "and the other cache warm" "bin" "$(cat $PV/v1/out/bin)"
 
 # 6. overlay repair and the removed cache add leave such a folder plain. One that an older layr made
-#    a cache (a subvolume with the same files) becomes a plain folder again, by save --glasses.
-no "overlay repair needs a cache overlay, which the folder has not" in_v layr-admin main overlay repair "$(glass artifacts)"
+#    a cache (a subvolume with the same files) becomes a plain folder again, by save --overlays.
+no "overlay repair needs a cache overlay, which the folder has not" in_v layr-admin main overlay repair "$(overlay artifacts)"
 no "and a plain folder" is_cache $PV/main/artifacts
 no "cache add is no command" in_v layr-admin main cache add artifacts
 no "and leaves it a plain folder" is_cache $PV/main/artifacts
@@ -101,12 +101,12 @@ older_cache() { # older_cache <line folder> <path>: as an older layr did
         rm -rf "${1:?}/$2" && mv "$1/$2.old" "$1/$2" && chown layr-admin: "$1/$2"
 }
 older_cache $PV/main artifacts && echo stale > $PV/main/artifacts/stale.bin
-eq "save --glasses makes it a plain folder again" "artifacts: $AGAIN" "$(in_v layr-admin main save --glasses | grep '^artifacts')"
+eq "save --overlays makes it a plain folder again" "artifacts: $AGAIN" "$(in_v layr-admin main save --overlays | grep '^artifacts')"
 no "a plain folder" is_cache $PV/main/artifacts
 eq "with all its files" "kept stale" "$(cat $PV/main/artifacts/kept.txt $PV/main/artifacts/stale.bin | xargs)"
 eq "none of them deleted" "" "$(in_v layr-admin main status -s)"
 older_cache $PV/main artifacts
-eq "save --glasses does the same" "artifacts: $AGAIN" "$(in_v layr-admin main save --glasses | grep '^artifacts')"
+eq "save --overlays does the same" "artifacts: $AGAIN" "$(in_v layr-admin main save --overlays | grep '^artifacts')"
 no "a plain folder after the save" is_cache $PV/main/artifacts
 eq "its files in the working content" "" "$(in_v layr-admin main status -s)"
 
@@ -114,7 +114,7 @@ eq "its files in the working content" "" "$(in_v layr-admin main status -s)"
 #    takes the files from its state, not the older cache.
 rm -rf $PV/main/out && mkdir $PV/main/out && echo keep > $PV/main/out/keep.txt && chown -R layr-admin: $PV/main/out
 as layr-admin sh -c "cd $PV/main && $L add -f out/keep.txt && $L save -qm 'keep out'"
-eq "the overlay of out says why" "$NOT" "$(in_v layr-admin main overlay list | grep "$(glass out)" | cut -f6)"
+eq "the overlay of out says why" "$NOT" "$(in_v layr-admin main overlay list | grep "$(overlay out)" | cut -f6)"
 as layr-u1 $L --project v line new -q v2 main
 eq "a new line takes the versioned file" "keep" "$(cat $PV/v2/out/keep.txt)"
 no "not the older cache" test -e $PV/v2/out/bin

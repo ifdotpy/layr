@@ -19,7 +19,7 @@ python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(3 << 20))' ta
 cp target/debug/deps/libbig-1111111111111111.rlib target/debug/deps/copy.rlib
 echo small > target/debug/out
 touch -t 202101010000.00 target/debug/out
-l save --glasses -q
+l save --overlays -q
 mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
 packs() { find "$T/archive" -path '*/chunks/*.pack.age' | sort; }
 bytes() { python3 -c 'import os,sys; print(sum(os.path.getsize(p) for p in sys.argv[1:]))' "$@"; }
@@ -51,7 +51,7 @@ middle = len(data) // 2
 open(os.path.join(d, "libbig-2222222222222222.rlib"), "wb").write(data[:middle] + os.urandom(100) + data[middle:])
 os.remove(old)
 EOF
-l save --glasses -q
+l save --overlays -q
 ok "push the changed cache" l push archive -q
 new=$(comm -13 <(echo "$first") <(packs))
 added=$(bytes $new)
@@ -67,7 +67,7 @@ ok "and the removed file is gone" test ! -e "$R/far/target/debug/deps/libbig-111
 # The next push preserves unchanged content and publishes the changed file. Visited files
 # are read and hashed; matching content reuses its chunks.
 echo more >> "$P/main/target/debug/out"
-l save --glasses -q
+l save --overlays -q
 l push archive -q
 mkdir -p "$T/d"
 env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
@@ -77,18 +77,18 @@ ok "an unchanged file is still complete" cmp "$P/main/target/debug/deps/libbig-2
 
 # No dead chunk stays, with no gc call: the pushes above made older cache states dead, and their
 # sweep rewrote the packs that held their chunks.
-out=$(l fsck --glasses --remote archive 2>&1); rc=$?
-eq "fsck --glasses --remote finds nothing unreachable" 0 "$rc"
+out=$(l fsck --overlays --remote archive 2>&1); rc=$?
+eq "fsck --overlays --remote finds nothing unreachable" 0 "$rc"
 has "and it counts chunks" "0 unreachable chunk(s)" "$out"
 has "and no tree misses a chunk" "0 tree(s) with missing chunks" "$out"
 # A line with a cache file of its own: its chunks go with the line.
 before=$(packs | wc -l | tr -d ' ')
 l line new z main >/dev/null 2>&1
-(cd "$P/z" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/zonly && l save --glasses -q && l push archive -q >/dev/null 2>&1)
+(cd "$P/z" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/zonly && l save --overlays -q && l push archive -q >/dev/null 2>&1)
 ok "the line's push adds a pack" test "$(packs | wc -l | tr -d ' ')" -gt "$before"
 l line delete -D z >/dev/null
 l push archive -q >/dev/null 2>&1
-out=$(l fsck --glasses --remote archive 2>&1); rc=$?
+out=$(l fsck --overlays --remote archive 2>&1); rc=$?
 eq "after the line delete and a push nothing is unreachable" 0 "$rc"
 has "no chunk of the line is left" "0 unreachable chunk(s)" "$out"
 eq "its pack is gone" "$before" "$(packs | wc -l | tr -d ' ')"
@@ -96,7 +96,7 @@ eq "its pack is gone" "$before" "$(packs | wc -l | tr -d ' ')"
 # With a wait: a sweep releases a dead chunk only when an earlier pass found it dead long enough before, so a push
 # of another machine that reused it meanwhile names it in its tree first.
 l line new y main >/dev/null 2>&1
-(cd "$P/y" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/yonly && l save --glasses -q && l push archive -q >/dev/null 2>&1)
+(cd "$P/y" && python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/yonly && l save --overlays -q && l push archive -q >/dev/null 2>&1)
 with_y=$(packs | wc -l | tr -d ' ')
 l line delete -D y >/dev/null
 LAYR_TEST_CHUNK_GRACE=3600 l push archive -q >/dev/null 2>&1

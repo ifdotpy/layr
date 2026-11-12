@@ -1762,7 +1762,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             } else {
                 commit_tree(repo, &export, &rec, base.as_ref(), &parents, None, &history_ref(&s))?
             };
-            // A state that changed only the parts of glasses has the tree of its parent: git gets
+            // A state that changed only the parts of overlays has the tree of its parent: git gets
             // no empty commit, the state maps to its parent's commit (docs/overlays.md section 1a).
             let c = match (rec.parents.as_slice(), base.as_ref()) {
                 ([parent], Some((_, parent_commit)))

@@ -111,14 +111,14 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.require(ctx, "line.create")?;
     let hidden = a.has("--hidden");
     let folder = a.get("--folder").map(crate::overlay::folder_path).transpose()?;
-    // A line has its own part on each glass, and a new line inherits the part of its source (owner decision
-    // 2026-11-11): the shared mode (one overlay line for all lines of a user) is gone for new glasses. Old shared
-    // glasses keep working.
+    // A line has its own part on each overlay, and a new line inherits the part of its source (owner decision
+    // 2026-11-11): the shared mode (one overlay line for all lines of a user) is gone for new overlays. Old shared
+    // overlays keep working.
     let mode = match a.get("--mode") {
         Some("shared") => {
             return Err(exit(
                 2,
-                "layr overlay create --mode shared was removed: each line has its part of a glass and a new line inherits it. Leave out --mode",
+                "layr overlay create --mode shared was removed: each line has its part of an overlay and a new line inherits it. Leave out --mode",
             ))
         }
         Some(m) => Mode::parse(m).ok_or_else(|| exit(128, format!("fatal: unknown mode '{m}' (follow)")))?,
@@ -135,7 +135,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if repo.overlay_info(&name)?.is_some() {
         return Err(exit(128, format!("fatal: overlay '{name}' already exists")));
     }
-    // One folder glass per folder and platform: build output of each platform is its own glass.
+    // One folder overlay per folder and platform: build output of each platform is its own overlay.
     if let Some(f) = &folder {
         let clash = |p: &Option<String>| p.is_none() || props.platform.is_none() || *p == props.platform;
         if let Some((other, _, _)) = repo.all_folder_overlays()?.into_iter().find(|(_, x, p)| x == f && clash(p)) {
@@ -160,7 +160,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Make overlay `name` of the caller with its empty first state and its records. The caller holds
 /// the project lock and has checked that no overlay has the name. `folder`: a folder overlay;
-/// `cache`: the cache overlay of a cache path (`save --glasses`).
+/// `cache`: the cache overlay of a cache path (`save --overlays`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_overlay(
     ctx: &Ctx,
@@ -340,7 +340,7 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
         };
     }
     if let Some(v) = a.get("--platform") {
-        // `--platform any` clears it: the glass is on every platform.
+        // `--platform any` clears it: the overlay is on every platform.
         p.platform = match v {
             "any" => None,
             _ => Some(crate::overlay::platform_name(v).ok_or_else(|| {
@@ -460,7 +460,7 @@ fn folder_in_line(
         (FolderIn::Cache, false) => "absent".to_string(),
     };
     let size = listing_size(with_size, kind, is_layer, || crate::overlay::tree_size(&cp));
-    // A glass of one platform has `line-<id>`; an older `cache.<folder>` glass one line per platform.
+    // An overlay of one platform has `line-<id>`; an older `cache.<folder>` overlay one line per platform.
     let saved = op
         .and_then(|p| {
             [crate::overlay::cache_line_name(&l.id), format!("line-{}", l.id)]
@@ -894,8 +894,8 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
             h.repo.p.config_value(&key)
         }
     };
-    // The state that the current line shows on the glass (its view), which is the newest also when an overlay-only
-    // save on a protected line keeps it in the stack; else the head of the glass's line.
+    // The state that the current line shows on the overlay (its view), which is the newest also when an overlay-only
+    // save on a protected line keeps it in the stack; else the head of the overlay's line.
     let shown = match h.line.as_ref() {
         Some(line) => h.repo.layers(line)?.into_iter().find(|l| &l.overlay == name).map(|l| l.state),
         None => None,
@@ -1032,7 +1032,7 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 /// `layr overlay migrate-parts` (docs/overlays.md, section 1a): the head of each line names its
-/// parts on the glasses that keep parts, from the line's stack (the heads of its overlay lines). One
+/// parts on the overlays that keep parts, from the line's stack (the heads of its overlay lines). One
 /// `state.parts` record adds them; the signed save records stay as they are. A state that two lines
 /// show takes the parts of the line that saved it, else of the first line by name. Older states
 /// keep no parts: their overlay lines stay for reading.
@@ -1047,18 +1047,18 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !repo.is_admin(ctx) {
         return Err(exit(1, "error: only an admin of the project can migrate its states to parts"));
     }
-    // A `cache.<folder>` glass of an older layr gets the platform of its states, so it is the glass of that platform.
+    // A `cache.<folder>` overlay of an older layr gets the platform of its states, so it is the overlay of that platform.
     // `overlay set` takes the project lock itself, so this comes before the lock below.
     let platforms = old_cache_platforms(repo)?;
     if !a.has("-n") {
-        for (glass, platform) in &platforms {
-            set(ctx, &[glass.clone(), "--platform".into(), platform.clone()])?;
+        for (overlay, platform) in &platforms {
+            set(ctx, &[overlay.clone(), "--platform".into(), platform.clone()])?;
         }
     }
     if !a.has("-q") {
         let verb = if a.has("-n") { "would set" } else { "set" };
-        for (glass, platform) in &platforms {
-            outln!(ctx, "{verb} platform {platform} on {glass}");
+        for (overlay, platform) in &platforms {
+            outln!(ctx, "{verb} platform {platform} on {overlay}");
         }
     }
     let _lock = repo.p.lock()?;
@@ -1083,14 +1083,14 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         };
         let mut parts = repo.parts_of(&layers)?;
-        // The folder glasses (build output): the head of the line's overlay line of this platform.
-        for (glass, part) in folder_parts(repo, l)? {
-            parts.entry(glass).or_insert(part);
+        // The folder overlays (build output): the head of the line's overlay line of this platform.
+        for (overlay, part) in folder_parts(repo, l)? {
+            parts.entry(overlay).or_insert(part);
         }
         let entry = states.entry(l.head.clone()).or_default();
-        for (glass, part) in parts {
-            if !st.parts.contains_key(&glass) && !entry.contains_key(&glass) {
-                entry.insert(glass, part);
+        for (overlay, part) in parts {
+            if !st.parts.contains_key(&overlay) && !entry.contains_key(&overlay) {
+                entry.insert(overlay, part);
                 moved.insert(l.name.clone());
             }
         }
@@ -1118,17 +1118,17 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// The parts of line `l` on the folder glasses of this platform: the head of its overlay line (`line-<id>`, or the
+/// The parts of line `l` on the folder overlays of this platform: the head of its overlay line (`line-<id>`, or the
 /// older `line-<id>.<platform>`), when that is not the empty first state.
 fn folder_parts(repo: &Repo, l: &crate::model::Line) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    for (glass, _) in repo.folder_overlays()? {
-        let (Some(info), Ok(orepo)) = (repo.overlay_info(&glass)?, repo.overlay_repo(&glass)) else { continue };
+    for (overlay, _) in repo.folder_overlays()? {
+        let (Some(info), Ok(orepo)) = (repo.overlay_info(&overlay)?, repo.overlay_repo(&overlay)) else { continue };
         let names = [format!("line-{}", l.id), crate::overlay::cache_line_name(&l.id)];
         for name in names {
             if let Some(ol) = orepo.p.db.line_by_name(&name)? {
                 if ol.head != info.root {
-                    out.insert(glass.clone(), ol.head);
+                    out.insert(overlay.clone(), ol.head);
                     break;
                 }
             }
@@ -1137,15 +1137,15 @@ fn folder_parts(repo: &Repo, l: &crate::model::Line) -> Result<BTreeMap<String, 
     Ok(out)
 }
 
-/// The `cache.<folder>` glasses with no `platform` whose saved states all have one platform: glass and platform.
-/// A glass with states of two platforms keeps no platform (`fetch` and `line new` filter its states one by one).
+/// The `cache.<folder>` overlays with no `platform` whose saved states all have one platform: overlay and platform.
+/// An overlay with states of two platforms keeps no platform (`fetch` and `line new` filter its states one by one).
 fn old_cache_platforms(repo: &Repo) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
-    for (glass, _, platform) in repo.all_folder_overlays()? {
-        if platform.is_some() || !glass.starts_with("cache.") {
+    for (overlay, _, platform) in repo.all_folder_overlays()? {
+        if platform.is_some() || !overlay.starts_with("cache.") {
             continue;
         }
-        let Ok(orepo) = repo.overlay_repo(&glass) else { continue };
+        let Ok(orepo) = repo.overlay_repo(&overlay) else { continue };
         let mut seen = BTreeSet::new();
         for (id, _) in orepo.p.db.cache_states()? {
             if let Some(st) = orepo.p.db.state(&id)? {
@@ -1153,7 +1153,7 @@ fn old_cache_platforms(repo: &Repo) -> Result<Vec<(String, String)>> {
             }
         }
         if seen.len() == 1 {
-            out.push((glass, seen.into_iter().next().unwrap_or_default()));
+            out.push((overlay, seen.into_iter().next().unwrap_or_default()));
         }
     }
     Ok(out)
@@ -1167,10 +1167,10 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     if !repo.reads_overlay(name, line.owner, gid)? {
         return Err(exit(1, format!("error: the owner of line '{}' does not read overlay '{name}'", line.name)));
     }
-    // A glass that keeps parts gets no overlay line: the folder shows the part that the head of
+    // An overlay that keeps parts gets no overlay line: the folder shows the part that the head of
     // the line names, else the state of its own old overlay line, else the empty first state.
-    if crate::overlay::parts_glass(&info) {
-        return repo.glass_layer(Some(line), &line.head, name)?.ok_or_else(|| exit(1, format!("error: no overlay '{name}'")));
+    if crate::overlay::parts_overlay(&info) {
+        return repo.overlay_layer(Some(line), &line.head, name)?.ok_or_else(|| exit(1, format!("error: no overlay '{name}'")));
     }
     let orepo = repo.overlay_repo(name)?;
     let _lock = orepo.p.lock()?;
@@ -1182,9 +1182,9 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     Ok(Layer { overlay: name.to_string(), state: ol.head })
 }
 
-/// `layr overlay order [<name>,...]`: show or set the project order of glasses (setting
-/// `overlays.order`). A new line folder shows its glasses in this order (docs/overlays.md, section
-/// 1a, slice 5); glasses that the list does not name follow in the order of their creation.
+/// `layr overlay order [<name>,...]`: show or set the project order of overlays (setting
+/// `overlays.order`). A new line folder shows its overlays in this order (docs/overlays.md, section
+/// 1a, slice 5); overlays that the list does not name follow in the order of their creation.
 fn order(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&Spec::new(), args)?;
     let h = here(ctx)?;
@@ -1221,7 +1221,7 @@ fn order(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// Set the view of the working folder of the current line: the glasses it shows and their order
+/// Set the view of the working folder of the current line: the overlays it shows and their order
 /// (`view.<line id>`, slice 5). The owner's choice: the line's overlay files come and go.
 fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--add").flag("--remove").flag("--none").flag("-f|--force").flag("-q|--quiet");
@@ -1457,10 +1457,10 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
     // The overlay's own policy decides: a user who does not read it is refused here.
     let orepo = Repo::open(ctx, &pname)?;
     let olname = overlay_line(ctx, &h.repo, h.line.as_ref(), &info, &name, &orepo)?.map(|l| l.name);
-    // A glass that keeps parts has no overlay line: the commands read from the part that the
+    // An overlay that keeps parts has no overlay line: the commands read from the part that the
     // current line shows, as a head without a line.
     let detached = match (&olname, h.line.as_ref()) {
-        (None, Some(l)) if crate::overlay::parts_glass(&info) => {
+        (None, Some(l)) if crate::overlay::parts_overlay(&info) => {
             h.repo.layers(l)?.into_iter().find(|x| x.overlay == name).map(|x| crate::model::Line {
                 id: ids::new_id(),
                 name: l.name.clone(),

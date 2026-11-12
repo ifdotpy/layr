@@ -10,7 +10,7 @@ P=$LAYR_ROOT/projects/p
 cd "$P/lines/main"
 mkdir -p target
 echo local > target/out.bin
-l save --glasses -q
+l save --overlays -q
 O=$P/meta/overlays/$TG
 ok "the fixture has a cache overlay" test -f "$O/meta/db/layr.sqlite"
 old_time=$(date -d '2 hours ago' +%Y%m%d%H%M 2>/dev/null || date -v-2H +%Y%m%d%H%M)

@@ -12,12 +12,12 @@ P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/overlays/$TG/states
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
-mkdir -p target; echo m > target/out; l save --glasses -q
+mkdir -p target; echo m > target/out; l save --overlays -q
 kept=$(ls $O | wc -l | tr -d ' ')
 l line new x main >/dev/null 2>&1
 cd $P/x || exit 1
-echo x1 > target/out; l save --glasses -q
-echo x2 > target/out; l save --glasses -q
+echo x1 > target/out; l save --overlays -q
+echo x2 > target/out; l save --overlays -q
 no "the line has its own cache states" test "$(ls $O | wc -l | tr -d ' ')" -eq "$kept"
 cd $P/main || exit 1
 l line delete -D x >/dev/null

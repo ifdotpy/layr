@@ -21,41 +21,41 @@ in the Studio project found these problems:
 
 ## 2. Model
 
-Owner decision 2026-11-11. A cache is an ordinary overlay: a glass of the model in
+Owner decision 2026-11-11. A cache is an ordinary overlay: an overlay of the model in
 [overlays](overlays.md) section 1. No special cache concept remains: no cache flags, no `cache.`
 name prefix, no separate code path. Slices 3 and 6 of [overlays](overlays.md) section 1a build most
 of it; "Built today" below says how the code still differs.
 
-- A cache is a glass such as `target.macos-aarch64` with `folder=target`, `quiet`, `history=last`,
+- A cache is an overlay such as `target.macos-aarch64` with `folder=target`, `quiet`, `history=last`,
   `merge=union-theirs`, `platform=macos-aarch64` and `trust=protected`. Build output of each
-  platform is its own glass. Lines and glasses are independent: a line does not own a cache, and
+  platform is its own overlay. Lines and overlays are independent: a line does not own a cache, and
   a cache does not own lines.
-- A line has the same name on every glass. One state of a line holds its part on each glass,
-  the cache glass too. A view joins a line and a set of glasses.
-- `history=last` on a glass: older states of a line keep their parts on other glasses; their
-  part on this glass is dropped.
-- `fetch` takes lines and glasses: for example, a merge runner takes the line `main` with the
-  base and the `target.linux-x86_64` glass.
-- Storage: cache glasses go into v2 objects ([objects](objects.md)) like any glass. A state
-  record names one tree and one times table per glass.
+- A line has the same name on every overlay. One state of a line holds its part on each overlay,
+  the cache overlay too. A view joins a line and a set of overlays.
+- `history=last` on an overlay: older states of a line keep their parts on other overlays; their
+  part on this overlay is dropped.
+- `fetch` takes lines and overlays: for example, a merge runner takes the line `main` with the
+  base and the `target.linux-x86_64` overlay.
+- Storage: cache overlays go into v2 objects ([objects](objects.md)) like any overlay. A state
+  record names one tree and one times table per overlay.
 - Space: layered storage and the cleanup of old layers (`history=last`) save space. No size cap
   applies to a cache: the owner rejects `gc lru:<size>` for caches.
 
 Built today:
 
-- `save -m` saves the part of each build-output glass that changed, and the state names it
-  (`parts`). The first named save of a `regenerable` folder makes the glass of this platform,
+- `save -m` saves the part of each build-output overlay that changed, and the state names it
+  (`parts`). The first named save of a `regenerable` folder makes the overlay of this platform,
   `<folder>.<platform>`. `line new <state>` takes the part that the state names.
 - The cache flags of transfers (`--caches`, `--no-caches`, `--caches-of` on push, fetch, pull,
   sync and clone) are removed: each fails with exit status 2 and names `--line` or `--overlay`.
   `save --caches`, `merge --caches-only` and `fsck --caches` are removed too: they are
-  `save --glasses`, `merge --glasses-only` and `fsck --glasses` ([commands](commands.md), `save`).
-- A `cache.<folder>` glass of an older layr stays the glass of its folder on every platform, with
-  one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6). A new glass has
-  one platform and overlay lines `line-<line id>`. To move a store to one glass per platform, see
+  `save --overlays`, `merge --overlays-only` and `fsck --overlays` ([commands](commands.md), `save`).
+- A `cache.<folder>` overlay of an older layr stays the overlay of its folder on every platform, with
+  one overlay line per line and platform (`line-<line id>.<os>-<arch>`, section 6). A new overlay has
+  one platform and overlay lines `line-<line id>`. To move a store to one overlay per platform, see
   [overlays](overlays.md) section 1a, "Slice 6 as built".
-- `src/cache_overlay.rs` is still a separate code path for build-output glasses, and the setting
-  `overlay.<glass>.cache` marks them. A part is a full native folder snapshot (section 21), not v2
+- `src/cache_overlay.rs` is still a separate code path for build-output overlays, and the setting
+  `overlay.<overlay>.cache` marks them. A part is a full native folder snapshot (section 21), not v2
   objects.
 
 The properties as built:
@@ -70,16 +70,16 @@ The properties as built:
   | `merge` | `three-way`, `union-theirs` | `three-way` | How a merge of a line combines the follow overlay. `union-theirs`: the result has every file of both sides; on the same path the incoming line wins; no conflicts. |
   | `gc` | `none`, `lru:<size>` | `none` | Built, but not for caches (owner decision 2026-11-11: no size cap for caches). `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
   | `folder` | a path | none | A **folder overlay**: the overlay is the whole folder at that path (section 3). |
-  | `platform` | a platform key (`<os>-<arch>`) or none | none | The glass of one platform (overlays.md section 1a, slice 3): shown, fetched and pushed only on that platform. Each part also records the key of its build (section 6); a line takes a part only when that key fits. |
-  | `trust` | `protected`, `readers` | `protected` for a folder glass | `protected`: a part that another user saved is taken only from a protected line (design.md section 5). `readers`: any part that the user reads. |
+  | `platform` | a platform key (`<os>-<arch>`) or none | none | The overlay of one platform (overlays.md section 1a, slice 3): shown, fetched and pushed only on that platform. Each part also records the key of its build (section 6); a line takes a part only when that key fits. |
+  | `trust` | `protected`, `readers` | `protected` for a folder overlay | `protected`: a part that another user saved is taken only from a protected line (design.md section 5). `readers`: any part that the user reads. |
 
 - A **cache overlay** is an overlay with `folder=<path>`, `quiet`, `history=last`,
   `merge=union-theirs`, `platform=<key>` and `trust=protected`, in follow mode. Its readers are its owner and the machines
   that the project trusts (owner decision 2026-10-27), so store copies and peer sync give caches
   only to those machines.
-- **`regenerable`** in `.layrattributes` is a short form: the folder that it marks gets the glass
+- **`regenerable`** in `.layrattributes` is a short form: the folder that it marks gets the overlay
   of this platform with that folder and the defaults above, the first time a named save (or
-  `layr save --glasses`) saves it.
+  `layr save --overlays`) saves it.
   The project setting `regenerable` (`layr config regenerable '["<path>"]'`) names cache paths for
   every line; a new line gets an empty cache of such a path at once.
 - Each line has its own overlay line in a follow overlay (`line-<line id>`). So **a line has
@@ -131,7 +131,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
 | `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
-| `layr save --glasses` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
+| `layr save --overlays` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |
 | `layr line new <name> <line>` | The new line takes the newest state of each cache overlay of the source line. |
 | `layr line new <name> <state>` | The new line takes, for each cache overlay, the newest state saved at that state or at its nearest ancestor (the rule of `warm_cache` today). It prints `no cache for <path>` when there is none. |
@@ -462,7 +462,7 @@ A cache is an overlay. The `layr cache` command group is removed, with no hint. 
 | Removed form | Replacement |
 | --- | --- |
 | `layr cache list [-v]` | `layr overlay list` |
-| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --glasses` |
+| `layr cache add <path>` | `regenerable` in `.layrattributes`, then `layr save --overlays` |
 | `layr cache remove <path>` | `-regenerable` in `.layrattributes`, or `layr config regenerable` without the path |
 | `layr cache repair` | `layr overlay repair <overlay>` |
 | `layr cache pull <line or state>` | `layr line new <name> <line>`, or `layr merge <line>` |
@@ -520,8 +520,8 @@ the new file equals the old one. `layr gc --dedup` shares such content again, on
 
 ## 17. `merge <line> --caches-only`
 
-Built today. Owner decision 2026-11-11: the flag goes away; a merge takes the cache glass like any
-other glass (section 2).
+Built today. Owner decision 2026-11-11: the flag goes away; a merge takes the cache overlay like any
+other overlay (section 2).
 
 `layr merge <line> --caches-only` brings the caches of a line into the current line. It runs only
 the cache step of `merge`: no file changes, no merge commit, and the head does not move. The
@@ -654,7 +654,7 @@ second prune at take time repeats the cargo listing (up to 120 s) for nothing. S
 
 | Command | Hook | Next step |
 | --- | --- | --- |
-| `layr save --glasses` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
+| `layr save --overlays` | in `prepare_caches`, for each cache folder of the line, after the cache is made a cache folder | the snapshot of the cache and the save |
 
 A follow pass ends with `save --caches`, so it prunes the folders it took, through `prepare_caches`.
 A union merge (`merge --caches-only`, or a merge) leaves the units of both sides in the target folder
@@ -739,7 +739,7 @@ build output. A line from a state, a merge and a follow pass write source files 
 the write (as `git checkout` does), so a warm cache looked stale and one or more crates compiled.
 
 - A cache save (`save --caches`, the follow pass, a local merge, the save-back of a passing check and
-  `save --glasses --save-back`) writes `.layr-times` into each
+  `save --overlays --save-back`) writes `.layr-times` into each
   cache folder before the snapshot: path, time, size and content hash (git blob id) of each tracked
   file of the working copy (the ignore rules keep it). It runs before the project lock.
 - The file goes with the cache: snapshots, copies and overlay layers carry it, and it goes away
@@ -762,9 +762,9 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   files and 118 MB: measured in the PR). A take reads only files of the recorded size whose time
   differs, and the files that two caches recorded with other bytes.
 
-## 21. Measurement 2026-11-11: a cache glass in v2 objects
+## 21. Measurement 2026-11-11: a cache overlay in v2 objects
 
-The question: what does a cache glass cost in v2 objects ([objects](objects.md))? Tool: the
+The question: what does a cache overlay cost in v2 objects ([objects](objects.md))? Tool: the
 example `objects-bench` of `crates/layr-objects`, a release build, an Apple Silicon Mac (Lumina),
 real `target` cache states of this repository.
 

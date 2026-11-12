@@ -1289,7 +1289,7 @@ impl<'a> Repo<'a> {
         }
         let st = self.save_working(ctx, line, message, running, force)?;
         // A cache folder that has no cache overlay state on this line yet gets its first one
-        // (the cache of the line, as `save --glasses` makes it). A failure keeps the state.
+        // (the cache of the line, as `save --overlays` makes it). A failure keeps the state.
         let of = match &st {
             Some(s) => s.id.clone(),
             None => self.save_base(line)?,
@@ -1451,7 +1451,7 @@ impl<'a> Repo<'a> {
         Ok(line.head.clone())
     }
 
-    /// The state that `save --glasses` gives a line's caches to: on a protected line with no
+    /// The state that `save --overlays` gives a line's caches to: on a protected line with no
     /// changes since its head, the head, so the next lines made from that head start warm; else a
     /// new automatic state. Only a protected line gives caches to a state that other lines share,
     /// so such a state never holds a cache that only its maker may use. The caller holds the
@@ -1502,7 +1502,7 @@ impl<'a> Repo<'a> {
         Ok(st)
     }
 
-    /// `save --glasses` before the project lock (issue #194): the snapshot of the working folder and
+    /// `save --overlays` before the project lock (issue #194): the snapshot of the working folder and
     /// its compare with the head, with the scan of the folder before them. The command holds the
     /// line lock. Off APFS a snapshot costs little under the lock: None.
     pub fn prepare_caches_state(
@@ -2451,7 +2451,7 @@ impl<'a> Repo<'a> {
 
     /// The cache folders of a line that are layers now but have no cache overlay state on this
     /// line yet. `save_cache_states` makes that first state, so a new line from a state of this
-    /// line starts warm, without `save --glasses`.
+    /// line starts warm, without `save --overlays`.
     fn unsaved_cache_layers(&self, line: &Line) -> Result<Vec<String>> {
         let w = self.working(line);
         if self.p.is_overlay() {
@@ -2498,7 +2498,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
-    /// under the lock with one rename (`save_cache_overlays`), as `save --glasses` makes it.
+    /// under the lock with one rename (`save_cache_overlays`), as `save --overlays` makes it.
     pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -2529,13 +2529,13 @@ impl<'a> Repo<'a> {
         made.map(|_| ())
     }
 
-    /// The build-output glasses of `line` for a named save (docs/overlays.md, section 1a, slice
-    /// 6): each cache path whose folder is a layer and holds no versioned files, with its glass (if
+    /// The build-output overlays of `line` for a named save (docs/overlays.md, section 1a, slice
+    /// 6): each cache path whose folder is a layer and holds no versioned files, with its overlay (if
     /// it has one yet) and whether the save makes a new part. A new part is due when the line has
-    /// no part on the glass yet, or when a file or folder in it changed since the line's part
+    /// no part on the overlay yet, or when a file or folder in it changed since the line's part
     /// (`folder_changed_since`). An unchanged folder keeps its part, so a named save of a line with
     /// big build output does not copy it again.
-    fn named_cache_glasses(&self, line: &Line) -> Result<Vec<(String, Option<String>, bool)>> {
+    fn named_cache_overlays(&self, line: &Line) -> Result<Vec<(String, Option<String>, bool)>> {
         let w = self.working(line);
         if self.p.is_overlay() {
             return Ok(Vec::new());
@@ -2561,7 +2561,7 @@ impl<'a> Repo<'a> {
             };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let current = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, &line.id))?.map(|ol| ol.head);
+            let current = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, &line.id))?.map(|ol| ol.head);
             let due = match current.as_deref() {
                 Some(id) if id != info.root && orepo.p.has_state(id) => {
                     let since = orepo.p.db.state(id)?.map(|st| st.time).unwrap_or(0);
@@ -2575,12 +2575,12 @@ impl<'a> Repo<'a> {
     }
 
     /// Before the lock (APFS): the copy of each build-output folder whose part a named save makes
-    /// (`named_cache_glasses`), taken under the lock with one rename (`save_cache_overlays`).
+    /// (`named_cache_overlays`), taken under the lock with one rename (`save_cache_overlays`).
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             let w = self.working(line);
-            for (p, _, due) in self.named_cache_glasses(line)? {
+            for (p, _, due) in self.named_cache_overlays(line)? {
                 if due {
                     btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
                 }
@@ -2591,21 +2591,21 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// A named save of `line` that makes the state `of`: the part of each build-output glass of the
+    /// A named save of `line` that makes the state `of`: the part of each build-output overlay of the
     /// line (docs/overlays.md, section 1a, slice 6). A changed folder gets a new part, saved with
-    /// `of`; the glass is made for this platform when it is missing (`regenerable`). An unchanged
+    /// `of`; the overlay is made for this platform when it is missing (`regenerable`). An unchanged
     /// folder names the part that the line has. Returns the parts for the state record. A failure
     /// is a warning: the named save goes on without that part. The caller holds the project lock.
     pub fn save_named_cache_parts(&self, ctx: &Ctx, line: &Line, of: &str) -> BTreeMap<String, String> {
         let mut parts = BTreeMap::new();
         let r = (|| -> Result<()> {
-            let glasses = self.named_cache_glasses(line)?;
-            let due: Vec<String> = glasses.iter().filter(|(_, _, due)| *due).map(|(p, _, _)| p.clone()).collect();
-            for (_, name, due) in &glasses {
+            let overlays = self.named_cache_overlays(line)?;
+            let due: Vec<String> = overlays.iter().filter(|(_, _, due)| *due).map(|(p, _, _)| p.clone()).collect();
+            for (_, name, due) in &overlays {
                 let Some(name) = name.as_ref().filter(|_| !due) else { continue };
                 let info = self.need_overlay(name)?;
                 let orepo = self.overlay_repo(name)?;
-                if let Some(ol) = orepo.p.db.line_by_name(&crate::overlay::glass_line_name(&info, &line.id))? {
+                if let Some(ol) = orepo.p.db.line_by_name(&crate::overlay::part_line_name(&info, &line.id))? {
                     parts.insert(name.clone(), ol.head);
                 }
             }
@@ -2623,7 +2623,7 @@ impl<'a> Repo<'a> {
             Ok(())
         })();
         if let Err(e) = r {
-            eprintln!("warning: build-output glass of line {} not saved: {e:#}", line.name);
+            eprintln!("warning: build-output overlay of line {} not saved: {e:#}", line.name);
         }
         parts
     }
@@ -2632,7 +2632,7 @@ impl<'a> Repo<'a> {
     /// folder holds files in the head of the line. Such a folder is versioned: never a cache.
     pub fn line_cache_paths(&self, line: &Line) -> Result<(Vec<String>, Vec<String>)> {
         // The layers of the head: a complete view of a thin head cost one clone of the whole tree
-        // after every merge (its `save --glasses`).
+        // after every merge (its `save --overlays`).
         let head = self.state_src(&line.head)?;
         Ok(self.cache_paths(&self.working(line))?.into_iter().partition(|p| !holds_files_in(&head, p)))
     }
@@ -3799,7 +3799,7 @@ fn writes_since(baseline: &Manifest, now: &Manifest, carried: &std::collections:
 }
 
 /// A cache folder that was not made a cache: a process uses it, or it was written while it was
-/// copied. The automatic save skips it; `save --glasses` and `overlay repair` report it.
+/// copied. The automatic save skips it; `save --overlays` and `overlay repair` report it.
 #[derive(Debug)]
 pub enum CacheRefused {
     Busy { path: String, user: crate::busy::User },
@@ -4582,7 +4582,7 @@ thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `save --glasses` work made before the project lock (`Repo::prepare_caches_state`), APFS only.
+/// `save --overlays` work made before the project lock (`Repo::prepare_caches_state`), APFS only.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct PreparedCaches {
     head: String,

@@ -14,7 +14,7 @@ cd "$P/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 mkdir -p target/debug/deps
 python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(3 << 20))' target/debug/deps/libbig.rlib
-l save --glasses -q
+l save --overlays -q
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
 ok "push the cache to the store" l push archive -q
 
@@ -25,7 +25,7 @@ Q=$T/b/store/projects/p/lines/main
 ok "the clone has the project" test -d "$Q"
 cd "$P/main" || exit 1
 python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(1 << 20))' target/debug/deps/libmore.rlib
-l save --glasses -q
+l save --overlays -q
 ok "push a newer cache" l push archive -q
 # The packs of the cache go, as a broken sweep or a stopped push would leave them; the tree still names the chunks.
 find "$T/archive" -path '*/chunks/*' -name '*.age' -exec rm -f {} +
@@ -37,7 +37,7 @@ out=$(B fetch origin 2>&1)
 has "the next fetch does not try it again" "it failed before, and the remote did not change" "$out"
 cd "$P/main" || exit 1
 echo again > target/debug/again
-l save --glasses -q
+l save --overlays -q
 l push archive -q
 cd "$Q" || exit 1
 out=$(B fetch origin 2>&1)

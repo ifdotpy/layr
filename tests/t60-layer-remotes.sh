@@ -17,7 +17,7 @@ l overlay create notes --mode follow -q
 l overlay move notes notes.md >/dev/null
 l save -m notes -q
 rm -rf target; mkdir target; echo bin > target/out
-l save --glasses -q
+l save --overlays -q
 
 ok "an overlay git remote" l overlay remote add notes notes-gh $T/notes.git
 eq "it is listed" "notes-gh	$T/notes.git" "$(l overlay remote list notes)"

@@ -12,7 +12,7 @@ l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
-mkdir -p target && echo a > target/a && l save --glasses -q
+mkdir -p target && echo a > target/a && l save --overlays -q
 ov=$TG
 plat=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/arm64/aarch64/')
 self() { env LAYR_ROOT="$T/$1/store" LAYR_MACHINE_NAME="$2" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"], d["name"])'; }
@@ -43,7 +43,7 @@ J=$T/j/store/projects/p/lines
 (cd "$J/main" && jl line new w main >/dev/null 2>&1)
 ok "the job reads the cache of main" test -f "$J/w/target/a"
 (cd "$J/main" && jl line new "main.checks-$plat" main >/dev/null 2>&1)
-(cd "$J/main.checks-$plat" && echo j > target/j && jl save --glasses -q && jl push origin -q >/dev/null 2>&1)
+(cd "$J/main.checks-$plat" && echo j > target/j && jl save --overlays -q && jl push origin -q >/dev/null 2>&1)
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l fetch cloud -q >/dev/null 2>&1
 has "the job's save-back line reaches the owner" "main.checks-$plat" "$(l line list 2>&1)"

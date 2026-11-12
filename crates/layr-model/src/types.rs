@@ -100,7 +100,7 @@ pub struct StateRec {
     /// does not take a cache names the parts that differ. Empty: saved by an older layr.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub cache_key_parts: std::collections::BTreeMap<String, String>,
-    /// The part of this state on each glass (docs/overlays.md, section 1a): the overlay name to
+    /// The part of this state on each overlay (docs/overlays.md, section 1a): the overlay name to
     /// the id of its state in the overlay store `<project>%<overlay>`. The base part is the state
     /// itself. Empty: a state without overlays, or one saved before parts (its overlay lines hold
     /// the history). The JSON key is `parts`, because `layers` is the key of `caches`.

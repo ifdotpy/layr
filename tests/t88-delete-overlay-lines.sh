@@ -12,7 +12,7 @@ l config regenerable '["target"]'
 l line new -q w >/dev/null
 cd $P/w || exit 1
 rm -rf target; mkdir target; echo cache > target/x
-l save --glasses --folder target -q >/dev/null 2>&1
+l save --overlays --folder target -q >/dev/null 2>&1
 echo changed >> notes.txt
 l save -a -m one -q >/dev/null 2>&1
 cd $P/main || exit 1

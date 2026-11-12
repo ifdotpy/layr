@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos
-# Parts of a glass are v2 objects (docs/overlays.md section 1a, slice 7): in a project that keeps its states as
-# objects, a named save writes the part of a build-output glass to the glass's own object store, and a second
+# Parts of an overlay are v2 objects (docs/overlays.md section 1a, slice 7): in a project that keeps its states as
+# objects, a named save writes the part of a build-output overlay to the overlay's own object store, and a second
 # save of the same build adds almost nothing.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -15,7 +15,7 @@ l protect main --remove >/dev/null 2>&1 || true
 l migrate >/dev/null 2>&1
 eq "the project keeps its states as objects" "true" "$(l config objects.enabled 2>/dev/null | tr -d '"' | tail -1)"
 G=$TG
-# part_of <state>: the part of the glass that a state record names.
+# part_of <state>: the part of the overlay that a state record names.
 part_of() {
     python3 - "$P/meta/db/layr.sqlite" "$1" "$G" <<'PY'
 import json, sqlite3, sys
@@ -31,7 +31,7 @@ echo a >> notes.txt
 ok "a named save" l save -qam "first build"
 p1=$(part_of "$(l rev-parse head)")
 no "the state names a part" test -z "$p1"
-ok "the glass has an object store" test -f "$P/meta/overlays/$G/meta/objects/config.json"
+ok "the overlay has an object store" test -f "$P/meta/overlays/$G/meta/objects/config.json"
 ok "the part is a state of that object store" test -f "$P/meta/overlays/$G/meta/objects/states/$p1"
 first=$(objects_bytes)
 
@@ -49,7 +49,7 @@ ok "a part of the same build adds under 100 KB" test $(( second - first )) -lt 1
 # The native copy of a build-output part goes once its objects are durable (docs/overlays.md section 1a, slice 7).
 cur=${p2:-$p1}
 no "the part of the head has no native copy" test -d "$P/meta/overlays/$G/states/$cur"
-ok "its objects are in the glass store" test -f "$P/meta/overlays/$G/meta/objects/states/$cur"
+ok "its objects are in the overlay store" test -f "$P/meta/overlays/$G/meta/objects/states/$cur"
 
 # history=last dropped the first part; gc gives its objects back.
 if [ -n "$p2" ] && [ "$p2" != "$p1" ]; then

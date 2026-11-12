@@ -76,7 +76,7 @@ work() {
     l merge -q topic >/dev/null
     ok "$p: a merge brings the line into main" test -f "$main/b.txt"
     mkdir -p target/debug; echo bin > target/debug/x
-    has "$p: save --glasses names the glass" "target: overlay target." "$(l save --glasses 2>/dev/null)"
+    has "$p: save --overlays names the overlay" "target: overlay target." "$(l save --overlays 2>/dev/null)"
     l line new -q warm >/dev/null
     eq "$p: a new line starts warm" "bin" "$(cat "$base/projects/$p/lines/warm/target/debug/x")"
     eq "$p: gc check is clean" 0 "$(l gc >/dev/null 2>&1; echo $?)"

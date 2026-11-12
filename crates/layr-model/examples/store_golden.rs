@@ -143,9 +143,9 @@ fn overlays(
             if let Some(record) = records.iter().find(|r| r.op == "overlay.key") {
                 row["epoch"] = record.data["epoch"].clone();
             }
-            // The states that the glass shows: the heads of its own lines (hidden glasses keep them), the states that
+            // The states that the overlay shows: the heads of its own lines (hidden overlays keep them), the states that
             // the project's lines show on it (their stacks), and the parts that their heads name (docs/overlays.md
-            // section 1a: a glass that keeps parts has no lines).
+            // section 1a: an overlay that keeps parts has no lines).
             let mut heads: BTreeSet<String> = overlay.line_list().into_iter().map(|l| l.head).collect();
             for line in project.line_list() {
                 if let Ok(layers) = model.layers(&project.id, &line) {

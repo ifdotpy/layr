@@ -31,28 +31,29 @@ it in slices (section 1a); "Built today" after the list says how the code differ
 
 - A **line** has its own history. Lines form a tree, as branches in git. A line does not know
   about overlays.
-- An **overlay** is a glass. Glasses stack. An overlay has an owner, readers and properties
+- An **overlay** is a layer of files. Overlays stack, like sheets of glass: a view looks through
+  all of them at once. An overlay has an owner, readers and properties
   (`folder`, `quiet`, `history`, `merge`, `platform`, id keying; see
   [cache overlays](cache-overlays.md)). An overlay does not own lines. Lines and overlays are
   independent entities.
 - The **base** (the project itself, called the shared set below) is also an overlay: the bottom
-  glass. Its readers are everyone who reads the project. It is the only glass that
+  overlay. Its readers are everyone who reads the project. It is the only overlay that
   `layr git push` sends to the git remote.
-- A line is a drawing across the glasses. One state of a line holds its part on each glass. A
-  line has the same name on every glass.
+- A line runs across the overlays. One state of a line holds its part on each overlay. A
+  line has the same name on every overlay.
 - A **view** is a function of a line and a set of overlays. Only the view joins a line and a
-  set of glasses. For the same path the upper glass wins, as in overlayfs. The same path (for
-  example `.env`) can be on many glasses.
+  set of overlays. For the same path the upper overlay wins, as in overlayfs. The same path (for
+  example `.env`) can be on many overlays.
 - `fetch` takes lines and overlays: the history of the chosen lines, only their parts on the
-  chosen glasses. Example: a merge runner fetches the line `main` with the base and the `target`
-  glass.
+  chosen overlays. Example: a merge runner fetches the line `main` with the base and the `target`
+  overlay.
 - A cache is an ordinary overlay ([cache overlays](cache-overlays.md) section 2).
 - **New files go to the base.** A file goes to an overlay by an explicit command
   (`layr overlay move`) or by a routing pattern of the overlay. The patterns are in the
   overlay's metadata in the project database, not in a file of the tree, so a change of the
   tree cannot change where a file goes.
-- **A merge is atomic across the glasses** that the merge takes. The user who merges must be a
-  reader of all of them. The checks run on the full result, with all glasses in place.
+- **A merge is atomic across the overlays** that the merge takes. The user who merges must be a
+  reader of all of them. The checks run on the full result, with all overlays in place.
 - **Encryption.** In remote copies and in remote vaults, an overlay can be stored encrypted for its
   readers with age.
 
@@ -60,12 +61,12 @@ Built today (section 9):
 
 - Each overlay has its own lines with other names: `line-<line id>` (follow mode, one per line
   of the project) and `user-<uid>` (shared mode, one per user). The new model uses the line's own
-  name on every glass. Since slice 4 (section 1a) a public follow overlay that is no cache gets no
+  name on every overlay. Since slice 4 (section 1a) a public follow overlay that is no cache gets no
   new `line-<line id>` lines: the state records name its parts. Shared, hidden and cache overlays
   still use their overlay lines.
 - Since slice 5 (section 1a) the view of the working folder (setting `view.<line id>`) chooses the
-  glasses that the folder shows and their order. The setting `stack.<line id>` still holds the
-  state that the folder shows on each glass (an overlay-only save makes no state record yet), and a
+  overlays that the folder shows and their order. The setting `stack.<line id>` still holds the
+  state that the folder shows on each overlay (an overlay-only save makes no state record yet), and a
   line made before views, without a view, shows its stack as before.
 - A state record of the project names the shared tree and, since slice 4, its part on each
   public follow overlay (`parts`). Each overlay keeps the part states in its own project. Shared,
@@ -73,7 +74,7 @@ Built today (section 9):
 - `fetch` takes the whole repository by default. `fetch --line <name> --overlay <layer>` (built
   2026-11-11) takes the history of those lines on those layers only; `base` names the base. The old
   cache flags of transfers (`--caches`, `--no-caches`, `--caches-of`) are removed (exit 2).
-- Since slice 3 a glass can have `platform=<key>`; since slice 6 a cache is a folder glass of one
+- Since slice 3 an overlay can have `platform=<key>`; since slice 6 a cache is a folder overlay of one
   platform (`target.macos-aarch64`), and a named save records its part in the state. The cache
   code (`src/cache_overlay.rs`) still makes and reads those parts, and the parts are still full
   folder snapshots, not v2 objects (slice 7).
@@ -86,7 +87,7 @@ The modes as built:
   | shared    | one overlay line for all lines of the user              |
   | ephemeral | not built: gets a new line with the source line, and is deleted when it merges |
 
-In this file a **layer** is the shared set or an overlay of a stack (a glass of a view in the new
+In this file a **layer** is the shared set or an overlay of a stack (an overlay of a view in the new
 model).
 
 ## 1a. The model in code (owner decision 2026-11-11, target)
@@ -96,112 +97,112 @@ This section turns section 1 into data and commands. Each part below is one slic
 
 **Records.**
 
-- A state of a line names its part on each glass: `layers: {<glass>: <part id>}` in the state
-  record. The base part is the state itself (its tree and times table). A glass with no part in a
-  state is clear for it: the view shows the glasses below.
-- A part lives in the store of its glass (`<project>%<glass>`), encrypted for the readers of the
-  glass, with the ids of that glass (plain or keyed, docs/objects.md section 2). A part has no
+- A state of a line names its part on each overlay: `layers: {<overlay>: <part id>}` in the state
+  record. The base part is the state itself (its tree and times table). An overlay with no part in a
+  state is clear for it: the view shows the overlays below.
+- A part lives in the store of its overlay (`<project>%<overlay>`), encrypted for the readers of the
+  overlay, with the ids of that overlay (plain or keyed, docs/objects.md section 2). A part has no
   line and no parents of its own; its delta base is the part of the first parent state.
 - History belongs to the line: parents, merges and undo are the parents of the states. Overlay
   stores keep no lines (today `line-<line id>` and `user-<uid>`). So a line has the same name on
-  every glass, because there is one line.
-- Properties of a glass: `folder`, `quiet`, `history`, `merge`, `platform`, readers, and
+  every overlay, because there is one line.
+- Properties of an overlay: `folder`, `quiet`, `history`, `merge`, `platform`, readers, and
   `trust` (a part that another user saved is taken only from a protected line; today
   `cache_by` and `cache_shared`).
 
-**Platforms.** A glass with `platform=<key>` is shown and fetched only on that platform. Build
-output of two platforms is two glasses (`target.macos-aarch64`, `target.linux-x86_64`); a
+**Platforms.** An overlay with `platform=<key>` is shown and fetched only on that platform. Build
+output of two platforms is two overlays (`target.macos-aarch64`, `target.linux-x86_64`); a
 platform key is no part of a line name.
 
-**Views.** A view is f(line, glasses): an ordered list of glasses over one state of a line. The
-working folder of a line is its default view: every glass that the caller reads and whose
-platform is this machine's, in the project order of glasses. `layr view <line> --overlay a,b`
+**Views.** A view is f(line, overlays): an ordered list of overlays over one state of a line. The
+working folder of a line is its default view: every overlay that the caller reads and whose
+platform is this machine's, in the project order of overlays. `layr view <line> --overlay a,b`
 makes another view. The setting `stack.<line id>` goes.
 
 **Commands.**
 
 | Command | Effect |
 | --- | --- |
-| `save -m` | Saves the changed parts of every glass of the view. A quiet glass (a cache) is saved with it. |
-| `merge <line>` | Merges per glass with the glass's `merge` property, as one operation. |
+| `save -m` | Saves the changed parts of every overlay of the view. A quiet overlay (a cache) is saved with it. |
+| `merge <line>` | Merges per overlay with the overlay's `merge` property, as one operation. |
 | `line new X <line>` | X starts at the state of `<line>` with all its parts. |
 | `fetch <remote> --line L --overlay G` | The states of L, and only their parts on G (built, slice 1). |
 | `push <remote> --line L --overlay G` | The same selection for a push. |
-| `gc` | A part outside `history` of its glass is dropped; the state keeps its record. |
+| `gc` | A part outside `history` of its overlay is dropped; the state keeps its record. |
 
 `save --caches`, `sync --caches`, `merge --caches-only`, `fetch --caches/--no-caches/--caches-of`,
 `fsck --caches` and the `cache.` name prefix go. Caches are stored as v2 objects like any part.
 
 **Overlay-only saves (owner decision 2026-11-11, built).** A line has its own history: a save
-that changes only glasses that keep parts makes a state of the line with the base tree of its
+that changes only overlays that keep parts makes a state of the line with the base tree of its
 parent and the new parts. In git that state maps to its parent's commit, so git gets no empty
 commit. A protected line moves only through merges, so there such a save keeps the part in the
 stack as before. Test t233 section 7.
 
-**Shared mode (owner decision 2026-11-11, built).** A glass has a part per line, and a new
+**Shared mode (owner decision 2026-11-11, built).** An overlay has a part per line, and a new
 line inherits the part of its source, so one personal file (`.env`) needs no shared mode: put it
-on a glass whose readers are its owner. `overlay create --mode shared` fails with exit status 2;
-the default mode is follow. Glasses made in shared mode before keep working.
+on an overlay whose readers are its owner. `overlay create --mode shared` fails with exit status 2;
+the default mode is follow. Overlays made in shared mode before keep working.
 
-**Hidden glasses (owner decision 2026-11-11, built partly).** A state of a line records its part
-on each hidden glass in that glass's own records (`hidden.part.<state>`), which a remote copy
-encrypts for the glass's readers; the public state record never names a hidden glass. A view of an
+**Hidden overlays (owner decision 2026-11-11, built partly).** A state of a line records its part
+on each hidden overlay in that overlay's own records (`hidden.part.<state>`), which a remote copy
+encrypts for the overlay's readers; the public state record never names a hidden overlay. A view of an
 older state (`layr view <state>`, `layers_at`) shows that part. The head of a line still reads the
-glass's overlay line. Test t238.
+overlay's overlay line. Test t238.
 
-**Local space and history of parts (owner decision 2026-11-11, built).** A part of a build-output glass
+**Local space and history of parts (owner decision 2026-11-11, built).** A part of a build-output overlay
 gives up its native copy once its objects are durable; the cache code reads it through
 `state_root`, which builds the copy again from the objects. `history=last` also drops parts that
-are here only as objects, and `layr gc` prunes each object store (the base and every glass): the
+are here only as objects, and `layr gc` prunes each object store (the base and every overlay): the
 records of states that no kept state needs, and the loose objects and hot blobs that kept trees,
 times tables, delta bases and chunk lists do not reach. Packed objects stay until a pack rewrite.
 `replay` keeps the parts of each state it replays; a mount of an older state shows its parts; a
-merge brings a glass that the incoming line shows into the view of the target line. Tests t236,
+merge brings an overlay that the incoming line shows into the view of the target line. Tests t236,
 t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`.
 
 **Slices.**
 
 1. `fetch --line --overlay` (built).
 2. `push --line --overlay` (built).
-3. Glasses per platform; no platform key in names. Built 2026-11-11; see "Slice 3 as built"
+3. Overlays per platform; no platform key in names. Built 2026-11-11; see "Slice 3 as built"
    below for what differs.
 4. State records name their parts; save, line new, merge and view use them; overlay
    stores keep parts only. Migration of existing stores. Built 2026-11-11 for public follow
    overlays; see "Slice 4 as built" below for what differs.
-5. Views hold the glasses; `stack.<line id>` goes. Built 2026-11-11; see "Slice 5 as built"
+5. Views hold the overlays; `stack.<line id>` goes. Built 2026-11-11; see "Slice 5 as built"
    below for what differs.
-6. A cache is an ordinary glass (default view shows cache glasses like any glass; transfer cache flags removed): the cache flags, `src/cache_overlay.rs` and the cache fields of
-   the state record go; `trust` is a glass property. Built 2026-11-11 in part; see "Slice 6 as
+6. A cache is an ordinary overlay (default view shows cache overlays like any overlay; transfer cache flags removed): the cache flags, `src/cache_overlay.rs` and the cache fields of
+   the state record go; `trust` is an overlay property. Built 2026-11-11 in part; see "Slice 6 as
    built" below for what differs.
-7. (migrate-parts also gives line heads their parts on folder glasses and sets the platform of an old `cache.<folder>` glass whose states have one platform; t237.) Parts of folder glasses as v2 objects (built, partly): in a project with `objects.enabled`, a
-   part of a glass goes to the glass's own object store (`meta/overlays/<glass>/meta/objects`),
+7. (migrate-parts also gives line heads their parts on folder overlays and sets the platform of an old `cache.<folder>` overlay whose states have one platform; t237.) Parts of folder overlays as v2 objects (built, partly): in a project with `objects.enabled`, a
+   part of an overlay goes to the overlay's own object store (`meta/overlays/<overlay>/meta/objects`),
    written incrementally against the part before it (`objstore::enabled`, `record_states`). The
    immutable flag of sealed files is handled by the store's clone hook. Left: the native copy of a
    part stays (the overlay code reads parts as folders), so the space gain is in pushes and in
    dedup, not yet on the local disk; history=last drops the part record, and its objects wait for
    a repack that walks reachability. Test t236.
 8. Layr Cloud: a state with parts needs no API change (checked 2026-11-12 against layr-cloud
-   `crates/layr-gateway`). Each glass is already its own layer scope (`overlays/<name>/`) with
-   its own `PUT /states/<state>` of one tree and times table, so a part is a state of its glass's
+   `crates/layr-gateway`). Each overlay is already its own layer scope (`overlays/<name>/`) with
+   its own `PUT /states/<state>` of one tree and times table, so a part is a state of its overlay's
    scope. The signed records carry `parts` and `state.parts` as opaque lines: the gateway
    validates only manifest and job-output records, and `StateRec` in its vendored `layr-model`
    accepts unknown fields.
 
 **Slice 4 as built (2026-11-11).**
 
-- Records. A state record has `parts: {<glass>: <part id>}`. The key is `parts`, not `layers`:
+- Records. A state record has `parts: {<overlay>: <part id>}`. The key is `parts`, not `layers`:
   `layers` is already the JSON key of the cache snapshots of a state (`caches`), so an older
   layr would read a `layers` map of parts as caches. A state without parts writes no key, so
   older records and older clients see no change. A part id is the id of a state in the store of
-  the glass (`<project>%<glass>`).
-- Which glasses. Only a public follow overlay that is no cache keeps parts (`parts_glass` in
+  the overlay (`<project>%<overlay>`).
+- Which overlays. Only a public follow overlay that is no cache keeps parts (`parts_overlay` in
   `src/overlay.rs`). Shared overlays (`user-<uid>`), hidden overlays and cache overlays keep their
-  overlay lines as before. A hidden glass is not in `parts`, because a public state record would
+  overlay lines as before. A hidden overlay is not in `parts`, because a public state record would
   show its name to every reader of the project.
-- `save -m`. A save that makes a new shared state names the part of each such glass of the stack
+- `save -m`. A save that makes a new shared state names the part of each such overlay of the stack
   in it, the changed parts and the unchanged ones. A part gets its next state from the part that
   the line showed, so its delta base is the part of the first parent. A part keeps that part as
-  its parent: the three-way merge of a glass and `undo` need it. The overlay store gets a record
+  its parent: the three-way merge of an overlay and `undo` need it. The overlay store gets a record
   with the new part and no overlay line. A line that already has an old `line-<line id>` keeps
   moving it, so the old data stays true.
 - A save that changes only overlays makes no shared state (as before): the stack of the line
@@ -209,16 +210,16 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
   stays the source of the current parts of a line until slice 5.
 - `line new X <rev>`. When `<rev>` is the head of a line, X takes the stack of that line. When it
   is an older state with parts, X takes those parts. A state without parts gives the stack of the
-  source line, as before. A state without a line gives the glasses of its parts.
-- `reset --hard <state>` shows the parts of the state. A glass of the stack that the state does
+  source line, as before. A state without a line gives the overlays of its parts.
+- `reset --hard <state>` shows the parts of the state. An overlay of the stack that the state does
   not name is clear (its empty first state). The other modes keep the stack. `undo` of such a
   reset is refused, as for other operations that changed overlays.
-- `merge <line>` combines each glass with its `merge` property, as before, and the merge state
-  names the merged parts. `merge <state>` (no line) takes the parts of that state on the glasses
+- `merge <line>` combines each overlay with its `merge` property, as before, and the merge state
+  names the merged parts. `merge <state>` (no line) takes the parts of that state on the overlays
   that the target shows. A queued merge takes no overlays, as before.
 - `view <state>` shows the state with its parts. `view <line>` and `view save` use the stack.
-- `overlay log|show|diff|grep|ls-files <glass>` read from the part that the current line shows
-  when the glass has no overlay line for the line.
+- `overlay log|show|diff|grep|ls-files <overlay>` read from the part that the current line shows
+  when the overlay has no overlay line for the line.
 - `fetch --line L` and `push --line L` take the parts that the states of L name, the part of the
   stack of L on each machine, and the history of each part.
 - `gc` with `history=<n>` keeps the parts of the newest n states of each line and the parts that
@@ -226,7 +227,7 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
 - Migration: `layr overlay migrate-parts [-n] [-q]` (a project admin). It gives the head of each
   line its parts from the line's stack (the heads of its overlay lines), with one `state.parts`
   record. The signed save records stay as they are. A state that the head of two lines shows
-  takes the parts of the line that saved it, else of the first line by name. A glass that a state
+  takes the parts of the line that saved it, else of the first line by name. An overlay that a state
   already names keeps its part. `layr migrate` does not run it.
 - History before the migration: older states keep no parts. Their overlay lines stay, and every
   command reads them as before (`line new`, `reset` and `merge` of such a state use the stack of
@@ -235,104 +236,104 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
 **Slice 5 as built (2026-11-11).**
 
 - Storage. The view of a working folder is the setting `view.<line id>`: the names of its public
-  glasses, bottom first. A line has one working folder on each machine, so the key is the line id;
+  overlays, bottom first. A line has one working folder on each machine, so the key is the line id;
   the view of a folder on another machine is `view.<line id>@<machine>`, as for stacks. Records
-  set it with `folder_view: {line, glasses}` (`line.create`, `overlay.use`, `line.adopt`, and
+  set it with `folder_view: {line, overlays}` (`line.create`, `overlay.use`, `line.adopt`, and
   `overlay remove`). The key is not `view`: the records of saved views (`view.save`) use that key.
-  Hidden glasses keep their place in their own store (`hidden.stack.<line id>`), so the public
-  setting never names them. The line record names no glass.
-- What stays. `stack.<line id>` still holds the state that the folder shows on each glass of its
+  Hidden overlays keep their place in their own store (`hidden.stack.<line id>`), so the public
+  setting never names them. The line record names no overlay.
+- What stays. `stack.<line id>` still holds the state that the folder shows on each overlay of its
   view. An overlay-only save makes no shared state (open item below), so a state record cannot
-  hold that part yet. The view chooses the glasses and their order; the stack gives the states. A
-  glass of the view that the stack does not name shows the part of the head, else the overlay line
+  hold that part yet. The view chooses the overlays and their order; the stack gives the states. A
+  overlay of the view that the stack does not name shows the part of the head, else the overlay line
   of the line, else its empty first state.
 - Compatibility. A line without `view.<line id>` (made before slice 5) shows its stack as before.
   Its first `overlay use` gives it a view. Older layr ignores `folder_view` and reads the stack,
   which every record still writes.
-- Default view. `line new` (and `init`) gives the new folder every glass that the owner reads, in
+- Default view. `line new` (and `init`) gives the new folder every overlay that the owner reads, in
   the project order: the names of the setting `overlays.order` (`layr overlay order a,b,c`), then
-  the other glasses in the order of their creation (the time of their empty first state), then by
-  name. The order refuses hidden names (it is public). Left out: folder overlays (no glass of the
-  file stack), a glass whose `platform` setting is not this machine's (no command sets `platform`
-  until slice 3), a glass that is not on this machine, and a cache glass that the source line does
-  not show (until slice 6 makes caches ordinary glasses). The part on each glass: the part that the
+  the other overlays in the order of their creation (the time of their empty first state), then by
+  name. The order refuses hidden names (it is public). Left out: folder overlays (no overlay of the
+  file stack), an overlay whose `platform` setting is not this machine's (no command sets `platform`
+  until slice 3), an overlay that is not on this machine, and a cache overlay that the source line does
+  not show (until slice 6 makes caches ordinary overlays). The part on each overlay: the part that the
   start state names, or the source's state when the start is the source's head; else the empty
   first state.
-- `overlay use <names>` changes the view of the current folder. A glass that comes back shows the
+- `overlay use <names>` changes the view of the current folder. An overlay that comes back shows the
   part that the head names.
-- `save -m` and `merge` act on the glasses of the view. The new state also keeps the parts of the
-  head on the glasses that the view does not show, so a folder that shows fewer glasses does not
+- `save -m` and `merge` act on the overlays of the view. The new state also keeps the parts of the
+  head on the overlays that the view does not show, so a folder that shows fewer overlays does not
   clear them.
 - `view <line or state> --overlay a,b` prints another view of the same line or state with those
-  glasses, in that order (`base` is always below). `--folder <dir>` writes the files of a view to
-  a new folder: a second folder of one line with other glasses. It is a copy, not a working folder.
-- Test: tests/t234-views-hold-glasses.sh.
+  overlays, in that order (`base` is always below). `--folder <dir>` writes the files of a view to
+  a new folder: a second folder of one line with other overlays. It is a copy, not a working folder.
+- Test: tests/t234-views-hold-overlays.sh.
 
 **Slice 3 as built (2026-11-11).**
 
-- Property. `layr overlay create|set <glass> --platform <key>` sets `overlay.<glass>.platform`
+- Property. `layr overlay create|set <overlay> --platform <key>` sets `overlay.<overlay>.platform`
   (`<os>-<arch>`, for example `macos-aarch64`; `--platform any` clears it). `overlay list` shows
   `platform=<key>`. The key has no hash of key files: the key parts of a build
-  ([cache overlays](cache-overlays.md) section 6) still decide which part of the glass fits a line.
-- Which commands. The default view of a new line folder leaves out a glass of another platform.
-  Every folder command (`line new`, `save`, `merge`, `status`) uses only the folder glasses of this
-  platform: a glass of another platform has no folder here. `push` and `fetch` to a store remote
-  and to Layr Cloud leave out a glass of another platform and say so (`overlay far: a glass of
-  platform linux-x86_64`), unless `--overlay` names the glass. Peer sync (`layr sync`) does not
+  ([cache overlays](cache-overlays.md) section 6) still decide which part of the overlay fits a line.
+- Which commands. The default view of a new line folder leaves out an overlay of another platform.
+  Every folder command (`line new`, `save`, `merge`, `status`) uses only the folder overlays of this
+  platform: an overlay of another platform has no folder here. `push` and `fetch` to a store remote
+  and to Layr Cloud leave out an overlay of another platform and say so (`overlay far: an overlay of
+  platform linux-x86_64`), unless `--overlay` names the overlay. Peer sync (`layr sync`) does not
   filter: the peer may be of either platform.
-- Names. A new build-output glass is `<folder>.<platform>` (`/` as `.`), and its overlay lines are
-  `line-<line id>`, with no platform key. One folder can have one glass per platform:
-  `overlay create --folder` refuses a second glass of the same folder and platform, and a glass
+- Names. A new build-output overlay is `<folder>.<platform>` (`/` as `.`), and its overlay lines are
+  `line-<line id>`, with no platform key. One folder can have one overlay per platform:
+  `overlay create --folder` refuses a second overlay of the same folder and platform, and an overlay
   without a platform clashes with every platform.
-- Old data. A `cache.<folder>` glass (no `platform`) stays the glass of its folder on every
-  platform, with its overlay lines `line-<line id>.<os>-<arch>`. When a glass of this platform
-  exists for the same folder, it wins. Test: tests/t235-cache-is-a-glass.sh.
+- Old data. A `cache.<folder>` overlay (no `platform`) stays the overlay of its folder on every
+  platform, with its overlay lines `line-<line id>.<os>-<arch>`. When an overlay of this platform
+  exists for the same folder, it wins. Test: tests/t235-cache-is-an-overlay.sh.
 
 **Slice 6 as built (2026-11-11).**
 
-- `save -m`. A named save saves the part of each build-output glass of the line: each folder that
+- `save -m`. A named save saves the part of each build-output overlay of the line: each folder that
   `regenerable` (`.layrattributes` or `layr config regenerable`) marks and that is a layer. A
   folder that has no part on the line, or in which a file or folder changed since the part (by
   modification time, in nanoseconds), gets a new part; an unchanged folder keeps its part, so a
   named save does not copy big build output each time. The new state names the part in `parts`.
-  The first named save makes the glass of this platform, with `folder`, `quiet`, `history=last`,
+  The first named save makes the overlay of this platform, with `folder`, `quiet`, `history=last`,
   `merge=union-theirs`, `platform` and `trust=protected`. A failure is a warning; the save goes on.
 - `line new X <state>` takes the part that the state (or its nearest ancestor) names, before the
   older rules (`cache_of`, the overlay line of the line that made the state). `line new X <line>`
   takes the line's part, as before.
-- `trust`. `layr overlay create|set <glass> --trust protected|readers`. `protected`: a line takes a
+- `trust`. `layr overlay create|set <overlay> --trust protected|readers`. `protected`: a line takes a
   part that another user saved only from a protected line. `readers`: any part that the user
-  reads. A folder glass without the property is protected. The state fields `cache_by` and
+  reads. A folder overlay without the property is protected. The state fields `cache_by` and
   `cache_shared` stay: they record who saved a part and whether the line was protected, and the
   rule reads them. They have the JSON keys `layer_by` and `layer_shared`.
 - Old flags. `--caches`, `--no-caches` and `--caches-of` on `push`, `fetch`, `pull`, `sync` and
   `clone` are removed: each fails with exit status 2 and names `--line` or `--overlay` (owner
-  decision 2026-11-11). Every glass comes by default. `save --caches`, `merge --caches-only` and
-  `fsck --caches` are `save --glasses`, `merge --glasses-only` and `fsck --glasses` now; the old
-  spellings fail with exit status 2. The follow pass and the check save-back call `save --glasses`.
-- `cache.` prefix. A new glass has no `cache.` prefix. A store keeps its `cache.<folder>` glasses
+  decision 2026-11-11). Every overlay comes by default. `save --caches`, `merge --caches-only` and
+  `fsck --caches` are `save --overlays`, `merge --overlays-only` and `fsck --overlays` now; the old
+  spellings fail with exit status 2. The follow pass and the check save-back call `save --overlays`.
+- `cache.` prefix. A new overlay has no `cache.` prefix. A store keeps its `cache.<folder>` overlays
   and the old cache fields of its state records; every command reads them as before.
-- Migration of a store: nothing to run. An existing `cache.target` stays the glass of `target`:
-  each named save records its part in the state from then on. To give a store one glass per
-  platform, an admin makes the new glass on each platform and removes the old one when every
-  line has a part on the new glass: `layr overlay remove cache.target` (cache-overlays.md section
+- Migration of a store: nothing to run. An existing `cache.target` stays the overlay of `target`:
+  each named save records its part in the state from then on. To give a store one overlay per
+  platform, an admin makes the new overlay on each platform and removes the old one when every
+  line has a part on the new overlay: `layr overlay remove cache.target` (cache-overlays.md section
   18), then the next named save of each line makes `target.<platform>`. The parts of the old
-  glass go with it; the next build fills the new glass.
-- What is left of the slice: `src/cache_overlay.rs` keeps the build-output code (glass creation,
-  platform key, part choice, prune, old data); only the general folder glass code moved to
-  `src/overlay.rs`. The `cache` setting (`overlay.<glass>.cache`) still marks a build-output
-  glass, so older layr reads it. The flags go in the next release. Parts are still full folder
+  overlay go with it; the next build fills the new overlay.
+- What is left of the slice: `src/cache_overlay.rs` keeps the build-output code (overlay creation,
+  platform key, part choice, prune, old data); only the general folder overlay code moved to
+  `src/overlay.rs`. The `cache` setting (`overlay.<overlay>.cache`) still marks a build-output
+  overlay, so older layr reads it. The flags go in the next release. Parts are still full folder
   snapshots (slice 7).
 
 **Open (owner decision needed).**
 
 - Shared mode (`user-<uid>`: one overlay line for all lines of a user) does not fit the model, in
-  which a glass holds a part of each state of a line. Slice 4 keeps it as it is for old and new
-  data. The owner must decide: drop the mode, or keep it as a glass without history per line.
+  which an overlay holds a part of each state of a line. Slice 4 keeps it as it is for old and new
+  data. The owner must decide: drop the mode, or keep it as an overlay without history per line.
 - Hidden overlays keep their overlay lines (see above). They need a place for their parts that
   does not show their names, for example a record in the hidden store keyed by the state.
 - Slice 6: should `overlay remove cache.<folder>` happen by itself (for example in `layr migrate`)
-  once each line has a part on the new glass of its platform? Today the admin runs it.
+  once each line has a part on the new overlay of its platform? Today the admin runs it.
 - Slice 6: the cost of a named save with changed build output is one folder snapshot (on APFS a
   copy of every file, made before the store lock). Is that acceptable for every `save -m`, or
   should a project choose that only `save -m` on protected lines saves the part?
@@ -654,7 +655,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 
 | Command                                                     | Effect                                                                                    |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `layr overlay create <name> [--readers <principals>]` | Makes an overlay (a glass). The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. Each line has its part; a new line inherits the part of its source. `--mode shared` was removed (owner decision 2026-11-11, exit 2); old shared glasses keep working. Needs the writer role. |
+| `layr overlay create <name> [--readers <principals>]` | Makes an overlay (an overlay). The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. Each line has its part; a new line inherits the part of its source. `--mode shared` was removed (owner decision 2026-11-11, exit 2); old shared overlays keep working. Needs the writer role. |
 | `layr overlay list [--json] [--size]`                        | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
 | `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
 | `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
@@ -687,11 +688,11 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
 - Its lines have no working folders: `user-<uid>` in shared mode (one per user) and
   `line-<line id>` in follow mode (one per line). The first state is empty. Since slice 4
   (section 1a) a public follow overlay that is no cache gets no new `line-<line id>`. Owner decision
-  2026-11-11: a line has the same name on every glass, so these names go (section 1).
+  2026-11-11: a line has the same name on every overlay, so these names go (section 1).
 - The project records `overlay.<name>` (owner, mode, first state) and, for each line,
   `stack.<line id>`: the overlays the line shows and the state of each. A record that changes a
   stack carries `stack` in its data; `reindex` rebuilds the stacks from the records. Owner
-  decision 2026-11-11: a line holds no stack; a view joins a line and glasses (section 1).
+  decision 2026-11-11: a line holds no stack; a view joins a line and overlays (section 1).
 - The base of a line with overlays is `meta/base/<line id>@<key>`: a read-only snapshot of the
   head with the overlay files in place, the key a hash of the head and the stack. It is derived:
   made again when missing. `fsck` compares it with a new assembly.
@@ -750,7 +751,7 @@ owner changes with named saves and a user who merges into the line changes by th
   is refused. A merge that changes only the overlays makes no shared state.
 - `pick`, `invert` and `replay` take the shared set only. `merge <state>` (not a line
   name) merges the shared set only, unless the state names parts (section 1a, slice 4): then
-  it also merges those parts on the glasses that the target shows.
+  it also merges those parts on the overlays that the target shows.
 
 ### 9.6 Answers to the open questions (for this slice)
 

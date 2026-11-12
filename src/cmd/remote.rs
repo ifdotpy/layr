@@ -1252,20 +1252,20 @@ fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
     a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// The cache flags of a transfer are gone: a cache is an ordinary glass, and `--line` and `--overlay` choose what
+/// The cache flags of a transfer are gone: a cache is an ordinary overlay, and `--line` and `--overlay` choose what
 /// comes (docs/overlays.md section 1a). Each old form fails with exit status 2 and names its replacement.
 fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
     let replacement = if a.has("--no-caches") {
-        Some(("--no-caches", format!("layr {op} <remote> --overlay base (--overlay names the glasses to take)")))
+        Some(("--no-caches", format!("layr {op} <remote> --overlay base (--overlay names the overlays to take)")))
     } else if a.get("--caches-of").is_some() {
         Some(("--caches-of", format!("layr {op} <remote> --line <line>")))
     } else if a.has("--caches") {
-        Some(("--caches", format!("layr {op} <remote> (every glass comes unless --overlay names fewer)")))
+        Some(("--caches", format!("layr {op} <remote> (every overlay comes unless --overlay names fewer)")))
     } else {
         None
     };
     match replacement {
-        Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary glass. Use {instead}"))),
+        Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}"))),
         None => Ok(()),
     }
 }

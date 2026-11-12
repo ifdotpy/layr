@@ -51,14 +51,14 @@ pub fn exit(code: i32, msg: impl Into<String>) -> anyhow::Error {
 }
 
 /// One line on stderr for a cache flag that goes (docs/overlays.md, section 1a, slice 6): a cache
-/// is an ordinary glass. The flag keeps working for one release, so runners have time to change.
-/// The glass flags of a command (owner decision 2026-11-11: a cache is an ordinary glass, so no flag names caches).
+/// is an ordinary overlay. The flag keeps working for one release, so runners have time to change.
+/// The overlay flags of a command (owner decision 2026-11-11: a cache is an ordinary overlay, so no flag names caches).
 /// Each old spelling in `renames` (old, new) fails with exit status 2 and names the new one; the new spelling maps to
 /// the old one, which the command's code still reads.
-pub fn glass_args(op: &str, args: &[String], renames: &[(&str, &str)]) -> Result<Vec<String>> {
+pub fn overlay_args(op: &str, args: &[String], renames: &[(&str, &str)]) -> Result<Vec<String>> {
     for (old, new) in renames {
         if args.iter().any(|a| a == old || a.starts_with(&format!("{old}="))) {
-            return Err(exit(2, format!("layr {op} {old} was removed: a cache is an ordinary glass. Use layr {op} {new}")));
+            return Err(exit(2, format!("layr {op} {old} was removed: a cache is an ordinary overlay. Use layr {op} {new}")));
         }
     }
     Ok(args
@@ -105,7 +105,7 @@ impl<'a> Here<'a> {
 
 thread_local! {
     /// A head without a line for the reading commands of `layr overlay log|show|diff|grep|ls-files`
-    /// on a glass that keeps parts (docs/overlays.md, section 1a): the project and the line, whose
+    /// on an overlay that keeps parts (docs/overlays.md, section 1a): the project and the line, whose
     /// head is the part that the current line shows. Only `overlaycmd::read` sets it.
     static DETACHED: std::cell::RefCell<Option<(String, Line)>> = const { std::cell::RefCell::new(None) };
 }

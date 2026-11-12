@@ -178,21 +178,21 @@ command reads it.
 
 ## 5. Warm caches
 
-Owner decision 2026-11-11: a cache is an ordinary overlay (a glass), for example
+Owner decision 2026-11-11: a cache is an ordinary overlay (an overlay), for example
 `target.macos-aarch64` with `folder=target`, `quiet`, `history=last`, `merge=union-theirs`,
 `platform=macos-aarch64` and `trust=protected` ([cache overlays](cache-overlays.md) section 2).
-Build output of each platform is its own glass. No cache flags, no `cache.` name prefix, no
+Build output of each platform is its own overlay. No cache flags, no `cache.` name prefix, no
 separate code path. Space comes from layered storage and `history=last`, not from a size cap.
 
 Built (overlays.md section 1a, slices 3 and 6): a named save saves the part of each build-output
-glass whose folder changed, and the new state names it. The first named save of a `regenerable`
-folder makes the glass of this platform. A glass with `platform` is shown, fetched and pushed only
-on its platform. `trust` is a glass property. The cache flags of transfers (`--caches`,
+overlay whose folder changed, and the new state names it. The first named save of a `regenerable`
+folder makes the overlay of this platform. An overlay with `platform` is shown, fetched and pushed only
+on its platform. `trust` is an overlay property. The cache flags of transfers (`--caches`,
 `--no-caches`, `--caches-of`) are removed; `--line` and `--overlay` choose. `save --caches`,
-`merge --caches-only` and `fsck --caches` are now `save --glasses`, `merge --glasses-only` and
-`fsck --glasses`; the old spellings fail with exit status 2. A store keeps its `cache.<folder>` glasses:
-each stays the glass of its folder on every platform. Parts are still full folder snapshots,
-not v2 objects. The rest of this section describes the rules that both kinds of glass follow.
+`merge --caches-only` and `fsck --caches` are now `save --overlays`, `merge --overlays-only` and
+`fsck --overlays`; the old spellings fail with exit status 2. A store keeps its `cache.<folder>` overlays:
+each stays the overlay of its folder on every platform. Parts are still full folder snapshots,
+not v2 objects. The rest of this section describes the rules that both kinds of overlay follow.
 
 A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states and diffs. Every working folder would otherwise build from
@@ -220,7 +220,7 @@ is valid for a state, so it never decides that by itself:
   into a state, on every file system, whether or not `save --caches` ever ran. Any save (automatic
   or named), `line new` and every state-making command first turn each such folder into a layer
   (before the store lock, the copy on btrfs; a marker on APFS). The first save of each cache also
-  saves the first cache state of the line (the glass `<folder>.<platform>`, or an older
+  saves the first cache state of the line (the overlay `<folder>.<platform>`, or an older
   `cache.<folder>`), so a new line from a state of the line starts warm. A later named save copies
   the folder again only when a file in it changed, and the new state names that part.
   Automatic saves do not copy the cache.
@@ -232,7 +232,7 @@ is valid for a state, so it never decides that by itself:
   it; a cache that the state has keeps its first snapshot.
 - A cache made by another user goes to a line only if it was saved on a protected line, because
   a cache holds code that review does not see. Other caches go only to lines of the user who
-  made them. This is the glass property `trust=protected`, the default of a folder glass; a glass
+  made them. This is the overlay property `trust=protected`, the default of a folder overlay; an overlay
   with `trust=readers` gives any part to each user who reads it.
 - A cache is build output for one operating system and processor. Each save records its
   platform (`<os>-<arch>`, for example `linux-aarch64` or `macos-aarch64`), and a line takes a
@@ -325,7 +325,7 @@ checks and the part of `project move` that rests on them are in [volumes](volume
 - Overlays: file trees with their own owner, readers and history, stacked on a line. The first
   slice (file overlays, shared and follow mode) is built; the rest is planned (`docs/overlays.md`).
   Owner decision 2026-11-11: lines and overlays are independent; a line has the same name on
-  every glass, and a view joins a line and a set of glasses (`docs/overlays.md` section 1).
+  every overlay, and a view joins a line and a set of overlays (`docs/overlays.md` section 1).
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
 
 ## 8. Decided against
@@ -336,7 +336,7 @@ checks and the part of `project move` that rests on them are in [volumes](volume
   copied Python environment runs the original line's interpreter), and the output holds code
   that no one reviewed. A state is a key of sources only, not of the compiler and environment
   that a build cache needs. Caches now come only from an explicit `save --caches`. (Owner
-  decision 2026-11-11: that flag goes; a cache is an ordinary glass of the line, section 5.)
+  decision 2026-11-11: that flag goes; a cache is an ordinary overlay of the line, section 5.)
 - **Working folders outside the store.** A line's folder stays at
   `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
   store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)

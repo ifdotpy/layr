@@ -22,14 +22,14 @@ for n in a b c; do
     cd $P/$n || exit 1
     mkdir -p target build
     echo $n.1 > target/x; echo $n.1 > build/y
-    l save --glasses -q
+    l save --overlays -q
     echo $n.2 > target/x; echo $n.2 > build/y
-    l save --glasses -q
+    l save --overlays -q
 done
 cd $P/main || exit 1
 l gc --repair -q >/dev/null 2>&1
 before_t=$(states $TG)
-before_b=$(states $(glass build))
+before_b=$(states $(overlay build))
 
 # The repair waits after each plan N (planned.N) until the test writes go.N.
 W=$T/wait
@@ -45,7 +45,7 @@ pid=$!
 planned 1
 cd $P/a || exit 1
 echo a.3 > target/x; echo a.3 > build/y
-l save --glasses -q
+l save --overlays -q
 cd $P/main || exit 1
 l line delete -D c >/dev/null 2>&1
 ok "the save and the line delete finish while the repair waits" kill -0 $pid
@@ -73,7 +73,7 @@ l line new -q a2 a >/dev/null
 eq "a new line from a has the newest target cache" a.3 "$(cat $P/a2/target/x)"
 eq "a new line from a has the newest build cache" a.3 "$(cat $P/a2/build/y)"
 eq "the target overlay drops c and keeps one state of a" "$((before_t - 1))" "$(states $TG)"
-eq "the build overlay drops c and keeps one state of a" "$((before_b - 1))" "$(states $(glass build))"
+eq "the build overlay drops c and keeps one state of a" "$((before_b - 1))" "$(states $(overlay build))"
 ok "the owners table matches the records" l gc -q
 
 # A second repair with nothing new changes nothing.

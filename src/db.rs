@@ -797,7 +797,7 @@ impl Db {
             }
             layr_model::validation::STATE_PARTS_OP => {
                 // The parts of states saved before parts (docs/overlays.md, section 1a). The state
-                // keeps its signed save record; the row gets the glasses it did not name.
+                // keeps its signed save record; the row gets the overlays it did not name.
                 self.apply_state_parts(d)?;
             }
             _ => {}
@@ -813,15 +813,15 @@ impl Db {
                 .execute(params![key, layers.to_string(), ord])?;
             }
         }
-        // The glasses that the working folder of a line shows (`view.<line id>`, slice 5).
+        // The overlays that the working folder of a line shows (`view.<line id>`, slice 5).
         if let Some(v) = d.get("folder_view") {
-            if let (Some(line), Some(glasses)) = (v.get("line").and_then(|v| v.as_str()), v.get("glasses")) {
+            if let (Some(line), Some(overlays)) = (v.get("line").and_then(|v| v.as_str()), v.get("overlays")) {
                 let key = if foreign { format!("view.{line}@{}", rec.machine) } else { format!("view.{line}") };
                 tx.prepare_cached(
                     "INSERT INTO config(key, value, ord) VALUES(?1,?2,?3)
                      ON CONFLICT(key) DO UPDATE SET value=?2, ord=?3 WHERE excluded.ord > config.ord",
                 )?
-                .execute(params![key, glasses.to_string(), ord])?;
+                .execute(params![key, overlays.to_string(), ord])?;
             }
         }
         self.owners_after(rec, &ord, foreign)?;
@@ -866,7 +866,7 @@ impl Db {
         Ok(())
     }
 
-    /// Add the parts of a `state.parts` record to the rows of its states. A glass that a state
+    /// Add the parts of a `state.parts` record to the rows of its states. An overlay that a state
     /// names already keeps its part; a state that is not here yet gets them when it arrives.
     fn apply_state_parts(&self, data: &serde_json::Value) -> Result<()> {
         for (state, parts) in layr_model::validation::state_parts(data)? {
@@ -879,8 +879,8 @@ impl Db {
             let mut value: serde_json::Value = serde_json::from_str(&raw)?;
             let mut all = value.get("parts").and_then(|x| x.as_object()).cloned().unwrap_or_default();
             let before = all.len();
-            for (glass, part) in parts {
-                all.entry(glass).or_insert(serde_json::json!(part));
+            for (overlay, part) in parts {
+                all.entry(overlay).or_insert(serde_json::json!(part));
             }
             if all.len() == before {
                 continue;

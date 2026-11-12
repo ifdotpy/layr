@@ -959,7 +959,7 @@ fn newer_cache_given_back(
     Ok(None)
 }
 
-/// `save_back` for any caller (`checks run`, `save --glasses --save-back`): the save-back line's name and the saved
+/// `save_back` for any caller (`checks run`, `save --overlays --save-back`): the save-back line's name and the saved
 /// caches (folder, overlay, cache state). Empty when `dir` has no cache folder.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn save_back_caches(
@@ -970,7 +970,7 @@ pub(crate) fn save_back_caches(
     dir: &std::path::Path,
 ) -> Result<(String, Vec<(String, String, String)>)> {
     // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
-    // could warm it): it becomes a cache first, as in `save --glasses`, so the first build of a platform is saved.
+    // could warm it): it becomes a cache first, as in `save --overlays`, so the first build of a platform is saved.
     let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
     for p in repo.cache_paths(dir)? {
         if !paths.contains(&p) {

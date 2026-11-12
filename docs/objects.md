@@ -12,9 +12,9 @@ After migration, source states remain usable without native state snapshots.
 Status, diff, and file reads use object trees directly.
 Operations that require native folders can create temporary copies.
 New saves write objects before they publish the state record.
-Derived states keep their native format. A part of a glass (a cache too) goes to the glass's own object store when its project has `objects.enabled`; its native copy stays for now (docs/overlays.md section 1a, slice 7). Owner decision 2026-11-11: a cache is an
-ordinary overlay (a glass), and its states go into v2 objects like any glass; a state record then
-names one tree and one times table per glass ([cache overlays](cache-overlays.md) section 2).
+Derived states keep their native format. A part of an overlay (a cache too) goes to the overlay's own object store when its project has `objects.enabled`; its native copy stays for now (docs/overlays.md section 1a, slice 7). Owner decision 2026-11-11: a cache is an
+ordinary overlay (an overlay), and its states go into v2 objects like any overlay; a state record then
+names one tree and one times table per overlay ([cache overlays](cache-overlays.md) section 2).
 Remote compatibility is separate (section 13 and `docs/remote-format.md`).
 
 ## 1. Model
@@ -265,7 +265,7 @@ Note for the API contract (layr-cloud `docs/api.md`): `times` is a required fiel
 objects must be linked to the project before the state is.
 
 Owner decision 2026-11-11: in the overlay model a state names one tree and one times table per
-glass (overlay), the base included. This file does not define that layout yet; the format above
+overlay, the base included. This file does not define that layout yet; the format above
 is what is built.
 
 ## 9. Hot and cold
@@ -516,7 +516,7 @@ macOS 27.2, M5 Max (18 cores), APFS, release build of `examples/objects-bench` (
 its usage is at the top of its source). Other agents used the machine at the same time, so times
 are upper bounds. Bytes are file sizes; "allocated" counts 4 KiB blocks (`du`).
 
-A cache glass (real `target` states, 2026-11-11) is measured in
+A cache overlay (real `target` states, 2026-11-11) is measured in
 [cache overlays](cache-overlays.md) section 21: about 2.3 to 2.6 GB compressed per new build, kilobytes per state of the same build.
 
 ### Choices

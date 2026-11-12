@@ -13,7 +13,7 @@ l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null 2>&1
-mkdir -p target && echo a > target/a && l save --glasses -q
+mkdir -p target && echo a > target/a && l save --overlays -q
 ov=$TG
 plat=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/arm64/aarch64/')
 self() { env LAYR_ROOT="$T/$1/store" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])'; }
@@ -57,7 +57,7 @@ wl() { env LAYR_ROOT="$T/w/store" "$LAYR" "$@"; }
 (cd "$T" && wl clone "file://$T/archive" p --line main >/dev/null 2>&1)
 W=$T/w/store/projects/p/lines
 (cd "$W/main" && wl line new "main.checks-$plat" main >/dev/null 2>&1)
-(cd "$W/main.checks-$plat" && echo w > target/w && wl save --glasses -q)
+(cd "$W/main.checks-$plat" && echo w > target/w && wl save --overlays -q)
 (cd "$W/main" && wl line new wx main >/dev/null 2>&1 && cd "$W/wx" && echo w > w.txt && wl add w.txt >/dev/null && wl save -qm "a source state of the writer")
 (cd "$W/main" && wl push origin -q >/dev/null 2>&1)
 l fetch cloud -q >/dev/null 2>&1

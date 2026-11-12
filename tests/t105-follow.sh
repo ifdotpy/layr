@@ -73,7 +73,7 @@ l line new feat main >/dev/null
 cd $P/feat
 echo feat > feat.txt; l add feat.txt; l save -m "feat work" -q
 rm -rf target; mkdir -p target/debug; echo bin-feat > target/debug/x
-l save --glasses -q
+l save --overlays -q
 l git push -q origin HEAD:refs/heads/feat >/dev/null 2>&1
 cd $U; git pull -q origin main; echo feat > feat.txt; git add feat.txt; git commit -qm "squash feat"; git push -q origin main
 cd $P/main
@@ -95,13 +95,13 @@ for n in good gone; do
     cd $P/$n
     echo $n > $n.txt; l add $n.txt; l save -m "$n work" -q
     rm -rf target; mkdir -p target/debug; echo bin-$n > target/debug/x
-    l save --glasses -q
+    l save --overlays -q
     l git push -q origin HEAD:refs/heads/$n >/dev/null 2>&1
     cd $P/main
 done
 # gone saves its caches once more on a state that it did not push.
 cd $P/gone; echo more > more.txt; l add more.txt; l save -m "gone more" -q
-echo bin-gone-more > target/debug/x; l save --glasses -q
+echo bin-gone-more > target/debug/x; l save --overlays -q
 # The cache names the automatic state of that save.
 gone_head=$(l rev-parse 'head@{0}'); cd $P/main
 P_ROOT=$LAYR_ROOT/projects/gm
@@ -152,7 +152,7 @@ eq "the pass keeps the cache files" bin-main "$(cat target/debug/x 2>/dev/null)"
 l line new loc main >/dev/null
 cd $P/loc
 echo loc > loc.txt; l add loc.txt; l save -m "loc work" -q
-l save --glasses -q
+l save --overlays -q
 cd $P/main
 l merge loc -q >/dev/null 2>&1
 l git push -q origin HEAD:refs/heads/main >/dev/null 2>&1
@@ -167,7 +167,7 @@ l line new viaother main >/dev/null
 cd $P/viaother
 echo viaother > viaother.txt; l add viaother.txt; l save -m "viaother work" -q
 rm -rf target; mkdir -p target/debug; echo bin-viaother > target/debug/x
-l save --glasses -q
+l save --overlays -q
 l git push -q other HEAD:refs/heads/viaother >/dev/null 2>&1
 cd $U; git pull -q origin main; echo viaother > viaother.txt; git add viaother.txt; git commit -qm "squash viaother"; git push -q origin main
 cd $P/main

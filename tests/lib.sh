@@ -27,11 +27,11 @@ export LAYR_TEST_CHUNK_GRACE=${LAYR_TEST_CHUNK_GRACE:-0}
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 export LAYR_AUTHOR_NAME=Tester LAYR_AUTHOR_EMAIL=tester@example.com
 # The platform key of this machine as layr names it (`<os>-<arch>`, docs/overlays.md section 1a,
-# slice 3). A cache is the glass of one platform: `glass target` names the glass of the folder
+# slice 3). A cache is the overlay of one platform: `overlay target` names the overlay of the folder
 # `target` (`target.macos-aarch64`), and `TG` is that name.
 HERE_PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$/macos/')-$(uname -m | sed 's/^arm64$/aarch64/')
-glass() { local f=${1//\//.}; echo "$f.${LAYR_TEST_PLATFORM:-$HERE_PLATFORM}"; }
-TG=$(glass target)
+overlay() { local f=${1//\//.}; echo "$f.${LAYR_TEST_PLATFORM:-$HERE_PLATFORM}"; }
+TG=$(overlay target)
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
 
 # Resolve rustup's toolchain in the sudo user's home, where the test owner can read it.
@@ -207,7 +207,7 @@ has() { # has <description> <needle> <haystack>
 
 # No garbage is left (docs/ownership.md): data goes in the operation that makes it dead, with no gc. At the end of
 # each test the owners of every project of the test store equal the replay of its records with no leaked state
-# (`layr gc`, a check), and no cache data is unreachable (`fsck --glasses`). A test that makes garbage on purpose (a
+# (`layr gc`, a check), and no cache data is unreachable (`fsck --overlays`). A test that makes garbage on purpose (a
 # crash, a leak) sets LAYR_TEST_GARBAGE_OK=1.
 garbage_check() {
     [ -n "${LAYR_TEST_GARBAGE_OK:-}" ] && return 0
@@ -221,8 +221,8 @@ garbage_check() {
         if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" gc 2>&1); then
             FAIL=$((FAIL+1)); echo "FAIL no garbage is left in project $name (layr gc)"; echo "$out" | sed 's/^/  /' | head -8
         fi
-        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --glasses 2>&1); then
-            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --glasses)"; echo "$out" | sed 's/^/  /' | head -8
+        if ! out=$(cd / && unset LAYR_SOCKET && l --project "$name" fsck --overlays 2>&1); then
+            FAIL=$((FAIL+1)); echo "FAIL no cache garbage is left in project $name (fsck --overlays)"; echo "$out" | sed 's/^/  /' | head -8
         fi
     done
 }

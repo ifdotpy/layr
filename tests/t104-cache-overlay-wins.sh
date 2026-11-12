@@ -13,9 +13,9 @@ cd $P/main
 l protect main >/dev/null
 head=$(l rev-parse main)
 rm -rf target; mkdir -p target/debug; echo first > target/debug/x
-l save --glasses -q
+l save --overlays -q
 echo second > target/debug/x
-l save --glasses -q
+l save --overlays -q
 eq "main stays at its head" "$head" "$(l rev-parse main)"
 has "the overlay has the second cache" "saved " "$(l overlay list | grep $TG)"
 

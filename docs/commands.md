@@ -16,8 +16,8 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
-| views         | `view [<rev or line>] [--overlay <glass>,...] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state with those glasses; `--folder` writes the files of the view to a new folder; see overlays.md section 1a, slice 5), `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--folder <path>] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--platform <key>\|any] [--trust protected\|readers]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>` (changes the view of the current working folder), `overlay order [<name>,...]` (shows or sets the project order of glasses, the order of the default view of a new line folder), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
+| views         | `view [<rev or line>] [--overlay <overlay>,...] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state with those overlays; `--folder` writes the files of the view to a new folder; see overlays.md section 1a, slice 5), `view save [<line>] [--json]`, `view show <id> [--json]` |
+| overlays      | `overlay create <name> [--readers <principals>] [--mode shared\|follow] [--hidden] [--folder <path>] [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--platform <key>\|any] [--trust protected\|readers]`, `overlay set <name> <properties>`, `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [--add\|--remove\|--none] <names>` (changes the view of the current working folder), `overlay order [<name>,...]` (shows or sets the project order of overlays, the order of the default view of a new line folder), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
 | refs          | `ref set <name> <rev> [--expect <rev\|none>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>] [-m <conventional title>]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
@@ -183,24 +183,24 @@ Use `--note <text>` to add an optional note to the auto state.
 If nothing changed since the newest auto state made over the head (or since the head when there is none), no state is made. The output names the existing state: `<line> <state id>`.
 Use `--running`, `--force`, or `-q` with an auto save.
 
-A named save also saves the build-output glasses (docs/overlays.md, section 1a, slice 6). A
-`regenerable` folder becomes the glass of this platform (`target.macos-aarch64`) at its first
+A named save also saves the build-output overlays (docs/overlays.md, section 1a, slice 6). A
+`regenerable` folder becomes the overlay of this platform (`target.macos-aarch64`) at its first
 named save. A folder that changed since the line's part gets a new part; an unchanged folder keeps
 its part. The new state names the part (`parts`), so `line new <state>` takes it.
 
-A cache is an ordinary glass, so no flag names caches. Each old flag fails with exit status 2 and
+A cache is an ordinary overlay, so no flag names caches. Each old flag fails with exit status 2 and
 names its replacement:
 
 | Flag | Use instead |
 | --- | --- |
-| `save --caches [--cache <path>]` (removed, exit 2) | `save --glasses [--folder <path>]`: the parts of the folder glasses, with no named change; a named save (`save -m`) saves them too |
-| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | nothing: every glass comes unless `--overlay` names fewer |
+| `save --caches [--cache <path>]` (removed, exit 2) | `save --overlays [--folder <path>]`: the parts of the folder overlays, with no named change; a named save (`save -m`) saves them too |
+| `push`, `fetch`, `pull`, `sync`, `clone` `--caches` (removed, exit 2) | nothing: every overlay comes unless `--overlay` names fewer |
 | `fetch --no-caches` (removed, exit 2) | `fetch <remote> --overlay base` |
 | `fetch`, `clone` `--caches-of <line>` (removed, exit 2) | `fetch <remote> --line <line>`, `clone <url> --line <line>` |
-| `merge <line> --caches-only` (removed, exit 2) | `merge <line> --glasses-only` |
-| `fsck --caches` (removed, exit 2) | `fsck --glasses` |
+| `merge <line> --caches-only` (removed, exit 2) | `merge <line> --overlays-only` |
+| `fsck --caches` (removed, exit 2) | `fsck --overlays` |
 
-`layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out a glass whose `platform` is another platform's, unless `--overlay` names it.
+`layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push`: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner on a Mac: `layr fetch cloud --line main --overlay base,target.macos-aarch64`. A fetch or push leaves out an overlay whose `platform` is another platform's, unless `--overlay` names it.
 Use `--all-lines` to save auto states for all lines. `--all` applies only to named saves.
 `--note` cannot be combined with `-m`, `-F`, or `--amend`.
 

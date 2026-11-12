@@ -54,7 +54,7 @@ no "a save keeps target a plain folder" is_cache $W/target
 sleep 1
 size2=$(stat -c %s target/debug/out)
 ok "the writer keeps writing into target" test "$size2" -gt "$size1"
-out=$(LAYR_TRACE=1 l save --glasses --folder target 2>&1)
+out=$(LAYR_TRACE=1 l save --overlays --folder target 2>&1)
 rc=$?
 echo "diag: busy trace: $(echo "$out" | grep -i busy | tr '\n' ' ')"
 eq "an explicit save refuses the busy folder" "1" "$rc"

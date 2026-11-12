@@ -10,8 +10,8 @@
 //!
 //! A line shows a stack: the shared set (the line's head) at the bottom and overlays above it. The
 //! view of the working folder (`view.<line id>`, docs/overlays.md section 1a, slice 5) chooses the
-//! glasses and their order; the setting `stack.<line id>` gives the state the folder shows on each
-//! (and the glasses too, for a line made before views).
+//! overlays and their order; the setting `stack.<line id>` gives the state the folder shows on each
+//! (and the overlays too, for a line made before views).
 //! The working folder holds the files of all layers, the upper file winning. The base
 //! (`meta/base/<line id>@<key>`, read-only) holds the same full tree for the head and the stack,
 //! so status and diff still compare two snapshots of one tree in O(changes).
@@ -104,16 +104,16 @@ pub struct Props {
     pub gc_lru: Option<u64>,
     /// `prune=<name>|none`: the cache adapter that prunes the folder (issue #167). None: detect it.
     pub prune: Option<String>,
-    /// `platform=<key>` (`<os>-<arch>`): the glass is shown and fetched only on that platform
+    /// `platform=<key>` (`<os>-<arch>`): the overlay is shown and fetched only on that platform
     /// (docs/overlays.md, section 1a, slice 3). None: every platform.
     pub platform: Option<String>,
     /// `trust=protected|readers`: whose parts a line takes (docs/overlays.md, section 1a, slice 6).
     /// `protected`: a part that another user saved only from a protected line. `readers`: any
-    /// part that the reader may read. None: `protected` for a build-output glass, else `readers`.
+    /// part that the reader may read. None: `protected` for a build-output overlay, else `readers`.
     pub trust: Option<Trust>,
 }
 
-/// The `trust` property of a glass.
+/// The `trust` property of an overlay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trust {
     Protected,
@@ -147,9 +147,9 @@ pub fn platform_name(s: &str) -> Option<String> {
     ok.then(|| s.to_string())
 }
 
-/// Whether a glass with `platform=<p>` belongs to another platform than this machine's
-/// (`cache_platform()`, `<os>-<arch>`). A glass with no platform is on every platform.
-pub fn other_platform_glass(platform: Option<&str>) -> bool {
+/// Whether an overlay with `platform=<p>` belongs to another platform than this machine's
+/// (`cache_platform()`, `<os>-<arch>`). An overlay with no platform is on every platform.
+pub fn other_platform_overlay(platform: Option<&str>) -> bool {
     let here = crate::model::cache_platform();
     platform.is_some_and(|p| p != here && !here.starts_with(&format!("{p}-")))
 }
@@ -316,10 +316,10 @@ struct OverlayClean {
 #[derive(Clone, Debug)]
 pub struct Info {
     pub hidden: bool,
-    /// A build-output glass (`regenerable`): it follows the cache paths of each line. Without a
+    /// A build-output overlay (`regenerable`): it follows the cache paths of each line. Without a
     /// `platform`, its lines have an overlay line per platform (`cache_line_name`).
     pub cache: bool,
-    /// `platform=<key>`: the glass of one platform (docs/overlays.md, section 1a, slice 3).
+    /// `platform=<key>`: the overlay of one platform (docs/overlays.md, section 1a, slice 3).
     pub platform: Option<String>,
     pub owner: u32,
     pub mode: Mode,
@@ -346,17 +346,17 @@ impl ListedOverlay<'_> {
     }
 }
 
-/// A glass whose parts the state records name (`StateRec::parts`, docs/overlays.md section 1a): a
+/// An overlay whose parts the state records name (`StateRec::parts`, docs/overlays.md section 1a): a
 /// public follow overlay that is no cache. Its overlay store gets no overlay lines for new lines; a
 /// line's part on it lives in the line's stack and in the state records. Shared, hidden and cache
 /// overlays keep their overlay lines (slices 5 and 6).
-pub fn parts_glass(info: &Info) -> bool {
+pub fn parts_overlay(info: &Info) -> bool {
     info.mode == Mode::Follow && !info.cache && !info.hidden
 }
 
-/// The overlay line of the line `line_id` in a build-output glass: `line-<id>` in the glass of one
+/// The overlay line of the line `line_id` in a build-output overlay: `line-<id>` in the overlay of one
 /// platform (slice 3), else `cache_line_name`.
-pub fn glass_line_name(info: &Info, line_id: &str) -> String {
+pub fn part_line_name(info: &Info, line_id: &str) -> String {
     if info.cache && info.platform.is_none() {
         cache_line_name(line_id)
     } else {
@@ -387,19 +387,19 @@ pub fn stack_data(line_id: &str, layers: &[Layer]) -> serde_json::Value {
 }
 
 /// The settings key of the view of the working folder of a line (docs/overlays.md, section 1a,
-/// slice 5): the glasses that the folder shows, bottom first. It names glasses only; the part on
-/// each glass comes from the line (its stack and its state records).
+/// slice 5): the overlays that the folder shows, bottom first. It names overlays only; the part on
+/// each overlay comes from the line (its stack and its state records).
 pub fn view_key(line_id: &str) -> String {
     format!("view.{line_id}")
 }
 
-/// The settings key of the project order of glasses (`layr overlay order`).
+/// The settings key of the project order of overlays (`layr overlay order`).
 pub const ORDER_KEY: &str = "overlays.order";
 
 /// Record data that sets the view of the working folder of a line: the names of its public
-/// glasses, bottom first.
-pub fn view_data(line_id: &str, glasses: &[String]) -> serde_json::Value {
-    serde_json::json!({"line": line_id, "glasses": glasses})
+/// overlays, bottom first.
+pub fn view_data(line_id: &str, overlays: &[String]) -> serde_json::Value {
+    serde_json::json!({"line": line_id, "overlays": overlays})
 }
 
 /// A folder path as a folder overlay keeps it: relative, without `.`, `..` or empty parts, not
@@ -430,18 +430,18 @@ pub fn tree_size(root: &Path) -> u64 {
 }
 
 impl Repo<'_> {
-    /// The folder glasses of the project on this platform: name and folder. A glass with
+    /// The folder overlays of the project on this platform: name and folder. An overlay with
     /// `platform=<key>` of another platform is left out (docs/overlays.md, section 1a, slice 3).
     pub fn folder_overlays(&self) -> Result<Vec<(String, String)>> {
         Ok(self
             .all_folder_overlays()?
             .into_iter()
-            .filter(|(_, _, p)| !crate::overlay::other_platform_glass(p.as_deref()))
+            .filter(|(_, _, p)| !crate::overlay::other_platform_overlay(p.as_deref()))
             .map(|(n, f, _)| (n, f))
             .collect())
     }
 
-    /// The folder glasses of every platform: name, folder and `platform`.
+    /// The folder overlays of every platform: name, folder and `platform`.
     pub fn all_folder_overlays(&self) -> Result<Vec<(String, String, Option<String>)>> {
         let mut out = Vec::new();
         for name in self.overlay_names()? {
@@ -453,12 +453,12 @@ impl Repo<'_> {
         Ok(out)
     }
 
-    /// The folder glass of `folder` on this platform. A glass of this platform wins over an older
-    /// glass without a platform (a `cache.<folder>` overlay), which serves every platform.
+    /// The folder overlay of `folder` on this platform. An overlay of this platform wins over an older
+    /// overlay without a platform (a `cache.<folder>` overlay), which serves every platform.
     pub fn folder_overlay_of(&self, folder: &str) -> Result<Option<String>> {
         let mut found: Option<(String, bool)> = None;
         for (n, f, p) in self.all_folder_overlays()? {
-            if f != folder || crate::overlay::other_platform_glass(p.as_deref()) {
+            if f != folder || crate::overlay::other_platform_overlay(p.as_deref()) {
                 continue;
             }
             if found.as_ref().is_none_or(|(_, own)| !own && p.is_some()) {
@@ -767,7 +767,7 @@ impl<'a> Repo<'a> {
         self.check_stack(line, &view.layers)?;
         for layer in &view.layers {
             let info = self.need_overlay(&layer.overlay)?;
-            if parts_glass(&info) {
+            if parts_overlay(&info) {
                 continue;
             }
             let repo = self.overlay_repo(&layer.overlay)?;
@@ -999,8 +999,8 @@ impl<'a> Repo<'a> {
         Ok(stack_data(line, &self.public_layers(layers)?))
     }
 
-    /// Record data that sets the view of the working folder of `line` to the public glasses of
-    /// `layers` (`view_key`). Hidden glasses keep their place in their own project
+    /// Record data that sets the view of the working folder of `line` to the public overlays of
+    /// `layers` (`view_key`). Hidden overlays keep their place in their own project
     /// (`record_hidden_selection`).
     pub fn public_view_data(&self, line: &str, layers: &[Layer]) -> Result<serde_json::Value> {
         let names: Vec<String> = self.public_layers(layers)?.into_iter().map(|l| l.overlay).collect();
@@ -1028,9 +1028,9 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The parts of a state on the hidden glasses that the caller reads (`layers` at that state): each goes to the
-    /// records of its own glass as `hidden.part.<state>`, so the public state record never names a hidden glass, and
-    /// the remote copy of the glass encrypts it for the glass's readers (docs/overlays.md section 1a).
+    /// The parts of a state on the hidden overlays that the caller reads (`layers` at that state): each goes to the
+    /// records of its own overlay as `hidden.part.<state>`, so the public state record never names a hidden overlay, and
+    /// the remote copy of the overlay encrypts it for the overlay's readers (docs/overlays.md section 1a).
     pub fn record_hidden_parts(&self, ctx: &Ctx, state: &str, layers: &[Layer]) -> Result<()> {
         for l in layers {
             if !self.overlay_info(&l.overlay)?.is_some_and(|i| i.hidden) || !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
@@ -1049,7 +1049,7 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The new state `to` names the same parts of the hidden glasses as `from` (a replayed state).
+    /// The new state `to` names the same parts of the hidden overlays as `from` (a replayed state).
     pub fn copy_hidden_parts(&self, ctx: &Ctx, from: &str, to: &str) -> Result<()> {
         let mut layers = Vec::new();
         for name in self.overlay_names()? {
@@ -1060,7 +1060,7 @@ impl<'a> Repo<'a> {
         self.record_hidden_parts(ctx, to, &layers)
     }
 
-    /// The part of the hidden glass `name` that the state `state` named when it was saved, if this machine reads it.
+    /// The part of the hidden overlay `name` that the state `state` named when it was saved, if this machine reads it.
     pub fn hidden_part(&self, name: &str, state: &str) -> Result<Option<String>> {
         let Ok(op) = self.overlay_project(name) else { return Ok(None) };
         Ok(op.db.overlay_config(&format!("hidden.part.{state}"))?.and_then(|v| v.as_str().map(str::to_owned)))
@@ -1162,16 +1162,16 @@ impl<'a> Repo<'a> {
             None => self.p.db.overlay_config(&key)?,
         };
         let mut layers: Vec<Layer> = value.map(serde_json::from_value).transpose()?.unwrap_or_default();
-        // The view of the working folder chooses the glasses and their order (slice 5). A line
+        // The view of the working folder chooses the overlays and their order (slice 5). A line
         // without a view (made before views) shows its stack as before.
         if !self.p.is_overlay() {
-            if let Some(glasses) = self.folder_view(line)? {
+            if let Some(overlays) = self.folder_view(line)? {
                 let mut shown = Vec::new();
-                for name in glasses {
+                for name in overlays {
                     match layers.iter().find(|l| l.overlay == name) {
                         Some(l) => shown.push(l.clone()),
                         None => {
-                            if let Some(l) = self.glass_layer(Some(line), &line.head, &name)? {
+                            if let Some(l) = self.overlay_layer(Some(line), &line.head, &name)? {
                                 shown.push(l);
                             }
                         }
@@ -1203,7 +1203,7 @@ impl<'a> Repo<'a> {
         Ok(layers)
     }
 
-    /// The view of the working folder of `line`: the names of the public glasses it shows,
+    /// The view of the working folder of `line`: the names of the public overlays it shows,
     /// bottom first. None for a line without a view (it shows its stack).
     pub fn folder_view(&self, line: &Line) -> Result<Option<Vec<String>>> {
         let key = view_key(&line.id);
@@ -1219,12 +1219,12 @@ impl<'a> Repo<'a> {
         Ok(value.filter(|v| !v.is_null()).map(serde_json::from_value).transpose()?)
     }
 
-    /// The layer of glass `name` over `state` when the stack of the line names no state for it:
-    /// the part that `state` names on a glass that keeps parts, else the overlay line of `line`,
-    /// else the empty first state of the glass. None for a glass that is not on this machine.
-    pub fn glass_layer(&self, line: Option<&Line>, state: &str, name: &str) -> Result<Option<Layer>> {
+    /// The layer of overlay `name` over `state` when the stack of the line names no state for it:
+    /// the part that `state` names on an overlay that keeps parts, else the overlay line of `line`,
+    /// else the empty first state of the overlay. None for an overlay that is not on this machine.
+    pub fn overlay_layer(&self, line: Option<&Line>, state: &str, name: &str) -> Result<Option<Layer>> {
         let Some(info) = self.overlay_info(name)? else { return Ok(None) };
-        if parts_glass(&info) {
+        if parts_overlay(&info) {
             if let Some(part) = self.p.db.state(state)?.and_then(|s| s.parts.get(name).cloned()) {
                 return Ok(Some(Layer { overlay: name.to_string(), state: part }));
             }
@@ -1240,7 +1240,7 @@ impl<'a> Repo<'a> {
         Ok(Some(layer))
     }
 
-    /// The project order of glasses: the names that `layr overlay order` set (setting
+    /// The project order of overlays: the names that `layr overlay order` set (setting
     /// `overlays.order`), then the others in the order of their creation (the time of the empty
     /// first state), then by name.
     pub fn project_order(&self) -> Result<Vec<String>> {
@@ -1269,11 +1269,11 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// The glasses of the default view of a new line folder of `owner`: every glass that the owner
+    /// The overlays of the default view of a new line folder of `owner`: every overlay that the owner
     /// reads and whose `platform` (if set) is this machine's, in the project order. Folder
-    /// overlays are no glass of the file stack (a line takes their parts as folders). A cache glass
-    /// is an ordinary glass (owner decision 2026-11-11): it comes like any other.
-    pub fn default_glasses(&self, owner: u32, _shown: &[String]) -> Result<Vec<String>> {
+    /// overlays are no overlay of the file stack (a line takes their parts as folders). A cache overlay
+    /// is an ordinary overlay (owner decision 2026-11-11): it comes like any other.
+    pub fn default_overlays(&self, owner: u32, _shown: &[String]) -> Result<Vec<String>> {
         let folders: Vec<String> = self.folder_overlays()?.into_iter().map(|(n, _)| n).collect();
         let mut out = Vec::new();
         for name in self.project_order()? {
@@ -1281,7 +1281,7 @@ impl<'a> Repo<'a> {
             if folders.contains(&name) {
                 continue;
             }
-            if other_platform_glass(info.platform.as_deref()) {
+            if other_platform_overlay(info.platform.as_deref()) {
                 continue;
             }
             if self.layer_root(&Layer { overlay: name.clone(), state: info.root.clone() }).is_none() {
@@ -1295,42 +1295,42 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// The parts that a new state of a line with `layers` names: the state of each glass that
-    /// keeps parts (`parts_glass`).
+    /// The parts that a new state of a line with `layers` names: the state of each overlay that
+    /// keeps parts (`parts_overlay`).
     pub fn parts_of(&self, layers: &[Layer]) -> Result<BTreeMap<String, String>> {
         let mut out = BTreeMap::new();
         for l in layers {
-            if self.overlay_info(&l.overlay)?.is_some_and(|i| parts_glass(&i)) {
+            if self.overlay_info(&l.overlay)?.is_some_and(|i| parts_overlay(&i)) {
                 out.insert(l.overlay.clone(), l.state.clone());
             }
         }
         Ok(out)
     }
 
-    /// A new state of a line keeps the parts of `head` on the glasses that its view does not show
-    /// (`layers`): a folder that shows fewer glasses does not clear the others (slice 5).
+    /// A new state of a line keeps the parts of `head` on the overlays that its view does not show
+    /// (`layers`): a folder that shows fewer overlays does not clear the others (slice 5).
     pub fn carry_parts(&self, parts: &mut BTreeMap<String, String>, head: &str, layers: &[Layer]) -> Result<()> {
         if self.p.is_overlay() {
             return Ok(());
         }
-        for (glass, part) in self.p.db.state(head)?.map(|s| s.parts).unwrap_or_default() {
-            if !layers.iter().any(|l| l.overlay == glass) && self.overlay_info(&glass)?.is_some_and(|i| parts_glass(&i)) {
-                parts.entry(glass).or_insert(part);
+        for (overlay, part) in self.p.db.state(head)?.map(|s| s.parts).unwrap_or_default() {
+            if !layers.iter().any(|l| l.overlay == overlay) && self.overlay_info(&overlay)?.is_some_and(|i| parts_overlay(&i)) {
+                parts.entry(overlay).or_insert(part);
             }
         }
         Ok(())
     }
 
-    /// The layers of `line` when it shows its state `state`: the line's stack, each glass that
+    /// The layers of `line` when it shows its state `state`: the line's stack, each overlay that
     /// keeps parts at the part that `state` names. A state with parts that names no part on such a
-    /// glass is clear on it (the empty first state). A state without parts (saved before them, or
+    /// overlay is clear on it (the empty first state). A state without parts (saved before them, or
     /// without overlays) and the head itself keep the stack as it is.
     pub fn layers_at(&self, line: &Line, state: &str) -> Result<Vec<Layer>> {
         let mut layers = self.layers(line)?;
         if self.p.is_overlay() || state == line.head || layers.is_empty() {
             return Ok(layers);
         }
-        // A hidden glass: the part that the state recorded in the glass's own records.
+        // A hidden overlay: the part that the state recorded in the overlay's own records.
         for l in layers.iter_mut() {
             if self.overlay_info(&l.overlay)?.is_some_and(|i| i.hidden) {
                 if let Some(part) = self.hidden_part(&l.overlay, state)? {
@@ -1344,14 +1344,14 @@ impl<'a> Repo<'a> {
         };
         for l in layers.iter_mut() {
             let Some(info) = self.overlay_info(&l.overlay)? else { continue };
-            if parts_glass(&info) {
+            if parts_overlay(&info) {
                 l.state = parts.get(&l.overlay).cloned().unwrap_or(info.root);
             }
         }
         Ok(layers)
     }
 
-    /// The glasses of the view of a state (docs/overlays.md, section 1a): the parts that the state
+    /// The overlays of the view of a state (docs/overlays.md, section 1a): the parts that the state
     /// names, in the order of the stack of `line` and then of the project's overlays. Empty for a
     /// state without parts.
     pub fn part_layers(&self, line: Option<&Line>, state: &str) -> Result<Vec<Layer>> {
@@ -1359,7 +1359,7 @@ impl<'a> Repo<'a> {
             return Ok(Vec::new());
         }
         let mut parts = self.p.db.state(state)?.map(|s| s.parts).unwrap_or_default();
-        // The hidden glasses that this machine reads: the part that the state recorded in each glass's own records.
+        // The hidden overlays that this machine reads: the part that the state recorded in each overlay's own records.
         let mut hidden = BTreeSet::new();
         for name in self.overlay_names()? {
             if self.overlay_info(&name)?.is_some_and(|i| i.hidden) {
@@ -1381,11 +1381,11 @@ impl<'a> Repo<'a> {
                 order.push(name);
             }
         }
-        // A build-output glass is a folder, not a glass of the file stack: `line new` places its part.
+        // A build-output overlay is a folder, not an overlay of the file stack: `line new` places its part.
         let mut out = Vec::new();
         for o in order {
             if let Some(s) = parts.get(&o) {
-                if hidden.contains(&o) || self.overlay_info(&o)?.is_some_and(|i| parts_glass(&i)) {
+                if hidden.contains(&o) || self.overlay_info(&o)?.is_some_and(|i| parts_overlay(&i)) {
                     out.push(Layer { overlay: o.clone(), state: s.clone() });
                 }
             }
@@ -1770,7 +1770,7 @@ impl<'a> Repo<'a> {
     }
 
     /// The present states of cache overlay `name` that nothing keeps: beyond its history limit (all
-    /// states when it has none), not shown by a line, or of a deleted line. `fsck --glasses` reports
+    /// states when it has none), not shown by a line, or of a deleted line. `fsck --overlays` reports
     /// them; the operations that make them dead delete them (`apply_history`). It only reads.
     pub fn cache_unreachable(&self, name: &str) -> Result<Vec<String>> {
         let keep_n = self.overlay_props(name)?.history.map_or(usize::MAX, |n| n as usize);
@@ -1843,7 +1843,7 @@ impl<'a> Repo<'a> {
                 keep.insert(l.state.clone());
             }
         }
-        // A glass that keeps parts: the parts of the newest `history` states of each line.
+        // An overlay that keeps parts: the parts of the newest `history` states of each line.
         if !cache {
             for line in lines {
                 let mut at = Some(line.head.clone());
@@ -1959,14 +1959,14 @@ impl<'a> Repo<'a> {
     }
 
     /// The layers of the working folder of a new line of `owner`: its default view (slice 5,
-    /// `default_glasses`), every glass that the owner reads in the project order.
+    /// `default_overlays`), every overlay that the owner reads in the project order.
     ///
-    /// The part on each glass: a glass that keeps parts (`parts_glass`) shows the part that the
-    /// start state names, or the source's state of the glass when the start is the source's head
+    /// The part on each overlay: an overlay that keeps parts (`parts_overlay`) shows the part that the
+    /// start state names, or the source's state of the overlay when the start is the source's head
     /// (an unsaved part of an overlay-only save) or names no part; else the empty first state. It
-    /// gets no overlay line. Another glass gets an overlay line: a follow glass at the source's
+    /// gets no overlay line. Another overlay gets an overlay line: a follow overlay at the source's
     /// state (else its empty first state), a shared one the owner's line (made at the source's
-    /// state, or the head of the glass owner's line, when missing).
+    /// state, or the head of the overlay owner's line, when missing).
     pub fn inherit_layers(&self, ctx: &Ctx, source: Option<&Line>, start: &str, line_id: &str, owner: u32) -> Result<Vec<Layer>> {
         let start_parts = self.p.db.state(start)?.map(|s| s.parts).unwrap_or_default();
         let at_head = source.is_some_and(|s| s.head == start);
@@ -1976,10 +1976,10 @@ impl<'a> Repo<'a> {
         };
         let shown: Vec<String> = source_layers.iter().map(|l| l.overlay.clone()).collect();
         let mut out = Vec::new();
-        for name in self.default_glasses(owner, &shown)? {
+        for name in self.default_overlays(owner, &shown)? {
             let Some(info) = self.overlay_info(&name)? else { continue };
             let from_source = source_layers.iter().find(|l| l.overlay == name).map(|l| l.state.clone());
-            if parts_glass(&info) {
+            if parts_overlay(&info) {
                 let named = start_parts.get(&name).cloned();
                 let state = if at_head { from_source.or(named) } else { named.or(from_source) };
                 let l = Layer { overlay: name, state: state.unwrap_or(info.root) };
@@ -2133,7 +2133,7 @@ pub fn move_overlay_line(orepo: &Repo, ctx: &Ctx, op: &str, ol: &Line, head: &st
     Ok(())
 }
 
-/// A record in an overlay that keeps new parts (`parts_glass`) of the project line `line_id`. It
+/// A record in an overlay that keeps new parts (`parts_overlay`) of the project line `line_id`. It
 /// moves no overlay line: the state records of the line and its stack name the parts.
 pub fn record_part(orepo: &Repo, ctx: &Ctx, op: &str, line_id: &str, states: Vec<StateRec>) -> Result<()> {
     let mut rec = Record::new(op);
@@ -2208,10 +2208,10 @@ pub fn commit_layers(
         let l = &layers[i];
         let info = repo.need_overlay(&l.overlay)?;
         let orepo = &orepos[i];
-        // A glass that keeps parts moves an overlay line only where an older layr made one.
+        // An overlay that keeps parts moves an overlay line only where an older layr made one.
         let ol = match orepo.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
             Some(ol) => Some(ol),
-            None if parts_glass(&info) => None,
+            None if parts_overlay(&info) => None,
             None => bail!("line '{}' has no line in overlay '{}'", line.name, l.overlay),
         };
         if ol.as_ref().is_some_and(|ol| ol.head != l.state) {
@@ -2262,11 +2262,11 @@ pub fn commit_layers(
         }
     };
     let head = repo.state(&line.head)?;
-    // A line has its own history (owner decision 2026-11-11): a save that changes only glasses
+    // A line has its own history (owner decision 2026-11-11): a save that changes only overlays
     // that keep parts makes a state of the line with the same base tree and the new parts. A
     // protected line moves only through merges, so there the parts wait in the stack as before.
     let parts_only = s.shared.is_empty()
-        && made.iter().any(|(i, _, _)| repo.overlay_info(&layers[*i].overlay).ok().flatten().is_some_and(|info| parts_glass(&info)))
+        && made.iter().any(|(i, _, _)| repo.overlay_info(&layers[*i].overlay).ok().flatten().is_some_and(|info| parts_overlay(&info)))
         && parts != head.parts
         && repo.authorize_line(ctx, line, crate::repo::LineOp::Direct).is_ok();
     let shared = if s.shared.is_empty() && !(allow_empty && made.is_empty()) && !parts_only {
@@ -2280,9 +2280,9 @@ pub fn commit_layers(
                     st.author.email = e.clone();
                 }
                 st.parts = parts;
-                // The parts of the build-output glasses (slice 6), as in a save without overlays.
-                for (glass, part) in repo.save_named_cache_parts(ctx, line, &st.id) {
-                    st.parts.entry(glass).or_insert(part);
+                // The parts of the build-output overlays (slice 6), as in a save without overlays.
+                for (overlay, part) in repo.save_named_cache_parts(ctx, line, &st.id) {
+                    st.parts.entry(overlay).or_insert(part);
                 }
                 // Content conflicts stay listed while the committed file has markers.
                 let root = repo.p.state_path(&st.id);

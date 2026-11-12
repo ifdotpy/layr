@@ -94,10 +94,10 @@ no_native_sources
 "$LAYR" config regenerable '["ignored"]'
 mkdir -p ignored
 printf 'cache content\n' > ignored/file
-"$LAYR" save --glasses
+"$LAYR" save --overlays
 [ "$(cat ignored/file)" = 'cache content' ]
 "$LAYR" line new with-cache
 cd "$base/lines/with-cache"
 [ "$(cat file)" = 'changed!' ]
-"$LAYR" fsck --glasses
+"$LAYR" fsck --overlays
 printf 'PASS object state lifecycle (%s)\n' "$(uname -s)"

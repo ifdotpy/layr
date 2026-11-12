@@ -275,7 +275,7 @@ fn discard_prepared(repo: &Repo) {
 pub struct OverlayMerge {
     /// The stack of the line after the merge.
     layers: Vec<Layer>,
-    /// Overlay, its line of the merged line (none for a glass that keeps parts), the new head, the
+    /// Overlay, its line of the merged line (none for an overlay that keeps parts), the new head, the
     /// new state (none for a fast-forward).
     moves: Vec<(String, Option<Line>, String, Option<StateRec>)>,
     messages: Vec<String>,
@@ -339,7 +339,7 @@ fn plan_overlays(
                 Some(st) => repo.p.db.state(st)?.map(|s| s.parts).unwrap_or_default(),
                 None => Default::default(),
             };
-            // A state takes part only on the glasses that the line shows.
+            // A state takes part only on the overlays that the line shows.
             let layers: Vec<Layer> = parts
                 .into_iter()
                 .filter(|(overlay, _)| ours.iter().any(|l| &l.overlay == overlay))
@@ -363,7 +363,7 @@ fn plan_overlays(
                     format!("error: merging line '{}' needs the read right of its overlay '{}'", theirs_name, tl.overlay),
                 ));
             }
-            // A line does not know glasses (owner decision 2026-11-11): a glass that the incoming line shows and this
+            // A line does not know overlays (owner decision 2026-11-11): an overlay that the incoming line shows and this
             // line does not comes into this line's view, from its empty first state.
             let i = match m.layers.iter().position(|l| l.overlay == tl.overlay) {
                 Some(i) => i,
@@ -379,10 +379,10 @@ fn plan_overlays(
             }
             let ol = match o.p.db.line_by_name(&Repo::overlay_line_name(&info, &line.id, line.owner))? {
                 Some(ol) => Some(ol),
-                None if crate::overlay::parts_glass(&info) => None,
+                None if crate::overlay::parts_overlay(&info) => None,
                 None => return Err(exit(1, format!("error: line '{}' has no line in overlay '{}'", line.name, tl.overlay))),
             };
-            // A glass that keeps parts has no overlay line: the new part belongs to no line of the overlay.
+            // An overlay that keeps parts has no overlay line: the new part belongs to no line of the overlay.
             let part_line = || Line {
                 id: crate::ids::new_id(),
                 name: line.name.clone(),
@@ -595,7 +595,7 @@ fn finish(
         Some(o) if o.changed() => o.layers.clone(),
         _ => repo.layers(line)?,
     };
-    // A new state names its parts on the glasses (docs/overlays.md, section 1a).
+    // A new state names its parts on the overlays (docs/overlays.md, section 1a).
     if !layers.is_empty() {
         let mut parts = repo.parts_of(&layers)?;
         repo.carry_parts(&mut parts, &line.head, &layers)?;
@@ -1238,7 +1238,7 @@ fn print_stat(ctx: &Ctx, repo: &Repo, from: &str, to: &str) -> Result<()> {
 }
 
 pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let args = &super::glass_args("merge", args, &[("--caches-only", "--glasses-only")])?;
+    let args = &super::overlay_args("merge", args, &[("--caches-only", "--overlays-only")])?;
     let spec = Spec::new()
         .value("-m|--message")
         .flag("--no-ff")
@@ -1348,7 +1348,7 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         orepo.hold(orepo.pin(&[ol.head.as_str()])?);
         let Some(saved) = orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of) else {
             return Ok(Some(format!(
-                "the cache of {} names no project state; run `layr save --glasses` in {} first",
+                "the cache of {} names no project state; run `layr save --overlays` in {} first",
                 theirs.name, theirs.name
             )));
         };
@@ -2464,7 +2464,7 @@ fn replay_locked(
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
         s.author = c.author.clone();
         s.change_id = c.change_id.clone();
-        // A replayed state moves the base change onto the new upstream; its parts on the glasses stay those of the
+        // A replayed state moves the base change onto the new upstream; its parts on the overlays stay those of the
         // state it replays (docs/overlays.md section 1a).
         s.parts = c.parts.clone();
         conflicts += out.conflicts.len();

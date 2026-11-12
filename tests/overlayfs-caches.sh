@@ -11,7 +11,7 @@ l config regenerable '["target"]'
 mkdir -p target
 no "the cache is not a mount" mountpoint -q target
 printf built > target/output
-l save -q --glasses
+l save -q --overlays
 l line new -q warm
 eq "the new line has the saved cache" built "$(cat "$P/warm/target/output")"
 ok "the new cache is a mount over the saved state (no copy)" mountpoint -q "$P/warm/target"
@@ -23,17 +23,17 @@ no "history excludes the cache output" l show head:target/output
 ok "remove the cache root" rm -rf target
 mkdir target
 printf rebuilt > target/output
-l save -q --glasses
-eq "save --glasses preserves rebuilt output" rebuilt "$(cat target/output)"
+l save -q --overlays
+eq "save --overlays preserves rebuilt output" rebuilt "$(cat target/output)"
 # A saved cache belongs to a state. Advance the state before saving new output.
 printf '\nnew build input\n' >> notes.txt
 l save -qam "new build input"
-l save -q --glasses
+l save -q --overlays
 # The regenerable setting belongs to this machine: a .layrattributes file makes target a cache path on the peer too.
 echo 'target regenerable' > .layrattributes
 l add .layrattributes
 l save -q -m "target is a cache"
-l save -q --glasses
+l save -q --overlays
 new_fs "$T/peer" 2G
 # Caches go only to machines the project trusts (docs/cache-overlays.md): trust the peer first.
 peer_self=$(env LAYR_ROOT="$T/peer/store" "$LAYR" remote self --json)

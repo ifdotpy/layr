@@ -120,12 +120,12 @@ checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <he
 `checks watch --once`), `layr push <remote> --caches`.
 
 A build outside `checks run`, such as a CI job, gives its caches back the same way with
-`layr save --glasses --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
+`layr save --overlays --save-back <line> [--json]` in a line made from the head of `<line>`: the cache
 folders of the current line go to `<line>.checks-<os>-<arch>` with the line's head as their source
 state, and no source state is made (a cache writer machine may run it, docs/ci-trust.md). Then
 `layr push <remote> --caches` publishes them.
-Owner decision 2026-11-11: a cache is an ordinary overlay (glass), so these cache flags
-(`--caches`, `--caches-of`) go away; a fetch and a push name lines and glasses
+Owner decision 2026-11-11: a cache is an ordinary overlay, so these cache flags
+(`--caches`, `--caches-of`) go away; a fetch and a push name lines and overlays
 ([overlays](overlays.md) section 1). The commands above are what is built.
 
 The referenced derived state contains `check.log`.

@@ -2,7 +2,7 @@
 # ci: macos overlayfs
 # A warm cargo target folder names the place of its build in some units: rustc compiles in the values of
 # env!("CARGO_BIN_EXE_<bin>") and env!("CARGO_MANIFEST_DIR"), and cargo does not compare them. A line that takes the
-# caches of another line (`line new`, `merge --glasses-only`) relocates them: these units build again and name the new
+# caches of another line (`line new`, `merge --overlays-only`) relocates them: these units build again and name the new
 # line, the other units stay fresh.
 #
 # The lines belong to the user that runs cargo: on a root run (the Linux CI job) the user who started the job.
@@ -62,7 +62,7 @@ if [ "$(id -u)" != 0 ]; then l protect main --remove >/dev/null 2>&1 || true; fi
 new_line -q later main >/dev/null
 out=$(cb "$P/main" test --workspace -- --nocapture)
 has "the test names the binary of main" "BIN=$P/main/target/debug/x" "$out"
-(cd "$P/main" && l save --glasses -q)
+(cd "$P/main" && l save --overlays -q)
 
 # line new: the copied test unit builds again, the binary and the dependency do not.
 err=$(new_line w main 2>&1 >/dev/null)
@@ -73,8 +73,8 @@ has "the test in the new line names its own folder" "DIR=$P/w" "$out"
 has "the test unit built again" "Compiling reloc" "$out"
 no "the dependency stayed fresh" grep -q "Compiling dep" <<<"$out"
 
-# merge --glasses-only into a line that had no caches.
-(cd "$P/later" && l merge main --glasses-only -q >/dev/null 2>&1)
+# merge --overlays-only into a line that had no caches.
+(cd "$P/later" && l merge main --overlays-only -q >/dev/null 2>&1)
 out=$(cb "$P/later" test --workspace -- --nocapture)
 has "after a merge of caches the test runs the line's own binary" "BIN=$P/later/target/debug/x" "$out"
 

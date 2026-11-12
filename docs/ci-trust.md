@@ -26,7 +26,7 @@ All of them run without a prompt; `--json` prints one object.
   gets its id, key and name from `LAYR_MACHINE_NAME=ci-… layr remote self --json`. A trust outside
   the delegation is refused with exit 128.
 - `layr remote untrust <remote> <machine> [--json]` ends a trust at once (a suspected leak).
-- `layr save --glasses --save-back <line> [--json]` saves the caches of the current line to the
+- `layr save --overlays --save-back <line> [--json]` saves the caches of the current line to the
   save-back line of `<line>` (`<line>.checks-<os>-<arch>`, as `checks run` does) and makes no source
   state (docs/checks.md).
 - Owner decision 2026-11-11: a cache is an ordinary overlay, so `--caches` and `save --caches`

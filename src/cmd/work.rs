@@ -1456,10 +1456,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         state.author.name = n;
         state.author.email = e;
     }
-    // The part of each build-output glass (docs/overlays.md, section 1a, slice 6): a folder that
+    // The part of each build-output overlay (docs/overlays.md, section 1a, slice 6): a folder that
     // changed gets a new part saved with this state; the state names the parts.
-    for (glass, part) in h.repo.save_named_cache_parts(ctx, &line, &state.id) {
-        state.parts.entry(glass).or_insert(part);
+    for (overlay, part) in h.repo.save_named_cache_parts(ctx, &line, &state.id) {
+        state.parts.entry(overlay).or_insert(part);
     }
     // `named_checks` checked the conflicts and the secrets of this content.
     let mut data = serde_json::json!({"line": line.id});
