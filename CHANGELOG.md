@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.44.0](https://github.com/ifdotpy/layr/compare/v0.43.0...v0.44.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **overlay:** A line is the same line on every overlay: the store of an overlay holds each line with its own id and name. New overlays have follow mode only (`overlay create --mode shared` exits 2). Run `layr overlay migrate-parts` once per project to move a store of an older layr (old stacks, `line-<id>` names, the `cache` flag).
+* **cli:** No flag names caches. `save --caches`, `merge --caches-only` and `fsck --caches` are `save --overlays`, `merge --overlays-only` and `fsck --overlays`. `--caches`, `--no-caches` and `--caches-of` on push, fetch, pull, sync and clone are removed. Each old flag exits with status 2 and names its replacement.
+
+### Features
+
+* **fetch:** `fetch --line <name> --overlay <layer>` takes the history of the chosen lines on the chosen layers only (`base` is the base); `--heads` takes their heads. `push` takes the same flags.
+* **overlay:** A state records its part on each overlay (`parts`); `line new`, `reset --hard`, merges and `view <state>` use them. A hidden overlay records its parts in its own records.
+* **overlay:** The view of a line folder holds its overlays (`overlay use`, `overlay order`, `view --overlay`, `view --folder`).
+* **overlay:** A cache is an ordinary overlay with properties: build output of each platform is its own overlay (`target.<os>-<arch>`), and `platform`, `trust`, `history` and `folder` decide how it behaves.
+* **objects:** Parts of folder overlays are stored as v2 objects in the overlay's own object store; gc prunes each object store.
+* **free:** free dead temporary copies, trash, leaked states and Git-built trees on time; migrate --delete-old fixes ([5283263](https://github.com/ifdotpy/layr/commit/528326305dfe326eff4a3ca3fac463cfba12fdbb))
+
+
+### Bug Fixes
+
+* **remote:** A push sends states that are here only as objects; a line whose head is not on the remote yet is named on stderr and fails only a fetch that names it.
+* **overlay:** A hidden overlay adds no record to the project; a state that changes only overlays keeps a stable git commit; a merge brings an overlay only with a change.
+* **free:** a dry run and fsck leave temporary copies of dead processes in place ([a6fca89](https://github.com/ifdotpy/layr/commit/a6fca8983aa627e3e6bbdb9d529ee96683c2268b))
+* **queue:** a required check that failed on another platform fails the queue entry with the reason instead of keeping it pending ([3c8aa74](https://github.com/ifdotpy/layr/commit/3c8aa747de5daca6355e0e6d3a24b00e86f3025f))
+* **status:** Ignore com.apple.provenance when a file is written again ([b86435e](https://github.com/ifdotpy/layr/commit/b86435e01524c1f32d081dd043b2ef6e72b79b6e))
+
+
+### Performance
+
+* **remote:** Object reads through a gateway come from its CDN (`x-layr-cdn: 1`, with a fallback through the gateway); fetch, push, `release files`, `release verify-main` and the follow pass read each record segment once; `checks pending` reads the newest change versions in one query.
+* **remote:** Every gateway client uses `LAYR_GATEWAY_CA_FILE` of the process.
+
 ## [0.43.0](https://github.com/ifdotpy/layr/compare/v0.42.0...v0.43.0) (2026-11-11)
 
 
