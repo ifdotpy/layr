@@ -255,7 +255,7 @@ Lines and states:
    park [list/show/pop/apply/drop/clear]
    retest run [--full] [--save] [-- <nextest args>], retest init [--yes], retest doctor
    tag, merge, pick, invert, replay, undo, op, try, bisect run, adopt
-   ref set/list/log/delete, release attach/files/get, attest, attestations, change list/show/log/diff
+   ref set/list/log/delete, release attach/files/get, attest, attestations, change list/show/log/diff/edit/close/reopen/numbering
    view [<rev or line>] [--json], view save [<line>], view show <id>
 Remotes:
    person keys, show, accept

@@ -31,10 +31,13 @@ pub fn heads(project: &Project, watermark: BTreeMap<String, Watermark>, seq: u64
     let refs = project.refs.values().map(|r| Ref { name: r.name.clone(), target: r.target.clone() }).collect();
     let mut changes = Vec::new();
     for s in project.open_changes() {
+        let id = s.change_id.clone().expect("open change has an identity");
+        let (title, _) = crate::changes::text(project.change_meta(&id), &s.message);
         changes.push(Change {
-            id: s.change_id.clone().expect("open change has an identity"),
+            number: project.numbering().number(&id),
+            id,
             state: s.id.clone(),
-            title: s.message.lines().next().unwrap_or("").into(),
+            title,
             author: serde_json::to_value(&s.author)?,
             time: s.time,
         });

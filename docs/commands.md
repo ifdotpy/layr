@@ -23,7 +23,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
-| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list`, `change show <id>`, `change log <id>`, `change diff <id> [--from vN\|--since-review [--person <login>]] [--to vM]` |
+| changes       | `comment <change> <text> [--version vN] [--path <path>] [--line N] [--reply-to <id>] [--json]`, `change list [--all\|--closed]`, `change show <change>`, `change log <change>`, `change diff <change> [--from vN\|--since-review [--person <login>]] [--to vM]`, `change edit <change> [--title <title>] [--description <text>\|--description-file <file>]`, `change close <change> [-m <reason>]`, `change reopen <change>`, `change numbering [--hand-to <machine>]`. `<change>` is `#12`, `12`, a change id or the start of one ([review](review.md#change-numbers-titles-and-closing)) |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
 | setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
@@ -458,6 +458,11 @@ A `.git` folder that the line owner made instead is left alone.
 
 `layr line list --json` writes an array of local lines. Each line includes its ID, name, head, owner, machine, and local path.
 A name pattern filters the array. JSON output does not support `--all` or `--remotes`.
+
+`layr change list --json` writes an array of changes. Each change has `change_id`, `number` (null until the
+numbering machine gives one), `title`, `description`, `status` (`open`, `closed` or `merged`), `closed` (only for a
+closed change), `versions`, `state` (the newest version) and `message`. `change show --json` has the same `number`,
+`title`, `description`, `status` and `closed` fields. See [review](review.md#change-numbers-titles-and-closing).
 
 `layr change diff <id> --from vN --to vM --json` writes the change ID, version labels, and interdiff text.
 `--since-review` starts at the newest version that you approved (an approval of this machine and your user), so

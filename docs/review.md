@@ -42,6 +42,60 @@ The operation gives the actor, machine, time, kind, source state, target line, a
 Versions from older records omit this field. `change log` lists their operations.
 `change diff` compares each version's patch against its own parent, so unrelated base changes do not enter the interdiff.
 
+### Change numbers, titles and closing
+
+Each change has a number, for example `#12`. `change show #12`, `change show 12` and `changes/#12` select it.
+A bare number that is also the start of a change id is ambiguous: use `#12` or more of the id.
+JSON output of `change list` and `change show` has these fields:
+
+| Field | Value |
+|-------|-------|
+| `number` | The change number, or null when the change has no number yet. |
+| `title` | The title from `change edit`. Without one, the first line of the newest version's message. |
+| `description` | The description from `change edit`. Without one, the rest of that message, or null. |
+| `status` | `open`, `closed` or `merged`. |
+| `closed` | Only for a closed change: `actor`, `machine`, `time` and `reason`. |
+
+How numbers work:
+
+- Records are written offline on many machines, so a counter on each machine would give the same number twice.
+  One machine gives all numbers: the numbering machine. At first it is the machine that created the project.
+- The numbering machine gives numbers when a `change` command or `queue add` runs on it. It numbers every change
+  that has none, the oldest first version first, in one signed `change.number` record.
+- Another machine shows a number when it has that record, for example after `layr fetch`. Before that, the number
+  is null. A new change on a laptop gets its number when the numbering machine sees the change.
+- A number never changes. The first number of a change stays. A number that another change has already is ignored.
+  Only the records of the numbering machine count.
+- `change numbering` shows the numbering machine and the next number. On the numbering machine, an admin can give
+  the role to another machine: `change numbering --hand-to <machine>`. The record gives the new machine the next
+  number. Numbers that the old machine writes after the handoff count no more. Use this before you retire the
+  numbering machine, or to give the role to a Layr Cloud machine.
+- We chose this rule over a number from a sort of the change records (time, machine, sequence). A sort gives a number
+  at once on every machine, but a change that arrives late with an old time would move the numbers of later changes.
+
+`change edit <change> --title <title> [--description <text> | --description-file <file>]` sets the title or the
+description. An edit changes only the fields that it names. An empty value clears the field, and the change then
+shows its message again. A title is one line of at most 300 characters. A description has at most 64 KiB.
+`--description-file -` reads standard input.
+
+`change close <change> [-m <reason>]` closes a change. `change reopen <change>` opens it again.
+`change list` does not show closed changes. `change list --closed` shows only closed changes, and
+`change list --all` shows all changes. A merged change cannot be closed or reopened, and a merged change shows
+`merged` also when a close record arrives later. A change is merged when its newest version is in the history of a
+`main` line or when a queue entry of that version is done.
+
+Who can edit, close or reopen a change: the author (the user who made the first version, on that machine) or a
+maintainer of the project (role `line.manage`). The machine that writes the record checks this. Other machines
+accept the record like other records of a trusted machine.
+
+When two machines write at the same time, the record that is last in the record order wins. The record order is the
+time, then the machine id, then the sequence number. All machines use the same order, so they show the same result.
+For example, a close at 10:00 on one machine and a reopen at 10:05 on another machine give an open change.
+
+A closed change cannot go into the queue. `queue add` refuses it. `queue run` does not merge a pending entry of a
+change that was closed after `queue add`. The entry becomes `failed` with the reason `#12 is closed`, and its hold is
+released. To merge the change, reopen it and add it to the queue again.
+
 Attestation kinds: `check`, `approval`, `origin`, `import`, `quarantine`, `revoke`, and `bisect`.
 `bisect run` writes a `bisect` attestation of the first bad state; its payload is the result
 (`layr attestations <state> --kind bisect`). Line and ref protection read a required check only as a
@@ -113,6 +167,8 @@ layr queue run --into main
 ```
 
 The queue stores the exact source state and its ChangeId. Later source edits do not change an entry.
+`queue add` refuses a closed change, and `queue run` fails the entry of a change that was closed later
+(see "Change numbers, titles and closing").
 The default target is `line.<name>.upstream` when that setting exists, else `main`.
 `queue run` processes pending entries in order. An entry becomes `done` or `failed`, with its result or reason.
 A failure does not stop later entries. A conflict leaves the target head and files unchanged.
