@@ -211,26 +211,13 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Err(e) => serde_json::json!({"status":"unavailable","reason":format!("{e:#}")}),
             };
             if a.has("--json") {
-<<<<<<< head
                 let mut out =
                     serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json,"comments":model.comments(&id)});
                 if let Some(view) = &view {
                     layr_model::changes::add_view_fields(&mut out, view);
                 }
+                layr_model::Project::add_review(&mut out, model.review(&id));
                 outln!(ctx, "{}", out);
-||||||| base
-                outln!(
-                    ctx,
-                    "{}",
-                    serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json,"comments":model.comments(&id)})
-                );
-=======
-                outln!(ctx, "{}", {
-                    let mut show = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior_json,"comments":model.comments(&id)});
-                    layr_model::Project::add_review(&mut show, model.review(&id));
-                    show
-                });
->>>>>>> feat-review
             } else {
                 outln!(ctx, "change {id}");
                 if let Some(view) = &view {

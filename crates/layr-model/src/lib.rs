@@ -865,25 +865,18 @@ impl Project {
             Ok(None) => serde_json::json!({"probes":[]}),
             Err(error) => serde_json::json!({"status":"unavailable","reason":format!("{error:#}")}),
         };
-<<<<<<< head
         let mut out = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)});
         if let Some(view) = self.change_view(id) {
             changes::add_view_fields(&mut out, &view);
         }
+        Self::add_review(&mut out, self.review(id));
         Ok(out)
-||||||| base
-        Ok(serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)}))
-=======
-        let mut show = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)});
-        Self::add_review(&mut show, self.review(id));
-        Ok(show)
     }
     /// Add the keys of `review` (threads, reactions, reviewers) to a `change show` object.
     pub fn add_review(show: &mut Value, review: Value) {
         if let (Some(show), Value::Object(review)) = (show.as_object_mut(), review) {
             show.extend(review);
         }
->>>>>>> feat-review
     }
     fn change_behavior(&self, state: &StateRec, context: &probes::Context) -> Result<Value> {
         for entry in self.queue_list(None).iter().rev() {
