@@ -133,29 +133,11 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let repo = &h.repo;
     let usage = "usage: layr change (list [--all|--closed]|show <change>|log <change>|diff <change> [--from vN|--since-review [--person <login>]] [--to vN]|edit <change> [--title <title>] [--description <text>|--description-file <file>]|close <change> [-m <reason>]|reopen <change>|numbering [--hand-to <machine>]) [--json]";
     let command = a.pos.first().map(String::as_str).unwrap_or("");
-<<<<<<< head
     let mut names = super::LineNames::new(&repo.p.db);
-    if command == "list" && a.pos.len() == 1 {
-        let mut rows = Vec::new();
-        for id in repo.p.db.changes()? {
-            let versions = repo.p.db.change_versions(&id)?;
-            if let Some(last) = versions.last() {
-                let mut row = serde_json::json!({"change_id":id,"versions":versions.len(),"state":last.id,"message":last.message,"line":last.line});
-                names.add(&mut row, "line")?;
-                rows.push(row);
-||||||| base
-    if command == "list" && a.pos.len() == 1 {
-        let mut rows = Vec::new();
-        for id in repo.p.db.changes()? {
-            let versions = repo.p.db.change_versions(&id)?;
-            if let Some(last) = versions.last() {
-                rows.push(serde_json::json!({"change_id":id,"versions":versions.len(),"state":last.id,"message":last.message}));
-=======
     let only = |flags: &[&str], commands: &[&str]| -> Result<()> {
         for flag in flags {
             if a.has(flag) && !commands.contains(&command) {
                 bail!("{flag} is only for change {}", commands.join(" or "));
->>>>>>> feat-change-lifecycle
             }
         }
         Ok(())
@@ -179,7 +161,16 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             })
             .collect();
         if a.has("--json") {
-            outln!(ctx, "{}", serde_json::to_string(&rows)?);
+            // The line of the newest version and its name, next to the model view (docs/commands.md).
+            let mut out = Vec::new();
+            for r in &rows {
+                let mut row = serde_json::to_value(r)?;
+                let line = repo.p.db.change_versions(&r.change_id)?.last().map(|s| s.line.clone());
+                row["line"] = serde_json::json!(line);
+                names.add(&mut row, "line")?;
+                out.push(row);
+            }
+            outln!(ctx, "{}", serde_json::to_string(&out)?);
         } else {
             for r in rows {
                 let number = r.number.map_or("-".to_string(), |n| format!("#{n}"));
