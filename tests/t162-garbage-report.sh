@@ -22,7 +22,7 @@ cd $P/lines/w || exit 1
 for i in 1 2 3; do echo "lk $i" > lk.txt; l save -q; done
 wid=$(q "select id from lines where name='w' and deleted=0")
 cd $P/lines/main || exit 1
-l line delete -D w >/dev/null
+l line delete -D --discard w >/dev/null
 # A leak, as a bug would make it: the storage of freed states, marked present again.
 exec_sql "update states set present=1, deleted=0 where present=0 and deleted=1 and kind='auto' and line='$wid'"
 leaked=$(q "select count(*) from states where present=1")

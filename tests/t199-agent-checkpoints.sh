@@ -65,6 +65,6 @@ eq "it is gone from the list" "" "$(kept t3/turn+/0)"
 no "a missing keep is an error" l keep drop t3/turn+/0
 no "--keep refuses a named save" l save -m named --keep x
 cd $P/lines/main
-l line delete -D agent >/dev/null
+l line delete -D --discard agent >/dev/null
 eq "the line delete releases its keeps" 0 "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("select count(*) from owners where kind=\"keep\"").fetchone()[0])' "$DB")"
 finish

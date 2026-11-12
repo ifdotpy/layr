@@ -114,6 +114,13 @@ Overlay and people prefixes are excluded. Public requests never use the authenti
 The gateway must expose the routes only when a signed public manifest is present.
 
 `line new <name> [<rev>] [--count N]` creates lines. A line starts at the state that `<rev>` names when the command reads it; a save or a fetch that moves that line during the command does not change the start. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
+`line delete <name>` refuses a line with saves that are not merged into the current line; `-D`
+deletes it anyway. It also refuses a line whose folder has unsaved changes: modified, added or
+deleted files, and new files that are not ignored. `-D` does not change this. An automatic save
+(`layr save` without `-m`) does not count as saved. The error names the line and its files. Save
+the changes in a named state (`layr add`, then `layr save -m`), park them (`layr park`), or add
+`--discard` to delete the line with them. `-f` is `-D` and `--discard` together. A discarded line
+stays in the `deleted` ring, so `layr undo` brings it back with its changes.
 With `--count N`, names run from `<name>-1` through `<name>-N`. The main project's line records
 commit together in one durable transaction: failure records none of the batch and removes its
 published folders. If a commit reports an error after it succeeded, all recorded lines and their
@@ -141,6 +148,11 @@ folder get the current time, as `git checkout` gives them, so build tools that c
 
 `reset <rev>` without `--hard` moves the head and keeps the files (mixed, as in git). It lists the
 files that now differ from the new head and names `layr reset --hard <rev>`, which changes them.
+
+Protection (`layr protect`) is about the history of a line: who can move its head. It does not
+lock the working folder. In a protected line such as `main`, the owner can use `restore`,
+`clean` and `reset` to the current head (`reset`, `reset --hard`, `reset --hard head`) to undo
+changes in the working folder. A `save`, and a `reset` to any other state, still refuse.
 
 `layr undo` reverses the newest operation of the line, an automatic save too. A second `layr undo`
 reverses that undo. Name an operation id to reverse an older one. Undo of an automatic save puts the

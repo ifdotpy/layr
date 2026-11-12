@@ -36,7 +36,7 @@ ok "the line has automatic states before its delete" test "$before" -ge 6
 oldest=$(first_auto w)
 ok "the oldest automatic state has storage" on_disk "$oldest"
 cd $M/main || exit 1
-l line delete -D w >/dev/null
+l line delete -D --discard w >/dev/null
 eq "the line delete leaves only its final state present" 1 "$(present_of_id "$wid")"
 # On APFS the thin final state keeps the layers under it until its complete tree, which a background process
 # makes after the delete (docs/ownership.md); gc --repair makes it at once.
@@ -88,7 +88,7 @@ cd $M/c || exit 1
 for i in 1 2 3; do echo "c $i" > c.txt; l save -q; done
 c_old=$(first_auto c)
 cd $M/main || exit 1
-LAYR_TEST_EXIT_AFTER_COMMIT=1 "$LAYR" line delete -D c >/dev/null 2>&1
+LAYR_TEST_EXIT_AFTER_COMMIT=1 "$LAYR" line delete -D --discard c >/dev/null 2>&1
 eq "the crash exits with status 86" 86 "$?"
 ok "the crash leaves states in the queue" test "$(queue)" -gt 0
 l status >/dev/null 2>&1
@@ -140,7 +140,7 @@ cd $M/w || exit 1
 for i in 1 2 3; do echo "lk $i" > lk.txt; l save -q; done
 wid=$(line_id w)
 cd $M/main || exit 1
-l line delete -D w >/dev/null
+l line delete -D --discard w >/dev/null
 pre=$(q "select count(*) from states where present=1")
 exec_sql "update states set present=1, deleted=0 where present=0 and deleted=1 and kind='auto' and line='$wid'"
 leaked=$(( $(q "select count(*) from states where present=1") - pre ))

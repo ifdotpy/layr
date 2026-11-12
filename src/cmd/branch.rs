@@ -173,6 +173,22 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// The paths with unsaved changes in the folder of a line: modified, added, deleted and new files
+/// that are not ignored. Files of quiet overlays (caches) do not count.
+fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
+    let (mut st, _scan, _it, _idx) = repo.status(l)?;
+    st.drop_paths(&repo.quiet_paths(l)?);
+    let mut out = std::collections::BTreeSet::new();
+    for c in st.staged.iter().chain(st.unstaged.iter()) {
+        out.insert(c.path.clone());
+        if let Some(o) = &c.old_path {
+            out.insert(o.clone());
+        }
+    }
+    out.extend(st.untracked.iter().cloned());
+    Ok(out.into_iter().collect())
+}
+
 fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     let spec = Spec::new()
         .flag("-l|--list")
@@ -184,6 +200,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .flag("-m|--move")
         .flag("-M")
         .flag("-f|--force")
+        .flag("--discard")
         .flag("--show-current")
         .flag("--path")
         .value("--owner")
@@ -239,6 +256,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if a.pos.is_empty() {
             return Err(exit(128, "fatal: line name required"));
         }
+        let discard = a.has("--discard") || a.has("-f");
         for name in &a.pos {
             let l = repo.line(name)?;
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
@@ -256,6 +274,32 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 let base_only = repo.p.db.line_states(&l.id, StateKind::Commit)?.is_empty();
                 if !merged && !base_only {
                     return Err(exit(1, format!("error: the line '{name}' is not fully merged.\nIf you are sure you want to delete it, run 'layr line delete -D {name}'.")));
+                }
+            }
+            // Unsaved changes in the folder of the line need an explicit --discard (or -f): -D
+            // allows only unmerged saves.
+            if !discard && repo.working(&l).exists() {
+                let flags = if a.has("-D") { "-D --discard" } else { "--discard" };
+                let unsaved = unsaved_paths(repo, &l).map_err(|e| {
+                    exit(
+                        1,
+                        format!(
+                            "error: cannot read the working folder of line '{name}': {e:#}\nTo delete the line and its folder as it is, run 'layr line delete {flags} {name}'."
+                        ),
+                    )
+                })?;
+                if !unsaved.is_empty() {
+                    let mut shown = unsaved.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                    if unsaved.len() > 5 {
+                        shown.push_str(&format!(", and {} more", unsaved.len() - 5));
+                    }
+                    return Err(exit(
+                        1,
+                        format!(
+                            "error: line '{name}' has unsaved changes in {} file(s): {shown}\nIn the line, save them ('layr add', then 'layr save -m <message>') or park them ('layr park'). To discard them, run 'layr line delete {flags} {name}'.",
+                            unsaved.len()
+                        ),
+                    ));
                 }
             }
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
@@ -296,7 +340,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     };
                     let checked = (|| -> Result<(crate::repo::FinalState, crate::model::Line)> {
                         // Automatic states leave overlay files out: uncommitted changes of them would be lost.
-                        if !a.has("-f") && repo.is_stacked(&l)? && repo.working(&l).exists() {
+                        if !discard && repo.is_stacked(&l)? && repo.working(&l).exists() {
                             let private = repo.private_paths(&l)?;
                             let (st, _scan, _it, _idx) = repo.status(&l)?;
                             let changed = st
@@ -309,7 +353,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                             if changed || !repo.pending_moves(&l).is_empty() {
                                 return Err(exit(
                                     1,
-                                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with -f"),
+                                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard"),
                                 ));
                             }
                         }

@@ -13,6 +13,6 @@ id=$(l line list --json 2>/dev/null | python3 -c 'import json,sys; print([l["id"
 (cd "$LAYR_ROOT/projects/p/lines/x" && echo change > c.txt && l status >/dev/null 2>&1)
 status_file=$LAYR_ROOT/projects/p/meta/status/$id.cache
 ok "a status saves the line's status" test -f "$status_file"
-l line delete -D x >/dev/null 2>&1
+l line delete -D --discard x >/dev/null 2>&1
 no "the line delete removes it" test -e "$status_file"
 finish

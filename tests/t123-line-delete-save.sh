@@ -1,7 +1,8 @@
 #!/bin/bash
 # ci: macos overlayfs
 # `line delete` saves the working state of the line before it takes the project lock (issue #194):
-# unsaved changes and new files go into the automatic state, and `undo` brings them back.
+# unsaved changes and new files go into the automatic state, and `undo` brings them back. A line
+# with unsaved changes needs --discard (t240).
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
@@ -16,7 +17,7 @@ printf 'unsaved\n' > tracked.txt
 mkdir -p bulk && for i in $(seq 1 300); do printf '%s\n' "$i" > "bulk/f$i"; done
 cd "$P/main" || exit 1
 
-trace=$(LAYR_TRACE=1 l line delete -D topic 2>&1)
+trace=$(LAYR_TRACE=1 l line delete -D --discard topic 2>&1)
 no "the line is deleted" test -e "$P/topic"
 has "the lock is taken after the save" "store lock taken" "$trace"
 # The layer written before the lock is an APFS feature (Linux saves a snapshot instead).
@@ -34,7 +35,7 @@ l line new -q busy
 cd "$P/busy" || exit 1
 mkdir -p bulk && for i in $(seq 1 300); do printf '%s\n' "$i" > "bulk/f$i"; done
 cd "$P/main" || exit 1
-LAYR_TEST_LINE_DELETE_PAUSE_MS=3000 LAYR_TRACE=1 l line delete -D busy 2>"$T/busy.trace" &
+LAYR_TEST_LINE_DELETE_PAUSE_MS=3000 LAYR_TRACE=1 l line delete -D --discard busy 2>"$T/busy.trace" &
 pid=$!
 sleep 1
 printf 'late\n' > "$P/busy/late.txt"

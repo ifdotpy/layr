@@ -54,7 +54,7 @@ l line new w -q >/dev/null 2>&1
 cd $P/lines/w
 echo staged3 > notes.txt; l add notes.txt; echo worked3 > notes.txt
 cd $P/lines/main
-l line delete -D w >/dev/null 2>&1
+l line delete -D --discard w >/dev/null 2>&1
 ok "the line is gone" test ! -e $P/lines/w
 l undo >/dev/null 2>&1
 ok "undo makes the line again" test -e $P/lines/w

@@ -45,13 +45,13 @@ d1id=$(line_id d1)
 final=$(newest_auto d1)
 ok "the first line has a final state with storage" on_disk "$final"
 cd $M/main || exit 1
-l line delete -D d1 >/dev/null
+l line delete -D --discard d1 >/dev/null
 ok "the deleted line keeps its final state while it is in the ring" on_disk "$final"
 for n in 2 3 4; do
     l line new -q d$n >/dev/null
     (cd $M/d$n && echo "d$n" > d$n.txt && l save -q) || exit 1
     cd $M/main || exit 1
-    l line delete -D d$n >/dev/null
+    l line delete -D --discard d$n >/dev/null
 done
 no "the final state of the first deleted line has no storage after it left the ring" on_disk "$final"
 eq "no owner names the final state of the first deleted line" 0 "$(q "select count(*) from owners where state='$final'")"
@@ -66,7 +66,7 @@ cd $M/r || exit 1
 for i in 1 2 3 4; do echo "r $i" > r.txt; l save -q; done
 rid=$(line_id r)
 cd $M/main || exit 1
-l line delete -D r >/dev/null
+l line delete -D --discard r >/dev/null
 eq "the deleted line has no stale undo owner before the ring change" 0 "$(stale_undo)"
 l config undo.ops 2 >/dev/null
 eq "after undo.ops shrinks no undo owner is outside the deleted ring" 0 "$(stale_undo)"
@@ -84,7 +84,7 @@ uid=$(line_id u)
 uhead=$(q "select head from lines where id='$uid'")
 ufinal=$(newest_auto u)
 cd $M/main || exit 1
-l line delete -D u >/dev/null
+l line delete -D --discard u >/dev/null
 no "the deleted line is gone from the line list" sh -c "$LAYR line list | awk '{print \$1}' | grep -qx u"
 l undo >/dev/null 2>&1
 ok "undo of the delete restores the line" sh -c "$LAYR line list | awk '{print \$1}' | grep -qx u"
@@ -101,7 +101,7 @@ for i in 1 2; do echo "g $i" > g.txt; l save -q; done
 gid=$(line_id g)
 gfinal=$(newest_auto g)
 cd $M/main || exit 1
-l line delete -D g >/dev/null
+l line delete -D --discard g >/dev/null
 # The leftover of 0.20.0: the undo owner of an earlier record of g names its final state. The
 # record is named by its real ord, so the holder has the form the store writes.
 gord=$(newest_save_ord)
@@ -109,7 +109,7 @@ exec_sql "insert into owners(state, kind, holder) values('$gfinal', 'undo', '$gi
 ok "the leaked undo owner keeps the final state while the line is in the ring" on_disk "$gfinal"
 # Push g out of the undo.deleted ring (size 1).
 l line new -q h >/dev/null
-l line delete -D h >/dev/null
+l line delete -D --discard h >/dev/null
 eq "one stale undo owner is outside the deleted ring" 1 "$(stale_undo)"
 ok "the leaked owner keeps the final state on disk" on_disk "$gfinal"
 has "gc check reports the stale undo owners" "stale undo" "$(l gc 2>&1 || true)"
