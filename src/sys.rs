@@ -339,10 +339,12 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
     unsafe {
         cmd.pre_exec(move || {
             for (resource, value) in [
-                // Darwin exposes RLIMIT_AS as RLIMIT_RSS and rejects an address-space cap.
-                // Keep the other hard limits there; Linux also enforces virtual memory.
+                // Linux bounds the writable private memory of each process (RLIMIT_DATA, kernel 4.7 and
+                // later), not its address space: V8 (Node's Wasm), Go and the JVM reserve gigabytes of
+                // address space that they never write, so an address-space cap (RLIMIT_AS) breaks them
+                // at any size. Darwin enforces neither, so only the other limits apply there.
                 #[cfg(target_os = "linux")]
-                (rustix::process::Resource::As, memory),
+                (rustix::process::Resource::Data, memory),
                 (rustix::process::Resource::Nproc, processes),
                 (rustix::process::Resource::Cpu, seconds),
                 (rustix::process::Resource::Nofile, CHECK_OPEN_FILES_COUNT),

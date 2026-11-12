@@ -36,7 +36,7 @@ only. Fetch into an existing project never grants local access.
 | `checks.platforms` | `{}` | Check names mapped to a platform or a list of platforms: `linux`, `macos` (any architecture), or `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`. A check must pass once on each entry; an unset name runs once on any platform. A merge into a protected line needs a passing run on each entry: this machine runs its own platform, and a queue entry waits (stays pending) for a runner of another one; a failed run there fails the entry with the reason |
 | `checks.after` | `{}` | Check names mapped to the checks they need, as `{"deploy": ["fmt", "clippy", "test@linux-aarch64"]}`. A check runs only after each need passed on the same state (on that platform when the entry names one). A pass runs the needed checks first. A failed need skips the check and a need with no result makes it wait, both with no attestation |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
-| `checks.memory` | `4294967296` | Linux per-process address-space limit; maximum file size on either platform |
+| `checks.memory` | `4294967296` | Linux per-process limit of writable private memory (`RLIMIT_DATA`, not the address space: V8, Go and the JVM reserve address space they never write); maximum file size on either platform |
 | `checks.processes` | `256` (Linux), `4096` (Mac) | Hard process limit for the sandbox user |
 | `checks.log-bytes` | `1048576` | Retained combined output bytes; at most 16 MiB |
 | `checks.runner` | `false` | Machine-local opt-in to execute checks; root on Linux, metadata owner on macOS, using `config --local` |
@@ -298,8 +298,8 @@ toolchain, and uses offline Cargo. Maintain the seed when Cargo.lock changes.
 If caches live on a data volume, bind-mount them under the seed directory instead
 of symlinking to host paths outside `/usr`, which the sandbox cannot see.
 The unit script sets one Cargo build job for small executors. Each machine may
-override `checks.memory` after configuring it; this is a hard address-space
-ceiling, and does not reserve that amount of host RAM.
+override `checks.memory` after configuring it; this is a hard ceiling of the writable
+private memory of each process (`RLIMIT_DATA`), and does not reserve that amount of host RAM.
 On macOS the creator's platform map selects `apfs`, the nonprivileged APFS workflow
 equivalent. Its watcher uses sandbox-exec and requires a current maintainer's
 exact-state approval for change versions; main heads can run without it. Its
