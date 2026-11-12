@@ -163,6 +163,13 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if entry.status != "pending" || entry.state != state {
                 bail!("queue entry is not pending at the expected state");
             }
+            let closed = match entry.change_id.as_deref() {
+                Some(change) => closed_reason(&repo.read_model()?, change),
+                None => None,
+            };
+            if let Some(reason) = closed {
+                bail!("{reason}: queue run fails its entry");
+            }
             let line = target(repo, &entry)?;
             if line.head != head || a.get("--into").is_some_and(|name| name != line.name) {
                 bail!("queue target is not at the expected head");
@@ -221,6 +228,14 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let state = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[1])?;
             let source = repo.source_state(&state)?;
             repo.state_src(&state)?;
+            if let Some(change) = &source.change_id {
+                // On the numbering machine, the new entry's change gets its number now.
+                super::change::try_assign_numbers(ctx, repo);
+                let model = repo.read_model()?;
+                if let Some(reason) = closed_reason(&model, change) {
+                    bail!("{reason}; reopen it first (layr change reopen {change})");
+                }
+            }
             // With a title (-m), the entry lands on the target as one state with that message.
             let title = a.get("-m").map(conventional_title).transpose()?;
             let upstream = match h
@@ -432,6 +447,30 @@ fn run_entries(
         }
         // A caller who cannot update this line cannot fail other users' entries.
         repo.authorize_line(ctx, &line, crate::repo::LineOp::Merge { expect: true, hint: None })?;
+        // A closed change does not merge: its entry fails and gives its hold back.
+        let closed = match entry.change_id.as_deref() {
+            Some(change) => closed_reason(&repo.read_model()?, change),
+            None => None,
+        };
+        if let Some(reason) = closed {
+            let _lock = repo.p.lock()?;
+            if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
+                bail!("queue entry '{}' changed", entry.id);
+            }
+            let mut after = entry.clone();
+            after.status = "failed".into();
+            after.reason = Some(reason);
+            let mut rec = Record::new("queue.result");
+            rec.data =
+                serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
+            release_hold(repo, &entry, &mut rec.data)?;
+            repo.commit_record(ctx, rec)?;
+            results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
+            if guard.is_some() {
+                break;
+            }
+            continue;
+        }
         let mut attempts = 0;
         let outcome = loop {
             attempts += 1;
@@ -499,6 +538,15 @@ fn run_entries(
         bail!("checked queue entry is not pending on the target line");
     }
     Ok(results)
+}
+
+/// Why a change cannot be queued or merged: it is closed. None for an open or merged change.
+fn closed_reason(model: &layr_model::Project, change: &str) -> Option<String> {
+    let view = model.change_view(change)?;
+    (view.status == layr_model::changes::Status::Closed).then(|| {
+        let why = view.closed.and_then(|c| c.reason).map(|r| format!(" ({r})")).unwrap_or_default();
+        format!("{} is closed{why}", super::change::label(model, change))
+    })
 }
 
 /// The remotes that a queue pass pushes its merged lines to (`queue.push`: a comma-separated list), if any.

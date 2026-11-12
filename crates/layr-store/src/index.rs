@@ -34,6 +34,9 @@ pub struct Change {
     pub title: String,
     pub author: serde_json::Value,
     pub time: i64,
+    /// The change number (`#12`), when the numbering machine has given one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counts {

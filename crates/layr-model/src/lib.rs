@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod changes;
 pub mod diff;
 pub mod history;
 pub mod index;
@@ -219,6 +220,11 @@ pub struct Project {
     ref_history: Vec<(usize, RefChange)>,
     queue: BTreeMap<String, QueueEntry>,
     attestations: Vec<(usize, Attestation)>,
+    /// Title, description and closed state of each change (see `changes`).
+    #[serde(default)]
+    change_meta: BTreeMap<String, changes::Meta>,
+    #[serde(default)]
+    numbering: changes::Numbering,
 }
 
 fn order(r: &Record) -> (i64, &str, u64) {
@@ -294,6 +300,8 @@ impl Project {
             ref_history: vec![],
             queue: BTreeMap::new(),
             attestations: vec![],
+            change_meta: BTreeMap::new(),
+            numbering: changes::Numbering::default(),
         };
         for (index, rec) in records.iter().enumerate() {
             p.derive(index, rec)?;
@@ -317,6 +325,7 @@ impl Project {
                 }
             }
         }
+        p.numbering = changes::Numbering::from_records(id, &records);
         p.records = records;
         Ok(p)
     }
@@ -403,6 +412,7 @@ impl Project {
         if let Some(a) = a {
             self.attestations.push((index, a));
         }
+        changes::apply(&mut self.change_meta, r);
         let str_at = |key: &str| d[key].as_str().unwrap_or("").to_string();
         match r.op.as_str() {
             "machine" => {
@@ -592,11 +602,18 @@ impl Project {
     pub fn changes(&self) -> Vec<String> {
         self.states.values().filter_map(|s| s.state.change_id.clone()).collect::<BTreeSet<_>>().into_iter().collect()
     }
-    /// Latest change versions outside every main line's ancestry. This is the shared
-    /// open-change rule for the index and site; queued execution remains separate metadata.
+    /// Latest change versions that are open: outside every main line's ancestry, not merged by a
+    /// queue entry and not closed. This is the shared open-change rule for the index and site.
     pub fn open_changes(&self) -> Vec<StateRec> {
-        let integrated: BTreeSet<_> =
-            self.line_list().iter().filter(|l| l.name == "main").flat_map(|l| self.ancestors(&l.head)).collect();
+        let merged = self.merged_states();
+        self.latest_versions()
+            .into_iter()
+            .filter(|(change, s)| self.status_of(change, s, &merged) == changes::Status::Open)
+            .map(|(_, s)| s.clone())
+            .collect()
+    }
+    /// The newest version of each change, in change id order.
+    fn latest_versions(&self) -> BTreeMap<&str, &StateRec> {
         let mut latest = BTreeMap::<&str, &StateRec>::new();
         for state in self.states.values().map(|s| &s.state) {
             if let Some(change) = &state.change_id {
@@ -606,7 +623,66 @@ impl Project {
                 }
             }
         }
-        latest.into_values().filter(|s| !integrated.contains(&s.id)).cloned().collect()
+        latest
+    }
+    /// States that are merged: the ancestry of each main line, and the source of each done queue entry
+    /// (a queue entry with a title lands as a new state, so its source is no ancestor of the target).
+    fn merged_states(&self) -> BTreeSet<String> {
+        let mut merged: BTreeSet<_> =
+            self.line_list().iter().filter(|l| l.name == "main").flat_map(|l| self.ancestors(&l.head)).collect();
+        merged.extend(self.queue.values().filter(|e| e.status == "done").map(|e| e.state.clone()));
+        merged
+    }
+    fn status_of(&self, change: &str, latest: &StateRec, merged: &BTreeSet<String>) -> changes::Status {
+        if merged.contains(&latest.id) {
+            changes::Status::Merged
+        } else if self.change_meta.get(change).is_some_and(|m| m.closed.is_some()) {
+            changes::Status::Closed
+        } else {
+            changes::Status::Open
+        }
+    }
+    /// The numbers of the changes and the numbering machine.
+    pub fn numbering(&self) -> &changes::Numbering {
+        &self.numbering
+    }
+    /// The edited title, description and closed state of a change, if any record set them.
+    pub fn change_meta(&self, change: &str) -> Option<&changes::Meta> {
+        self.change_meta.get(change)
+    }
+    /// Every change with its number, title, description and status, in change id order.
+    pub fn change_views(&self) -> Vec<changes::View> {
+        let merged = self.merged_states();
+        let mut counts = BTreeMap::<&str, usize>::new();
+        for state in self.states.values().filter_map(|s| s.state.change_id.as_deref()) {
+            *counts.entry(state).or_default() += 1;
+        }
+        self.latest_versions()
+            .into_iter()
+            .map(|(change, latest)| self.view_of(change, latest, counts.get(change).copied().unwrap_or(0), &merged))
+            .collect()
+    }
+    /// One change as `change_views` shows it.
+    pub fn change_view(&self, change: &str) -> Option<changes::View> {
+        let versions = self.change_versions(change);
+        let latest = versions.last()?;
+        Some(self.view_of(change, latest, versions.len(), &self.merged_states()))
+    }
+    fn view_of(&self, change: &str, latest: &StateRec, versions: usize, merged: &BTreeSet<String>) -> changes::View {
+        let meta = self.change_meta.get(change);
+        let (title, description) = changes::text(meta, &latest.message);
+        let status = self.status_of(change, latest, merged);
+        changes::View {
+            change_id: change.into(),
+            number: self.numbering.number(change),
+            title,
+            description,
+            status,
+            closed: if status == changes::Status::Closed { meta.and_then(|m| m.closed.clone()) } else { None },
+            versions,
+            state: latest.id.clone(),
+            message: latest.message.clone(),
+        }
     }
     pub fn change_versions(&self, id: &str) -> Vec<StateRec> {
         let mut out: Vec<_> =
@@ -798,7 +874,11 @@ impl Project {
             Ok(None) => serde_json::json!({"probes":[]}),
             Err(error) => serde_json::json!({"status":"unavailable","reason":format!("{error:#}")}),
         };
-        Ok(serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)}))
+        let mut out = serde_json::json!({"change_id":id,"versions":rows,"behavior":behavior,"comments":self.comments(id)});
+        if let Some(view) = self.change_view(id) {
+            changes::add_view_fields(&mut out, &view);
+        }
+        Ok(out)
     }
     fn change_behavior(&self, state: &StateRec, context: &probes::Context) -> Result<Value> {
         for entry in self.queue_list(None).iter().rev() {
