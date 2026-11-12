@@ -1,5 +1,6 @@
 #!/bin/bash
-# A partial clone retains available lines and a later fetch creates the missing line.
+# A partial clone retains available lines and a later fetch creates the missing line. A line that
+# waits for its head fails only a fetch that names it.
 . "$(dirname "$0")/lib.sh"
 set -e
 sample "$T/source"
@@ -37,10 +38,17 @@ assert missing[0].startswith('line delayed: head state '+sys.argv[2])
 assert 'layr fetch <remote>' in missing[0]
 PY
 unset LAYR_PAPER_KEY_FILE
+# A plain fetch takes what is there: a line whose head tree is not on the remote yet is named on
+# stderr, and the fetch succeeds (docs/remotes.md). A fetch that names the line with --line fails
+# with the partial status until the tree exists.
 rc=0
-l --project project fetch origin > "$T/still-partial.txt" || rc=$?
-eq "fetch retains partial status until the tree exists" 2 "$rc"
-has "human output names the unavailable line" 'line delayed: head state' "$(cat "$T/still-partial.txt")"
+l --project project fetch origin > "$T/still-partial.txt" 2> "$T/still-partial.err" || rc=$?
+eq "a plain fetch succeeds while another line waits" 0 "$rc"
+has "stderr names the unavailable line" 'line delayed: head state' "$(cat "$T/still-partial.err")"
+rc=0
+l --project project fetch origin --line delayed > /dev/null 2> "$T/asked.err" || rc=$?
+eq "fetch --line of that line retains partial status until the tree exists" 2 "$rc"
+has "and names it" 'line delayed: head state' "$(cat "$T/asked.err")"
 CR=$LAYR_ROOT
 export LAYR_ROOT=$AR
 cd "$AR/projects/project/lines/main"
