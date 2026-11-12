@@ -11,11 +11,14 @@ AR=$LAYR_ROOT
 A=$AR/projects/p/lines/main
 cd "$A"
 l access grant layr-check-reader reader
+# layr sets no address-space limit: a check keeps the one of its caller (an outer check sandbox of an older
+# layr may set one), so the smoke compares with this shell's hard limit.
+AS=$(python3 -c 'import resource; print(resource.getrlimit(resource.RLIMIT_AS)[1])')
 l config checks.changes '["smoke","fail","root"]'
 l config checks.lines '{"main":["smoke"]}'
 l config checks.privileged '["root"]'
 l config checks.timeout 5
-l config check.smoke 'python3 -c '\''import json,os,resource,socket; assert os.getuid()!=0; assert "CHECK_SECRET" not in os.environ; assert not os.path.exists("/root/.ssh"); assert not os.path.exists("/etc/shadow"); assert not os.path.exists("/home/layr-check-reader/.ssh"); assert not os.path.exists("/run/layr"); assert resource.getrlimit(resource.RLIMIT_DATA)[1]==4294967296; assert resource.getrlimit(resource.RLIMIT_AS)[1]==resource.RLIM_INFINITY; assert resource.getrlimit(resource.RLIMIT_NPROC)[1]==4096; assert not any(line.split()[1]=="00000000" for line in open("/proc/net/route").readlines()[1:]); print(json.dumps({"uid":os.getuid(),"state":os.environ["LAYR_TRY_STATE"],"value":open("value").read().strip()}))'\'''
+l config check.smoke 'python3 -c '\''import json,os,resource,socket; assert os.getuid()!=0; assert "CHECK_SECRET" not in os.environ; assert not os.path.exists("/root/.ssh"); assert not os.path.exists("/etc/shadow"); assert not os.path.exists("/home/layr-check-reader/.ssh"); assert not os.path.exists("/run/layr"); assert resource.getrlimit(resource.RLIMIT_DATA)[1]==4294967296; assert resource.getrlimit(resource.RLIMIT_AS)[1]=='"$AS"'; assert resource.getrlimit(resource.RLIMIT_NPROC)[1]==4096; assert not any(line.split()[1]=="00000000" for line in open("/proc/net/route").readlines()[1:]); print(json.dumps({"uid":os.getuid(),"state":os.environ["LAYR_TRY_STATE"],"value":open("value").read().strip()}))'\'''
 l config check.fail 'echo failed-check; exit 7'
 l config check.root 'test "$(id -u)" = 0 && test -z "${CHECK_SECRET:-}" && test "$(stat -c %a "$HOME")" = 700 && /usr/sbin/runuser -u layr-check-reader -- cat "$PWD/value" >/dev/null && printf "root:%s\n" "$PWD"'
 SMOKE=$(l config check.smoke)
