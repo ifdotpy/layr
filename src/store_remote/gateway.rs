@@ -10,10 +10,15 @@ use reqwest::{
 use serde::Deserialize;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const OBJECT_LIMIT: usize = 32 << 20;
+/// The request header by which a client says that it follows a signed CDN URL, and the type of that answer
+/// (layr-gateway `cdn.rs`).
+const CDN_CAPABILITY: &str = "x-layr-cdn";
+const CDN_CONTENT_TYPE: &str = "application/vnd.layr.cdn+json";
 const SLOTS_LIMIT: usize = 8 << 20;
 const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// A cached read proof is renewed when it expires within this time: a long push or a CI clock that runs behind the
@@ -45,6 +50,8 @@ pub struct Gateway {
     epoch: Mutex<Option<String>>,
     read: Mutex<Option<(String, i64)>>,
     public: std::sync::atomic::AtomicBool,
+    /// The CDN failed once in this command: later reads go through the gateway.
+    cdn_off: std::sync::atomic::AtomicBool,
     person: Arc<Mutex<Option<PersonSession>>>,
 }
 
@@ -59,6 +66,7 @@ impl Clone for Gateway {
             epoch: Mutex::new(self.epoch.lock().expect("gateway epoch lock").clone()),
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
+            cdn_off: std::sync::atomic::AtomicBool::new(self.cdn_off.load(Ordering::SeqCst)),
             person: self.person.clone(),
         }
     }
@@ -190,6 +198,7 @@ impl Gateway {
             epoch: Mutex::new(None),
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
+            cdn_off: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
         })
     }
@@ -410,6 +419,20 @@ impl Gateway {
         query: &[(&str, &str)],
         data: Option<Vec<u8>>,
     ) -> Result<Response> {
+        self.send_query_cdn(method, action, bearer, query, data, false)
+    }
+
+    /// `send_query`; with `cdn`, the request says that this client follows a signed CDN URL
+    /// (header `x-layr-cdn: 1`, docs/remotes.md), so the gateway may answer with the URL instead of the bytes.
+    fn send_query_cdn(
+        &self,
+        method: Method,
+        action: &str,
+        bearer: Option<&str>,
+        query: &[(&str, &str)],
+        data: Option<Vec<u8>>,
+        cdn: bool,
+    ) -> Result<Response> {
         let mut url = self.base.clone();
         url.set_path(&format!("{}{action}", self.base.path()));
         for (key, value) in query {
@@ -420,6 +443,9 @@ impl Gateway {
             let mut request = self.http.request(method.clone(), url.clone());
             if let Some(token) = token {
                 request = request.bearer_auth(token);
+            }
+            if cdn {
+                request = request.header(CDN_CAPABILITY, "1");
             }
             if let Some(data) = &data {
                 request = request
@@ -525,14 +551,19 @@ impl Gateway {
     /// then exchanges one new proof and sends the request once again. A second 401 is an error. Other answers, a 404
     /// too, go to the caller at once.
     fn proof_request(&self, method: Method, action: &str, query: &[(&str, &str)], data: Option<Vec<u8>>) -> Result<Response> {
+        // An object read may come from the CDN: the gateway then answers with a signed URL, not the bytes.
+        let cdn = method == Method::GET && action.starts_with("objects/") && query.is_empty() && !self.cdn_off.load(Ordering::SeqCst);
         let token = self.proof().with_context(|| format!("gateway {method} {action}"))?;
-        let response = self.send_query(method.clone(), action, Some(&token), query, data.clone())?;
+        let response = self.send_query_cdn(method.clone(), action, Some(&token), query, data.clone(), cdn)?;
         if response.status().as_u16() != 401 {
-            return Ok(response);
+            return self.follow_cdn(response, method, action, &token, query, data);
         }
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         let token = self.proof().with_context(|| format!("gateway {method} {action}: renew the read proof after HTTP 401"))?;
-        let response = self.send_query(method.clone(), action, Some(&token), query, data)?;
+        let response = self.send_query_cdn(method.clone(), action, Some(&token), query, data.clone(), cdn)?;
+        if response.status().as_u16() != 401 {
+            return self.follow_cdn(response, method, action, &token, query, data);
+        }
         if response.status().as_u16() == 401 {
             let body = bytes(response, 4096).unwrap_or_default();
             bail!(
@@ -541,6 +572,53 @@ impl Gateway {
             );
         }
         Ok(response)
+    }
+
+    /// A gateway answer with a signed CDN URL (`application/vnd.layr.cdn+json`): the object comes from that URL,
+    /// with no credentials of this client. The URL must be on the host of the gateway. When the CDN does not
+    /// answer 200, the object comes through the gateway, and later reads of this command skip the CDN.
+    fn follow_cdn(
+        &self,
+        response: Response,
+        method: Method,
+        action: &str,
+        token: &str,
+        query: &[(&str, &str)],
+        data: Option<Vec<u8>>,
+    ) -> Result<Response> {
+        let is_cdn = response.status().as_u16() == 200
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(';').next().is_some_and(|t| t.trim() == CDN_CONTENT_TYPE));
+        if !is_cdn {
+            return Ok(response);
+        }
+        #[derive(Deserialize)]
+        struct Signed {
+            url: String,
+        }
+        let signed: Signed = json(response, 16 << 10)?;
+        let url = reqwest::Url::parse(&signed.url).context("invalid CDN URL from the gateway")?;
+        let _t = crate::trace::span("gateway object from the CDN");
+        let fetched = if url.scheme() == "https" && url.host_str() == self.base.host_str() && url.path().starts_with("/o/") {
+            send_again(true, || {
+                self.http.get(url.clone()).header(reqwest::header::ACCEPT_ENCODING, "identity").send().map_err(reqwest::Error::without_url).map_err(Into::into)
+            })
+            .ok()
+            .filter(|r| r.status().as_u16() == 200)
+        } else {
+            None
+        };
+        match fetched {
+            Some(r) => Ok(r),
+            None => {
+                let _t = crate::trace::span("gateway object: the CDN failed, read through the gateway");
+                self.cdn_off.store(true, Ordering::SeqCst);
+                self.send_query_cdn(method, action, Some(token), query, data, false)
+            }
+        }
     }
 
     pub fn prove_reader(&self) -> Result<()> {
@@ -1639,7 +1717,8 @@ mod tests {
                     .unwrap_or("-")
                     .trim()
                     .to_string();
-                log.push(format!("{request} {bearer}"));
+                let cdn = if lower.lines().any(|l| l.trim() == "x-layr-cdn: 1") { " cdn" } else { "" };
+                log.push(format!("{request} {bearer}{cdn}"));
                 let (status, reply) = match request.as_str() {
                     "GET /v1/p/project/challenge" => {
                         let sealed = keys::encrypt(&recipient, b"challenge.proof").unwrap();
@@ -1656,7 +1735,9 @@ mod tests {
                     }
                     _ => answer(&request, &bearer),
                 };
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
+                // A reply that names a signed URL has the CDN type, as layr-gateway `cdn.rs` sends it.
+                let kind = if reply.starts_with("{\"url\"") { format!("Content-Type: {CDN_CONTENT_TYPE}\r\n") } else { String::new() };
+                write!(stream, "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
                     .unwrap();
             }
         });
@@ -1773,7 +1854,28 @@ mod tests {
         let error = format!("{:#}", gateway.get("states/ab").unwrap_err());
         let log = quit(&address, server);
         assert!(error.contains("no such project"), "{error}");
-        assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof"], "a 404 does not renew the proof or send again");
+        assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof cdn"], "a 404 does not renew the proof or send again");
+    }
+
+    #[test]
+    fn an_object_read_asks_for_the_cdn_and_takes_the_bytes_from_the_gateway_when_the_url_is_not_its_host() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, bearer| {
+            assert_eq!(request, "GET /v1/p/project/objects/states/ab");
+            assert_eq!(bearer, "old.proof");
+            ("200 OK", r#"{"url":"https://elsewhere.example/o/project/states/ab","expires":1,"bytes":5}"#.into())
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        // The URL is on another host: the client never follows it. The second request asks for the bytes.
+        let body = gateway.get("states/ab").unwrap().unwrap();
+        assert!(body.starts_with(b"{\"url\""), "the test server answers the same both times");
+        let log = quit(&address, server);
+        assert_eq!(
+            log,
+            ["GET /v1/p/project/objects/states/ab old.proof cdn", "GET /v1/p/project/objects/states/ab old.proof"],
+            "the first read asks for the CDN; after a CDN failure the read goes through the gateway"
+        );
+        assert!(gateway.cdn_off.load(Ordering::SeqCst), "later reads of the command skip the CDN");
     }
 }
 

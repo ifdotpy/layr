@@ -36,7 +36,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let expected =
             crate::revs::resolve(&h.repo, h.line.as_ref(), a.get("--expect").context("verify-main requires --expect")?)?;
-        store.verify_release_main(ctx, name, &expected)?;
+        store.verify_release_main(ctx, &h.repo, name, &expected)?;
         return Ok(0);
     }
     let files = match command {
@@ -68,7 +68,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("--name") || a.has("--expect") {
                 bail!("--name and --expect are only valid for attach");
             }
-            let mut files = store.release_files(ctx, name)?;
+            let mut files = store.release_files(ctx, &h.repo, name)?;
             if let Some(selected) = a.pos.get(2) {
                 files.retain(|f| &f.name == selected);
                 if files.is_empty() {

@@ -83,6 +83,19 @@ The client repeats the list once after `invalid listing continuation`.
 It discards the partial result and keeps the same access mode.
 A second token failure stops the operation.
 
+## Reads that cost egress
+
+- Object reads through a gateway (`layr+https://`) ask for the CDN: a GET of `objects/<key>` with a read proof
+  carries `x-layr-cdn: 1`. A gateway with a CDN answers `application/vnd.layr.cdn+json` (`{url, expires, bytes}`),
+  and the client reads the object from that signed URL on the host of the gateway, with no credentials. When the
+  URL is on another host or the CDN does not answer 200, the client reads through the gateway, and the rest of the
+  command skips the CDN. `LAYR_TRACE=1` shows `gateway object from the CDN`.
+- Record segments are read once. A fetch, a push to a public store, `release files`, `release verify-main` and the
+  follow pass read the segments that `seen-records` (in the local folder of the remote) does not name with the same
+  time, or whose records are not all here; the others come from the local records.
+- `checks pending` and `checks watch` read local records only. The newest version of each change comes from one
+  read of the states (`Db::newest_change_versions`).
+
 ## Project modes
 
 A store has one of three modes (see docs/cloud-rfc.md 7.0):

@@ -269,9 +269,23 @@ impl Store {
         model(&descriptor.project, &reader::records(&self.backend, &identity, &descriptor.project)?, &self.machine)
     }
 
-    pub fn release_files(&mut self, ctx: &Ctx, name: &str) -> Result<Vec<File>> {
+    /// The signed records of the remote, read with the local records of `repo`: a segment that an earlier fetch,
+    /// push or read checked and whose records are here is not read again (`seen-records`).
+    fn known_records(&self, repo: &Repo) -> Result<reader::Records> {
+        let descriptor = self.descriptor()?;
+        let identity = self.identity(&descriptor, None)?;
+        let local: Vec<String> = if repo.p.id == descriptor.project {
+            repo.p.export_jsonl()?.lines().map(str::to_string).collect()
+        } else {
+            Vec::new()
+        };
+        reader::records_with_local(&self.backend, &identity, &descriptor.project, &local, Some(&reader::seen_file(&self.dir)))
+    }
+
+    pub fn release_files(&mut self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<Vec<File>> {
         self.connect(ctx)?;
-        let model = self.release_model()?;
+        let descriptor = self.descriptor()?;
+        let model = model(&descriptor.project, &self.known_records(repo)?, &self.machine)?;
         if !model.ref_list(name, ids::now_ms()).iter().any(|r| r.name == name) {
             bail!("release ref '{name}' does not exist");
         }
@@ -279,11 +293,10 @@ impl Store {
     }
 
     /// Read the creator's main and any compatible, signed queue merge on the configured machine.
-    fn main_snapshot(&mut self, ctx: &Ctx) -> Result<(layr_model::Project, String)> {
+    fn main_snapshot(&mut self, ctx: &Ctx, repo: &Repo) -> Result<(layr_model::Project, String)> {
         self.connect(ctx)?;
         let descriptor = self.descriptor()?;
-        let identity = self.identity(&descriptor, None)?;
-        let history = reader::records(&self.backend, &identity, &descriptor.project)?;
+        let history = self.known_records(repo)?;
         if !history.gaps.is_empty() {
             bail!("remote record gaps prevent verifying main");
         }
@@ -332,13 +345,13 @@ impl Store {
     }
 
     /// Read the accepted main head directly from signed remote history.
-    pub fn verified_main_head(&mut self, ctx: &Ctx) -> Result<String> {
-        Ok(self.main_snapshot(ctx)?.1)
+    pub fn verified_main_head(&mut self, ctx: &Ctx, repo: &Repo) -> Result<String> {
+        Ok(self.main_snapshot(ctx, repo)?.1)
     }
 
     /// Check the signed remote release ref against the remote main history.
-    pub fn verify_release_main(&mut self, ctx: &Ctx, name: &str, expected: &str) -> Result<()> {
-        let (project, head) = self.main_snapshot(ctx)?;
+    pub fn verify_release_main(&mut self, ctx: &Ctx, repo: &Repo, name: &str, expected: &str) -> Result<()> {
+        let (project, head) = self.main_snapshot(ctx, repo)?;
         let reference = project
             .ref_list(name, ids::now_ms())
             .into_iter()

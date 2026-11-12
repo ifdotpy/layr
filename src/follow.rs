@@ -264,7 +264,7 @@ impl<'a> Repo<'a> {
             if code != 0 {
                 bail!("fetch of {remote} was incomplete");
             }
-            crate::store_remote::open_named(remote, self)?.verified_main_head(ctx)?
+            crate::store_remote::open_named(remote, self)?.verified_main_head(ctx, self)?
         } else {
             remote::git::fetch(ctx, &[remote.to_string(), branch.to_string(), "-q".to_string()])?;
             revs::resolve(self, Some(line), &rb)?

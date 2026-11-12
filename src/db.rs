@@ -1414,6 +1414,24 @@ impl Db {
         raw.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
+    /// The newest version of each change (`change_versions(..).pop()` for every change), with one read of the
+    /// states: a project with many changes reads its states once, not once per change.
+    pub fn newest_change_versions(&self) -> Result<Vec<StateRec>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT json_extract(rec,'$.change_id'), rec FROM states WHERE json_extract(rec,'$.change_id') IS NOT NULL ORDER BY 1, time, id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut newest: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let (change, rec) = row?;
+            match newest.last_mut() {
+                Some((last, slot)) if *last == change => *slot = rec,
+                _ => newest.push((change, rec)),
+            }
+        }
+        newest.into_iter().map(|(_, r)| Ok(serde_json::from_str(&r)?)).collect()
+    }
+
     pub fn changes(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached("SELECT DISTINCT json_extract(rec,'$.change_id') FROM states WHERE json_extract(rec,'$.change_id') IS NOT NULL ORDER BY 1")?;
         let v = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;

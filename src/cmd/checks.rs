@@ -390,10 +390,7 @@ fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: boo
     // already, or whose line is deleted, is done; an older version is superseded.
     if !changes.is_empty() {
         let merged = protected_history(repo, &policy)?;
-        for change in repo.p.db.changes()? {
-            let Some(newest) = repo.p.db.change_versions(&change)?.pop() else {
-                continue;
-            };
+        for newest in repo.p.db.newest_change_versions()? {
             if merged.contains(&newest.id)
                 || newest.line.as_deref().map(|l| repo.p.db.line_deleted(l)).transpose()?.unwrap_or(false)
             {

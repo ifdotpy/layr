@@ -945,7 +945,11 @@ impl Store {
             let manifest = layr_store::public::Manifest::parse(&bytes, &descriptor)?;
             let identity = self.identity(&descriptor, opts.paper_key.as_deref())?;
             self.require_private_access()?;
-            let records = reader::records(&self.backend, &identity, &descriptor.project)?;
+            // The segments that an earlier fetch or push read and checked are not read again (`seen-records`): a
+            // runner that pushes after each check reads only the new segments, not the whole log each time.
+            let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
+            let records =
+                reader::records_with_local(&self.backend, &identity, &descriptor.project, &local, Some(&reader::seen_file(&self.dir)))?;
             manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
         } else if self.force_public {
             self.require_private_access()?;
