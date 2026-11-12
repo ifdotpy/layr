@@ -1026,6 +1026,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     }
     let a = parse(
         &Spec::new()
+            .paths()
             .flag("--index")
             .flag("--auto")
             .flag("--caches")
