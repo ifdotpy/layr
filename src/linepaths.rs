@@ -1,9 +1,13 @@
-//! Working folders of lines at a chosen path (`layr line move`).
+//! Working folders of lines at a chosen path (`layr line move`), or kept after a rename.
 //!
 //! The path of a moved line is machine local and never replicates. Two files hold it:
 //! `meta/line-paths.json` of the project (`{line id: path}`, the owner) and the index
 //! `<store>/line-paths.json` (`[{path, project, line}]`), which lets a command find its project
 //! and line from a folder outside the store without opening every project.
+//!
+//! A relative path in the project file is a folder below the project's `lines/`: `line rename`
+//! keeps the folder of the old name, so programs that work in it keep their folder. It moves with
+//! the project, so only the project file holds it, never the index.
 use crate::store::{Project, Store};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -45,7 +49,11 @@ fn project_entries(root: &Path) -> Vec<Entry> {
             let Ok(data) = std::fs::read(paths_file_in(&dir.path().join("meta"))) else { continue };
             let Ok(map) = serde_json::from_slice::<BTreeMap<String, PathBuf>>(&data) else { continue };
             let project = dir.file_name().to_string_lossy().into_owned();
-            out.extend(map.into_iter().map(|(line, path)| Entry { path, project: project.clone(), line }));
+            out.extend(map.into_iter().filter(|(_, path)| path.is_absolute()).map(|(line, path)| Entry {
+                path,
+                project: project.clone(),
+                line,
+            }));
         }
     }
     out
@@ -56,17 +64,63 @@ impl Project<'_> {
         paths_file_in(&self.meta_dir())
     }
 
-    /// The moved folders of this project: line id to folder.
-    pub(crate) fn moved_paths(&self) -> BTreeMap<String, PathBuf> {
+    /// The project file as written: line id to an absolute folder (moved out of the store) or to a
+    /// folder name below `lines/` (kept after a rename).
+    fn recorded_paths(&self) -> BTreeMap<String, PathBuf> {
         std::fs::read(self.paths_file()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
     }
 
-    /// The recorded folder of a line, when it was moved out of the store.
-    pub fn moved_path(&self, line_id: &str) -> Option<PathBuf> {
-        self.moved_paths().remove(line_id)
+    /// The folders of this project outside the store: line id to folder.
+    pub(crate) fn moved_paths(&self) -> BTreeMap<String, PathBuf> {
+        self.recorded_paths().into_iter().filter(|(_, p)| p.is_absolute()).collect()
     }
 
-    /// Record (or with `None` forget) the folder of a line. The project file is the source of the
+    /// The recorded folder of a line: a path outside the store (`line move`), or a folder in
+    /// `lines/` that is not `lines/<name>` (kept by `line rename`). None: `lines/<name>`.
+    pub fn moved_path(&self, line_id: &str) -> Option<PathBuf> {
+        self.recorded_paths().remove(line_id).map(|p| self.resolve_folder(p))
+    }
+
+    fn resolve_folder(&self, p: PathBuf) -> PathBuf {
+        if p.is_absolute() {
+            return p;
+        }
+        // A line name only, so an edited file cannot point out of `lines/`.
+        self.default_line_path(&p.to_string_lossy())
+    }
+
+    /// The line id that keeps the folder `lines/<folder>` after a rename.
+    pub fn kept_folder_line(&self, folder: &str) -> Option<String> {
+        kept_folder_line_in(&self.meta_dir(), folder)
+    }
+
+    /// After `line rename` (or its undo) to `new`: the folder stays where it is. A folder in
+    /// `lines/` is recorded by its name, and forgotten when it is `lines/<new>`; a folder outside
+    /// the store keeps its path. Returns the entry before, for `restore_folder`. The caller holds
+    /// the project lock.
+    pub fn keep_folder(&self, line_id: &str, old: &str, new: &str) -> Result<Option<PathBuf>> {
+        let before = self.recorded_paths().remove(line_id);
+        let folder = match &before {
+            Some(p) if p.is_absolute() => return Ok(before),
+            Some(p) => p.clone(),
+            // A line without a folder on this machine has nothing to keep.
+            None if self.default_line_path(old).symlink_metadata().is_err() => return Ok(before),
+            None => PathBuf::from(old),
+        };
+        self.set_moved_path(line_id, (folder != Path::new(new)).then_some(folder.as_path()))?;
+        Ok(before)
+    }
+
+    /// Put back the entry that `keep_folder` returned (a rename whose record failed).
+    pub fn restore_folder(&self, line_id: &str, before: Option<&Path>) -> Result<()> {
+        if self.recorded_paths().get(line_id).map(PathBuf::as_path) == before {
+            return Ok(());
+        }
+        self.set_moved_path(line_id, before)
+    }
+
+    /// Record (or with `None` forget) the folder of a line: an absolute path outside the store, or a
+    /// folder name below `lines/` (see `keep_folder`). The project file is the source of the
     /// path; the store index is rewritten from it. If the index write fails, the project file goes
     /// back to its earlier bytes, so the caller can move the folder back and both keep the old
     /// path. The caller holds the project lock.
@@ -76,7 +130,7 @@ impl Project<'_> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        let mut map = self.moved_paths();
+        let mut map = self.recorded_paths();
         match path {
             Some(p) => map.insert(line_id.to_string(), p.to_path_buf()),
             None => map.remove(line_id),
@@ -105,9 +159,21 @@ impl Project<'_> {
             .open(self.store.root.join(".line-paths.lock"))?;
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
         let mut all: Vec<Entry> = index(&self.store.root).into_iter().filter(|e| e.project != self.name).collect();
-        all.extend(map.iter().map(|(line, path)| Entry { path: path.clone(), project: self.name.clone(), line: line.clone() }));
+        all.extend(map.iter().filter(|(_, path)| path.is_absolute()).map(|(line, path)| Entry {
+            path: path.clone(),
+            project: self.name.clone(),
+            line: line.clone(),
+        }));
         crate::fsutil::atomic_write(&index_file(&self.store.root), &serde_json::to_vec(&all)?, 0o644)
     }
+}
+
+/// The line id that keeps the folder `lines/<folder>` of the project with the meta folder `meta`
+/// (a folder kept by `line rename`), from the project file alone.
+pub fn kept_folder_line_in(meta: &Path, folder: &str) -> Option<String> {
+    let data = std::fs::read(paths_file_in(meta)).ok()?;
+    let map: BTreeMap<String, PathBuf> = serde_json::from_slice(&data).ok()?;
+    map.into_iter().find(|(_, p)| p.is_relative() && p == Path::new(folder)).map(|(id, _)| id)
 }
 
 /// The index entry that holds `path`, with the path below its root. The index is a copy of the
@@ -152,5 +218,24 @@ pub fn register_with(root: &Path, extra: Option<&Path>) {
         }
         folders.extend(extra.map(Path::to_path_buf));
         crate::storage::set_external(root, folders);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_folder_is_found_by_its_relative_entry() {
+        let root = std::env::temp_dir().join(format!("layr-linepaths-{}", crate::ids::new_id()));
+        let meta = root.join("projects").join("p").join("meta");
+        std::fs::create_dir_all(&meta).unwrap();
+        let map: BTreeMap<String, PathBuf> =
+            [("a".to_string(), PathBuf::from("feat")), ("b".to_string(), PathBuf::from("/elsewhere/work"))].into();
+        std::fs::write(paths_file_in(&meta), serde_json::to_vec(&map).unwrap()).unwrap();
+        assert_eq!(kept_folder_line_in(&meta, "feat").as_deref(), Some("a"));
+        assert_eq!(kept_folder_line_in(&meta, "work"), None, "an absolute entry is no kept folder");
+        assert_eq!(kept_folder_line_in(&meta, "other"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

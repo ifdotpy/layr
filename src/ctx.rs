@@ -152,7 +152,12 @@ impl Ctx {
             }
             let project = comps[0].clone();
             if comps.len() >= 3 && comps[1] == "lines" {
-                return Some(Loc { project, line: Some(comps[2].clone()), sub: comps[3..].join("/") });
+                // A folder that `line rename` kept belongs to the renamed line, not to its old name.
+                let dir = projects.join(&project);
+                let line = crate::linepaths::kept_folder_line_in(&dir.join("meta"), &comps[2])
+                    .and_then(|id| crate::db::Db::open(&crate::store::db_file(&dir)).ok()?.line_by_id(&id).ok()?)
+                    .map_or_else(|| comps[2].clone(), |l| l.name);
+                return Some(Loc { project, line: Some(line), sub: comps[3..].join("/") });
             }
             return Some(Loc { project, line: None, sub: String::new() });
         }

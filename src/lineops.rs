@@ -108,7 +108,22 @@ impl Repo<'_> {
     fn check_names_free(&self, names: &[String]) -> Result<()> {
         for name in names {
             crate::store::check_name("line", name)?;
-            if self.p.db.line_by_name(name)?.is_some() || self.p.line_path(name).symlink_metadata().is_ok() {
+            if self.p.db.line_by_name(name)?.is_some() {
+                bail!("a line named '{name}' already exists");
+            }
+            // `line rename` keeps the folder of the old name: a new line with that name gets no
+            // folder of another line.
+            let folder = self.p.line_path(name);
+            if let Some(owner) = self.p.kept_folder_line(name).and_then(|id| self.p.db.line_by_id(&id).ok().flatten()) {
+                bail!(
+                    "the folder {} belongs to line '{}' (renamed from '{name}'); choose another name, or run 'layr line move {}' to move that folder to {}",
+                    folder.display(),
+                    owner.name,
+                    owner.name,
+                    self.p.default_line_path(&owner.name).display()
+                );
+            }
+            if folder.symlink_metadata().is_ok() {
                 bail!("a line named '{name}' already exists");
             }
         }

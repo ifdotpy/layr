@@ -50,10 +50,14 @@ l line delete -D w >/dev/null
 no "line deleted" test -e $P/w
 l undo >/dev/null
 eq "undo of a line delete brings it back" "w" "$(cat $P/w/w.txt)"
-l line rename w w2
-ok "renamed line folder" test -d $P/w2
+l line rename w w2 >/dev/null
+ok "a rename keeps the folder" test -d $P/w
+no "a rename makes no folder" test -e $P/w2
+eq "the kept folder finds the renamed line" "w2" "$(cd $P/w && l line list --show-current)"
 l undo >/dev/null
 ok "undo of a rename" test -d $P/w
+eq "after the undo the folder finds the line by its old name" "w" "$(cd $P/w && l line list --show-current)"
+no "the undo makes no folder" test -e $P/w2
 l tag v1; l undo >/dev/null
 eq "undo of a tag" "" "$(l tag)"
 

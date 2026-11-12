@@ -877,8 +877,9 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 // Save the current content, then restore the old pointers and content.
                 wb = save_before_undo(ctx, repo, l, in_place)?;
                 written.push((l.clone(), wb.clone()));
-                if b.name != l.name && repo.p.moved_path(&l.id).is_none() {
-                    crate::fsutil::rename_tree(repo.p.line_path(&l.name), repo.p.default_line_path(&b.name))?;
+                // A name change keeps the folder where it is, as `line rename` does.
+                if b.name != l.name {
+                    repo.p.keep_folder(&l.id, &l.name, &b.name)?;
                 }
                 let mut l2 = l.clone();
                 l2.name = b.name.clone();

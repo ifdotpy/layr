@@ -95,12 +95,13 @@ fn rewrite_lines(project_dir: &Path, from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
-/// The moved line folders of a project folder (`meta/line-paths.json`).
+/// The line folders outside a project folder (`meta/line-paths.json`). A relative entry is a folder
+/// in `lines/` that a rename kept; it moves with the project.
 fn moved_folders(project_dir: &Path) -> Vec<PathBuf> {
     fs::read(linepaths::paths_file_in(&project_dir.join("meta")))
         .ok()
         .and_then(|d| serde_json::from_slice::<std::collections::BTreeMap<String, PathBuf>>(&d).ok())
-        .map(|m| m.into_values().collect())
+        .map(|m| m.into_values().filter(|p| p.is_absolute()).collect())
         .unwrap_or_default()
 }
 

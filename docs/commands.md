@@ -127,9 +127,17 @@ published folders. If a commit reports an error after it succeeded, all recorded
 folders are kept and the error names them. Overlay preparation records belong to separate overlay
 projects and may remain after a failed batch; they are not part of this transaction.
 A line is a folder. Use `cd` to enter it.
+`line rename [<old>] <new>` gives the line a new name and keeps its folder where it is. A shell,
+an editor or an agent that works in the folder keeps a valid working folder. The line has the new
+name everywhere: in the records, on its overlays, in `line list` and in `status`. `line list
+--json` shows the folder path, which can differ from the name. A rename of a line in the store
+keeps `lines/<old>`; a rename back to `<old>` makes it the default folder again. Run
+`line move <new>` to move the folder to `lines/<new>`. `undo` of a rename also keeps the folder.
+`line new <old>` refuses while the kept folder is there. The error names the line that owns the
+folder and the `line move` command that frees the name.
 `line move <line> <path>` keeps the working folder of a line at `<path>`, outside the store, for
 example `~/Projects/app` as the real folder of the line `main`. `line move <line>` without a path
-moves it back to `lines/<name>`. The path must not exist, its parent must exist and be writable
+moves it back to `lines/<name>`, also from a folder that `line rename` kept. The path must not exist, its parent must exist and be writable
 by you, it must be outside the store and on the same file system as the store, and it must not
 overlap the folder of another moved line. You need the right to manage the line, and you cannot
 move the line of the current folder. The move is one rename under the project lock, so `.git`,
