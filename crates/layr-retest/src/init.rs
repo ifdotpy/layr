@@ -281,7 +281,7 @@ pub fn run(args: &[String]) -> Result<i32> {
                     if saved.iter().any(|s| s == folder) {
                         println!("{folder}: already a cache overlay");
                     } else {
-                        match crate::layr(&["save", "--caches", "--cache", folder]) {
+                        match crate::save_folder(folder) {
                             Ok(_) => println!("{folder}: saved as cache overlay"),
                             Err(e) => {
                                 println!("{folder}: not saved: {e:#}");

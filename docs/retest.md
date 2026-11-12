@@ -180,7 +180,7 @@ retest = [["test", "--workspace", "--no-run"]]
 - An entry of `sweep` can be an object for a test that builds into a folder of its own below `target`:
   `{ target_dir = "provider-contract-compile", args = ["check", "--offline", "-p", "x"], env = { RUSTFLAGS = "" } }`
   (a TOML inline table in the `sweep` array). The follow pass builds it with `CARGO_TARGET_DIR=target/<target_dir>` and the project `env`
-  plus its own `env`, and the prune of `save --caches` keeps the units of that command there and keeps the folder
+  plus its own `env`, and the prune of `save --overlays` keeps the units of that command there and keeps the folder
   however old it is. `retest` does not run these entries.
 - `retest` (optional) lists the commands of the retest build. `layr retest sweep` sweeps `target/retest` with
   `sweep` and `retest` under the environment of `run`. Without `retest`, `target/retest` is left as it is and the
@@ -221,7 +221,7 @@ other builds, outputs of units that no command lists, orphan incremental folders
 go whole, so no live unit loses a file. The removal frees the bytes of an inode only when all its links go.
 
 Folders of `target` that no `sweep` command makes have no live set: another `--target` triple
-(`target/<triple>`), a custom profile (`target/<name>`), `target/doc`. The cache prune (`save --caches`, the
+(`target/<triple>`), a custom profile (`target/<name>`), `target/doc`. The cache prune (`save --overlays`, the
 follow pass) removes such a folder when no build wrote into it for 7 days: the newest time of the folder, its
 entries and their entries is older (cargo writes `.cargo-lock` and `.fingerprint` there at each build). The profile
 folders and `--target` triples of the `sweep` commands, `target/retest` and `target/profraw` stay, as do files at
@@ -665,7 +665,7 @@ What the numbers say:
 - The first version did not lose its time in two builds. A warm no-change run spent 1.3 to 2.1 s in
   `cargo`, and 52 to 73 s in `layr save --overlays`, which saves every cache of the line (the 19.6 GiB
   `target` too). That was 80 % of the run.
-- `layr save --caches --cache .layr-retest` saves the record folder only, but it still makes a state of
+- `layr save --overlays --folder .layr-retest` saves the record folder only, but it still makes a state of
   the line: 75 s in this line (load 28). So the save is off by default and `--save` runs it
   once at the end of a series. It holds the lock of the store while it runs.
 - `layr save` of a changed working copy takes 38 to 57 s in this line (3.7 s in the layr line, whose
@@ -700,7 +700,7 @@ and `llvm-cov` as programs and uses no internal crate of layr. The two LLVM tool
 Run in the root folder of a layr line that is also the cargo project root.
 
 - `layr retest run [--full] [--save] [-- <nextest args>]`
-  `--save` ends the run with `layr save --caches --cache .layr-retest` (after step 7), which puts the
+  `--save` ends the run with `layr save --overlays --folder .layr-retest` (after step 7), which puts the
   records in the cache overlay so that a new line takes them. It is off by default: the call makes a
   state of the line and holds the lock of the store (75 s in the Studio line, see Measurements 2026-10-29).
   Run it once at the end of a series of runs, or when a new line is about to start.
@@ -758,7 +758,7 @@ Run in the root folder of a layr line that is also the cargo project root.
   - Adds the keys `sweep` (`build --workspace --all-targets --locked`) and `env` (`CARGO_INCREMENTAL = "1"`, `RUSTC_WRAPPER = ""`) to
     `[workspace.metadata.layr-retest]` in `Cargo.toml` when they are missing. A package-only manifest gets a
     `[workspace]` table, so that cargo reads the metadata. A key that the project set keeps its value.
-  - Saves each cache folder that exists and is not a cache overlay yet: `layr save --caches --cache <folder>`.
+  - Saves each cache folder that exists and is not a cache overlay yet: `layr save --overlays --folder <folder>`.
     It does nothing for a folder that is already an overlay. Outside a layr line the save fails, and the exit code is 1.
   - Checks `cargo-nextest` and the `llvm-tools` rustup component of the active toolchain. A missing one
     prints its install command (`cargo install cargo-nextest --locked`, `rustup component add llvm-tools`);
@@ -918,10 +918,11 @@ So the baseline search reads the whole line log, not only the ancestors of the c
    `layr overlay set <overlay> --key-files none`. The overlay name is in `layr overlay list`
    (`cache.<hash>`, folder `.layr-retest`).
 
-With `--save`, `run` calls `layr save --caches --cache .layr-retest` after it writes the record. The `--cache`
-option saves only that cache path: `layr save --overlays` alone also saves every other cache of the line,
-and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. A layr without
-`--cache` makes this call fail; the run then prints a warning and keeps the record files. The call
+With `--save`, `run` calls `layr save --overlays --folder .layr-retest` after it writes the record. The `--folder`
+option saves only that folder: `layr save --overlays` alone also saves every other cache of the line,
+and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. With a layr before 0.44
+the run uses the old spelling (`save --caches --cache`); when both fail, the run prints a warning and keeps
+the record files. The call
 saves the folder as the newest
 state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
 The record also goes under the id of the head when the working copy equals the head, because an

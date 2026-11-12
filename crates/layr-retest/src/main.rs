@@ -32,7 +32,7 @@ const PROFILE_DIR_VAR: &str = "LAYR_RETEST_PROFILE_DIR";
 const PROFDATA_VAR: &str = "LAYR_RETEST_PROFDATA";
 /// File in the profile folder of a test: how many raw profile files (processes) the merge read.
 const RAW_COUNT_FILE: &str = "raw-count";
-/// Set by `--save`: the run ends with `layr save --caches --cache` so that new lines take the records.
+/// Set by `--save`: the run ends with `layr save --overlays --folder` so that new lines take the records.
 /// Off by default: the call makes a state of the line, which takes 40 to 75 s in a line with a big
 /// build folder, and it holds the lock of the store.
 static SAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -159,6 +159,14 @@ fn merge_raw(profdata: &Path, dir: &Path) -> Result<usize> {
 }
 
 /// Runs the layr CLI as a process of this executable (the `layr` that runs `layr retest`).
+/// `layr save` of the build-output folder `folder` alone: `save --overlays --folder` (layr 0.44 and later), else
+/// the spelling of an older layr (`save --caches --cache`).
+fn save_folder(folder: &str) -> Result<String> {
+    layr(&["save", "--overlays", "--folder", folder]).or_else(|new| {
+        layr(&["save", "--caches", "--cache", folder]).map_err(|old| new.context(format!("an older layr: {old:#}")))
+    })
+}
+
 fn layr(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output(Command::new(std::env::current_exe()?).args(args))?).into_owned())
 }
@@ -193,9 +201,9 @@ fn save_records() {
     if !SAVE.load(Ordering::Relaxed) {
         return;
     }
-    if let Err(e) = layr(&["save", "--caches", "--cache", record::RECORD_DIR]) {
+    if let Err(e) = save_folder(record::RECORD_DIR) {
         eprintln!(
-            "layr-retest: warning: records are not in the cache overlay (needs a layr with `save --caches --cache`): {e:#}"
+            "layr-retest: warning: records are not in the cache overlay (needs a layr with `save --overlays --folder`): {e:#}"
         );
     }
 }

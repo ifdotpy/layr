@@ -1313,7 +1313,7 @@ fn omitted_summaries(omitted: &[String]) -> Vec<String> {
     }
     for (kind, ids) in states {
         let flag = match kind {
-            "cache" => "--caches",
+            "cache" => "--overlay <overlay>",
             "auto" => "--auto",
             _ => "",
         };
