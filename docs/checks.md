@@ -37,7 +37,7 @@ only. Fetch into an existing project never grants local access.
 | `checks.after` | `{}` | Check names mapped to the checks they need, as `{"deploy": ["fmt", "clippy", "test@linux-aarch64"]}`. A check runs only after each need passed on the same state (on that platform when the entry names one). A pass runs the needed checks first. A failed need skips the check and a need with no result makes it wait, both with no attestation |
 | `checks.timeout` | `900` | Wall timeout and per-process CPU seconds; 1–86400 |
 | `checks.memory` | `4294967296` | Linux per-process limit of writable private memory (`RLIMIT_DATA`, not the address space: V8, Go and the JVM reserve address space they never write); maximum file size on either platform |
-| `checks.processes` | `256` (Linux), `4096` (Mac) | Hard process limit for the sandbox user |
+| `checks.processes` | `4096` | Hard process limit for the sandbox user (`RLIMIT_NPROC`; on Linux it counts threads, and a browser test runs hundreds) |
 | `checks.log-bytes` | `1048576` | Retained combined output bytes; at most 16 MiB |
 | `checks.runner` | `false` | Machine-local opt-in to execute checks; root on Linux, metadata owner on macOS, using `config --local` |
 | `checks.privileged-runner` | `false` | Additional machine-local opt-in to execute explicitly privileged checks |

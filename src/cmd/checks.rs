@@ -631,7 +631,8 @@ fn scan(
     let limits = Limits {
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
         memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
-        processes: setting(&policy, "checks.processes", json!(if cfg!(target_os = "macos") { 4096 } else { 256 }))?
+        // RLIMIT_NPROC counts threads on Linux: Chromium, Node and vite of a web check run more than 256.
+        processes: setting(&policy, "checks.processes", json!(4096))?
             .as_u64()
             .context("invalid checks.processes")?,
         log_bytes: setting(&policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
