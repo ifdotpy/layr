@@ -1,13 +1,14 @@
 """A small JSON Schema (draft 2020-12) validator for the schemas in schemas/, with the Python standard library only.
 
 usage: json-schema.py lint <schema>
-       json-schema.py check <schema> <json file> [--strict]
+       json-schema.py check <schema> <json file> [--strict] [--def <name>]
 
 `lint` checks the schema itself: the draft, an integer `version`, only the keywords that this validator knows, and a
 description for each property. `check` validates a command's JSON output. With --strict, each object member must also be
 named in `properties` where the schema lists properties: an output field that the schema does not describe fails, so the
 schema cannot fall behind the output. The published schemas allow more members (`additionalProperties: true`), so a
-consumer keeps working when a release adds a field.
+consumer keeps working when a release adds a field. With --def <name>, the file is checked against the definition
+`$defs/<name>` of the schema (for example one queue entry of `queue add --json`).
 """
 import json
 import re
@@ -128,12 +129,30 @@ def lint(schema):
     return errors
 
 
+def options(args):
+    """(strict, definition name) from the options after `check <schema> <file>`, or None when they are bad."""
+    strict, name = False, None
+    while args:
+        if args[0] == "--strict":
+            strict, args = True, args[1:]
+        elif args[0] == "--def" and len(args) > 1:
+            name, args = args[1], args[2:]
+        else:
+            return None
+    return strict, name
+
+
 def main(argv):
     if len(argv) == 3 and argv[1] == "lint":
         errors = lint(json.load(open(argv[2])))
-    elif len(argv) in (4, 5) and argv[1] == "check" and argv[4:] in ([], ["--strict"]):
+    elif len(argv) >= 4 and argv[1] == "check" and options(argv[4:]) is not None:
+        strict, name = options(argv[4:])
         schema = json.load(open(argv[2]))
-        errors = validate(schema, schema, json.load(open(argv[3])), strict=argv[4:] == ["--strict"])
+        target = schema if name is None else schema.get("$defs", {}).get(name)
+        if target is None:
+            print(f"the schema has no definition '{name}'")
+            return 1
+        errors = validate(schema, target, json.load(open(argv[3])), strict=strict)
     else:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2

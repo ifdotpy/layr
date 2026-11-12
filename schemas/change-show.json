@@ -3,14 +3,43 @@
   "$id": "urn:layr:schema:change-show",
   "version": 1,
   "title": "layr change show <id> --json",
-  "description": "One logical change: each version with its state and evidence, the behavior of the newest version, and the comments.",
+  "description": "One logical change: its number, title, description and status, each version with its state and evidence, the behavior of the newest version, the comments, the review threads, the reactions and the reviewers. The command takes a change number (12 or #12), a change id, or a unique prefix of the id.",
   "type": "object",
-  "required": ["behavior", "change_id", "comments", "versions"],
+  "required": ["behavior", "change_id", "comments", "description", "number", "reactions", "reviewers", "status", "threads", "title", "versions"],
   "additionalProperties": true,
   "properties": {
     "change_id": {
-      "description": "The full id of the change. The command also takes a unique prefix of it.",
+      "description": "The full id of the change.",
       "$ref": "#/$defs/id"
+    },
+    "number": {
+      "description": "The number of the change (#12 in the text output). The numbering machine of the project gives the numbers. Null until it has given one.",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "title": {
+      "description": "The title that 'layr change edit --title' set, else the first line of the message of the newest version.",
+      "type": "string"
+    },
+    "description": {
+      "description": "The description that 'layr change edit --description' set, else the rest of the message of the newest version after its first line. Null when that is empty.",
+      "type": ["string", "null"]
+    },
+    "status": {
+      "description": "The status of the change: 'merged' when its newest version is in the history of the line main or a queue entry merged it, else 'closed' after 'layr change close' (until 'layr change reopen'), else 'open'.",
+      "enum": ["open", "closed", "merged"]
+    },
+    "closed": {
+      "description": "Who closed the change, when and why. Present only when the status is 'closed'.",
+      "type": "object",
+      "required": ["actor", "machine", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "actor": { "$ref": "#/$defs/actor" },
+        "machine": { "description": "The id of the machine that recorded the close.", "$ref": "#/$defs/id" },
+        "time": { "$ref": "#/$defs/time" },
+        "reason": { "description": "The reason from 'layr change close -m'. Absent without one.", "type": "string" }
+      }
     },
     "versions": {
       "description": "The versions of the change, oldest first (v1, v2, ...).",
@@ -25,9 +54,23 @@
       ]
     },
     "comments": {
-      "description": "The comments on the change, in the order they were recorded.",
+      "description": "The comments on the change, in the order they were recorded (threads and replies in one flat list).",
       "type": "array",
       "items": { "$ref": "#/$defs/comment" }
+    },
+    "threads": {
+      "description": "The review threads, in the order of their first comments. A comment that replies to no comment starts a thread; a reply belongs to the thread of the comment it answers.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/thread" }
+    },
+    "reactions": {
+      "description": "The reactions to the change itself ('layr react <change> <name>'): the reaction name to the number of writers that have it.",
+      "$ref": "#/$defs/reaction_counts"
+    },
+    "reviewers": {
+      "description": "The active reviewer requests ('layr review request'), sorted by reviewer.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/reviewer" }
     }
   },
   "$defs": {
@@ -52,7 +95,7 @@
           "minimum": 0
         },
         "name": {
-          "description": "The user name on the machine of the record.",
+          "description": "The user name on the machine of the record, or 'person:<login>' for a record signed with a person key.",
           "type": "string"
         },
         "session": {
@@ -121,6 +164,10 @@
         "line": {
           "description": "The id of the line that made the state.",
           "$ref": "#/$defs/id"
+        },
+        "line_name": {
+          "description": "The current name of 'line'. A deleted line keeps its last name. Null when the project has no record of the line. Present when 'line' is present.",
+          "type": ["string", "null"]
         },
         "subvol": {
           "description": "The id of the snapshot of the state on the machine that made it.",
@@ -277,6 +324,7 @@
         },
         "source": { "description": "The id of the state the operation started from.", "$ref": "#/$defs/id" },
         "target_line": { "description": "The id of the line the operation wrote to. Null when there was none.", "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "target_line_name": { "description": "The current name of 'target_line'. Null when 'target_line' is null or the project has no record of the line.", "type": ["string", "null"] },
         "target_head": { "description": "The id of the head of the target line before the operation.", "$ref": "#/$defs/id" },
         "id": { "description": "The id of the operation record.", "$ref": "#/$defs/id" },
         "machine": { "description": "The id of the machine that recorded the operation.", "$ref": "#/$defs/id" },
@@ -334,6 +382,47 @@
         "limit_reasons": { "description": "For a screenshot probe: why a change is over its limit.", "type": "array", "items": { "type": "string" } }
       }
     },
+    "reaction_counts": {
+      "description": "Reaction names to the number of writers (a person, or one user of one machine) that have that reaction.",
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 1 }
+    },
+    "thread": {
+      "description": "One review thread.",
+      "type": "object",
+      "required": ["comment", "id", "line", "line_end", "path", "replies", "resolved", "resolved_by", "resolved_time", "version", "version_label"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "description": "The id of the first comment of the thread. 'layr comment reply|resolve|unresolve <id>' takes it.", "type": "string" },
+        "version": { "description": "The id of the state of the version that the first comment is about.", "$ref": "#/$defs/id" },
+        "version_label": { "description": "The label of that version ('v1', 'v2', ...). Null when the state is no version of the change.", "type": ["string", "null"] },
+        "path": { "description": "The file of the first comment. Null for a comment on the whole change.", "type": ["string", "null"] },
+        "line": { "description": "The line, or the first line of the range, of the first comment. Null without one.", "type": ["integer", "null"], "minimum": 0 },
+        "line_end": { "description": "The last line of the range of the first comment. Null for one line or no line.", "type": ["integer", "null"], "minimum": 1 },
+        "resolved": { "description": "True when the thread is resolved ('layr comment resolve'). Resolves written at the same time on two machines with different values leave the thread open.", "type": "boolean" },
+        "resolved_by": { "description": "Who resolved the thread. Null when it is open.", "anyOf": [{ "$ref": "#/$defs/actor" }, { "type": "null" }] },
+        "resolved_time": { "description": "When the thread was resolved, in milliseconds since the Unix epoch. Null when it is open.", "type": ["integer", "null"] },
+        "comment": { "description": "The first comment, with its reactions.", "$ref": "#/$defs/comment" },
+        "replies": { "description": "The replies in the thread, in the order they were recorded, each with its reactions.", "type": "array", "items": { "$ref": "#/$defs/comment" } }
+      }
+    },
+    "reviewer": {
+      "description": "One reviewer request that is active.",
+      "type": "object",
+      "required": ["approved_version", "commented", "requested_by", "requested_time", "reviewer", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "reviewer": { "description": "The reviewer: 'person:<login>', 'user:<uid>' or 'machine:<machine id>'.", "type": "string", "pattern": "^(person|user|machine):.+$" },
+        "status": {
+          "description": "'approved': the reviewer approved the newest version. 'outdated': the reviewer approved an older version only. 'commented': no approval, but a comment of the reviewer. 'pending': neither.",
+          "enum": ["approved", "outdated", "commented", "pending"]
+        },
+        "approved_version": { "description": "The label of the newest version that the reviewer approved ('v2'). Null without an approval.", "type": ["string", "null"] },
+        "commented": { "description": "True when the reviewer wrote a comment on the change.", "type": "boolean" },
+        "requested_by": { "description": "Who requested the review.", "$ref": "#/$defs/actor" },
+        "requested_time": { "description": "When the review was requested, in milliseconds since the Unix epoch.", "type": "integer" }
+      }
+    },
     "comment": {
       "description": "One comment.",
       "type": "object",
@@ -344,11 +433,16 @@
         "change_id": { "description": "The id of the change.", "$ref": "#/$defs/id" },
         "version": { "description": "The id of the state of the version that the comment is about.", "$ref": "#/$defs/id" },
         "path": { "description": "The file the comment is about. Absent for a comment on the whole change.", "type": "string" },
-        "line": { "description": "The line number in 'path'.", "type": "integer", "minimum": 0 },
+        "line": { "description": "The line number in 'path', or the first line of a range.", "type": "integer", "minimum": 0 },
+        "line_end": { "description": "The last line of a line range ('--line 12-20'). Absent for one line or no line.", "type": "integer", "minimum": 1 },
         "text": { "description": "The text of the comment.", "type": "string" },
         "reply_to": { "description": "The id of the comment that this one answers.", "type": "string" },
         "actor": { "$ref": "#/$defs/actor" },
-        "time": { "$ref": "#/$defs/time" }
+        "time": { "$ref": "#/$defs/time" },
+        "reactions": {
+          "description": "In 'threads' only: the reactions to this comment, as in 'reactions' of the change. Absent in 'comments'.",
+          "$ref": "#/$defs/reaction_counts"
+        }
       }
     }
   }

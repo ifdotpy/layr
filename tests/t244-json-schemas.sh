@@ -9,15 +9,20 @@ CHECK="python3 -I $SRC/tests/json-schema.py"
 OUT=$T/out
 mkdir -p "$OUT"
 
-# check <description> <schema> <command...>: the command's output validates against schemas/<schema>.json.
+# check <description> <schema>[#<definition>] <command...>: the command's output validates against
+# schemas/<schema>.json, or against its definition $defs/<definition>. CHECK_EXIT names another exit status that
+# the command must end with (a save with nothing to save ends with 1).
 check() {
-    local d=$1 schema=$2 file errors
+    local d=$1 schema=${2%%#*} def=() file errors rc
+    [ "$2" = "$schema" ] || def=(--def "${2#*#}")
     shift 2
     file=$OUT/$(printf '%s' "$d" | tr -c 'a-z0-9' -).json
-    if ! "$@" > "$file" 2>"$file.err"; then
-        FAIL=$((FAIL + 1)); echo "FAIL $d (the command failed)"; sed 's/^/  /' "$file.err" | head -5; return
+    "$@" > "$file" 2>"$file.err"
+    rc=$?
+    if [ "$rc" != "${CHECK_EXIT:-0}" ]; then
+        FAIL=$((FAIL + 1)); echo "FAIL $d (exit status $rc)"; sed 's/^/  /' "$file.err" | head -5; return
     fi
-    if errors=$($CHECK check "$SRC/schemas/$schema.json" "$file" --strict 2>&1); then
+    if errors=$($CHECK check "$SRC/schemas/$schema.json" "$file" --strict ${def[@]+"${def[@]}"} 2>&1); then
         PASS=$((PASS + 1)); echo "PASS $d"
     else
         FAIL=$((FAIL + 1)); echo "FAIL $d"; echo "$errors" | sed 's/^/  /' | head -10
@@ -40,7 +45,9 @@ P=$LAYR_ROOT/projects/p
 cd "$P/lines/main"
 l line new -q topic
 cd ../topic
-echo one > one.txt; l add one.txt; l save -qm one
+echo one > one.txt; l add one.txt
+check 'save -m --json' save l save -m one --json
+CHECK_EXIT=1 check 'save -m --json with nothing to save' save l save -m nothing --json
 l try -q head -- true 2>/dev/null
 l try -q head -- sh -c 'exit 3' 2>/dev/null
 l approve -q head
@@ -48,15 +55,24 @@ printf 'payload' > "$T/payload"
 l attest origin head --payload "$T/payload" >/dev/null
 echo two >> one.txt; l save -qam 'one, amended' --amend
 C=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"].startswith("one")))')
-l comment "$C" 'a note' --path one.txt --line 1 >/dev/null
+NOTE=$(l comment "$C" 'a note' --file one.txt --line 1-2 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l comment "$C" 'a whole-change note' --version v1 >/dev/null
+l comment reply "$NOTE" 'an answer' >/dev/null
+l comment resolve "$NOTE" >/dev/null
+l react "$NOTE" +1 >/dev/null
+l react "$C" heart >/dev/null
+l review request "$C" "user:$(id -u)" >/dev/null
+l change edit "$C" --title 'feat: one' --description 'The first file.' >/dev/null
 l line new -q other main
 (cd ../other && echo other >> notes.txt && l save -qam other)
+OTHER=$(l change list --json | python3 -c 'import json,sys; print(next(r["change_id"] for r in json.load(sys.stdin) if r["message"]=="other"))')
+l change close "$OTHER" -m 'not needed' >/dev/null
 echo topic >> notes.txt
 echo new > staged.txt; l add staged.txt
 l mv one.txt renamed.txt
 echo loose > loose.txt
 check 'status --json' status l status --json
+check 'save --json (an automatic state)' save l save --json
 eq 'the fixture has a staged rename' renamed.txt "$(l status --json | python3 -c 'import json,sys; print(next(c["path"] for c in json.load(sys.stdin)["staged"] if c["old_path"]))')"
 eq 'the fixture has an overlap' other "$(l status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["overlaps"][0]["line"])')"
 check 'status --json --no-overlaps --no-ignored' status l status --json --no-overlaps --no-ignored
@@ -73,7 +89,7 @@ eq 'the fixture has a conflict' notes.txt "$(l status --json | python3 -c 'impor
 cd ../topic
 check 'line list --json' line-list l line list --json
 check 'line list --json with a pattern' line-list l line list --json 'c*'
-l queue add topic --into main >/dev/null
+check 'queue add --json' 'queue-list#entry' l queue add topic --into main --json
 l queue add c2 --into other -m 'fix: c2' >/dev/null
 l line new -q q1 main
 l line new -q q2 main
@@ -81,13 +97,29 @@ l line new -q q2 main
 (cd ../q2 && echo q2 > notes.txt && l save -qam q2)
 l queue add q2 --into q1 >/dev/null
 (cd ../main && l queue run --into main >/dev/null 2>&1)
-(cd ../q1 && l queue run --into q1 >/dev/null 2>&1)
+cd ../q1
+CHECK_EXIT=1 check 'queue run --json with a failed entry' queue-list l queue run --into q1 --json
+cd ../topic
 check 'queue list --json' queue-list l queue list --json
 eq 'the fixture has done, pending and failed entries' 'done failed pending' "$(l queue list --json | python3 -c 'import json,sys; print(" ".join(sorted({e["status"] for e in json.load(sys.stdin)})))')"
 check 'queue list --into --json' queue-list l queue list --into q1 --json
 check 'change list --json' change-list l change list --json
+check 'change list --all --json' change-list l change list --all --json
+check 'change list --closed --json' change-list l change list --closed --json
+eq 'the fixture has open, closed and merged changes' 'closed merged open' "$(l change list --all --json | python3 -c 'import json,sys; print(" ".join(sorted({r["status"] for r in json.load(sys.stdin)})))')"
+check 'change show --json of a closed change' change-show l change show "$OTHER" --json
+eq 'a closed change names its reason' 'not needed' "$(l change show "$OTHER" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["closed"]["reason"])')"
 check 'change show --json' change-show l change show "$C" --json
-eq 'the fixture change has two versions, checks, comments and an operation' '2 2 2 amend' "$(l change show "$C" --json | python3 -c '
+l change show "$C" --json > "$T/review.json"
+eq 'the fixture change has a title, a thread with a reply, reactions and a reviewer' 'feat: one|1 1 2|True|1 1|outdated' "$(python3 - "$T/review.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+t = c["threads"][0]
+print(f"{c['title']}|{len(t['replies'])} {t['comment']['reactions']['+1']} {t['line_end']}|{t['resolved']}|"
+      f"{c['reactions']['heart']} {len(c['reviewers'])}|{c['reviewers'][0]['status']}")
+PY
+)"
+eq 'the fixture change has two versions, checks, comments and an operation' '2 2 3 amend' "$(l change show "$C" --json | python3 -c '
 import json,sys
 c = json.load(sys.stdin)
 print(len(c["versions"]), len(c["versions"][0]["checks"]), len(c["comments"]), c["versions"][1]["operation"]["kind"])')"

@@ -3,7 +3,7 @@
   "$id": "urn:layr:schema:change-list",
   "version": 1,
   "title": "layr change list --json",
-  "description": "The logical changes of the project. A change is a sequence of versions (states) with one change id, for example a state and its amended forms.",
+  "description": "The logical changes of the project, in change id order (the order they were made). A change is a sequence of versions (states) with one change id, for example a state and its amended forms. Without a flag the list has the changes that are not closed; --closed lists only the closed ones, --all lists every change.",
   "type": "array",
   "items": { "$ref": "#/$defs/change" },
   "$defs": {
@@ -12,15 +12,65 @@
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
+    "status": {
+      "description": "The status of the change: 'merged' when its newest version is in the history of the line main or a queue entry merged it, else 'closed' after 'layr change close' (until 'layr change reopen'), else 'open'.",
+      "enum": ["open", "closed", "merged"]
+    },
+    "closed": {
+      "description": "Who closed the change, when and why. Present only when the status is 'closed'.",
+      "type": "object",
+      "required": ["actor", "machine", "time"],
+      "additionalProperties": true,
+      "properties": {
+        "actor": { "$ref": "#/$defs/actor" },
+        "machine": { "description": "The id of the machine that recorded the close.", "$ref": "#/$defs/id" },
+        "time": { "description": "When the change was closed, in milliseconds since the Unix epoch.", "type": "integer" },
+        "reason": { "description": "The reason from 'layr change close -m'. Absent without one.", "type": "string" }
+      }
+    },
+    "actor": {
+      "description": "The user who recorded an operation on its machine.",
+      "type": "object",
+      "required": ["name", "uid"],
+      "additionalProperties": true,
+      "properties": {
+        "uid": { "description": "The user id (uid) on the machine of the record.", "type": "integer", "minimum": 0 },
+        "name": { "description": "The user name on the machine of the record, or 'person:<login>' for a person key.", "type": "string" },
+        "session": { "description": "The LAYR_SESSION label of the process. Free text. Absent when it was not set.", "type": "string" }
+      }
+    },
     "change": {
       "description": "One change, described by its newest version.",
       "type": "object",
-      "required": ["change_id", "message", "state", "versions"],
+      "required": ["change_id", "description", "line", "line_name", "message", "number", "state", "status", "title", "versions"],
       "additionalProperties": true,
       "properties": {
         "change_id": {
           "description": "The id of the change. 'layr change show <change_id>' shows it.",
           "$ref": "#/$defs/id"
+        },
+        "number": {
+          "description": "The number of the change (#12 in the text output; 'layr change show 12' finds it). The numbering machine of the project gives the numbers. Null until it has given one.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "title": {
+          "description": "The title that 'layr change edit --title' set, else the first line of the message of the newest version.",
+          "type": "string"
+        },
+        "description": {
+          "description": "The description that 'layr change edit --description' set, else the rest of the message of the newest version after its first line. Null when that is empty.",
+          "type": ["string", "null"]
+        },
+        "status": { "$ref": "#/$defs/status" },
+        "closed": { "$ref": "#/$defs/closed" },
+        "line": {
+          "description": "The id of the line that made the newest version. Null when the state names no line.",
+          "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "line_name": {
+          "description": "The current name of 'line'. A deleted line keeps its last name. Null when 'line' is null or the project has no record of the line.",
+          "type": ["string", "null"]
         },
         "versions": {
           "description": "The number of versions of the change.",

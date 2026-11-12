@@ -502,8 +502,8 @@ A `.git` folder that the line owner made instead is left alone.
 
 `layr log --json` writes one state JSON object per line. History filters and `--auto` apply before output.
 
-The `--json` output of `status`, `line list`, `queue list`, `change list`, `change show` and `attestations` has a
-JSON Schema. `layr schema <name>` prints the schema of the installed version. See [JSON output](json.md).
+The `--json` output of `status`, `save`, `line list`, `queue list`, `change list`, `change show` and `attestations`
+has a JSON Schema. `layr schema <name>` prints the schema of the installed version. See [JSON output](json.md).
 
 `layr line list --json` writes an array of local lines. Each line includes its ID, name, head, owner, machine, and local path.
 A name pattern filters the array. JSON output does not support `--all` or `--remotes`.

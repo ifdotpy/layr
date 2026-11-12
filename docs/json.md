@@ -8,10 +8,11 @@ Many commands write JSON with `--json`. For the commands below, the repository h
 | Schema         | Command                          |
 | -------------- | -------------------------------- |
 | `status`       | `layr status --json`             |
+| `save`         | `layr save --json`, `layr save -m <message> --json` |
 | `line-list`    | `layr line list --json`          |
-| `queue-list`   | `layr queue list --json`         |
-| `change-list`  | `layr change list --json`        |
-| `change-show`  | `layr change show <id> --json`   |
+| `queue-list`   | `layr queue list --json`, `layr queue run --json`; `layr queue add --json` writes one item (`$defs/entry`) |
+| `change-list`  | `layr change list [--all\|--closed] --json` |
+| `change-show`  | `layr change show <change> --json` |
 | `attestations` | `layr attestations <rev> --json` |
 
 ## Get a schema
@@ -32,6 +33,11 @@ Each schema has a top-level `"version"` (an integer). The current version of eac
   when a release adds a field. Do not use `additionalProperties: false` in a consumer.
 - A field that is removed or renamed, or that changes its type or meaning, increases the version
   of that schema by 1.
+
+Fields were added after the first schemas (change numbers, titles, status and closing; review threads, reactions and
+reviewers; line names next to line ids; `line_id` in `status`). No field was removed or changed, so
+each schema stays at version 1. The schema of a release lists the new fields as required, because that
+release always writes them; output of an older release does not have them.
 
 `"version"` is not a JSON Schema keyword. A validator in strict mode (for example Ajv) must
 know it: use `ajv.addKeyword("version")`, or turn strict mode off.
@@ -54,7 +60,8 @@ To add a schema:
 `tests/json-schema.py` knows a subset of JSON Schema: `type`, `properties`, `required`,
 `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `pattern`, `minimum`, `$ref` to
 `#/$defs/...`, and the annotations `title`, `description` and `examples`. `json-schema.py lint`
-refuses a schema with another keyword.
+refuses a schema with another keyword. `json-schema.py check <schema> <file> --def <name>` checks
+the file against one definition of the schema, for example `--def entry` for `queue add --json`.
 
 ## Known limits
 
@@ -62,4 +69,8 @@ refuses a schema with another keyword.
   attestation that `layr attest check` made by hand there is no result; the item is then the
   record data, with an `attestation` member.
 - `status` in `queue-list`, `kind` in `attestations` and similar fields are strings with
-  `examples`, not closed lists: a new value is not an incompatible change.
+  `examples`, not closed lists: a new value is not an incompatible change. The status of a change
+  (`open`, `closed`, `merged`) and of a reviewer (`approved`, `outdated`, `commented`, `pending`)
+  are closed lists (`enum`): a new value there increases the version of the schema.
+- `layr save --json` without `-m` writes one object per line of output; with `--all-lines` the
+  output has several lines. The schema describes one line.

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:layr:schema:save",
+  "version": 1,
+  "title": "layr save --json",
+  "description": "The result of a save, as one object per line of output. 'layr save -m <message> --json' (also with -a, --amend or -F) writes one object for a named save. 'layr save --json' and 'layr save --overlays --json' (automatic states) write one object for each line: one, or several with --all-lines. Files that the save left out are still named on stderr.",
+  "anyOf": [
+    { "$ref": "#/$defs/named" },
+    { "$ref": "#/$defs/nothing" },
+    { "$ref": "#/$defs/automatic" }
+  ],
+  "$defs": {
+    "id": {
+      "description": "A layr id in UUID form.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "short": {
+      "description": "The short form of a state id, as the text output prints it.",
+      "type": "string"
+    },
+    "line": {
+      "description": "The line of the save.",
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "description": "The id of the line.", "$ref": "#/$defs/id" },
+        "name": { "description": "The name of the line.", "type": "string" }
+      }
+    },
+    "named": {
+      "description": "A named save that made a state ('layr save -m'). The exit status is 0.",
+      "type": "object",
+      "required": ["amend", "conflicts", "files", "line", "message", "parents", "saved", "short", "state"],
+      "additionalProperties": true,
+      "properties": {
+        "saved": { "description": "Always true.", "const": true },
+        "state": {
+          "description": "The id of the new state. Null in a line with overlays when only overlays changed: then 'overlays' names the new overlay states.",
+          "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "short": { "description": "The short id of 'state'. Null when 'state' is null.", "anyOf": [{ "$ref": "#/$defs/short" }, { "type": "null" }] },
+        "line": { "$ref": "#/$defs/line" },
+        "message": { "description": "The message of the state.", "type": "string" },
+        "parents": {
+          "description": "The ids of the parent states. Empty when 'state' is null.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "amend": { "description": "True for 'save --amend': the state replaced the head.", "type": "boolean" },
+        "conflicts": { "description": "The number of files of the state that still have conflict markers.", "type": "integer", "minimum": 0 },
+        "files": {
+          "description": "The numbers of the summary of the text output: the changes from the old head.",
+          "type": "object",
+          "required": ["changed", "deletions", "insertions"],
+          "additionalProperties": true,
+          "properties": {
+            "changed": { "description": "The number of changed files.", "type": "integer", "minimum": 0 },
+            "insertions": { "description": "The number of added lines.", "type": "integer", "minimum": 0 },
+            "deletions": { "description": "The number of removed lines.", "type": "integer", "minimum": 0 }
+          }
+        },
+        "overlays": {
+          "description": "In a line with overlays: the new state of each overlay that the save changed.",
+          "type": "array",
+          "items": {
+            "description": "The new state of one overlay.",
+            "type": "object",
+            "required": ["overlay", "short", "state"],
+            "additionalProperties": true,
+            "properties": {
+              "overlay": { "description": "The name of the overlay.", "type": "string" },
+              "state": { "description": "The id of the new state in the overlay store.", "$ref": "#/$defs/id" },
+              "short": { "$ref": "#/$defs/short" }
+            }
+          }
+        }
+      }
+    },
+    "nothing": {
+      "description": "A named save that found nothing to save. The exit status is 1, as with the text output.",
+      "type": "object",
+      "required": ["line", "reason", "saved", "short", "state"],
+      "additionalProperties": true,
+      "properties": {
+        "saved": { "description": "Always false.", "const": false },
+        "state": { "description": "Always null.", "type": "null" },
+        "short": { "description": "Always null.", "type": "null" },
+        "line": { "$ref": "#/$defs/line" },
+        "reason": { "description": "Why nothing was saved, in words for people.", "type": "string", "examples": ["nothing to save"] }
+      }
+    },
+    "automatic": {
+      "description": "An automatic state of one line ('layr save --json' without -m).",
+      "type": "object",
+      "required": ["line", "overlays", "saved", "short", "state"],
+      "additionalProperties": true,
+      "properties": {
+        "saved": { "description": "False when the working folder did not change: then 'state' is the existing state.", "type": "boolean" },
+        "state": { "description": "The id of the state that is equal to the working folder.", "$ref": "#/$defs/id" },
+        "short": { "$ref": "#/$defs/short" },
+        "line": { "$ref": "#/$defs/line" },
+        "overlays": {
+          "description": "The cache overlays that --overlays saved. Empty without it.",
+          "type": "array",
+          "items": {
+            "description": "The new state of one cache overlay.",
+            "type": "object",
+            "required": ["overlay", "path", "short", "state"],
+            "additionalProperties": true,
+            "properties": {
+              "path": { "description": "The cache folder in the line.", "type": "string" },
+              "overlay": { "description": "The name of the overlay.", "type": "string" },
+              "state": { "description": "The id of the new state in the overlay store.", "$ref": "#/$defs/id" },
+              "short": { "$ref": "#/$defs/short" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

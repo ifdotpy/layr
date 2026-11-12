@@ -3,7 +3,7 @@
   "$id": "urn:layr:schema:queue-list",
   "version": 1,
   "title": "layr queue list --json",
-  "description": "The entries of the merge queue, oldest first. With --into <line>, only the entries for that target line. 'layr queue run --json' writes the entries it ran in the same form, and 'layr queue add --json' writes one entry.",
+  "description": "The entries of the merge queue, oldest first. With --into <line>, only the entries for that target line. 'layr queue run --json' writes the entries it ran in the same form, and 'layr queue add --json' writes one entry (the definition 'entry').",
   "type": "array",
   "items": { "$ref": "#/$defs/entry" },
   "$defs": {
@@ -15,7 +15,7 @@
     "entry": {
       "description": "One queue entry: an exact state to merge into a target line.",
       "type": "object",
-      "required": ["added_by", "attempts", "id", "into", "state", "status", "target_line", "time"],
+      "required": ["added_by", "attempts", "id", "into", "state", "status", "target_line", "target_line_name", "time"],
       "additionalProperties": true,
       "properties": {
         "id": {
@@ -29,6 +29,10 @@
         "target_line": {
           "description": "The id of the target line. It stays the same when the line is renamed.",
           "$ref": "#/$defs/id"
+        },
+        "target_line_name": {
+          "description": "The current name of the target line ('into' keeps the name it had when the entry was added). A deleted line keeps its last name. Null when the project has no record of the line.",
+          "type": ["string", "null"]
         },
         "state": {
           "description": "The id of the exact state to merge. A later save in the source line does not change it.",

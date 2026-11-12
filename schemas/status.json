@@ -5,12 +5,16 @@
   "title": "layr status --json",
   "description": "The state of the working folder of the current line, compared with the line head. Paths are relative to the line root and use '/'. Path arguments of the command filter every list except 'overlaps'.",
   "type": "object",
-  "required": ["conflicts", "head", "line", "staged", "unstaged", "untracked"],
+  "required": ["conflicts", "head", "line", "line_id", "staged", "unstaged", "untracked"],
   "additionalProperties": true,
   "properties": {
     "line": {
       "description": "The name of the current line.",
       "type": "string"
+    },
+    "line_id": {
+      "description": "The id of the current line. It stays the same when the line is renamed.",
+      "$ref": "#/$defs/id"
     },
     "head": {
       "description": "The id of the state at the head of the line.",

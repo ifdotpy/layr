@@ -10,6 +10,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("change-show", include_str!("../schemas/change-show.json")),
     ("line-list", include_str!("../schemas/line-list.json")),
     ("queue-list", include_str!("../schemas/queue-list.json")),
+    ("save", include_str!("../schemas/save.json")),
     ("status", include_str!("../schemas/status.json")),
 ];
 
