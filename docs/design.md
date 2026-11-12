@@ -178,7 +178,6 @@ command reads it.
 
 ## 5. Warm caches
 
-<<<<<<< head
 Owner decision 2026-11-11: a cache is an ordinary overlay (an overlay), for example
 `target.macos-aarch64` with `folder=target`, `quiet`, `history=last`, `merge=union-theirs`,
 `platform=macos-aarch64` and `trust=protected` ([cache overlays](cache-overlays.md) section 2).
@@ -194,18 +193,6 @@ on its platform. `trust` is an overlay property. The cache flags of transfers (`
 `fsck --overlays`; the old spellings fail with exit status 2. A store keeps its `cache.<folder>` overlays:
 each stays the overlay of its folder on every platform. Parts are still full folder snapshots,
 not v2 objects. The rest of this section describes the rules that both kinds of overlay follow.
-||||||| base
-Planned: caches become overlays with properties ([cache overlays](cache-overlays.md)). This
-section describes the caches as built.
-=======
-Owner decision 2026-11-11: a cache is an ordinary overlay (a glass), for example `target` with
-`folder=target`, `quiet`, `history=last`, `merge=union-theirs` and `platform`
-([cache overlays](cache-overlays.md) section 2). No cache flags (`save --caches`, `sync --caches`,
-`merge --caches-only`, `fetch --caches`, `--no-caches`, `--caches-of`, `fsck --caches`), no
-`cache.` name prefix, no separate code path. Cache states go into v2 objects like any glass.
-Space comes from layered storage and `history=last`, not from a size cap. This section describes
-the caches as built.
->>>>>>> d598433
 
 A cache is a folder of regenerable content, such as a Rust `target` folder, kept as a nested
 subvolume, outside states and diffs. Every working folder would otherwise build from
@@ -338,12 +325,7 @@ checks and the part of `project move` that rests on them are in [volumes](volume
 - Overlays: file trees with their own owner, readers and history, stacked on a line. The first
   slice (file overlays, shared and follow mode) is built; the rest is planned (`docs/overlays.md`).
   Owner decision 2026-11-11: lines and overlays are independent; a line has the same name on
-<<<<<<< head
   every overlay, and a view joins a line and a set of overlays (`docs/overlays.md` section 1).
-||||||| base
-=======
-  every glass, and a view joins a line and a set of glasses (`docs/overlays.md` section 1).
->>>>>>> d598433
 - A dry-run mode for rule changes that reports what would be refused (GitHub rule evaluation).
 
 ## 8. Decided against
@@ -354,13 +336,7 @@ checks and the part of `project move` that rests on them are in [volumes](volume
   copied Python environment runs the original line's interpreter), and the output holds code
   that no one reviewed. A state is a key of sources only, not of the compiler and environment
   that a build cache needs. Caches now come only from an explicit `save --caches`. (Owner
-<<<<<<< head
   decision 2026-11-11: that flag goes; a cache is an ordinary overlay of the line, section 5.)
-||||||| base
-  that a build cache needs. Caches now come only from an explicit `save --caches`.
-=======
-  decision 2026-11-11: that flag goes; a cache is an ordinary glass of the line, section 5.)
->>>>>>> d598433
 - **Working folders outside the store.** A line's folder stays at
   `projects/<p>/lines/<name>`: snapshots, deletes and writes of the service go through the
   store's own folders, which no user can replace. A link (`ln -s <line folder> ~/code/topic`)

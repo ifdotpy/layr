@@ -563,7 +563,6 @@ fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Opt
             }
         }
     }
-<<<<<<< head
     if !opts.takes_layer(super::BASE_LAYER) {
         return Ok(Some(BTreeSet::new()));
     }
@@ -584,18 +583,6 @@ pub(super) fn push_selection(repo: &Repo, records: &[String], opts: &Options) ->
     let mut base = opts.clone();
     base.heads = false;
     base_selection(repo, records, &base)
-||||||| base
-=======
-    if !opts.takes_layer(super::BASE_LAYER, false) {
-        return Ok(Some(BTreeSet::new()));
-    }
-    if opts.lines.is_empty() {
-        return Ok(None);
-    }
-    let mut keep: BTreeSet<String> = if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
-    keep.extend(deletion_dependencies(records)?);
-    Ok(Some(keep))
->>>>>>> d598433
 }
 
 pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
