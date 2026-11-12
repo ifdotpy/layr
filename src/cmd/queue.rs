@@ -267,7 +267,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let entry = repo.p.db.queue_entry(&entry.id)?.unwrap_or(entry);
             if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&entry)?);
+                outln!(ctx, "{}", entry_json(&mut super::LineNames::new(&repo.p.db), &entry)?);
             } else {
                 print_entry(ctx, &entry);
             }
@@ -277,7 +277,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let line = a.get("--into").map(|name| repo.line(name)).transpose()?;
             let entries = repo.p.db.queue_entries(line.as_ref().map(|line| line.id.as_str()))?;
             if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&entries)?);
+                outln!(ctx, "{}", entries_json(repo, &entries)?);
             } else {
                 for entry in entries {
                     print_entry(ctx, &entry);
@@ -329,7 +329,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&entries)?);
+                outln!(ctx, "{}", entries_json(repo, &entries)?);
             } else {
                 for entry in entries {
                     print_entry(ctx, &entry);
@@ -339,6 +339,18 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         _ => Err(exit(128, usage)),
     }
+}
+
+/// A queue entry in JSON output: its fields and `target_line_name`, the current name of its target line.
+fn entry_json(names: &mut super::LineNames, entry: &QueueEntry) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(entry)?;
+    names.add(&mut value, "target_line")?;
+    Ok(value)
+}
+
+fn entries_json(repo: &Repo, entries: &[QueueEntry]) -> Result<serde_json::Value> {
+    let mut names = super::LineNames::new(&repo.p.db);
+    Ok(serde_json::Value::Array(entries.iter().map(|e| entry_json(&mut names, e)).collect::<Result<_>>()?))
 }
 
 fn release_hold(repo: &Repo, entry: &QueueEntry, data: &mut serde_json::Value) -> Result<()> {

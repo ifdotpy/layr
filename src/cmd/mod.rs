@@ -50,6 +50,41 @@ pub fn exit(code: i32, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Exit(code, msg.into()))
 }
 
+/// The names of lines for JSON output, next to their ids (docs/commands.md, "Line names in JSON").
+/// Each line is looked up once.
+pub(crate) struct LineNames<'d> {
+    db: &'d crate::db::Db,
+    seen: std::collections::BTreeMap<String, Option<String>>,
+}
+
+impl<'d> LineNames<'d> {
+    pub(crate) fn new(db: &'d crate::db::Db) -> Self {
+        Self { db, seen: Default::default() }
+    }
+
+    /// The name of line `id`, also of a deleted line; null when the project knows no name.
+    pub(crate) fn name(&mut self, id: &str) -> Result<serde_json::Value> {
+        if !self.seen.contains_key(id) {
+            let name = self.db.line_name(id)?;
+            self.seen.insert(id.to_string(), name);
+        }
+        Ok(serde_json::json!(self.seen[id]))
+    }
+
+    /// Add `<key>_name` next to the line id `key` of `value` (an object) when it has that key. A key
+    /// that is no line id (null) gets a null name.
+    pub(crate) fn add(&mut self, value: &mut serde_json::Value, key: &str) -> Result<()> {
+        let Some(id) = value.get(key).map(|v| v.as_str().map(str::to_owned)) else {
+            return Ok(());
+        };
+        value[format!("{key}_name")] = match id {
+            Some(id) => self.name(&id)?,
+            None => serde_json::Value::Null,
+        };
+        Ok(())
+    }
+}
+
 /// One line on stderr for a cache flag that goes (docs/overlays.md, section 1a, slice 6): a cache
 /// is an ordinary overlay. The flag keeps working for one release, so runners have time to change.
 /// The overlay flags of a command (owner decision 2026-11-11: a cache is an ordinary overlay, so no flag names caches).

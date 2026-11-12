@@ -1053,6 +1053,23 @@ impl Db {
             .optional()?)
     }
 
+    /// The name of line `id`, also of a deleted line: the line row keeps the name, and a row that a
+    /// delete record made alone takes it from that record. None: the project knows no name.
+    pub fn line_name(&self, id: &str) -> Result<Option<String>> {
+        if let Some(name) = self.line_by_id(id)?.map(|l| l.name).filter(|n| !n.is_empty()) {
+            return Ok(Some(name));
+        }
+        let name: Option<Option<String>> = self
+            .conn
+            .prepare_cached(
+                "SELECT json_extract(r.raw, '$.r.data.name') FROM record_lines l JOIN records r ON r.id=l.record_id
+                 WHERE l.kind=1 AND l.line_id=?1 AND r.op='line.delete' ORDER BY l.time DESC, l.seq DESC LIMIT 1",
+            )?
+            .query_row(params![id], |r| r.get(0))
+            .optional()?;
+        Ok(name.flatten().filter(|n| !n.is_empty()))
+    }
+
     pub fn lines(&self) -> Result<Vec<Line>> {
         let mut st =
             self.conn.prepare_cached("SELECT id, name, owner, machine, head FROM lines WHERE deleted=0 ORDER BY name")?;
@@ -1723,6 +1740,36 @@ mod tests {
         assert_eq!(find("wanted")?.as_deref(), Some("\"new\""));
         assert_eq!(find("missing")?.as_deref(), Some("null"));
         assert_eq!(find("wrong")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn line_name_keeps_the_name_of_a_deleted_line() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let db = Db { conn, stale: false };
+        let apply = |seq: u64, op: &str, id: &str, after: Option<&str>, data: serde_json::Value| -> Result<()> {
+            let mut rec = Record::new(op);
+            rec.id = format!("r{seq}");
+            rec.machine = "m".into();
+            rec.seq = seq;
+            rec.time = seq as i64;
+            let after =
+                after.map(|name| crate::model::LineState { name: name.into(), head: "h".into(), owner: 1, machine: "m".into() });
+            rec.lines
+                .insert(id.into(), crate::model::LineChange { before: None, after, working_before: None, working_after: None });
+            rec.data = data;
+            db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
+            db.derive(&rec, &|_| true, "m")
+        };
+        apply(1, "line.create", "kept", Some("w"), serde_json::json!({}))?;
+        apply(2, "line.delete", "kept", None, serde_json::json!({"name": "w"}))?;
+        assert!(db.line_deleted("kept")?);
+        assert_eq!(db.line_name("kept")?.as_deref(), Some("w"), "the row of a deleted line keeps its name");
+        // Only the delete record names this line (its create record never reached this store).
+        apply(3, "line.delete", "gone", None, serde_json::json!({"name": "old"}))?;
+        assert_eq!(db.line_name("gone")?.as_deref(), Some("old"));
+        assert_eq!(db.line_name("unknown")?, None);
         Ok(())
     }
 

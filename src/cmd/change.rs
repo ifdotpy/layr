@@ -41,12 +41,15 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let usage =
         "usage: layr change (list|show <id>|log <id>|diff <id> [--from vN|--since-review [--person <login>]] [--to vN]) [--json]";
     let command = a.pos.first().map(String::as_str).unwrap_or("");
+    let mut names = super::LineNames::new(&repo.p.db);
     if command == "list" && a.pos.len() == 1 {
         let mut rows = Vec::new();
         for id in repo.p.db.changes()? {
             let versions = repo.p.db.change_versions(&id)?;
             if let Some(last) = versions.last() {
-                rows.push(serde_json::json!({"change_id":id,"versions":versions.len(),"state":last.id,"message":last.message}));
+                let mut row = serde_json::json!({"change_id":id,"versions":versions.len(),"state":last.id,"message":last.message,"line":last.line});
+                names.add(&mut row, "line")?;
+                rows.push(row);
             }
         }
         if a.has("--json") {
@@ -75,7 +78,9 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let model = repo.read_model()?;
             for (n, s) in versions.iter().enumerate() {
                 let mut row = serde_json::json!({"version":format!("v{}",n+1),"state":s,"attestations":repo.p.db.attestations(&s.id,None)?,"checks":model.checks(&s.id)});
-                if let Some(version) = model.version_info(&s.id) {
+                names.add(&mut row["state"], "line")?;
+                if let Some(mut version) = model.version_info(&s.id) {
+                    names.add(&mut version, "target_line")?;
                     row["operation"] = version;
                 }
                 rows.push(row);
