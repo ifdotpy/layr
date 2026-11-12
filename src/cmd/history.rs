@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 fn diff_spec() -> Spec {
     Spec::new()
+        .paths()
         .flag("--cached|--staged")
         .flag("--stat")
         .flag("--numstat")
@@ -1060,6 +1061,17 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
+    // `layr --line a log b`: two lines for one log. An overlay read sets its own line.
+    if let Some(chosen) = ctx.env("LAYR_LINE").filter(|_| !ctx.env("LAYR_PROJECT").is_some_and(|p| p.contains('%'))) {
+        for name in &a.pos {
+            if name != chosen && repo.p.db.line_by_name(name)?.is_some() {
+                return Err(exit(
+                    128,
+                    format!("--line {chosen} and 'log {name}' name two lines; use 'layr --line {name} log' or 'layr log {name}'"),
+                ));
+            }
+        }
+    }
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &path_base(ctx, &h), &a)?;
     repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&paths)?;
@@ -1384,6 +1396,7 @@ pub fn merge_base(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
+        .paths()
         .value("-L")
         .flag("-s")
         .flag("-e|--show-email")
@@ -1582,6 +1595,7 @@ fn ignore_folder(repo: &Repo, commit: &str) -> Result<Temp> {
 
 pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
+        .paths()
         .flag("-n|--line-number")
         .flag("-i|--ignore-case")
         .flag("-w|--word-regexp")

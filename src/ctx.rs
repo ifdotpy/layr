@@ -110,14 +110,21 @@ impl Ctx {
     }
 
     /// Find the project and line from `LAYR_PROJECT`/`LAYR_LINE` or from the working folder.
+    /// `LAYR_LINE` (the global `--line`) alone names a line of the project of the working folder.
     pub fn locate(&self) -> Result<Loc> {
+        let line = self.env("LAYR_LINE").map(|s| s.to_string());
         if let Some(p) = self.env("LAYR_PROJECT") {
-            let line = self.env("LAYR_LINE").map(|s| s.to_string());
             let sub = self.sub_in_line(p, line.as_deref()).unwrap_or_default();
             return Ok(Loc { project: p.to_string(), line, sub });
         }
         match self.loc_from_path(&self.cwd) {
-            Some(l) => Ok(l),
+            Some(l) => match line {
+                // Another line of this project: paths start at its root, as with --project.
+                Some(name) if l.line.as_deref() != Some(name.as_str()) => {
+                    Ok(Loc { project: l.project, line: Some(name), sub: String::new() })
+                }
+                _ => Ok(l),
+            },
             None => bail!(
                 "not in a layr line (cwd {}); cd into a line, or name the project with --project <name> (and a line with --line <name>)",
                 self.cwd.display()

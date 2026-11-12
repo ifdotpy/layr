@@ -1,5 +1,10 @@
 //! A small git-style argument parser: short and long options, `--opt=value`, `-n5`, grouped
-//! short flags, and `--` before paths.
+//! short flags, and `--` as the end of the options.
+//!
+//! After `--`, no argument is an option: `layr comment <change> -- "-1 for this"`. The arguments
+//! after `--` are positional, unless the command gives `--` its own meaning (paths, a command to
+//! run) with `Spec::paths`. A value option takes the next argument as its value even if it
+//! starts with `-`: `layr save -m "-x"`.
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
@@ -14,6 +19,8 @@ pub struct Spec {
     optional: Vec<&'static str>,
     /// Aliases: alias to canonical name.
     alias: HashMap<&'static str, &'static str>,
+    /// The arguments after `--` go to `Parsed::paths`, not to `Parsed::pos`.
+    paths: bool,
 }
 
 impl Spec {
@@ -37,6 +44,12 @@ impl Spec {
         }
         self
     }
+    /// The command reads the arguments after `--` apart from the positional ones (paths, as in
+    /// `layr diff <rev> -- <path>`, or a command, as in `layr try <rev> -- <cmd>`).
+    pub fn paths(mut self) -> Spec {
+        self.paths = true;
+        self
+    }
     pub fn optional(mut self, names: &'static str) -> Spec {
         let v: Vec<&'static str> = names.split('|').collect();
         for n in &v {
@@ -52,7 +65,7 @@ pub struct Parsed {
     pub flags: HashMap<String, usize>,
     pub values: HashMap<String, Vec<String>>,
     pub pos: Vec<String>,
-    /// Arguments after `--`.
+    /// Arguments after `--`, for a spec with `Spec::paths` (in `pos` for the others).
     pub paths: Vec<String>,
     pub dashdash: bool,
 }
@@ -82,7 +95,11 @@ pub fn parse(spec: &Spec, args: &[String]) -> Result<Parsed> {
         let a = &args[i];
         i += 1;
         if p.dashdash {
-            p.paths.push(a.clone());
+            if spec.paths {
+                p.paths.push(a.clone());
+            } else {
+                p.pos.push(a.clone());
+            }
             continue;
         }
         if a == "--" {
@@ -117,7 +134,7 @@ pub fn parse(spec: &Spec, args: &[String]) -> Result<Parsed> {
                 }
                 continue;
             }
-            bail!("unknown option: {name}");
+            bail!("{}", unknown(name, a));
         }
         if a.starts_with('-') && a.len() > 1 {
             // `-<digits>`: a count, as in `log -5`.
@@ -132,7 +149,7 @@ pub fn parse(spec: &Spec, args: &[String]) -> Result<Parsed> {
                 let key: &str = name.as_str();
                 let canon = match spec.alias.iter().find(|(n, _)| **n == key) {
                     Some((_, c)) => *c,
-                    None => bail!("unknown option: {key}"),
+                    None => bail!("{}", unknown(key, a)),
                 };
                 if spec.optional.contains(&key) {
                     let rest: String = chars[k + 1..].iter().collect();
@@ -161,4 +178,84 @@ pub fn parse(spec: &Spec, args: &[String]) -> Result<Parsed> {
         p.pos.push(a.clone());
     }
     Ok(p)
+}
+
+/// The error for an argument that looks like an option and is not one. Text that starts with `-`
+/// (a comment, a message) goes after `--`.
+fn unknown(name: &str, arg: &str) -> String {
+    if name == arg {
+        format!("unknown option: {name} (put -- before an argument that starts with '-' and is not an option)")
+    } else {
+        format!("unknown option: {name} in '{arg}' (put -- before an argument that starts with '-' and is not an option)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse, Spec};
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn spec() -> Spec {
+        Spec::new().flag("-a|--all").flag("-q").value("-m|--message").value("-n|--max-count").optional("--porcelain")
+    }
+
+    #[test]
+    fn value_options_take_a_next_value_that_starts_with_a_dash() {
+        for (list, want) in [
+            (&["-m", "-x"][..], "-x"),
+            (&["-m", "--"][..], "--"),
+            (&["-m", "-- looks good"][..], "-- looks good"),
+            (&["--message", "-1 for this"][..], "-1 for this"),
+            (&["--message", "--all"][..], "--all"),
+            (&["--message=-x"][..], "-x"),
+            (&["-m-x"][..], "-x"),
+            (&["-am", "-q"][..], "-q"),
+        ] {
+            let a = parse(&spec(), &args(list)).unwrap();
+            assert_eq!(a.get("-m"), Some(want), "{list:?}");
+            assert!(a.pos.is_empty() && a.paths.is_empty(), "{list:?}");
+        }
+        assert!(!parse(&spec(), &args(&["-m", "-q"])).unwrap().has("-q"));
+    }
+
+    #[test]
+    fn dashdash_ends_the_options() {
+        let a = parse(&spec(), &args(&["x", "--", "-1 for this", "--all", "--", "-q"])).unwrap();
+        assert_eq!(a.pos, ["x", "-1 for this", "--all", "--", "-q"]);
+        assert!(a.paths.is_empty() && a.dashdash);
+        assert!(!a.has("--all") && !a.has("-q"));
+        assert_eq!(a.rest(), ["x", "-1 for this", "--all", "--", "-q"]);
+    }
+
+    #[test]
+    fn dashdash_paths_for_a_command_that_reads_them() {
+        let a = parse(&spec().paths(), &args(&["-q", "head", "--", "-a", "src"])).unwrap();
+        assert_eq!(a.pos, ["head"]);
+        assert_eq!(a.paths, ["-a", "src"]);
+        assert!(a.has("-q") && !a.has("-a") && a.dashdash);
+        assert_eq!(a.rest(), ["head", "-a", "src"]);
+    }
+
+    #[test]
+    fn flags_and_values_still_parse() {
+        let a = parse(&spec(), &args(&["-aq", "-n5", "--porcelain=v2", "--max-count", "3", "pos", "-5"])).unwrap();
+        assert!(a.has("-a") && a.has("-q"));
+        assert_eq!(a.all("-n"), ["5", "3", "5"]);
+        assert_eq!(a.get("--porcelain"), Some("v2"));
+        assert_eq!(a.pos, ["pos"]);
+        assert!(parse(&spec(), &args(&["--all=x"])).is_err());
+        assert!(parse(&spec(), &args(&["-m"])).unwrap_err().to_string().contains("needs a value"));
+    }
+
+    #[test]
+    fn text_that_looks_like_an_option_names_the_fix() {
+        for list in [&["-- looks good"][..], &["-1 for this"][..], &["--nope"][..], &["-z"][..]] {
+            let e = parse(&spec(), &args(list)).unwrap_err().to_string();
+            assert!(e.starts_with("unknown option: "), "{e}");
+            assert!(e.contains("put -- before"), "{e}");
+        }
+    }
 }

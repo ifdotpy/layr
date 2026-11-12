@@ -54,7 +54,7 @@ fn first_parent(repo: &Repo, good: &str, bad: &str) -> Result<Vec<StateRec>> {
 }
 
 pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().value("--good").value("--bad").flag("--auto").value("--ref-log").flag("--json"), args)?;
+    let a = parse(&Spec::new().paths().value("--good").value("--bad").flag("--auto").value("--ref-log").flag("--json"), args)?;
     if a.pos == ["list"] && a.paths.is_empty() {
         let h = here(ctx)?;
         let rows = h.repo.read_model()?.bisect_results();

@@ -1124,7 +1124,7 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Run a command in a temporary writable copy of an exact state and record the result.
 pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--keep").flag("-q|--quiet").value("--check");
+    let spec = Spec::new().paths().flag("--keep").flag("-q|--quiet").value("--check");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;

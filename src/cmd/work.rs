@@ -2014,7 +2014,8 @@ fn reset_op(line: &Line, target: &str) -> crate::repo::LineOp<'static> {
 }
 
 pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--soft").flag("--mixed").flag("--hard").flag("--keep").flag("--merge").flag("-q|--quiet");
+    let spec =
+        Spec::new().paths().flag("--soft").flag("--mixed").flag("--hard").flag("--keep").flag("--merge").flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();

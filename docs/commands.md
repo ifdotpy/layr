@@ -32,6 +32,26 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | store         | `store remove <path> [--force] [-q]` (deletes a whole store folder; see [Remove a store](#remove-a-store)), `store-version [--json]` ([store version](local-store-version.md)) |
 | JSON schemas  | `schema` (lists the schemas), `schema <name>` (prints one; see [JSON output](json.md)) |
 
+### Command line
+
+- Global options come before the command: `-C <folder>`, `--root <store>`, `--project <name>`,
+  `--line <name>`. `--line` alone names a line of the project of the current folder:
+  `layr --line topic-1 log` is the same as `layr log topic-1`. `layr --line a log b` with two
+  different lines is refused.
+- `--` ends the options. No argument after it is an option. Use it for text that starts with `-`:
+  `layr comment <change> -- "-1 for this"`. Without `--`, such text is refused as an unknown
+  option, and the error tells you to put `--` before it.
+- Some commands give `--` a second meaning: paths (`diff`, `log`, `show`, `blame`, `grep`,
+  `reset`) or a command to run (`try`, `bisect run`, `fetch --command`).
+- An option that takes a value takes the next argument, also when it starts with `-`:
+  `layr save -m "-x"`, `layr save -m "-- looks good"`.
+- `layr <command> --help` (or `-h`) and `layr help <command>` print the usage of that command.
+  `layr help <command> <subcommand>` prints only that subcommand, for example `layr help line move`.
+  A command without its own usage text prints the lines of the general help that name it.
+  `layr help` and `layr --help` print the general help.
+- `-h` and `--help` after `--` are no request for help. Also not as the value of a text option
+  such as `-m`, `--message` or `--note`. `grep` keeps `-h` for its own use: use `layr grep --help`.
+
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
 `init [<project>] --from-git <checkout>` makes a project from a Git checkout, in place. The
@@ -448,7 +468,8 @@ layr keep drop app/thread-7/12                      # release it (the line delet
 
 A user with the reader role (or a line of their own) reads every state of the project through
 the service. A line is not needed: name the project with `--project` (and a line with `--line`
-when the command reads a line's head, index or working content).
+when the command reads a line's head, index or working content). Inside a line folder, `--line`
+alone names another line of the same project.
 
 | Task | Command |
 | --- | --- |
