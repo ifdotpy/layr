@@ -624,7 +624,7 @@ pub fn exchange(
             let incoming = peer_present.difference(&mine).filter(|_| direction != "push");
             for id in outgoing.chain(incoming) {
                 if repo.p.db.state(id)?.is_some_and(|s| s.kind == StateKind::Cache) {
-                    omitted.insert(format!("cache state {id}: use --caches"));
+                    omitted.insert(format!("cache state {id}: fetch --overlay <overlay> takes it"));
                 }
             }
         }

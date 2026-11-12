@@ -65,21 +65,14 @@ pub(super) fn records_with_local(
             wanted.push((object.key, machine, first, last));
         }
     }
-    // A segment is one small object: a clone reads hundreds of them, many at a time, so the latency of the remote
-    // counts once per batch, not once per segment.
-    let mut bodies: Vec<Result<Vec<u8>>> = Vec::with_capacity(wanted.len());
-    for batch in wanted.chunks(32) {
-        bodies.extend(std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|(key, ..)| scope.spawn(move || backend.get(key)?.context("record segment disappeared")))
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("segment read panicked"))))
-                .collect::<Vec<_>>()
-        }));
-    }
+    // A segment is one small object: a clone reads hundreds of them, so they come in batches (one request per
+    // 256 segments through a gateway, else 32 reads at a time).
+    let keys: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
+    let bodies: Vec<Result<Vec<u8>>> = backend
+        .get_many(&keys)?
+        .into_iter()
+        .map(|body| body.context("record segment disappeared"))
+        .collect();
     for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
         let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
@@ -492,7 +485,7 @@ pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<Stri
     if !opts.caches {
         for reference in repo.p.db.refs("", crate::ids::now_ms())? {
             if repo.state(&reference.target)?.kind == crate::model::StateKind::Cache {
-                omitted.push(format!("cache state {} of ref {}: use --caches", reference.target, reference.name));
+                omitted.push(format!("cache state {} of ref {}: fetch --overlay <overlay> takes it", reference.target, reference.name));
             }
         }
     }

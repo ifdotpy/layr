@@ -290,6 +290,25 @@ impl Backend {
         matches!(self, Self::S3(_) | Self::Gateway(_) | Self::Api(_) | Self::File(..))
     }
 
+    /// The objects `keys` in their order, as `get` gives each: one batch request per epoch through a gateway
+    /// (`Gateway::get_many`), else up to 32 reads at a time.
+    pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if let Self::Gateway(gateway) = self {
+            return gateway.get_many(keys);
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for batch in keys.chunks(32) {
+            let got: Vec<Result<Option<Vec<u8>>>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch.iter().map(|key| scope.spawn(move || self.get(key))).collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("read panicked")))).collect()
+            });
+            for item in got {
+                out.push(item?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         let _io = Io::start("get", key, self.is_leaf());

@@ -1441,13 +1441,13 @@ mod tests {
             format!("{auto} \"auto\""),
             format!("{cache} \"cache\""),
             format!("{other} \"cache\""),
-            format!("cache state {cache} of ref caches/one: use --caches"),
-            format!("cache state {cache} of ref caches/two: use --caches"),
+            format!("cache state {cache} of ref caches/one: fetch --overlay <overlay> takes it"),
+            format!("cache state {cache} of ref caches/two: fetch --overlay <overlay> takes it"),
             "private overlay files".into(),
         ];
         assert_eq!(
             omitted_summaries(&omitted),
-            vec!["1 auto state (use --auto)", "2 cache states (use --caches)", "private overlay files"]
+            vec!["1 auto state (use --auto)", "2 cache states (use --overlay <overlay>)", "private overlay files"]
         );
     }
     #[test]

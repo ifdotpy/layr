@@ -1324,7 +1324,7 @@ mod tests {
         let repo = Repo { p: project, ctx: None };
         let report = push(&store, &ctx, &repo, &Options::default()).unwrap();
         assert_eq!(report.states, 3);
-        assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: use --caches")));
+        assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: fetch --overlay <overlay> takes it")));
         assert!(!reader::attempts(&store.backend).unwrap().contains_key(&cache));
         let report = push(&store, &ctx, &repo, &Options { caches: true, ..Default::default() }).unwrap();
         assert_eq!(report.states, 1);

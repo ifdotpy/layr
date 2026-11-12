@@ -19,6 +19,38 @@ const OBJECT_LIMIT: usize = 32 << 20;
 /// (layr-gateway `cdn.rs`).
 const CDN_CAPABILITY: &str = "x-layr-cdn";
 const CDN_CONTENT_TYPE: &str = "application/vnd.layr.cdn+json";
+/// The most keys of one `POST batch`, and the most bytes of its reply (32 MiB of bodies and the index).
+const BATCH_KEYS: usize = 256;
+const BATCH_LIMIT: usize = (32 << 20) + (1 << 20);
+
+/// The objects of a `POST batch` reply of `count` keys, in their order: `Some(Some(bytes))` for 200, `Some(None)`
+/// for 404, `None` for a key to read alone (a streamed object, the byte limit of the reply, another error).
+fn batch_objects(reply: &[u8], count: usize) -> Result<Vec<Option<Option<Vec<u8>>>>> {
+    let length = u32::from_be_bytes(reply.get(..4).context("short batch reply")?.try_into()?) as usize;
+    let index: serde_json::Value = serde_json::from_slice(reply.get(4..4 + length).context("short batch index")?)?;
+    let items = index["objects"].as_array().context("batch index has no objects")?;
+    if items.len() != count {
+        bail!("batch reply names {} objects for {count} keys", items.len());
+    }
+    let mut bodies = &reply[4 + length..];
+    let mut out = Vec::with_capacity(count);
+    for item in items {
+        out.push(match item["status"].as_u64() {
+            Some(200) => {
+                let n = item["length"].as_u64().context("batch entry has no length")? as usize;
+                let body = bodies.get(..n).context("short batch body")?.to_vec();
+                bodies = &bodies[n..];
+                Some(Some(body))
+            }
+            Some(404) => Some(None),
+            _ => None,
+        });
+    }
+    if !bodies.is_empty() {
+        bail!("batch reply has bytes after its bodies");
+    }
+    Ok(out)
+}
 const SLOTS_LIMIT: usize = 8 << 20;
 const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// A cached read proof is renewed when it expires within this time: a long push or a CI clock that runs behind the
@@ -52,6 +84,8 @@ pub struct Gateway {
     public: std::sync::atomic::AtomicBool,
     /// The CDN failed once in this command: later reads go through the gateway.
     cdn_off: std::sync::atomic::AtomicBool,
+    /// The gateway has no `POST batch` (an older one): later reads go one by one.
+    batch_off: std::sync::atomic::AtomicBool,
     person: Arc<Mutex<Option<PersonSession>>>,
 }
 
@@ -67,6 +101,7 @@ impl Clone for Gateway {
             read: Mutex::new(self.read.lock().expect("gateway read lock").clone()),
             public: std::sync::atomic::AtomicBool::new(self.is_public()),
             cdn_off: std::sync::atomic::AtomicBool::new(self.cdn_off.load(Ordering::SeqCst)),
+            batch_off: std::sync::atomic::AtomicBool::new(self.batch_off.load(Ordering::SeqCst)),
             person: self.person.clone(),
         }
     }
@@ -199,6 +234,7 @@ impl Gateway {
             read: Mutex::new(None),
             public: std::sync::atomic::AtomicBool::new(false),
             cdn_off: std::sync::atomic::AtomicBool::new(false),
+            batch_off: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
         })
         .and_then(|mut gateway| {
@@ -790,6 +826,61 @@ impl Gateway {
             200 => Ok(Some(bytes(response, if key == "store.json" { 16 << 10 } else { OBJECT_LIMIT })?)),
             status => bail!("gateway get: HTTP {status}"),
         }
+    }
+
+    /// Whether `key` is read with the machine read proof through `objects/<key>` (`get`), so a batch can read it.
+    fn batchable(&self, key: &str) -> bool {
+        let inner = epoch_path(key).map_or(key, |(_, k)| k);
+        !self.is_public()
+            && !key.starts_with("keys/")
+            && !inner.starts_with("slots/")
+            && !matches!(inner, "store.json" | "public.json" | "vault.json")
+            && !overlay_keys_path(key)
+            && !super::format::release_file(inner)
+    }
+
+    /// The objects `keys`, as `get` gives each: up to [`BATCH_KEYS`] of an epoch in one `POST batch` request
+    /// (layr-cloud docs/cdn-cache-design.md, "Batch request and response"). A key that the batch does not give
+    /// (a streamed object, the byte limit of a reply, another error) is read alone; a gateway without the route
+    /// is read one by one for the rest of the command.
+    pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut out: Vec<Option<Option<Vec<u8>>>> = vec![None; keys.len()];
+        let mut groups: std::collections::BTreeMap<&str, Vec<(usize, &str)>> = Default::default();
+        for (i, key) in keys.iter().enumerate() {
+            if self.batchable(key) && !self.batch_off.load(Ordering::SeqCst) {
+                let (epoch, inner) = epoch_path(key).unwrap_or(("root", key));
+                groups.entry(epoch).or_default().push((i, inner));
+            }
+        }
+        for (epoch, items) in groups {
+            for chunk in items.chunks(BATCH_KEYS) {
+                if self.batch_off.load(Ordering::SeqCst) {
+                    break;
+                }
+                let names: Vec<&str> = chunk.iter().map(|(_, k)| *k).collect();
+                let body = serde_json::to_vec(&serde_json::json!({"epoch": epoch, "keys": names}))?;
+                let response = self.proof_request(Method::POST, "batch", &[], Some(body))?;
+                let status = response.status().as_u16();
+                if matches!(status, 404 | 405) {
+                    self.batch_off.store(true, Ordering::SeqCst);
+                    break;
+                }
+                if status != 200 {
+                    continue;
+                }
+                let reply = bytes(response, BATCH_LIMIT)?;
+                for ((i, _), object) in chunk.iter().zip(batch_objects(&reply, chunk.len())?) {
+                    out[*i] = object;
+                }
+            }
+        }
+        out.into_iter()
+            .zip(keys)
+            .map(|(got, key)| match got {
+                Some(object) => Ok(object),
+                None => self.get(key),
+            })
+            .collect()
     }
 
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
@@ -1863,6 +1954,41 @@ mod tests {
         let log = quit(&address, server);
         assert!(error.contains("no such project"), "{error}");
         assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof cdn"], "a 404 does not renew the proof or send again");
+    }
+
+    #[test]
+    fn get_many_reads_the_objects_in_one_batch_request() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, _| {
+            assert_eq!(request, "POST /v1/p/project/batch");
+            let index = r#"{"objects":[{"status":200,"length":3},{"status":404,"error":"no such object"}]}"#;
+            let mut reply = String::new();
+            reply.push_str(std::str::from_utf8(&(index.len() as u32).to_be_bytes()).unwrap());
+            reply.push_str(index);
+            reply.push_str("abc");
+            ("200 OK", reply)
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        let got = gateway.get_many(&["states/ab".into(), "states/cd".into()]).unwrap();
+        assert_eq!(got, vec![Some(b"abc".to_vec()), None]);
+        let log = quit(&address, server);
+        assert_eq!(log, ["POST /v1/p/project/batch old.proof"], "one request for both objects");
+    }
+
+    #[test]
+    fn get_many_reads_one_by_one_from_a_gateway_without_batch() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, _| match request {
+            "POST /v1/p/project/batch" => ("404 Not Found", r#"{"error":"no such route"}"#.into()),
+            _ => ("200 OK", "x".into()),
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        let got = gateway.get_many(&["states/ab".into(), "states/cd".into()]).unwrap();
+        assert_eq!(got, vec![Some(b"x".to_vec()), Some(b"x".to_vec())]);
+        let log = quit(&address, server);
+        assert_eq!(log[0], "POST /v1/p/project/batch old.proof");
+        assert_eq!(log.len(), 3, "after the 404 each object is read alone: {log:?}");
+        assert!(gateway.batch_off.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -1477,10 +1477,9 @@ fn overlay_line(
     repo: &Repo,
     line: Option<&crate::model::Line>,
     info: &crate::overlay::Info,
-    name: &str,
+    _name: &str,
     orepo: &Repo,
 ) -> Result<Option<crate::model::Line>> {
-    // The overlay line of the current line; else the caller's own line, else the owner's.
     // The line of the current line on the overlay; else the line of main there (a reader whose line has no part
     // reads the history of the project's main line).
     if let Some(l) = line {
