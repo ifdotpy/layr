@@ -1481,11 +1481,16 @@ fn overlay_line(
     orepo: &Repo,
 ) -> Result<Option<crate::model::Line>> {
     // The overlay line of the current line; else the caller's own line, else the owner's.
+    // The line of the current line on the overlay; else the line of main there (a reader whose line has no part
+    // reads the history of the project's main line).
     if let Some(l) = line {
-        if repo.layers(l)?.iter().any(|x| x.overlay == name) {
-            if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, info, l)? {
-                return Ok(Some(ol));
-            }
+        if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, info, l)? {
+            return Ok(Some(ol));
+        }
+    }
+    if let Some(main) = repo.p.db.line_by_name("main")? {
+        if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, info, &main)? {
+            return Ok(Some(ol));
         }
     }
     let mut names: Vec<String> = Vec::new();
@@ -1496,7 +1501,11 @@ fn overlay_line(
     }
     names.push(format!("user-{}", ctx.caller.uid));
     names.push(format!("user-{}", info.owner));
-    Ok(names.into_iter().find_map(|n| orepo.p.db.line_by_name(&n).ok().flatten()))
+    if let Some(ol) = names.into_iter().find_map(|n| orepo.p.db.line_by_name(&n).ok().flatten()) {
+        return Ok(Some(ol));
+    }
+    // A project without main: the newest line of the overlay.
+    Ok(orepo.lines()?.into_iter().max_by(|a, b| a.head.cmp(&b.head)))
 }
 
 /// A reading command on an overlay's history, as a reader of the overlay: `layr <cmd>` in the

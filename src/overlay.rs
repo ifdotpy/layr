@@ -2476,7 +2476,9 @@ pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: 
     repo.record_hidden_selection(ctx, &line.id, layers)?;
     let shown: Vec<String> = repo.public_layers(&repo.layers(line)?)?.into_iter().map(|l| l.overlay).collect();
     let want: Vec<String> = repo.public_layers(layers)?.into_iter().map(|l| l.overlay).collect();
-    if shown != want || repo.folder_view(line)?.is_none() {
+    // Only a change of the public overlays is a record of the project: a hidden overlay keeps its place in its
+    // own records (`record_hidden_selection`).
+    if shown != want {
         repo.commit_record(ctx, rec)?;
     }
     repo.drop_stage(line)?;

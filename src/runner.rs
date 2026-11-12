@@ -107,11 +107,16 @@ fn ws_url(url: &str) -> String {
     }
 }
 
+/// A client of the gateway, with the CA of `LAYR_GATEWAY_CA_FILE` as every gateway client.
 fn http() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?)
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = std::env::var_os("LAYR_GATEWAY_CA_FILE").filter(|p| !p.is_empty()) {
+        let pem = std::fs::read(&path).context("read LAYR_GATEWAY_CA_FILE")?;
+        for certificate in reqwest::Certificate::from_pem_bundle(&pem).context("invalid CA file")? {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    Ok(builder.build()?)
 }
 
 fn post(url: &str, path: &str, body: &Value) -> Result<Value> {

@@ -312,6 +312,31 @@ impl Api {
             held: Arc::new(Mutex::new(Default::default())),
             single_put_limit: SINGLE_PUT_LIMIT,
         })
+        .and_then(|mut api| {
+            // The CA of the process, as for the gateway client; `connect` sets the command's own after it.
+            if let Some(path) = std::env::var_os("LAYR_GATEWAY_CA_FILE").filter(|p| !p.is_empty()) {
+                api.use_ca(&std::fs::read(&path).context("read LAYR_GATEWAY_CA_FILE")?)?;
+            }
+            Ok(api)
+        })
+    }
+
+    /// Trust the certificates of `pem` for the server (`LAYR_GATEWAY_CA_FILE`).
+    fn use_ca(&mut self, pem: &[u8]) -> Result<()> {
+        let certificates = reqwest::Certificate::from_pem_bundle(pem).context("invalid CA file")?;
+        if certificates.is_empty() {
+            bail!("the CA file has no certificates");
+        }
+        let mut builder = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(600));
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+        self.http = builder.build()?;
+        Ok(())
     }
 
     /// A client of a test server over plain HTTP.
@@ -333,19 +358,7 @@ impl Api {
         // A private CA for a test or an internal server (the same setting as the gateway).
         if let Some(path) = ctx.env("LAYR_GATEWAY_CA_FILE") {
             let pem = crate::privs::as_caller_fs(ctx, || Ok(std::fs::read(ctx.cwd.join(path))?))?;
-            let certificates = reqwest::Certificate::from_pem_bundle(&pem).context("invalid CA file")?;
-            if certificates.is_empty() {
-                bail!("the CA file has no certificates");
-            }
-            let mut builder = Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(600));
-            for certificate in certificates {
-                builder = builder.add_root_certificate(certificate);
-            }
-            self.http = builder.build()?;
+            self.use_ca(&pem)?;
         }
         if anonymous {
             self.token = None;

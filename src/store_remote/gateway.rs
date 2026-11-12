@@ -201,6 +201,14 @@ impl Gateway {
             cdn_off: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
         })
+        .and_then(|mut gateway| {
+            // Every client of the gateway uses the CA of the process, also one that never connects with a
+            // command's environment (the daemon's cache sweep); `connect` sets the command's own after it.
+            if let Some(path) = std::env::var_os("LAYR_GATEWAY_CA_FILE").filter(|p| !p.is_empty()) {
+                gateway.configure_ca(&ca_file(std::path::Path::new(&path))?)?;
+            }
+            Ok(gateway)
+        })
     }
 
     pub fn connect(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
