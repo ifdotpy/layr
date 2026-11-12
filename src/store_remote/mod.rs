@@ -1280,6 +1280,9 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
         }
         "gc" => {
             for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, a.has("-n"))? {
+                if let Some(refused) = &swept.refused {
+                    eprintln!("warning: overlay {overlay}: the remote refused a delete ({refused}); the rest stays");
+                }
                 if !a.has("-q") && (!swept.trees.is_empty() || !swept.packs.is_empty()) {
                     let verb = if a.has("-n") { "would delete" } else { "deleted" };
                     outln!(
@@ -1346,6 +1349,9 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             });
             match swept {
                 Ok(list) => {
+                    for (overlay, refused) in list.iter().filter_map(|(o, s)| Some((o, s.refused.as_ref()?))) {
+                        eprintln!("layr daemon: {project} remote {remote} overlay {overlay}: the remote refused a delete ({refused}); the rest stays");
+                    }
                     for (overlay, s) in list.into_iter().filter(|(_, s)| !s.trees.is_empty() || !s.packs.is_empty()) {
                         eprintln!(
                             "layr daemon: {project} remote {remote} overlay {overlay}: deleted {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes",

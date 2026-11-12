@@ -640,18 +640,28 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         let selected = layer_selection(repo, &orepo, opts)?;
         merge(report, writer::push_locked(&scoped, ctx, &orepo, &selected)?, &name, "push");
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
+        // The sweep never fails the push: what it cannot delete now waits for a later pass.
         if !opts.no_cache_sweep && repo.limited_history(&name)? {
-            let swept = sweep_layer(repo, &name, &orepo, &scoped, false)?;
-            if !swept.trees.is_empty() || !swept.packs.is_empty() {
-                eprintln!(
-                    "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
-                    swept.trees.len(),
-                    swept.parts.len(),
-                    swept.bytes,
-                    swept.chunks,
-                    swept.packs.len(),
-                    swept.chunk_bytes
-                );
+            match sweep_layer(repo, &name, &orepo, &scoped, false) {
+                Ok(swept) => {
+                    if !swept.trees.is_empty() || !swept.packs.is_empty() {
+                        eprintln!(
+                            "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
+                            swept.trees.len(),
+                            swept.parts.len(),
+                            swept.bytes,
+                            swept.chunks,
+                            swept.packs.len(),
+                            swept.chunk_bytes
+                        );
+                    }
+                    if let Some(refused) = &swept.refused {
+                        eprintln!("warning: overlay {name}: the remote refused a delete of a dead cache state ({refused}); the rest stays for a later pass");
+                    }
+                }
+                Err(e) => eprintln!(
+                    "warning: overlay {name}: the sweep of dead cache states stopped ({e:#}); it runs again at the next push"
+                ),
             }
         }
         drop(push_lock);
@@ -689,14 +699,24 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         store.backend.put_new(&published.object(), body)?;
         // The key of this epoch is published: the caches of the older epochs have no reader now.
         if repo.regenerable_overlay(&name)? {
-            let swept = sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false)?;
-            if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
-                eprintln!(
-                    "layr: overlay {name}: deleted {} cache state(s), {} part(s) and {} chunk object(s) of older key epochs in the remote",
-                    swept.trees.len(),
-                    swept.parts.len(),
-                    swept.packs.len()
-                );
+            // The sweep never fails the push: what it cannot delete now waits for a later pass.
+            match sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false) {
+                Ok(swept) => {
+                    if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
+                        eprintln!(
+                            "layr: overlay {name}: deleted {} cache state(s), {} part(s) and {} chunk object(s) of older key epochs in the remote",
+                            swept.trees.len(),
+                            swept.parts.len(),
+                            swept.packs.len()
+                        );
+                    }
+                    if let Some(refused) = &swept.refused {
+                        eprintln!("warning: overlay {name}: the remote refused a delete of the older key epochs ({refused}); the rest stays for a later pass");
+                    }
+                }
+                Err(e) => eprintln!(
+                    "warning: overlay {name}: the sweep of the older key epochs stopped ({e:#}); it runs again at the next push"
+                ),
             }
         }
     }
@@ -734,28 +754,28 @@ fn sweep_old_epochs(
         let (trees, parts): (Vec<_>, Vec<_>) =
             store.backend.list(&prefix)?.into_iter().map(|o| o.key).partition(|k| k.ends_with(".tree.age"));
         // Parts first, then the trees, as in `sweep::sweep`.
-        for key in &parts {
-            if !dry_run {
-                store.backend.delete(key)?;
+        for key in parts {
+            if dry_run || swept.delete(&store.backend, &key) {
+                swept.parts.push(key);
             }
         }
-        for key in &trees {
-            if !dry_run {
-                store.backend.delete(key)?;
+        for key in trees {
+            if dry_run || swept.delete(&store.backend, &key) {
+                swept.trees.push(key);
             }
         }
-        swept.parts.extend(parts);
-        swept.trees.extend(trees);
+        if swept.refused.is_some() {
+            break;
+        }
         // Chunk packs of the old epoch: nothing names them once its trees are gone. Packs and
         // indexes go after the trees, so a reader never finds a tree without its chunks.
         let chunks: Vec<String> =
             store.backend.list(&format!("overlays/{overlay}/epochs/{epoch}/chunks/"))?.into_iter().map(|o| o.key).collect();
-        for key in &chunks {
-            if !dry_run {
-                store.backend.delete(key)?;
+        for key in chunks {
+            if dry_run || swept.delete(&store.backend, &key) {
+                swept.packs.push(key);
             }
         }
-        swept.packs.extend(chunks);
     }
     Ok(swept)
 }
@@ -832,6 +852,7 @@ pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
         swept.trees.extend(old.trees);
         swept.parts.extend(old.parts);
         swept.packs.extend(old.packs);
+        swept.refused = swept.refused.or(old.refused);
         out.push((name.clone(), swept));
     }
     Ok(out)

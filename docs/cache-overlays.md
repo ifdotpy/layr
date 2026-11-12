@@ -243,7 +243,9 @@ There are two kinds of remote:
   flight on another machine reuses its parts). The daemon runs the same pass for each store remote
   of each project every hour, so a remote that nobody pushes to loses its dead caches too (a remote
   that cannot be reached is tried at the next pass). `layr push <name> --no-cache-sweep` defers
-  the ordinary cache cleanup to a later push or daemon pass. Key-epoch cleanup still runs.
+  the ordinary cache cleanup to a later push or daemon pass. Key-epoch cleanup still runs. A
+  remote can refuse a delete (a Layr Cloud gateway GC token deletes only state data parts): the
+  first refusal stops the pass with a warning, the push goes on, and the rest stays for a later pass.
   `layr fsck --caches --remote <name>` lists what
   the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
   key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes

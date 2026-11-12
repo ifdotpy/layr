@@ -10,6 +10,9 @@
 //! links them. Parts first, then the tree: a stop between them leaves a dead tree, which the next
 //! pass deletes.
 //!
+//! A remote can refuse a delete: a Layr Cloud gateway GC token deletes only state data parts. The first refusal
+//! stops the pass, the rest stays for a later pass, and the push or the daemon tick goes on (`Swept::refused`).
+//!
 //! Chunks (`chunked`): the chunks that the deleted trees name and no kept tree names are dead.
 //! `chunked::release` rewrites each pack that holds one with its live chunks, after the trees go,
 //! so that no dead chunk stays in a pack. A pack whose chunks no tree names at all (a push that
@@ -38,6 +41,29 @@ pub struct Swept {
     pub missing: usize,
     /// Dead chunks that wait for a later pass (`CHUNK_GRACE`).
     pub chunks_waiting: usize,
+    /// The first delete that the remote refused. The pass deletes nothing after it.
+    pub refused: Option<String>,
+}
+
+impl Swept {
+    /// Delete `key` from `backend`, unless an earlier delete of this pass was refused. False: the key stays.
+    pub(super) fn delete(&mut self, backend: &super::backend::Backend, key: &str) -> bool {
+        if self.refused.is_some() {
+            return false;
+        }
+        // Test only (tests/t145-remote-cache-sweep.sh): a remote that refuses the deletes of keys with this suffix.
+        let result = match std::env::var("LAYR_TEST_REFUSE_DELETE") {
+            Ok(suffix) if !suffix.is_empty() && key.ends_with(&suffix) => Err(anyhow::anyhow!("delete {key}: refused")),
+            _ => backend.delete(key),
+        };
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                self.refused = Some(format!("{e:#}"));
+                false
+            }
+        }
+    }
 }
 
 /// A pack index younger than this may belong to a push in flight.
@@ -193,17 +219,19 @@ pub(super) fn sweep(
         }
     }
     for part in parts {
-        if !dry_run {
-            store.backend.delete(&part)?;
+        if dry_run || swept.delete(&store.backend, &part) {
+            swept.parts.push(part);
         }
-        swept.parts.push(part);
     }
     for (state, attempt) in dead.into_iter().filter(|t| !broken.contains(*t)) {
         let name = tree_name(state, attempt);
-        if !dry_run {
-            store.backend.delete(&name)?;
+        if dry_run || swept.delete(&store.backend, &name) {
+            swept.trees.push(name);
         }
-        swept.trees.push(name);
+    }
+    if swept.refused.is_some() {
+        // A chunk of a dead tree that stays is not dead yet.
+        return Ok(swept);
     }
     sweep_chunks(store, &identity, &descriptor.recipient, &live_chunks, &kept_chunks, dead_chunks, dry_run, &mut swept)?;
     Ok(swept)
@@ -226,10 +254,9 @@ fn sweep_chunks(
     for pack in super::chunked::listing(&store.backend)?.1 {
         let name = layr_store::chunks::index_name(&pack);
         eprintln!("layr: chunk pack {pack} has an index but no data; the index goes");
-        if !dry_run {
-            store.backend.delete(&name)?;
+        if dry_run || swept.delete(&store.backend, &name) {
+            swept.packs.push(name);
         }
-        swept.packs.push(name);
     }
     let objects = store.backend.list("chunks/")?;
     if objects.is_empty() {
@@ -288,7 +315,7 @@ fn sweep_chunks(
             }
         }
     }
-    if dead.is_empty() {
+    if dead.is_empty() || swept.refused.is_some() {
         return Ok(());
     }
     if dry_run {
@@ -301,8 +328,9 @@ fn sweep_chunks(
         return Ok(());
     }
     for key in super::chunked::release(store, identity, recipient, &dead)? {
-        store.backend.delete(&key)?;
-        swept.packs.push(key);
+        if swept.delete(&store.backend, &key) {
+            swept.packs.push(key);
+        }
     }
     Ok(())
 }

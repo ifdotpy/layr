@@ -35,6 +35,19 @@ l push archive -q >/dev/null 2>&1
 eq "after the line delete and a push its cache state is gone from the remote" 2 "$(trees)"
 eq "and its data part too" "$first_parts" "$(parts)"
 
+# A remote can refuse a delete (a Layr Cloud gateway GC token deletes only state data parts). The push goes on
+# with a warning, and a later push deletes what stayed.
+l line new z main >/dev/null 2>&1
+(cd "$P/z" && head -c 20000 /dev/urandom > target/zonly && l save --overlays -q && l push archive -q >/dev/null 2>&1)
+l line delete -D z >/dev/null
+out=$(LAYR_TEST_REFUSE_DELETE=.tree.age l push archive -q 2>&1); rc=$?
+eq "a push with a refused delete exits 0" 0 "$rc"
+has "it warns" "the remote refused a delete of a dead cache state" "$out"
+eq "the dead tree stays" 3 "$(trees)"
+l push archive -q >/dev/null 2>&1
+eq "a later push deletes it" 2 "$(trees)"
+eq "and no part of it stays" "$first_parts" "$(parts)"
+
 # A push that stopped before its tree leaves parts that no tree names. After 24 hours (writers stop at +23 h) the
 # sweep of a push deletes them; a younger one stays, as it may belong to a push in flight.
 dir=$(dirname "$(find "$T/archive/overlays" -name '*.tree.age' | head -1)")/..
