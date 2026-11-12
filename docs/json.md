@@ -38,7 +38,7 @@ know it: use `ajv.addKeyword("version")`, or turn strict mode off.
 
 ## Keep the schemas correct
 
-`tests/t240-json-schemas.sh` runs each command in a test store and checks its output against
+`tests/t244-json-schemas.sh` runs each command in a test store and checks its output against
 the schema with `tests/json-schema.py` (Python standard library only). The check is strict: a
 field that the output has and the schema does not describe fails the test. A change of the
 output must therefore change the schema in the same pull request. The test also checks that
@@ -49,7 +49,7 @@ To add a schema:
 1. Write `schemas/<name>.json`. Give it `$schema`, `$id` (`urn:layr:schema:<name>`),
    `"version": 1`, `title`, `description`, and a `description` for each property.
 2. Add the file to `SCHEMAS` in `src/schemas.rs`.
-3. Add the command to `tests/t240-json-schemas.sh` and to the table above.
+3. Add the command to `tests/t244-json-schemas.sh` and to the table above.
 
 `tests/json-schema.py` knows a subset of JSON Schema: `type`, `properties`, `required`,
 `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `pattern`, `minimum`, `$ref` to
