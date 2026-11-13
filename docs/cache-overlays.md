@@ -251,6 +251,21 @@ There are two kinds of remote:
   the ordinary cache cleanup to a later push or daemon pass. Key-epoch cleanup still runs. A
   remote can refuse a delete (a Layr Cloud gateway GC token deletes only state data parts): the
   first refusal stops the pass with a warning, the push goes on, and the rest stays for a later pass.
+  Eviction: not every machine must store all data, a store remote must (owner decision
+  2026-11-13). With the project config `gc.evict on`, `layr gc --repair` removes the local tree of a
+  cache state that a store remote holds (`cmd::admin::evict_caches`). A cache state goes when:
+  a successful push record of the overlay (from this machine or from the machine that made the
+  state) names it with a URL that a store remote of the project has now, and this machine has read
+  that store (`store_remote::cache_store_copies`); the remote keeps it (in an overlay with
+  `history`, a state that the records keep, so the sweep above does not delete it there); and the
+  store format can restore its tree exactly. These stay: the empty first state, the newest cache
+  of each line whose working folder is on this machine (the folder is a clone of it, so its blocks
+  are shared and nothing would be freed), a cache that no push sent, and a state with a `pin`,
+  `park`, `keep` or `auto` owner. The record stays. A command that takes an evicted cache (`line
+  new`, `merge`, `merge --overlays-only`, a check copy, `follow`) fetches it back on demand; when
+  the remote cannot give it, the folder starts cold with a warning. `gc --repair` prints the
+  number of evicted cache states and the bytes that only their trees held. Test:
+  `tests/t253-evict-cache-states.sh`.
   `layr fsck --caches --remote <name>` lists what
   the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A
   key change (a reader removal, a closer access mode) starts a new key epoch, and a reader takes

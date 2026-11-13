@@ -350,6 +350,14 @@ still has the recorded URL, and this machine reads that store) is kept while evi
 default). With `gc.evict on`, `gc --repair` evicts such a state: its tree
 goes when no local owner of the strong kinds (head, auto, undo, deleted, park, overlay, pin) names
 it, no cache or cache overlay needs it, and the store format can restore its tree exactly. Its record stays, and a read fetches the tree back.
+`gc.evict on` also evicts the cache states of the cache overlays (for example `target.macos-aarch64`): a cache
+state goes when a successful push to a store remote of the project (from this machine or from the machine that
+made it) names it, that remote still has the recorded URL, the remote keeps it (within `history`), and no working
+folder on this machine uses it now. The newest cache of each line with a working folder, a cache that no push
+sent, and a state that a reader pins stay. `line new`, `merge`, `merge --overlays-only`, a check copy and
+`follow` fetch an evicted cache back when they take it; when the remote cannot give it, the folder starts cold
+with a warning. `gc --repair` prints `evicted <n> state(s) and <m> cache state(s) that a store remote holds,
+<bytes> freed` (the bytes that only those trees held, as `layr du` counts them).
 
 A state that a live thin layer (APFS) uses as its base keeps its storage until that layer goes.
 `gc --all-projects` repairs the owners table and finishes the free queue for every project, but frees no

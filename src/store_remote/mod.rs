@@ -541,6 +541,34 @@ pub fn cache_on_store_remote(repo: &Repo, orepo: &Repo, id: &str) -> Result<bool
     Ok(false)
 }
 
+/// The cache states of the overlay `orepo` of `repo` that a store remote of the project holds, for eviction
+/// (`gc.evict on`, docs/cache-overlays.md, "Eviction"): a successful push record of the overlay, from this machine
+/// or from the machine that made the state, names the state and a URL that a store remote of the project has now,
+/// and this machine has read that store with its own key (`mark_read`). The overlay keeps no remotes of its own: the
+/// URLs come from the project. A renamed remote with the same URL still counts; a changed or removed one does not.
+pub fn cache_store_copies(repo: &Repo, orepo: &Repo) -> Result<std::collections::BTreeSet<String>> {
+    let mut urls = std::collections::BTreeSet::new();
+    for name in store_remote_names(repo)? {
+        let url = crate::cmd::remote::remote_url(repo, &name)?;
+        if store_dir(repo, &url).join("read").is_file() {
+            urls.insert(layr_model::operations::public_url(&url));
+            urls.insert(url);
+        }
+    }
+    let mut held = std::collections::BTreeSet::new();
+    if urls.is_empty() {
+        return Ok(held);
+    }
+    for rec in orepo.p.db.records_with_op("push")? {
+        let data = &rec.data;
+        if data["result"] != "success" || !data["url"].as_str().is_some_and(|url| urls.contains(url)) {
+            continue;
+        }
+        held.extend(data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned));
+    }
+    Ok(held)
+}
+
 /// The names of the store remotes of the project (`cloud.remote.<name>.url` of a store), sorted.
 pub fn store_remote_names(repo: &Repo) -> Result<Vec<String>> {
     let mut remotes: Vec<String> = repo

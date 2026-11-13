@@ -159,6 +159,13 @@ command reads it.
   symbolic links and git-like modes, not extended attributes, ACLs, hard links, empty folders or
   nested subvolumes (`store_remote::restorable`). macOS marks every new file with
   `com.apple.provenance`; that name does not count.
+- Cache states (owner decision 2026-11-13: "Not every machine must store all data. Layr Cloud
+  must."): the cache states of a cache overlay are evicted too, by their own rules
+  (`cmd::admin::evict_caches`, docs/cache-overlays.md, "Eviction"). The remote copy counts by the
+  push records of the overlay against the store remotes of the project
+  (`store_remote::cache_store_copies`). The newest cache of a line with a working folder here stays,
+  and a command that takes an evicted cache fetches it on demand
+  (`store_remote::fetch_caches_on_demand`).
 - Kept on disk even when recoverable: a line head, the newest automatic state of a line, a state
   with caches, a state that a cache overlay names, and a base that a state on disk needs. On APFS
   a base is a thin layer that a layer chain of a remaining state reads (`thin::delete_states`).
