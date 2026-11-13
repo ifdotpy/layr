@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.46.0](https://github.com/ifdotpy/layr/compare/v0.45.0...v0.46.0) (2026-11-13)
+
+
+### Features
+
+* **gc:** evict cache states that a store remote holds
+* **json:** Describe the new change, review and line-name fields and add a save schema ([ffa54a6](https://github.com/ifdotpy/layr/commit/ffa54a67c5ad68d5b859cd01874da67b7271b2ac))
+
+
+### Bug Fixes
+
+* **cli:** Show the help of store, store-version and schema, and keep text values of --title, --description and --reason ([3ba09c8](https://github.com/ifdotpy/layr/commit/3ba09c800a86864351ee23ca37a6172740df8944))
+* **fetch:** Check that a store remote holds a missing cache, fetch caches on merge and adopt, and do not wait for a failed remote
+* **fetch:** Take no cache data on a plain fetch or clone, and fetch caches on demand
+* **gc:** Read the published key epoch and keep other machines' caches on a key change
+* **gc:** Count a cache copy only in the store's current key epoch
+* **gc:** Skip an overlay that has no project on this machine
+* **git:** Accept a line's .git HEAD at any commit that layr maps to its head
+* **line:** Refuse a rename to a folder that another line keeps, and give no folder to a line whose folder another line keeps ([496e0a7](https://github.com/ifdotpy/layr/commit/496e0a7f8fd59ff5c0ebf9f482e1975750cec7e0))
+* **line:** Refuse to delete a line with unsaved changes unless --discard ([b72e670](https://github.com/ifdotpy/layr/commit/b72e6708bdd123a7f7bbe91cf284f688c79beb9a))
+* **model:** Build the read model only from records that take effect ([76c985a](https://github.com/ifdotpy/layr/commit/76c985ac91dc0d396cd7e1d98e373d79afd30851))
+* **review:** Accept unknown fields of review payloads and read each payload only in its own op ([2db232a](https://github.com/ifdotpy/layr/commit/2db232a60d2b6a978414c16c479e8a2ce0eca6fb))
+* **service:** Periodic saves and the free step no longer wait for the project lock
+* **undo:** Skip change records and comments so undo finds the last undoable operation ([f568371](https://github.com/ifdotpy/layr/commit/f568371e5d5e45f747f61de08b07972ccb660eb5))
+* **work:** Allow restore, clean and reset to the head in a protected line ([2d18c54](https://github.com/ifdotpy/layr/commit/2d18c543af46c0b66e4d600d7eab1ebfcf7920f3))
+
 ## [0.45.0](https://github.com/ifdotpy/layr/compare/v0.44.0...v0.45.0) (2026-11-13)
 
 
