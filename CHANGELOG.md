@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.45.0](https://github.com/ifdotpy/layr/compare/v0.44.0...v0.45.0) (2026-11-13)
+
+
+### Features
+
+* **clone:** --overlay takes only the named layers, as for a fetch
+
+
+### Bug Fixes
+
+* **checks:** The default process limit of a check is 4096 on Linux too
+* **checks:** Bound the memory of a check with RLIMIT_DATA, not RLIMIT_AS
+* **remote:** Any refused batch read falls back to single reads
+* **remote:** A refused delete stops the cache sweep with a warning, not the push
+* **retest:** Save the record and cache folders with save --overlays --folder
+
+
+### Performance
+
+* **remote:** Read record segments in batches of 256 through a gateway
+
 ## [0.44.0](https://github.com/ifdotpy/layr/compare/v0.43.0...v0.44.0) (2026-11-12)
 
 
