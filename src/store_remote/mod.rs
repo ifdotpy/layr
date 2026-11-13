@@ -380,84 +380,165 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
 /// Fetch on demand: a plain fetch, pull or clone takes only the records of a cache overlay (owner decision
 /// 2026-11-13), so the cache that a new line from the line `source` (or from the state `start`) takes can be on a store
 /// remote only. This fetches those cache states from the store remotes of the project, before the line or the copy of
-/// a check takes its caches (`take_caches`, `pull_caches`, `copy_caches`). It reads only the records and the named cache states, and nothing when every
-/// such cache is here. A failure leaves the folder cold, with a warning; the command goes on.
-pub fn fetch_caches_on_demand(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>) {
-    if let Err(e) = fetch_caches_inner(ctx, repo, start, source) {
+/// a check takes its caches (`take_caches`, `pull_caches`, `copy_caches`, `take_follow_caches`). It reads only the
+/// records and the named cache states, and nothing when every such cache is here. The caller holds no project lock.
+/// A failure leaves the folder cold, with a warning; the command goes on. `quiet` leaves out the progress line.
+///
+/// It must not make each command wait: connections are quick (`gateway::quick`), a remote that failed is not asked
+/// again for `FAILED_FOR`, and a cache that a remote did not give is not asked of it again for `ABSENT_FOR`
+/// (`on-demand.json` in the remote's local folder).
+pub fn fetch_caches_on_demand(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>, quiet: bool) {
+    if let Err(e) = gateway::quick(|| fetch_caches_inner(ctx, repo, start, source, quiet)) {
         eprintln!("layr: caches not fetched from the store remote: {e:#}");
     }
 }
 
-fn fetch_caches_inner(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>) -> Result<()> {
+const FAILED_FOR: i64 = 10 * 60 * 1000;
+const ABSENT_FOR: i64 = 60 * 60 * 1000;
+
+/// The marks of the fetch on demand for one store remote: when it last failed, and the cache states that it did not
+/// give (state id to time, in ms).
+#[derive(Default, Deserialize, Serialize)]
+struct OnDemandMarks {
+    #[serde(default)]
+    failed_at: Option<i64>,
+    #[serde(default)]
+    absent: std::collections::BTreeMap<String, i64>,
+}
+
+fn on_demand_marks_path(repo: &Repo, url: &str) -> PathBuf {
+    store_dir(repo, url).join("on-demand.json")
+}
+
+fn read_on_demand_marks(repo: &Repo, url: &str) -> OnDemandMarks {
+    std::fs::read(on_demand_marks_path(repo, url)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn write_on_demand_marks(repo: &Repo, url: &str, marks: &mut OnDemandMarks) -> Result<()> {
+    let now = crate::ids::now_ms();
+    marks.absent.retain(|_, at| now - *at < ABSENT_FOR);
+    let path = on_demand_marks_path(repo, url);
+    std::fs::create_dir_all(path.parent().context("remote folder")?)?;
+    crate::fsutil::atomic_write(&path, &serde_json::to_vec(marks)?, 0o600)
+}
+
+fn fetch_caches_inner(
+    ctx: &Ctx,
+    repo: &Repo,
+    start: &str,
+    source: Option<&crate::model::Line>,
+    quiet: bool,
+) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
     }
-    let missing = |want: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>| -> Result<bool> {
-        for (name, ids) in want {
-            let orepo = repo.overlay_repo(name)?;
-            for id in ids {
-                if !orepo.p.has_state(id) && crate::objstore::verified(&orepo.p, id)?.is_none() {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+    let absent_here = |orepo: &Repo, id: &str| -> Result<bool> {
+        Ok(!orepo.p.has_state(id) && crate::objstore::verified(&orepo.p, id)?.is_none())
     };
-    // The caches that the line takes, from the records: absent here, and usable by the caller (the fetch takes no
-    // cache of another user's unprotected line).
-    let mut want = std::collections::BTreeMap::new();
+    // The caches that the line takes, from the records: absent here, and usable by the caller (`usable_cache`).
+    let mut want: std::collections::BTreeMap<String, (String, Repo)> = std::collections::BTreeMap::new();
     for (name, _folder) in repo.folder_overlays()? {
         let Ok(orepo) = repo.overlay_repo(&name) else { continue };
         let ids = match source {
-            Some(line) => overlays::caches_of_lines(repo, &orepo, std::slice::from_ref(&line.name))?,
-            None => overlays::caches_from_state(repo, &orepo, start)?,
+            Some(line) => overlays::caches_of_lines_for(repo, &orepo, std::slice::from_ref(&line.name), Some(ctx.caller.uid))?,
+            None => overlays::caches_from_state(repo, &orepo, start, ctx.caller.uid)?,
         };
-        let mut absent = std::collections::BTreeSet::new();
         for id in ids {
-            let Some(st) = orepo.p.db.state(&id)? else { continue };
-            let usable = ctx.caller.is_root() || st.cache_shared || st.cache_by == Some(ctx.caller.uid);
-            if usable && !orepo.p.has_state(&id) && crate::objstore::verified(&orepo.p, &id)?.is_none() {
-                absent.insert(id);
+            if absent_here(&orepo, &id)? {
+                want.insert(id, (name.clone(), repo.overlay_repo(&name)?));
             }
-        }
-        if !absent.is_empty() {
-            want.insert(name, absent);
         }
     }
     if want.is_empty() {
         return Ok(());
     }
-    let remotes = store_remote_names(repo)?;
-    let opts = Options {
-        caches: true,
-        heads: true,
-        // Only the cache overlays with an absent cache, and no base state.
-        overlays: Some(want.keys().cloned().collect()),
-        only_caches: Some(want.values().flatten().cloned().collect()),
-        only_states: Some(std::collections::BTreeSet::new()),
-        ..Default::default()
-    };
     let mut errors = Vec::new();
-    for name in &remotes {
-        let names: Vec<&str> = want.keys().map(String::as_str).collect();
-        eprintln!("layr: fetching the cache of {} from {name}", names.join(", "));
+    for name in store_remote_names(repo)? {
+        let url = crate::cmd::remote::remote_url(repo, &name)?;
+        let mut marks = read_on_demand_marks(repo, &url);
+        let now = crate::ids::now_ms();
+        if marks.failed_at.is_some_and(|at| now - at < FAILED_FOR) {
+            errors.push(format!("{name}: it failed less than {} minutes ago", FAILED_FOR / 60_000));
+            continue;
+        }
+        let mut asked = std::collections::BTreeSet::new();
+        for (id, (_, orepo)) in &want {
+            if absent_here(orepo, id)? && !marks.absent.get(id).is_some_and(|at| now - *at < ABSENT_FOR) {
+                asked.insert(id.clone());
+            }
+        }
+        if asked.is_empty() {
+            continue;
+        }
+        let overlays: std::collections::BTreeSet<String> = asked.iter().map(|id| want[id].0.clone()).collect();
+        if !quiet {
+            eprintln!("layr: fetching the cache of {} from {name}", overlays.iter().cloned().collect::<Vec<_>>().join(", "));
+        }
+        let opts = Options {
+            caches: true,
+            heads: true,
+            // Only the cache overlays with an absent cache, and no base state.
+            overlays: Some(overlays),
+            only_caches: Some(asked.clone()),
+            only_states: Some(std::collections::BTreeSet::new()),
+            ..Default::default()
+        };
         let attempt = (|| -> Result<()> {
             let mut fresh = Repo::open(ctx, &repo.p.name)?;
-            let mut store = open_named(name, &fresh)?;
+            let mut store = open_named(&name, &fresh)?;
             store.configure(ctx, &ConfigureOptions::default())?;
             store.fetch(ctx, &mut fresh, &opts)?;
             Ok(())
         })();
         match attempt {
-            Err(e) => errors.push(format!("{name}: {e:#}")),
-            Ok(()) if !missing(&want)? => return Ok(()),
-            Ok(()) => {}
+            Err(e) => {
+                marks.failed_at = Some(now);
+                errors.push(format!("{name}: {e:#}"));
+            }
+            Ok(()) => {
+                marks.failed_at = None;
+                for id in &asked {
+                    if absent_here(&want[id].1, id)? {
+                        marks.absent.insert(id.clone(), now);
+                        errors.push(format!("{name}: cache state {} is not there", crate::ids::short(id)));
+                    }
+                }
+            }
+        }
+        write_on_demand_marks(repo, &url, &mut marks)?;
+        let mut left = false;
+        for (id, (_, orepo)) in &want {
+            left |= absent_here(orepo, id)?;
+        }
+        if !left {
+            return Ok(());
         }
     }
     if !errors.is_empty() {
         bail!("{}", errors.join("; "));
     }
     Ok(())
+}
+
+/// Whether the cache state `id` of the overlay `orepo` is on a store remote of the project, so that a command can
+/// fetch it on demand (`fsck`). A state of another machine came here as a record only, from a remote that holds it;
+/// a state of this machine counts only when a successful push to a store remote that the project still has named it.
+pub fn cache_on_store_remote(repo: &Repo, orepo: &Repo, id: &str) -> Result<bool> {
+    let remotes = store_remote_names(repo)?;
+    if remotes.is_empty() {
+        return Ok(false);
+    }
+    if orepo.p.db.state_machine(id)?.is_some_and(|machine| machine != repo.p.store.machine.id) {
+        return Ok(true);
+    }
+    for rec in orepo.p.db.records_with_op("push")? {
+        let data = &rec.data;
+        let named = data["state_ids_sent"].as_array().into_iter().flatten().any(|v| v.as_str() == Some(id));
+        if named && data["result"] == "success" && data["remote"].as_str().is_some_and(|r| remotes.iter().any(|n| n == r)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The names of the store remotes of the project (`cloud.remote.<name>.url` of a store), sorted.

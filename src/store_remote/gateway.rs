@@ -131,6 +131,34 @@ fn absent<T>(response: Response) -> Result<Option<T>> {
 /// Tries of a request that the gateway refuses as busy (503 or 429) before the error goes to the caller.
 const BUSY_TRIES: u32 = 8;
 
+thread_local! {
+    /// Set by `quick`: a fetch on demand that a command waits for (`fetch_caches_on_demand`).
+    static QUICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with quick connections: a connection that fails is not tried again, and a client made in `f` waits at
+/// most 2 s for a connection (`connect_timeout`). A fetch on demand of a cache must not stop `line new` for half a
+/// minute while the remote is away: the folder starts cold.
+pub(crate) fn quick<T>(f: impl FnOnce() -> T) -> T {
+    let before = QUICK.with(|q| q.replace(true));
+    let out = f();
+    QUICK.with(|q| q.set(before));
+    out
+}
+
+fn is_quick() -> bool {
+    QUICK.with(|q| q.get())
+}
+
+/// The connect timeout of a new client: `normal`, or at most 2 s inside `quick`.
+pub(crate) fn connect_timeout(normal: Duration) -> Duration {
+    if is_quick() {
+        normal.min(Duration::from_secs(2))
+    } else {
+        normal
+    }
+}
+
 /// A request that did not reach the server: no connection, no address for the name, or no answer in time.
 /// The message is the one that the caller showed before.
 #[derive(Debug)]
@@ -177,7 +205,7 @@ pub(super) fn send_again(idempotent: bool, mut send: impl FnMut() -> Result<Resp
     loop {
         let response = match send() {
             Ok(response) => response,
-            Err(_) if idempotent && attempt < BUSY_TRIES => {
+            Err(_) if idempotent && attempt < BUSY_TRIES && !is_quick() => {
                 std::thread::sleep(wait);
                 wait = (wait * 2).min(std::time::Duration::from_secs(8));
                 attempt += 1;
@@ -251,7 +279,7 @@ impl Gateway {
         let http = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(connect_timeout(Duration::from_secs(5)))
             .timeout(Duration::from_secs(150))
             .build()?;
         Ok(Self {
@@ -386,7 +414,7 @@ impl Gateway {
         let mut builder = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(connect_timeout(Duration::from_secs(5)))
             .timeout(Duration::from_secs(150));
         for certificate in certificates {
             builder = builder.add_root_certificate(certificate);
@@ -1245,7 +1273,7 @@ mod tests {
                     gateway.http = Client::builder()
                         .no_proxy()
                         .redirect(reqwest::redirect::Policy::none())
-                        .connect_timeout(Duration::from_secs(5))
+                        .connect_timeout(connect_timeout(Duration::from_secs(5)))
                         .timeout(Duration::from_secs(150))
                         .unix_socket(path.clone())
                         .build()

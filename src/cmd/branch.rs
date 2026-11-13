@@ -592,7 +592,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         };
         // A plain fetch or clone takes only the records of a cache overlay: the cache that the new lines start from
         // comes now from the store remote, before the lock.
-        crate::store_remote::fetch_caches_on_demand(ctx, repo, &from, from_line);
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, &from, from_line, a.has("-q") || a.has("--json"));
         let prepared = repo.prepare_named_lines(ctx, names, &from, owner, from_line, view)?;
         // Test hook: wait after the prepare step, so a test can move the start before the commit.
         if let Some(ms) = std::env::var("LAYR_TEST_LINE_NEW_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
@@ -750,6 +750,11 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a.pos.first().ok_or_else(|| exit(128, "usage: layr adopt <line> [--state <rev>|--head]"))?;
     let l = repo.line(name)?;
     repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+    // The caches of the line: a plain fetch takes only the records of a cache overlay, so they come now from the
+    // store remote, before the lock (`take_caches` below runs under it).
+    if !repo.working(&l).exists() {
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, &l.head, Some(&l), false);
+    }
     let _lock = repo.p.lock()?;
     let w = repo.working(&l);
     if w.exists() {

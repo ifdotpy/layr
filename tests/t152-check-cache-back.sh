@@ -1,7 +1,8 @@
 #!/bin/bash
 # ci: macos
 # A check runner gives warmth back (docs/checks.md): runner c checks the head of protected main and pushes, and the
-# laptop a starts a new line from that head with the cache that c's check built. One build per head.
+# laptop a starts a new line from that head with the cache that c's check built. One build per head. The runner's
+# plain clone takes only the records of the cache overlay: the copy of the check fetches the cache on demand.
 . "$(dirname "$0")/lib.sh"
 needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -28,9 +29,10 @@ head=$(l rev-parse main)
 cl() { env LAYR_ROOT="$T/c/store" "$LAYR" "$@"; }
 cl clone "file://$T/archive" p >/dev/null 2>&1
 cd "$T/c/store/projects/p/lines/main" || exit 1
+eq "the runner's plain clone takes no cache state" 0 "$(ls "$T/c/store/projects/p/meta/overlays/$TG/states" 2>/dev/null | wc -l | tr -d ' ')"
 cl config --local checks.runner true >/dev/null
 out=$(cl checks run --state main --json 2>/dev/null)
-has "the runner checks main's head warm" '"exit":0' "$out"
+has "the runner checks main's head warm: the copy of the check fetches the cache on demand" '"exit":0' "$out"
 cl push origin -q >/dev/null 2>&1
 
 cd "$P/main" || exit 1

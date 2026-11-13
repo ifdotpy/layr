@@ -16,11 +16,12 @@ Owner decision 2026-11-13: caches are the contents of an overlay, and a command 
 The records name every cache, so a command that needs one fetches it on demand from the store remotes of the project (`store_remote::fetch_caches_on_demand`):
 
 - `layr line new X <line>` and `layr line new X <state>`: the cache that the new line starts from, before the line is made (`layr: fetching the cache of <overlay> from <remote>` on stderr). A cache that is here already needs no fetch.
-- `layr merge <line> --overlays-only`: the caches of that line.
+- `layr merge <line>` and `layr merge <line> --overlays-only`: the caches of that line. The merge still takes them only when the state that the cache is saved with is here (`caches_contained`): a cache that `save --overlays` saved with an automatic state needs a push with `--auto`, or a named save.
+- `layr adopt <line>` (a line that moved here, or a restore): the caches of the line, before the lock.
 - A check (`layr checks run`): the cache of the state that its copy starts from, by the rules of `line new X <state>`.
 - The follow pass: the caches saved with the head that it takes (`take_store_follow_caches`).
 
-When no store remote gives the cache (the remote is away, or the cache is gone), the command goes on and the folder starts cold, with the warning `layr: caches not fetched from the store remote: ...`. These commands take cache data before a command needs it:
+When no store remote gives the cache (the remote is away, or the cache is gone), the command goes on and the folder starts cold, with the warning `layr: caches not fetched from the store remote: ...`. A command must not wait for an absent remote: the fetch on demand waits at most 2 s for a connection and does not try a failed connection again (`gateway::quick`; an `s3://` remote keeps its own timeouts). It writes marks to `on-demand.json` in the local folder of each remote: a remote that failed is not asked again for 10 minutes, and a cache state that a remote did not give is not asked of that remote again for 1 hour. `-q` leaves out the progress line, not the warning. `layr fsck` accepts the head of a cache overlay line that is not here when a store remote holds it (a state of another machine, or a state of this machine that a successful push named), and names it: `the head of line <line> is on the store remote (fetched on demand)`. A missing cache of this machine that no push named is still an error. These commands take cache data before a command needs it:
 
 - `layr fetch <remote> --line <name>`, `layr clone <url> --line <name>`: the caches that a new line from those lines starts from.
 - `layr fetch <remote> --overlay <cache>`: all cache states of that overlay that this machine can use.

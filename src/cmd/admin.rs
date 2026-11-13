@@ -1309,7 +1309,7 @@ pub fn with_try_copy<T>(
     if caches {
         // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
         // the records of a cache overlay, so the cache comes now from the store remote.
-        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None);
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
         if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
             let _ = btrfs::delete_tree(&dir);
             return Err(e);
@@ -2237,11 +2237,12 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
                     continue;
                 }
                 // A plain fetch or clone takes only the records of a cache overlay (docs/remotes.md): a cache that it
-                // left on a store remote is not damage, a command that needs it fetches it on demand.
+                // left on a store remote is not damage, a command that needs it fetches it on demand. A cache of this
+                // machine that no push gave to a store remote is damage.
                 let left_cache = o.p.db.state(&l.head)?.is_some_and(|state| state.cache_of.is_some())
                     && o.p.db.state_flags(&l.head)? == Some((false, false))
                     && repo.cache_data_overlay(&name)?
-                    && !crate::store_remote::store_remote_names(repo)?.is_empty();
+                    && crate::store_remote::cache_on_store_remote(repo, &o, &l.head)?;
                 if left_cache {
                     outln!(ctx, "overlay {name}: the head of line {} is on the store remote (fetched on demand)", l.name);
                     continue;

@@ -297,7 +297,7 @@ impl Api {
         let http = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(super::gateway::connect_timeout(Duration::from_secs(10)))
             .timeout(Duration::from_secs(600))
             .build()?;
         Ok(Self {
@@ -330,7 +330,7 @@ impl Api {
         let mut builder = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(super::gateway::connect_timeout(Duration::from_secs(10)))
             .timeout(Duration::from_secs(600));
         for certificate in certificates {
             builder = builder.add_root_certificate(certificate);

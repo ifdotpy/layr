@@ -134,13 +134,20 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
 /// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
 /// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
 pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
-    let saved_with = saved_with(repo, orepo)?;
+    caches_of_lines_for(repo, orepo, lines, None)
+}
+
+/// `caches_of_lines`, with `uid`: only the caches that a line of that user can take (`usable_cache`).
+pub(super) fn caches_of_lines_for(repo: &Repo, orepo: &Repo, lines: &[String], uid: Option<u32>) -> Result<BTreeSet<String>> {
+    let saved_with = saved_with(repo, orepo, uid)?;
     let mut out = BTreeSet::new();
     for name in lines {
         let line = repo.line(name).with_context(|| format!("--line: no line {name}"))?;
         // The line on the overlay: its own name or id, or a name of layr before 0.44 (`line-<id>.<platform>`).
         if let Some(own) = crate::overlay::find_follow_line(&orepo.p.db, &line)? {
-            if !orepo.p.db.state(&own.head)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
+            if !orepo.p.db.state(&own.head)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref()))
+                && usable_by(repo, orepo, &own.head, uid)?
+            {
                 out.insert(own.head);
             }
         }
@@ -159,19 +166,33 @@ pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Re
     Ok(out)
 }
 
-/// The cache state of the cache overlay `orepo` that `line new X <state>` takes, from the records alone: the newest
-/// cache of this platform saved with `state` or else with its nearest ancestor that has one (`cache_source`).
-pub(super) fn caches_from_state(repo: &Repo, orepo: &Repo, state: &str) -> Result<BTreeSet<String>> {
-    Ok(nearest_cache(repo, &saved_with(repo, orepo)?, state.to_string())?.into_iter().collect())
+/// The cache state of the cache overlay `orepo` that `line new X <state>` takes for a line of `uid`, from the records
+/// alone: the newest usable cache of this platform saved with `state` or else with its nearest ancestor that has one
+/// (`cache_source`).
+pub(super) fn caches_from_state(repo: &Repo, orepo: &Repo, state: &str, uid: u32) -> Result<BTreeSet<String>> {
+    Ok(nearest_cache(repo, &saved_with(repo, orepo, Some(uid))?, state.to_string())?.into_iter().collect())
 }
 
-/// The newest cache state of this platform saved with each project state, from the records of `orepo`.
-fn saved_with(repo: &Repo, orepo: &Repo) -> Result<BTreeMap<String, String>> {
+/// Whether a line of `uid` may take the cache state `id` (`Repo::usable_cache` without the key, which needs the
+/// working folder): made by `uid`, shared, or the overlay takes caches of other users (`trust=readers`). None: any.
+fn usable_by(repo: &Repo, orepo: &Repo, id: &str, uid: Option<u32>) -> Result<bool> {
+    let Some(uid) = uid else { return Ok(true) };
+    let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
+    let name = orepo.p.name.rsplit_once('%').map_or(orepo.p.name.as_str(), |(_, name)| name);
+    Ok(uid == 0 || st.cache_shared || st.cache_by == Some(uid) || !repo.trust_protected(name)?)
+}
+
+/// The newest cache state of this platform saved with each project state, from the records of `orepo`; with `uid`,
+/// only the caches that a line of that user can take, as `cache_source` filters them before it picks the newest.
+fn saved_with(repo: &Repo, orepo: &Repo, uid: Option<u32>) -> Result<BTreeMap<String, String>> {
     let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
     for (id, of) in orepo.p.db.cache_states_known()? {
         // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
         // not hide this platform's cache of the same state.
         if orepo.p.db.state(&id)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
+            continue;
+        }
+        if !usable_by(repo, orepo, &id, uid)? {
             continue;
         }
         // A save with no named change saves with an automatic state over the head: it counts for the head.

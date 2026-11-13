@@ -1270,6 +1270,8 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
         let r = (|| -> Result<()> {
             let theirs = h.repo.localize(theirs)?;
+            // A plain fetch takes only the records of a cache overlay: the caches of the line come now.
+            crate::store_remote::fetch_caches_on_demand(ctx, &h.repo, &theirs.head, Some(&theirs), a.has("-q"));
             let now = h.repo.line(&line.id)?;
             let (taken, refused) = h.repo.take_follow_caches(ctx, &now, vec![theirs], Some(&before), false)?;
             if !a.has("-q") {
@@ -1298,6 +1300,9 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     repo.hold(repo.pin(&[&theirs.head, &line.head])?);
     // No head moves, so the reviewed-state rule of a protected line does not apply.
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect: true, hint: None })?;
+    // A plain fetch takes only the records of a cache overlay: the caches of the line come now from the store remote,
+    // before the lock.
+    crate::store_remote::fetch_caches_on_demand(ctx, repo, &theirs.head, Some(&theirs), quiet);
     let lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     if let Some(rule) = repo.policy().rule_for(&line.name) {
@@ -1311,8 +1316,6 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     }
     // The copies of build output take minutes: they hold only the lock of each cache overlay.
     drop(lock);
-    // A plain fetch takes only the records of a cache overlay: the caches of the line come now from the store remote.
-    crate::store_remote::fetch_caches_on_demand(ctx, repo, &theirs.head, Some(&theirs));
     let none = std::collections::BTreeSet::new();
     let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
     let folders: Vec<String> = taken.iter().map(|(f, _)| f.clone()).collect();

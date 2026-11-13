@@ -3,8 +3,10 @@
 # Caches are the contents of an overlay: a command copies them only when it asks for data of the overlay (owner
 # decision 2026-11-13, docs/remotes.md). A plain `layr fetch <remote>` and a plain `layr clone` take the records, the
 # lines and the base, and of a cache overlay only the records: no cache state comes, not even main's. A new line
-# fetches the cache that it starts from on demand, `merge --overlays-only` fetches the caches of the line, and
-# `fetch --line <line>` and `fetch --overlay <cache>` take caches too. An unreachable remote leaves the line cold.
+# fetches the cache that it starts from on demand, `merge` and `merge --overlays-only` fetch the caches of the line,
+# and `fetch --line <line>` and `fetch --overlay <cache>` take caches too. An unreachable remote leaves the line cold,
+# and a remote that failed is not asked again for a while. fsck accepts a cache that the remote holds, not a lost
+# cache of this machine.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -81,8 +83,29 @@ mv "$T/archive.away" "$T/archive"
 eq "a new line works while the remote is away" 0 "$code"
 has "it says that the cache did not come" "caches not fetched from the store remote" "$out"
 no "and starts without the new cache" test -e "$Y/s4/target/side3.bin"
+# The remote is back, but it failed a moment ago: a new line does not wait for it again (10 minutes), and says so.
+out=$(yl line new s5 side 2>&1)
+has "a new line does not ask a remote that failed a moment ago" "failed less than 10 minutes ago" "$out"
+no "and starts cold" test -e "$Y/s5/target/side3.bin"
+rm -f "$T"/y/store/projects/p/meta/remote-stores/*/on-demand.json
+yl line new s6 side >/dev/null 2>&1
+ok "without the mark the next new line fetches the cache" cmp -s "$P/side/target/side3.bin" "$Y/s6/target/side3.bin"
 
-# A plain clone takes no cache state either; a new line and merge --overlays-only fetch the caches they take.
+# A cache of this machine that no push named and whose tree is gone is damage: fsck still says so.
+(cd "$Y/s6" && head -c 1000 /dev/urandom > target/mine.bin && yl save --overlays -q)
+odb=$T/y/store/projects/p/meta/overlays/$TG/meta/db/layr.sqlite
+mine=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT head FROM lines WHERE name=?", ("s6",)).fetchone()[0])' "$odb")
+chflags -R nouchg "$T/y/store/projects/p/meta/overlays/$TG/states/$mine" 2>/dev/null
+rm -rf "$T/y/store/projects/p/meta/overlays/$TG/states/$mine"
+python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE states SET present=0 WHERE id=?", (sys.argv[2],)); c.commit()' "$odb" "$mine"
+out=$(yl fsck 2>&1); code=$?
+eq "fsck rejects an unpushed cache of this machine without a tree" 1 "$code"
+has "and names it as missing" "the head of line s6 is missing" "$out"
+
+# A plain clone takes no cache state either; a new line, merge --overlays-only and merge fetch the caches they take.
+# The cache of side is saved with a named state here: a merge takes the caches of a line only when the state that
+# they are saved with is on this machine (`caches_contained`), and a push without --auto sends no automatic state.
+(cd "$P/side" && head -c 1000000 /dev/urandom > target/side4.bin && echo s2 > s2.txt && l add s2.txt >/dev/null && l save -qm s2 && l push cloud -q >/dev/null 2>&1)
 zl() { env LAYR_ROOT="$T/z/store" "$LAYR" "$@"; }
 zl clone "file://$T/archive" p -q >/dev/null 2>&1
 eq "a plain clone works" 0 "$?"
@@ -90,6 +113,10 @@ eq "it restores no cache state" 0 "$(states z)"
 Z=$T/z/store/projects/p/lines
 (cd "$Z/main" && zl line new w main >/dev/null 2>&1)
 ok "a new line from main in the clone starts warm" cmp -s "$P/main/target/main.bin" "$Z/w/target/main.bin"
-(cd "$Z/w" && zl merge side --overlays-only -q >/dev/null 2>&1)
-ok "merge --overlays-only fetches the cache of side" cmp -s "$P/side/target/side3.bin" "$Z/w/target/side3.bin"
+(cd "$Z/main" && zl line new w2 main >/dev/null 2>&1)
+(cd "$Z/w2" && zl merge side -q >/dev/null 2>&1)
+ok "a plain merge fetches the cache of the merged line" cmp -s "$P/side/target/side4.bin" "$Z/w2/target/side4.bin"
+(cd "$P/side" && head -c 1000000 /dev/urandom > target/side5.bin && echo s3 > s3.txt && l add s3.txt >/dev/null && l save -qm s3 && l push cloud -q >/dev/null 2>&1)
+(cd "$Z/w" && zl fetch origin -q >/dev/null 2>&1 && zl merge side --overlays-only -q >/dev/null 2>&1)
+ok "merge --overlays-only fetches the new cache of side" cmp -s "$P/side/target/side5.bin" "$Z/w/target/side5.bin"
 finish
