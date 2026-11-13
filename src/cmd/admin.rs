@@ -1570,6 +1570,10 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
 pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
     let mut named: BTreeSet<String> = BTreeSet::new();
     for name in repo.overlay_names()? {
+        // An overlay of another platform that this machine never fetched has no project here and names no state.
+        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
+            continue;
+        }
         let overlay = repo.overlay_repo(&name)?;
         for line in overlay.p.db.lines()? {
             named.insert(line.head);
