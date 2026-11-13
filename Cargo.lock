@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1708,7 +1708,7 @@ version = "0.1.0"
 
 [[package]]
 name = "layr-api"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "serde",
  "serde_json",
