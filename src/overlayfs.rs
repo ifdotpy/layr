@@ -1447,7 +1447,16 @@ mod tests {
             assert!(root.join(".layr-overlayfs/registry.json").is_file());
             Ok(())
         })();
-        sys::overlay_unmount(&root)?;
+        // Another test of this process can fork while recover() holds the registry lock open: the child keeps
+        // a copy of that file descriptor until exec closes it, and the unmount gives EBUSY for that time.
+        let mut tries = 0;
+        while let Err(error) = sys::overlay_unmount(&root) {
+            tries += 1;
+            if error.raw_os_error() != Some(libc::EBUSY) || tries == 50 {
+                return Err(error.into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         fs::remove_dir_all(&root)?;
         result
     }
