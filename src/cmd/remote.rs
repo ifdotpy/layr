@@ -1159,7 +1159,6 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
                 only_states: None,
                 // A plain fetch takes only the records of the cache overlays; `--overlay` or `--line` takes data.
-                all_caches: false,
                 plain_cache_fetch: false,
             };
             for line in &opts.lines {
@@ -1419,8 +1418,8 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             only_states: None,
             heads: a.has("--heads"),
             only_line: a.get("--only-line").map(str::to_owned),
-            // A plain clone starts warm and works offline: it takes the usable caches of this platform.
-            all_caches: true,
+            // A plain clone takes only the records of the cache overlays, as a plain fetch; `--line` or `--overlay`
+            // takes data, and a new line fetches the cache it starts from on demand.
             plain_cache_fetch: false,
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;

@@ -590,6 +590,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 None => (vec![name.to_string()], start.clone(), source.as_ref()),
             },
         };
+        // A plain fetch or clone takes only the records of a cache overlay: the cache that the new lines start from
+        // comes now from the store remote, before the lock.
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, &from, from_line);
         let prepared = repo.prepare_named_lines(ctx, names, &from, owner, from_line, view)?;
         // Test hook: wait after the prepare step, so a test can move the start before the commit.
         if let Some(ms) = std::env::var("LAYR_TEST_LINE_NEW_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {

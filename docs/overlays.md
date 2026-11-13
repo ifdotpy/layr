@@ -70,9 +70,9 @@ Built today (section 9):
 - A state record of the project names the shared tree and its part on each public overlay
   (`parts`), build output included. A hidden overlay records the part in its own records
   (`hidden.part.<state>`), so the public record never names it.
-- `fetch` takes the whole repository by default, except the caches of most lines: of a cache overlay a
-  plain fetch takes the records and only the caches of `main`, the protected lines and the save-back
-  lines ([remotes](remotes.md)). `fetch --line <name> --overlay <layer>` (built
+- `fetch` takes the whole repository by default, except the contents of the cache overlays: of a cache
+  overlay a plain fetch, pull or clone takes only the records, and a command that needs a cache fetches it
+  on demand (owner decision 2026-11-13, [remotes](remotes.md)). `fetch --line <name> --overlay <layer>` (built
   2026-11-11) takes the history of those lines on those layers only; `base` names the base. The old
   cache flags of transfers (`--caches`, `--no-caches`, `--caches-of`) are removed (exit 2).
 - Since slice 3 an overlay can have `platform=<key>`; since slice 6 a cache is a folder overlay of one
@@ -114,8 +114,8 @@ This section turns section 1 into data and commands. Each part below is one slic
   `cache_by` and `cache_shared`).
 
 **Platforms.** An overlay with `platform=<key>` is shown and fetched only on that platform, and a plain
-fetch takes only the caches of `main`, the protected lines and the save-back lines from it (the others
-come with `fetch --overlay <name>` or `--line`). Build
+fetch takes only its records (its states come with `fetch --overlay <name>`, `--line`, or on demand when a
+new line takes a cache). Build
 output of two platforms is two overlays (`target.macos-aarch64`, `target.linux-x86_64`); a
 platform key is no part of a line name.
 

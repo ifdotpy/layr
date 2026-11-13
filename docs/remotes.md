@@ -9,19 +9,23 @@ Run `layr sync work` to exchange signed records and missing states in both direc
 Layr starts `ssh host layr serve-peer project`.
 The internal peer command does not appear in help.
 Use `--auto --caches` to include automatic states and saved caches.
-Owner decision 2026-11-11: a cache is an ordinary overlay, and the cache flags go away. `fetch` then takes lines and overlays: the history of the chosen lines, and only their parts on the chosen overlays ([overlays](overlays.md) section 1). Without `--line` and `--overlay`, `fetch` takes the whole repository except the caches of most lines (see below), and `--caches`, `--caches-of` and `--no-caches` select caches. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push` are the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
+Owner decision 2026-11-11: a cache is an ordinary overlay, and the cache flags go away. `fetch` then takes lines and overlays: the history of the chosen lines, and only their parts on the chosen overlays ([overlays](overlays.md) section 1). Without `--line` and `--overlay`, `fetch` takes the whole repository except the cache states (see below), and `--caches`, `--caches-of` and `--no-caches` select caches. `layr fetch <store remote> --line <name>[,<name>] --overlay <layer>[,<layer>]` and the same flags on `push` are the first built part of this rule: `--line` takes the history of those lines (their heads with `--heads`) and, in each overlay, the history of their overlay lines; `--overlay` takes only those layers, and `base` names the base. A state left out stays on the remote and comes on first read. Example for a merge runner: `layr fetch cloud --line main --overlay base,cache.target`.
 
-A plain `layr fetch <remote>` (also with `--heads`, and `layr pull`) takes the records, the lines and the base states. Of a cache overlay (an overlay of one platform, or a folder overlay such as `cache.target`) it takes the records, and only the caches that a new line from these shared lines starts from:
+Owner decision 2026-11-13: caches are the contents of an overlay, and a command copies them only when it asks for data of the overlay. A plain `layr fetch <remote>` (also with `--heads`), `layr pull` and a plain `layr clone <url>` take the records, the lines and the base states. Of a cache overlay (an overlay of one platform, or a folder overlay such as `cache.target`) they take only the records: no cache state comes, not even the caches of `main`, the protected lines or the save-back lines of checks and CI jobs (`<line>.checks-<os>-<arch>`, [checks](checks.md)). The fetch says what stays on the remote (`overlay target.macos-aarch64: 4 state(s) stay on the remote; a new line fetches the cache it starts from, fetch --overlay target.macos-aarch64 takes them all`). Each line can have a cache of gigabytes, and a fetch that took the cache of every line ran for many minutes.
 
-- `main`,
-- the lines that this machine protects (`layr protect`; protection is a setting of each machine),
-- the save-back lines of checks and CI jobs (`<line>.checks-<os>-<arch>`, [checks](checks.md)).
+The records name every cache, so a command that needs one fetches it on demand from the store remotes of the project (`store_remote::fetch_caches_on_demand`):
 
-So the caches that a check runner gives back still come with a plain fetch. The caches of the other lines stay on the remote, and the fetch says so (`overlay target.macos-aarch64: 4 cache state(s) stay on the remote; fetch --overlay target.macos-aarch64 takes them`). Each line can have a cache of gigabytes, and a fetch that took the cache of every line ran for many minutes. A new line from a line whose cache is not here starts cold. These commands take more cache data:
+- `layr line new X <line>` and `layr line new X <state>`: the cache that the new line starts from, before the line is made (`layr: fetching the cache of <overlay> from <remote>` on stderr). A cache that is here already needs no fetch.
+- `layr merge <line> --overlays-only`: the caches of that line.
+- A check (`layr checks run`): the cache of the state that its copy starts from, by the rules of `line new X <state>`.
+- The follow pass: the caches saved with the head that it takes (`take_store_follow_caches`).
 
-- `layr fetch <remote> --line <name>`: the caches that a new line from those lines starts from.
+When no store remote gives the cache (the remote is away, or the cache is gone), the command goes on and the folder starts cold, with the warning `layr: caches not fetched from the store remote: ...`. These commands take cache data before a command needs it:
+
+- `layr fetch <remote> --line <name>`, `layr clone <url> --line <name>`: the caches that a new line from those lines starts from.
 - `layr fetch <remote> --overlay <cache>`: all cache states of that overlay that this machine can use.
-- `layr clone <url>`: a plain clone still takes the usable caches of this platform, so it starts warm and works offline.
+
+A peer remote (`ssh://`) is not changed yet: `fetch`, `pull` and `sync` of a peer still take the caches, because a peer has no fetch on demand.
 
 An overlay of another platform never comes unless `--overlay` names it.
 

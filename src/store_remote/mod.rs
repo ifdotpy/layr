@@ -55,11 +55,8 @@ pub struct Options {
     pub overlays: Option<std::collections::BTreeSet<String>>,
     /// The states of one overlay that `lines` need, set by the overlay fetch (None: every state).
     pub(crate) only_states: Option<std::collections::BTreeSet<String>>,
-    /// Take the states of every cache overlay that no selection names (a plain clone). Without it a plain fetch
-    /// takes the records of such an overlay and only the caches of the shared lines (`takes_cache_states`).
-    pub all_caches: bool,
-    /// A plain fetch of one cache overlay, set by the overlay fetch: only the caches of `lines` (the shared lines)
-    /// come, and the fetch names the count of the others that stay on the remote.
+    /// A plain fetch of one cache overlay, set by the overlay fetch: no cache state comes, and the fetch names the
+    /// count of the states that stay on the remote (`takes_cache_states`).
     pub(crate) plain_cache_fetch: bool,
 }
 
@@ -79,13 +76,12 @@ impl Options {
             && !self.overlays.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
     }
 
-    /// Whether a fetch takes the states of the cache overlay `name` (`Repo::cache_data_overlay`) as the caller
-    /// chose them: `--overlay` names it, `--line` or a cache selection asks for the caches of lines, or the caller
-    /// takes every cache (a plain clone). Else it is a plain fetch: only the caches of the shared lines come
-    /// (docs/remotes.md).
+    /// Whether a fetch or clone takes the states of the cache overlay `name` (`Repo::cache_data_overlay`) as the
+    /// caller chose them: `--overlay` names it, or `--line` or a cache selection asks for the caches of lines. Else it
+    /// is a plain fetch: only the records come, and a command that needs a cache fetches it on demand
+    /// (`fetch_caches_on_demand`, docs/remotes.md).
     pub(crate) fn takes_cache_states(&self, name: &str) -> bool {
-        self.all_caches
-            || self.overlays.as_ref().is_some_and(|only| only.contains(name))
+        self.overlays.as_ref().is_some_and(|only| only.contains(name))
             || !self.lines.is_empty()
             || !self.caches_of.is_empty()
             || self.caches_of_state.is_some()
@@ -379,6 +375,107 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
         |store, ctx| store.connect(ctx),
         |store| reader::restore_states(store, repo, &[id.to_string()]).map(|_| ()),
     )
+}
+
+/// Fetch on demand: a plain fetch, pull or clone takes only the records of a cache overlay (owner decision
+/// 2026-11-13), so the cache that a new line from the line `source` (or from the state `start`) takes can be on a store
+/// remote only. This fetches those cache states from the store remotes of the project, before the line or the copy of
+/// a check takes its caches (`take_caches`, `pull_caches`, `copy_caches`). It reads only the records and the named cache states, and nothing when every
+/// such cache is here. A failure leaves the folder cold, with a warning; the command goes on.
+pub fn fetch_caches_on_demand(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>) {
+    if let Err(e) = fetch_caches_inner(ctx, repo, start, source) {
+        eprintln!("layr: caches not fetched from the store remote: {e:#}");
+    }
+}
+
+fn fetch_caches_inner(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>) -> Result<()> {
+    if repo.p.is_overlay() {
+        return Ok(());
+    }
+    let missing = |want: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>| -> Result<bool> {
+        for (name, ids) in want {
+            let orepo = repo.overlay_repo(name)?;
+            for id in ids {
+                if !orepo.p.has_state(id) && crate::objstore::verified(&orepo.p, id)?.is_none() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    };
+    // The caches that the line takes, from the records: absent here, and usable by the caller (the fetch takes no
+    // cache of another user's unprotected line).
+    let mut want = std::collections::BTreeMap::new();
+    for (name, _folder) in repo.folder_overlays()? {
+        let Ok(orepo) = repo.overlay_repo(&name) else { continue };
+        let ids = match source {
+            Some(line) => overlays::caches_of_lines(repo, &orepo, std::slice::from_ref(&line.name))?,
+            None => overlays::caches_from_state(repo, &orepo, start)?,
+        };
+        let mut absent = std::collections::BTreeSet::new();
+        for id in ids {
+            let Some(st) = orepo.p.db.state(&id)? else { continue };
+            let usable = ctx.caller.is_root() || st.cache_shared || st.cache_by == Some(ctx.caller.uid);
+            if usable && !orepo.p.has_state(&id) && crate::objstore::verified(&orepo.p, &id)?.is_none() {
+                absent.insert(id);
+            }
+        }
+        if !absent.is_empty() {
+            want.insert(name, absent);
+        }
+    }
+    if want.is_empty() {
+        return Ok(());
+    }
+    let remotes = store_remote_names(repo)?;
+    let opts = Options {
+        caches: true,
+        heads: true,
+        // Only the cache overlays with an absent cache, and no base state.
+        overlays: Some(want.keys().cloned().collect()),
+        only_caches: Some(want.values().flatten().cloned().collect()),
+        only_states: Some(std::collections::BTreeSet::new()),
+        ..Default::default()
+    };
+    let mut errors = Vec::new();
+    for name in &remotes {
+        let names: Vec<&str> = want.keys().map(String::as_str).collect();
+        eprintln!("layr: fetching the cache of {} from {name}", names.join(", "));
+        let attempt = (|| -> Result<()> {
+            let mut fresh = Repo::open(ctx, &repo.p.name)?;
+            let mut store = open_named(name, &fresh)?;
+            store.configure(ctx, &ConfigureOptions::default())?;
+            store.fetch(ctx, &mut fresh, &opts)?;
+            Ok(())
+        })();
+        match attempt {
+            Err(e) => errors.push(format!("{name}: {e:#}")),
+            Ok(()) if !missing(&want)? => return Ok(()),
+            Ok(()) => {}
+        }
+    }
+    if !errors.is_empty() {
+        bail!("{}", errors.join("; "));
+    }
+    Ok(())
+}
+
+/// The names of the store remotes of the project (`cloud.remote.<name>.url` of a store), sorted.
+pub fn store_remote_names(repo: &Repo) -> Result<Vec<String>> {
+    let mut remotes: Vec<String> = repo
+        .p
+        .db
+        .config_all()?
+        .into_iter()
+        .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")).map(str::to_owned))
+        .filter(|name| {
+            crate::cmd::remote::remote_url(repo, name)
+                .is_ok_and(|url| matches!(crate::cmd::remote::kind(&url), Ok(crate::cmd::remote::Kind::Store)))
+        })
+        .collect();
+    remotes.sort();
+    remotes.dedup();
+    Ok(remotes)
 }
 
 /// Try each remote that holds the state, in order. Each one is opened, connected with the same

@@ -2,7 +2,7 @@
 # ci: macos overlayfs
 # A push deletes the dead cache states of a cache overlay in the store remote (docs/cache-overlays.md):
 # the remote keeps the trees that the records keep (the newest `history` states of each live line on
-# each platform) and the data parts that they link. A clone still starts warm.
+# each platform) and the data parts that they link. A new line of a clone still starts warm (its cache comes on demand).
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -97,6 +97,6 @@ has "nothing is unreachable" "unreachable cache data: 0 object(s)" "$(l fsck --o
 mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines
-(cd "$Q/main" && env LAYR_ROOT="$T/b/store" "$LAYR" line new far main >/dev/null 2>&1)
-ok "a clone still starts warm" cmp -s "$P/main/target/big4" "$Q/far/target/big4"
+(cd "$Q/main" && env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" line new far main >/dev/null 2>&1)
+ok "a new line of a clone still starts warm" cmp -s "$P/main/target/big4" "$Q/far/target/big4"
 finish

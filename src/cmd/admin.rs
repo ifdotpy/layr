@@ -1307,7 +1307,9 @@ pub fn with_try_copy<T>(
         repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
     }
     if caches {
-        // A check starts warm: the cache of the state, by the rules of `line new <state>`.
+        // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
+        // the records of a cache overlay, so the cache comes now from the store remote.
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None);
         if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
             let _ = btrfs::delete_tree(&dir);
             return Err(e);
@@ -2232,6 +2234,16 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
                         .is_some_and(|state| crate::cache_overlay::other_platform(state.cache_platform.as_deref()));
                 if foreign_cache && o.p.db.state_flags(&l.head)? == Some((false, false)) {
                     outln!(ctx, "overlay {name}: the head of line {} is not local (another cache platform)", l.name);
+                    continue;
+                }
+                // A plain fetch or clone takes only the records of a cache overlay (docs/remotes.md): a cache that it
+                // left on a store remote is not damage, a command that needs it fetches it on demand.
+                let left_cache = o.p.db.state(&l.head)?.is_some_and(|state| state.cache_of.is_some())
+                    && o.p.db.state_flags(&l.head)? == Some((false, false))
+                    && repo.cache_data_overlay(&name)?
+                    && !crate::store_remote::store_remote_names(repo)?.is_empty();
+                if left_cache {
+                    outln!(ctx, "overlay {name}: the head of line {} is on the store remote (fetched on demand)", l.name);
                     continue;
                 }
                 problems += 1;

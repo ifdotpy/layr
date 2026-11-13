@@ -25,7 +25,7 @@ mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines
 eq "a file of the clone keeps its time" "$(mtime "$P/main/a.txt")" "$(mtime "$Q/main/a.txt")"
-(cd "$Q/main" && env LAYR_ROOT="$T/b/store" "$LAYR" line new far main >/dev/null 2>&1)
+(cd "$Q/main" && env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" line new far main >/dev/null 2>&1)
 eq "a cache file of a line in the clone keeps its time" "$(mtime "$P/main/target/debug/dep")" "$(mtime "$Q/far/target/debug/dep")"
 eq "and the newer file stays newer" "$(mtime "$P/main/target/debug/out")" "$(mtime "$Q/far/target/debug/out")"
 finish

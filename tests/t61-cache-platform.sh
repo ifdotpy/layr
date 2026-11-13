@@ -30,7 +30,8 @@ eq "after a save with the new lock file it is warm again" built-v2 "$(cat $P/aga
 ok "the key files can be cleared" l overlay set $TG --key-files none
 no "a bad key file path fails" l overlay set $TG --key-files ../x
 
-# 2. A store carries the cache overlay; a clone on the same platform starts warm.
+# 2. A store carries the cache overlay; a new line of a clone on the same platform starts warm (the clone takes the
+# records, the line fetches the cache on demand with the paper key of this reader).
 l overlay set $TG --key-files Cargo.lock >/dev/null
 l save --overlays -q
 l remote add archive "file://$T/archive" --paper-key-out $T/paper.txt >/dev/null 2>&1
@@ -39,7 +40,7 @@ new_fs $T/b 2G
 out=$(env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR clone "file://$T/archive" p 2>&1)
 has "the clone takes the cache overlay" "overlay $TG" "$out"
 cd $T/b/store/projects/p/lines/main
-env LAYR_ROOT=$T/b/store $LAYR line new warm main >/dev/null 2>&1
+env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR line new warm main >/dev/null 2>&1
 eq "a new line in the clone starts warm" built-v2 "$(cat $T/b/store/projects/p/lines/warm/target/out 2>/dev/null)"
 
 # 3. A machine the project trusts reads the cache overlay through its own machine slot.

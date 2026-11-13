@@ -68,34 +68,18 @@ fn layer_selection(repo: &Repo, orepo: &Repo, opts: &Options) -> Result<Options>
     Ok(selected)
 }
 
-/// The fetch options of the overlay `name`. A plain fetch of a cache overlay takes its records and only the
-/// caches that new lines from the shared lines start from (`shared_cache_lines`); the other cache states stay on
-/// the remote until `fetch --overlay <name>` or `--line` asks for them. Each line can have a cache of gigabytes.
+/// The fetch options of the overlay `name`. A plain fetch, pull or clone of a cache overlay takes only its records
+/// (owner decision 2026-11-13: caches are the contents of an overlay, copied only when the command asks for data of
+/// the overlay). The cache states stay on the remote until `fetch --overlay <name>`, `--line`, or a command that
+/// needs one (`fetch_caches_on_demand`) asks for them. Each line can have a cache of gigabytes.
 fn fetch_selection(repo: &Repo, name: &str, opts: &Options) -> Result<Options> {
     let mut selected = opts.clone();
     if repo.cache_data_overlay(name)? && !opts.takes_cache_states(name) {
         selected.plain_cache_fetch = true;
-        selected.lines = shared_cache_lines(repo)?;
-        // No shared line: no cache state comes (`--line` sets these selections from the lines).
         selected.only_caches = Some(BTreeSet::new());
         selected.only_states = Some(BTreeSet::new());
     }
     Ok(selected)
-}
-
-/// The lines whose caches a plain fetch takes: `main`, the lines that this machine protects, and the save-back lines
-/// of checks and CI jobs (`<line>.checks-<os>-<arch>`, docs/checks.md), which give the caches of reviewed heads back
-/// to every machine. Protection is a setting of each machine, so `main` counts on every machine.
-fn shared_cache_lines(repo: &Repo) -> Result<Vec<String>> {
-    let policy = repo.policy();
-    Ok(repo
-        .p
-        .db
-        .lines()?
-        .into_iter()
-        .map(|line| line.name)
-        .filter(|name| name == "main" || policy.rule_for(name).is_some() || name.contains(".checks-"))
-        .collect())
 }
 
 /// The states of the overlay `orepo` that the project lines `lines` show: the history of each line on the overlay
@@ -150,23 +134,7 @@ pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads
 /// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
 /// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
 pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
-    let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
-    for (id, of) in orepo.p.db.cache_states_known()? {
-        // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
-        // not hide this platform's cache of the same state.
-        if orepo.p.db.state(&id)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
-            continue;
-        }
-        // A save with no named change saves with an automatic state over the head: it counts for the head.
-        if let Some(st) = repo.p.db.state(&of)? {
-            if st.kind == crate::model::StateKind::Auto {
-                if let Some(parent) = st.parents.first() {
-                    saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
-                }
-            }
-        }
-        saved_with.entry(of).or_insert(id);
-    }
+    let saved_with = saved_with(repo, orepo)?;
     let mut out = BTreeSet::new();
     for name in lines {
         let line = repo.line(name).with_context(|| format!("--line: no line {name}"))?;
@@ -185,23 +153,56 @@ pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Re
             }
         }
         for head in heads {
-            let mut seen = BTreeSet::new();
-            let mut queue = std::collections::VecDeque::from([head]);
-            while let Some(id) = queue.pop_front() {
-                if seen.len() >= 200 || !seen.insert(id.clone()) {
-                    continue;
-                }
-                if let Some(cache) = saved_with.get(&id) {
-                    out.insert(cache.clone());
-                    break;
-                }
-                if let Some(state) = repo.p.db.state(&id)? {
-                    queue.extend(state.parents);
-                }
-            }
+            out.extend(nearest_cache(repo, &saved_with, head)?);
         }
     }
     Ok(out)
+}
+
+/// The cache state of the cache overlay `orepo` that `line new X <state>` takes, from the records alone: the newest
+/// cache of this platform saved with `state` or else with its nearest ancestor that has one (`cache_source`).
+pub(super) fn caches_from_state(repo: &Repo, orepo: &Repo, state: &str) -> Result<BTreeSet<String>> {
+    Ok(nearest_cache(repo, &saved_with(repo, orepo)?, state.to_string())?.into_iter().collect())
+}
+
+/// The newest cache state of this platform saved with each project state, from the records of `orepo`.
+fn saved_with(repo: &Repo, orepo: &Repo) -> Result<BTreeMap<String, String>> {
+    let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
+    for (id, of) in orepo.p.db.cache_states_known()? {
+        // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
+        // not hide this platform's cache of the same state.
+        if orepo.p.db.state(&id)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
+            continue;
+        }
+        // A save with no named change saves with an automatic state over the head: it counts for the head.
+        if let Some(st) = repo.p.db.state(&of)? {
+            if st.kind == crate::model::StateKind::Auto {
+                if let Some(parent) = st.parents.first() {
+                    saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
+                }
+            }
+        }
+        saved_with.entry(of).or_insert(id);
+    }
+    Ok(saved_with)
+}
+
+/// The cache saved with `head` or else with its nearest ancestor that has one (at most 200 states back).
+fn nearest_cache(repo: &Repo, saved_with: &BTreeMap<String, String>, head: String) -> Result<Option<String>> {
+    let mut seen = BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([head]);
+    while let Some(id) = queue.pop_front() {
+        if seen.len() >= 200 || !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(cache) = saved_with.get(&id) {
+            return Ok(Some(cache.clone()));
+        }
+        if let Some(state) = repo.p.db.state(&id)? {
+            queue.extend(state.parents);
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn caches_of_state(repo: &Repo, orepo: &Repo, state: &str) -> Result<BTreeSet<String>> {

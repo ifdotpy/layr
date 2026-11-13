@@ -21,7 +21,8 @@ l remote add archive "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/nu
 l push archive -q >/dev/null
 new_fs "$T/peer" 2G
 export LAYR_ROOT=$T/peer/store
-LAYR_PAPER_KEY_FILE=$T/paper.txt l clone "file://$T/archive" p >/dev/null
+# The clone names the cache overlay: a plain clone takes only its records (docs/remotes.md).
+LAYR_PAPER_KEY_FILE=$T/paper.txt l clone "file://$T/archive" p --overlay base,cache.target >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
 O=$LAYR_ROOT/projects/p/meta/overlays/cache.target
 odb=$O/meta/db/layr.sqlite
@@ -62,7 +63,8 @@ import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 con.execute('UPDATE states SET deleted=0 WHERE id=?', (sys.argv[2],)); con.commit()
 PYCACHE
-# The same absence on this platform remains a fault, even with present=0.
+# The same absence on this platform is a cache that a plain fetch left on the store remote (present=0): fsck accepts
+# it while a store remote is configured, and names it. Without a store remote it remains a fault.
 local_head=$(python3 - "$odb" <<'PYCACHE'
 import json, sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
@@ -80,7 +82,11 @@ con = sqlite3.connect(sys.argv[1])
 con.execute('UPDATE states SET present=0 WHERE id=?', (sys.argv[2],)); con.commit()
 PYCACHE
 out=$(l fsck 2>&1); rc=$?
-eq "fsck still rejects a required local cache without a tree" 1 "$rc"
+eq "fsck accepts a local cache that a store remote holds" 0 "$rc"
+has "fsck names it as on the store remote" 'is on the store remote (fetched on demand)' "$out"
+l remote remove origin >/dev/null 2>&1
+out=$(l fsck 2>&1); rc=$?
+eq "fsck still rejects a required local cache without a tree and no store remote" 1 "$rc"
 has "fsck names the required local head" 'is missing' "$out"
 mv "$T/local-cache" "$O/states/$local_head"
 if [ "$(uname -s)" = Darwin ]; then chflags uchg "$O/states/$local_head"; fi

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # A cache state on a store remote that names a chunk no pack holds is not restored, and the check runs before any
-# file is read (the fetch names the cache overlay: a plain fetch takes only the caches of shared lines). A fetch remembers the failure: the next fetch does not try the state again while the packs of the
+# file is read (the fetch names the cache overlay: a plain fetch takes only the records of a cache overlay). A fetch remembers the failure: the next fetch does not try the state again while the packs of the
 # remote stay the same, and tries once more after a push changed them. One user.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }

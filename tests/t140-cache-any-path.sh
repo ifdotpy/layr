@@ -77,7 +77,7 @@ if [ "$(id -u)" != 0 ]; then
     mkdir -p $T/b
     env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR clone "file://$T/archive" p >/dev/null 2>&1
     Q=$T/b/store/projects/p/lines
-    (cd $Q/main && env LAYR_ROOT=$T/b/store $LAYR line new far main >/dev/null 2>&1)
+    (cd $Q/main && env LAYR_ROOT=$T/b/store LAYR_PAPER_KEY_FILE=$T/paper.txt $LAYR line new far main >/dev/null 2>&1)
     out=$(cb "$Q/far" test --workspace -- --nocapture)
     no "a line of a clone in another store compiles nothing" grep -q "Compiling" <<<"$out"
     has "its test reads its own binary" "BIN=$Q/far/target/debug/x" "$out"

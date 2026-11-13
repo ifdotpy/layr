@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # A cache layer goes to a layr store remote as content-defined chunks in pack objects
-# (docs/remote-format.md, "Chunks of cache layers"): a clone restores the cache with equal bytes and
+# (docs/remote-format.md, "Chunks of cache layers"): a new line of a clone fetches the cache with equal bytes and
 # times, and a small change in a large build file uploads only the chunks around the change, also
 # when the file moves to a new path, as cargo does with a rebuilt unit. One user.
 . "$(dirname "$0")/lib.sh"
@@ -36,7 +36,7 @@ ok "equal files share chunks ($size bytes)" test "$size" -lt $((4 << 20))
 mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines
-(cd "$Q/main" && env LAYR_ROOT="$T/b/store" "$LAYR" line new far main >/dev/null 2>&1)
+(cd "$Q/main" && env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" line new far main >/dev/null 2>&1)
 ok "a chunked file comes back with equal bytes" cmp "$P/main/target/debug/deps/libbig-1111111111111111.rlib" "$Q/far/target/debug/deps/libbig-1111111111111111.rlib"
 ok "and its copy too" cmp "$P/main/target/debug/deps/copy.rlib" "$Q/far/target/debug/deps/copy.rlib"
 eq "a chunked file keeps its time" "$(mtime "$P/main/target/debug/out")" "$(mtime "$Q/far/target/debug/out")"
@@ -60,7 +60,7 @@ ok "a moved and changed file uploads only its new chunks ($added bytes)" test "$
 mkdir -p "$T/c"
 env LAYR_ROOT="$T/c/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 R=$T/c/store/projects/p/lines
-(cd "$R/main" && env LAYR_ROOT="$T/c/store" "$LAYR" line new far main >/dev/null 2>&1)
+(cd "$R/main" && env LAYR_ROOT="$T/c/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" line new far main >/dev/null 2>&1)
 ok "the changed file comes back with equal bytes" cmp "$P/main/target/debug/deps/libbig-2222222222222222.rlib" "$R/far/target/debug/deps/libbig-2222222222222222.rlib"
 ok "and the removed file is gone" test ! -e "$R/far/target/debug/deps/libbig-1111111111111111.rlib"
 
@@ -71,7 +71,7 @@ l save --overlays -q
 l push archive -q
 mkdir -p "$T/d"
 env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
-(cd "$T/d/store/projects/p/lines/main" && env LAYR_ROOT="$T/d/store" "$LAYR" line new far main >/dev/null 2>&1)
+(cd "$T/d/store/projects/p/lines/main" && env LAYR_ROOT="$T/d/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" line new far main >/dev/null 2>&1)
 ok "the changed file has its new content" cmp "$P/main/target/debug/out" "$T/d/store/projects/p/lines/far/target/debug/out"
 ok "an unchanged file is still complete" cmp "$P/main/target/debug/deps/libbig-2222222222222222.rlib" "$T/d/store/projects/p/lines/far/target/debug/deps/libbig-2222222222222222.rlib"
 

@@ -841,7 +841,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
     let mut missing = Vec::new();
     let mut asked = Vec::new();
-    // A plain fetch of a cache overlay: the cache states that no shared line takes stay on the remote, counted.
+    // A plain fetch of a cache overlay: its states stay on the remote, counted.
     let plain_cache = opts.plain_cache_fetch && repo.p.is_overlay();
     let mut stay = 0;
     for id in states.keys() {
@@ -917,7 +917,9 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     }
     if stay > 0 {
         let name = repo.p.name.rsplit_once('%').map_or(repo.p.name.as_str(), |(_, name)| name);
-        report.omitted.push(format!("{stay} cache state(s) stay on the remote; fetch --overlay {name} takes them"));
+        report.omitted.push(format!(
+            "{stay} state(s) stay on the remote; a new line fetches the cache it starts from, fetch --overlay {name} takes them all"
+        ));
     }
     if let Some(api) = api {
         // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).

@@ -1311,6 +1311,8 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     }
     // The copies of build output take minutes: they hold only the lock of each cache overlay.
     drop(lock);
+    // A plain fetch takes only the records of a cache overlay: the caches of the line come now from the store remote.
+    crate::store_remote::fetch_caches_on_demand(ctx, repo, &theirs.head, Some(&theirs));
     let none = std::collections::BTreeSet::new();
     let taken = repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::Line(&theirs), &none)?;
     let folders: Vec<String> = taken.iter().map(|(f, _)| f.clone()).collect();
