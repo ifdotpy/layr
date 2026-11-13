@@ -159,6 +159,14 @@ eq "the refused save leaves git HEAD" "$gc" "$(git rev-parse HEAD)"
 eq "the refused save leaves the line head" "$gh" "$(l rev-parse head)"
 git reset -q --hard $g1
 eq "after a reset to the last export, save builds on it" "$g1" "$(l save -qm "guard 4" >/dev/null 2>&1; git rev-parse HEAD^)"
+# A state can have two commits: an import from Git and the export of layr, and a clone writes the
+# import. HEAD at any commit that layr maps to the head state is layr's own.
+xdb=$LAYR_ROOT/projects/gx/meta/db/layr.sqlite
+alt=$(printf '%040d' 7)
+python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("insert into git_map(state, gcommit) values(?,?)", (sys.argv[2], sys.argv[3])); c.commit()' "$xdb" "$(l rev-parse head | python3 -c 'import sys; d=sys.stdin.read().strip(); print(f"{d[20:28]}-{d[28:32]}-{d[12:16]}-{d[16:20]}-{d[0:12]}")')" "$alt"
+printf '%s\n' "$alt" > .git/HEAD
+echo g5 > guard5.txt; l add guard5.txt
+ok "save accepts HEAD at another commit of the head state" l save -qm "guard 5"
 
 # The same for a git merge in the line.
 cd $LAYR_ROOT && l git clone $R gy -q >/dev/null

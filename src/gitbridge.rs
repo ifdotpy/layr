@@ -2347,7 +2347,10 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
     let Ok(expected) = line_commit(repo, &line.head) else {
         return Ok(());
     };
-    if cur != expected {
+    // A state can have more than one commit: an import from Git and a later export of the same state, or
+    // the exports of two layr versions. A clone writes one of them. Any commit that layr maps to the head
+    // names the same files, so no git command ran.
+    if cur != expected && !repo.p.db.git_commits_of(&line.head)?.contains(&cur) {
         bail!(
             "A git commit, merge, reset or checkout ran in this line ({cur}). layr did not touch the files.\n\
              To keep the files as they are and continue, run:\n  printf '%s\\n' {expected} > .git/HEAD\n\
