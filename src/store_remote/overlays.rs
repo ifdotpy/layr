@@ -580,6 +580,22 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         };
         // The overlay's project lock covers its key records only. The upload (minutes for the first push of a cache)
         // and the sweep run under the lock of the remote folder, so `line new` and `save --overlays` do not wait.
+        // A key change deletes the old epoch: the kept caches come here first, before the lock (`restore_kept`).
+        let regenerable = repo.regenerable_overlay(&name)?;
+        let manager = match authorities.get(&name) {
+            Some(authority) => authority.machines.contains(&store.machine),
+            None => crate::overlay_managers::of(repo, &name)?.machines.contains(&store.machine),
+        };
+        let kept_old = match remote.get(&name) {
+            Some(old)
+                if regenerable
+                    && manager
+                    && rotates(&orepo, previous_key(repo, &orepo, Some(old), &descriptor.recipient, &trusted)?.as_ref())? =>
+            {
+                Some(restore_kept(store, repo, &orepo, &name, old)?)
+            }
+            _ => None,
+        };
         let lock = orepo.p.lock()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
@@ -589,17 +605,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         let overlay_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
         authority.validate(&overlay_lines, &orepo.p.id, &trusted)?;
         let readers = key_readers(&orepo);
-        let mut previous = remote.get(&name).cloned();
-        // A record whose publication was interrupted remains the source of its retry.
-        for line in orepo.p.effective_jsonl()?.lines() {
-            let rec = oplog::parse_line(line, None)?.record;
-            if rec.op == "overlay.key" && rec.data["store"].as_str() == Some(&descriptor.recipient) {
-                let next = parse(line, &repo.p.id, &descriptor.recipient, &trusted)?;
-                if previous.as_ref().is_none_or(|old| next.order() > old.order()) {
-                    previous = Some(next);
-                }
-            }
-        }
+        let previous = previous_key(repo, &orepo, remote.get(&name), &descriptor.recipient, &trusted)?;
         let revocation = orepo.p.db.overlay_config("overlay.revocation")?.and_then(|value| value.as_str().map(str::to_owned));
         let access_mode = super::epochs::overlay_mode(&orepo)?;
         if hidden && access_mode != layr_store::epochs::Mode::Private {
@@ -614,11 +620,17 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             continue;
         }
         // A key change starts an epoch that has only the states present here, and the push deletes the trees of the
-        // older epochs: the caches that eviction took from this machine come back from the old epoch first, or the
-        // remote would lose them (`cmd::admin::evict_caches`). A cache that does not come back stops this push.
-        if rotate {
-            if let Some(old) = remote.get(&name) {
-                restore_evicted(store, repo, &orepo, &name, old)?;
+        // older epoch: each kept cache of the old epoch must be here now (`restore_kept` before the lock). gc can evict
+        // one meanwhile, and the key can change after the check: the push stops then, and the key stays.
+        if rotate && regenerable && manager && remote.contains_key(&name) {
+            let Some(kept_old) = &kept_old else {
+                bail!("overlay {name}: the key changed while the push ran; run the push again");
+            };
+            if let Some(gone) = kept_old.iter().find(|id| !orepo.p.has_state(id)) {
+                bail!(
+                    "overlay {name}: kept cache state {} went from this machine before the key change; run the push again",
+                    crate::ids::short(gone)
+                );
             }
         }
         let published = if rotate {
@@ -805,6 +817,16 @@ fn key_readers(orepo: &Repo) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The key epoch that the store `store` publishes now for each overlay of `repo` (by name), from one key listing
+/// (`published`).
+pub(super) fn published_epochs(store: &Store, repo: &Repo, recipient: &str) -> Result<BTreeMap<String, String>> {
+    let trusted = trusted_keys(repo)?;
+    let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+    let authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    let (layers, _) = published(&store.backend, &repo.p.id, recipient, &trusted, &authorities)?;
+    Ok(layers.into_iter().map(|(name, layer)| (name, layer.key.epoch)).collect())
+}
+
 /// The key epoch of the overlay `orepo` in the store whose root recipient is `store`, when no key change waits: the
 /// epoch of the newest local `overlay.key` record for that store. None when there is no such record, or when the
 /// next push starts a new epoch (`rotation_due`): eviction then counts no copy in that store
@@ -855,28 +877,72 @@ pub(crate) fn restore_overlay_state(ctx: &Ctx, parent: &Repo, orepo: &Repo, name
     Ok(())
 }
 
-/// Before a key change: restore from the epoch of `old` the cache states of `orepo` that eviction took from this
-/// machine (`cmd::admin::evicted_caches`) and that the records still keep, so the push sends them to the new epoch.
-fn restore_evicted(store: &Store, repo: &Repo, orepo: &Repo, name: &str, old: &Published) -> Result<()> {
+/// Before a key change of the cache overlay `orepo` (overlay `name` of `repo`): the push deletes the trees of the old
+/// epoch, and the new epoch gets only the states that are here. So every state that the records keep
+/// (`cache_kept`) and that the old epoch `old` holds comes here first: the caches that gc evicted here
+/// (`cmd::admin::evict_caches`) and the caches of other machines that this machine never fetched. A tree in the old
+/// epoch whose record is not here yet (another machine pushed it after this machine's last fetch) stops the push:
+/// fetch first. Runs before the overlay lock. Returns the kept states of the old epoch, which the caller checks again
+/// under the lock (`kept_here`).
+fn restore_kept(store: &Store, repo: &Repo, orepo: &Repo, name: &str, old: &Published) -> Result<Vec<String>> {
     let kept = repo.cache_kept(name)?.unwrap_or_default();
-    let ids: Vec<String> = crate::cmd::admin::evicted_caches(orepo)?
-        .into_iter()
-        .filter(|id| kept.contains(id) && !orepo.p.has_state(id) && orepo.p.db.state(id).ok().flatten().is_some())
-        .collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
     let identity = layer_identity(store, &orepo.p.id, old)?;
     let scoped = layer(store, old, identity, false)?;
-    reader::restore_states(&scoped, orepo, &ids).with_context(|| {
-        format!(
-            "overlay {name}: {} cache state(s) that gc evicted here must come back before the key change, and did not; \
-             the key stays, run the push again when the store gives them",
-            ids.len()
-        )
-    })?;
-    eprintln!("layr: overlay {name}: fetched {} evicted cache state(s) back before the key change", ids.len());
-    Ok(())
+    let mut in_old = Vec::new();
+    for id in reader::attempts(&scoped.backend)?.into_keys() {
+        if orepo.p.db.state(&id)?.is_none() {
+            bail!(
+                "overlay {name}: the old key epoch holds cache state {} whose record is not here; run layr fetch first, \
+                 then the push that changes the key",
+                crate::ids::short(&id)
+            );
+        }
+        if kept.contains(&id) {
+            in_old.push(id);
+        }
+    }
+    let missing: Vec<String> = in_old.iter().filter(|id| !orepo.p.has_state(id)).cloned().collect();
+    if !missing.is_empty() {
+        reader::restore_states(&scoped, orepo, &missing).with_context(|| {
+            format!(
+                "overlay {name}: {} kept cache state(s) must come here before the key change, and did not; the key \
+                 stays, run the push again when the store gives them",
+                missing.len()
+            )
+        })?;
+        eprintln!("layr: overlay {name}: fetched {} kept cache state(s) before the key change", missing.len());
+    }
+    Ok(in_old)
+}
+
+/// The key that the next push of the overlay `orepo` builds on: the newest of the key that the store publishes
+/// (`remote`) and the local `overlay.key` records for the store `recipient` (a record whose publication was
+/// interrupted is the source of its retry).
+fn previous_key(
+    repo: &Repo,
+    orepo: &Repo,
+    remote: Option<&Published>,
+    recipient: &str,
+    trusted: &BTreeMap<String, VerifyingKey>,
+) -> Result<Option<Published>> {
+    let mut previous = remote.cloned();
+    for line in orepo.p.effective_jsonl()?.lines() {
+        let rec = oplog::parse_line(line, None)?.record;
+        if rec.op == "overlay.key" && rec.data["store"].as_str() == Some(recipient) {
+            let next = parse(line, &repo.p.id, recipient, trusted)?;
+            if previous.as_ref().is_none_or(|old| next.order() > old.order()) {
+                previous = Some(next);
+            }
+        }
+    }
+    Ok(previous)
+}
+
+/// Whether the next push of the overlay `orepo` after the key `previous` starts a new key epoch (`rotation_due`).
+fn rotates(orepo: &Repo, previous: Option<&Published>) -> Result<bool> {
+    let revocation = orepo.p.db.overlay_config("overlay.revocation")?.and_then(|value| value.as_str().map(str::to_owned));
+    let access_mode = super::epochs::overlay_mode(orepo)?;
+    Ok(previous.is_none_or(|old| rotation_due(&old.key, &key_readers(orepo), revocation.as_deref(), access_mode)))
 }
 
 /// The overlay and epoch of each overlay key object in `objects` (`overlays/<overlay>/keys/<epoch>-<record>.<ext>`).

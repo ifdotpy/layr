@@ -127,7 +127,7 @@ A cache state of a cache overlay is evicted by other rules, because a cache is t
 overlay and its `head` and `undo` owners (the recent caches of an overlay line) are no reason to keep
 a copy on every machine. With `gc.evict on`, `gc --repair` evicts a cache state when a successful
 push record of the overlay, of this machine or of the machine that made the state, names it with
-the URL, the store recipient and the current key epoch of a store remote of the project (and this
+the URL, the store recipient and the key epoch that a store remote of the project publishes now (and this
 machine has read that store), no key change waits, the records keep it, and the store format can
 restore its tree. It keeps the overlay's empty first state, the newest cache of each line whose
 working folder is on this machine, and a state with a `pin`, `park`, `keep`, `auto` or `deleted`

@@ -564,47 +564,98 @@ pub fn cache_on_store_remote(repo: &Repo, orepo: &Repo, id: &str) -> Result<bool
     Ok(false)
 }
 
-/// The cache states of the overlay `orepo` of `repo` that a store remote of the project holds, for eviction
-/// (`gc.evict on`, docs/cache-overlays.md, "Eviction"). A state counts when a successful push record of the overlay
-/// names it, and the record:
+/// A store remote of the project as eviction sees it (`cache_stores`): the URL that push records name, the store
+/// recipient that the project pins, and the key epoch that the store publishes now for each overlay (by name). None:
+/// the store has no key epochs (a plain layer of Layr Cloud).
+pub struct CacheStore {
+    url: String,
+    recipient: String,
+    epochs: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// The store remotes of the project whose copies eviction may count (`gc.evict on`, `cmd::admin::evict_caches`):
+/// this machine has read the store with its own key (`mark_read`), the project pins its recipient, and the key
+/// listing of the store reads now. The listing is read once per store, before the project lock: the epoch that
+/// counts is the one the store publishes, not the newest key record here (another machine may have changed the key
+/// and deleted the older epochs since this machine read its records). A store that cannot be read counts nothing,
+/// with a warning.
+pub fn cache_stores(ctx: &Ctx, repo: &Repo) -> Vec<CacheStore> {
+    let mut out = Vec::new();
+    let Ok(names) = store_remote_names(repo) else { return out };
+    for name in names {
+        let read = (|| -> Result<Option<CacheStore>> {
+            let url = crate::cmd::remote::remote_url(repo, &name)?;
+            if !store_dir(repo, &url).join("read").is_file() {
+                return Ok(None);
+            }
+            let Some(pin) = repo
+                .p
+                .config_value(&format!("cloud.remote.{name}.store"))?
+                .and_then(|v| serde_json::from_value::<StorePin>(v).ok())
+            else {
+                return Ok(None);
+            };
+            let mut store = open_named(&name, repo)?;
+            store.configure(ctx, &ConfigureOptions::default())?;
+            let epochs = if store.is_api() {
+                None
+            } else {
+                let descriptor = store.root_descriptor()?;
+                anyhow::ensure!(descriptor.recipient == pin.recipient, "the store has another recipient than its pin");
+                Some(overlays::published_epochs(&store, repo, &descriptor.recipient)?)
+            };
+            Ok(Some(CacheStore { url: layr_model::operations::public_url(&url), recipient: pin.recipient, epochs }))
+        })();
+        match read {
+            Ok(Some(found)) => out.push(found),
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: gc: store remote {name} cannot be read ({e:#}); no cache counts as held by it"),
+        }
+    }
+    out
+}
+
+/// The cache states of the overlay `orepo` (overlay `name` of `repo`) that a store remote of the project holds, for
+/// eviction (`gc.evict on`, docs/cache-overlays.md, "Eviction"). A state counts when a successful push record of the
+/// overlay names it, and the record:
 /// - is of this machine or of the machine that made the state;
-/// - names the URL of a store remote that the project has now, and this machine has read that store with its own
-///   key (`mark_read`);
+/// - names the URL of a store in `stores` (`cache_stores`);
 /// - names the store by its recipient, and that is the recipient that the project pins for the remote
 ///   (`cloud.remote.<name>.store`): a store made again at the same URL, or a path that names another disk, differs;
-/// - names the key epoch that the store publishes now, with no key change waiting (`overlays::settled_epoch`): a key
-///   change deletes the trees of the older epochs.
+/// - names the key epoch that the store publishes now, and that is also the newest key here with no key change
+///   waiting (`overlays::settled_epoch`): a key change deletes the trees of the older epochs.
 ///
 /// The overlay keeps no remotes of its own: the URLs and pins come from the project.
-pub fn cache_store_copies(repo: &Repo, orepo: &Repo) -> Result<std::collections::BTreeSet<String>> {
+pub fn cache_store_copies(
+    repo: &Repo,
+    orepo: &Repo,
+    name: &str,
+    stores: &[CacheStore],
+) -> Result<std::collections::BTreeSet<String>> {
     // URL (as a record writes it) to the store recipient and the epoch that count there.
-    let mut stores: std::collections::BTreeMap<String, (String, Option<String>)> = std::collections::BTreeMap::new();
-    for name in store_remote_names(repo)? {
-        let url = crate::cmd::remote::remote_url(repo, &name)?;
-        if !store_dir(repo, &url).join("read").is_file() {
+    let mut counted: std::collections::BTreeMap<&str, (&str, Option<String>)> = std::collections::BTreeMap::new();
+    for store in stores {
+        let published = match &store.epochs {
+            None => None,
+            Some(epochs) => match epochs.get(name) {
+                Some(epoch) => Some(epoch.clone()),
+                None => continue,
+            },
+        };
+        if overlays::settled_epoch(orepo, &store.recipient)? != Some(published.clone()) {
             continue;
         }
-        let Some(pin) = repo
-            .p
-            .config_value(&format!("cloud.remote.{name}.store"))?
-            .and_then(|v| serde_json::from_value::<StorePin>(v).ok())
-        else {
-            continue;
-        };
-        let Some(epoch) = overlays::settled_epoch(orepo, &pin.recipient)? else { continue };
-        stores.insert(layr_model::operations::public_url(&url), (pin.recipient, epoch));
+        counted.insert(&store.url, (&store.recipient, published));
     }
     let mut held = std::collections::BTreeSet::new();
-    if stores.is_empty() {
+    if counted.is_empty() {
         return Ok(held);
     }
     let here = &repo.p.store.machine.id;
     for rec in orepo.p.db.records_with_op("push")? {
         let data = &rec.data;
-        let Some((recipient, epoch)) = data["url"].as_str().and_then(|url| stores.get(url)) else { continue };
-        if data["result"] != "success"
-            || data["store"].as_str() != Some(recipient.as_str())
-            || data["epoch"].as_str() != epoch.as_deref()
+        let Some((recipient, epoch)) = data["url"].as_str().and_then(|url| counted.get(url)) else { continue };
+        if data["result"] != "success" || data["store"].as_str() != Some(*recipient) || data["epoch"].as_str() != epoch.as_deref()
         {
             continue;
         }

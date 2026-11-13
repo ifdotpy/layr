@@ -262,10 +262,14 @@ There are two kinds of remote:
   - The record names the store recipient (`store`), and it is the recipient that the project pins
     for that remote (`cloud.remote.<name>.store`). A store made again at the same URL, or a path
     that names another disk on another machine, has another recipient.
-  - The record names the key epoch (`epoch`), and it is the epoch of the newest local `overlay.key`
-    record for that store, with no key change waiting (`overlays::settled_epoch`): a reader
-    removal, a new revocation or a closer access mode makes the next push start a new epoch, and
-    that push deletes the trees of the older epochs. A plain layer of Layr Cloud has no epochs.
+  - The record names the key epoch (`epoch`), and it is the epoch that the store publishes now. `gc`
+    reads the key listing of each store once, before the lock (`store_remote::cache_stores`): another
+    machine can have changed the key and deleted the older epochs since this machine read its
+    records. A store that cannot be read counts nothing, with a warning. The epoch must also be
+    the newest local `overlay.key` record for that store, with no key change waiting here
+    (`overlays::settled_epoch`): a reader removal, a new revocation or a closer access mode makes
+    the next push start a new epoch, and that push deletes the trees of the older epochs. A plain
+    layer of Layr Cloud has no epochs.
   - The records keep it (`cache_kept`: the newest `history` states of each live line, all of them
     without `history`), so a push or `gc --remote` does not delete it on the remote.
   - The store format can restore its tree exactly.
@@ -273,16 +277,18 @@ There are two kinds of remote:
   These stay: the empty first state; the newest cache of each line whose working folder is on this
   machine (the folder is a clone of it, so its blocks are shared and nothing would be freed); a
   state with a `pin`, `park`, `keep`, `auto` or `deleted` owner. An `undo` owner does not keep a
-  cache: the undo ring of an overlay line names its recent caches. The record stays, and the
-  evicted state is listed in `meta/evicted` of the overlay. A command that takes an evicted cache
+  cache: the undo ring of an overlay line names its recent caches. The record stays. A command that takes an evicted cache
   (`line new`, `merge`, `merge --overlays-only`, a check copy, `follow`) fetches it back on
   demand; when the remote cannot give it, the folder starts cold with a warning. A cache that gc
   evicts after the command chose it and before its pin is not taken: the folder starts cold.
   Any other read of the tree (`Repo::check_state`) restores it from the layer that a store remote
   of the project publishes (`store_remote::restore_state`). A push that starts a new key epoch
-  first restores, from the old epoch, the listed caches that the records keep, so that the new
-  epoch has them before the push deletes the old one; when one does not come, the push of that
-  overlay stops and the key stays. `gc --repair` prints the number of evicted cache states and the
+  first restores, from the old epoch and before the overlay lock, every state of the old epoch
+  that the records keep and that is not here: the caches that gc evicted here and the caches of
+  other machines that this machine never fetched. The new epoch then has them before the push
+  deletes the old one. A tree in the old epoch whose record is not here yet stops the push (fetch
+  first); a cache that does not come, or that goes again before the lock, stops the push of that
+  overlay, and the key stays. `gc --repair` prints the number of evicted cache states and the
   bytes that only their trees held. Test: `tests/t253-evict-cache-states.sh`.
   `layr fsck --caches --remote <name>` lists what
   the pass would delete (exit 1 when there is something); `layr gc --remote <name>` runs it. A

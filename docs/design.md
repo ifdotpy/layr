@@ -163,10 +163,11 @@ command reads it.
   must."): the cache states of a cache overlay are evicted too, by their own rules
   (`cmd::admin::evict_caches`, docs/cache-overlays.md, "Eviction"). The remote copy counts by the
   push records of the overlay, which name the store recipient and the key epoch, against the store
-  remotes and pins of the project (`store_remote::cache_store_copies`). The newest cache of a line
+  remotes and pins of the project and the key epoch that each store publishes now
+  (`store_remote::cache_stores`, `store_remote::cache_store_copies`). The newest cache of a line
   with a working folder here stays. A command that takes an evicted cache fetches it on demand
   (`store_remote::fetch_caches_on_demand`), any other read restores it
-  (`store_remote::restore_state`), and a push that changes the key restores the evicted caches first.
+  (`store_remote::restore_state`), and a push that changes the key first restores every kept cache that is not here.
 - Kept on disk even when recoverable: a line head, the newest automatic state of a line, a state
   with caches, a state that a cache overlay names, and a base that a state on disk needs. On APFS
   a base is a thin layer that a layer chain of a remaining state reads (`thin::delete_states`).

@@ -74,6 +74,27 @@ has "it says that the cache did not come" "caches not fetched from the store rem
 no "and starts cold" test -e "$P/cold/target/side.bin"
 rm -f "$LAYR_ROOT"/projects/p/meta/remote-stores/*/on-demand.json
 
+# Another machine B, trusted and a key manager, pushes a cache that this machine never fetches (a plain fetch takes
+# only the records of a cache overlay).
+read bid bkey <<<"$(env LAYR_ROOT="$T/b/store" "$LAYR" remote self --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["public_key"])')"
+aid=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+l remote trust cloud "$bid" --public-key "$bkey" >/dev/null
+l overlay managers "$TG" "machine:$aid" "machine:$bid" >/dev/null
+l push cloud -q >/dev/null 2>&1
+bl() { env LAYR_ROOT="$T/b/store" "$LAYR" "$@"; }
+bl clone "file://$T/archive" p -q >/dev/null 2>&1
+B=$T/b/store/projects/p/lines
+(cd "$B/main" && bl line new bl main >/dev/null 2>&1)
+cd "$B/bl" || exit 1
+echo sb > sb.txt; bl add sb.txt >/dev/null; bl save -qm sb
+sb=$(bl rev-parse head)
+mkdir -p target; head -c 300000 /dev/urandom > target/b.bin; cp target/b.bin "$T/b.bin"; bl save --overlays -q
+cb=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT head FROM lines WHERE name=?", ("bl",)).fetchone()[0])' "$T/b/store/projects/p/meta/overlays/$TG/meta/db/layr.sqlite")
+bl push origin -q >/dev/null 2>&1
+cd "$P/main" || exit 1
+l fetch cloud -q >/dev/null 2>&1
+eq "this machine has the record of B's cache and not its tree" 0 "$(present "$cb")"
+
 # Key epochs: a reader removal starts a new epoch at the next push, and that push deletes the trees of the old epoch.
 epochs() { find "$T/archive/overlays" -path '*/epochs/*' -name '*.tree.age' | sed 's|.*/epochs/\([^/]*\)/.*|\1|' | sort -u | wc -l | tr -d ' '; }
 cd "$P/side" || exit 1
@@ -93,10 +114,11 @@ eq "while a key change waits, gc evicts no cache" 1 "$(present "$c4")"
 eq "one epoch has cache states before the key change" 1 "$(epochs)"
 out=$(l push cloud 2>&1); code=$?
 eq "the push of the key change works" 0 "$code"
-has "it fetches the evicted cache back before the key change" "fetched 1 evicted cache state(s) back before the key change" "$out"
+has "it fetches the evicted cache and the cache of B back before the key change" "kept cache state(s) before the key change" "$out"
 has "and deletes the old epoch" "of older key epochs" "$out"
 eq "only the new epoch has cache states" 1 "$(epochs)"
 eq "the evicted cache is here again" 1 "$(present "$c1")"
+eq "and the cache of B" 1 "$(present "$cb")"
 out=$(l gc --repair 2>&1)
 has "the push to the new epoch counts: gc evicts again" "cache state(s) that a store remote holds" "$out"
 eq "c1 is evicted" 0 "$(present "$c1")"
@@ -113,7 +135,27 @@ has "a new line from s3 fetches the evicted cache" "fetching the cache of $TG fr
 eq "the cache has its tree again" 1 "$(present "$c4")"
 ok "and the new line starts warm with it" cmp -s "$T/side4.bin" "$P/after/target/side4.bin"
 no "and without the later caches" test -e "$P/after/target/side5.bin"
+out=$(l line new fromb "$sb" 2>&1)
+has "a new line from B's state fetches B's cache from the new epoch" "fetching the cache of $TG from cloud" "$out"
+ok "and starts warm with it" cmp -s "$T/b.bin" "$P/fromb/target/b.bin"
 l line delete -D after >/dev/null 2>&1
 l gc --repair -q >/dev/null 2>&1
 eq "the cache that a deleted line showed stays: an undelete reads it" 1 "$(present "$c4")"
+
+# B changes the key and deletes the old epoch; this machine has not fetched B's key record yet. Its push records of
+# the old epoch must not count: gc reads the epoch that the store publishes.
+cd "$P/side" || exit 1
+head -c 400000 /dev/urandom > target/side6.bin; l save --overlays -q
+c6=$(head_of side)
+l push cloud -q >/dev/null 2>&1
+echo s5 > s5.txt; l add s5.txt >/dev/null; l save -qm s5
+head -c 1000 /dev/urandom > target/side7.bin; l save --overlays -q
+cd "$B/bl" || exit 1
+bl fetch origin -q >/dev/null 2>&1
+bl overlay readers "$TG" "machine:$aid" "machine:$bid" >/dev/null 2>&1
+out=$(bl push origin 2>&1)
+has "B's push changes the key and deletes the old epoch" "of older key epochs" "$out"
+cd "$P/main" || exit 1
+l gc --repair -q >/dev/null 2>&1
+eq "a cache pushed to the epoch that B deleted stays here" 1 "$(present "$c6")"
 finish

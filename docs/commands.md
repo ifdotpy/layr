@@ -352,7 +352,8 @@ goes when no local owner of the strong kinds (head, auto, undo, deleted, park, o
 it, no cache or cache overlay needs it, and the store format can restore its tree exactly. Its record stays, and a read fetches the tree back.
 `gc.evict on` also evicts the cache states of the cache overlays (for example `target.macos-aarch64`). A cache
 state goes when a successful push of the overlay, from this machine or from the machine that made the state,
-sent it to a store remote of the project in the key epoch that the remote publishes now; the remote still has
+sent it to a store remote of the project in the key epoch that the remote publishes now (gc reads the key listing
+of each store remote; a store that cannot be read counts nothing); the remote still has
 the recorded URL and the store recipient that the project pins; no key change waits (a reader removal, a new
 revocation, a closer access mode); the remote keeps it (the records keep it); and no working folder on this
 machine uses it now. These stay: the newest cache of each line with a working folder, a cache that no push sent,
@@ -360,7 +361,8 @@ a state that a reader pins, and a state that unsaved work or a deleted line keep
 `deleted` owners). `line new`, `merge`, `merge --overlays-only`, a check copy and `follow` fetch an evicted cache
 back when they take it; when the remote cannot give it, the folder starts cold with a warning. Any other read of
 the tree (`layr undo`, `overlay show`) restores it from a store remote of the project. A push that starts a new
-key epoch first fetches back the caches that gc evicted here, so the new epoch has them before the old one goes.
+key epoch first fetches every kept cache that is not here (evicted here, or made on another machine), so the new
+epoch has them before the old one goes.
 `gc --repair` prints `evicted <n> state(s) and <m> cache state(s) that a store remote holds, at least <bytes>
 freed`: the blocks that no other file shares (as `layr du` counts them); blocks that only evicted states share
 are not counted.

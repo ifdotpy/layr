@@ -1462,7 +1462,7 @@ struct Evicted {
 /// a read fetches the tree back. A state that a cache overlay names, a state with caches, and
 /// the bases of layers that stay are kept. The cache states of the cache overlays go by their own
 /// rules (`evict_caches`). Off by default: nothing is evicted then.
-fn evict_stored(repo: &Repo) -> Result<Evicted> {
+fn evict_stored(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Result<Evicted> {
     let mut out = Evicted::default();
     if !repo.p.gc_evicts() {
         return Ok(out);
@@ -1491,7 +1491,7 @@ fn evict_stored(repo: &Repo) -> Result<Evicted> {
     out.states = gone;
     out.bytes = bytes;
     if !repo.p.is_overlay() {
-        let (gone, bytes) = evict_caches(repo)?;
+        let (gone, bytes) = evict_caches(repo, stores)?;
         out.caches = gone;
         out.bytes += bytes;
     }
@@ -1509,7 +1509,8 @@ fn drop_trees_measured(repo: &Repo, ids: &[String]) -> Result<(usize, u64)> {
 /// Eviction of cache states (`gc.evict on`, docs/cache-overlays.md, "Eviction"): a cache is the
 /// content of an overlay, and a machine keeps only what it uses now. A cache state of a cache overlay
 /// loses its local tree when:
-/// - a store remote holds it in the key epoch that the store publishes now, with no key change waiting
+/// - a store remote holds it in the key epoch that the store publishes now (read from the store before
+///   the lock, `store_remote::cache_stores`), with no key change waiting here
 ///   (`store_remote::cache_store_copies`);
 /// - the records keep it (`cache_kept`: the newest `history` states of each live line, all of them
 ///   without `history`), so a push or `gc --remote` does not delete it on the remote;
@@ -1523,10 +1524,9 @@ fn drop_trees_measured(repo: &Repo, ids: &[String]) -> Result<(usize, u64)> {
 /// command that takes the cache later (`line new`, merge, a check copy, follow) fetches it back
 /// (`store_remote::fetch_caches_on_demand`); when that fails, the folder starts cold. Any other read
 /// of the tree (`layr undo`, `overlay show`) restores it from a store remote of the project
-/// (`store_remote::restore_state`). Each evicted state is listed in `evicted` of the overlay
-/// (`evicted_caches`): a key change brings it back first (`store_remote::overlays::push`). Returns the
-/// states that went and their bytes.
-fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
+/// (`store_remote::restore_state`). A push that changes the key first restores every kept cache that
+/// is not here (`store_remote::overlays::push`). Returns the states that went and their bytes.
+fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Result<(usize, u64)> {
     let (mut gone, mut bytes) = (0, 0);
     let lines = repo.lines()?;
     for name in repo.overlay_names()? {
@@ -1536,7 +1536,7 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
         let Some(info) = repo.overlay_info(&name)? else { continue };
         let Ok(orepo) = repo.overlay_repo(&name) else { continue };
         let _lock = orepo.p.lock()?;
-        let held = crate::store_remote::cache_store_copies(repo, &orepo)?;
+        let held = crate::store_remote::cache_store_copies(repo, &orepo, &name, stores)?;
         if held.is_empty() {
             continue;
         }
@@ -1569,45 +1569,11 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
             }
             evict.push(id);
         }
-        if evict.is_empty() {
-            continue;
-        }
-        // The list is written before the trees go: a crash between leaves a name too many, which a later read
-        // drops (`evicted_caches` lists only absent states).
-        let mut listed = evicted_caches(&orepo)?;
-        listed.extend(evict.iter().cloned());
-        write_evicted(&orepo, &listed)?;
         let (n, b) = drop_trees_measured(&orepo, &evict)?;
         gone += n;
         bytes += b;
     }
     Ok((gone, bytes))
-}
-
-fn evicted_path(orepo: &Repo) -> std::path::PathBuf {
-    orepo.p.meta_dir().join("evicted")
-}
-
-/// The cache states of the overlay `orepo` that eviction took from this machine and that are still not here (one id
-/// a line in `meta/evicted` of the overlay). A state that came back, or whose record is gone, is left out.
-pub(crate) fn evicted_caches(orepo: &Repo) -> Result<BTreeSet<String>> {
-    let text = match std::fs::read_to_string(evicted_path(orepo)) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut out = BTreeSet::new();
-    for id in text.lines().filter(|l| !l.is_empty()) {
-        if !orepo.p.has_state(id) && orepo.p.db.state(id)?.is_some() {
-            out.insert(id.to_string());
-        }
-    }
-    Ok(out)
-}
-
-fn write_evicted(orepo: &Repo, ids: &BTreeSet<String>) -> Result<()> {
-    let text: String = ids.iter().map(|id| format!("{id}\n")).collect();
-    fsutil::atomic_write(&evicted_path(orepo), text.as_bytes(), 0o600)
 }
 
 /// The project states that a cache overlay names through its heads and records: eviction and
@@ -1747,6 +1713,8 @@ fn repair_project(
     // without the lock rather than replaying records while other commands wait.
     let mut attempts = 0;
     let evicted: Evicted;
+    // The key epochs that the store remotes publish now, read before the lock (network).
+    let stores = if repo.p.gc_evicts() && !repo.p.is_overlay() { crate::store_remote::cache_stores(ctx, repo) } else { Vec::new() };
     let leaks = loop {
         attempts += 1;
         let (mark, diff) = {
@@ -1775,7 +1743,7 @@ fn repair_project(
             anyhow::bail!("project changed during the command; run it again");
         }
         let leaks = repair_table(repo, free, Some(diff))?;
-        evicted = evict_stored(repo)?;
+        evicted = evict_stored(repo, &stores)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
