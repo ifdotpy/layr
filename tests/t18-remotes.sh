@@ -158,7 +158,7 @@ cd "$A/lines/main"
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/before-states"
 echo uncommitted > "$A/lines/doomed/uncommitted.txt"
-l line delete -D doomed >/dev/null
+l line delete -D --discard doomed >/dev/null
 deleted=$(l op log --all -n 1 --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/after-states"

@@ -68,7 +68,7 @@ export LAYR_ROOT=$original_root LAYR_PROJECT=project
 cd "$original_root/projects/project/lines/temporary"
 printf 'unfinished work\n' >> notes.txt
 cd "$original_root/projects/project/lines/main"
-l line delete -D temporary
+l line delete -D --discard temporary
 l op export > "$T/deletion-records"
 final=$(python3 - "$T/deletion-records" <<'PYCODE'
 import json,sys

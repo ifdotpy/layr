@@ -84,7 +84,7 @@ no "the freed state is not read" l show "$Z:notes.txt"
 
 # 3. An overlap compare: the other line's head moves away while status compares it.
 cd $M/main || exit 1
-l line delete -D w >/dev/null 2>&1
+l line delete -D --discard w >/dev/null 2>&1
 l line new -q a >/dev/null
 l line new -q b >/dev/null
 cd $M/a || exit 1

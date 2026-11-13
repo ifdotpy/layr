@@ -202,7 +202,7 @@ ok "no view is left" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"
 # Delete a virtual line with unsaved work: the work goes into its final state.
 ok "a second virtual line" l line new v2 --view virtual
 echo unsaved > "$P/lines/v2/unsaved.txt"
-ok "line delete -D of a virtual line" l line delete -D v2
+ok "line delete -D of a virtual line" l line delete -D --discard v2
 no "the mount is gone" bash -c "mount | grep -q '$P/lines/v2 (layrfs'"
 ok "the line folder is gone" test ! -e "$P/lines/v2"
 ok "the view folder is gone" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"

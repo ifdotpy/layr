@@ -50,7 +50,7 @@ eq "gc check is clean with pushed work and build output" 0 "$(l gc >/dev/null 2>
 eq "the newest automatic state of a live line stays" 1 "$(present "$built2")"
 eq "an older automatic state with pushed work stays inside the rings" 1 "$(present "$built")"
 
-l line delete -D w u np -q >/dev/null
+l line delete -D --discard w u np -q >/dev/null
 eq "a deleted line frees its older automatic state, pushed work or not" 0 "$(present "$built")"
 eq "a deleted line keeps its final working state in the undo.deleted ring" 1 "$(present "$npbuilt")"
 eq "an automatic state with unsaved work stays in the undo ring" 1 "$(present "$unsaved")"

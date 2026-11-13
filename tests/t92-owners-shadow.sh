@@ -66,7 +66,7 @@ l fsck --repair >/dev/null
 eq "fsck --repair rewrites the owners" "0 problem(s)" "$(l fsck | tail -1)"
 
 # Line delete, then undo of the delete.
-l line delete -D w
+l line delete -D --discard w
 check "line delete"
 l undo >/dev/null
 check "undo of line delete"
