@@ -176,7 +176,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> (--code <join code>|--code-file <path>) --project <a,b> [--name <runner name>] [--no-start] [--json]\n       layr checks run --state <rev> [--required-checks <names> | --planned-only] [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--passing] [--required-checks <names>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> (--code <join code>|--code-file <path>) --project <a,b> [--name <runner name>] [--no-start] [--json]\n       layr checks run --state <rev> [--required-checks <names> | --planned-only] [--only <names>] [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--passing] [--required-checks <names>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // `join`: make this store a check runner of a Layr Cloud gateway (src/runner.rs).
@@ -193,7 +193,8 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--interval")
             .value("--state")
             .value("--platform")
-            .value("--required-checks"),
+            .value("--required-checks")
+            .value("--only"),
         args,
     )?;
     if a.pos == ["pending"]
@@ -213,6 +214,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
         || a.get("--platform").is_some()
         || a.has("--passing")
         || (a.get("--required-checks").is_some() && !run)
+        || (a.get("--only").is_some() && !run)
         || (a.has("--planned-only") && (!run || a.get("--required-checks").is_some()))
     {
         return Err(exit(128, USAGE));
@@ -234,15 +236,16 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.require(ctx, "try")?;
     let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let required = required_checks(a.get("--required-checks"), state.as_deref(), true)?;
-    // Match the queue runner: one watcher per project without holding the project write lock.
-    let lock =
-        std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(h.repo.p.meta_dir().join("checks.lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("a check watcher is already active for this project")?;
+    let only = only_checks(a.get("--only"))?;
+    // Match the queue runner: one watcher per project without holding the project write lock. A run
+    // with --only shares the project lock with other --only runs and takes the lock of each check it
+    // names, so a CI runner can run different checks of one state in parallel processes.
+    let _locks = checks_locks(&h.repo.p.meta_dir(), &only)?;
     loop {
         let h = here(ctx)?;
         h.repo.require(ctx, "try")?;
-        let results = scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref(), &required, a.has("--planned-only"))?;
+        let results =
+            scan(ctx, &h.repo, a.has("--privileged-only"), state.as_deref(), &required, &only, a.has("--planned-only"))?;
         if a.has("--json") {
             outln!(
                 ctx,
@@ -349,6 +352,49 @@ struct Plan {
 }
 
 /// `state`: also plan the change checks (`checks.changes`) of that one state.
+/// `--only <name,...>`: the checks that this run may start; none means all of them.
+fn only_checks(value: Option<&str>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() {
+        bail!("--only needs a comma-separated list of check names");
+    }
+    let mut names = Vec::new();
+    for name in value.split(',') {
+        crate::oci::valid_component(name)?;
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+/// The locks of a check executor. Without `only`: `meta/checks.lock` exclusive, one executor per
+/// project. With `only`: that lock shared, and `meta/checks-<name>.lock` exclusive for each name, so
+/// runs of other checks go on in parallel and a full executor waits for none of them but starts
+/// only when no run is left.
+fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<std::fs::File>> {
+    use rustix::fs::FlockOperation;
+    let open = |name: &str| std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join(name));
+    let project = open("checks.lock")?;
+    if only.is_empty() {
+        rustix::fs::flock(&project, FlockOperation::NonBlockingLockExclusive)
+            .context("a check watcher is already active for this project")?;
+        return Ok(vec![project]);
+    }
+    rustix::fs::flock(&project, FlockOperation::NonBlockingLockShared)
+        .context("a check watcher is already active for this project")?;
+    let mut locks = vec![project];
+    for name in only {
+        let lock = open(&format!("checks-{name}.lock"))?;
+        rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
+            .with_context(|| format!("check {name} already runs for this project"))?;
+        locks.push(lock);
+    }
+    Ok(locks)
+}
+
 fn required_checks(value: Option<&str>, state: Option<&str>, passing: bool) -> Result<Vec<String>> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -605,6 +651,7 @@ fn scan(
     privileged_only: bool,
     state: Option<&str>,
     required: &[String],
+    only: &[String],
     planned_only: bool,
 ) -> Result<Scan> {
     let explicit_state = state.is_some();
@@ -632,6 +679,9 @@ fn scan(
     let mut pending_privileged = 0;
     for (state, name, want) in jobs {
         if want.as_deref().is_some_and(|want| !meets(want, &here)) {
+            continue;
+        }
+        if !only.is_empty() && !only.contains(&name) {
             continue;
         }
         let command = &commands[&name];
@@ -1302,6 +1352,34 @@ mod policy_tests {
         assert!(required_checks(Some("unit"), Some("state"), false).is_err());
         assert!(required_checks(Some(""), Some("state"), true).is_err());
         assert!(required_checks(Some("unit,,apfs"), Some("state"), true).is_err());
+    }
+
+    #[test]
+    fn only_checks_need_valid_names_and_drop_repeats() {
+        assert!(only_checks(None).unwrap().is_empty());
+        assert_eq!(only_checks(Some("overlayfs-xfs,integration,overlayfs-xfs")).unwrap(), vec!["overlayfs-xfs", "integration"]);
+        assert!(only_checks(Some("")).is_err());
+        assert!(only_checks(Some("unit,,apfs")).is_err());
+        assert!(only_checks(Some("../unit")).is_err());
+    }
+
+    #[test]
+    fn only_runs_of_other_checks_go_on_in_parallel_and_exclude_a_full_executor() {
+        let meta = std::env::temp_dir().join(format!("layr-checks-locks-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&meta).unwrap();
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap();
+        let other = checks_locks(&meta, &names(&["integration", "overlayfs-ext4"])).unwrap();
+        let same = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap_err();
+        assert!(format!("{same:#}").contains("check overlayfs-xfs already runs"), "{same:#}");
+        let full = checks_locks(&meta, &[]).unwrap_err();
+        assert!(format!("{full:#}").contains("already active"), "{full:#}");
+        drop((xfs, other));
+        let full = checks_locks(&meta, &[]).unwrap();
+        let only = checks_locks(&meta, &names(&["unit"])).unwrap_err();
+        assert!(format!("{only:#}").contains("already active"), "{only:#}");
+        drop(full);
+        std::fs::remove_dir_all(meta).unwrap();
     }
 
     #[test]

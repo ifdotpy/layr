@@ -89,6 +89,11 @@ lock rules as `watch`, attested in the same way. Its JSON line and exit code are
 `watch --once`. A CI job for a Git commit fetches it (`layr git fetch <remote> <branch>`), runs
 `layr checks run --state <commit>`, and pushes the results.
 
+`layr checks run --state <rev> --only <name,...>` starts only the named checks. Runs with `--only`
+of different checks can go on at the same time in one project, so a CI runner can start each
+privileged suite of a state in its own process. Two runs of the same check refuse each other, and
+a watcher or a run without `--only` refuses to start while any of them runs (and the other way round).
+
 `layr checks run --state <rev> --planned-only` runs only jobs that a watcher already plans for that
 state. It does not add change checks to an unrelated state. It can restore the selected state from the
 remote. It cannot be combined with `--required-checks`.
