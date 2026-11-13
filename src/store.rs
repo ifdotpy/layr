@@ -1923,6 +1923,83 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         result
     }
+
+    /// A merge machine can hold the change numbering role (docs/review.md, "How numbers work"): after the creator's
+    /// handoff, its signed numbers count for readers. Its own handoff does not count; the creator takes the role
+    /// back. A cache writer that gets the role gives no number: its records stay outside its role.
+    #[test]
+    fn a_merge_machine_with_the_numbering_role_gives_numbers() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-numbering-{}", ids::new_id()));
+        let result = (|| -> Result<()> {
+            let store = Store::open(&base.join("store"))?;
+            let actor = Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
+            let dir = store.project_dir("p")?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            fs::create_dir(dir.join("states"))?;
+            let id = ids::new_id();
+            let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: id.clone(), db: Db::open(&db_file(&dir))? };
+            let mut project = Record::new("project");
+            project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+            p.append(project, &actor)?;
+            let machine = |seed: u8, role: &str| -> Result<(SigningKey, String)> {
+                let key = SigningKey::from_bytes(&[seed; 32]);
+                let machine = ids::new_id();
+                let mut trust = Record::new("machine.trust");
+                trust.data = serde_json::json!({"machine": machine, "public_key": hex::encode(key.verifying_key().to_bytes()),
+                    "role": role});
+                p.append(trust, &actor)?;
+                Ok((key, machine))
+            };
+            let (merge_key, merge) = machine(11, "merge")?;
+            let (writer_key, writer) = machine(12, "writer")?;
+            let signed = |key: &SigningKey, machine: &str, seq: u64, op: &str, data: serde_json::Value| -> Result<String> {
+                let mut rec = Record::new(op);
+                (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), machine.to_string(), seq, ids::now_ms());
+                (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), data);
+                if op == "machine" {
+                    rec.data = serde_json::json!({"name": machine, "public_key": hex::encode(key.verifying_key().to_bytes())});
+                }
+                oplog::sign_line(&rec, key)
+            };
+            let numbering = || -> Result<layr_model::changes::Numbering> {
+                Ok(layr_model::Project::from_records(&p.id, p.effective_records()?, &p.store.machine.id)?.numbering().clone())
+            };
+            let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+            handoff.data = serde_json::json!({"machine": merge, "next": 1});
+            p.append(handoff, &actor)?;
+            p.import_lines(
+                &[
+                    signed(&merge_key, &merge, 1, "machine", serde_json::json!({}))?,
+                    signed(&merge_key, &merge, 2, layr_model::changes::NUMBER_OP, serde_json::json!({"numbers": {"c1": 1}}))?,
+                    // The merge machine hands the role on, to the cache writer.
+                    signed(
+                        &merge_key,
+                        &merge,
+                        3,
+                        layr_model::changes::HANDOFF_OP,
+                        serde_json::json!({"machine": writer, "next": 2}),
+                    )?,
+                    signed(&writer_key, &writer, 1, "machine", serde_json::json!({}))?,
+                    signed(&writer_key, &writer, 2, layr_model::changes::NUMBER_OP, serde_json::json!({"numbers": {"c2": 2}}))?,
+                ],
+                Trust::All,
+            )?;
+            let n = numbering()?;
+            assert_eq!(n.number("c1"), Some(1), "the merge machine's number counts");
+            assert_eq!(n.authority.as_deref(), Some(merge.as_str()), "its handoff does not count");
+            // The creator takes the role back from the merge machine, then gives it to the cache writer.
+            for to in [&p.store.machine.id, &writer] {
+                let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+                handoff.data = serde_json::json!({"machine": to, "next": 2});
+                p.append(handoff, &actor)?;
+                assert_eq!(numbering()?.authority.as_deref(), Some(to.as_str()), "a handoff of the creator counts");
+            }
+            assert_eq!(numbering()?.number("c2"), None, "a cache writer's number does not count");
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&base);
+        result
+    }
 }
 
 #[cfg(test)]

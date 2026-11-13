@@ -183,6 +183,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 return Ok(0);
             }
+            super::change::try_assign_numbers(ctx, repo);
             let (result, _) = super::mergecmd::merge_queued(ctx, repo, &line, &entry, &head, 1, true, true, None);
             let error = match result {
                 Err(error) => error,
@@ -334,6 +335,9 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }),
                 _ => None,
             };
+            // On the numbering machine (usually the Layr Cloud merge machine), each pass numbers the changes that
+            // have none before it merges, in one record (docs/review.md, "How numbers work").
+            super::change::try_assign_numbers(ctx, repo);
             let entries = run_entries(ctx, repo, line.as_ref().map(|line| line.id.as_str()), false, guard)?;
             let mut failed = entries.iter().any(|entry| entry.status == "failed");
             let push = a.get("--push").map(str::to_owned).or(push_remote(repo)?);

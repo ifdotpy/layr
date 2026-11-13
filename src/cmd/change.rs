@@ -402,21 +402,50 @@ fn lifecycle(ctx: &Ctx, repo: &Repo, command: &str, which: &str, a: &crate::args
 }
 
 /// `change numbering`: the numbering machine and the next number. `--hand-to <machine>` gives the role to
-/// another machine (only the numbering machine itself, by an admin).
+/// another machine, by an admin: on the numbering machine, or on an admin machine of the project (the creator and
+/// the machines of its `admin.machines`), which takes the role from any holder, also for itself.
 fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Result<i32> {
     let me = repo.p.store.machine.id.clone();
     if let Some(target) = hand_to {
         repo.require(ctx, "config")?;
-        let machine = repo.p.db.machine_by_name(target)?.ok_or_else(|| anyhow::anyhow!("unknown machine '{target}'"))?;
+        // A machine that this machine trusts but whose records it has not yet (a new merge machine) goes by its id.
+        let machine = match repo.p.db.machine_by_name(target)? {
+            Some(machine) => machine,
+            None if repo.p.db.trusted(target)?.is_some() => target.to_string(),
+            None => bail!("unknown machine '{target}'"),
+        };
         let _lock = repo.p.lock()?;
         let model = repo.read_model()?;
-        match model.numbering().authority.as_deref() {
-            Some(m) if m == me => {}
-            Some(m) => bail!("only the numbering machine ({m}) can hand the role to another machine"),
+        let n = model.numbering();
+        let terms = repo.p.trust_terms(&[])?;
+        use layr_store::trust::Role;
+        match n.authority.as_deref() {
             None => bail!("the project has no numbering machine: it has no single creator record"),
+            Some(m) if m == me && machine == me => bail!("this machine gives the numbers already"),
+            // A merge machine holds the role but hands it on to no machine: its handoff would not count.
+            Some(m) if m == me && terms.get(&me).is_some_and(|t| t.role == Role::Merge) => {
+                bail!("a merge machine cannot hand the role on; an admin machine of the project takes it")
+            }
+            Some(m) if m == me || n.admins.contains(&me) => {}
+            Some(m) => bail!("only the numbering machine ({m}) or an admin machine of the project can hand the role"),
         }
-        if machine == me {
-            bail!("this machine gives the numbers already");
+        // The new holder must be a machine whose records count: this machine, an admin machine, or a trusted machine
+        // (a machine without limits in `trust_terms` can also be one that is not trusted at all).
+        if machine != me && !n.admins.contains(&machine) && repo.p.db.trusted(&machine)?.is_none() {
+            bail!("machine '{target}' is not trusted: its numbers would not count");
+        }
+        // Readers take only the numbers of a full machine or a merge machine (docs/ci-trust.md), and only while
+        // its trust lasts: a handoff to another machine would stop the numbers until an admin takes the role.
+        if let Some(terms) = terms.get(&machine) {
+            if !matches!(terms.role, Role::Merge | Role::Full) {
+                bail!(
+                    "machine '{target}' has the {} role: its numbers would not count; use a full or a merge machine",
+                    terms.role.name()
+                );
+            }
+            if terms.expires_at.is_some() || terms.untrusted_at.is_some() {
+                bail!("the trust of machine '{target}' ends: its numbers would stop counting; use a machine without an end");
+            }
         }
         let mut rec = crate::model::Record::new(layr_model::changes::HANDOFF_OP);
         rec.data = serde_json::json!({"machine": machine, "next": model.numbering().next});

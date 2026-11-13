@@ -1,10 +1,10 @@
 //! Validate limited merge records before deriving reader policy.
 //! Input signatures and contiguous machine prefixes must already be verified.
-use crate::Record;
+use crate::{changes, Record};
 use anyhow::Result;
 use ed25519_dalek::VerifyingKey;
 use layr_store::{public, record};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Effective {
     pub lines: Vec<String>,
@@ -17,9 +17,27 @@ pub fn effective_lines(project: &str, lines: &[String], now: i64) -> Result<Effe
         .iter()
         .map(|line| -> Result<(&String, Record)> { Ok((line, serde_json::from_str(record::parse_line(line, None)?.get())?)) })
         .collect::<Result<Vec<_>>>()?;
+    // Change numbers count only from a full or a merge machine, as in the store's trust rules
+    // (`layr_store::trust`): a reader or a cache writer that holds the numbering role gives no number.
+    let limited: BTreeSet<&str> = parsed
+        .iter()
+        .filter(|(_, r)| r.op == "machine.trust" && layr_store::trust::Terms::of_trust(&r.data).is_some())
+        .filter_map(|(_, r)| r.data["machine"].as_str())
+        .collect();
+    let numbering = |r: &Record| matches!(r.op.as_str(), changes::NUMBER_OP | changes::HANDOFF_OP);
+    let limited_numbers = parsed.iter().any(|(_, r)| numbering(r) && limited.contains(r.machine.as_str()));
     // Preserve existing reader contracts when the project has no merge-role trust.
     if !parsed.iter().any(|(_, r)| r.op == "machine.trust" && r.data["role"] == "merge") {
-        return Ok(Effective { lines: lines.to_vec(), merge_keys: BTreeMap::new() });
+        if !limited_numbers {
+            return Ok(Effective { lines: lines.to_vec(), merge_keys: BTreeMap::new() });
+        }
+        let writers = public::release_writers_checked(project, lines)?;
+        let kept = parsed
+            .iter()
+            .filter(|(_, r)| !numbering(r) || writers.full.contains_key(&r.machine))
+            .map(|(line, _)| (*line).clone())
+            .collect();
+        return Ok(Effective { lines: kept, merge_keys: BTreeMap::new() });
     }
     let writers = public::release_writers_checked(project, lines)?;
     let mut ordered = parsed.iter().collect::<Vec<_>>();
@@ -32,6 +50,8 @@ pub fn effective_lines(project: &str, lines: &[String], now: i64) -> Result<Effe
             if terms.refusal_in(r.time, &r.op, &r.data, None, &payload_of(r), &r.machine, &current).is_some() {
                 continue;
             }
+        } else if limited_numbers && numbering(r) && !writers.full.contains_key(&r.machine) {
+            continue;
         }
         current.apply(r);
         kept.push((*line).clone());
@@ -270,6 +290,47 @@ mod tests {
             .unwrap();
         (effective, m.projects["01a1c000-0000-7000-8000-000000000003"].clone())
     }
+    #[test]
+    fn numbers_count_from_a_merge_machine_but_not_its_handoff_nor_a_cache_writer() {
+        let (owner, merge, writer) = (
+            "01a1c000-0000-7000-8000-000000000001",
+            "01a1c000-0000-7000-8000-000000000002",
+            "01a1c000-0000-7000-8000-000000000009",
+        );
+        let (mut lines, merger, _) = fixture();
+        let owner_key = SigningKey::from_bytes(&[7; 32]);
+        let writer_key = SigningKey::from_bytes(&[9; 32]);
+        let own = |seq: u64, time: i64, op: &str, data: Value, key: &SigningKey, machine: &str| {
+            let mut r = decode(&signed(machine, seq, time, op, data, key));
+            r.id = format!("01a1c000-0000-7000-a000-{:04x}{:08x}", machine.len() + machine.ends_with('9') as usize, seq);
+            sign(r, key)
+        };
+        let writer_public = hex::encode(writer_key.verifying_key().to_bytes());
+        lines.push(own(1, 1, "machine", json!({"public_key": writer_public}), &writer_key, writer));
+        lines.push(own(
+            5,
+            5,
+            "machine.trust",
+            json!({"machine": writer, "public_key": writer_public, "role": "writer",
+            "expires_at": 1_000_000}),
+            &owner_key,
+            owner,
+        ));
+        lines.push(own(6, 6, changes::HANDOFF_OP, json!({"machine": merge, "next": 1}), &owner_key, owner));
+        lines.push(own(2, 7, changes::NUMBER_OP, json!({"numbers": {"c1": 1}}), &merger, merge));
+        // The merge machine hands the role on: refused. The creator takes it for the cache writer, whose numbers
+        // do not count.
+        lines.push(own(3, 8, changes::HANDOFF_OP, json!({"machine": owner, "next": 2}), &merger, merge));
+        lines.push(own(7, 9, changes::HANDOFF_OP, json!({"machine": writer, "next": 2}), &owner_key, owner));
+        lines.push(own(2, 10, changes::NUMBER_OP, json!({"numbers": {"c2": 2}}), &writer_key, writer));
+        let (effective, project) = model(&lines);
+        let kept = |machine: &str, op: &str| effective.lines.iter().any(|l| decode(l).machine == machine && decode(l).op == op);
+        assert!(kept(merge, changes::NUMBER_OP) && !kept(merge, changes::HANDOFF_OP));
+        assert!(!kept(writer, changes::NUMBER_OP));
+        let n = project.numbering();
+        assert_eq!((n.number("c1"), n.number("c2"), n.authority.as_deref()), (Some(1), None, Some(writer)));
+    }
+
     #[test]
     fn accepts_real_queue_state_and_rejects_claimed_before() {
         let (mut lines, key, pending) = fixture();
