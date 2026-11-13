@@ -407,7 +407,12 @@ fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Resul
     let me = repo.p.store.machine.id.clone();
     if let Some(target) = hand_to {
         repo.require(ctx, "config")?;
-        let machine = repo.p.db.machine_by_name(target)?.ok_or_else(|| anyhow::anyhow!("unknown machine '{target}'"))?;
+        // A machine that this machine trusts but whose records it has not yet (a new merge machine) goes by its id.
+        let machine = match repo.p.db.machine_by_name(target)? {
+            Some(machine) => machine,
+            None if repo.p.db.trusted(target)?.is_some() => target.to_string(),
+            None => bail!("unknown machine '{target}'"),
+        };
         let _lock = repo.p.lock()?;
         let model = repo.read_model()?;
         match model.numbering().authority.as_deref() {
@@ -417,6 +422,20 @@ fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Resul
         }
         if machine == me {
             bail!("this machine gives the numbers already");
+        }
+        // Readers take only the numbers of a full machine or a merge machine (docs/ci-trust.md), and only while
+        // its trust lasts: a handoff to another machine would stop the numbers for good.
+        if let Some(terms) = repo.p.trust_terms(&[])?.get(&machine) {
+            use layr_store::trust::Role;
+            if !matches!(terms.role, Role::Merge | Role::Full) {
+                bail!(
+                    "machine '{target}' has the {} role: its numbers would not count; use a full or a merge machine",
+                    terms.role.name()
+                );
+            }
+            if terms.expires_at.is_some() || terms.untrusted_at.is_some() {
+                bail!("the trust of machine '{target}' ends: its numbers would stop counting; use a machine without an end");
+            }
         }
         let mut rec = crate::model::Record::new(layr_model::changes::HANDOFF_OP);
         rec.data = serde_json::json!({"machine": machine, "next": model.numbering().next});
