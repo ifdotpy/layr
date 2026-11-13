@@ -40,7 +40,9 @@ All of them run without a prompt; `--json` prints one object.
    cannot upload a record later.
 2. A record of a limited machine outside its terms stays in the log, so the sequence of its machine stays whole,
    but it has no effect anywhere: no derived table, no key, reader or mode (`Project::effective_jsonl`), no
-   trusted writer (`trusted_writers`), no owner. A machine always takes its own records. `LAYR_TRACE=1` names
+   trusted writer (`trusted_writers`), no owner, and no view of the read model (`Repo::read_model` folds only
+   `Project::effective_records`: a reader's change close, comment resolve, reaction, reviewer request, queue result
+   or second `project` record changes no change, thread or queue view). A machine always takes its own records. `LAYR_TRACE=1` names
    each such record on import. The rules are in `crates/layr-store/src/trust.rs`.
 3. A record signed at or after `expires_at` has no effect. After `expires_at` the machine is no cache reader and
    gets no slot of a new key epoch. Its old slots stay until the next epoch made for another reason: its key was

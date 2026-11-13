@@ -865,7 +865,7 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let info = visible_info(ctx, &h.repo, name)?;
     let orepo = Repo::open(ctx, &format!("{}%{name}", h.repo.p.name))?;
-    let records = own_records(&orepo)?;
+    let records = orepo.p.effective_records()?;
     let readers: Vec<_> = orepo
         .policy()
         .access

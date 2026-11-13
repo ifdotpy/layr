@@ -608,9 +608,10 @@ impl<'a> Repo<'a> {
     }
 
     /// The working folder of a line: its recorded path (`layr line move`, or the folder that
-    /// `line rename` kept), else `lines/<name>`.
+    /// `line rename` kept), else `lines/<name>` unless another line keeps that folder
+    /// (`Project::line_folder`).
     pub fn working(&self, line: &Line) -> PathBuf {
-        self.p.moved_path(&line.id).unwrap_or_else(|| self.p.default_line_path(&line.name))
+        self.p.line_folder(&line.id, &line.name)
     }
 
     pub fn owner_ids(&self, line: &Line) -> (u32, u32) {
@@ -902,15 +903,10 @@ impl<'a> Repo<'a> {
         }
     }
 
-    /// Read authenticated records already accepted into the local database.
+    /// Read the authenticated records of the local database that have an effect here (`effective_records`): a
+    /// record that the trust rules refuse is kept in the log but changes no view.
     pub fn read_model(&self) -> Result<layr_model::Project> {
-        let records = self
-            .p
-            .db
-            .all_lines()?
-            .iter()
-            .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
-            .collect::<Result<Vec<_>>>()?;
+        let records = self.p.effective_records()?;
         layr_model::Project::from_records(&self.p.id, records, &self.p.store.machine.id)
     }
 

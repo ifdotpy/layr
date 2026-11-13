@@ -366,13 +366,7 @@ fn required_checks(value: Option<&str>, state: Option<&str>, passing: bool) -> R
 }
 
 fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: bool) -> Result<Plan> {
-    let records = repo
-        .p
-        .db
-        .all_lines()?
-        .iter()
-        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
-        .collect::<Result<Vec<_>>>()?;
+    let records = repo.p.effective_records()?;
     let (policy, main_states) = creator_policy(&repo.p.id, records)?;
     let changes = names("checks.changes", &setting(&policy, "checks.changes", json!([]))?)?;
     let lines = setting(&policy, "checks.lines", json!({}))?;
@@ -527,26 +521,14 @@ fn attested_result(
 
 /// A queue gate uses the creator's privilege policy and requires a passing executor result.
 pub(crate) fn passing_required(repo: &Repo, state: &str, name: &str, argv: &[String], want: Option<&str>) -> Result<bool> {
-    let records = repo
-        .p
-        .db
-        .all_lines()?
-        .iter()
-        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
-        .collect::<Result<Vec<_>>>()?;
+    let records = repo.p.effective_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     let privileged = names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?;
     attested_result(repo, state, argv, privileged.iter().any(|check| check == name), want, true)
 }
 
 pub(crate) fn creator_project(repo: &Repo) -> Result<layr_model::Project> {
-    let records = repo
-        .p
-        .db
-        .all_lines()?
-        .iter()
-        .map(|line| crate::oplog::parse_line(line, None).map(|s| s.record))
-        .collect::<Result<Vec<_>>>()?;
+    let records = repo.p.effective_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     Ok(policy)
 }

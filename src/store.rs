@@ -920,10 +920,10 @@ impl<'a> Project<'a> {
     /// The working folder of a line: the path recorded by `layr line move`, the folder that
     /// `line rename` kept, else `lines/<name>`.
     pub fn line_path(&self, name: &str) -> PathBuf {
-        if let Some(path) = self.db.line_by_name(name).ok().flatten().and_then(|l| self.moved_path(&l.id)) {
-            return path;
+        match self.db.line_by_name(name).ok().flatten() {
+            Some(l) => self.line_folder(&l.id, name),
+            None => self.default_line_path(name),
         }
-        self.default_line_path(name)
     }
     /// The folder of a line in the store, `lines/<name>`.
     pub fn default_line_path(&self, name: &str) -> PathBuf {
@@ -1726,6 +1726,20 @@ impl<'a> Project<'a> {
             if self.refusal(&terms, &oplog::parse_line(line, None)?.record)?.is_none() {
                 out.push_str(line);
                 out.push('\n');
+            }
+        }
+        Ok(out)
+    }
+
+    /// The records that have an effect here (`refusal`), in time order: the input of the read model. A record of a
+    /// limited machine outside its terms (a reader, an ended trust) stays in the log but changes no view.
+    pub fn effective_records(&self) -> Result<Vec<Record>> {
+        let terms = self.trust_terms(&[])?;
+        let mut out = Vec::new();
+        for line in self.db.all_lines()? {
+            let record = oplog::parse_line(&line, None)?.record;
+            if terms.is_empty() || self.refusal(&terms, &record)?.is_none() {
+                out.push(record);
             }
         }
         Ok(out)
