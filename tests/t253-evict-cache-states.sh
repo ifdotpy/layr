@@ -54,7 +54,8 @@ before=$(kb)
 out=$(l gc --repair 2>&1); code=$?
 eq "gc --repair works" 0 "$code"
 has "it evicts the pushed cache and says how much it freed" "1 cache state(s) that a store remote holds" "$out"
-no "it frees more than nothing" grep -q "cache state(s) that a store remote holds, at least 0 B freed" <<<"$out"
+# The freed bytes are a lower bound (blocks that a clone shares count as 0 in a check sandbox);
+# the size of the overlay folder below shows what went.
 eq "the pushed cache has no tree here" 0 "$(present "$c1")"
 after=$(kb)
 ok "the cache folder of the overlay shrinks by about the 2 MB that only c1 held ($before KB to $after KB)" test $((before - after)) -ge 1500
