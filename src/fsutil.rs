@@ -685,8 +685,16 @@ pub fn same_entry(
     pb: &str,
     ranges: Option<&[(u64, u64)]>,
 ) -> Result<bool> {
-    let left = match ra.objects() { Some(objects) => objects.meta(pa)?, None => lmeta(ra, pa) };
-    let right = match rb.objects() { Some(objects) => objects.meta(pb)?, None => lmeta(rb, pb) };
+    let left_entry = ra.objects().map(|objects| objects.entry(pa)).transpose()?.flatten();
+    let right_entry = rb.objects().map(|objects| objects.entry(pb)).transpose()?.flatten();
+    let left = match ra.objects() {
+        Some(_) => left_entry.as_ref().map(|e| e.meta()),
+        None => lmeta(ra, pa),
+    };
+    let right = match rb.objects() {
+        Some(_) => right_entry.as_ref().map(|e| e.meta()),
+        None => lmeta(rb, pb),
+    };
     let (ma, mb) = match (left, right) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
@@ -703,12 +711,14 @@ pub fn same_entry(
                 return Ok(false);
             }
             if let Some(o) = ra.objects() {
-                let entry = o.entry(pa)?.context("missing object entry")?;
+                let entry = left_entry.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
                     if let Some(other) = rb.objects() {
-                        if let Some(entry) = other.entry(pb)? {
+                        if let Some(entry) = right_entry {
                             if let layr_objects::Node::File { blob: other_blob, .. } = entry.entry.node {
-                                if blob == other_blob { return Ok(true); }
+                                if blob == other_blob {
+                                    return Ok(true);
+                                }
                             }
                         }
                         return Ok(o.read(pa)? == other.read(pb)?);
@@ -717,7 +727,7 @@ pub fn same_entry(
                 }
             }
             if let Some(o) = rb.objects() {
-                let entry = o.entry(pb)?.context("missing object entry")?;
+                let entry = right_entry.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
                     return Ok(o.store.hash_file(&ra.at(pa)?)?.0 == blob);
                 }

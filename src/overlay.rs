@@ -851,20 +851,32 @@ impl<'a> Repo<'a> {
 
     /// Retain the project that supplied hidden metadata, so a read caller can use it again.
     fn open_overlay_info(&self, name: &str) -> Result<(Option<Info>, Option<Project<'a>>)> {
+        Ok(self.open_overlay_info_with(name, |name| self.overlay_project(name).map(Some))?.expect("blocking overlay open"))
+    }
+
+    fn open_overlay_info_with(
+        &self,
+        name: &str,
+        open: impl FnOnce(&str) -> Result<Option<Project<'a>>>,
+    ) -> Result<Option<(Option<Info>, Option<Project<'a>>)>> {
         if crate::store::check_name("overlay", name).is_err() {
-            return Ok((None, None));
+            return Ok(Some((None, None)));
         }
         // A removed cache overlay (`layr overlay remove`) is gone, also from the history of its own
         // project, which would otherwise name it again.
         if self.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some() {
-            return Ok((None, None));
+            return Ok(Some((None, None)));
         }
         let platform_key = format!("overlay.{name}.platform");
         let mut value = self.p.db.overlay_config(&format!("overlay.{name}"))?;
         let mut platform = None;
         let mut project = None;
         if value.is_none() {
-            project = self.overlay_project(name).ok();
+            project = match open(name) {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return Ok(None),
+                Err(_) => None,
+            };
             if let Some(op) = &project {
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
@@ -876,9 +888,9 @@ impl<'a> Repo<'a> {
         }
         let v = match value {
             Some(v) if v.is_object() => v,
-            _ => return Ok((None, project)),
+            _ => return Ok(Some((None, project))),
         };
-        Ok((
+        Ok(Some((
             Some(Info {
                 hidden: v["hidden"].as_bool().unwrap_or(false),
                 platform: platform.and_then(|p| p.as_str().and_then(platform_name)),
@@ -887,7 +899,7 @@ impl<'a> Repo<'a> {
                 root: v["root"].as_str().unwrap_or("").to_string(),
             }),
             project,
-        ))
+        )))
     }
 
     /// Whether overlay `name` shares with the machines that the project trusts (property `trust`):
@@ -1026,6 +1038,31 @@ impl<'a> Repo<'a> {
             names.insert(entry.file_name().to_string_lossy().into_owned());
         }
         Ok(names.into_iter().collect())
+    }
+
+    /// The local overlays for cleanup; a busy recovery defers the whole pass.
+    pub(crate) fn maintenance_overlay_projects(&self) -> Result<Option<Vec<Project<'a>>>> {
+        let mut projects = Vec::new();
+        for name in self.overlay_candidates()? {
+            // An overlay of another platform that this machine never fetched has no project here.
+            if !self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                continue;
+            }
+            let open = |name: &str| Project::open_maintenance(self.p.store, &format!("{}%{name}", self.p.name));
+            let Some((info, project)) = self.open_overlay_info_with(&name, open)? else { return Ok(None) };
+            if info.is_none() {
+                continue;
+            }
+            let project = match project {
+                Some(p) => p,
+                None => {
+                    let Some(p) = open(&name)? else { return Ok(None) };
+                    p
+                }
+            };
+            projects.push(project);
+        }
+        Ok(Some(projects))
     }
 
     /// Open each local overlay once for `overlay list`, before reading its metadata and policy.
@@ -2726,6 +2763,38 @@ mod read_open_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.ctx.store.root.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn maintenance_retirement_reads_hidden_heads_and_defers_busy_recovery() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let repo = Repo::open(&fixture.ctx, "p")?;
+        let overlay = repo.overlay_project("private")?;
+        overlay.db.conn.execute(
+            "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,'main',?2,?3,?4,0,'1')",
+            (ids::new_id(), fixture.ctx.caller.uid, &fixture.ctx.store.machine.id, &fixture.head),
+        )?;
+        let _lock = repo.p.lock()?;
+        #[cfg(target_os = "macos")]
+        {
+            let held =
+                std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(overlay.meta_dir().join("lock"))?;
+            rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+            let pending = overlay.meta_dir().join("pending/test");
+            std::fs::create_dir_all(&pending)?;
+            let queue = repo.p.meta_dir().join("object-native");
+            std::fs::create_dir(&queue)?;
+            let marker = queue.join(&fixture.head);
+            std::fs::write(&marker, b"")?;
+            assert!(crate::cmd::admin::overlay_named_states_maintenance(&repo)?.is_none());
+            crate::objstore::retire_native_maintenance(&repo)?;
+            assert!(marker.exists());
+            std::fs::remove_dir(&pending)?;
+            drop(held);
+        }
+        let named = crate::cmd::admin::overlay_named_states_maintenance(&repo)?.expect("available overlays");
+        assert!(named.contains(&fixture.head));
+        Ok(())
     }
 
     #[test]

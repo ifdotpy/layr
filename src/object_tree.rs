@@ -3,7 +3,7 @@
 use crate::fsutil::{FType, Meta};
 use anyhow::{bail, Context, Result};
 use layr_objects::{Id, Node, StateRef, Store};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,9 @@ pub struct ObjectTree {
     pub refs: StateRef,
     cache: PathBuf,
     materialized: Mutex<BTreeMap<String, PathBuf>>,
+    // Verified immutable folders only; file blobs stay in the store.
+    trees: Mutex<HashMap<Id, Arc<layr_objects::tree::Tree>>>,
+    times: Mutex<HashMap<Id, Arc<layr_objects::times::Times>>>,
     links: BTreeMap<String, (String, u64, u64)>,
 }
 impl std::fmt::Debug for ObjectTree {
@@ -26,12 +29,23 @@ pub struct Entry {
     pub ns: i64,
     folder_times: Option<Id>,
 }
+/// The verified object `id` from `cache`, loaded by `load` on a miss. The load runs outside the
+/// lock, so a slow miss does not stop other lookups; a racing load of the same id gives an equal value.
+fn cached<T>(cache: &Mutex<HashMap<Id, Arc<T>>>, id: &Id, load: impl FnOnce() -> Result<T>) -> Result<Arc<T>> {
+    let poisoned = || anyhow::anyhow!("object cache lock poisoned");
+    if let Some(hit) = cache.lock().map_err(|_| poisoned())?.get(id) {
+        return Ok(hit.clone());
+    }
+    let loaded = Arc::new(load()?);
+    Ok(cache.lock().map_err(|_| poisoned())?.entry(*id).or_insert(loaded).clone())
+}
 impl ObjectTree {
     pub fn new(store: Store, refs: StateRef, parent: &Path) -> Result<Arc<Self>> {
         std::fs::create_dir_all(parent)?;
         let cache = parent.join(crate::store::temp_name());
         let mut links = BTreeMap::new();
-        for (index, group) in store.get_tree(&refs.tree)?.links.iter().enumerate() {
+        let root = Arc::new(store.get_tree(&refs.tree)?);
+        for (index, group) in root.links.iter().enumerate() {
             let first = std::str::from_utf8(&group[0])?.to_string();
             for path in group {
                 let path = std::str::from_utf8(path)?.to_string();
@@ -42,10 +56,24 @@ impl ObjectTree {
             }
         }
         std::fs::DirBuilder::new().mode(0o700).create(&cache)?;
-        Ok(Arc::new(Self { store, refs, cache, links, materialized: Mutex::new(BTreeMap::new()) }))
+        Ok(Arc::new(Self {
+            store,
+            refs,
+            cache,
+            links,
+            materialized: Mutex::new(BTreeMap::new()),
+            trees: Mutex::new(HashMap::from([(refs.tree, root)])),
+            times: Mutex::new(HashMap::new()),
+        }))
     }
     pub fn root(&self) -> &Path {
         &self.cache
+    }
+    fn tree(&self, id: &Id) -> Result<Arc<layr_objects::tree::Tree>> {
+        cached(&self.trees, id, || self.store.get_tree(id))
+    }
+    fn times(&self, id: &Id) -> Result<Arc<layr_objects::times::Times>> {
+        cached(&self.times, id, || self.store.get_times(id))
     }
     pub fn entry(&self, rel: &str) -> Result<Option<Entry>> {
         crate::fsutil::check_rel(rel)?;
@@ -54,27 +82,30 @@ impl ObjectTree {
         if rel.is_empty() {
             return Ok(Some(Entry {
                 entry: layr_objects::tree::Entry { name: Vec::new(), mode: 0o755, node: Node::Dir { tree }, xattrs: Vec::new() },
-                ns: self.store.get_times(&times)?.own,
+                ns: self.times(&times)?.own,
                 folder_times: Some(times),
             }));
         }
-        let parts: Vec<_> = rel.split('/').collect();
-        for (i, part) in parts.iter().enumerate() {
-            let folder = self.store.get_tree(&tree)?;
-            let tm = self.store.get_times(&times)?;
+        let mut parts = rel.split('/').peekable();
+        while let Some(part) = parts.next() {
+            let folder = self.tree(&tree)?;
+            let tm = self.times(&times)?;
             anyhow::ensure!(folder.entries.len() == tm.records.len(), "tree and times count differ");
-            let Some(index) = folder.entries.iter().position(|e| e.name == part.as_bytes()) else { return Ok(None) };
+            // Tree::decode checks that names are sorted and unique.
+            let Ok(index) = folder.entries.binary_search_by(|e| e.name.as_slice().cmp(part.as_bytes())) else {
+                return Ok(None);
+            };
             let entry = folder.entries[index].clone();
             let ns = match (&entry.node, tm.records[index]) {
                 (Node::Dir { tree: t }, layr_objects::times::Record::Folder(ts)) => {
                     tree = *t;
                     times = ts;
-                    self.store.get_times(&ts)?.own
+                    self.times(&ts)?.own
                 }
                 (Node::Dir { .. }, _) | (_, layr_objects::times::Record::Folder(_)) => bail!("tree and times kinds differ"),
                 (_, layr_objects::times::Record::Time(ns)) => ns,
             };
-            if i + 1 == parts.len() {
+            if parts.peek().is_none() {
                 let folder_times = matches!(entry.node, Node::Dir { .. }).then_some(times);
                 return Ok(Some(Entry { entry, ns, folder_times }));
             }
@@ -105,20 +136,18 @@ impl ObjectTree {
         self.walk_tree(rel, tree, entry.folder_times.context("missing directory times")?, f)
     }
     fn walk_tree(&self, rel: &str, tree: Id, times: Id, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
-        let folder = self.store.get_tree(&tree)?;
-        let times = self.store.get_times(&times)?;
+        let folder = self.tree(&tree)?;
+        let times = self.times(&times)?;
         anyhow::ensure!(folder.entries.len() == times.records.len(), "tree and times count differ");
-        for (entry, record) in folder.entries.into_iter().zip(times.records) {
+        for (entry, record) in folder.entries.iter().zip(times.records.iter().copied()) {
             let name = std::str::from_utf8(&entry.name).context("a layr path is not UTF-8")?;
             let path = if rel.is_empty() { name.to_owned() } else { format!("{rel}/{name}") };
             let (ns, folder_times) = match (&entry.node, record) {
-                (Node::Dir { .. }, layr_objects::times::Record::Folder(times)) => {
-                    (self.store.get_times(&times)?.own, Some(times))
-                }
+                (Node::Dir { .. }, layr_objects::times::Record::Folder(times)) => (self.times(&times)?.own, Some(times)),
                 (Node::Dir { .. }, _) | (_, layr_objects::times::Record::Folder(_)) => bail!("tree and times kinds differ"),
                 (_, layr_objects::times::Record::Time(ns)) => (ns, None),
             };
-            let entry = Entry { entry, ns, folder_times };
+            let entry = Entry { entry: entry.clone(), ns, folder_times };
             if f(&path, &entry.meta())? {
                 if let Node::Dir { tree } = entry.entry.node {
                     self.walk_tree(&path, tree, folder_times.context("missing directory times")?, f)?;
@@ -218,7 +247,7 @@ impl ObjectTree {
     }
 }
 impl Entry {
-    fn meta(&self) -> Meta {
+    pub(crate) fn meta(&self) -> Meta {
         let (ftype, size) = match &self.entry.node {
             Node::File { size, .. } => (FType::File, *size),
             Node::Dir { .. } => (FType::Dir, 0),
@@ -305,6 +334,110 @@ mod tests {
             ObjectTree::new(store, StateRef { tree: written.tree.unwrap(), times: written.times.unwrap() }, &tmp.join("reads"))?;
         std::fs::remove_dir_all(source)?;
         Ok((tmp, tree))
+    }
+
+    #[test]
+    fn cached_lookups_match_decoded_folders_on_pool_threads() -> Result<()> {
+        use rayon::prelude::*;
+        let (tmp, tree) = fixture()?;
+        let root = tree.store.get_tree(&tree.refs.tree)?;
+        let times = tree.store.get_times(&tree.refs.times)?;
+        let mut expected = Vec::new();
+        for (entry, record) in root.entries.iter().zip(&times.records) {
+            let name = std::str::from_utf8(&entry.name)?;
+            let ns = match record {
+                layr_objects::times::Record::Time(ns) => *ns,
+                layr_objects::times::Record::Folder(id) => tree.store.get_times(id)?.own,
+            };
+            expected.push((name.to_owned(), entry.clone(), ns));
+            if let (Node::Dir { tree: id }, layr_objects::times::Record::Folder(ts)) = (&entry.node, record) {
+                let folder = tree.store.get_tree(id)?;
+                let times = tree.store.get_times(ts)?;
+                for (entry, record) in folder.entries.into_iter().zip(times.records) {
+                    let layr_objects::times::Record::Time(ns) = record else { unreachable!() };
+                    expected.push((format!("{name}/{}", std::str::from_utf8(&entry.name)?), entry, ns));
+                }
+            }
+        }
+        crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(4.try_into()?), || {
+            (0..8).into_par_iter().try_for_each(|_| -> Result<()> {
+                assert_eq!(tree.entry("")?.unwrap().ns, times.own);
+                for (path, expected, ns) in &expected {
+                    let entry = tree.entry(path)?.unwrap();
+                    assert_eq!(&entry.entry, expected);
+                    assert_eq!(entry.ns, *ns);
+                }
+                for path in ["absent", "nested/absent", "zzz", "file/child", "symlink/child"] {
+                    assert!(tree.entry(path)?.is_none(), "{path}");
+                }
+                Ok(())
+            })
+        })??;
+        assert!(Arc::ptr_eq(&tree.tree(&tree.refs.tree)?, &tree.tree(&tree.refs.tree)?));
+        assert!(Arc::ptr_eq(&tree.times(&tree.refs.times)?, &tree.times(&tree.refs.times)?));
+        assert_eq!(tree.trees.lock().unwrap().len(), 2);
+        assert_eq!(tree.times.lock().unwrap().len(), 2);
+        assert_eq!(tree.entries("")?.len(), expected.len());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cached_trees_keep_distinct_times_and_report_mismatches() -> Result<()> {
+        use layr_objects::times::Record;
+        let (tmp, tree) = fixture()?;
+        let original = tree.store.get_times(&tree.refs.times)?;
+        let mut changed = original.clone();
+        changed.records[0] = Record::Time(42);
+        let changed_id = tree.store.put_times(&changed)?;
+        assert_ne!(tree.refs.times, changed_id);
+        assert_eq!(tree.times(&changed_id)?.records[0], Record::Time(42));
+        assert_eq!(*tree.times(&tree.refs.times)?, original);
+        for (path, records, message) in [
+            ("file", Vec::new(), "tree and times count differ"),
+            (
+                "file",
+                vec![Record::Folder(tree.refs.times), original.records[1], original.records[2]],
+                "tree and times kinds differ",
+            ),
+            ("nested/link", vec![original.records[0], Record::Time(0), original.records[2]], "tree and times kinds differ"),
+        ] {
+            let times = tree.store.put_times(&layr_objects::times::Times { own: original.own, records })?;
+            let invalid = ObjectTree::new(
+                Store::open_existing(tree.store.root(), layr_objects::Keying::Plain)?,
+                StateRef { tree: tree.refs.tree, times },
+                &tmp.join("reads"),
+            )?;
+            for _ in 0..2 {
+                assert_eq!(invalid.entry(path).err().unwrap().to_string(), message);
+                assert_eq!(invalid.walk("", &mut |_, _| Ok(true)).unwrap_err().to_string(), message);
+            }
+        }
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn folder_cache_checks_objects_before_insertion() -> Result<()> {
+        let (tmp, tree) = fixture()?;
+        let root = tree.store.get_tree(&tree.refs.tree)?;
+        let Node::Dir { tree: nested } = root.entries[1].node else { unreachable!() };
+        for id in [tree.refs.times, nested] {
+            let hex = id.hex();
+            let path = tree.store.root().join("objects").join(&hex[..2]).join(&hex[2..]);
+            let bytes = std::fs::read(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::write(&path, b"corrupt")?;
+            assert!(tree.entry("nested/link").is_err());
+            assert!(!tree.trees.lock().unwrap().contains_key(&nested));
+            std::fs::write(path, bytes)?;
+        }
+        assert!(tree.entry("nested/link")?.is_some());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
     }
 
     #[test]

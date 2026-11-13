@@ -33,6 +33,10 @@ HERE_PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$/macos/')
 overlay() { local f=${1//\//.}; echo "$f.${LAYR_TEST_PLATFORM:-$HERE_PLATFORM}"; }
 TG=$(overlay target)
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
+# A pre-mounted test store must never forward commands to the host service.
+if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
+    export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock
+fi
 
 # Resolve rustup's toolchain in the sudo user's home, where the test owner can read it.
 owner_toolchain_env() {
@@ -73,6 +77,9 @@ needs_nested_sandbox() {
 }
 
 l() {
+    if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
+        export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock
+    fi
     "$LAYR" "$@"
     local rc=$?
     # The Linux suite runs as root and bypasses policy. On macOS the owner explicitly
@@ -89,7 +96,7 @@ l() {
 
 new_fs() { # new_fs <mountpoint> <size>
     local mp=$1 size=${2:-8G}
-    if [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
+    if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ] || [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ] || [ "$(uname -s)" = Darwin ]; then
         mkdir -p "$mp"
         return
     fi
@@ -151,6 +158,10 @@ sys.exit(1 if check(json.load(sys.stdin)["filesystems"]) else 0)
 ' "$T"; then
             echo "FATAL: test folder contains a mount or the mount list is invalid: $T" >&2
             exit 1
+        fi
+        if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
+            # Unprivileged deletion needs writable subvolumes, including sealed states.
+            find "$T" -depth -type d -inum 256 -exec btrfs property set -ts {} ro false \; || exit 1
         fi
         private=$(mktemp -d "$base/layr-fixture-clean.XXXXXX") || exit 1
         trash="$private/trash"

@@ -340,6 +340,33 @@ pub fn set_holder_command(argv: &[String]) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Wait {
+    Block,
+    Try,
+}
+
+impl Wait {
+    fn acquire(self, f: &fs::File, notice: Option<&Path>) -> Result<bool> {
+        use rustix::fs::FlockOperation;
+        match self {
+            Self::Block => {
+                if let Some(meta) = notice {
+                    flock_with_notice(f, meta)?;
+                } else {
+                    rustix::fs::flock(f, FlockOperation::LockExclusive)?;
+                }
+                Ok(true)
+            }
+            Self::Try => match rustix::fs::flock(f, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Ok(true),
+                Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+                Err(e) => Err(e.into()),
+            },
+        }
+    }
+}
+
 /// Take the exclusive lock of `f`. A command that has to wait prints the lock holder once,
 /// when the wait passes `LOCK_NOTICE_AFTER`.
 fn flock_with_notice(f: &fs::File, meta: &Path) -> Result<()> {
@@ -1118,6 +1145,17 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Ok(Self::open_wait(store, name, Wait::Block)?.expect("blocking project open"))
+    }
+
+    /// Defer maintenance when a live APFS commit needs recovery under the lock.
+    pub fn open_maintenance(store: &'a Store, name: &str) -> Result<Option<Project<'a>>> {
+        Self::open_wait(store, name, Wait::Try)
+    }
+
+    fn open_wait(store: &'a Store, name: &str, wait: Wait) -> Result<Option<Project<'a>>> {
+        #[cfg(not(target_os = "macos"))]
+        let _ = wait;
         #[cfg(test)]
         PROJECT_OPEN_COUNT.with(|count| count.set(count.get() + 1));
         let _t = crate::trace::span(format!("open project {name}"));
@@ -1152,11 +1190,11 @@ impl<'a> Project<'a> {
             let _t = crate::trace::span("project commit recovery");
             if crate::apfs_commit::pending(&p)? {
                 // Wait for a live commit, or recover the index after an interrupted one.
-                let _lock = p.lock()?;
+                let Some(_lock) = p.lock_wait(wait)? else { return Ok(None) };
             }
         }
         p.remove_dead_temporaries();
-        Ok(p)
+        Ok(Some(p))
     }
 
     /// Temporary copies whose creator process is gone (a crash, a kill, a stopped migration): each
@@ -1198,6 +1236,14 @@ impl<'a> Project<'a> {
     /// this process is refused: that order can deadlock with a command that holds the line lock.
     /// A second take of the same line in this process gives a guard that holds nothing.
     pub fn line_lock(&self, id: &str, name: &str) -> Result<LineLock> {
+        Ok(self.line_lock_wait(id, name, Wait::Block)?.expect("blocking line lock"))
+    }
+
+    pub fn try_line_lock(&self, id: &str, name: &str) -> Result<Option<LineLock>> {
+        self.line_lock_wait(id, name, Wait::Try)
+    }
+
+    fn line_lock_wait(&self, id: &str, name: &str, wait: Wait) -> Result<Option<LineLock>> {
         anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid line id '{id}'");
         let meta = self.meta_dir();
         if HELD_PROJECTS.lock().map(|held| held.contains(&meta)).unwrap_or(false) {
@@ -1206,20 +1252,22 @@ impl<'a> Project<'a> {
         let log = meta.join("lock-slow.log");
         let key = (meta.clone(), id.to_string());
         if HELD_LINES.lock().map(|held| held.contains(&key)).unwrap_or(false) {
-            return Ok(LineLock {
+            return Ok(Some(LineLock {
                 f: None,
                 key: None,
                 since: std::time::Instant::now(),
                 waited: Default::default(),
                 log,
                 line: name.to_string(),
-            });
+            }));
         }
         let dir = meta.join("line-locks");
         fs::create_dir_all(&dir)?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(id))?;
         let asked = std::time::Instant::now();
-        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+        if !wait.acquire(&f, None)? {
+            return Ok(None);
+        }
         if let Ok(mut held) = HELD_LINES.lock() {
             held.push(key.clone());
         }
@@ -1239,15 +1287,25 @@ impl<'a> Project<'a> {
         if let Some(ms) = std::env::var("LAYR_TEST_LINE_LOCK_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        Ok(guard)
+        Ok(Some(guard))
     }
 
     pub fn lock(&self) -> Result<Lock> {
+        Ok(self.lock_wait(Wait::Block)?.expect("blocking project lock"))
+    }
+
+    pub fn try_lock(&self) -> Result<Option<Lock>> {
+        self.lock_wait(Wait::Try)
+    }
+
+    fn lock_wait(&self, wait: Wait) -> Result<Option<Lock>> {
         // Resolved before the lock is taken: a failure here must not leave a count behind.
         let trash = self.trash_dir()?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
         let asked = std::time::Instant::now();
-        flock_with_notice(&f, &self.meta_dir())?;
+        if !wait.acquire(&f, Some(&self.meta_dir()))? {
+            return Ok(None);
+        }
         write_lock_holder(&self.meta_dir());
         // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
         if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
@@ -1289,7 +1347,7 @@ impl<'a> Project<'a> {
         };
         #[cfg(target_os = "macos")]
         crate::apfs_commit::recover(self)?;
-        Ok(lock)
+        Ok(Some(lock))
     }
 
     fn state_present(&self) -> impl Fn(&str) -> bool + '_ {
@@ -1835,6 +1893,39 @@ impl<'a> Project<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_locks_keep_bookkeeping_and_line_order() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-try-locks-{}", ids::new_id()));
+        let store = Store::open(&base.join("store"))?;
+        let dir = store.project_dir("p")?;
+        fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: ids::new_id(), db: Db::open(&db_file(&dir))? };
+        let line = p.try_line_lock("line", "main")?.expect("free line");
+        assert!(line.f.is_some());
+        let nested = p.try_line_lock("line", "main")?.expect("nested line");
+        assert!(nested.f.is_none());
+        drop(nested);
+        let lock = p.try_lock()?.expect("free project");
+        assert!(p.holds_lock());
+        assert!(p.meta_dir().join(LOCK_HOLDER).is_file());
+        assert!(p.try_lock()?.is_none(), "a second file description cannot lock the project");
+        assert!(p.try_line_lock("other", "other").is_err(), "line locks come first");
+        drop(lock);
+        assert!(!p.holds_lock());
+        assert!(!p.meta_dir().join(LOCK_HOLDER).exists());
+        drop(line);
+        let held = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/line"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        assert!(p.try_line_lock("line", "main")?.is_none());
+        drop(held);
+        assert!(p.try_line_lock("line", "main")?.is_some());
+        assert!(p.try_line_lock("../bad", "bad").is_err());
+        drop(p);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
 
     #[test]
     fn a_store_root_below_a_link_is_resolved_once() -> Result<()> {

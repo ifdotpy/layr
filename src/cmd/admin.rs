@@ -1579,17 +1579,29 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
 /// The project states that a cache overlay names through its heads and records: eviction and
 /// `layr migrate --delete-old` keep their trees.
 pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
-    let mut named: BTreeSet<String> = BTreeSet::new();
+    let mut overlays = Vec::new();
     for name in repo.overlay_names()? {
         // An overlay of another platform that this machine never fetched has no project here and names no state.
         if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
             continue;
         }
-        let overlay = repo.overlay_repo(&name)?;
-        for line in overlay.p.db.lines()? {
+        overlays.push(repo.overlay_project(&name)?);
+    }
+    overlay_project_named_states(overlays)
+}
+
+/// Defer native retirement if an overlay needs recovery under a busy lock.
+pub(crate) fn overlay_named_states_maintenance(repo: &Repo) -> Result<Option<BTreeSet<String>>> {
+    repo.maintenance_overlay_projects()?.map(overlay_project_named_states).transpose()
+}
+
+fn overlay_project_named_states(overlays: Vec<Project<'_>>) -> Result<BTreeSet<String>> {
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for overlay in overlays {
+        for line in overlay.db.lines()? {
             named.insert(line.head);
         }
-        for raw in overlay.p.db.all_lines()? {
+        for raw in overlay.db.all_lines()? {
             for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
                 named.insert(token.to_string());
             }
@@ -1972,7 +1984,11 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
     for name in ctx.store.project_names()?.into_iter().filter(|n| !n.contains('%')) {
         let result = Repo::open(ctx, &name).and_then(|repo| {
             repo.require(ctx, "gc")?;
-            repair_project(ctx, &repo, dry, true, false, None)
+            let freed = repair_project(ctx, &repo, dry, true, false, None)?;
+            if !dry {
+                crate::objstore::retire_native(&repo)?;
+            }
+            Ok(freed)
         });
         match result {
             Ok(freed) if !quiet => outln!(ctx, "{name}: {freed} state(s)"),
@@ -2054,6 +2070,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // First what no kept state reaches leaves each object store (the base and every overlay): a dropped part of an overlay
     // with `history=last` gives its objects back here (docs/overlays.md section 1a, slice 7).
     if !a.has("-n") {
+        crate::objstore::retire_native(&h.repo)?;
         let mut stores = vec![("base".to_string(), crate::objstore::prune(&h.repo.p))];
         for name in h.repo.overlay_names().unwrap_or_default() {
             if let Ok(op) = h.repo.overlay_project(&name) {

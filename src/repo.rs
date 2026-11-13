@@ -210,7 +210,10 @@ pub enum LineOp<'a> {
 
 impl<'a> Repo<'a> {
     pub fn open(ctx: &'a Ctx, project: &str) -> Result<Repo<'a>> {
-        let p = Project::open(&ctx.store, project)?;
+        Self::from_project(ctx, Project::open(&ctx.store, project)?)
+    }
+
+    pub fn from_project(ctx: &'a Ctx, p: Project<'a>) -> Result<Repo<'a>> {
         let r = Repo { p, ctx: Some(ctx) };
         r.can_read(ctx)?;
         Ok(r)
@@ -1278,7 +1281,7 @@ impl<'a> Repo<'a> {
             return Ok(true);
         }
         let base = self.state_src(&prev)?;
-        Ok(changes::file_changes(&base, &self.state_src(id)?)?.into_iter().any(|c| !skip_path(&c.path)))
+        changes::any_file_change(&base, &self.state_src(id)?, skip_path)
     }
 
     /// Save the working content as an automatic state if it changed since the previous one.

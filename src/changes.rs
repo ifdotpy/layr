@@ -171,7 +171,7 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
     Ok(!equal || (o.is_file() && !stored_same(parent, child, &c.path)))
 }
 
-/// True when two files hold the same extended attributes and ACL (APFS; else always).
+/// True when two entries hold the same stored attributes (and ACL on APFS).
 #[cfg(target_os = "macos")]
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
     match (parent.at(path), child.at(path)) {
@@ -181,11 +181,15 @@ fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: 
 }
 #[cfg(target_os = "linux")]
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
-    match (parent.at(path), child.at(path)) {
-        (Ok(a), Ok(b)) => match (layr_objects::fsx::xattrs(&a), layr_objects::fsx::xattrs(&b)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        },
+    fn attrs(src: &(impl Src + ?Sized), path: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if let Some(tree) = src.objects() {
+            return Ok(tree.entry(path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?.entry.xattrs);
+        }
+        Ok(layr_objects::fsx::xattrs(&src.at(path)?)?)
+    }
+    // Keep object-backed entries in the object store during metadata comparisons.
+    match (attrs(parent, path), attrs(child, path)) {
+        (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
@@ -209,38 +213,43 @@ pub fn file_changes_and_touched(parent: &(impl Src + ?Sized), child: &(impl Src 
 
 /// File level changes of a candidate list (`file_changes`).
 pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), list: Vec<Change>) -> Result<Vec<Change>> {
-    let mut out = Vec::new();
-    for c in list {
-        let is_dir_only =
-            c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
-        if is_dir_only {
-            if c.old.as_ref().is_some_and(|m| m.is_dir())
-                && c.new.as_ref().is_some_and(|m| m.is_dir())
-                && c.old_path.is_none()
-                && !stored_same(parent, child, &c.path)
-            {
-                out.push(c);
-            }
-            continue;
+    list.into_iter().filter_map(|c| file_change(parent, child, c).transpose()).collect()
+}
+
+/// Stop at the first confirmed change outside the skipped paths.
+pub fn any_file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), skip: impl Fn(&str) -> bool) -> Result<bool> {
+    for c in candidates_equal(parent, child)? {
+        if !skip(&c.path) && file_change(parent, child, c)?.is_some() {
+            return Ok(true);
         }
-        // A folder replaced by a file or the reverse: report only the non-folder side.
-        let mut c = c;
-        if c.old.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
-            c.old = None;
-            c.old_path = None;
-        }
-        if c.new.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
-            c.new = None;
-        }
-        if c.old.is_none() && c.new.is_none() {
-            continue;
-        }
-        if c.old.is_some() && c.new.is_some() && !really_changed(parent, child, &c)? {
-            continue;
-        }
-        out.push(c);
     }
-    Ok(out)
+    Ok(false)
+}
+
+fn file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), mut c: Change) -> Result<Option<Change>> {
+    let is_dir_only = c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
+    if is_dir_only {
+        return Ok((c.old.as_ref().is_some_and(|m| m.is_dir())
+            && c.new.as_ref().is_some_and(|m| m.is_dir())
+            && c.old_path.is_none()
+            && !stored_same(parent, child, &c.path))
+        .then_some(c));
+    }
+    // A folder replaced by a file or the reverse: report only the non-folder side.
+    if c.old.as_ref().is_some_and(|m| m.is_dir()) {
+        c.old = None;
+        c.old_path = None;
+    }
+    if c.new.as_ref().is_some_and(|m| m.is_dir()) {
+        c.new = None;
+    }
+    if c.old.is_none() && c.new.is_none() {
+        return Ok(None);
+    }
+    if c.old.is_some() && c.new.is_some() && !really_changed(parent, child, &c)? {
+        return Ok(None);
+    }
+    Ok(Some(c))
 }
 
 /// Split moves into a delete and an add (git shows unstaged moves this way).
@@ -455,6 +464,82 @@ mod tests {
 
     fn meta(size: u64) -> Meta {
         Meta { ftype: fsutil::FType::File, mode: 0o644, size, ino: 0, uid: 0, gid: 0, mtime: 0 }
+    }
+
+    #[test]
+    fn any_change_stops_before_later_content_and_skips_before_comparing() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-any-change-{}", crate::ids::new_id()));
+        let native = tmp.join("native");
+        std::fs::create_dir_all(&native)?;
+        std::fs::write(native.join("a"), b"first")?;
+        std::fs::write(native.join("z"), b"later")?;
+        std::fs::create_dir(native.join("dir"))?;
+        let store = layr_objects::Store::open(&tmp.join("objects"), layr_objects::Keying::Plain)?;
+        let report = layr_objects::write::write_tree(
+            &store,
+            &native,
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        let tree = crate::object_tree::ObjectTree::new(
+            store,
+            layr_objects::StateRef { tree: report.tree.unwrap(), times: report.times.unwrap() },
+            &tmp.join("reads"),
+        )?;
+        struct Reads(PathBuf, std::sync::Mutex<Vec<String>>);
+        impl Src for Reads {
+            fn at(&self, rel: &str) -> Result<PathBuf> {
+                self.1.lock().unwrap().push(rel.to_owned());
+                fsutil::safe_join(&self.0, rel)
+            }
+            fn folder(&self) -> Option<&Path> {
+                Some(&self.0)
+            }
+        }
+        let child = Reads(native.clone(), Default::default());
+        #[cfg(target_os = "macos")]
+        let parent = crate::thin::Layered::objects(tree.clone());
+        #[cfg(not(target_os = "macos"))]
+        let parent = crate::repo::Snap::Objects(tree.clone());
+        assert!(!any_file_change(&parent, &child, |path| path == "z")?);
+        assert!(!child.1.lock().unwrap().iter().any(|p| p == "z"), "skipped paths are never compared");
+        assert!(!any_file_change(&parent, &child, |_| false)?);
+        assert!(child.1.lock().unwrap().iter().any(|p| p == "z"), "unchanged candidates need comparison");
+        child.1.lock().unwrap().clear();
+        std::fs::write(native.join("a"), b"other")?;
+        assert!(any_file_change(&parent, &child, |_| false)?);
+        assert!(!child.1.lock().unwrap().iter().any(|p| p == "z"), "later candidates are never compared");
+        assert_eq!(file_changes(&parent, &child)?.len(), 1);
+        assert!(child.1.lock().unwrap().iter().any(|p| p == "z"));
+        std::fs::write(native.join("a"), b"first")?;
+        layr_objects::fsx::set_xattrs(&native.join("dir"), &[(b"user.test".to_vec(), b"changed".to_vec())])?;
+        assert!(any_file_change(&parent, &child, |_| false)?, "directory attributes count as a change");
+        assert!(!any_file_change(&parent, &child, |p| p == "dir")?);
+        #[cfg(target_os = "linux")]
+        assert_eq!(std::fs::read_dir(tree.root())?.count(), 0, "metadata comparisons do not materialize entries");
+        drop(parent);
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_candidate_normalization_keeps_file_sides_and_moves() -> Result<()> {
+        let root = Path::new("/");
+        let dir = Meta { ftype: fsutil::FType::Dir, ..meta(0) };
+        let change = |old, new| Change { path: "child".into(), old_path: Some("parent".into()), old, new, ranges: None };
+        let c = file_change(root, root, change(Some(dir.clone()), Some(meta(1))))?.unwrap();
+        assert!(c.old.is_none() && c.old_path.is_none() && c.new.is_some());
+        let c = file_change(root, root, change(Some(meta(1)), Some(dir.clone())))?.unwrap();
+        assert!(c.old.is_some() && c.old_path.as_deref() == Some("parent") && c.new.is_none());
+        assert!(file_change(root, root, change(None, Some(dir)))?.is_none());
+        let c = file_change(root, root, change(Some(meta(1)), Some(meta(1))))?.unwrap();
+        assert_eq!(c.old_path.as_deref(), Some("parent"));
+        Ok(())
     }
 
     #[test]

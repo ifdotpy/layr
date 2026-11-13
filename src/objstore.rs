@@ -209,7 +209,6 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         let source = crate::thin::Layered::of_state(p, &state.id)?;
         #[cfg(not(target_os = "macos"))]
         let source = crate::repo::snap(&p.state_path(&state.id));
-        let source = SnapshotSource(&source);
         let options = layr_objects::WriteOptions {
             temperature: layr_objects::Temperature::Hot,
             previous: None,
@@ -219,7 +218,9 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         #[cfg(target_os = "macos")]
         let incremental = incremental_base(p, &store, &state.id)?;
         #[cfg(not(target_os = "macos"))]
-        let incremental: Option<(StateRef, Vec<Vec<u8>>)> = None;
+        // Publication holds the project lock, so retirement cannot remove the parent.
+        let incremental = native_write_base(p, &store, state.parents.first().map(String::as_str), &source)?;
+        let source = SnapshotSource(&source);
         let written = match incremental {
             Some((refs, paths)) => layr_objects::write::write_changed_from(
                 &store,
@@ -274,27 +275,50 @@ pub fn write_base(
     if let Some(base) = incremental_base(&repo.p, store, state)? {
         return Ok(Some(base));
     }
-    let Some(parent_state) = parent else {
-        return Ok(None);
-    };
-    let Some(refs) = store.state_ref(parent_state)? else {
-        return Ok(None);
-    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = state;
+    let Some(parent_state) = parent else { return Ok(None) };
+    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
     if !repo.p.has_state(parent_state) {
         return Ok(None);
     }
     let _pin = repo.pin(&[parent_state])?;
-    let parent = repo.state_src(parent_state)?;
+    changed_write_base(refs, &repo.state_src(parent_state)?, source)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_write_base(
+    p: &Project,
+    store: &Store,
+    parent: Option<&str>,
+    source: &crate::repo::Snap,
+) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
+    let Some(parent_state) = parent else { return Ok(None) };
+    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
+    if !p.has_state(parent_state) {
+        return Ok(None);
+    }
+    let parent = crate::repo::snap(&p.state_path(parent_state));
+    changed_write_base(refs, &parent, source)
+}
+
+fn changed_write_base(
+    refs: StateRef,
+    parent: &crate::repo::Snap,
+    source: &crate::repo::Snap,
+) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
     // Portable readers can supply ordinary folders. A btrfs send stream requires both
     // roots to be subvolumes; keep ioctl failures visible when those prerequisites hold.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    if !crate::fsutil::Src::folder(&parent).is_some_and(crate::storage::is_subvolume) || !crate::fsutil::Src::folder(source).is_some_and(crate::storage::is_subvolume) {
+    if !crate::fsutil::Src::folder(parent).is_some_and(crate::storage::is_subvolume)
+        || !crate::fsutil::Src::folder(source).is_some_and(crate::storage::is_subvolume)
+    {
         return Ok(None);
     }
     #[cfg(target_os = "macos")]
-    let changes = crate::storage::with_stored_compare(|| crate::changes::candidates(&parent, source))?;
+    let changes = crate::storage::with_stored_compare(|| crate::changes::candidates(parent, source))?;
     #[cfg(not(target_os = "macos"))]
-    let changes = crate::changes::candidates(&parent, source)?;
+    let changes = crate::changes::candidates(parent, source)?;
     let mut paths = std::collections::BTreeSet::new();
     for change in changes {
         // OverlayFS can report unchanged entries after a complete snapshot copy. Do not
@@ -303,7 +327,7 @@ pub fn write_base(
         #[cfg(feature = "overlayfs")]
         if change.old_path.is_none() && change.old.is_some() && change.new.is_some() {
             use std::os::unix::fs::MetadataExt;
-            let a = crate::fsutil::Src::at(&parent, &change.path)?;
+            let a = crate::fsutil::Src::at(parent, &change.path)?;
             let b = crate::fsutil::Src::at(source, &change.path)?;
             let am = std::fs::symlink_metadata(&a)?;
             let bm = std::fs::symlink_metadata(&b)?;
@@ -351,11 +375,35 @@ fn queue_native(p: &Project, state: &str) -> Result<()> {
 /// Retire native copies after command readers release their pins. The existing reservation
 /// protocol prevents another reader from taking a path while it is removed.
 pub fn retire_native(repo: &Repo) -> Result<()> {
-    let dir = repo.p.meta_dir().join("object-native");
-    if !dir.is_dir() { return Ok(()); }
     let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    if !repo.p.meta_dir().join("object-native").is_dir() {
+        return Ok(());
+    }
+    retire_native_locked(repo, crate::cmd::admin::overlay_named_states(repo)?)
+}
+
+/// A command's free step leaves busy native copies for the next pass.
+pub fn retire_native_maintenance(repo: &Repo) -> Result<()> {
+    if !repo.p.meta_dir().join("object-native").is_dir() {
+        return Ok(());
+    }
+    let _lock = if repo.p.holds_lock() {
+        None
+    } else {
+        let Some(lock) = repo.p.try_lock()? else { return Ok(()) };
+        Some(lock)
+    };
+    let Some(keep) = crate::cmd::admin::overlay_named_states_maintenance(repo)? else { return Ok(()) };
+    retire_native_locked(repo, keep)
+}
+
+fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -> Result<()> {
+    let dir = repo.p.meta_dir().join("object-native");
+    if !dir.is_dir() {
+        return Ok(());
+    }
     #[allow(unused_mut)]
-    let mut keep = crate::cmd::admin::overlay_named_states(repo)?;
+    let mut keep = keep;
     #[cfg(target_os = "macos")]
     keep.extend(crate::views::protected_states(&repo.p));
     let mut ids = Vec::new();
@@ -380,4 +428,72 @@ pub fn prune(p: &Project) -> Result<Option<layr_objects::store::PruneReport>> {
     let _lock = (!p.holds_lock()).then(|| p.lock()).transpose()?;
     let keep = p.db.kept_state_ids()?;
     Ok(Some(open(p)?.prune(&keep)?))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
+    fn native_base_keeps_metadata_changes_and_requires_subvolumes_for_send() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-native-base-{}", crate::ids::new_id()));
+        let store = crate::store::Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: crate::ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        let id = crate::ids::new_id();
+        let parent = p.state_path(&id);
+        let child = root.join("child");
+        for folder in [&parent, &child] {
+            std::fs::create_dir_all(folder)?;
+            for path in ["same", "time", "attr"] {
+                std::fs::write(folder.join(path), b"data")?;
+                layr_objects::times::set(&folder.join(path), 1_700_000_000_000_000_000)?;
+            }
+        }
+        let objects = open(&p)?;
+        let options = layr_objects::WriteOptions {
+            temperature: layr_objects::Temperature::Hot,
+            previous: None,
+            exclude: Vec::new(),
+            similar: false,
+        };
+        let full = layr_objects::write_tree(&objects, &parent, &options)?;
+        let refs = StateRef { tree: full.tree.unwrap(), times: full.times.unwrap() };
+        objects.set_state(&id, &refs)?;
+        layr_objects::times::set(&child.join("time"), 1_700_000_001_000_000_000)?;
+        layr_objects::fsx::set_xattrs(&child.join("attr"), &[(b"user.test".to_vec(), b"new".to_vec())])?;
+        let source = crate::repo::snap(&child);
+        let base = native_write_base(&p, &objects, Some(&id), &source)?;
+        #[cfg(not(feature = "overlayfs"))]
+        assert!(base.is_none(), "ordinary folders cannot supply a btrfs send stream");
+        #[cfg(feature = "overlayfs")]
+        {
+            let (base, paths) = base.expect("native parent");
+            assert!(paths.contains(&b"time".to_vec()));
+            assert!(paths.contains(&b"attr".to_vec()));
+            assert!(!paths.contains(&b"same".to_vec()));
+            let incremental = layr_objects::write::write_changed_from(
+                &objects,
+                &SnapshotSource(&source),
+                &layr_objects::write::Base { tree: base.tree, times: base.times },
+                &paths,
+                &options,
+            )?;
+            let full = layr_objects::write_tree(&objects, &child, &options)?;
+            assert_eq!(incremental.tree, full.tree);
+            assert_eq!(incremental.times, full.times);
+        }
+        drop(p);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

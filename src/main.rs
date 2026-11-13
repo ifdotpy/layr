@@ -112,6 +112,14 @@ fn main() {
         std::process::exit(cache_hook::worker());
     }
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("__test-periodic")
+        && argv.len() == 2
+        && std::env::var_os("LAYR_TEST_PERIODIC").is_some()
+    {
+        // Test only (tests/t255-periodic-yields.sh): one periodic pass for an isolated store.
+        crate::service::periodic_test(std::path::Path::new(&argv[1]));
+        return;
+    }
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
         // The trash of a store, emptied in the background after a command (`store::Lock`).
         crate::sys::lower_process_priority();

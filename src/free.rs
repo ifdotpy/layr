@@ -90,9 +90,9 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
         if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
-            if let Ok(p) = Project::open(store, &name) {
+            if let Ok(Some(p)) = Project::open_maintenance(store, &name) {
                 let repo = crate::repo::Repo { p, ctx: Some(ctx) };
-                if let Err(error) = crate::objstore::retire_native(&repo) {
+                if let Err(error) = crate::objstore::retire_native_maintenance(&repo) {
                     eprintln!("layr: native copies of {name} remain for retry: {error:#}");
                 }
             }
@@ -128,13 +128,13 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
         if !pending(&conn) || unchanged_queue(store, &name, &conn) {
             continue;
         }
-        let Ok(p) = Project::open(store, &name) else { continue };
+        let Ok(Some(p)) = Project::open_maintenance(store, &name) else { continue };
         if std::env::var_os("LAYR_TEST_EXIT_AFTER_COMMIT").is_some() && !p.db.queued_frees().unwrap_or_default().is_empty() {
             eprintln!("test: exit after the commit, before the free step of {name}");
             std::process::exit(86);
         }
         let _t = crate::trace::span("finish project");
-        if let Err(e) = finish_project(&p) {
+        if let Err(e) = finish_project_maintenance(&p) {
             eprintln!("layr: states of {name} stay queued until the next command: {e:#}");
         }
     }
@@ -265,8 +265,14 @@ fn expired_refs(conn: &rusqlite::Connection) -> bool {
 
 /// The `ref.expire` record of each expired ref of project `name`, under its lock.
 fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
-    let repo = crate::repo::Repo::open(ctx, name)?;
-    let _lock = repo.p.lock()?;
+    let Some(p) = Project::open_maintenance(&ctx.store, name)? else { return Ok(()) };
+    let repo = crate::repo::Repo::from_project(ctx, p)?;
+    let _lock = if repo.p.holds_lock() {
+        None
+    } else {
+        let Some(lock) = repo.p.try_lock()? else { return Ok(()) };
+        Some(lock)
+    };
     for expired in repo.p.db.expired_refs(crate::ids::now_ms())? {
         let mut rec = crate::model::Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name: expired.name.clone(), before: Some(expired), after: None }});
@@ -302,12 +308,36 @@ fn unchanged_queue(store: &Store, name: &str, conn: &rusqlite::Connection) -> bo
 /// the number of states whose storage went.
 pub fn finish_project(p: &Project) -> Result<usize> {
     hold_before_free();
+    let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
+    let gone = finish_project_locked(p)?;
+    drop(_lock);
+    if gone != 0 {
+        crate::store::kick_trash(&p.trash_dir()?);
+    }
+    Ok(gone)
+}
+
+fn finish_project_maintenance(p: &Project) -> Result<usize> {
+    hold_before_free();
+    let _lock = if p.holds_lock() {
+        None
+    } else {
+        let Some(lock) = p.try_lock()? else { return Ok(0) };
+        Some(lock)
+    };
+    let gone = finish_project_locked(p)?;
+    drop(_lock);
+    if gone != 0 {
+        crate::store::kick_trash(&p.trash_dir()?);
+    }
+    Ok(gone)
+}
+
+fn finish_project_locked(p: &Project) -> Result<usize> {
     // The check and the move run under the project lock: a command that re-owns a queued state
     // (an undo, a fetch, a ref) either finishes before the check, or waits and finds the state
     // here. Only the trash emptying runs after the lock.
     let gone = {
-        // A caller that already holds the lock (it is not taken twice: a second lock would wait).
-        let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
         release_dead_pins(p)?;
         let gone = free_queued(p)?;
         let mut left = p.db.queued_frees()?;
@@ -317,9 +347,6 @@ pub fn finish_project(p: &Project) -> Result<usize> {
         }
         gone
     };
-    if !gone.is_empty() {
-        crate::store::kick_trash(&p.trash_dir()?);
-    }
     Ok(gone.len())
 }
 
@@ -577,6 +604,36 @@ impl<D: ReleasePins> Drop for Pin<D> {
 #[cfg(test)]
 mod inspection_tests {
     use super::*;
+
+    #[test]
+    fn busy_maintenance_leaves_the_queue_and_last_pass_untouched() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-free-busy-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: crate::ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        p.db.conn.execute("INSERT INTO free_queue(state) VALUES('dead')", [])?;
+        let key = (store.root.clone(), "p".to_string());
+        let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("lock"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        assert_eq!(finish_project_maintenance(&p)?, 0);
+        assert_eq!(p.db.queued_frees()?, ["dead"]);
+        assert!(!LEFT_QUEUED.lock().unwrap().contains_key(&key));
+        drop(held);
+        assert_eq!(finish_project_maintenance(&p)?, 1);
+        assert!(p.db.queued_frees()?.is_empty());
+        assert_eq!(LEFT_QUEUED.lock().unwrap().remove(&key), Some(Vec::new()));
+        drop(p);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn inspections_see_expiration_and_queue_writes_without_a_snapshot() -> Result<()> {

@@ -499,6 +499,11 @@ const PERIODIC_CHECKS: &str = "periodic-checks.json";
 /// How old a state without an owner must be before the hourly pass frees it.
 const LEAK_AGE_MS: i64 = 3_600_000;
 
+/// Test only (tests/t255-periodic-yields.sh): one automatic-state pass without a daemon.
+pub fn periodic_test(root: &Path) {
+    periodic(root, false, None, true);
+}
+
 fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: bool) {
     let now = crate::ids::now_ms();
     let store = match Store::open(root) {
@@ -521,10 +526,7 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
             author: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
-        let repo = match crate::repo::Repo::open(&ctx, &name) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+        let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };
         if user_mode.is_none() {
             automatic_states(&ctx, &repo, &name, now);
         }
@@ -580,17 +582,41 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                 }
                 let saved = repo.last_auto(&l).ok().flatten().map(|s| s.time).unwrap_or(0);
                 let last = saved.max(checks.get(&l.id).copied().unwrap_or(0));
-                if now - last >= interval {
-                    if let Ok(_lock) = repo.p.lock() {
-                        match repo.save(&ctx, &l, "periodic", true, false) {
-                            Ok(None) => {
-                                checks.insert(l.id.clone(), now);
-                            }
-                            Ok(Some(_)) => {}
-                            // A failed save is compared again on the next tick: say why.
-                            Err(e) => eprintln!("layr periodic save ({name}/{}): {e:#}", l.name),
+                if now - last < interval {
+                    continue;
+                }
+                let Ok(Some(_line_lock)) = repo.p.try_line_lock(&l.id, &l.name) else { continue };
+                let Ok(Some(_lock)) = repo.p.try_lock() else { continue };
+                let Ok(Some(l)) = repo.p.db.line_by_id(&l.id) else { continue };
+                let Ok(l) = repo.localize(l) else { continue };
+                if l.machine != repo.p.store.machine.id || !repo.working(&l).exists() {
+                    continue;
+                }
+                let interval = repo.p.config_u64("snapshot.interval", 600) as i64 * 1000;
+                let saved = repo.last_auto(&l).ok().flatten().map(|s| s.time).unwrap_or(0);
+                let last = saved.max(checks.get(&l.id).copied().unwrap_or(0));
+                if now - last < interval {
+                    continue;
+                }
+                // Test only (tests/t255-periodic-yields.sh): pause before either save path.
+                if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_SAVE_BARRIER") {
+                    let dir = PathBuf::from(dir);
+                    let _ = std::fs::write(dir.join("ready"), b"");
+                    let start = std::time::Instant::now();
+                    while !dir.join("release").exists() {
+                        if start.elapsed() >= std::time::Duration::from_secs(5) {
+                            return;
                         }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                     }
+                }
+                match repo.save(ctx, &l, "periodic", true, false) {
+                    Ok(None) => {
+                        checks.insert(l.id.clone(), now);
+                    }
+                    Ok(Some(_)) => {}
+                    // A failed save is compared again on the next tick: say why.
+                    Err(e) => eprintln!("layr periodic save ({name}/{}): {e:#}", l.name),
                 }
             }
         }
