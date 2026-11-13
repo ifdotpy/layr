@@ -335,6 +335,8 @@ pub const COMMANDS: &[&str] = &[
     "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
     "usage", "keep", "objects",
     "migrate", "fs", "tool",
+    // Handled in main.rs before a store opens; listed for `--help`.
+    "store", "store-version", "schema",
 ];
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {

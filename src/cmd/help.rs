@@ -10,7 +10,7 @@ include!(concat!(env!("OUT_DIR"), "/usage_texts.rs"));
 
 /// Options whose value is text: a `-h` or `--help` right after one is the value, not a request
 /// for help (`layr save -m -h`).
-const TEXT_OPTIONS: &[&str] = &["-m", "--message", "--note", "-e", "--grep", "--author"];
+const TEXT_OPTIONS: &[&str] = &["-m", "--message", "--note", "-e", "--grep", "--author", "--title", "--description", "--reason"];
 
 /// The help that `argv` (after the global options) asks for: `None` for none, an empty list for
 /// the general help, else the command and its first subcommand word.
@@ -161,6 +161,11 @@ mod tests {
         // A text value, an argument after `--`, and grep's own -h are no help requests.
         assert_eq!(wanted(&args("save -m -h")), None);
         assert_eq!(wanted(&args("save --message --help")), None);
+        assert_eq!(wanted(&args("change edit 1 --title --help")), None);
+        assert_eq!(wanted(&args("change edit 1 --description -h")), None);
+        assert_eq!(wanted(&args("change close 1 -m --help")), None);
+        assert_eq!(wanted(&args("remote mode cloud --reason -h")), None);
+        assert_eq!(wanted(&args("store remove -h")), Some(args("store remove")));
         assert_eq!(wanted(&args("comment abc -- --help")), None);
         assert_eq!(wanted(&args("try head -- cargo --help")), None);
         assert_eq!(wanted(&args("grep -h x")), None);
@@ -185,7 +190,7 @@ mod tests {
         assert!(!checks.contains("layr line "), "{checks}");
 
         let comment = usage("help comment");
-        assert!(comment.starts_with("layr comment <change> <text> "), "{comment}");
+        assert!(comment.starts_with("layr comment <change> (-m <text> | <text>) "), "{comment}");
 
         // A subcommand narrows the text; `|`-joined forms are entries of their own.
         assert_eq!(usage("op show --help"), "layr op show <id>\n");

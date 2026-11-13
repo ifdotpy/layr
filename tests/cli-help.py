@@ -12,7 +12,7 @@ source = Path(__file__).resolve().parent.parent
 dispatch = (source / "src/cmd/mod.rs").read_text().split("pub fn run(ctx:", 1)[1].split("#[cfg(test)]", 1)[0]
 arms = re.findall(r'^\s*((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>', dispatch, re.M)
 commands = {name for arm in arms for name in re.findall(r'"([^"]+)"', arm)}
-commands.update(("person", "mount", "daemon", "retest", "fs", "tool", "schema", "store"))
+commands.update(("person", "mount", "daemon", "retest", "fs", "tool", "schema", "store", "store-version"))
 existing = root / "existing"
 (existing / "machine").mkdir(parents=True)
 (existing / "machine/id").write_text("test-machine")
@@ -54,7 +54,7 @@ for store in (root / "absent", existing):
     assert fingerprint(store) == before, "help after -- changed the store"
     checks += 1
 # `layr help <command>` is `layr <command> --help`; a subcommand narrows it.
-for command, want in (("checks", "usage: layr checks watch "), ("comment", "usage: layr comment <change> <text>"),
+for command, want in (("checks", "usage: layr checks watch "), ("comment", "usage: layr comment <change> (-m <text> | <text>) "),
                       ("line", "layr line new <name> [<rev>] [--count N]")):
     asked = subprocess.run([binary, "help", command], cwd=root, capture_output=True, text=True)
     flag = subprocess.run([binary, command, "--help"], cwd=root, capture_output=True, text=True)
