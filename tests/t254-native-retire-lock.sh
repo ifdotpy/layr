@@ -8,6 +8,7 @@ export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock
 mkdir -p "$T/src"
 echo content > "$T/src/file.txt"
 python3 - "$T" "$LAYR" <<'PY'
+import errno
 import json
 import os
 from pathlib import Path
@@ -40,11 +41,21 @@ run('init', 'p', '--from', str(root / 'src'), '-q')
 run('protect', 'main', '--remove', cwd=work)
 # This fixture has no unsaved work. Hide its folder during migration to avoid the
 # automatic-save comparison, whose btrfs metadata send requires root.
-work.rename(root / 'main')
+# The folder cannot move on Linux: it is a mount on overlayfs (EBUSY) and on another
+# device than the test folder on btrfs (EXDEV). Those checks run as root, where the
+# comparison works, so the folder stays.
+try:
+    work.rename(root / 'main')
+    hidden = True
+except OSError as e:
+    if e.errno not in (errno.EXDEV, errno.EBUSY):
+        raise
+    hidden = False
 try:
     run('--project', 'p', 'migrate', cwd=root)
 finally:
-    (root / 'main').rename(work)
+    if hidden:
+        (root / 'main').rename(work)
 with sqlite3.connect(meta / 'db/layr.sqlite') as db:
     state = db.execute("SELECT head FROM lines WHERE name='main'").fetchone()[0]
     record = json.loads(db.execute('SELECT rec FROM states WHERE id=?', (state,)).fetchone()[0])

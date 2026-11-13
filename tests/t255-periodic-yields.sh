@@ -6,6 +6,7 @@ export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock LAYR_TEST_PERIODIC=1
 mkdir -p "$T/src"
 echo content > "$T/src/file.txt"
 python3 - "$T" "$LAYR" <<'PY'
+import errno
 import json
 import os
 from pathlib import Path
@@ -34,7 +35,16 @@ def until(predicate, description):
 run('init', 'p', '--from', str(root / 'src'), '-q')
 run('protect', 'main', '--remove', cwd=work)
 # Object-backed comparisons also work on an unprivileged btrfs test mount.
-work.rename(root / 'main')
+# The folder cannot move on Linux: it is a mount on overlayfs (EBUSY) and on another
+# device than the test folder on btrfs (EXDEV). Those checks run as root, where the
+# comparison works, so the folder stays.
+try:
+    work.rename(root / 'main')
+    hidden = True
+except OSError as e:
+    if e.errno not in (errno.EXDEV, errno.EBUSY):
+        raise
+    hidden = False
 try:
     run('--project', 'p', 'migrate', cwd=root)
     if os.environ.get('LAYR_TEST_PREMOUNTED') == '1':
@@ -43,7 +53,8 @@ try:
             subprocess.run(['btrfs', 'property', 'set', '-ts', str(native), 'ro', 'false'], check=True, timeout=3)
     run('--project', 'p', 'migrate', '--delete-old', cwd=root)
 finally:
-    (root / 'main').rename(work)
+    if hidden:
+        (root / 'main').rename(work)
 run('config', 'snapshot.interval', '600', cwd=work)
 with sqlite3.connect(meta / 'db/layr.sqlite') as db:
     line = db.execute("SELECT id FROM lines WHERE name='main'").fetchone()[0]

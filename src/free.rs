@@ -626,7 +626,15 @@ mod inspection_tests {
         assert_eq!(p.db.queued_frees()?, ["dead"]);
         assert!(!LEFT_QUEUED.lock().unwrap().contains_key(&key));
         drop(held);
-        assert_eq!(finish_project_maintenance(&p)?, 1);
+        // A child that another test forks keeps a copy of `held` until its exec, so the lock can
+        // stay taken for a moment after the drop: try again until the pass gets the lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut gone = finish_project_maintenance(&p)?;
+        while gone == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            gone = finish_project_maintenance(&p)?;
+        }
+        assert_eq!(gone, 1);
         assert!(p.db.queued_frees()?.is_empty());
         assert_eq!(LEFT_QUEUED.lock().unwrap().remove(&key), Some(Vec::new()));
         drop(p);
