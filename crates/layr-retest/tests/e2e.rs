@@ -2,7 +2,8 @@
 //! Runs `layr retest ...`. Needs the `layr` built from this repository first in PATH
 //! (`cargo build -p layr`, then `target/debug` first in PATH),
 //! `cargo nextest`, the registry package `hex` 0.4 in the cargo cache (the test runs offline), `cargo nextest` and the `llvm-tools` rustup component. The store is a temp
-//! folder with its own LAYR_ROOT. Takes about 10 s.
+//! folder with its own LAYR_ROOT, and every test-launched `layr` command runs with LAYR_DIRECT=1: without it a
+//! client of a normal user forwards to the system daemon, which uses its own store. Takes about 10 s.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::process::CommandExt;
@@ -62,7 +63,7 @@ fn sh(dir: &Path, root: &Path, prog: &str, args: &[&str]) -> (String, String) {
         Command::new(prog)
             .args(args)
             .current_dir(dir)
-            .env("LAYR_ROOT", root)
+            .env("LAYR_ROOT", root).env("LAYR_DIRECT", "1")
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_TARGET_DIR")
             .env("CARGO_NET_OFFLINE", "true")
@@ -167,7 +168,7 @@ fn runs_only_the_stale_test() {
 
     // 1b. Doctor: the two integration tests are two binaries, which it says; it reads and writes nothing.
     let before = walk(&line).len();
-    let o = Command::new("layr").args(["retest", "doctor"]).current_dir(&line).env("LAYR_ROOT", &root).output_limited();
+    let o = Command::new("layr").args(["retest", "doctor"]).current_dir(&line).env("LAYR_ROOT", &root).env("LAYR_DIRECT", "1").output_limited();
     let text = String::from_utf8_lossy(&o.stdout);
     assert_eq!(o.status.code(), Some(1), "{text}");
     assert!(text.contains("tiny: 2 integration test binaries"), "{text}");
@@ -267,7 +268,7 @@ fn runs_only_the_stale_test() {
     let o = Command::new("layr")
         .args(["retest", "run", "--full"])
         .current_dir(&line)
-        .env("LAYR_ROOT", &root)
+        .env("LAYR_ROOT", &root).env("LAYR_DIRECT", "1")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR")
         .env("CARGO_NET_OFFLINE", "true")
@@ -334,7 +335,7 @@ fn vitest_adapter_with_a_fake_tool() {
             .arg("retest")
             .args(args)
             .current_dir(&line)
-            .env("LAYR_ROOT", &root)
+            .env("LAYR_ROOT", &root).env("LAYR_DIRECT", "1")
             .env("LAYR_RETEST_VITEST", &fake)
             .output_limited();
         let _ = std::fs::read_to_string(&log); // the log is read by `calls`
@@ -465,7 +466,7 @@ fn init_is_idempotent() {
     std::fs::create_dir_all(line.join("node_modules/pkg")).unwrap();
     std::fs::write(line.join("node_modules/pkg/index.js"), "x").unwrap();
     let init = || {
-        let o = Command::new("layr").args(["retest", "init"]).current_dir(&line).env("LAYR_ROOT", &root).output_limited();
+        let o = Command::new("layr").args(["retest", "init"]).current_dir(&line).env("LAYR_ROOT", &root).env("LAYR_DIRECT", "1").output_limited();
         (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
     };
     let overlay_folders = || {
@@ -567,7 +568,7 @@ fn gate_child(dir: &Path, lock: &Path, args: &[&str]) -> std::process::Child {
     Command::new("layr")
         .args(all)
         .current_dir(dir)
-        .env("LAYR_ROOT", dir.join("unused-store"))
+        .env("LAYR_ROOT", dir.join("unused-store")).env("LAYR_DIRECT", "1")
         .env("LAYR_RETEST_GATE_LOCK", lock)
         .process_group(0)
         .stdout(std::process::Stdio::piped())
@@ -1164,7 +1165,7 @@ fn sweep_skips_a_busy_build_lock_without_waiting() {
     let child = Command::new("layr")
         .args(["retest", "sweep"])
         .current_dir(&ws)
-        .env("LAYR_ROOT", ws.join("unused-store"))
+        .env("LAYR_ROOT", ws.join("unused-store")).env("LAYR_DIRECT", "1")
         .env("CARGO_TERM_COLOR", "always")
         .process_group(0)
         .stdout(std::process::Stdio::piped())
