@@ -29,9 +29,10 @@ pub const CANCEL_OP: &str = "review.cancel";
 /// The most records that one register record can name: more heads than this are not real concurrency.
 const MAX_PREV: usize = 64;
 
+// The payloads accept unknown fields: a later layr can add one, and an older machine still reads the record.
+
 /// `data.thread_status` of `comment.resolve` and `comment.unresolve`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ThreadStatus {
     pub change_id: String,
     /// The id of the first comment of the thread.
@@ -44,7 +45,6 @@ pub struct ThreadStatus {
 
 /// `data.reaction` of `reaction.add` and `reaction.remove`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Reaction {
     pub change_id: String,
     /// A comment id, or the change id for a reaction to the change.
@@ -55,7 +55,6 @@ pub struct Reaction {
 
 /// `data.review_request` of `review.request` and `review.cancel`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReviewRequest {
     pub change_id: String,
     /// `person:<login>`, `user:<uid>` or `machine:<machine id>`.
@@ -90,54 +89,86 @@ fn check_prev(r: &Record, prev: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The review fields of one record (called from `validation::validate`).
+/// The payload `key` of a record whose op is one of `ops`, else None. Another op's field of the same name is not
+/// this payload: a later layr can use the name for something else.
+fn payload<T: serde::de::DeserializeOwned>(r: &Record, ops: [&str; 2], key: &str) -> Option<serde_json::Result<T>> {
+    ops.contains(&r.op.as_str()).then(|| r.data.get(key).map(|v| serde_json::from_value::<T>(v.clone())))?
+}
+
+/// The review fields of one record (called from `validation::validate`). Only the fields that the fold reads are
+/// checked; a record of another op is not checked here.
 pub fn validate(r: &Record) -> Result<()> {
-    let d = &r.data;
     let uuid = |what: &str, v: &str| {
         if !is_uuid(v) {
             bail!("record {}: {what} is not an id: {v:?}", r.seq);
         }
         Ok(())
     };
-    let status = d.get("thread_status").map(|v| serde_json::from_value::<ThreadStatus>(v.clone())).transpose()?;
-    if let Some(s) = &status {
-        uuid("change", &s.change_id)?;
-        uuid("thread", &s.thread)?;
-        check_prev(r, &s.prev)?;
-    }
-    if matches!(r.op.as_str(), RESOLVE_OP | UNRESOLVE_OP) && status.is_none_or(|s| s.resolved != (r.op == RESOLVE_OP)) {
-        bail!("record {}: {} needs a thread status that matches it", r.seq, r.op);
-    }
-    let reaction = d.get("reaction").map(|v| serde_json::from_value::<Reaction>(v.clone())).transpose()?;
-    if let Some(x) = &reaction {
-        uuid("change", &x.change_id)?;
-        uuid("reaction target", &x.target)?;
-        if !reaction_name(&x.name) {
-            bail!("record {}: bad reaction name {:?}: use 1 to 32 of a-z, 0-9, '_', '+' and '-'", r.seq, x.name);
+    match r.op.as_str() {
+        RESOLVE_OP | UNRESOLVE_OP => {
+            let Some(Ok(s)) = payload::<ThreadStatus>(r, [RESOLVE_OP, UNRESOLVE_OP], "thread_status") else {
+                bail!("record {}: {} needs a thread status", r.seq, r.op);
+            };
+            uuid("change", &s.change_id)?;
+            uuid("thread", &s.thread)?;
+            check_prev(r, &s.prev)?;
+            if s.resolved != (r.op == RESOLVE_OP) {
+                bail!("record {}: {} needs a thread status that matches it", r.seq, r.op);
+            }
         }
-    }
-    if matches!(r.op.as_str(), REACT_OP | UNREACT_OP) && reaction.is_none_or(|x| x.on != (r.op == REACT_OP)) {
-        bail!("record {}: {} needs a reaction that matches it", r.seq, r.op);
-    }
-    let request = d.get("review_request").map(|v| serde_json::from_value::<ReviewRequest>(v.clone())).transpose()?;
-    if let Some(q) = &request {
-        uuid("change", &q.change_id)?;
-        if !reviewer(&q.reviewer) {
-            bail!("record {}: bad reviewer {:?}: use person:<login>, user:<uid> or machine:<id>", r.seq, q.reviewer);
+        REACT_OP | UNREACT_OP => {
+            let Some(Ok(x)) = payload::<Reaction>(r, [REACT_OP, UNREACT_OP], "reaction") else {
+                bail!("record {}: {} needs a reaction", r.seq, r.op);
+            };
+            uuid("change", &x.change_id)?;
+            uuid("reaction target", &x.target)?;
+            if !reaction_name(&x.name) {
+                bail!("record {}: bad reaction name {:?}: use 1 to 32 of a-z, 0-9, '_', '+' and '-'", r.seq, x.name);
+            }
+            if x.on != (r.op == REACT_OP) {
+                bail!("record {}: {} needs a reaction that matches it", r.seq, r.op);
+            }
         }
-        check_prev(r, &q.prev)?;
-    }
-    if matches!(r.op.as_str(), REQUEST_OP | CANCEL_OP) && request.is_none_or(|q| q.active != (r.op == REQUEST_OP)) {
-        bail!("record {}: {} needs a reviewer request that matches it", r.seq, r.op);
-    }
-    if let Some(end) = d.get("line_end") {
-        let end = end.as_u64().and_then(|n| u32::try_from(n).ok());
-        let start = d["comment"]["line"].as_u64();
-        if r.op != "comment" || start.is_none() || end.is_none_or(|end| u64::from(end) < start.unwrap_or(0)) {
-            bail!("record {}: a comment line range needs a first line and an end line not before it", r.seq);
+        REQUEST_OP | CANCEL_OP => {
+            let Some(Ok(q)) = payload::<ReviewRequest>(r, [REQUEST_OP, CANCEL_OP], "review_request") else {
+                bail!("record {}: {} needs a reviewer request", r.seq, r.op);
+            };
+            uuid("change", &q.change_id)?;
+            if !reviewer(&q.reviewer) {
+                bail!("record {}: bad reviewer {:?}: use person:<login>, user:<uid> or machine:<id>", r.seq, q.reviewer);
+            }
+            check_prev(r, &q.prev)?;
+            if q.active != (r.op == REQUEST_OP) {
+                bail!("record {}: {} needs a reviewer request that matches it", r.seq, r.op);
+            }
         }
+        "comment" => {
+            if let Some(end) = r.data.get("line_end") {
+                let end = end.as_u64().and_then(|n| u32::try_from(n).ok());
+                let start = r.data["comment"]["line"].as_u64();
+                if start.is_none() || end.is_none_or(|end| u64::from(end) < start.unwrap_or(0)) {
+                    bail!("record {}: a comment line range needs a first line and an end line not before it", r.seq);
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
+}
+
+/// The thread status of a `comment.resolve` or `comment.unresolve` record.
+fn thread_status_of(r: &Record) -> Option<ThreadStatus> {
+    payload(r, [RESOLVE_OP, UNRESOLVE_OP], "thread_status")?.ok()
+}
+
+/// The reviewer request of a `review.request` or `review.cancel` record.
+fn review_request_of(r: &Record) -> Option<ReviewRequest> {
+    payload(r, [REQUEST_OP, CANCEL_OP], "review_request")?.ok()
+}
+
+/// The reaction of a `reaction.add` or `reaction.remove` record.
+fn reaction_of(r: &Record) -> Option<Reaction> {
+    payload(r, [REACT_OP, UNREACT_OP], "reaction")?.ok()
 }
 
 /// One record of a register.
@@ -233,7 +264,7 @@ impl Project {
         self.records
             .iter()
             .filter_map(|record| {
-                let s: ThreadStatus = serde_json::from_value(record.data.get("thread_status")?.clone()).ok()?;
+                let s = thread_status_of(record)?;
                 (s.change_id == change && s.thread == thread).then_some(Entry { record, prev: s.prev, value: s.resolved })
             })
             .collect()
@@ -243,7 +274,7 @@ impl Project {
         self.records
             .iter()
             .filter_map(|record| {
-                let q: ReviewRequest = serde_json::from_value(record.data.get("review_request")?.clone()).ok()?;
+                let q = review_request_of(record)?;
                 (q.change_id == change && q.reviewer == reviewer).then_some(Entry { record, prev: q.prev, value: q.active })
             })
             .collect()
@@ -271,7 +302,7 @@ impl Project {
         let mut latest: BTreeMap<(String, String, String), &Record> = BTreeMap::new();
         let mut on: BTreeMap<(String, String, String), bool> = BTreeMap::new();
         for record in &self.records {
-            let Some(Ok(x)) = record.data.get("reaction").map(|v| serde_json::from_value::<Reaction>(v.clone())) else {
+            let Some(x) = reaction_of(record) else {
                 continue;
             };
             if x.change_id != change {
@@ -298,7 +329,7 @@ impl Project {
     pub fn has_reaction(&self, change: &str, writer_key: &str, target: &str, name: &str) -> bool {
         let mut state: Option<(&Record, bool)> = None;
         for record in &self.records {
-            let Some(Ok(x)) = record.data.get("reaction").map(|v| serde_json::from_value::<Reaction>(v.clone())) else {
+            let Some(x) = reaction_of(record) else {
                 continue;
             };
             if x.change_id != change || x.target != target || x.name != name || writer(self, record) != writer_key {
@@ -388,13 +419,8 @@ impl Project {
             }));
         }
         let mut reviewers: BTreeMap<String, Value> = BTreeMap::new();
-        let names: BTreeSet<String> = self
-            .records
-            .iter()
-            .filter_map(|r| serde_json::from_value::<ReviewRequest>(r.data.get("review_request")?.clone()).ok())
-            .filter(|q| q.change_id == change)
-            .map(|q| q.reviewer)
-            .collect();
+        let names: BTreeSet<String> =
+            self.records.iter().filter_map(review_request_of).filter(|q| q.change_id == change).map(|q| q.reviewer).collect();
         for name in names {
             let entries = self.request_entries(change, &name);
             let Some((true, by)) = register(&entries, true) else { continue };
@@ -637,5 +663,20 @@ mod tests {
         assert!(validate(&base("comment", comment(json!(3), json!(5)))).is_ok());
         assert!(validate(&base("comment", comment(json!(3), json!(2)))).is_err());
         assert!(validate(&base("comment", comment(Value::Null, json!(2)))).is_err());
+        // A later layr can add a field to a payload, or use a payload name in another op.
+        let mut later = status(true, vec![]);
+        later["thread_status"]["weight"] = json!(2);
+        assert!(validate(&base(RESOLVE_OP, later.clone())).is_ok(), "an unknown field of a payload is accepted");
+        assert_eq!(thread_status_of(&base(RESOLVE_OP, later.clone())).map(|s| s.resolved), Some(true));
+        let mut later_reaction = reaction("+1");
+        later_reaction["reaction"]["emoji"] = json!("x");
+        assert!(validate(&base(REACT_OP, later_reaction)).is_ok());
+        let mut later_request = request("user:501");
+        later_request["review_request"]["due"] = json!(1);
+        assert!(validate(&base(REQUEST_OP, later_request)).is_ok());
+        let other = base("future.op", json!({"thread_status": "a string", "reaction": 1, "review_request": [], "line_end": "x"}));
+        assert!(validate(&other).is_ok(), "another op's fields of the same names are not review payloads");
+        assert!(thread_status_of(&other).is_none() && reaction_of(&other).is_none() && review_request_of(&other).is_none());
+        assert!(thread_status_of(&base("future.op", later)).is_none(), "a payload counts only in its own op");
     }
 }
