@@ -32,7 +32,7 @@ eq "the state before the newest save stays present (undo of the save reads it)" 
 ok "the dead base keeps its storage while the live layer uses it" on_disk "$A"
 ok "the live state is a thin layer over the dead base" test -d "$P/deltas/$B"
 cd $P/lines/main || exit 1
-l line delete -D w >/dev/null
+l line delete -D --discard w >/dev/null
 l gc --repair >/dev/null 2>&1
 no "the base goes when the live layer goes" on_disk "$A"
 eq "the final state keeps its record as present" 1 "$(present "$b")"
