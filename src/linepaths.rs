@@ -89,6 +89,21 @@ impl Project<'_> {
         self.default_line_path(&p.to_string_lossy())
     }
 
+    /// The working folder of line `line_id` named `name`: its recorded folder, else `lines/<name>`. When another
+    /// line keeps `lines/<name>` (a folder that `line rename` kept), the line has no folder there: the path is a
+    /// folder of its id below `meta/`, which no command makes, so that no command reads, writes or deletes the
+    /// folder of the other line as this line's.
+    pub fn line_folder(&self, line_id: &str, name: &str) -> PathBuf {
+        let map = self.recorded_paths();
+        if let Some(p) = map.get(line_id) {
+            return self.resolve_folder(p.clone());
+        }
+        if map.iter().any(|(id, p)| id != line_id && p.is_relative() && p == Path::new(name)) {
+            return self.meta_dir().join("no-folder").join(line_id);
+        }
+        self.default_line_path(name)
+    }
+
     /// The line id that keeps the folder `lines/<folder>` after a rename.
     pub fn kept_folder_line(&self, folder: &str) -> Option<String> {
         kept_folder_line_in(&self.meta_dir(), folder)

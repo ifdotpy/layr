@@ -414,6 +414,18 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
+        // The folder `lines/<new>` that `line rename` kept for another line stays that line's: two lines never
+        // share one folder (a delete of one would trash the other's work).
+        if let Some(owner) = repo.p.kept_folder_line(&new).filter(|id| *id != l.id) {
+            let owner = repo.p.db.line_by_id(&owner)?.map_or(owner, |o| o.name);
+            return Err(exit(
+                128,
+                format!(
+                    "fatal: the folder {} belongs to line '{owner}' (renamed from '{new}'); choose another name, or run 'layr line move {owner}' to move that folder to the folder of its name",
+                    repo.p.default_line_path(&new).display()
+                ),
+            ));
+        }
         // The folder stays where it is: programs that work in it (a shell, an editor, an agent)
         // keep their folder. `line move <line>` gives it the folder of the new name.
         let folder_before = repo.p.keep_folder(&l.id, &l.name, &new)?;
@@ -739,6 +751,16 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let w = repo.working(&l);
     if w.exists() {
         return Err(exit(1, format!("line '{name}' already has a working folder here: {}", w.display())));
+    }
+    // `Project::line_folder`: another line keeps the folder of this name.
+    if w.starts_with(repo.p.meta_dir()) {
+        return Err(exit(
+            1,
+            format!(
+                "the folder {} belongs to another line (kept by 'line rename'); rename line '{name}' first",
+                repo.p.default_line_path(name).display()
+            ),
+        ));
     }
     let start = match a.get("--state") {
         Some(r) => revs::resolve(repo, Some(&l), r)?,

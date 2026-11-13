@@ -74,6 +74,13 @@ ok "rename two" l line rename a1 a2
 eq "the first folder stays" "$P/feat2" "$(path_of a2)"
 eq "the kept folder finds the last name" "a2" "$(cd "$P/feat2" && l line list --show-current)"
 
+# A rename to a name whose folder another line keeps is refused: two lines never share a folder.
+out=$(l line rename feat feat2 2>&1); rc=$?
+no "a rename to the kept folder of another line is refused" test "$rc" = 0
+has "the refusal names the line of the folder" "belongs to line 'a2'" "$out"
+ok "the kept folder is unchanged" test -f "$P/feat2/kept.txt"
+eq "the line keeps its name" "feat" "$(cd "$P/feat" && l line list --show-current)"
+
 # A line moved out of the store keeps its path through a rename.
 mkdir -p "$T/outside"
 ok "move out" l line move a2 "$T/outside/w"
@@ -84,9 +91,37 @@ eq "back in the folder of the new name" "$P/a3" "$(path_of a3)"
 
 # A deleted line takes its kept folder with it.
 ok "rename for the delete" l line rename a3 gone
-ok "delete of a renamed line" l line delete -D gone
+ok "delete of a renamed line with its unsaved change" l line delete -D --discard gone
 no "its folder is gone" test -e "$P/a3"
 ok "a new line takes the free name" l line new -q a3 main
 ok "with its own folder" test -d "$P/a3"
+
+# A line of another machine whose name is the folder that a rename kept here gets no folder here: a delete of it
+# leaves the folder of the renamed line.
+ok "remote add" l remote add cloud "file://$T/plain"
+ok "push to the store" l push cloud -q
+FIRST=$LAYR_ROOT
+new_fs "$T/second" 2G
+export LAYR_ROOT=$T/second/store
+cd "$T"
+ok "clone the store" l clone "file://$T/plain" p -q
+Q=$LAYR_ROOT/projects/p/lines
+cd "$Q/main"
+ok "a line on the second machine" l line new -q shared main
+ok "rename it; its folder stays" l line rename shared moved
+echo work > "$Q/shared/work.txt"
+export LAYR_ROOT=$FIRST
+cd "$P/main"
+ok "the first machine makes a line of the kept name" l line new -q shared main
+ok "push it" l push cloud -q
+export LAYR_ROOT=$T/second/store
+cd "$Q/main"
+ok "the second machine fetches it" l fetch origin -q
+has "the line of the first machine arrives" "shared" "$(l line list)"
+no "it has no folder in the kept folder" test "$(path_of shared)" = "$Q/shared"
+eq "the kept folder still finds the renamed line" "moved" "$(cd "$Q/shared" && l line list --show-current)"
+l line delete -D --discard shared >/dev/null 2>&1
+eq "a delete of it leaves the kept folder" "work" "$(cat "$Q/shared/work.txt" 2>&1)"
+export LAYR_ROOT=$FIRST
 
 finish

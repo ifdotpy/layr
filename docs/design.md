@@ -311,8 +311,11 @@ For a line in the store, the project file then maps the line id to a relative pa
 below `lines/` (the old name). The store index never holds a relative entry: the folder is in the
 store and moves with the project (`project move`). A command in `lines/<folder>` first looks for a
 line that keeps that folder, then for a line with that name. A rename back to the folder name, a
-`line move`, or a delete removes the entry. `line new` refuses a name whose folder another line
-keeps, and names that line and `layr line move <line>` in the error.
+`line move`, or a delete removes the entry. `line new` and `line rename` refuse a name whose folder
+another line keeps, and name that line and `layr line move <line>` in the error. A line without an
+entry whose name is a folder that another line keeps (a line of another machine) has no folder here:
+`Repo::working` gives it a path below `meta/no-folder/` that no command makes, so no command reads,
+writes or deletes the other line's folder as its own. `adopt` refuses such a line.
 
 ### Volumes
 

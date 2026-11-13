@@ -157,7 +157,9 @@ name everywhere: in the records, on its overlays, in `line list` and in `status`
 keeps `lines/<old>`; a rename back to `<old>` makes it the default folder again. Run
 `line move <new>` to move the folder to `lines/<new>`. `undo` of a rename also keeps the folder.
 `line new <old>` refuses while the kept folder is there. The error names the line that owns the
-folder and the `line move` command that frees the name.
+folder and the `line move` command that frees the name. `line rename <line> <old>` of another line
+refuses too, so two lines never share one folder. A line of another machine with that name has no
+folder here until the kept folder moves.
 `line move <line> <path>` keeps the working folder of a line at `<path>`, outside the store, for
 example `~/Projects/app` as the real folder of the line `main`. `line move <line>` without a path
 moves it back to `lines/<name>`, also from a folder that `line rename` kept. The path must not exist, its parent must exist and be writable
