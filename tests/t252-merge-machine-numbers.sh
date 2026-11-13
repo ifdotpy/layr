@@ -3,7 +3,8 @@
 # The Layr Cloud merge machine as the change numbering machine (docs/review.md, "How numbers work"). The creator
 # trusts a second machine with the merge role and hands it the numbering role. That machine runs only `queue run`:
 # each pass numbers the changes without a number in one record, before it merges. After a fetch, the creator shows
-# those numbers. A machine with a reader or writer role cannot get the numbering role.
+# those numbers. A machine with a reader or writer role cannot get the numbering role. The merge machine cannot hand
+# the role on; the creator, an admin machine, takes it back.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
@@ -43,6 +44,7 @@ read -r WRITER_ID WRITER_KEY < <(l remote self --json | js "d['id'] + ' ' + d['p
 
 export LAYR_ROOT=$FIRST
 cd "$P/main"
+CREATOR_ID=$(l remote self --json | js "d['id']")
 ok "trust the merge machine" l remote trust cloud "$MERGE_ID" --public-key "$MERGE_KEY"
 ok "narrow it to the merge role" l remote trust cloud "$MERGE_ID" --public-key "$MERGE_KEY" --role merge
 ok "trust a cache writer" l remote trust cloud "$WRITER_ID" --public-key "$WRITER_KEY" --expires 1h --role writer
@@ -76,6 +78,7 @@ eq "the pass merges the queued change" done "$(l queue list --into main --json |
 eq "the pass wrote one number record" 1 "$(numbers_by "$MERGE_ID")"
 l queue run --into main --json >"$T/run2.out" 2>&1
 eq "a pass without new changes writes no number record" 1 "$(numbers_by "$MERGE_ID")"
+has "a merge machine cannot hand the role on" "cannot hand the role on" "$(l change numbering --hand-to "$CREATOR_ID" 2>&1)"
 ok "the merge machine pushes" l push origin -q
 
 export LAYR_ROOT=$FIRST
@@ -86,4 +89,21 @@ eq "the queued change has the next number" "$((N1 + 1))" "$(number_of "$C2")"
 eq "the pushed change has a number too" "$((N1 + 2))" "$(number_of "$C3")"
 eq "#$((N1 + 1)) selects the queued change" "$C2" "$(l change show "#$((N1 + 1))" --json | js "d['change_id']")"
 eq "the first number stays" "$N1" "$(number_of "$C1")"
+
+# The creator, an admin machine, takes the role back from the merge machine.
+ok "the creator takes the role back" l change numbering --hand-to "$CREATOR_ID"
+eq "the creator gives numbers again" True "$(l change numbering --json | js "d['this_machine']")"
+l line new -q fourth
+cd "$P/fourth"
+echo four > four.txt
+l add four.txt
+l save -q -m "feat: four"
+C4=$(l log -n1 --json | head -1 | js "d['change_id']")
+eq "the creator numbers its new change next" "$((N1 + 3))" "$(number_of "$C4")"
+ok "push the takeover" l push cloud -q
+export LAYR_ROOT=$T/merge/store
+cd "$M/main"
+ok "the merge machine fetches the takeover" l fetch origin -q
+eq "the merge machine no longer gives numbers" False "$(l change numbering --json | js "d['this_machine']")"
+eq "the merge machine shows the creator's number" "$((N1 + 3))" "$(number_of "$C4")"
 finish

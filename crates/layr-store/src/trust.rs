@@ -174,8 +174,9 @@ pub trait Current {
 /// records the signed evidence of person requests and request refusals, makes release refs and lists the files of
 /// its own release refs. It changes no policy: no trust, no access, no protection, no overlay or project setting (its
 /// `config` is namespaced as `<key>@<machine>` by every other machine), no other ref, no other line, and no line
-/// name, owner or home machine. It may hold the change numbering role: its change numbers and its handoff of that
-/// role count as far as the numbering rules let them. Each check reads `current`, never the record's own `before`.
+/// name, owner or home machine. It may hold the change numbering role: its change numbers count as far as the
+/// numbering rules let them, but it hands the role to no machine. Each check reads `current`, never the record's own
+/// `before`.
 fn merge_refusal(
     op: &str,
     data: &Value,
@@ -200,10 +201,10 @@ fn merge_refusal(
         }
         "release.files" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => merge_release_files(data, current),
         "request.refused" | "config" | "push" | "machine" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => None,
-        // Change numbers and the handoff of the numbering role (`layr_model::changes`): a merge machine may be the
-        // numbering machine. The fold of the numbers takes only the records of the current numbering machine, so
-        // these records of a merge machine that does not hold the role change nothing.
-        "change.number" | "change.number.authority" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => None,
+        // Change numbers (`layr_model::changes`): a merge machine may hold the numbering role. The fold of the numbers
+        // takes only the records of the current numbering machine, so the numbers of a merge machine that does not
+        // hold the role change nothing. Only a full machine hands the role on (`change.number.authority`).
+        "change.number" if quiet && !SHARED_DATA.iter().any(|key| shared(key)) => None,
         _ => Some("a merge machine makes only queue, review evidence and release records"),
     }
 }
@@ -800,11 +801,12 @@ mod tests {
         for op in ["request.refused", "config", "push", "machine"] {
             assert!(at(op, &json!({}), &none).is_none(), "{op}");
         }
-        // The numbering role: its numbers and its handoff count, but carry no state, line or shared data.
+        // The numbering role: its numbers count, but carry no state, line or shared data, and it hands the role on to
+        // no machine: an admin machine takes the role back.
         let numbers = json!({"numbers": {"c1": 1}});
         assert!(at("change.number", &numbers, &none).is_none(), "change numbers");
         assert!(merge.refusal(5, "change.number", &numbers, None, &none).is_none(), "change numbers by shape");
-        assert!(at("change.number.authority", &json!({"machine": "m", "next": 2}), &none).is_none(), "a handoff");
+        assert!(at("change.number.authority", &json!({"machine": "m", "next": 2}), &none).is_some(), "a handoff");
         assert!(at("change.number", &numbers, &state).is_some(), "change numbers make no state");
         assert!(at("change.number", &json!({"numbers": {}, "ref_change": {}}), &none).is_some(), "no shared data");
         assert!(merge.refusal_in(5, "change.number", &numbers, Some("cache-target"), &none, "merge", &Reader).is_some());

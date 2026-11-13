@@ -100,10 +100,10 @@ Release verification replays accepted full and merge records in time, machine an
 - `release.files` for a release ref that the merge machine itself set, at the list's state. An attach replaces
   the list, so the files of a release that another machine made stay out of its reach;
 - `request.refused`, `config`, `push` and `machine`, which make no state and move no line;
-- `change.number` and `change.number.authority`, which make no state and move no line. A merge machine can hold
-  the change numbering role (docs/review.md, "How numbers work"). Only the records of the current numbering
-  machine give numbers, so these records of a merge machine without the role change nothing. A reader or a writer
-  cannot hold the role.
+- `change.number`, which makes no state and moves no line. A merge machine can hold the change numbering role
+  (docs/review.md, "How numbers work"). Only the records of the current numbering machine give numbers, so the
+  numbers of a merge machine without the role change nothing. Its `change.number.authority` (a handoff) has no
+  effect: an admin machine takes the role from it. A reader or a writer cannot hold the role.
 
 Any other record of a merge machine has no effect: it makes, renames or deletes no line, changes no other ref or
 line, writes no overlay and carries no queue change or attestation outside these records. Its `config` is

@@ -7,13 +7,14 @@
 //!   sequence) wins. Title and description are separate fields: an edit changes only the fields
 //!   it names.
 //! - Numbers: one machine at a time gives numbers, the numbering machine. It is the project
-//!   creator until that machine hands the role to another machine. The numbering machine writes
-//!   its numbers in its own sequence, so they never collide, and the first number of a change
-//!   stays its number.
+//!   creator until that machine hands the role to another machine. An admin machine (the creator
+//!   and the machines of its `admin.machines`) can also take the role from any holder. The
+//!   numbering machine writes its numbers in its own sequence, so they never collide, and the
+//!   first number of a change stays its number.
 use crate::{Actor, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Sets the title or the description of a change: `{"change_id", "title"?, "description"?}`.
 /// A field that is absent stays as it is; null or an empty string clears it.
@@ -105,39 +106,71 @@ pub struct Numbering {
     pub next: u64,
     pub numbers: BTreeMap<String, u64>,
     pub changes: BTreeMap<u64, String>,
+    /// The machines that can take the role from any holder: the project creator and the machines that the
+    /// creator's newest `admin.machines` setting names.
+    #[serde(default)]
+    pub admins: BTreeSet<String>,
 }
 
 impl Numbering {
     /// Fold the number records. `records` holds every record of the project.
+    ///
+    /// The role moves in segments: one machine gives the numbers in [low, high). A segment ends with the first
+    /// handoff of its machine (its records with a lower sequence count), or with a takeover: a handoff of an admin
+    /// machine that does not hold the role (all records of the holder count, below the takeover's `next`). Of the
+    /// two, the one with the lower `next` ends the segment first; each handoff record ends at most one segment.
+    /// A number record gives at most as many numbers above the highest number as it has entries, so a holder
+    /// cannot jump far ahead.
     pub fn from_records(project: &str, records: &[Record]) -> Numbering {
         let mut n = Numbering { next: 1, ..Default::default() };
         let own_records = records.iter().filter(|r| r.project == project);
-        let Ok(mut machine) = crate::project_perspective(project, own_records) else { return n };
-        // A segment: the numbers of one machine in [low, high), from its records with a sequence
-        // in (after, until). A machine that gets the role back starts after its last handoff.
+        let Ok(creator) = crate::project_perspective(project, own_records) else { return n };
+        n.admins.insert(creator.clone());
+        let named = records
+            .iter()
+            .filter(|r| r.machine == creator && matches!(r.op.as_str(), "project" | "config"))
+            .filter(|r| r.data["config"].get("admin.machines").is_some())
+            .max_by_key(|r| (r.time, r.seq));
+        if let Some(list) = named.and_then(|r| r.data["config"]["admin.machines"].as_array()) {
+            n.admins.extend(list.iter().filter_map(Value::as_str).filter(|m| !m.is_empty()).map(String::from));
+        }
+        let mut machine = creator;
         let mut low = 1u64;
         let mut last_handoff = BTreeMap::<String, u64>::new();
+        let mut used = BTreeSet::<&str>::new();
         for _ in 0..=records.len() {
+            let valid = |r: &Record, low: u64| {
+                r.op == HANDOFF_OP
+                    && r.data["machine"].as_str().is_some_and(|m| !m.is_empty())
+                    && r.data["next"].as_u64().is_some_and(|next| next >= low)
+            };
             let after = last_handoff.get(&machine).copied().unwrap_or(0);
             let mut own: Vec<&Record> = records
                 .iter()
                 .filter(|r| r.machine == machine && r.seq > after && matches!(r.op.as_str(), NUMBER_OP | HANDOFF_OP))
                 .collect();
             own.sort_by_key(|r| r.seq);
-            let handoff = own.iter().find(|r| {
-                r.op == HANDOFF_OP
-                    && r.data["machine"].as_str().is_some_and(|m| !m.is_empty())
-                    && r.data["next"].as_u64().is_some_and(|next| next >= low)
-            });
-            let until = handoff.map_or(u64::MAX, |r| r.seq);
-            let high = handoff.and_then(|r| r.data["next"].as_u64()).unwrap_or(u64::MAX);
+            let handoff = own.iter().copied().find(|r| valid(r, low) && !used.contains(r.id.as_str()));
+            let takeover = records
+                .iter()
+                .filter(|r| r.machine != machine && n.admins.contains(&r.machine))
+                .filter(|r| valid(r, low) && !used.contains(r.id.as_str()))
+                .min_by_key(|r| (r.data["next"].as_u64(), r.time, &r.machine, r.seq));
+            let next_of = |r: Option<&Record>| r.and_then(|r| r.data["next"].as_u64()).unwrap_or(u64::MAX);
+            let (end, until) = match (handoff, takeover) {
+                (Some(h), Some(t)) if next_of(Some(t)) < next_of(Some(h)) => (Some(t), u64::MAX),
+                (Some(h), _) => (Some(h), h.seq),
+                (None, t) => (t, u64::MAX),
+            };
+            let high = next_of(end);
             for r in own.iter().filter(|r| r.op == NUMBER_OP && r.seq < until) {
                 let Some(numbers) = r.data["numbers"].as_object() else { continue };
                 let mut pairs: Vec<(u64, &String)> =
                     numbers.iter().filter_map(|(change, v)| v.as_u64().map(|v| (v, change))).collect();
                 pairs.sort();
+                let limit = n.changes.keys().next_back().map_or(low, |max| low.max(max + 1)).saturating_add(pairs.len() as u64);
                 for (number, change) in pairs {
-                    if number < low || number >= high || change.is_empty() {
+                    if number < low || number >= high || number >= limit || change.is_empty() {
                         continue;
                     }
                     if n.numbers.contains_key(change) || n.changes.contains_key(&number) {
@@ -147,10 +180,13 @@ impl Numbering {
                     n.changes.insert(number, change.clone());
                 }
             }
-            match handoff {
-                Some(h) => {
-                    last_handoff.insert(machine.clone(), h.seq);
-                    machine = h.data["machine"].as_str().unwrap_or_default().to_string();
+            match end {
+                Some(e) => {
+                    used.insert(&e.id);
+                    if e.machine == machine {
+                        last_handoff.insert(machine.clone(), e.seq);
+                    }
+                    machine = e.data["machine"].as_str().unwrap_or_default().to_string();
                     low = high;
                 }
                 None => {
@@ -384,6 +420,39 @@ mod tests {
         assert_eq!(n.number("c5"), Some(5));
         assert_eq!(n.number("c3"), Some(4), "machine a's stale record after its first handoff still has no effect");
         assert_eq!(n.next, 6);
+    }
+
+    #[test]
+    fn an_admin_machine_takes_the_role_from_any_holder() {
+        let mut records = vec![
+            at("a", 1, 1, "project", json!({"id":"project","name":"p","config":{"admin.machines":["d"]}})),
+            commit("a", 2, "c1"),
+            commit("a", 3, "c2"),
+            commit("a", 4, "c3"),
+            commit("a", 5, "c4"),
+            at("a", 6, 6, HANDOFF_OP, json!({"machine":"m","next":1})),
+            at("m", 1, 7, NUMBER_OP, json!({"numbers":{"c1":1,"c2":2}})),
+            // The admin machine d takes the role at 3; m's later numbers from 3 on count no more.
+            at("d", 1, 10, HANDOFF_OP, json!({"machine":"d","next":3})),
+            at("m", 2, 30, NUMBER_OP, json!({"numbers":{"c3":3,"c4":4}})),
+            // A machine that is no admin takes nothing.
+            at("x", 1, 11, HANDOFF_OP, json!({"machine":"x","next":3})),
+            at("d", 2, 12, NUMBER_OP, json!({"numbers":{"c3":3}})),
+            // A number far above the highest number does not count.
+            at("d", 3, 13, NUMBER_OP, json!({"numbers":{"c4":1000}})),
+        ];
+        let n = both_orders(records.clone()).numbering().clone();
+        assert_eq!(n.admins, BTreeSet::from(["a".to_string(), "d".to_string()]));
+        assert_eq!(n.authority.as_deref(), Some("d"));
+        assert_eq!((n.number("c1"), n.number("c2"), n.number("c3"), n.number("c4")), (Some(1), Some(2), Some(3), None));
+        assert_eq!(n.next, 4);
+        // A takeover below the holder's range does nothing; the creator takes the role back at the next number.
+        records.push(at("a", 7, 14, HANDOFF_OP, json!({"machine":"a","next":2})));
+        assert_eq!(both_orders(records.clone()).numbering().authority.as_deref(), Some("d"));
+        records.push(at("a", 8, 15, HANDOFF_OP, json!({"machine":"a","next":4})));
+        records.push(at("a", 9, 16, NUMBER_OP, json!({"numbers":{"c4":4}})));
+        let n = both_orders(records).numbering().clone();
+        assert_eq!((n.authority.as_deref(), n.number("c4"), n.next), (Some("a"), Some(4), 5));
     }
 
     #[test]

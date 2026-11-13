@@ -1925,8 +1925,8 @@ mod tests {
     }
 
     /// A merge machine can hold the change numbering role (docs/review.md, "How numbers work"): after the creator's
-    /// handoff, its signed numbers count for readers. A cache writer that gets the role gives no number: its records
-    /// stay outside its role.
+    /// handoff, its signed numbers count for readers. Its own handoff does not count; the creator takes the role
+    /// back. A cache writer that gets the role gives no number: its records stay outside its role.
     #[test]
     fn a_merge_machine_with_the_numbering_role_gives_numbers() -> Result<()> {
         let base = std::env::temp_dir().join(format!("layr-numbering-{}", ids::new_id()));
@@ -1986,8 +1986,15 @@ mod tests {
             )?;
             let n = numbering()?;
             assert_eq!(n.number("c1"), Some(1), "the merge machine's number counts");
-            assert_eq!(n.authority.as_deref(), Some(writer.as_str()), "its handoff counts");
-            assert_eq!(n.number("c2"), None, "a cache writer's number does not count");
+            assert_eq!(n.authority.as_deref(), Some(merge.as_str()), "its handoff does not count");
+            // The creator takes the role back from the merge machine, then gives it to the cache writer.
+            for to in [&p.store.machine.id, &writer] {
+                let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+                handoff.data = serde_json::json!({"machine": to, "next": 2});
+                p.append(handoff, &actor)?;
+                assert_eq!(numbering()?.authority.as_deref(), Some(to.as_str()), "a handoff of the creator counts");
+            }
+            assert_eq!(numbering()?.number("c2"), None, "a cache writer's number does not count");
             Ok(())
         })();
         let _ = fs::remove_dir_all(&base);

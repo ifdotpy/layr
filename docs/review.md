@@ -73,22 +73,28 @@ How numbers work:
   trusted machine. The record gives the new machine the next number. Numbers that the old machine writes after the
   handoff count no more. Use this before you retire the numbering machine, or to give the role to the Layr Cloud
   merge machine.
+- An admin machine of the project (the creator, and the machines that the creator's `admin.machines` setting names)
+  can take the role from any holder: run `change numbering --hand-to <machine>` on the admin machine. Use the id of
+  the admin machine itself to take the role back. The new holder gives numbers from the admin machine's next number.
+  The numbers that the old holder gives from that number on count no more, so fetch the old holder's records first.
 - Only a full machine or a merge machine (docs/ci-trust.md, "Merge machines") can hold the role. `--hand-to` refuses
-  a machine with the reader or writer role, and a machine whose trust ends: other machines would not take its
-  numbers. A merge machine that holds the role can also hand it on.
+  a machine that is not trusted, a machine with the reader or writer role, and a machine whose trust ends: other
+  machines would not take its numbers. A merge machine cannot hand the role on; an admin machine takes it.
+- A number record gives at most as many numbers above the highest number as it has entries. A number above that
+  limit counts for nothing.
 - The usual numbering machine of a project with Layr Cloud is its merge machine. The merge machine runs
   `queue run` on each pass, so each pass numbers the new changes. No other CI step is necessary.
-  To give it the role, on the machine that gives the numbers now (at first the project creator), as an admin:
+  To give it the role, on the project creator (or another admin machine), as an admin:
 
   1. Trust the merge machine with the merge role, if it is not trusted yet (docs/ci-trust.md, "Merge machines").
-  2. Run `layr change numbering` and make sure that the line shows `this machine`.
+  2. Run `layr fetch <remote>`, so that this machine has the newest numbers.
   3. Run `layr change numbering --hand-to <merge machine id>`.
   4. Run `layr push <remote>` to the store that the merge machine fetches.
 
   After its next fetch and pass, the merge machine gives the numbers. Other machines show them after a fetch.
   `layr change numbering` on any machine names the merge machine.
-- Known limit: when the trust of the numbering machine ends (`remote untrust`), its later numbers count no more,
-  and no other machine can take the role. Hand the role to another machine before you untrust the machine.
+- When the trust of the numbering machine ends (`remote untrust`), its later numbers count no more. An admin machine
+  then takes the role, as above.
 - We chose this rule over a number from a sort of the change records (time, machine, sequence). A sort gives a number
   at once on every machine, but a change that arrives late with an old time would move the numbers of later changes.
 
