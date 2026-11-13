@@ -87,6 +87,8 @@ shows its message again. A title is one line of at most 300 characters. A descri
 Who can edit, close or reopen a change: the author (the user who made the first version, on that machine) or a
 maintainer of the project (role `line.manage`). The machine that writes the record checks this. Other machines
 accept the record like other records of a trusted machine.
+`layr undo` skips the change records (edit, close, reopen, and the numbers that the numbering machine writes); use
+the reverse command.
 
 When two machines write at the same time, the record that is last in the record order wins. The record order is the
 time, then the machine id, then the sequence number. All machines use the same order, so they show the same result.

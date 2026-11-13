@@ -27,6 +27,8 @@ N=$(number_of "$C")
 case "$N" in '' | None | *[!0-9]*) N= ;; esac
 ok "the creator machine gives the change a number" test -n "$N"
 eq "the number resolves with #" "$C" "$(l change show "#$N" --json | js "d['change_id']")"
+has "undo after change list names the save, not the change number" " state (" "$(l undo -n 2>&1)"
+no "undo names no change record" sh -c "'$LAYR' undo -n 2>&1 | grep -q change"
 eq "a bare number resolves too" "$C" "$(l change show "$N" --json | js "d['change_id']")"
 eq "changes/#N is a revision" "$(l rev-parse head)" "$(l rev-parse "changes/#$N")"
 eq "show --json has the number" "$N" "$(l change show "#$N" --json | js "d['number']")"
@@ -50,6 +52,9 @@ no "edit needs a field" l change edit "#$N"
 no "a description and a file are refused together" l change edit "#$N" --description x --description-file "$T/desc.txt"
 
 ok "close the change with a reason" l change close "#$N" -m "not needed"
+no "undo after change close names no change record" sh -c "'$LAYR' undo -n 2>&1 | grep -q change"
+CLOSE_OP=$(l op log --all --json | python3 -c 'import json,sys; print([r["id"] for r in map(json.loads, sys.stdin) if r["op"] == "change.close"][-1])')
+has "an undo of the close itself is refused" "nothing to undo" "$(l undo "$CLOSE_OP" 2>&1)"
 eq "the change is closed" closed "$(l change show "#$N" --json | js "d['status']")"
 eq "the reason is recorded" "not needed" "$(l change show "#$N" --json | js "d['closed']['reason']")"
 has "change show tells who closed it" "closed by" "$(l change show "#$N")"

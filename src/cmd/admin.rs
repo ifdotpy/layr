@@ -476,6 +476,15 @@ const NOT_UNDOABLE: &[&str] = &[
     "reaction.remove",
     "review.request",
     "review.cancel",
+    // A comment stays in the log; the read model keeps it after an undo.
+    "comment",
+    // Change records have their own reverse commands (change edit, change reopen, change close); a change number
+    // and the numbering role are written by the numbering machine, often inside another command (change list).
+    "change.edit",
+    "change.close",
+    "change.reopen",
+    "change.number",
+    "change.number.authority",
 ];
 
 /// True when `layr undo` reverses the operation. An automatic save is one only when it names the
