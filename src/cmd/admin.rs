@@ -1508,14 +1508,24 @@ fn drop_trees_measured(repo: &Repo, ids: &[String]) -> Result<(usize, u64)> {
 
 /// Eviction of cache states (`gc.evict on`, docs/cache-overlays.md, "Eviction"): a cache is the
 /// content of an overlay, and a machine keeps only what it uses now. A cache state of a cache overlay
-/// loses its local tree when a store remote holds it (`store_remote::cache_store_copies`), the remote
-/// keeps it (in an overlay with a history limit, the states that the records keep: a push deletes
-/// the others there), and the store format can restore its tree exactly. Kept: the empty first state,
-/// the newest cache of each line whose working folder is on this machine (the folder is a clone of
-/// it, so its blocks are shared and nothing would be freed), a state that a reader pinned or that a
-/// park, keep or automatic owner holds (work not yet saved). A command that takes the cache later
-/// (`line new`, merge, a check copy, follow) fetches it back (`store_remote::fetch_caches_on_demand`);
-/// when that fails, the folder starts cold. Returns the states that went and their bytes.
+/// loses its local tree when:
+/// - a store remote holds it in the key epoch that the store publishes now, with no key change waiting
+///   (`store_remote::cache_store_copies`);
+/// - the records keep it (`cache_kept`: the newest `history` states of each live line, all of them
+///   without `history`), so a push or `gc --remote` does not delete it on the remote;
+/// - the store format can restore its tree exactly.
+///
+/// Kept: the empty first state, the newest cache of each line whose working folder is on this machine
+/// (the folder is a clone of it, so its blocks are shared and nothing would be freed), a state that a
+/// reader pinned, and a state with an `auto`, `park`, `keep` or `deleted` owner (unsaved work, and
+/// the final states of deleted lines, which an undelete reads). An `undo` owner does not keep it: the
+/// undo ring of an overlay line names its recent caches, so it would keep nearly all of them. A
+/// command that takes the cache later (`line new`, merge, a check copy, follow) fetches it back
+/// (`store_remote::fetch_caches_on_demand`); when that fails, the folder starts cold. Any other read
+/// of the tree (`layr undo`, `overlay show`) restores it from a store remote of the project
+/// (`store_remote::restore_state`). Each evicted state is listed in `evicted` of the overlay
+/// (`evicted_caches`): a key change brings it back first (`store_remote::overlays::push`). Returns the
+/// states that went and their bytes.
 fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
     let (mut gone, mut bytes) = (0, 0);
     let lines = repo.lines()?;
@@ -1530,7 +1540,7 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
         if held.is_empty() {
             continue;
         }
-        let kept_remote = if repo.limited_history(&name)? { repo.cache_kept(&name)? } else { None };
+        let Some(kept) = repo.cache_kept(&name)? else { continue };
         let mut live: BTreeSet<String> = BTreeSet::from([info.root.clone()]);
         for line in &lines {
             if repo.p.line_path(&line.name).exists() {
@@ -1542,14 +1552,15 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
         let rows: Vec<String> = {
             let mut st = orepo.p.db.conn.prepare(
                 "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
-                 AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind IN ('auto','park','pin','keep'))",
+                 AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
+                    AND o.kind IN ('auto','park','pin','keep','deleted'))",
             )?;
             let rows = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
             rows
         };
         let mut evict = Vec::new();
         for id in rows {
-            if live.contains(&id) || !held.contains(&id) || kept_remote.as_ref().is_some_and(|k| !k.contains(&id)) {
+            if live.contains(&id) || !held.contains(&id) || !kept.contains(&id) {
                 continue;
             }
             let Some(state) = orepo.p.db.state(&id)? else { continue };
@@ -1558,11 +1569,45 @@ fn evict_caches(repo: &Repo) -> Result<(usize, u64)> {
             }
             evict.push(id);
         }
+        if evict.is_empty() {
+            continue;
+        }
+        // The list is written before the trees go: a crash between leaves a name too many, which a later read
+        // drops (`evicted_caches` lists only absent states).
+        let mut listed = evicted_caches(&orepo)?;
+        listed.extend(evict.iter().cloned());
+        write_evicted(&orepo, &listed)?;
         let (n, b) = drop_trees_measured(&orepo, &evict)?;
         gone += n;
         bytes += b;
     }
     Ok((gone, bytes))
+}
+
+fn evicted_path(orepo: &Repo) -> std::path::PathBuf {
+    orepo.p.meta_dir().join("evicted")
+}
+
+/// The cache states of the overlay `orepo` that eviction took from this machine and that are still not here (one id
+/// a line in `meta/evicted` of the overlay). A state that came back, or whose record is gone, is left out.
+pub(crate) fn evicted_caches(orepo: &Repo) -> Result<BTreeSet<String>> {
+    let text = match std::fs::read_to_string(evicted_path(orepo)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = BTreeSet::new();
+    for id in text.lines().filter(|l| !l.is_empty()) {
+        if !orepo.p.has_state(id) && orepo.p.db.state(id)?.is_some() {
+            out.insert(id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn write_evicted(orepo: &Repo, ids: &BTreeSet<String>) -> Result<()> {
+    let text: String = ids.iter().map(|id| format!("{id}\n")).collect();
+    fsutil::atomic_write(&evicted_path(orepo), text.as_bytes(), 0o600)
 }
 
 /// The project states that a cache overlay names through its heads and records: eviction and
@@ -1701,7 +1746,7 @@ fn repair_project(
     // Plan outside the project lock. A changed record invalidates the entire plan: retry
     // without the lock rather than replaying records while other commands wait.
     let mut attempts = 0;
-    let mut evicted = Evicted::default();
+    let evicted: Evicted;
     let leaks = loop {
         attempts += 1;
         let (mark, diff) = {
@@ -1815,7 +1860,7 @@ fn repair_project(
         if evicted.states + evicted.caches > 0 {
             outln!(
                 ctx,
-                "evicted {} state(s) and {} cache state(s) that a store remote holds, {} freed",
+                "evicted {} state(s) and {} cache state(s) that a store remote holds, at least {} freed",
                 evicted.states,
                 evicted.caches,
                 human_size(evicted.bytes)

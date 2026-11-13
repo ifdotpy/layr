@@ -353,6 +353,9 @@ pub(super) fn states_left_file(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
+    if repo.p.is_overlay() {
+        return restore_overlay_state(repo, id);
+    }
     let mut names = store_copies(repo)?.remove(id).unwrap_or_default();
     // A `--heads` clone or fetch left the state on the remote that it read.
     for (key, _) in repo.p.db.config_all()? {
@@ -374,6 +377,26 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
         |name| open_named(name, repo),
         |store, ctx| store.connect(ctx),
         |store| reader::restore_states(store, repo, &[id.to_string()]).map(|_| ()),
+    )
+}
+
+/// `restore_state` for a state of an overlay project (`<project>%<overlay>`): a cache state that `gc` evicted
+/// (`cmd::admin::evict_caches`). The overlay keeps no remotes; the store remotes of the project are tried in order.
+fn restore_overlay_state(orepo: &Repo, id: &str) -> Result<()> {
+    let ctx = orepo.ctx.context("restore needs a command context")?;
+    let (project, name) = orepo.p.name.split_once('%').context("overlay project name")?;
+    let parent = Repo::open(ctx, project)?;
+    let names = store_remote_names(&parent)?;
+    if names.is_empty() {
+        bail!("state {} is not on this machine, and project {project} has no store remote", crate::ids::short(id));
+    }
+    restore_from_remotes(
+        ctx,
+        &names,
+        id,
+        |remote| Ok(remote.to_string()),
+        |_, _| Ok(()),
+        |remote| overlays::restore_overlay_state(ctx, &parent, orepo, name, remote, id),
     )
 }
 
@@ -542,29 +565,55 @@ pub fn cache_on_store_remote(repo: &Repo, orepo: &Repo, id: &str) -> Result<bool
 }
 
 /// The cache states of the overlay `orepo` of `repo` that a store remote of the project holds, for eviction
-/// (`gc.evict on`, docs/cache-overlays.md, "Eviction"): a successful push record of the overlay, from this machine
-/// or from the machine that made the state, names the state and a URL that a store remote of the project has now,
-/// and this machine has read that store with its own key (`mark_read`). The overlay keeps no remotes of its own: the
-/// URLs come from the project. A renamed remote with the same URL still counts; a changed or removed one does not.
+/// (`gc.evict on`, docs/cache-overlays.md, "Eviction"). A state counts when a successful push record of the overlay
+/// names it, and the record:
+/// - is of this machine or of the machine that made the state;
+/// - names the URL of a store remote that the project has now, and this machine has read that store with its own
+///   key (`mark_read`);
+/// - names the store by its recipient, and that is the recipient that the project pins for the remote
+///   (`cloud.remote.<name>.store`): a store made again at the same URL, or a path that names another disk, differs;
+/// - names the key epoch that the store publishes now, with no key change waiting (`overlays::settled_epoch`): a key
+///   change deletes the trees of the older epochs.
+///
+/// The overlay keeps no remotes of its own: the URLs and pins come from the project.
 pub fn cache_store_copies(repo: &Repo, orepo: &Repo) -> Result<std::collections::BTreeSet<String>> {
-    let mut urls = std::collections::BTreeSet::new();
+    // URL (as a record writes it) to the store recipient and the epoch that count there.
+    let mut stores: std::collections::BTreeMap<String, (String, Option<String>)> = std::collections::BTreeMap::new();
     for name in store_remote_names(repo)? {
         let url = crate::cmd::remote::remote_url(repo, &name)?;
-        if store_dir(repo, &url).join("read").is_file() {
-            urls.insert(layr_model::operations::public_url(&url));
-            urls.insert(url);
-        }
-    }
-    let mut held = std::collections::BTreeSet::new();
-    if urls.is_empty() {
-        return Ok(held);
-    }
-    for rec in orepo.p.db.records_with_op("push")? {
-        let data = &rec.data;
-        if data["result"] != "success" || !data["url"].as_str().is_some_and(|url| urls.contains(url)) {
+        if !store_dir(repo, &url).join("read").is_file() {
             continue;
         }
-        held.extend(data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned));
+        let Some(pin) = repo
+            .p
+            .config_value(&format!("cloud.remote.{name}.store"))?
+            .and_then(|v| serde_json::from_value::<StorePin>(v).ok())
+        else {
+            continue;
+        };
+        let Some(epoch) = overlays::settled_epoch(orepo, &pin.recipient)? else { continue };
+        stores.insert(layr_model::operations::public_url(&url), (pin.recipient, epoch));
+    }
+    let mut held = std::collections::BTreeSet::new();
+    if stores.is_empty() {
+        return Ok(held);
+    }
+    let here = &repo.p.store.machine.id;
+    for rec in orepo.p.db.records_with_op("push")? {
+        let data = &rec.data;
+        let Some((recipient, epoch)) = data["url"].as_str().and_then(|url| stores.get(url)) else { continue };
+        if data["result"] != "success"
+            || data["store"].as_str() != Some(recipient.as_str())
+            || data["epoch"].as_str() != epoch.as_deref()
+        {
+            continue;
+        }
+        for id in data["state_ids_sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+            let maker = orepo.p.db.state_machine(id)?;
+            if rec.machine == *here || maker.as_deref() == Some(rec.machine.as_str()) {
+                held.insert(id.to_owned());
+            }
+        }
     }
     Ok(held)
 }

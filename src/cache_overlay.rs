@@ -148,6 +148,17 @@ pub fn other_platform(platform: Option<&str>) -> bool {
     platform.is_some_and(|p| p != base && !p.starts_with(&format!("{base}-")))
 }
 
+/// After the pin of the cache state `sid`: whether its tree is still here. `gc` can evict it between the choice of
+/// the cache and the pin (`cmd::admin::evict_caches`); the pin keeps it from then on. False: the folder starts
+/// cold, with a warning.
+fn cache_here(orepo: &Repo, sid: &str, folder: &str) -> Result<bool> {
+    if orepo.p.has_state(sid) || crate::objstore::verified(&orepo.p, sid)?.is_some() {
+        return Ok(true);
+    }
+    eprintln!("layr: no cache for {folder}: gc evicted state {} meanwhile; the folder starts cold", ids::short(sid));
+    Ok(false)
+}
+
 impl<'a> Repo<'a> {
     /// The key files of overlay `name` (`overlay.<name>.key-files`).
     pub fn key_files(&self, name: &str) -> Result<Vec<String>> {
@@ -819,6 +830,9 @@ impl<'a> Repo<'a> {
             };
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
+            if !cache_here(&orepo, &sid, &folder)? {
+                continue;
+            }
             let _t =
                 crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
             let cp = fsutil::safe_join(w, &folder)?;
@@ -866,6 +880,9 @@ impl<'a> Repo<'a> {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             orepo.hold(orepo.pin(&[sid.as_str()])?);
+            if !cache_here(&orepo, &sid, &folder)? {
+                continue;
+            }
             let made = {
                 let _lock = orepo.p.lock()?;
                 let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &info.root)?;

@@ -700,10 +700,15 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let root = repo.state_root(&state.id)?;
         // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
         // the state goes up as a complete tree.
-        let base = base.filter(|(id, _)| repo.p.has_state(id));
-        if let Some((id, _)) = &base {
-            repo.hold(repo.pin(&[id.as_str()])?);
-        }
+        // Pin first, then look: eviction can take a tree that is not pinned (`cmd::admin::evict_caches`), and a pin
+        // after its reservation is refused.
+        let base = base.filter(|(id, _)| match repo.pin(&[id.as_str()]) {
+            Ok(pin) => {
+                repo.hold(pin);
+                repo.p.has_state(id)
+            }
+            Err(_) => false,
+        });
         let base_root = base.as_ref().map(|(id, _)| repo.state_root(id)).transpose()?;
         let (pushed, files, bytes) = upload_state_journal(
             store,

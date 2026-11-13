@@ -124,14 +124,15 @@ history. With `gc.evict on`, `gc --repair` evicts a state whose only owners are 
 record stays, and a read fetches it back. Git is never a source.
 
 A cache state of a cache overlay is evicted by other rules, because a cache is the content of an
-overlay and its `head` owner (the newest cache of an overlay line) is no reason to keep a copy on
-every machine. With `gc.evict on`, `gc --repair` evicts a cache state when a successful push record
-of the overlay names it with the URL of a store remote that the project has now (and this machine
-has read that store), the remote keeps it (a state within `history`), and the store format can
+overlay and its `head` and `undo` owners (the recent caches of an overlay line) are no reason to keep
+a copy on every machine. With `gc.evict on`, `gc --repair` evicts a cache state when a successful
+push record of the overlay, of this machine or of the machine that made the state, names it with
+the URL, the store recipient and the current key epoch of a store remote of the project (and this
+machine has read that store), no key change waits, the records keep it, and the store format can
 restore its tree. It keeps the overlay's empty first state, the newest cache of each line whose
-working folder is on this machine, and a state with a `pin`, `park`, `keep` or `auto` owner. The
-record and the owners stay; `line new`, merge, a check copy and `follow` fetch the tree back on
-demand (docs/cache-overlays.md, "Eviction").
+working folder is on this machine, and a state with a `pin`, `park`, `keep`, `auto` or `deleted`
+owner. The record and the owners stay; a read fetches the tree back (docs/cache-overlays.md,
+"Eviction").
 
 ## States imported from Git
 

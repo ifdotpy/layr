@@ -28,6 +28,14 @@ pub struct Transfer {
     pub state_ids_sent: Vec<String>,
     pub state_ids_received: Vec<String>,
     pub overlays: Vec<String>,
+    /// The push of an overlay layer: the key epoch the states went to. A key change starts a new epoch and deletes
+    /// the trees of the older ones, so a copy counts only in the epoch that the remote publishes now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<String>,
+    /// The push of an overlay layer: the recipient of the store (its `store.json`), which names the store better
+    /// than its URL (a store made again at the same URL, a path that names another disk on another machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// Explicit provenance of a new version. The record envelope identifies its actor.
