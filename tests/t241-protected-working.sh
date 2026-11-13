@@ -4,6 +4,8 @@
 # `restore`, `clean` and a `reset` to the head undo working changes; a save, and a reset that moves
 # the head, still refuse.
 . "$(dirname "$0")/lib.sh"
+# Root bypasses the protection of a line (tests/lib.sh), so the refusals need another user.
+[ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
 l init prot --from "$T/src" -q >/dev/null
