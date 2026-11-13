@@ -44,7 +44,10 @@ ok "the save in line b finished" test -s "$T/save-b.end"
 ok "the save in line b did not fail" test ! -s "$T/save-b.log"
 ok "the second merge finished" test -s "$T/merge2.end"
 ok "line b finished before the merge of line a" test "$(echo "$(cat "$T/save-b.end") < $(cat "$T/merge1.end")" | bc)" = 1
-ok "the second merge in line a waited for the first" test "$(echo "$(cat "$T/merge2.end") > $(cat "$T/merge1.end")" | bc)" = 1
+# The end times of the two processes do not show the wait: the first merge still records and frees
+# after it gives the line lock back, and the second one can exit first (seen on xfs). The lock log
+# does: only the second merge waits for the lock of line a, and the first one holds it for 6 s.
+ok "the second merge in line a waited for the first" awk -F'\t' '$3 == "line=a" { split($4, w, "="); if (w[2] + 0 >= 1000) found = 1 } END { exit !found }' "$LAYR_ROOT/projects/locks/meta/lock-slow.log"
 has "the line lock log names line a with a wait" "line=a" "$(cat "$LAYR_ROOT/projects/locks/meta/lock-slow.log" 2>/dev/null)"
 eq "line a has both merged files" "1" "$(test -f "$P/a/x.txt" && test -f "$P/a/y.txt" && echo 1)"
 
