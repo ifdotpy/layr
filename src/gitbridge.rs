@@ -1244,6 +1244,8 @@ fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut 
             return Ok(src.bottom().to_path_buf());
         }
         let t = crate::repo::Temp { path: repo.p.scan_dir().join(crate::store::temp_name()) };
+        #[cfg(test)]
+        crate::repo::MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
         crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
         let p = t.path.clone();
         keep.push(t);
@@ -1256,14 +1258,33 @@ fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut 
     }
 }
 
-/// True when the state is a thin layer: git reads only changed paths of it.
-fn is_thin(repo: &Repo, state: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    return repo.state_src(state).map(|s| !s.is_complete()).unwrap_or(false);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (repo, state);
-        false
+/// A checkout borrowed from one immutable source, owning any temporary trees until Git has
+/// finished both the index command and its refresh. It cannot survive or mutate its source.
+struct ExportCheckout<'source> {
+    source: &'source crate::repo::Snap,
+    root: PathBuf,
+    _keep: Vec<crate::repo::Temp>,
+}
+
+impl<'source> ExportCheckout<'source> {
+    fn new(repo: &Repo, source: &'source crate::repo::Snap, paths: Option<&[String]>) -> Result<Self> {
+        let _source = crate::trace::span("git export source materialization");
+        let mut keep = Vec::new();
+        let root = match paths {
+            None => repo.complete(source.clone(), &mut keep)?,
+            Some(paths) => work_tree(repo, source, paths, &mut keep)?,
+        };
+        Ok(Self { source, root, _keep: keep })
+    }
+
+    fn is_thin(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return !self.source.is_complete();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.source;
+            false
+        }
     }
 }
 
@@ -1898,10 +1919,9 @@ fn commit_tree(
     let s = &export.store;
     let src = repo.state_src(&state.id)?;
     let tmp_idx = std::env::temp_dir().join(format!("layr-index-{}", ids::new_id()));
-    let mut keep: Vec<crate::repo::Temp> = Vec::new();
     let res = (|| -> Result<String> {
         let mut paths: Vec<String> = Vec::new();
-        let mut full: Option<PathBuf> = None;
+        let mut full = None;
         // True when the index is a copy of the index of the base: its entries for unchanged
         // files have valid stat data, so no refresh of every tracked file is needed.
         let mut inherited = false;
@@ -1932,13 +1952,9 @@ fn commit_tree(
                 }
             }
             None => {
-                let root = {
-                    let _source = crate::trace::span("git export source materialization");
-                    repo.complete(src.clone(), &mut keep)?
-                };
-                full = Some(root.clone());
-                let rules = crate::ignore_rules::Rules::new(&root);
-                fsutil::walk(&root, "", &mut |rel, m| {
+                let checkout = ExportCheckout::new(repo, &src, None)?;
+                let rules = crate::ignore_rules::Rules::new(&checkout.root);
+                fsutil::walk(&checkout.root, "", &mut |rel, m| {
                     if skip_path(rel) || rules.ignored(rel, m.is_dir()) {
                         return Ok(false);
                     }
@@ -1947,6 +1963,7 @@ fn commit_tree(
                     }
                     Ok(true)
                 })?;
+                full = Some(checkout);
             }
         }
         let mut input = Vec::new();
@@ -1954,19 +1971,16 @@ fn commit_tree(
             input.extend_from_slice(p.as_bytes());
             input.push(0);
         }
-        let root = match full {
-            Some(root) => root,
-            None => {
-                let _source = crate::trace::span("git export source materialization");
-                work_tree(repo, &src, &paths, &mut keep)?
-            }
+        let checkout = match full {
+            Some(checkout) => checkout,
+            None => ExportCheckout::new(repo, &src, Some(&paths))?,
         };
         // Changed paths are hashed again: see FORGET_CHANGED.
         let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
         let index_command = crate::trace::span("git export index command");
         for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
             let mut c = base_cmd(s);
-            c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
+            c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &checkout.root).args(args);
             c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
             let mut ch = c.spawn()?;
             ch.stdin.take().unwrap().write_all(&input)?;
@@ -1989,7 +2003,7 @@ fn commit_tree(
         git_out(s, &["update-ref", refname, &commit])?;
         drop(commit_write);
         // Keep the index for the next export and for lines made from this state.
-        keep_index(repo, &state.id, &tmp_idx, inherited)?;
+        keep_index(repo, &state.id, &tmp_idx, inherited, &checkout)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
@@ -1999,7 +2013,7 @@ fn commit_tree(
 /// Keep `idx` as the index of `state` unless it has one. An index that is not a copy of an
 /// earlier index gets its stat data from one refresh. The file appears complete or not at
 /// all: other processes copy kept indexes without the project lock.
-fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
+fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool, checkout: &ExportCheckout<'_>) -> Result<()> {
     let _retain = crate::trace::span("git export index retention");
     let dst = index_path(repo, state);
     if dst.exists() {
@@ -2012,7 +2026,7 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<(
     }
     r.context("keep the git index of the exported state")?;
     if !inherited {
-        let _ = refresh_index(repo, state);
+        let _ = refresh_index(repo, state, checkout);
     }
     Ok(())
 }
@@ -2058,22 +2072,18 @@ pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
     Ok(c)
 }
 
-fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
+fn refresh_index(repo: &Repo, state: &str, checkout: &ExportCheckout<'_>) -> Result<()> {
     // An index made from the previous index and the changed paths of a thin state has valid
     // stat data already; a refresh would need a complete tree.
-    if is_thin(repo, state) {
+    if checkout.is_thin() {
         return Ok(());
     }
     let _t = crate::trace::span("git index refresh");
     let s = store(repo);
-    let root = {
-        let _source = crate::trace::span("git index refresh source materialization");
-        repo.state_root(state)?
-    };
     let _command = crate::trace::span("git index refresh command");
     base_cmd(&s)
         .env("GIT_INDEX_FILE", index_path(repo, state))
-        .env("GIT_WORK_TREE", &root)
+        .env("GIT_WORK_TREE", &checkout.root)
         .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false", "update-index", "-q", "--refresh"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2984,6 +2994,109 @@ mod export_tests {
             assert!(!ExportContext::load(root.clone()).signs(&state.author.email));
             Ok(())
         })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    #[ignore = "requires a filesystem test volume (btrfs, APFS or OverlayFS)"]
+    fn object_exports_materialize_once_per_state() -> Result<()> {
+        let base = std::env::var_os("LAYR_APFS_TEST_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!("layr-export-test-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            let store = crate::store::Store::open(&root.join("store"))?;
+            let dir = store.project_dir("export")?;
+            for path in ["meta/db", "meta/scan", "meta/work", "states"] {
+                std::fs::create_dir_all(dir.join(path))?;
+            }
+            let p = crate::store::Project {
+                lease: Default::default(),
+                store: &store,
+                name: "export".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+            };
+            let actor =
+                crate::model::Actor { uid: rustix::process::getuid().as_raw(), name: "Export Test".into(), session: None };
+            let mut project = Record::new("project");
+            project.data = serde_json::json!({"name": "export", "id": p.id, "config": {}});
+            p.lock_maintenance()?.append(project, &actor)?;
+            let repo = Repo { p, ctx: None };
+            let objects = crate::objstore::open(&repo.p)?;
+            let source = root.join("source");
+            std::fs::create_dir(&source)?;
+            std::fs::write(source.join(".gitignore"), "*.log\n")?;
+            std::fs::write(source.join("ignored.log"), "ignored\n")?;
+            std::fs::write(source.join("run"), "#!/bin/sh\n")?;
+            std::fs::set_permissions(source.join("run"), std::fs::Permissions::from_mode(0o755))?;
+            std::os::unix::fs::symlink("text", source.join("link"))?;
+            let mut parents = Vec::<String>::new();
+            let mut commits = Vec::<String>::new();
+            for version in 0..3 {
+                let contents = format!("version {version}\n");
+                std::fs::write(source.join("text"), &contents)?;
+                // Equal size and mtime must still hash the changed path again.
+                layr_objects::times::set(&source.join("text"), 1_700_000_000_000_000_000)?;
+                let written = layr_objects::write_tree(
+                    &objects,
+                    &source,
+                    &layr_objects::WriteOptions {
+                        temperature: layr_objects::Temperature::Hot,
+                        previous: None,
+                        exclude: Vec::new(),
+                        similar: false,
+                    },
+                )?;
+                let id = ids::new_id();
+                let refs = layr_objects::StateRef { tree: written.tree.unwrap(), times: written.times.unwrap() };
+                objects.set_state(&id, &refs)?;
+                let state: StateRec = serde_json::from_value(serde_json::json!({
+                    "id": id, "kind": "commit", "subvol": "", "parents": parents,
+                    "time": 1700000000000i64 + version * 1000,
+                    "author": {"name": "Author", "email": "author@example.test"}, "message": contents,
+                    "tree": refs.tree.to_string(), "times": refs.times.to_string()
+                }))?;
+                let mut record = Record::new("state");
+                record.states.push(state);
+                repo.p.lock_maintenance()?.append(record, &actor)?;
+                if version == 2 {
+                    // Missing ancestor indexes retain the read-tree/full-refresh fallback.
+                    std::fs::remove_file(index_path(&repo, &parents[0]))?;
+                }
+                crate::repo::MATERIALIZATIONS.with(|n| n.set(0));
+                let (commit, made) = export_history(&repo, &id)?;
+                assert_eq!(crate::repo::MATERIALIZATIONS.with(|n| n.get()), 1, "version {version}");
+                assert_eq!(made.last(), Some(&(id.clone(), commit.clone())));
+                assert!(!repo.p.state_path(&id).exists(), "export must not rebuild a second native state");
+                assert!(index_path(&repo, &id).exists());
+                let git = repo.p.git_dir();
+                assert_eq!(git_out(&git, &["show", &format!("{commit}:text")])?, contents);
+                let listing = git_out(&git, &["ls-tree", &commit])?;
+                assert!(listing.contains("100755 blob") && listing.contains("120000 blob"));
+                assert!(!listing.contains("ignored.log"));
+                if let Some(parent) = commits.last() {
+                    assert_eq!(git_out(&git, &["rev-parse", &format!("{commit}^")])?.trim(), parent);
+                }
+                // A cached export neither checks out the source nor changes commit identity.
+                crate::repo::MATERIALIZATIONS.with(|n| n.set(0));
+                assert_eq!(export_commit(&repo, &id)?, commit);
+                assert_eq!(crate::repo::MATERIALIZATIONS.with(|n| n.get()), 0);
+                check_reachable(&repo, &commit)?;
+                parents = vec![id];
+                commits.push(commit);
+            }
+            Ok(())
+        })();
+        // Unprivileged btrfs cannot drop read-only scan subvolumes. Unseal test-owned
+        // leftovers before removing the fixture (also works for sealed APFS trees).
+        let scans = root.join("store/projects/export/meta/scan");
+        for entry in std::fs::read_dir(scans)? {
+            let path = entry?.path();
+            crate::storage::set_writable(&path)?;
+            crate::storage::delete_tree(&path)?;
+        }
         std::fs::remove_dir_all(root)?;
         result
     }

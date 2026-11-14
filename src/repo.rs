@@ -56,6 +56,12 @@ pub fn same_tree(a: &Snap, b: &Snap) -> bool {
     a.same(b)
 }
 
+// Count complete and partial source checkouts, including native rebuilds, on the calling thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A temporary read-only or writable snapshot, deleted on drop.
 pub struct Temp {
     pub path: PathBuf,
@@ -581,6 +587,8 @@ impl<'a> Repo<'a> {
                 return Ok(tree.bottom().to_path_buf());
             }
             let t = Temp { path: self.p.scan_dir().join(crate::store::temp_name()) };
+            #[cfg(test)]
+            MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
             tree.materialize(&t.path, true)?;
             btrfs::write_info(
                 &t.path,
@@ -598,6 +606,8 @@ impl<'a> Repo<'a> {
                 crate::source::Source::Objects(objects) => {
                     let temp = Temp { path: self.p.scan_dir().join(crate::store::temp_name()) };
                     btrfs::create_subvolume(&temp.path)?;
+                    #[cfg(test)]
+                    MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
                     layr_objects::checkout_with(&objects.store, &objects.refs.tree, Some(&objects.refs.times), &temp.path)?;
                     btrfs::set_readonly(&temp.path)?;
                     let path = temp.path.clone();

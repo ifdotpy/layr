@@ -78,6 +78,8 @@ pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
     let work = repo.p.work_dir().join(crate::store::temp_name());
     let made = (|| -> Result<()> {
         crate::storage::create_subvolume(&work)?;
+        #[cfg(test)]
+        crate::repo::MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
         layr_objects::checkout_with(&store, &r.tree, Some(&r.times), &work)?;
         crate::storage::snapshot(&work, &repo.p.state_path(state), true)
     })();
