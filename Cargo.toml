@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/core/types",
+  "crates/fs/stream-codec",
   "crates/store/object-format",
   "crates/layr-api",
   "crates/layr-store",
@@ -33,6 +34,7 @@ undocumented_unsafe_blocks = "deny"
 [workspace.metadata.layers]
 layr-adapter = { layer = 0, dependencies = [], leaf = true }
 layr-api = { layer = 0, dependencies = [], leaf = true }
+layr-stream-codec = { layer = 0, dependencies = [], leaf = true }
 layr-types = { layer = 0, dependencies = [], leaf = true }
 layr-hashers = { layer = 0, dependencies = [], leaf = true }
 layr-object-format = { layer = 1, dependencies = [
@@ -58,6 +60,7 @@ layr = { layer = 3, dependencies = [
   "layr-retest",
   "layr-store",
   "layr-types",
+  "layr-stream-codec",
 ] }
 
 [workspace.package]
@@ -94,6 +97,7 @@ path = "src/main.rs"
 overlayfs = []
 
 [dependencies]
+layr-stream-codec = { path = "crates/fs/stream-codec" }
 layr-types = { path = "crates/core/types" }
 layr-api = { path = "crates/layr-api" }
 layr-store = { path = "crates/layr-store" }

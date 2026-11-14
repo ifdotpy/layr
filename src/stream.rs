@@ -1,202 +1,39 @@
-//! Parser for `btrfs send --no-data` streams, and a namespace model that turns the command
-//! sequence into entries with their path in the parent and in the child.
-//!
-//! The stream refers to paths in the receiver's tree as it is while the stream is applied, so a
-//! path can be a temporary orphan name (`o<ino>-<gen>-<seq>`) or a path below a folder that was
-//! renamed earlier in the stream. The model replays renames on a tree of touched entries; an
-//! entry that the stream did not create has an origin path in the parent snapshot.
-
+//! IO adapter and namespace replay for local `btrfs send --no-data` observations.
 use crate::compare::RangeEnd;
 use anyhow::{bail, Result};
-use std::collections::HashMap;
-use std::io::Read;
+pub use layr_stream_codec::Kind;
+use layr_stream_codec::{CommandHeader, DecodeLimits, MetadataCommand as Cmd, Version};
+use std::{collections::HashMap, io::Read};
 
-const MAGIC: &[u8] = b"btrfs-stream\0";
-
-mod cmd {
-    pub const MKFILE: u16 = 3;
-    pub const MKDIR: u16 = 4;
-    pub const MKNOD: u16 = 5;
-    pub const MKFIFO: u16 = 6;
-    pub const MKSOCK: u16 = 7;
-    pub const SYMLINK: u16 = 8;
-    pub const RENAME: u16 = 9;
-    pub const LINK: u16 = 10;
-    pub const UNLINK: u16 = 11;
-    pub const RMDIR: u16 = 12;
-    pub const SET_XATTR: u16 = 13;
-    pub const REMOVE_XATTR: u16 = 14;
-    pub const WRITE: u16 = 15;
-    pub const CLONE: u16 = 16;
-    pub const TRUNCATE: u16 = 17;
-    pub const CHMOD: u16 = 18;
-    pub const UTIMES: u16 = 20;
-    pub const UPDATE_EXTENT: u16 = 22;
-    pub const FALLOCATE: u16 = 23;
-    pub const ENCODED_WRITE: u16 = 25;
-}
-
-mod attr {
-    pub const SIZE: u16 = 4;
-    pub const MODE: u16 = 5;
-    pub const PATH: u16 = 15;
-    pub const PATH_TO: u16 = 16;
-    pub const PATH_LINK: u16 = 17;
-    pub const FILE_OFFSET: u16 = 18;
-    pub const CLONE_LEN: u16 = 24;
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Cmd {
-    Create { path: String, kind: Kind },
-    Symlink { path: String, target: String },
-    Rename { from: String, to: String },
-    Link { path: String, target: String },
-    Unlink { path: String },
-    Rmdir { path: String },
-    Extent { path: String, offset: u64, end: RangeEnd },
-    Truncate { path: String, size: u64 },
-    Chmod { path: String, mode: u32 },
-    Metadata { path: String },
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    File,
-    Dir,
-    Symlink,
-    Special,
-}
-
-fn le16(b: &[u8]) -> u16 {
-    u16::from_le_bytes([b[0], b[1]])
-}
-fn le32(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-}
-fn le64(b: &[u8]) -> u64 {
-    let mut a = [0u8; 8];
-    a.copy_from_slice(&b[..8]);
-    u64::from_le_bytes(a)
-}
-
-/// The attributes of a command that `decode` needs, as fixed fields.
-#[derive(Default)]
-struct Attrs<'a> {
-    path: Option<&'a [u8]>,
-    path_to: Option<&'a [u8]>,
-    path_link: Option<&'a [u8]>,
-    file_offset: u64,
-    size: u64,
-    mode: u64,
-    clone_len: u64,
-}
-
-impl<'a> Attrs<'a> {
-    fn scan(body: &'a [u8]) -> Self {
-        let num = |v: &[u8]| if v.len() >= 8 { le64(v) } else { 0 };
-        let mut out = Attrs::default();
-        let mut a = 0;
-        while a + 4 <= body.len() {
-            let t = le16(&body[a..]);
-            let l = le16(&body[a + 2..]) as usize;
-            let s = a + 4;
-            if s + l > body.len() {
-                break;
-            }
-            let v = &body[s..s + l];
-            match t {
-                attr::PATH => out.path = Some(v),
-                attr::PATH_TO => out.path_to = Some(v),
-                attr::PATH_LINK => out.path_link = Some(v),
-                attr::FILE_OFFSET => out.file_offset = num(v),
-                attr::SIZE => out.size = num(v),
-                attr::MODE => out.mode = num(v),
-                attr::CLONE_LEN => out.clone_len = num(v),
-                _ => {}
-            }
-            a = s + l;
-        }
-        out
-    }
-}
-
-/// Read a send stream command by command and call `f` for each. Unknown commands become
-/// `Cmd::Other`. Only one command body is in memory. The stream is read to its end.
-pub fn decode(mut r: impl Read, mut f: impl FnMut(Cmd)) -> Result<()> {
-    let mut head = [0u8; MAGIC.len() + 4];
-    if r.read_exact(&mut head).is_err() || &head[..MAGIC.len()] != MAGIC {
-        bail!("not a btrfs send stream");
-    }
-    let mut header = [0u8; 10];
+/// Read only bounded command bodies. This local metadata policy never authorizes receive.
+fn decode(mut r: impl Read, mut f: impl FnMut(Cmd)) -> Result<()> {
+    let limits = DecodeLimits::default();
+    let mut head = [0; layr_stream_codec::STREAM_HEADER_LEN];
+    r.read_exact(&mut head)?;
+    let version = Version::decode(&head)?;
+    let mut header = [0; layr_stream_codec::COMMAND_HEADER_LEN];
     let mut body = Vec::new();
     loop {
-        let n = read_all(&mut r, &mut header)?;
+        let mut n = 0;
+        while n < header.len() {
+            match r.read(&mut header[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         if n == 0 {
             return Ok(());
         }
-        if n < header.len() {
+        if n != header.len() {
             bail!("truncated send stream");
         }
-        let len = le32(&header) as usize;
-        let code = le16(&header[4..]);
-        body.resize(len, 0);
-        if r.read_exact(&mut body).is_err() {
-            bail!("truncated send stream");
-        }
-        let at = Attrs::scan(&body);
-        let path = |v: Option<&[u8]>| -> Result<String> {
-            match v {
-                Some(v) => Ok(String::from_utf8_lossy(v).into_owned()),
-                None => bail!("send command {code} without a path attribute"),
-            }
-        };
-        let c = match code {
-            cmd::MKFILE => Cmd::Create { path: path(at.path)?, kind: Kind::File },
-            cmd::MKDIR => Cmd::Create { path: path(at.path)?, kind: Kind::Dir },
-            cmd::MKNOD | cmd::MKFIFO | cmd::MKSOCK => Cmd::Create { path: path(at.path)?, kind: Kind::Special },
-            cmd::SYMLINK => Cmd::Symlink { path: path(at.path)?, target: path(at.path_link)? },
-            cmd::RENAME => Cmd::Rename { from: path(at.path)?, to: path(at.path_to)? },
-            cmd::LINK => Cmd::Link { path: path(at.path)?, target: path(at.path_link)? },
-            cmd::UNLINK => Cmd::Unlink { path: path(at.path)? },
-            cmd::RMDIR => Cmd::Rmdir { path: path(at.path)? },
-            cmd::UPDATE_EXTENT => Cmd::Extent {
-                path: path(at.path)?,
-                offset: at.file_offset,
-                end: RangeEnd::Offset(at.file_offset.checked_add(at.size).ok_or_else(|| anyhow::anyhow!("extent overflow"))?),
-            },
-            cmd::CLONE => Cmd::Extent {
-                path: path(at.path)?,
-                offset: at.file_offset,
-                end: RangeEnd::Offset(
-                    at.file_offset.checked_add(at.clone_len).ok_or_else(|| anyhow::anyhow!("extent overflow"))?,
-                ),
-            },
-            cmd::WRITE | cmd::ENCODED_WRITE | cmd::FALLOCATE => {
-                Cmd::Extent { path: path(at.path)?, offset: at.file_offset, end: RangeEnd::Eof }
-            }
-            cmd::TRUNCATE => Cmd::Truncate { path: path(at.path)?, size: at.size },
-            cmd::CHMOD => Cmd::Chmod { path: path(at.path)?, mode: at.mode as u32 },
-            cmd::SET_XATTR | cmd::REMOVE_XATTR | cmd::UTIMES => Cmd::Metadata { path: path(at.path)? },
-            _ => Cmd::Other,
-        };
-        f(c);
+        let frame = CommandHeader::decode(&header, limits)?;
+        body.resize(frame.body_len(), 0);
+        r.read_exact(&mut body)?;
+        f(Cmd::decode(frame, &body, version, limits)?);
     }
-}
-
-/// Fill `buf` from `r`; fewer bytes only at the end of the stream.
-fn read_all(r: &mut impl Read, buf: &mut [u8]) -> Result<usize> {
-    let mut n = 0;
-    while n < buf.len() {
-        match r.read(&mut buf[n..]) {
-            Ok(0) => break,
-            Ok(k) => n += k,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(n)
 }
 
 /// One entry touched by the stream.
@@ -332,8 +169,12 @@ impl Model {
                 let n = &mut self.nodes[id];
                 n.touched = true;
                 n.entry.content = true;
-                if *end > RangeEnd::Offset(*offset) {
-                    n.entry.ranges.push((*offset, *end));
+                let end = match end {
+                    layr_stream_codec::RangeEnd::Offset(end) => RangeEnd::Offset(*end),
+                    layr_stream_codec::RangeEnd::Eof => RangeEnd::Eof,
+                };
+                if end > RangeEnd::Offset(*offset) {
+                    n.entry.ranges.push((*offset, end));
                 }
             }
             Cmd::Truncate { path, size } => {
@@ -401,96 +242,36 @@ mod tests {
         m.finish()
     }
 
-    fn command(code: u16, attrs: &[(u16, &[u8])]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for (t, v) in attrs {
-            body.extend_from_slice(&t.to_le_bytes());
-            body.extend_from_slice(&(v.len() as u16).to_le_bytes());
-            body.extend_from_slice(v);
-        }
-        let mut out = (body.len() as u32).to_le_bytes().to_vec();
-        out.extend_from_slice(&code.to_le_bytes());
-        out.extend_from_slice(&[0; 4]);
-        out.extend(body);
-        out
-    }
-
     #[test]
-    fn metadata_commands_mark_the_final_path() {
-        let mut data = MAGIC.to_vec();
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend(command(cmd::SET_XATTR, &[(attr::PATH, b"old/file")]));
-        data.extend(command(cmd::RENAME, &[(attr::PATH, b"old"), (attr::PATH_TO, b"new")]));
-        data.extend(command(cmd::REMOVE_XATTR, &[(attr::PATH, b"new/other")]));
-        data.extend(command(cmd::UTIMES, &[(attr::PATH, b"new/time")]));
-        let got = entries_from(&data[..]).unwrap();
+    fn decoding_keeps_metadata_paths_through_renames_and_rejects_large_frames() {
+        let mut data = layr_stream_codec::MAGIC.to_vec();
+        data.extend(1u32.to_le_bytes());
+        for (code, attrs) in [
+            (13, vec![(15, b"old/file".as_slice())]),
+            (9, vec![(15, b"old".as_slice()), (16, b"new".as_slice())]),
+            (14, vec![(15, b"new/other".as_slice())]),
+            (20, vec![(15, b"new/time".as_slice())]),
+        ] {
+            data.extend(layr_stream_codec::encode_command(code, &attrs, DecodeLimits::default()).unwrap());
+        }
+        let got = entries_from(data.as_slice()).unwrap();
         for (old, new) in [("old/file", "new/file"), ("old/other", "new/other"), ("old/time", "new/time")] {
             assert!(got.iter().any(|e| e.origin.as_deref() == Some(old) && e.path.as_deref() == Some(new)));
         }
-    }
-
-    #[test]
-    fn decode_reads_commands_one_by_one() {
-        let mut data = MAGIC.to_vec();
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend(command(cmd::MKFILE, &[(attr::PATH, b"a")]));
-        data.extend(command(cmd::RENAME, &[(attr::PATH, b"a"), (attr::PATH_TO, b"b")]));
-        data.extend(command(
-            cmd::UPDATE_EXTENT,
-            &[(attr::PATH, b"b"), (attr::FILE_OFFSET, &4096u64.to_le_bytes()), (attr::SIZE, &8u64.to_le_bytes())],
-        ));
-        data.extend(command(99, &[]));
-        let mut got = Vec::new();
-        decode(&data[..], |c| got.push(c)).unwrap();
-        assert_eq!(
-            got,
-            vec![
-                Cmd::Create { path: s("a"), kind: Kind::File },
-                Cmd::Rename { from: s("a"), to: s("b") },
-                Cmd::Extent { path: s("b"), offset: 4096, end: RangeEnd::Offset(4104) },
-                Cmd::Other,
-            ]
-        );
-        assert!(decode(&data[..data.len() - 1], |_| {}).is_err());
-        assert!(decode(&b"nope"[..], |_| {}).is_err());
-    }
-
-    #[test]
-    fn extent_decoder_checks_bounds_and_keeps_eof() {
-        let stream = |code, offset: u64, len: u64| {
-            let mut data = MAGIC.to_vec();
-            data.extend_from_slice(&1u32.to_le_bytes());
-            data.extend(command(
-                code,
-                &[
-                    (attr::PATH, b"file"),
-                    (attr::FILE_OFFSET, &offset.to_le_bytes()),
-                    (attr::SIZE, &len.to_le_bytes()),
-                    (attr::CLONE_LEN, &len.to_le_bytes()),
-                ],
-            ));
-            data
-        };
-        for code in [cmd::WRITE, cmd::ENCODED_WRITE, cmd::FALLOCATE] {
-            let data = stream(code, 8, 0);
-            let entries = entries_from(&data[..]).unwrap();
-            assert_eq!(entries[0].ranges, [(8, RangeEnd::Eof)]);
-        }
-        for code in [cmd::UPDATE_EXTENT, cmd::CLONE] {
-            let data = stream(code, 8, 0);
-            let entries = entries_from(&data[..]).unwrap();
-            assert!(entries[0].ranges.is_empty());
-            assert!(entries[0].content, "zero extents still mark the entry touched");
-            let data = stream(code, u64::MAX - 1, 3);
-            assert!(decode(&data[..], |_| {}).is_err());
-        }
+        data.extend(u32::MAX.to_le_bytes());
+        data.extend([0; 6]);
+        assert!(entries_from(data.as_slice())
+            .unwrap_err()
+            .downcast_ref::<layr_stream_codec::DecodeError>()
+            .is_some_and(|e| *e == layr_stream_codec::DecodeError::Limit));
+        assert!(entries_from(&data[..data.len() - 1]).is_err());
     }
 
     #[test]
     fn rename_of_folder_maps_children() {
         let cmds = vec![
             Cmd::Rename { from: s("a"), to: s("b") },
-            Cmd::Extent { path: s("b/x.txt"), offset: 0, end: RangeEnd::Offset(10) },
+            Cmd::Extent { path: s("b/x.txt"), offset: 0, end: layr_stream_codec::RangeEnd::Offset(10) },
         ];
         let e = entries(&cmds);
         let x = e.iter().find(|e| e.path.as_deref() == Some("b/x.txt")).unwrap();

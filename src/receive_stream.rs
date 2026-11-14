@@ -1,27 +1,22 @@
 //! Bounded framing and project-source validation for untrusted receive streams.
-//! Trusted kernel metadata decoding remains in `stream`, with its own policy.
+//! Pure validation lives in `layr-stream-codec`; project and filesystem checks stay here.
 
 use anyhow::{anyhow, bail, Result};
+use layr_stream_codec::{CommandHeader, DecodeLimits, ReceiveDecoder, Version};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8] = b"btrfs-stream\0";
-const MAX_CMD: usize = 16 << 20;
+#[cfg(test)]
+const MAGIC: &[u8] = layr_stream_codec::MAGIC;
 
 const SUBVOL: u16 = 1;
 const SNAPSHOT: u16 = 2;
-const LINK: u16 = 10;
 const CLONE: u16 = 16;
 const END: u16 = 21;
-/// The highest command number of send stream version 3 (enable verity).
-const LAST_CMD: u16 = 26;
 
 const A_UUID: u16 = 1;
 const A_CTRANSID: u16 = 2;
 const A_PATH: u16 = 15;
-const A_PATH_TO: u16 = 16;
-const A_PATH_LINK: u16 = 17;
-const A_DATA: u16 = 19;
 const A_CLONE_UUID: u16 = 20;
 const A_CLONE_CTRANSID: u16 = 21;
 const A_CLONE_PATH: u16 = 22;
@@ -56,61 +51,9 @@ fn check_clone_file(root: &Path, path: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn le16(b: &[u8]) -> u16 {
-    u16::from_le_bytes([b[0], b[1]])
-}
-
-fn le32(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-}
-
 fn uuid_text(b: &[u8]) -> Result<String> {
     let a: [u8; 16] = b.try_into().map_err(|_| anyhow!("bad UUID in the stream"))?;
     Ok(uuid::Uuid::from_bytes(a).hyphenated().to_string())
-}
-
-/// A path inside the new subvolume: relative, no empty, `.` or `..` component. The empty path
-/// is the subvolume root.
-fn check_path(p: &[u8]) -> Result<()> {
-    if p.is_empty() {
-        return Ok(());
-    }
-    if p.split(|b| *b == b'/').any(|c| c.is_empty() || c == b"." || c == b"..") {
-        bail!("stream path {:?} leaves the subvolume", String::from_utf8_lossy(p));
-    }
-    Ok(())
-}
-
-/// Attributes of one command. In stream version 2 and later the data attribute has no length
-/// and takes the rest of the command.
-pub(crate) fn attrs(body: &[u8], version: u32) -> Result<Vec<(u16, &[u8])>> {
-    let mut v = Vec::new();
-    let mut a = 0;
-    while a < body.len() {
-        if a + 2 > body.len() {
-            bail!("truncated attribute");
-        }
-        let t = le16(&body[a..]);
-        if t == A_DATA && version >= 2 {
-            v.push((t, &body[a + 2..]));
-            break;
-        }
-        if a + 4 > body.len() {
-            bail!("truncated attribute");
-        }
-        let l = le16(&body[a + 2..]) as usize;
-        let s = a + 4;
-        if s + l > body.len() {
-            bail!("truncated attribute");
-        }
-        v.push((t, &body[s..s + l]));
-        a = s + l;
-    }
-    Ok(v)
-}
-
-fn get<'b>(attrs: &[(u16, &'b [u8])], t: u16) -> Option<&'b [u8]> {
-    attrs.iter().find(|(k, _)| *k == t).map(|(_, v)| *v)
 }
 
 /// Check a stream while copying it to `out`. Returns the local parent of an incremental stream.
@@ -118,13 +61,9 @@ fn get<'b>(attrs: &[(u16, &'b [u8])], t: u16) -> Option<&'b [u8]> {
 pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Option<PathBuf>> {
     let mut head = [0u8; 17];
     src.read_exact(&mut head)?;
-    if &head[..MAGIC.len()] != MAGIC {
-        bail!("not a btrfs send stream");
-    }
-    let version = le32(&head[MAGIC.len()..]);
-    if !(1..=3).contains(&version) {
-        bail!("unsupported send stream version {version}");
-    }
+    let limits = DecodeLimits::default();
+    let version = Version::decode(&head)?;
+    let mut decoder = ReceiveDecoder::new(version, limits);
     out.write_all(&head)?;
     // (uuid, ctransid) of the new subvolume and of its parent: the only clone sources.
     let mut own: Option<(Vec<u8>, Vec<u8>)> = None;
@@ -134,51 +73,32 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
     let mut body = Vec::new();
     loop {
         src.read_exact(&mut hdr)?;
-        let len = le32(&hdr) as usize;
-        let code = le16(&hdr[4..]);
-        if len > MAX_CMD {
-            bail!("stream command of {len} bytes");
-        }
-        if code == 0 || code > LAST_CMD {
-            bail!("unknown stream command {code}");
-        }
-        body.resize(len, 0);
+        let frame = CommandHeader::decode(&hdr, limits)?;
+        body.resize(frame.body_len(), 0);
         src.read_exact(&mut body)?;
-        let at = attrs(&body, version)?;
-        for k in [A_PATH, A_PATH_TO, A_CLONE_PATH] {
-            if let Some(p) = get(&at, k) {
-                check_path(p)?;
-            }
-        }
+        let command = decoder.decode(frame, &body)?;
+        let code = command.code();
         match code {
             SUBVOL | SNAPSHOT => {
-                if own.is_some() {
-                    bail!("the stream holds more than one subvolume");
-                }
-                if get(&at, A_PATH) != Some(e.name.as_bytes()) {
+                if command.value(A_PATH)? != e.name.as_bytes() {
                     bail!("the stream is not {}", e.name);
                 }
-                let uuid = get(&at, A_UUID).ok_or_else(|| anyhow!("stream without a UUID"))?;
+                let uuid = command.value(A_UUID)?;
                 if uuid_text(uuid)? != e.uuid {
                     bail!("the stream of {} is not the subvolume its record names", e.name);
                 }
-                own = Some((uuid.to_vec(), get(&at, A_CTRANSID).unwrap_or_default().to_vec()));
+                own = Some((uuid.to_vec(), command.value(A_CTRANSID)?.to_vec()));
                 if code == SNAPSHOT {
-                    let pu = get(&at, A_CLONE_UUID).ok_or_else(|| anyhow!("snapshot without a parent"))?;
+                    let pu = command.value(A_CLONE_UUID)?;
                     let pu_text = uuid_text(pu)?;
                     let local =
                         (e.parent)(&pu_text).ok_or_else(|| anyhow!("the parent of {} is not a state of this project", e.name))?;
-                    parent = Some((pu.to_vec(), get(&at, A_CLONE_CTRANSID).unwrap_or_default().to_vec()));
+                    parent = Some((pu.to_vec(), command.value(A_CLONE_CTRANSID)?.to_vec()));
                     parent_path = Some(local);
                 }
             }
-            _ if own.is_none() => bail!("the stream does not start with a subvolume"),
-            LINK => check_path(get(&at, A_PATH_LINK).unwrap_or_default())?,
             CLONE => {
-                let source = (
-                    get(&at, A_CLONE_UUID).unwrap_or_default().to_vec(),
-                    get(&at, A_CLONE_CTRANSID).unwrap_or_default().to_vec(),
-                );
+                let source = (command.value(A_CLONE_UUID)?.to_vec(), command.value(A_CLONE_CTRANSID)?.to_vec());
                 if Some(&source) != own.as_ref() && Some(&source) != parent.as_ref() {
                     let uuid = uuid_text(&source.0)?;
                     let transid =
@@ -187,7 +107,7 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
                         e.clones.iter().find(|(u, t, _)| *u == uuid && t.is_none_or(|t| t == transid)).ok_or_else(|| {
                             anyhow!("the stream clones from a subvolume outside this state and its allowed sources")
                         })?;
-                    check_clone_file(root, get(&at, A_CLONE_PATH).ok_or_else(|| anyhow!("clone without a source path"))?)?;
+                    check_clone_file(root, command.value(A_CLONE_PATH)?)?;
                 }
             }
             _ => {}
@@ -202,6 +122,7 @@ pub fn check(src: &mut dyn Read, out: &mut dyn Write, e: &Expect) -> Result<Opti
     if src.read(&mut extra)? != 0 {
         bail!("data after the end of the stream");
     }
+    decoder.finish()?;
     Ok(parent_path)
 }
 
@@ -210,17 +131,15 @@ mod tests {
     use super::*;
 
     fn cmd(code: u16, attrs: &[(u16, &[u8])]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for (t, v) in attrs {
-            body.extend_from_slice(&t.to_le_bytes());
-            body.extend_from_slice(&(v.len() as u16).to_le_bytes());
-            body.extend_from_slice(v);
+        let zero = 0u64.to_le_bytes();
+        let mut attrs = attrs.to_vec();
+        if (3..=8).contains(&code) {
+            attrs.push((3, &zero));
         }
-        let mut c = (body.len() as u32).to_le_bytes().to_vec();
-        c.extend_from_slice(&code.to_le_bytes());
-        c.extend_from_slice(&[0, 0, 0, 0]);
-        c.extend_from_slice(&body);
-        c
+        if code == CLONE {
+            attrs.extend([(18, zero.as_slice()), (23, zero.as_slice()), (24, zero.as_slice())]);
+        }
+        layr_stream_codec::encode_command(code, &attrs, DecodeLimits::default()).unwrap()
     }
 
     fn stream(cmds: &[Vec<u8>]) -> Vec<u8> {
@@ -251,22 +170,52 @@ mod tests {
         let end = cmd(END, &[]);
         let ok = stream(&[snap.clone(), cmd(3, &[(A_PATH, b"a/b")]), end.clone()]);
         assert_eq!(run(&ok).unwrap(), Some(PathBuf::from("/parent")));
-        let foreign = cmd(SNAPSHOT, &[(A_PATH, b"s1"), (A_UUID, &U), (A_CLONE_UUID, &X)]);
-        assert!(run(&stream(&[foreign, end.clone()])).is_err(), "a parent outside the project");
+        let foreign =
+            cmd(SNAPSHOT, &[(A_PATH, b"s1"), (A_UUID, &U), (A_CTRANSID, &t), (A_CLONE_UUID, &X), (A_CLONE_CTRANSID, &t)]);
+        assert_eq!(
+            run(&stream(&[foreign, end.clone()])).unwrap_err().to_string(),
+            "the parent of s1 is not a state of this project"
+        );
         let up = cmd(3, &[(A_PATH, b"../escape")]);
         assert!(run(&stream(&[snap.clone(), up, end.clone()])).is_err(), "a path with ..");
         let clone = cmd(CLONE, &[(A_PATH, b"f"), (A_CLONE_UUID, &X), (A_CLONE_CTRANSID, &t), (A_CLONE_PATH, b"g")]);
         assert!(run(&stream(&[snap.clone(), clone, end.clone()])).is_err(), "a clone from another subvolume");
         let clone_path = cmd(CLONE, &[(A_PATH, b"f"), (A_CLONE_UUID, &P), (A_CLONE_CTRANSID, &t), (A_CLONE_PATH, b"../../x")]);
         assert!(run(&stream(&[snap.clone(), clone_path, end.clone()])).is_err(), "a clone path with ..");
-        let other_name = cmd(SUBVOL, &[(A_PATH, b"s2"), (A_UUID, &U)]);
-        assert!(run(&stream(&[other_name, end.clone()])).is_err(), "another name");
+        let other_name = cmd(SUBVOL, &[(A_PATH, b"s2"), (A_UUID, &U), (A_CTRANSID, &t)]);
+        assert_eq!(run(&stream(&[other_name, end.clone()])).unwrap_err().to_string(), "the stream is not s1");
         let mut trailing = ok.clone();
         trailing.push(0);
         assert!(run(&trailing).is_err(), "data after the end");
-        let two = stream(&[snap.clone(), cmd(SUBVOL, &[(A_PATH, b"s1"), (A_UUID, &U)]), end]);
-        assert!(run(&two).is_err(), "two subvolumes");
+        let two = stream(&[snap.clone(), cmd(SUBVOL, &[(A_PATH, b"s1"), (A_UUID, &U), (A_CTRANSID, &t)]), end]);
+        assert_eq!(
+            run(&two).unwrap_err().downcast_ref::<layr_stream_codec::DecodeError>(),
+            Some(&layr_stream_codec::DecodeError::Sequence)
+        );
     }
+    #[test]
+    fn invalid_command_is_never_forwarded() {
+        let uuid = uuid_text(&U).unwrap();
+        let e = Expect { name: "s1", uuid: &uuid, parent: &|_| None, clones: &[] };
+        let first = cmd(SUBVOL, &[(A_PATH, b"s1"), (A_UUID, &U), (A_CTRANSID, &7u64.to_le_bytes())]);
+        for bad in [
+            cmd(3, &[(A_PATH, b"../escape")]),
+            cmd(17, &[(A_PATH, b"file"), (4, &[0; 7])]),
+            cmd(17, &[(A_PATH, b"file")]),
+            cmd(3, &[(A_PATH, b"file"), (A_PATH, b"other")]),
+            {
+                let mut damaged = cmd(3, &[(A_PATH, b"file")]);
+                damaged[6] ^= 1;
+                damaged
+            },
+        ] {
+            let data = stream(&[first.clone(), bad, cmd(END, &[])]);
+            let mut out = Vec::new();
+            assert!(check(&mut data.as_slice(), &mut out, &e).is_err());
+            assert_eq!(out, stream(std::slice::from_ref(&first)));
+        }
+    }
+
     #[test]
     fn extra_clone_sources_require_exact_identity() {
         let t = 7u64.to_le_bytes();

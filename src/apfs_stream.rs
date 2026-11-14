@@ -8,40 +8,10 @@ use std::{
     path::Path,
 };
 
-// btrfs uses CRC32C with zero seed and no final inversion.
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            c = (c >> 1) ^ (0x82f63b78u32 & 0u32.wrapping_sub(c & 1));
-            bit += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-};
-fn crc(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |c, b| (c >> 8) ^ CRC_TABLE[((c as u8) ^ b) as usize])
-}
+use layr_stream_codec::{CommandHeader, DecodeLimits, ReceiveDecoder, Version};
 
 fn command(out: &mut dyn Write, code: u16, attrs: &[(u16, &[u8])]) -> Result<()> {
-    let mut v = vec![0; 10];
-    for &(t, value) in attrs {
-        let len = u16::try_from(value.len()).context("stream attribute exceeds 64 KiB")?;
-        v.extend(t.to_le_bytes());
-        v.extend(len.to_le_bytes());
-        v.extend(value);
-    }
-    let len = (v.len() - 10) as u32;
-    v[..4].copy_from_slice(&len.to_le_bytes());
-    v[4..6].copy_from_slice(&code.to_le_bytes());
-    let checksum = crc(&v);
-    v[6..10].copy_from_slice(&checksum.to_le_bytes());
-    out.write_all(&v)?;
+    out.write_all(&layr_stream_codec::encode_command(code, attrs, DecodeLimits::default())?)?;
     Ok(())
 }
 fn time(sec: i64, nano: i64) -> Vec<u8> {
@@ -397,17 +367,8 @@ fn send_plan(root: &Path, plan: &Plan, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn value<'a>(attrs: &[(u16, &'a [u8])], key: u16) -> Result<&'a [u8]> {
-    attrs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).with_context(|| format!("stream missing attribute {key}"))
-}
-fn number(attrs: &[(u16, &[u8])], key: u16) -> Result<u64> {
-    Ok(u64::from_le_bytes(value(attrs, key)?.try_into().context("invalid integer")?))
-}
 fn path(root: &Path, bytes: &[u8], follow: bool) -> Result<std::path::PathBuf> {
     let rel = std::str::from_utf8(bytes)?;
-    if bytes.contains(&0) {
-        bail!("NUL in stream path");
-    }
     let p = crate::fsutil::safe_join(root, rel)?;
     if follow && fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("stream operation follows a symbolic link");
@@ -431,8 +392,8 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
         let root = staging.join("tree");
         let mut head = [0; 17];
         spool.read_exact(&mut head)?;
-        let version = u32::from_le_bytes(head[13..].try_into()?);
-        if version > 2 {
+        let version = Version::decode(&head)?;
+        if version.number() > 2 {
             bail!("portable receive supports send stream versions 1 and 2");
         }
         if let Some(p) = &parent {
@@ -458,31 +419,24 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
         }
         prepare(&root, &mut modes)?;
         let mut times: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
+        let limits = DecodeLimits::default();
+        let mut decoder = ReceiveDecoder::new(version, limits);
         loop {
             let mut hdr = [0; 10];
             spool.read_exact(&mut hdr)?;
-            let len = u32::from_le_bytes(hdr[..4].try_into()?) as usize;
-            if len > 16 << 20 {
-                bail!("stream command exceeds limit");
-            }
-            let code = u16::from_le_bytes(hdr[4..6].try_into()?);
-            let checksum = u32::from_le_bytes(hdr[6..10].try_into()?);
-            let mut body = vec![0; len];
+            let frame = CommandHeader::decode(&hdr, limits)?;
+            let mut body = vec![0; frame.body_len()];
             spool.read_exact(&mut body)?;
-            hdr[6..].fill(0);
-            let mut checked = hdr.to_vec();
-            checked.extend(&body);
-            if crc(&checked) != checksum {
-                bail!("stream checksum mismatch");
-            }
-            let at = crate::receive_stream::attrs(&body, version)?;
+            let command = decoder.decode(frame, &body)?;
+            let code = command.code();
             if code == 1 || code == 2 {
                 continue;
             }
             if code == 21 {
+                decoder.finish()?;
                 break;
             }
-            let p = path(&root, value(&at, 15)?, !matches!(code, 8..=14 | 19 | 20))?;
+            let p = path(&root, command.value(15)?, !matches!(code, 8..=14 | 19 | 20))?;
             // On a volume that ignores case, README and Readme are one entry: refuse instead of
             // failing on an unclear error or replacing the other entry.
             let clash = |q: &Path| -> Result<()> {
@@ -505,10 +459,10 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
                     fs::create_dir(&p)?;
                 }
                 8 => {
-                    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(value(&at, 17)?), &p)?;
+                    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(command.value(17)?), &p)?;
                 }
                 9 => {
-                    let to = path(&root, value(&at, 16)?, false)?;
+                    let to = path(&root, command.value(16)?, false)?;
                     // A rename of an entry to another case of its own name is no clash: the
                     // entry that `to` finds is `p` itself, in the same folder.
                     let itself = to.parent() == p.parent()
@@ -519,7 +473,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
                     fs::rename(&p, to)?;
                 }
                 10 => {
-                    let from = path(&root, value(&at, 17)?, true)?;
+                    let from = path(&root, command.value(17)?, true)?;
                     if !fs::symlink_metadata(&from)?.is_file() {
                         bail!("hardlink source is not a file");
                     }
@@ -528,7 +482,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
                 11 => fs::remove_file(&p)?,
                 12 => fs::remove_dir(&p)?,
                 13 | 14 => {
-                    let raw = value(&at, 13)?;
+                    let raw = command.value(13)?;
                     if raw.starts_with(b"system.posix_acl_") || raw.starts_with(b"security.") {
                         bail!("APFS cannot enforce the Linux security attribute {}", String::from_utf8_lossy(raw));
                     }
@@ -556,18 +510,18 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
                     }
                     let name = std::ffi::CString::new(name)?;
                     if code == 13 {
-                        crate::stream_fs::attribute(&p, &name, Some(value(&at, 14)?))?;
+                        crate::stream_fs::attribute(&p, &name, Some(command.value(14)?))?;
                     } else {
                         crate::stream_fs::remove_attribute(&p, &name)?;
                     }
                 }
                 15 => {
                     let mut f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
-                    f.seek(SeekFrom::Start(number(&at, 18)?))?;
-                    f.write_all(value(&at, 19)?)?;
+                    f.seek(SeekFrom::Start(command.number(18)?))?;
+                    f.write_all(command.value(19)?)?;
                 }
                 16 => {
-                    let source_id = uuid::Uuid::from_slice(value(&at, 20)?)?.to_string();
+                    let source_id = uuid::Uuid::from_slice(command.value(20)?)?.to_string();
                     let source_root = if source_id == expected.uuid {
                         root.clone()
                     } else if let Some(p) = (expected.parent)(&source_id) {
@@ -580,43 +534,34 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream:
                             .map(|(_, _, p)| p.clone())
                             .context("clone source unavailable")?
                     };
-                    let from = path(&source_root, value(&at, 22)?, true)?;
+                    let from = path(&source_root, command.value(22)?, true)?;
                     if !fs::metadata(&from)?.is_file() {
                         bail!("clone source is not a file");
                     }
                     let mut input = File::open(from)?;
                     let mut output = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
-                    let len = number(&at, 24)?;
-                    let start = number(&at, 23)?;
+                    let len = command.number(24)?;
+                    let start = command.number(23)?;
                     if start.checked_add(len).is_none_or(|end| end > input.metadata().map(|m| m.len()).unwrap_or(0)) {
                         bail!("clone range exceeds source");
                     }
                     input.seek(SeekFrom::Start(start))?;
-                    output.seek(SeekFrom::Start(number(&at, 18)?))?;
+                    output.seek(SeekFrom::Start(command.number(18)?))?;
                     if std::io::copy(&mut input.take(len), &mut output)? != len {
                         bail!("short clone source");
                     }
                 }
-                17 => fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?.set_len(number(&at, 4)?)?,
+                17 => fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?.set_len(command.number(4)?)?,
                 18 => {
-                    modes.insert(fs::symlink_metadata(&p)?.ino(), (number(&at, 5)? & 0o7777) as u32);
+                    modes.insert(fs::symlink_metadata(&p)?.ino(), (command.number(5)? & 0o7777) as u32);
                 }
                 // Numeric owners do not identify the same user on two machines.
                 // APFS stores belong to the local user; worktree access is applied by layr.
-                19 => {
-                    number(&at, 6)?;
-                    number(&at, 7)?;
-                }
+                19 => {}
                 20 => {
-                    let t = value(&at, 10)?;
-                    if t.len() != 12 {
-                        bail!("invalid stream time");
-                    }
+                    let t = command.value(10)?;
                     let sec = i64::from_le_bytes(t[..8].try_into()?);
                     let ns = u32::from_le_bytes(t[8..].try_into()?);
-                    if ns >= 1_000_000_000 {
-                        bail!("invalid nanoseconds");
-                    }
                     times.insert(fs::symlink_metadata(&p)?.ino(), (sec, ns as i64));
                 }
                 _ => bail!("portable receive cannot apply stream command {code}"),
@@ -821,7 +766,7 @@ mod tests {
         fs::create_dir(&dir)?;
         let mut bytes = b"btrfs-stream\0\x01\0\0\0".to_vec();
         command(&mut bytes, 1, &[(15, b"state"), (1, id.as_bytes()), (2, &1u64.to_le_bytes())])?;
-        command(&mut bytes, 3, &[(15, b"file")])?;
+        command(&mut bytes, 3, &[(15, b"file"), (3, &1u64.to_le_bytes())])?;
         command(
             &mut bytes,
             16,
@@ -859,12 +804,12 @@ mod tests {
         let text = id.to_string();
         let e = crate::receive_stream::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
         for (code, attrs) in [
-            (3, vec![(15, b"link/new".as_slice())]),
+            (3, vec![(15, b"link/new".as_slice()), (3, b"\x01\0\0\0\0\0\0\0".as_slice())]),
             (15, vec![(15, b"link/keep".as_slice()), (18, b"\0\0\0\0\0\0\0\0".as_slice()), (19, b"bad".as_slice())]),
         ] {
             let mut bytes = b"btrfs-stream\0\x01\0\0\0".to_vec();
             command(&mut bytes, 1, &[(15, b"state"), (1, id.as_bytes()), (2, &1u64.to_le_bytes())])?;
-            command(&mut bytes, 8, &[(15, b"link"), (17, outside.as_os_str().as_bytes())])?;
+            command(&mut bytes, 8, &[(15, b"link"), (3, &1u64.to_le_bytes()), (17, outside.as_os_str().as_bytes())])?;
             command(&mut bytes, code, &attrs)?;
             command(&mut bytes, 21, &[])?;
             assert!(receive(&mut &bytes[..], &dir, &e).is_err());
