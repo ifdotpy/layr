@@ -97,7 +97,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
                     return Err(error);
                 }
             } else {
-                let state = crate::revs::resolve(repo, line, rev)?;
+                let state = crate::revs::resolve_state(repo, line, rev)?;
                 if !repo.p.db.state_flags(&state)?.map(|(_, deleted)| deleted).unwrap_or(false) {
                     return Err(error);
                 }
@@ -863,7 +863,7 @@ pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Be
         _ => bail!("the line upstream must be a line name"),
     };
     let target = repo.line(target)?;
-    let base = repo.merge_base(&target.head, &state.id)?.context("change and target have no common ancestor")?;
+    let base = repo.merge_base(&repo.source_id(&target.head)?, &repo.source_id(&state.id)?)?.context("change and target have no common ancestor")?;
     let base = resolve(repo, None, &base)?;
     let head = resolve(repo, None, &state.id)?;
     let mut behavior = diff(repo, &base, &head)?;

@@ -67,7 +67,7 @@ fn entry(repo: &Repo, line: &Line, arg: Option<&str>) -> Result<Option<(usize, L
     if let Some(i) = parked.iter().position(|l| l.name == arg) {
         return Ok(Some((i, parked[i].clone())));
     }
-    let id = revs::resolve(repo, Some(line), arg)?;
+    let id = revs::resolve_state(repo, Some(line), arg)?;
     Ok(parked.iter().position(|l| l.head == id).map(|i| (i, parked[i].clone())))
 }
 
@@ -133,7 +133,7 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let a = parse(&spec, &rest)?;
             let id = match entry(repo, &line, a.pos.first().map(String::as_str))? {
                 Some((_, l)) => l.head,
-                None => revs::resolve(repo, Some(&line), &a.pos[0])?,
+                None => revs::resolve_state(repo, Some(&line), &a.pos[0])?,
             };
             let s = repo.state(&id)?;
             let Some(parent) = s.parents.first() else { bail!("state {} has no parent", ids::short(&id)) };
@@ -174,7 +174,7 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let id = match (&found, sub) {
                 (Some((_, l)), _) => l.head.clone(),
                 // `apply` takes any state with a parent (a dropped entry); `pop` needs a park entry.
-                (None, "apply") => revs::resolve(repo, Some(&line), arg.unwrap_or_default())?,
+                (None, "apply") => revs::resolve_state(repo, Some(&line), arg.unwrap_or_default())?,
                 (None, _) => return Err(exit(1, format!("error: {} is no park entry of this line", arg.unwrap_or_default()))),
             };
             let s = repo.state(&id)?;

@@ -234,7 +234,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let required = required_checks(a.get("--required-checks"), state.as_deref(), true)?;
     let only = only_checks(a.get("--only"))?;
     // Match the queue runner: one watcher per project without holding the project write lock. A run
@@ -281,7 +281,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn pending(ctx: &Ctx, a: &Parsed) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let have = a.get("--platform").map_or_else(platform, str::to_owned);
     if !PLATFORMS.iter().any(|p| p.contains('-') && *p == have) {
         bail!(

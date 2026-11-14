@@ -825,7 +825,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         for l in &made {
             let o = repo.overlay_repo(&l.overlay)?;
             let parent =
-                o.parents(&l.state)?.first().cloned().ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
+                o.parents(&o.source_id(&l.state)?)?.first().cloned().ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
             let info = repo.need_overlay(&l.overlay)?;
             let Some(ol) = crate::overlay::find_overlay_line(&o.p.db, &info, &line)? else { continue };
             if ol.head != l.state && !force {
@@ -3197,7 +3197,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    let state = revs::resolve_state(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     if a.pos.len() > 1 {
         bail!("usage: layr approve [--declassify <path>@<id>] <rev>");
     }
@@ -3427,8 +3427,8 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     match args.first().map(|s| s.as_str()) {
         Some("changes") if args.len() >= 3 => {
-            let a = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
-            let b = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
+            let a = h.repo.state_src(&revs::resolve_state(&h.repo, h.line.as_ref(), &args[1])?)?;
+            let b = h.repo.state_src(&revs::resolve_state(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
                 let k = |m: Option<&fsutil::Meta>| m.map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
                 outln!(

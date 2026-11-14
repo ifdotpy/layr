@@ -1900,7 +1900,7 @@ pub fn restore_impl(
     let (index, _it) = repo.index_view(&line)?;
     let head_root = repo.head_src(&line)?;
     let src_id = match source {
-        Some(r) => Some(revs::resolve(repo, Some(&line), r)?),
+        Some(r) => Some(revs::resolve_state(repo, Some(&line), r)?),
         None => None,
     };
     // In a line with overlays a source state comes with the line's overlays in place.
@@ -2088,7 +2088,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut paths = a.paths.clone();
     if !a.dashdash && pos.len() > 1 {
         paths = pos.split_off(1);
-    } else if !a.dashdash && pos.len() == 1 && revs::resolve(&h.repo, Some(&line), &pos[0]).is_err() {
+    } else if !a.dashdash && pos.len() == 1 && revs::resolve_state(&h.repo, Some(&line), &pos[0]).is_err() {
         paths = pos.clone();
         pos.clear();
     }
@@ -2097,7 +2097,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let src = pos.first().map(|s| s.as_str()).unwrap_or("head");
         return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false, false);
     }
-    let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    let target = revs::resolve_state(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     // APFS: an equal tree with a clean working folder moves only the head (`reset_same_tree`).
     #[cfg(target_os = "macos")]
     if a.has("--hard") && !a.has("--soft") && h.repo.layers(&line)?.is_empty() && reset_same_tree(ctx, &h.repo, &line, &target)? {

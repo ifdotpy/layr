@@ -481,7 +481,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         // save, a fetch or a follow): the start is the state at the time of the command.
         let resolve_start = || -> Result<String> {
             Ok(match a.pos.get(1) {
-                Some(r) => revs::resolve(repo, current.as_ref(), r)?,
+                Some(r) => revs::resolve_state(repo, current.as_ref(), r)?,
                 None => match &current {
                     Some(c) => repo.p.db.line_by_id(&c.id)?.map_or_else(|| c.head.clone(), |l| l.head),
                     None => match repo.p.db.line_by_name("main")? {
@@ -790,7 +790,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     let start = match a.get("--state") {
-        Some(r) => revs::resolve(repo, Some(&l), r)?,
+        Some(r) => revs::resolve_state(repo, Some(&l), r)?,
         None if a.has("--head") => l.head.clone(),
         None => repo
             .p
@@ -869,7 +869,7 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::check_name("tag", name)?;
     // Tags are names of the whole project and keep their states from gc: the admin sets them.
     repo.require(ctx, "tag")?;
-    let id = revs::resolve(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("head"))?;
+    let id = revs::resolve_state(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("head"))?;
     let _lock = repo.p.lock_maintenance()?;
     if repo.p.db.tag(name)?.is_some() && !a.has("-f") {
         return Err(exit(128, format!("fatal: tag '{name}' already exists")));

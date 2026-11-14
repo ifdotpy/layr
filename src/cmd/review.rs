@@ -48,7 +48,7 @@ pub fn comment(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let state = match (a.get("--state"), a.get("--version")) {
         (Some(_), Some(_)) => bail!("--state and --version both name the version; give one"),
         (Some(rev), None) => {
-            let state = crate::revs::resolve(&h.repo, h.line.as_ref(), rev)?;
+            let state = crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)?;
             if !versions.iter().any(|v| v.id == state) {
                 bail!("state {} is no version of change {id}", crate::ids::short(&state));
             }

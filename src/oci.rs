@@ -540,7 +540,7 @@ pub fn export(
     if repo.p.is_overlay() {
         bail!("OCI export refuses private overlays");
     }
-    let id = crate::revs::resolve(repo, line, rev)?;
+    let id = crate::revs::resolve_state(repo, line, rev)?;
     let state = repo.state(&id)?;
     let named_line = repo.p.db.line_by_name(rev)?;
     if let Some(l) = named_line.as_ref().or_else(|| line.filter(|l| l.head == id)) {
@@ -731,7 +731,7 @@ fn chart(root: &Path, folder: &str, name: &str, image: &str, cache: &Cache, forb
 /// Single resolver hook. Core extends revs::resolve for refs, changes and exact views.
 pub fn resolve_tag(repo: &Repo, tag: &str) -> Result<String> {
     let rev = tag_revision(tag)?;
-    crate::revs::resolve(repo, None, &rev)
+    crate::revs::resolve_state(repo, None, &rev)
 }
 
 pub fn tag_revision(tag: &str) -> Result<String> {

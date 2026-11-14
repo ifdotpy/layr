@@ -215,9 +215,9 @@ pub mod git {
         }
         if a.has("--rebase") {
             // Replay the exact fetched state after checking the review expectation.
-            let target = revs::resolve(&h.repo, Some(&line), &rev)?;
+            let target = revs::resolve_state(&h.repo, Some(&line), &rev)?;
             if let Some(expected) = a.get("--expect") {
-                let expected = revs::resolve(&h.repo, Some(&line), expected)?;
+                let expected = revs::resolve_state(&h.repo, Some(&line), expected)?;
                 if expected != target {
                     return Err(exit(
                         1,
@@ -280,7 +280,7 @@ pub mod git {
                 ),
             ));
         }
-        let (commit, made) = gitbridge::export_history(repo, &state.id)?;
+        let (commit, made) = gitbridge::export_history(repo, &repo.source_id(&state.id)?)?;
         if !made.is_empty() || repo.p.db.git_commit_of(&state.id)?.is_none() {
             // An export without a remote: the record keeps the commits of the states, as a push does.
             let commits: serde_json::Map<String, serde_json::Value> =
@@ -358,7 +358,7 @@ pub mod git {
             }
             _ => rev.clone(),
         };
-        let state_id = revs::resolve(repo, line.as_ref(), &source)?;
+        let state_id = revs::resolve_state(repo, line.as_ref(), &source)?;
         // A line started on unpushed states of another line would publish that line's work too.
         let owner = match repo.p.db.line_by_name(&source)? {
             Some(l) => Some(repo.localize(l)?),
@@ -471,7 +471,7 @@ pub mod git {
                     let (c, parent) = gitbridge::make_commit(repo, &state, a.get("-m"))?;
                     (c, parent, Vec::new())
                 } else {
-                    let (c, made) = gitbridge::export_history(repo, &state_id)?;
+                    let (c, made) = gitbridge::export_history(repo, &repo.source_id(&state_id)?)?;
                     (c, None, made)
                 };
                 let commits: serde_json::Map<String, serde_json::Value> =

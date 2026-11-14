@@ -538,10 +538,12 @@ impl Repo<'_> {
         let history = if lines.is_empty() { None } else { Some(self.history()?) };
         // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
         let step1 = crate::trace::span("overlap step 1");
+        let source = self.source_id(&line.head)?;
         for other in lines {
-            let found = match history.as_ref().and_then(|h| h.merge_base(&line.head, &other.head)) {
+            let other_source = self.source_id(&other.head)?;
+            let found = match history.as_ref().and_then(|h| h.merge_base(&source, &other_source)) {
                 Some(found) => found,
-                None => self.merge_base(&line.head, &other.head)?,
+                None => self.merge_base(&source, &other_source)?,
             };
             let Some(base) = found else { continue };
             let root = match self.state_src(&base) {
@@ -665,7 +667,7 @@ impl Repo<'_> {
             if repo.can_read(ctx).is_err() {
                 continue;
             }
-            let base = match repo.merge_base(&layer.state, &theirs.state)? {
+            let base = match repo.merge_base(&repo.source_id(&layer.state)?, &repo.source_id(&theirs.state)?)? {
                 Some(base) => base,
                 None => continue,
             };

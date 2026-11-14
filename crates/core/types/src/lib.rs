@@ -41,7 +41,7 @@ impl fmt::Display for LineId {
 }
 
 /// A full state UUID, stored in canonical form for borrowed catalog lookups.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct StateId([u8; 36]);
 
 impl StateId {

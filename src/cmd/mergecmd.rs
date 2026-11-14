@@ -156,7 +156,7 @@ thread_local! {
 #[cfg(target_os = "macos")]
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     let _t = crate::trace::span("prepare merge");
-    let theirs = revs::resolve(repo, Some(line), rev)?;
+    let theirs = revs::resolve_state(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
         return Ok(());
@@ -165,7 +165,7 @@ fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
         // A fast-forward reads the layers of the new head (`finish`): it needs no complete tree.
         return Ok(());
     }
-    let Some(base) = repo.merge_base(head, &theirs)? else { return Ok(()) };
+    let Some(base) = repo.merge_base(&repo.source_id(head)?, &repo.source_id(&theirs)?)? else { return Ok(()) };
     let label = repo.p.db.line_by_name(rev)?.map(|l| l.name).unwrap_or_else(|| rev.to_string());
     let (work, out) = merge_trees(ctx, repo, line, &base, head, &theirs, &label, true)?;
     crate::storage::prepare_snapshot(&work.path, &repo.p.work_dir(), true)?;
@@ -245,7 +245,7 @@ fn prepare_steps(
 #[cfg(target_os = "macos")]
 fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
     let _t = crate::trace::span("prepare replay");
-    if repo.merge_base(&line.head, upstream)?.is_none() {
+    if repo.merge_base(&repo.source_id(&line.head)?, &repo.source_id(upstream)?)?.is_none() {
         return Ok(Vec::new());
     }
     let mut chain = repo.first_parents_since(&line.head, upstream)?;
@@ -398,8 +398,7 @@ fn plan_overlays(
                 m.moves.push((tl.overlay.clone(), ol, st.id.clone(), Some(st)));
                 continue;
             }
-            let base = o
-                .merge_base(&ours_s, &tl.state)?
+            let base = o.merge_base(&o.source_id(&ours_s)?, &o.source_id(&tl.state)?)?
                 .ok_or_else(|| exit(128, format!("fatal: overlay '{}': refusing to merge unrelated histories", tl.overlay)))?;
             if !o.p.has_state(&base) {
                 return Err(exit(
@@ -480,7 +479,7 @@ fn resolve_commands(repo: &Repo, line: &Line, checks: &[String]) -> Result<Vec<(
 /// line, the check commands and, for a merge of another state, the approvals of the source.
 fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, s: &Settled<'_>) -> Result<()> {
     if let Some(rev) = &s.rev {
-        let at = revs::resolve(repo, Some(now), rev)?;
+        let at = revs::resolve_state(repo, Some(now), rev)?;
         if at != s.source {
             if s.expect {
                 return Err(exit(
@@ -801,7 +800,7 @@ fn queue_approvals(
         let patterns: Vec<_> =
             creator.iter().flat_map(|r| r.paths.keys()).chain(rule.into_iter().flat_map(|r| r.paths.keys())).collect();
         if !patterns.is_empty() {
-            let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_owned());
+            let base = repo.merge_base(&repo.source_id(head)?, &repo.source_id(theirs)?)?.unwrap_or_else(|| head.to_owned());
             let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
             let paths: Vec<_> = changed
                 .iter()
@@ -880,7 +879,7 @@ fn check_creator_approvals(
         anyhow::bail!("not enough approvals of the source state");
     }
     if !rule.owners.is_empty() {
-        let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_owned());
+        let base = repo.merge_base(&repo.source_id(head)?, &repo.source_id(theirs)?)?.unwrap_or_else(|| head.to_owned());
         let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
         let paths: Vec<_> =
             changed.iter().flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)]).flatten().collect();
@@ -1051,7 +1050,7 @@ fn missing_owner(
     if rule.owners.is_empty() {
         return Ok(None);
     }
-    let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_string());
+    let base = repo.merge_base(&repo.source_id(head)?, &repo.source_id(theirs)?)?.unwrap_or_else(|| head.to_string());
     let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
     let paths: Vec<&str> =
         changed.iter().flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)]).flatten().collect();
@@ -1389,7 +1388,7 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
             )));
         };
         repo.hold(repo.pin(&[saved.as_str()])?);
-        let Some(base) = repo.merge_base(&saved, &line.head)? else {
+        let Some(base) = repo.merge_base(&repo.source_id(&saved)?, &repo.source_id(&line.head)?)? else {
             return Ok(Some(format!("the cache of {} and line '{}' have no common state", theirs.name, line.name)));
         };
         let (base, saved) = (repo.state_src(&base)?, repo.state_src(&saved)?);
@@ -1664,19 +1663,19 @@ fn merge_rev_inner(
     let want = a
         .get("--expect")
         .map(|e| {
-            let state = if queue.is_some() { e.to_string() } else { revs::resolve(repo, Some(line), e)? };
+            let state = if queue.is_some() { e.to_string() } else { revs::resolve_state(repo, Some(line), e)? };
             crate::model::HeadExpectation::try_from(state).map_err(anyhow::Error::msg)
         })
         .transpose()?;
     let expect = want.is_some();
     // The refusal of a protected line names the ready command; the state is read only.
     let hint = match queue {
-        None if !expect => Some(format!("layr merge {rev} --expect {}", ids::display(&revs::resolve(repo, Some(line), rev)?))),
+        None if !expect => Some(format!("layr merge {rev} --expect {}", ids::display(&revs::resolve_state(repo, Some(line), rev)?))),
         _ => None,
     };
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     if queue.is_none() {
-        repo.hold(repo.pin(&[&revs::resolve(repo, Some(line), rev)?])?);
+        repo.hold(repo.pin(&[&revs::resolve_state(repo, Some(line), rev)?])?);
     }
     if queue.is_none() {
         #[cfg(target_os = "macos")]
@@ -1703,7 +1702,7 @@ fn merge_rev_inner(
     }
     let (theirs, theirs_line) = match queue {
         Some(q) => (q.entry.state.clone(), None),
-        None => (revs::resolve(repo, Some(line), rev)?, repo.p.db.line_by_name(rev)?),
+        None => (revs::resolve_state(repo, Some(line), rev)?, repo.p.db.line_by_name(rev)?),
     };
     if let Some(want) = want {
         if let Err(mismatch) = want.check(&theirs) {
@@ -1917,7 +1916,7 @@ fn merge_rev_inner(
         ovl.discard(repo);
         return Err(exit(128, "fatal: Not possible to fast-forward, aborting."));
     }
-    let base = match repo.merge_base(&head, &theirs)? {
+    let base = match repo.merge_base(&repo.source_id(&head)?, &repo.source_id(&theirs)?)? {
         Some(b) => b,
         None => {
             ovl.discard(repo);
@@ -2112,13 +2111,13 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
     let mut picks = Vec::new();
     for r in &a.pos {
         if let Some((x, y)) = r.split_once("..") {
-            let xi = revs::resolve(repo, Some(&line), x)?;
-            let yi = revs::resolve(repo, Some(&line), y)?;
+            let xi = revs::resolve_state(repo, Some(&line), x)?;
+            let yi = revs::resolve_state(repo, Some(&line), y)?;
             let mut chain = repo.first_parents_since(&yi, &xi)?;
             chain.reverse();
             picks.extend(chain);
         } else {
-            picks.push(revs::resolve(repo, Some(&line), r)?);
+            picks.push(revs::resolve_state(repo, Some(&line), r)?);
         }
     }
     let picked: Vec<&str> = picks.iter().map(String::as_str).collect();
@@ -2470,9 +2469,9 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, "layr replay never stops on a conflict: fix the files and run 'layr save -m <message>'."));
     }
     let up = a.pos.first().ok_or_else(|| exit(128, "usage: layr replay [--onto <newbase>] <upstream>"))?;
-    let upstream = revs::resolve(repo, Some(&line), up)?;
+    let upstream = revs::resolve_state(repo, Some(&line), up)?;
     let onto = match a.get("--onto") {
-        Some(o) => revs::resolve(repo, Some(&line), o)?,
+        Some(o) => revs::resolve_state(repo, Some(&line), o)?,
         None => upstream.clone(),
     };
     repo.hold(repo.pin(&[&line.head, &upstream, &onto])?);
@@ -2511,7 +2510,7 @@ fn replay_locked(
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
-    repo.merge_base(&line.head, &upstream)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
+    repo.merge_base(&repo.source_id(&line.head)?, &repo.source_id(&upstream)?)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
     if repo.is_ancestor(&upstream, &line.head)? && onto == upstream {
         outln!(ctx, "Current line {} is up to date.", line.name);
         return Ok(0);

@@ -159,8 +159,8 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             repo.require(ctx, if a.has("--existing") { "try" } else { "merge" })?;
             let head = a.get("--expect-head").ok_or_else(|| anyhow::anyhow!("queue candidate needs --expect-head"))?;
             let state = a.get("--expect-state").ok_or_else(|| anyhow::anyhow!("queue candidate needs --expect-state"))?;
-            let head = crate::revs::resolve(repo, h.line.as_ref(), head)?;
-            let state = crate::revs::resolve(repo, h.line.as_ref(), state)?;
+            let head = crate::revs::resolve_state(repo, h.line.as_ref(), head)?;
+            let state = crate::revs::resolve_state(repo, h.line.as_ref(), state)?;
             let _queue_lock = require_lock(repo)?;
             let entry = find(repo, &a.pos[1])?;
             if entry.status != "pending" || entry.state != state {
@@ -229,7 +229,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "add" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
-            let state = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[1])?;
+            let state = crate::revs::resolve_state(repo, h.line.as_ref(), &a.pos[1])?;
             let source = repo.source_state(&state)?;
             repo.state_src(&state)?;
             if let Some(change) = &source.change_id {
@@ -260,7 +260,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let expected_head = a
                 .get("--expect-head")
-                .map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev))
+                .map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev))
                 .transpose()?
                 .map(crate::model::HeadExpectation::try_from)
                 .transpose()
@@ -334,10 +334,10 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "run" if a.pos.len() == 1 => {
             let line = a.get("--into").map(|name| repo.line(name)).transpose()?;
-            let checked_head = guarded.1.map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
-            let checked_state = guarded.2.map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
+            let checked_head = guarded.1.map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
+            let checked_state = guarded.2.map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
             let checked_candidate =
-                a.get("--checked-candidate").map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
+                a.get("--checked-candidate").map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
             let guard = match guarded {
                 (Some(entry), Some(_), Some(_)) => Some(QueueGuard {
                     entry,

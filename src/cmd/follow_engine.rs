@@ -267,7 +267,7 @@ impl<'a> Repo<'a> {
             crate::store_remote::open_named(remote, self)?.verified_main_head(ctx, self)?
         } else {
             remote::git::fetch(ctx, &[remote.to_string(), branch.to_string(), "-q".to_string()])?;
-            revs::resolve(self, Some(line), &rb)?
+            revs::resolve_state(self, Some(line), &rb)?
         };
         let head = self.line(&line.id)?.head;
         if fetched == head || self.is_ancestor(&fetched, &head)? {

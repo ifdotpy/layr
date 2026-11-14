@@ -213,12 +213,12 @@ fn is_path_arg(cwd: &std::path::Path, p: &str) -> bool {
 
 fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
     if let Some((a, b)) = s.split_once("...") {
-        return (a.is_empty() || revs::resolve(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve(repo, line, b).is_ok());
+        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
     }
     if let Some((a, b)) = s.split_once("..") {
-        return (a.is_empty() || revs::resolve(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve(repo, line, b).is_ok());
+        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
     }
-    revs::resolve(repo, line, s).is_ok()
+    revs::resolve_state(repo, line, s).is_ok()
 }
 
 /// Pin the saved states that a read names (and the head of its line): they stay on disk for the
@@ -247,7 +247,7 @@ fn revs_to_pin(repo: &Repo, line: Option<&Line>, names: &[String]) -> Vec<String
         let rev = if rev.is_empty() { "head" } else { rev };
         for part in rev.split("...").flat_map(|s| s.split("..")) {
             let part = if part.is_empty() { "head" } else { part };
-            if let Ok(id) = revs::resolve(repo, line, part) {
+            if let Ok(id) = revs::resolve_state(repo, line, part) {
                 ids.push(id);
             }
         }
@@ -264,7 +264,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _pin = pin_revs_borrowed(repo, line.as_ref(), &revs_v)?;
     for rev in &revs_v {
         for part in rev.split("...").flat_map(|s| s.split("..")) {
-            let id = revs::resolve(repo, line.as_ref(), if part.is_empty() { "head" } else { part })?;
+            let id = revs::resolve_state(repo, line.as_ref(), if part.is_empty() { "head" } else { part })?;
             repo.source_state(&id)?;
         }
     }
@@ -272,7 +272,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let cached = a.has("--cached");
     let opts = DiffOpts::from(&a, true)?;
     let mut keep: Vec<Temp> = Vec::new();
-    let resolve_id = |r: &str| revs::resolve(repo, line.as_ref(), if r.is_empty() { "head" } else { r });
+    let resolve_id = |r: &str| revs::resolve_state(repo, line.as_ref(), if r.is_empty() { "head" } else { r });
     // A virtual line (docs/views.md): its working content is the merged view of its upper folder.
     if let Some((l, v)) = line.as_ref().and_then(|l| crate::views::of(repo, l).map(|v| (l, v))) {
         if revs_v.len() <= 1 && !revs_v.iter().any(|r| r.contains("..")) {
@@ -333,9 +333,9 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         1 => {
             let r = &revs_v[0];
             if let Some((x, y)) = r.split_once("...") {
-                let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
-                let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
-                let b = repo.merge_base(&xi, &yi)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
+                let xi = revs::resolve_state(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+                let yi = revs::resolve_state(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
+                let b = repo.merge_base(&repo.source_id(&xi)?, &repo.source_id(&yi)?)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
                 let (o, n, k) = pair_of(repo, &b, &yi)?;
                 keep.extend(k);
                 (o, n, false)
@@ -345,7 +345,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 (o, n, false)
             } else if let Some(filtered) = &filtered {
                 let l = h.line()?;
-                let id = revs::resolve(repo, line.as_ref(), r)?;
+                let id = revs::resolve_state(repo, line.as_ref(), r)?;
                 let layers = repo.caller_layers(ctx, l)?;
                 let old = repo.assemble(l, &id, &layers)?;
                 let root = snap(&old.path);
@@ -356,7 +356,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 repo.check_view(ctx, l)?;
                 // Against the working content of a line with overlays, a state is compared with
                 // the line's overlays in place (its own head: the line's base).
-                let id = revs::resolve(repo, line.as_ref(), r)?;
+                let id = revs::resolve_state(repo, line.as_ref(), r)?;
                 let layers = repo.layers(l)?;
                 let old = if layers.is_empty() {
                     repo.state_src(&id)?
@@ -904,7 +904,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Some((rv, path)) = r.split_once(':') {
             // An imported state that is not on disk: its entry is read from git, no tree is built.
             if !rv.is_empty() {
-                let id = revs::resolve(repo, line.as_ref(), rv)?;
+                let id = revs::resolve_state(repo, line.as_ref(), rv)?;
                 if let Some(commit) = crate::gitbridge::unbuilt_commit(repo, &id)? {
                     let p = if path.starts_with("./") || path.starts_with("../") {
                         super::normalize(&h.loc.sub, path)?
@@ -943,7 +943,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     root_path = repo.complete(idx, &mut _keep)?;
                 }
             } else {
-                let id = revs::resolve(repo, line.as_ref(), rv)?;
+                let id = revs::resolve_state(repo, line.as_ref(), rv)?;
                 root_path = repo.state_root(&id)?;
             }
             let p = if path.starts_with("./") || path.starts_with("../") {
@@ -981,7 +981,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             first = false;
             continue;
         }
-        let id = revs::resolve(repo, line.as_ref(), &r)?;
+        let id = revs::resolve_state(repo, line.as_ref(), &r)?;
         let s = repo.state(&id)?;
         let header_ends_blank = print_state(
             ctx,
@@ -1087,22 +1087,22 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     for r in &revs_v {
         if let Some((x, y)) = r.split_once("...") {
-            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
-            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
+            let xi = revs::resolve_state(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+            let yi = revs::resolve_state(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
             include.push(xi.clone());
             include.push(yi.clone());
-            if let Some(b) = repo.merge_base(&xi, &yi)? {
+            if let Some(b) = repo.merge_base(&repo.source_id(&xi)?, &repo.source_id(&yi)?)? {
                 add_excl(&b)?;
             }
         } else if let Some((x, y)) = r.split_once("..") {
-            let xi = revs::resolve(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
-            let yi = revs::resolve(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
+            let xi = revs::resolve_state(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
+            let yi = revs::resolve_state(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
             add_excl(&xi)?;
             include.push(yi);
         } else if let Some(x) = r.strip_prefix('^') {
-            add_excl(&revs::resolve(repo, line.as_ref(), x)?)?;
+            add_excl(&revs::resolve_state(repo, line.as_ref(), x)?)?;
         } else {
-            include.push(revs::resolve(repo, line.as_ref(), r)?);
+            include.push(revs::resolve_state(repo, line.as_ref(), r)?);
         }
     }
     if a.has("--all") {
@@ -1310,7 +1310,7 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // <rev>:<path>: the git object id of the path in the commit a push exports for the
             // state (a tree for a folder, a blob for a file). Relative paths as in `show`.
             let rv_state = rv.trim_end_matches("^{tree}").trim_end_matches("^{commit}").trim_end_matches("^{}");
-            let obj = revs::resolve(repo, line.as_ref(), rv_state).and_then(|id| {
+            let obj = revs::resolve_state(repo, line.as_ref(), rv_state).and_then(|id| {
                 let p = if path.starts_with("./") || path.starts_with("../") {
                     super::normalize(&h.loc.sub, path)?
                 } else {
@@ -1328,7 +1328,7 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         if let Some(rr) = r.strip_suffix("^{tree}") {
             // The git tree hash of the state's content: the same on every machine and in git.
-            let tree = revs::resolve(repo, line.as_ref(), rr).and_then(|id| crate::gitbridge::tree_of(repo, &id));
+            let tree = revs::resolve_state(repo, line.as_ref(), rr).and_then(|id| crate::gitbridge::tree_of(repo, &id));
             match tree {
                 Ok(t) => outln!(ctx, "{}", &t[..short.unwrap_or(t.len()).clamp(4, t.len())]),
                 Err(e) => {
@@ -1341,7 +1341,7 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         }
         let rr = r.trim_end_matches("^{commit}").trim_end_matches("^{}");
-        match revs::resolve(repo, line.as_ref(), rr) {
+        match revs::resolve_state(repo, line.as_ref(), rr) {
             // --git: the git commit of the state, not its layr id.
             Ok(id) if a.has("--git") => match crate::gitbridge::commit_of(repo, &id)? {
                 Some(c) => outln!(ctx, "{}", &c[..short.unwrap_or(c.len()).clamp(4, c.len())]),
@@ -1379,10 +1379,10 @@ pub fn merge_base(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos.len() < 2 {
         return Err(exit(128, "usage: layr merge-base [--is-ancestor] <a> <b>"));
     }
-    let x = revs::resolve(&h.repo, line.as_ref(), &a.pos[0])?;
-    let y = revs::resolve(&h.repo, line.as_ref(), &a.pos[1])?;
+    let x = revs::resolve(&h.repo, line.as_ref(), &a.pos[0])?.into_source(&h.repo)?;
+    let y = revs::resolve(&h.repo, line.as_ref(), &a.pos[1])?.into_source(&h.repo)?;
     if a.has("--is-ancestor") {
-        return Ok(if h.repo.is_ancestor(&x, &y)? { 0 } else { 1 });
+        return Ok(if h.repo.is_ancestor(x.as_str(), y.as_str())? { 0 } else { 1 });
     }
     match h.repo.merge_base(&x, &y)? {
         Some(b) => {
@@ -1416,7 +1416,7 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let path = h.specs(&[path])?.remove(0);
     // Versions of the file along first parents; the working content when no revision is given.
-    let start = revs::resolve(repo, line.as_ref(), rev.as_deref().unwrap_or("head"))?;
+    let start = revs::resolve_state(repo, line.as_ref(), rev.as_deref().unwrap_or("head"))?;
     let mut versions: Vec<(Option<StateRec>, Vec<u8>)> = Vec::new();
     // Versions are held in memory: files of at most MAX_TEXT bytes, at most 4 * MAX_TEXT bytes in
     // all. Older history is cut there, and its lines belong to the oldest version read.
@@ -1550,7 +1550,7 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(PathBuf, Vec<Temp>, Option<PathBuf>)> {
     match rev {
         Some(r) => {
-            let id = revs::resolve(repo, line, r)?;
+            let id = revs::resolve_state(repo, line, r)?;
             Ok((repo.state_root(&id)?, Vec::new(), None))
         }
         None => {
@@ -1633,7 +1633,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut rev: Option<String> = None;
     let mut paths = a.paths.clone();
     for p in pos {
-        if rev.is_none() && paths.is_empty() && revs::resolve(repo, line.as_ref(), &p).is_ok() {
+        if rev.is_none() && paths.is_empty() && revs::resolve_state(repo, line.as_ref(), &p).is_ok() {
             rev = Some(p);
         } else {
             paths.push(p);
@@ -1667,7 +1667,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // go to a temporary folder (the rules read them from a folder). No tree is built.
     let git_commit = match (&rev, filtered.is_some(), a.has("--cached")) {
         (Some(r), false, false) => {
-            let id = revs::resolve(repo, line.as_ref(), r)?;
+            let id = revs::resolve_state(repo, line.as_ref(), r)?;
             crate::gitbridge::unbuilt_commit(repo, &id)?
         }
         _ => None,
@@ -1918,7 +1918,7 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if let Some(arg) = rev_argument(&rest, printed, |r| revs::resolve(&h.repo, Some(&line), r).is_ok()) {
+    if let Some(arg) = rev_argument(&rest, printed, |r| revs::resolve_state(&h.repo, Some(&line), r).is_ok()) {
         return Err(exit(
             128,
             format!("ls-files takes paths of the line's index, not states: '{arg}' is a revision. To list a state, use `layr show {arg}:<folder>`."),

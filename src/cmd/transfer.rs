@@ -145,7 +145,7 @@ fn sync_folder(
 /// The state to copy: a revision, or the working content saved as an automatic state.
 fn source_state(ctx: &Ctx, h: &super::Here, rev: Option<&str>) -> Result<String> {
     match rev {
-        Some(r) => revs::resolve(&h.repo, h.line.as_ref(), r),
+        Some(r) => revs::resolve_state(&h.repo, h.line.as_ref(), r),
         None => {
             let l = h.line()?;
             h.repo.authorize_line(ctx, l, crate::repo::LineOp::Save)?;

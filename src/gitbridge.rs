@@ -1738,7 +1738,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// Commits for a state and every ancestor state without one, parents first, each with the same
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
-pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+pub fn export_history(repo: &Repo, state: &crate::repo::SourceStateId) -> Result<(String, Vec<(String, String)>)> {
     cache_retry(repo, || export_history_once(repo, state, true))
 }
 
@@ -1746,17 +1746,17 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
 /// no record names yet: a history commit's parents have theirs, so the walk stops there. A line's
 /// `.git` folder needs only this; without the stop each save walks every earlier unpushed save.
 pub fn export_commit(repo: &Repo, state: &str) -> Result<String> {
-    cache_retry(repo, || export_history_once(repo, state, false)).map(|(c, _)| c)
+    let source = repo.source_id(state)?;
+    cache_retry(repo, || export_history_once(repo, &source, false)).map(|(c, _)| c)
 }
 
-fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
+fn export_history_once(repo: &Repo, state: &crate::repo::SourceStateId, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
     let _export = crate::trace::span("git export history");
     let dag = crate::trace::span("git export DAG ordering");
-    repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut stack: Vec<(String, bool)> = vec![(state.to_string(), false)];
+    let mut stack: Vec<(String, bool)> = vec![(state.as_str().to_string(), false)];
     let mut made = Vec::new();
     while let Some((s, parents_done)) = stack.pop() {
         if parents_done {
@@ -1766,6 +1766,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
         if !seen.insert(s.clone()) {
             continue;
         }
+        repo.source_state(&s)?;
         if let Some(c) = recorded_commit(repo, &s)? {
             known.insert(s, c);
             continue;
@@ -1823,7 +1824,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             made.push((s, c));
         }
     }
-    let tip = known.get(state).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state)))?;
+    let tip = known.get(state.as_str()).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state.as_str())))?;
     Ok((tip, made))
 }
 
@@ -3202,7 +3203,7 @@ mod export_tests {
                     std::fs::remove_file(index_path(&repo, &parents[0]))?;
                 }
                 crate::repo::MATERIALIZATIONS.with(|n| n.set(0));
-                let (commit, made) = export_history(&repo, &id)?;
+                let (commit, made) = export_history(&repo, &repo.source_id(&id)?)?;
                 assert_eq!(crate::repo::MATERIALIZATIONS.with(|n| n.get()), 1, "version {version}");
                 assert_eq!(made.last(), Some(&(id.clone(), commit.clone())));
                 assert!(!repo.p.state_path(&id).exists(), "export must not rebuild a second native state");

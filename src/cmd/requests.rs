@@ -37,7 +37,7 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let key = crate::privs::as_caller_fs(ctx, || crate::person::signing_key(ctx, &access))?;
     let kind = a.pos.first().map(String::as_str).unwrap_or("");
     let pos = &a.pos[1.min(a.pos.len())..];
-    let resolve = |rev: &str| crate::revs::resolve(&h.repo, h.line.as_ref(), rev);
+    let resolve = |rev: &str| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev);
     let into = || a.get("--into").unwrap_or("main").to_owned();
     let usage = "usage: layr request (approve|withdraw|queue-add|queue-remove|ref-move|comment|declassify) ... --person [--remote <name>]";
     let action = match (kind, pos) {

@@ -88,7 +88,7 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let bad = match a.get("--bad") {
-        Some(rev) => crate::revs::resolve(repo, h.line.as_ref(), rev)?,
+        Some(rev) => crate::revs::resolve_state(repo, h.line.as_ref(), rev)?,
         None if !positions.is_empty() => positions.last().unwrap().clone(),
         None => {
             let _lock = repo.p.lock_maintenance()?;
@@ -100,7 +100,7 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     };
     let good = match a.get("--good") {
-        Some(rev) => crate::revs::resolve(repo, h.line.as_ref(), rev)?,
+        Some(rev) => crate::revs::resolve_state(repo, h.line.as_ref(), rev)?,
         None => {
             let history = if positions.is_empty() {
                 repo.first_parent_chain(&h.line()?.head)?

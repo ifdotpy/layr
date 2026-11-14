@@ -76,7 +76,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let matches = if expect == "none" {
                     before.is_none()
                 } else {
-                    let expected = crate::model::HeadExpectation::try_from(crate::revs::resolve(repo, h.line.as_ref(), expect)?)
+                    let expected = crate::model::HeadExpectation::try_from(crate::revs::resolve_state(repo, h.line.as_ref(), expect)?)
                         .map_err(anyhow::Error::msg)?;
                     before.as_ref().is_some_and(|r| expected.check(&r.target).is_ok())
                 };
@@ -88,7 +88,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("ref '{name}' does not exist");
             }
             let after = if set {
-                let target = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[2])?;
+                let target = crate::revs::resolve_state(repo, h.line.as_ref(), &a.pos[2])?;
                 repo.state_src(&target)?;
                 let expires_at = a
                     .get("--ttl")

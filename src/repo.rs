@@ -30,6 +30,52 @@ pub struct Repo<'a> {
     pub ctx: Option<&'a Ctx>,
 }
 
+/// An immutable source-state identity checked against this catalog's state kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use]
+pub struct SourceStateId(layr_types::StateId);
+impl SourceStateId {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct AuxStateId(layr_types::StateId);
+impl AuxStateId {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone)]
+#[must_use]
+pub enum ResolvedRevision {
+    Source(SourceStateId),
+    Auxiliary(AuxStateId),
+    View(crate::overlay::View),
+}
+impl ResolvedRevision {
+    /// Explicitly project a view onto its shared state for commands that read a tree.
+    pub fn into_state(self) -> String {
+        match self {
+            Self::Source(id) => id.as_str().to_owned(),
+            Self::Auxiliary(id) => id.as_str().to_owned(),
+            Self::View(view) => view.shared,
+        }
+    }
+    /// Source-only operations retain the existing auxiliary-state refusal, including
+    /// when an exact view projects onto its shared source history.
+    pub fn into_source(self, repo: &Repo) -> Result<SourceStateId> {
+        match self {
+            Self::Source(id) => Ok(id),
+            Self::Auxiliary(id) => repo.source_id(id.as_str()),
+            Self::View(view) => repo.source_id(&view.shared),
+        }
+    }
+}
+
 /// A complete folder as a tree to read.
 #[cfg(target_os = "macos")]
 pub fn snap(p: &Path) -> Snap {
@@ -452,6 +498,20 @@ impl<'a> Repo<'a> {
             );
         }
         Ok(state)
+    }
+
+    pub fn source_id(&self, id: &str) -> Result<SourceStateId> {
+        Ok(SourceStateId(layr_types::StateId::parse(&self.source_state(id)?.id)?))
+    }
+
+    pub fn resolved_state(&self, id: &str) -> Result<ResolvedRevision> {
+        let state = self.state(id)?;
+        let id = layr_types::StateId::parse(&state.id)?;
+        Ok(if state.kind.auxiliary() {
+            ResolvedRevision::Auxiliary(AuxStateId(id))
+        } else {
+            ResolvedRevision::Source(SourceStateId(id))
+        })
     }
 
     /// The complete tree of a state. On APFS a thin state gets a view (`thin::complete_tree`);
@@ -2803,8 +2863,8 @@ impl<'a> Repo<'a> {
 
     // ----- ancestry -----
 
-    pub fn parents(&self, id: &str) -> Result<Vec<String>> {
-        Ok(self.source_state(id)?.parents)
+    pub fn parents(&self, id: &SourceStateId) -> Result<Vec<String>> {
+        Ok(self.source_state(id.as_str())?.parents)
     }
 
     /// All ancestors of `id` (including itself), breadth first.
@@ -2892,9 +2952,9 @@ impl<'a> Repo<'a> {
 
     /// The best common ancestor: a common ancestor that is not an ancestor of another one.
     /// One walk finds every state that is a proper ancestor of a common ancestor.
-    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
-        let aa = self.ancestors(a)?;
-        let bs: BTreeSet<String> = self.ancestors(b)?.into_iter().collect();
+    pub fn merge_base(&self, a: &SourceStateId, b: &SourceStateId) -> Result<Option<String>> {
+        let aa = self.ancestors(a.as_str())?;
+        let bs: BTreeSet<String> = self.ancestors(b.as_str())?.into_iter().collect();
         let common: Vec<String> = aa.into_iter().filter(|x| bs.contains(x)).collect();
         let mut parents = Vec::new();
         for c in &common {
@@ -2959,7 +3019,11 @@ impl History {
     }
 
     /// The merge base of `a` and `b`, as `Repo::merge_base`. `None` when a walk reaches an auxiliary state.
-    pub fn merge_base(&self, a: &str, b: &str) -> Option<Option<String>> {
+    pub fn merge_base(&self, a: &SourceStateId, b: &SourceStateId) -> Option<Option<String>> {
+        self.merge_base_ids(a.as_str(), b.as_str())
+    }
+
+    fn merge_base_ids(&self, a: &str, b: &str) -> Option<Option<String>> {
         let aa = self.ancestors(vec![a])?;
         let bs: HashSet<&str> = self.ancestors(vec![b])?.into_iter().collect();
         let common: Vec<&str> = aa.into_iter().filter(|x| bs.contains(x)).collect();
@@ -3026,7 +3090,7 @@ mod history_tests {
             let h = history(&parents);
             for a in &ids {
                 for b in &ids {
-                    assert_eq!(h.merge_base(a, b), Some(reference_merge_base(&parents, a, b)), "round {round}: {a} {b}");
+                    assert_eq!(h.merge_base_ids(a, b), Some(reference_merge_base(&parents, a, b)), "round {round}: {a} {b}");
                 }
             }
         }
@@ -3037,8 +3101,8 @@ mod history_tests {
     fn an_auxiliary_state_in_the_walk_gives_no_answer() {
         let parents = HashMap::from([("top".to_string(), vec!["cache".to_string()]), ("cache".to_string(), vec![])]);
         let h = History { parents, auxiliary: HashSet::from(["cache".to_string()]) };
-        assert_eq!(h.merge_base("top", "top"), None);
-        assert_eq!(h.merge_base("cache", "cache"), None);
+        assert_eq!(h.merge_base_ids("top", "top"), None);
+        assert_eq!(h.merge_base_ids("cache", "cache"), None);
     }
 }
 
@@ -4415,6 +4479,37 @@ mod cache_platform_tests {
         let mut rec = crate::model::DraftRecord::new("project");
         rec.data = serde_json::json!({"id":id,"name":"p","config":{}});
         p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
+        let (first, second, tip, cycle) = (ids::new_id(), ids::new_id(), ids::new_id(), ids::new_id());
+        let mut source_record = crate::model::DraftRecord::new("state");
+        for (id, parents) in [(&first, vec![]), (&second, vec![]), (&tip, vec![first.clone(), second.clone()]), (&cycle, vec![cycle.clone()])] {
+            source_record.states.push(serde_json::from_value(serde_json::json!({
+                "id":id,"kind":"commit","parents":parents,"subvol":"","time":1,
+                "author":{"name":"test","email":"test@example.com"}
+            })).unwrap());
+        }
+        p.lock_maintenance().unwrap().append(source_record, &ctx.actor()).unwrap();
+        {
+            let repo = Repo::open(&ctx, "p").unwrap();
+            assert!(matches!(crate::revs::resolve(&repo, None, &tip).unwrap(), ResolvedRevision::Source(_)));
+            for (suffix, expected) in [("~", &first), ("^2", &second), ("^0", &tip), ("~0", &tip)] {
+                assert_eq!(crate::revs::resolve_state(&repo, None, &format!("{tip}{suffix}")).unwrap(), *expected);
+            }
+            for (suffix, message) in [("~2", "state has no parent"), ("^3", "state has no parent 3")] {
+                let rev = format!("{tip}{suffix}");
+                assert_eq!(crate::revs::resolve_state(&repo, None, &rev).unwrap_err().to_string(), format!("{rev}: {message}"));
+            }
+            let rev = format!("{cycle}~2");
+            assert_eq!(crate::revs::resolve_state(&repo, None, &rev).unwrap_err().to_string(), format!("bad revision {rev}"));
+            let view = crate::overlay::View::new(tip.clone(), vec![]);
+            let view_id = view.id().unwrap();
+            let mut saved = crate::model::DraftRecord::new("view.save");
+            saved.data = serde_json::json!({"view_id":view_id,"view":view});
+            p.lock_maintenance().unwrap().append(saved, &ctx.actor()).unwrap();
+            let rev = format!("views/{view_id}");
+            assert!(matches!(crate::revs::resolve(&repo, None, &rev).unwrap(), ResolvedRevision::View(_)));
+            assert_eq!(crate::revs::resolve_state(&repo, None, &rev).unwrap(), tip);
+            assert_eq!(crate::revs::resolve(&repo, None, &rev).unwrap().into_source(&repo).unwrap().as_str(), tip);
+        }
         for kind in [StateKind::Cache, StateKind::Derived] {
             let id = ids::new_id();
             // A state is a subvolume where the store can make one (btrfs): a plain folder there reads as a rollback.
@@ -4453,14 +4548,21 @@ mod cache_platform_tests {
             p.lock_maintenance().unwrap().append(rec, &ctx.actor()).unwrap();
             let repo = Repo::open(&ctx, "p").unwrap();
             assert!(repo.state_root(&id).is_ok());
-            assert_eq!(crate::revs::resolve(&repo, None, &id).unwrap(), id);
+            assert_eq!(crate::revs::resolve_state(&repo, None, &id).unwrap(), id);
             for args in [vec!["line", "new", "rejected", &id], vec!["diff", &id, &id], vec!["log", &id], vec!["show", &id]] {
                 let args: Vec<String> = args.into_iter().map(String::from).collect();
                 let error = crate::cmd::run(&ctx, &args).unwrap_err().to_string();
                 assert!(error.contains("outside source history"), "{args:?}: {error}");
             }
-            assert!(crate::gitbridge::export_history(&repo, &id).unwrap_err().to_string().contains("outside source history"));
-            assert!(repo.merge_base(&id, &id).unwrap_err().to_string().contains("outside source history"));
+            assert!(repo.source_id(&id).unwrap_err().to_string().contains("outside source history"));
+            assert!(crate::gitbridge::export_commit(&repo, &id).unwrap_err().to_string().contains("outside source history"));
+            assert!(matches!(crate::revs::resolve(&repo, None, &id).unwrap(), ResolvedRevision::Auxiliary(_)));
+            for suffix in ["^0", "~0"] {
+                assert_eq!(crate::revs::resolve_state(&repo, None, &format!("{id}{suffix}")).unwrap(), id);
+            }
+            for suffix in ["^", "~"] {
+                assert!(crate::revs::resolve_state(&repo, None, &format!("{id}{suffix}")).unwrap_err().to_string().contains("outside source history"));
+            }
             let args = vec!["ref".into(), "set".into(), format!("caches/{}", crate::db::kind_str(kind)), id.clone()];
             assert_eq!(crate::cmd::run(&ctx, &args).unwrap(), 0);
         }

@@ -54,7 +54,7 @@ pub(crate) struct Imported {
 /// parent's tree as the delta base (`--parent` names another).
 pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full: bool, parent: Option<Id>) -> Result<Imported> {
     let started = Instant::now();
-    let id = crate::revs::resolve(&h.repo, h.line.as_ref(), rev)?;
+    let id = crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)?;
     let state = h.repo.source_state(&id)?;
     let first = state.parents.first().cloned();
     let base = match &first {
@@ -385,7 +385,7 @@ fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
             None => bail!("tree {tree} is not the tree of an imported state"),
         },
         Err(_) => {
-            let state = crate::revs::resolve(&h.repo, h.line.as_ref(), &a.pos[0])?;
+            let state = crate::revs::resolve_state(&h.repo, h.line.as_ref(), &a.pos[0])?;
             match store.state_ref(&state)? {
                 Some(r) => (r, state),
                 None => bail!("state {} is not imported: run layr objects import {}", ids::short(&state), a.pos[0]),

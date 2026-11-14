@@ -17,7 +17,7 @@ fn subject(repo: &Repo, line: Option<&crate::model::Line>, rev: &str) -> Result<
         repo.saved_view(id)?;
         Ok(Subject::view(id)?)
     } else {
-        Ok(Subject::state(&crate::revs::resolve(repo, line, rev)?)?)
+        Ok(Subject::state(&crate::revs::resolve_state(repo, line, rev)?)?)
     }
 }
 

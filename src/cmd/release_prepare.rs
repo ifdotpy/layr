@@ -196,8 +196,8 @@ pub fn prepare(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let here = super::here(ctx)?;
     let head = &here.line()?.head;
     let ref_name = format!("release/v{previous}");
-    let base = crate::revs::resolve(&here.repo, here.line.as_ref(), &ref_name)
-        .or_else(|_| crate::revs::resolve(&here.repo, here.line.as_ref(), &format!("v{previous}")))
+    let base = crate::revs::resolve_state(&here.repo, here.line.as_ref(), &ref_name)
+        .or_else(|_| crate::revs::resolve_state(&here.repo, here.line.as_ref(), &format!("v{previous}")))
         .with_context(|| format!("no release ref or tag for v{previous}"))?;
     if !here.repo.is_ancestor(&base, head)? {
         bail!("v{previous} is not in the current line history");

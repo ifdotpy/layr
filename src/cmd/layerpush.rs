@@ -195,7 +195,7 @@ fn push_overlay_git(ctx: &Ctx, repo: &Repo, name: &str, remote: &OverlayRemote, 
     let orepo = repo.overlay_repo(name)?;
     let _lock = orepo.p.lock_maintenance()?;
     gitbridge::init_store(&orepo)?;
-    let (commit, made) = gitbridge::export_history(&orepo, state)?;
+    let (commit, made) = gitbridge::export_history(&orepo, &orepo.source_id(state)?)?;
     let commits: serde_json::Map<String, serde_json::Value> =
         made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
     let eid = ids::new_id();

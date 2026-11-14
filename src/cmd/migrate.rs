@@ -312,7 +312,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("{} is an overlay: migrate its project; overlays keep their snapshots in this version", repo.p.name);
     }
     let leave_missing: BTreeSet<String> =
-        a.all("--leave-missing").iter().map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).collect::<Result<_>>()?;
+        a.all("--leave-missing").iter().map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).collect::<Result<_>>()?;
     let dry = a.has("-n");
     let marker = running_marker(repo);
     if marker.exists() && !a.has("--resume") && !dry {
