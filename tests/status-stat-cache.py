@@ -44,7 +44,7 @@ def same(label, hashes=None):
     return fast
 
 
-run("init", "cache", "--from", str(source), "-q")
+run("init", "cache", "--no-objects", "--from", str(source), "-q")
 run("protect", "main", "--remove", cwd=work)
 # Retire native history so unprivileged Linux status does not require btrfs send.
 # The working tree is hidden from migration's live-line retention rule.

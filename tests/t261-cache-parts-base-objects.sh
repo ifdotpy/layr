@@ -31,7 +31,7 @@ def retire():
             subprocess.run(['btrfs', 'property', 'set', '-ts', str(native), 'ro', 'false'], check=True)
     run('--project', 'p', 'line', 'list', cwd=root)
 
-run('init', 'p', '--from', str(root / 'src'), '-q', cwd=root)
+run('init', 'p', '--no-objects', '--from', str(root / 'src'), '-q', cwd=root)
 run('protect', 'main', '--remove')
 run('line', 'new', 'build', 'main')
 run('config', 'regenerable', '["target"]')

@@ -6,10 +6,13 @@ the new storage. You do not need to know the history of this work.
 ## What changes
 
 Project storage v1 uses snapshots. Project storage v2 uses objects.
+New projects (`init`, including `--from`, `git clone`, and `clone`) enable object writes from the start
+on btrfs, APFS and OverlayFS. Existing projects keep their storage setting until you migrate them.
+`init --no-objects` creates a v1 project for legacy storage and migration tests.
 `layr objects stat --json` reports `"format":2` after migration.
 The root container format and remote protocol versions are separate from these project storage versions.
 
-- Today layr keeps each saved state as a full folder copy or a thin layer (a folder with only the
+- A v1 project keeps each saved state as a full folder copy or a thin layer (a folder with only the
   changed files). These copies are the "old snapshots", in `states/` and `deltas/` of the project.
 - The object store (`meta/objects` of the project) keeps each file content once, compressed, and
   each folder as a small "tree" object. A state then names one tree and one "times table" (the

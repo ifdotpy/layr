@@ -6,6 +6,10 @@ server (`docs/api.md` in ifdotpy/layr-cloud) and the V1 client use it. A change 
 here changes the format: the test vectors (section 12) and the unit tests that pin them change too.
 
 Snapshot storage is v1. Object storage is v2.
+New projects enable `objects.enabled` before their first save on every backend (`init`, including
+`--from`, and `git clone`); `clone` enables it after importing the source records, even if the
+source used v1. Existing projects keep their recorded setting.
+`init --no-objects` is available for legacy storage and migration tests.
 `layr migrate` moves a project from v1 to v2 (section 13, user guide `docs/migrate.md`).
 Experimental object configs marked `v:1` upgrade automatically; object encodings and IDs stay unchanged.
 After migration, source states remain usable without native state snapshots.

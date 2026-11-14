@@ -1373,6 +1373,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         store_remote::backend::trace_requests();
         let _lock = repo.p.lock_maintenance()?;
+        crate::objstore::enable(&_lock, ctx, &repo)?;
         set_config(&_lock, ctx, &repo, "cloud.remote.origin.url", json!(url))?;
         store.save_pin(&_lock, ctx, &repo, "origin")?;
         set_config(&_lock, ctx, &repo, "cloud.remote.origin.mode", json!(store.store_mode()?.name()))?;

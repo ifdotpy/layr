@@ -30,7 +30,7 @@ if [ "$(uname -s)" = Darwin ]; then
 else
     python3 -I -c 'import os,sys; os.setxattr(sys.argv[1], "user.layr-test", b"value")' $T/src/bin/run.sh 2>/dev/null || true
 fi
-l init p --from $T/src -q >/dev/null
+l init p --no-objects --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/objects
 cd $P/main

@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
-l init p --from "$T/src" -q >/dev/null || exit 1
+l init p --no-objects --from "$T/src" -q >/dev/null || exit 1
 cd "$LAYR_ROOT/projects/p/lines/main"
 # A native project without Git history does not need a Git bridge, so create its nested
 # directory explicitly. Its contents must stay outside the parent snapshot.

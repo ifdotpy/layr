@@ -9,7 +9,7 @@ set_xattr() {
     if [ "$(uname -s)" = Darwin ]; then xattr -w user.layr kept "$1"; else setfattr -n user.layr -v kept "$1"; fi
 }
 sample "$T/source"
-l init project --from "$T/source" -q >/dev/null
+l init project --no-objects --from "$T/source" -q >/dev/null
 P=$LAYR_ROOT/projects/project
 cd "$P/lines/main"
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" >/dev/null

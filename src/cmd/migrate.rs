@@ -521,7 +521,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     );
     outln!(ctx, "object store: {} ({} bytes)", human(stat.total_bytes()), stat.total_bytes());
     outln!(ctx, "{} absent source state(s) have no owner; their records stay unchanged", p.unowned_missing);
-    super::admin::set_config(&_lock, ctx, repo, crate::objstore::ENABLED, serde_json::json!(true))?;
+    crate::objstore::enable(&_lock, ctx, repo)?;
     delete_old(ctx, &h, a.has("--delete-old"), false)?;
     std::fs::remove_file(&marker)?;
     Ok(0)

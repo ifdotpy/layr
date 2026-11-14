@@ -2383,13 +2383,14 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--owner")
         .value("--volume")
         .flag("--include-ignored")
+        .flag("--no-objects")
         .value("-m|--message")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let name = a
         .pos
         .first()
-        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>], or layr init [<project>] --from-git <checkout>"))?;
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>] [--no-objects], or layr init [<project>] --from-git <checkout>"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -2429,6 +2430,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let res = (|| -> Result<(Line, String)> {
         let _lock = repo.p.lock_maintenance()?;
+        if !a.has("--no-objects") {
+            crate::objstore::enable(&_lock, ctx, &repo)?;
+        }
         let work = repo.p.work_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&work)?;
         let cleanup = crate::repo::Temp { path: work.clone() };

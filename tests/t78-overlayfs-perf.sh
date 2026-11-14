@@ -102,7 +102,7 @@ for i in range(300):
     with open(f"{root}/sub/f{i:03d}", "wb") as f:
         f.write(os.urandom(65536))
 PY
-l init s --from $T/s -q >/dev/null
+l init s --no-objects --from $T/s -q >/dev/null
 S=$LAYR_ROOT/projects/s/lines
 cd $S/main
 echo one >> sub/f001; l save -qam s1

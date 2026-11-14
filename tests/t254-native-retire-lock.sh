@@ -36,7 +36,7 @@ def until(predicate, description):
         time.sleep(0.02)
     raise RuntimeError(f'timed out: {description}')
 
-run('init', 'p', '--from', str(root / 'src'), '-q')
+run('init', 'p', '--no-objects', '--from', str(root / 'src'), '-q')
 # Direct non-root commands still enforce main's default protection.
 run('protect', 'main', '--remove', cwd=work)
 # This fixture has no unsaved work. Hide its folder during migration to avoid the

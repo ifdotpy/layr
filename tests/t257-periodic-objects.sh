@@ -147,7 +147,7 @@ import_src = root / 'import-src'
 import_src.mkdir()
 for n in range(20):
     (import_src / f'file{n}').write_text(f'imported {n}\n')
-run('init', 'q', '--from', str(import_src), '-q', cwd=root)
+run('init', 'q', '--no-objects', '--from', str(import_src), '-q', cwd=root)
 q = Path(os.environ['LAYR_ROOT']) / 'projects/q'
 run('config', 'snapshot.interval', '3600', cwd=q / 'lines/main')
 import_barrier = root / 'import-barrier'

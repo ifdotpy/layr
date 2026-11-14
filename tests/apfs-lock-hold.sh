@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
-l init hold --from "$T/src" -q >/dev/null
+l init hold --no-objects --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/hold/lines
 cd "$P/main" || exit 1
 l line new -q topic

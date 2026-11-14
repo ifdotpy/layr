@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
-l init del --from "$T/src" -q >/dev/null
+l init del --no-objects --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/del/lines
 # Object-backed comparisons also run on unprivileged btrfs, where metadata send is forbidden.
 # Hide main during migration to avoid a native automatic-save comparison (as in t257).

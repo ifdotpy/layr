@@ -1,4 +1,4 @@
-//! Portable state objects are the durable source after migration. Generic readers use
+//! Portable state objects are the durable source for new and migrated projects. Generic readers use
 //! ObjectTree directly. Native-only consumers can request a disposable tree through
 //! build_state; retire_native removes that copy after the command releases its readers.
 
@@ -116,9 +116,14 @@ pub fn entry(store: &Store, root: &Id, path: &str) -> Result<crate::gitbridge::E
     ))
 }
 
-/// Enable object writes only after a successful migration. This is a project setting so other
-/// updated writers also keep new history in the portable format.
+/// Project setting shared by new projects and successful migrations.
 pub const ENABLED: &str = "objects.enabled";
+
+/// Enable portable source-state writes for a new project or a completed migration.
+/// The caller holds the project lock; existing projects keep their recorded setting.
+pub fn enable(locked: &crate::store::LockedProject<'_>, ctx: &crate::ctx::Ctx, repo: &Repo) -> Result<()> {
+    crate::project_config::set_config(locked, ctx, repo, ENABLED, serde_json::json!(true))
+}
 
 // Select the native reader once; backends without placeholders use the ordinary kind.
 pub(crate) const ENTRY_KIND: fn(&Path, &std::fs::Metadata) -> Result<layr_objects::fsx::EntryKind> = {
@@ -405,8 +410,8 @@ fn changed_write_base(
         let paths = comparison.changed.into_iter().chain(comparison.dirty).collect();
         return Ok(Some((refs, paths)));
     }
-    // Portable readers can supply ordinary folders. A btrfs send stream requires both
-    // roots to be subvolumes; keep ioctl failures visible when those prerequisites hold.
+    // A btrfs send stream requires both roots to be subvolumes. If the kernel
+    // refuses send, a full write preserves the state without a checked delta.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     if !crate::fsutil::Src::folder(parent).is_some_and(crate::storage::is_subvolume)
         || !crate::fsutil::Src::folder(source).is_some_and(crate::storage::is_subvolume)
@@ -415,7 +420,16 @@ fn changed_write_base(
     }
     #[cfg(target_os = "macos")]
     let changes = crate::storage::with_stored_compare(|| crate::changes::candidates(parent, source))?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let changes = match crate::changes::candidates(parent, source) {
+        Err(error)
+            if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())) =>
+        {
+            return Ok(None);
+        }
+        result => result?,
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "overlayfs"))]
     let changes = crate::changes::candidates(parent, source)?;
     let mut paths = std::collections::BTreeSet::new();
     for change in changes {
@@ -515,6 +529,38 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
+    fn enable_records_the_project_setting_without_changing_existing_projects() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-enable-{}", crate::ids::new_id()));
+        let ctx = crate::ctx::Ctx {
+            store: crate::store::Store::open(&root)?,
+            caller: crate::ctx::Caller::from_uid(rustix::process::getuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            author: Default::default(),
+        };
+        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), serde_json::json!({}))?, ctx: None };
+        assert!(!enabled(&repo.p)?);
+        {
+            let lock = repo.p.lock_maintenance()?;
+            enable(&lock, &ctx, &repo)?;
+        }
+        assert!(enabled(&repo.p)?);
+        let records = repo.p.db.records_with_op("config")?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data["config"][ENABLED], true);
+        repo.p.verify_records()?;
+        drop(repo);
+        let p = Project::open(&ctx.store, "p")?;
+        assert!(enabled(&p)?, "the setting survives reopening");
+        drop(p);
+        drop(ctx);
+        crate::storage::delete_tree(&root)?;
+        Ok(())
+    }
 
     fn options() -> layr_objects::WriteOptions {
         layr_objects::WriteOptions {

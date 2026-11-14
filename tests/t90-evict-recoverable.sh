@@ -6,7 +6,7 @@
 . "$(dirname "$0")/lib.sh"
 set -e
 sample "$T/source"
-l init project --from "$T/source" -q >/dev/null
+l init project --no-objects --from "$T/source" -q >/dev/null
 P=$LAYR_ROOT/projects/project
 cd "$P/lines/main"
 l remote add archive "file://$T/archive" --paper-key-out "$T/paper" >/dev/null

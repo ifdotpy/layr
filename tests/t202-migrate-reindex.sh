@@ -14,7 +14,7 @@ PY
 }
 
 sample "$T/src"
-l init p --from "$T/src" -q >/dev/null
+l init p --no-objects --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd "$P/main"
 l config undo.deleted 0 >/dev/null

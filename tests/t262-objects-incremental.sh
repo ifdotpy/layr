@@ -42,7 +42,7 @@ def head_refs():
     assert not any((project / kind / head).exists() for kind in ('states', 'deltas')), 'native parent must be retired'
     return state['tree'], state['times']
 
-run('init', 'p', '--from', str(root / 'src'), '-q')
+run('init', 'p', '--no-objects', '--from', str(root / 'src'), '-q')
 run('protect', 'main', '--remove', cwd=work)
 # Hide the folder during migration when possible, avoiding unprivileged btrfs send.
 try:
