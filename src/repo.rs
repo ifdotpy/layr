@@ -779,10 +779,13 @@ impl<'a> Repo<'a> {
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
         let private = self.private_paths(line)?;
+        // A build can keep a cache plain by holding it open for writing. Its physical
+        // conversion is optional; its files still belong only to the cache overlay.
+        let caches = self.plain_caches(line)?;
         #[cfg(not(target_os = "macos"))]
         let _ = base;
         #[cfg(target_os = "macos")]
-        if private.is_empty() && self.thin_line(line)? {
+        if private.is_empty() && caches.is_empty() && self.thin_line(line)? {
             // A thin layer over the base: only the entries that changed are copied.
             let id = ids::new_id();
             let base = if self.p.has_state(base) { base } else { line.head.as_str() };
@@ -803,7 +806,7 @@ impl<'a> Repo<'a> {
                 Err(e) => return Err(e),
             }
         }
-        if private.is_empty() {
+        if private.is_empty() && caches.is_empty() {
             return self.new_state(ctx, &w, StateKind::Auto, parents, message, Some(line));
         }
         let id = ids::new_id();
@@ -811,7 +814,7 @@ impl<'a> Repo<'a> {
         btrfs::snapshot(&w, &dst, false)?;
         let made = (|| -> Result<btrfs::SubvolInfo> {
             let t = Tree::open(&dst)?;
-            for p in &private {
+            for p in private.iter().chain(&caches) {
                 if t.stat(p).is_some() {
                     t.remove(p)?;
                 }
@@ -820,7 +823,7 @@ impl<'a> Repo<'a> {
             btrfs::set_readonly(&dst)?;
             // An overlay file under another name leaves too: moved from an overlay path, or a
             // new file with the content of an overlay file (a copy, an editor's extra copy).
-            let copies = self.private_copies(line, &dst, &private)?;
+            let copies = if private.is_empty() { Vec::new() } else { self.private_copies(line, &dst, &private)? };
             if !copies.is_empty() {
                 btrfs::set_writable(&dst)?;
                 let t = Tree::open(&dst)?;
@@ -2350,12 +2353,12 @@ impl<'a> Repo<'a> {
                 continue;
             }
             if head.is_none() {
-                head = Some(self.state_root(&line.head)?);
+                head = Some(self.state_src(&line.head)?);
                 stage = Some(self.current_stage(line)?);
             }
             // A file that the head or the stage (`add -f`) versions makes the folder no cache.
             let versioned =
-                holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
+                holds_files_in(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p));
             if !versioned {
                 out.push(p);
             }
