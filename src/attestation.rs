@@ -8,22 +8,21 @@ use layr_hashers::{ContentAddress, Digest};
 
 /// The project appender stamps the signer, record id and time before it signs the record.
 pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
-    record_subject(repo, Subject { kind: "state".into(), id: state.into() }, kind, payload)
+    record_subject(repo, Subject::state(state)?, kind, payload)
 }
 
 pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
-    record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
+    record_subject(repo, Subject::view(&view.id()?)?, kind, payload)
 }
 
 pub(crate) fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
     if !ATTESTATION_KINDS.contains(&kind) {
         bail!("unknown attestation kind '{kind}'");
     }
-    let change_id = if subject.kind == "state" {
-        repo.state(&subject.id)?.change_id
-    } else {
-        repo.saved_view(&subject.id)?;
-        None
+    let change_id = match &subject {
+        Subject::State(id) => repo.state(id.as_str())?.change_id,
+        Subject::View(id) => { repo.saved_view(id.as_str())?; None },
+        _ => bail!("unsupported attestation subject"),
     };
     let mut rec = crate::model::DraftRecord::new("attest");
     rec.data = serde_json::json!({"attestation": Attestation {

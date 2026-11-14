@@ -1,6 +1,7 @@
 //! Records of the operation log and the objects they describe.
 
 use serde::{Deserialize, Serialize};
+pub use crate::transitions::*;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -13,18 +14,6 @@ pub struct Author {
     /// `LAYR_SESSION`. Free text: layr shows it and never decides anything from it.
     #[serde(default, alias = "agent", skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Conflict {
-    pub path: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ours: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theirs: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,12 +238,6 @@ pub struct Attestation {
     pub time: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Subject {
-    pub kind: String,
-    pub id: String,
-}
-
 /// The pointers of a line at one time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineState {
@@ -262,18 +245,6 @@ pub struct LineState {
     pub head: String,
     pub owner: u32,
     pub machine: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LineChange {
-    pub before: Option<LineState>,
-    pub after: Option<LineState>,
-    /// Automatic states of the working content before and after the operation, when the
-    /// operation changed the working content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_before: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

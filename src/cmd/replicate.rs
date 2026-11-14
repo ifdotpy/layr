@@ -1067,7 +1067,7 @@ mod tests {
         let mut rec = crate::model::Record::untrusted_preview("line.delete");
         rec.lines.insert(
             "line".into(),
-            crate::model::LineChange { before: None, after: None, working_before: Some("working".into()), working_after: None },
+            crate::model::LineChange { transition: crate::model::LineTransition::Delete { before: None }, working_before: Some("working".into()), working_after: None },
         );
         rec.data = json!({"final_state": "working"});
         assert_eq!(deletion_states(&rec), BTreeSet::from(["working".into()]));

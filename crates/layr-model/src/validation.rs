@@ -245,14 +245,14 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         }
         for c in &s.conflicts {
             layr_store::paths::check_rel(&c.path)?;
-            for x in [&c.base, &c.ours, &c.theirs].into_iter().flatten() {
+            for x in c.sides().into_iter().flatten() {
                 uuid("conflict state", x)?;
             }
         }
     }
     for (id, ch) in &r.lines {
         uuid("line", id)?;
-        for st in [&ch.before, &ch.after].into_iter().flatten() {
+        for st in [ch.before(), ch.after()].into_iter().flatten() {
             if !is_name(&st.name) {
                 bail!("record {}: bad line name {:?}", r.seq, st.name);
             }
@@ -488,9 +488,8 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         if a.attestation_id != r.id {
             bail!("attestation id must match its signed record");
         }
-        match a.subject.kind.as_str() {
-            "state" => uuid("subject", &a.subject.id)?,
-            "view" if is_view_id(&a.subject.id) => {}
+        match &a.subject {
+            Subject::State(_) | Subject::View(_) => {},
             _ => bail!("unsupported attestation subject"),
         }
         if let Some(id) = &a.change_id {
@@ -728,17 +727,12 @@ mod tests {
         let mut r = rec();
         r.lines.insert(
             "01a12290-0000-7000-8000-000000000004".into(),
-            LineChange {
-                before: None,
-                after: Some(LineState {
+            LineChange { transition: crate::LineTransition::Create { after: LineState {
                     name: "../main".into(),
                     head: "01a12290-0000-7000-8000-000000000003".into(),
                     owner: 0,
                     machine: "01a12290-0000-7000-8000-000000000002".into(),
-                }),
-                working_before: None,
-                working_after: None,
-            },
+                } }, working_before: None, working_after: None },
         );
         assert!(validate(&r).is_err());
         let mut r = rec();
@@ -805,7 +799,7 @@ mod tests {
         let a = Attestation {
             format: 1,
             attestation_id: r.id.clone(),
-            subject: Subject { kind: "state".into(), id: "01a12290-0000-7000-8000-000000000003".into() },
+            subject: Subject::state("01a12290-0000-7000-8000-000000000003").unwrap(),
             change_id: None,
             kind: "approval".into(),
             payload_digest: "0".repeat(64),
@@ -829,7 +823,7 @@ mod tests {
         assert!(validate(&r).is_err());
         r.op = "attest".into();
         r.data = serde_json::json!({"attestation":Attestation {
-            format:1, attestation_id:r.id.clone(), subject:Subject{kind:"view".into(),id:view.id().unwrap()},
+            format:1, attestation_id:r.id.clone(), subject:Subject::view(&view.id().unwrap()).unwrap(),
             change_id:None,kind:"check".into(),payload_digest:"0".repeat(64),payload_ref:None,
             signer:r.machine.clone(),time:r.time,
         }});

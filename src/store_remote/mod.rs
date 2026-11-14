@@ -1418,12 +1418,7 @@ impl Store {
                 let mut record = crate::model::DraftRecord::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
-                    crate::model::LineChange {
-                        before: repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
-                        after: Some(repo.line_state(&local, &local.head)),
-                        working_before: None,
-                        working_after: None,
-                    },
+                    crate::model::LineChange { transition: crate::model::LineTransition::from_endpoints(repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)), Some(repo.line_state(&local, &local.head))), working_before: None, working_after: None },
                 );
                 let shown = repo.readable_layers(&local)?;
                 record.data = serde_json::json!({
@@ -1857,7 +1852,7 @@ fn own_line_moves(repo: &Repo, machine: &str) -> Result<std::collections::BTreeM
         for (id, change) in &record.lines {
             let order = (record.time, record.seq);
             if moves.get(id).is_none_or(|(newest, ..)| order >= *newest) {
-                moves.insert(id.clone(), (order, record.id.clone(), change.after.as_ref().map(|after| after.head.clone())));
+                moves.insert(id.clone(), (order, record.id.clone(), change.after().map(|after| after.head.clone())));
             }
         }
     }
@@ -1996,12 +1991,7 @@ mod clone_head_tests {
         let old = crate::ids::new_id();
         let new = crate::ids::new_id();
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
-        let change = |head: &str, machine: &str| LineChange {
-            before: None,
-            after: Some(LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() }),
-            working_before: None,
-            working_after: None,
-        };
+        let change = |head: &str, machine: &str| LineChange { transition: crate::model::LineTransition::Create { after: LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() } }, working_before: None, working_after: None };
         let mut creation = crate::model::Record::untrusted_preview("project");
         creation.project = project.clone();
         creation.machine = creator.clone();
@@ -2054,7 +2044,7 @@ mod clone_head_tests {
         own.seq = 1;
         own.time = 4;
         let mut own_change = change(&local_head, &store.machine.id);
-        own_change.after.as_mut().unwrap().owner = caller.uid;
+        (match &mut own_change.transition { crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).owner = caller.uid;
         own.lines.insert(line.clone(), own_change);
         repo.p.db.test_insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
         repo.p.db.test_derive(&own, &|_| false, &store.machine.id)?;

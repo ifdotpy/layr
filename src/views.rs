@@ -251,7 +251,7 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         rec.data = serde_json::json!({"name": name, "start": start});
         rec.lines.insert(
             line.id.clone(),
-            LineChange { before: None, after: Some(repo.line_state(&line, start)), working_before: None, working_after: None },
+            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, start) }, working_before: None, working_after: None },
         );
         _lock.append(rec, &ctx.actor())?;
         write_view(

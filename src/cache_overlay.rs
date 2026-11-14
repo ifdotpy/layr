@@ -251,12 +251,7 @@ impl<'a> Repo<'a> {
             let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
-                LineChange {
-                    before: Some(orepo.line_state(&ol, &ol.head)),
-                    after: None,
-                    working_before: None,
-                    working_after: None,
-                },
+                LineChange { transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(&ol, &ol.head)) }, working_before: None, working_after: None },
             );
             rec.data = serde_json::json!({"name": ol.name});
             orepo.commit_record(&_lock, ctx, rec)?;
@@ -344,12 +339,7 @@ impl<'a> Repo<'a> {
             let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
-                LineChange {
-                    before: Some(orepo.line_state(ol, &ol.head)),
-                    after: None,
-                    working_before: None,
-                    working_after: None,
-                },
+                LineChange { transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(ol, &ol.head)) }, working_before: None, working_after: None },
             );
             rec.data = serde_json::json!({"name": ol.name});
             orepo.commit_record(locked, ctx, rec)?;

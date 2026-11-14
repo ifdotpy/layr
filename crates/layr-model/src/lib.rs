@@ -23,6 +23,7 @@ pub mod protection;
 pub mod release;
 pub mod review;
 pub mod screenshots;
+mod transitions;
 pub mod types;
 pub mod validation;
 
@@ -381,7 +382,7 @@ impl Project {
                 heads: BTreeMap::new(),
                 deleted: true,
             });
-            if let Some(after) = &change.after {
+            if let Some(after) = change.after() {
                 if self.states.get(&after.head).is_some_and(|s| s.state.kind.auxiliary()) {
                     bail!("line head cannot be a cache or derived state");
                 }
@@ -390,7 +391,7 @@ impl Project {
             if foreign && self.admins.contains(&heads.line.machine) {
                 continue;
             }
-            if let Some(after) = &change.after {
+            if let Some(after) = change.after() {
                 heads.line = Line {
                     id: id.clone(),
                     name: after.name.clone(),
@@ -424,10 +425,10 @@ impl Project {
         let a = if let Some(v) = d.get("attestation") {
             Some(serde_json::from_value::<Attestation>(v.clone())?)
         } else if matches!(r.op.as_str(), "approve" | "approve.withdraw" | "check") {
-            d["state"].as_str().map(|state| Attestation {
+            d["state"].as_str().map(|state| -> Result<Attestation> { Ok(Attestation {
                 format: 1,
                 attestation_id: r.id.clone(),
-                subject: Subject { kind: "state".into(), id: state.into() },
+                subject: Subject::state(state)?,
                 change_id: self.states.get(state).and_then(|s| s.state.change_id.clone()),
                 kind: match r.op.as_str() {
                     "approve" => "approval",
@@ -439,7 +440,7 @@ impl Project {
                 payload_ref: None,
                 signer: r.machine.clone(),
                 time: r.time,
-            })
+            }) }).transpose()?
         } else {
             None
         };
@@ -728,7 +729,7 @@ impl Project {
     pub fn attestations(&self, subject: &str, kind: Option<&str>) -> Vec<Attestation> {
         self.attestations
             .iter()
-            .filter(|(_, a)| a.subject.id == subject && kind.is_none_or(|k| k == a.kind))
+            .filter(|(_, a)| a.subject.id() == subject && kind.is_none_or(|k| k == a.kind))
             .map(|(_, a)| a.clone())
             .collect()
     }
@@ -739,7 +740,7 @@ impl Project {
         };
         let owner = &self.records[*index];
         self.attestations.iter().any(|(i, r)| {
-            if *i <= *index || r.kind != "revoke" || r.subject.id != a.subject.id {
+            if *i <= *index || r.kind != "revoke" || r.subject != a.subject {
                 return false;
             }
             let rec = &self.records[*i];
@@ -931,8 +932,8 @@ impl Project {
         let base = self.merge_base(&target.head, &state.id).context("change and target have no common ancestor")?;
         let mut behavior = probes::diff(
             self,
-            &Subject { kind: "state".into(), id: base.clone() },
-            &Subject { kind: "state".into(), id: state.id.clone() },
+            &Subject::state(&base)?,
+            &Subject::state(&state.id)?,
             context,
         )?;
         if !behavior.probes.iter().any(|p| p["base_run"] == true || p["base"].is_object()) {
@@ -950,7 +951,7 @@ impl Project {
                 continue;
             }
             let Some(id) = rec.data["view_id"].as_str() else { continue };
-            let subject = Subject { kind: "view".into(), id: id.into() };
+            let subject = Subject::view(id)?;
             for result in self.probe_results(id) {
                 let Some(name) = result["probe"].as_str() else { continue };
                 let Ok(definition) = serde_json::from_value::<probes::Probe>(result["definition"].clone()) else { continue };
@@ -970,7 +971,7 @@ impl Project {
         let mut by_actor = BTreeMap::<(String, u32), i64>::new();
         for (index, a) in &self.attestations {
             let record = &self.records[*index];
-            if a.subject.id != subject
+            if a.subject.id() != subject
                 || a.kind != "approval"
                 || self.is_revoked(&a.attestation_id)
                 || record.data.get("declassify").is_some()
@@ -1005,7 +1006,7 @@ impl Project {
             .iter()
             .filter(|(index, a)| {
                 self.person_record_pinned(&self.records[*index])
-                    && a.subject.id == subject
+                    && a.subject.id() == subject
                     && a.signer == format!("person:{login}")
                     && a.kind == "approval"
                     && !self.is_revoked(&a.attestation_id)
@@ -1021,7 +1022,7 @@ impl Project {
             let Some(login) = a.signer.strip_prefix("person:") else {
                 continue;
             };
-            if a.subject.id == subject
+            if a.subject.id() == subject
                 && a.kind == "approval"
                 && !self.is_revoked(&a.attestation_id)
                 && self.person_record_pinned(&self.records[*index])

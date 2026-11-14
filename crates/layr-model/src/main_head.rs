@@ -30,7 +30,7 @@ pub fn select(project: &mut Project, records: &[Record], trusted: &BTreeMap<Stri
         .iter()
         .filter(|record| record.machine == machine && record.op != "line.adopt")
         .filter_map(|record| {
-            record.lines.get(&main.id).and_then(|change| change.after.as_ref()).map(|line| (record, line.head.clone()))
+            record.lines.get(&main.id).and_then(|change| change.after()).map(|line| (record, line.head.clone()))
         })
         .max_by(|(a, _), (b, _)| crate::order(a).cmp(&crate::order(b)))
     else {
@@ -49,7 +49,7 @@ pub fn select(project: &mut Project, records: &[Record], trusted: &BTreeMap<Stri
             && after["status"] == "done"
             && after["target_line"] == main.id
             && after["result"] == merged
-            && record.lines.get(&main.id).and_then(|change| change.after.as_ref()).is_some_and(|line| line.head == merged)
+            && record.lines.get(&main.id).and_then(|change| change.after()).is_some_and(|line| line.head == merged)
     });
     if !completed {
         bail!("merge machine main has no matching queue completion");
@@ -101,7 +101,7 @@ mod tests {
         owner.states[0].id = "s2".into();
         owner.states[0].parents = vec!["s1".into()];
         owner.states[0].time = 3;
-        owner.lines.get_mut("line").unwrap().after.as_mut().unwrap().head = "s2".into();
+        (match &mut owner.lines.get_mut("line").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s2".into();
         records.push(owner);
         let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         select(&mut project, &records, &trusted).unwrap();
@@ -115,8 +115,8 @@ mod tests {
         completed.states[0].parents = vec!["s2".into()];
         completed.states[0].time = 4;
         let change = completed.lines.get_mut("line").unwrap();
-        change.before.as_mut().unwrap().head = "s2".into();
-        change.after.as_mut().unwrap().head = "s3".into();
+        (match &mut change.transition { crate::LineTransition::Move { before, .. } | crate::LineTransition::Delete { before: Some(before) } => before, _ => panic!("fixture needs before") }).head = "s2".into();
+        (match &mut change.transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s3".into();
         completed.data["queue_change"]["id"] = json!("q2");
         completed.data["queue_change"]["after"]["id"] = json!("q2");
         completed.data["queue_change"]["after"]["state"] = json!("s3");
@@ -166,7 +166,7 @@ mod tests {
         adoption.op = "line.adopt".into();
         adoption.states.clear();
         adoption.data = serde_json::json!({});
-        adoption.lines.get_mut("line").unwrap().after.as_mut().unwrap().head = "s0".into();
+        (match &mut adoption.lines.get_mut("line").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s0".into();
         records.push(adoption);
         let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         assert_eq!(project.lines["line"].heads["merger"], "s0");

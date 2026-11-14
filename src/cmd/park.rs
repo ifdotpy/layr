@@ -96,7 +96,7 @@ fn move_old_entries(ctx: &Ctx, repo: &Repo) -> Result<()> {
         rec.data = serde_json::json!({"state": state, "line": line.id, "parked_line": parked.name});
         rec.lines.insert(
             parked.id.clone(),
-            LineChange { before: None, after: Some(repo.line_state(&parked, &state)), working_before: None, working_after: None },
+            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state) }, working_before: None, working_after: None },
         );
         repo.commit_record(&_lock, ctx, rec)?;
         eprintln!("park entry {} is now the line {}", ids::short(&state), parked.name);
@@ -332,21 +332,11 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
         let working_after = repo.after_state(ctx, &line, "park", &mut rec)?;
         rec.lines.insert(
             line.id.clone(),
-            LineChange {
-                before: Some(repo.line_state(&line, &line.head)),
-                after: Some(repo.line_state(&line, &line.head)),
-                working_before: w,
-                working_after,
-            },
+            LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&line, &line.head), after: repo.line_state(&line, &line.head) }, working_before: w, working_after: working_after },
         );
         rec.lines.insert(
             parked.id.clone(),
-            LineChange {
-                before: None,
-                after: Some(repo.line_state(&parked, &state.id)),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state.id) }, working_before: None, working_after: None },
         );
         repo.commit_record(&_lock, ctx, rec)?;
         if !a.has("-q") {

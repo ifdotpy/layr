@@ -82,8 +82,8 @@ pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate
         repo.saved_view(id)?
     } else if let Some(id) = rev.strip_prefix("attestations/") {
         let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
-        if a.subject.kind == "view" {
-            repo.saved_view(&a.subject.id)?
+        if matches!(&a.subject, crate::model::Subject::View(_)) {
+            repo.saved_view(a.subject.id())?
         } else {
             crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
         }
@@ -161,7 +161,7 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
     }
     if let Some(id) = name.strip_prefix("attestations/") {
         let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
-        return if a.subject.kind == "view" { Ok(repo.saved_view(&a.subject.id)?.shared) } else { Ok(a.subject.id) };
+        return if matches!(&a.subject, crate::model::Subject::View(_)) { Ok(repo.saved_view(a.subject.id())?.shared) } else { Ok(a.subject.id().to_owned()) };
     }
     if let Some(r) = repo.p.db.ref_value(name, crate::ids::now_ms())? {
         return Ok(r.target);

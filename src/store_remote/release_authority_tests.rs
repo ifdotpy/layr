@@ -172,7 +172,7 @@ fn updates_line_ownership_before_the_next_merge_record() {
         &owner,
     ));
     let mut first = completion(&key, &pending);
-    first.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().after.as_mut().unwrap().owner = 0;
+    (match &mut first.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().transition { crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).owner = 0;
     lines.push(sign(first, &key));
     let mut second = completion(&key, &pending2);
     second.id = "01a1c000-0000-7000-9000-000000000103".into();
@@ -182,7 +182,7 @@ fn updates_line_ownership_before_the_next_merge_record() {
     second.data["queue_change"]["after"]["result"] = pending2["state"].clone();
     second.states[0].id = pending2["state"].as_str().unwrap().into();
     second.states[0].parents = vec!["01a1c000-0000-7000-8000-000000000005".into()];
-    second.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().after.as_mut().unwrap().head =
+    (match &mut second.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().transition { crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head =
         second.states[0].id.clone();
     // The second real pending entry cannot restore ownership from root to uid 1.
     lines.push(sign(second, &key));

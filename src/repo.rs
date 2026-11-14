@@ -1360,7 +1360,7 @@ impl<'a> Repo<'a> {
     pub fn recorded_working(&self, line: &Line) -> Result<String> {
         for r in self.p.db.records_naming(&line.id, 50)? {
             if let Some(ch) = r.lines.get(&line.id) {
-                let head = ch.after.as_ref().map(|s| s.head.clone());
+                let head = ch.after().map(|s| s.head.clone());
                 return Ok(ch.working_after.clone().or(head).unwrap_or_else(|| line.head.clone()));
             }
             if r.op == "save" && r.data["line"].as_str() == Some(line.id.as_str()) {
@@ -2234,12 +2234,7 @@ impl<'a> Repo<'a> {
             let mut rec = crate::model::DraftRecord::new("line.create");
             rec.lines.insert(
                 line.id.clone(),
-                LineChange {
-                    before: None,
-                    after: Some(self.line_state(&line, start)),
-                    working_before: None,
-                    working_after: None,
-                },
+                LineChange { transition: crate::model::LineTransition::Create { after: self.line_state(&line, start) }, working_before: None, working_after: None },
             );
             rec.data = serde_json::json!({"name": name, "start": start});
             if !layers.is_empty() {
@@ -2721,12 +2716,7 @@ impl<'a> Repo<'a> {
         };
         rec.lines.insert(
             line.id.clone(),
-            LineChange {
-                before: Some(self.line_state(line, &line.head)),
-                after: Some(self.line_state(line, new_head)),
-                working_before,
-                working_after,
-            },
+            LineChange { transition: crate::model::LineTransition::Move { before: self.line_state(line, &line.head), after: self.line_state(line, new_head) }, working_before: working_before, working_after: working_after },
         );
         rec.data = data;
         Ok(rec)
@@ -3079,7 +3069,7 @@ fn classify_with(rules: &Rules, list: Vec<EntryChange>, st: &mut Status) {
 /// larger file has none). Other kinds (moves, deletes, types, binary files) stay open until the
 /// next commit of the line, which is the admin's decision.
 pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result<bool> {
-    if c.kind == "content" || c.kind == "add/add" {
+    if c.uses_markers() {
         return Ok(match fsutil::lmeta(root, &c.path) {
             Some(m) if m.is_file() && m.size <= fsutil::MAX_TEXT => has_markers(&fsutil::read_file(root, &c.path)?),
             _ => false,
@@ -4842,13 +4832,12 @@ mod commit_record_tests {
         rec.lines.insert(
             ids::new_id(),
             crate::model::LineChange {
-                before: None,
-                after: Some(LineState {
+                transition: crate::model::LineTransition::Create { after: LineState {
                     name: "main".into(),
                     head: state.clone(),
                     owner: ctx.caller.uid,
                     machine: ctx.store.machine.id.clone(),
-                }),
+                } },
                 working_before: None,
                 working_after: None,
             },
@@ -5178,17 +5167,12 @@ mod status_policy_tests {
         }))?);
         rec.lines.insert(
             line.id.clone(),
-            LineChange {
-                before: None,
-                after: Some(LineState {
+            LineChange { transition: crate::model::LineTransition::Create { after: LineState {
                     name: line.name.clone(),
                     head: line.head.clone(),
                     owner: line.owner,
                     machine: line.machine.clone(),
-                }),
-                working_before: None,
-                working_after: None,
-            },
+                } }, working_before: None, working_after: None },
         );
         repo.p.lock_maintenance()?.append(rec, &actor)?;
         let work = repo.working(&line);

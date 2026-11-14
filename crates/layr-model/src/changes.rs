@@ -339,12 +339,7 @@ mod tests {
         let mut main = commit("a", 2, "c1");
         main.lines.insert(
             "line".into(),
-            LineChange {
-                before: None,
-                after: Some(LineState { name: "main".into(), head: "s-c1".into(), owner: 10, machine: "a".into() }),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::LineTransition::Create { after: LineState { name: "main".into(), head: "s-c1".into(), owner: 10, machine: "a".into() } }, working_before: None, working_after: None },
         );
         let p = both_orders(vec![creator(), main, at("b", 1, 9, CLOSE_OP, json!({"change_id":"c1"}))]);
         let view = p.change_view("c1").unwrap();

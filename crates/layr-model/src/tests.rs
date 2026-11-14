@@ -38,12 +38,7 @@ pub(super) fn state(id: &str, kind: StateKind, parents: &[&str]) -> StateRec {
     }
 }
 fn line(head: &str, machine: &str) -> LineChange {
-    LineChange {
-        before: None,
-        after: Some(LineState { name: "main".into(), head: head.into(), owner: 10, machine: machine.into() }),
-        working_before: None,
-        working_after: None,
-    }
+    LineChange { transition: crate::LineTransition::Create { after: LineState { name: "main".into(), head: head.into(), owner: 10, machine: machine.into() } }, working_before: None, working_after: None }
 }
 pub(super) fn fold(records: Vec<Record>) -> Project {
     Project::preview_records("project", records, "a").unwrap()
@@ -52,34 +47,34 @@ pub(super) fn fold(records: Vec<Record>) -> Project {
 #[test]
 fn change_show_includes_active_check_results_for_each_exact_version() {
     let mut first = record(1, "commit");
-    first.states.push(state("s1", StateKind::Commit, &[]));
+    first.states.push(state("01a12290-0000-7000-8001-000000000001", StateKind::Commit, &[]));
     let mut failed = record(2, "check");
-    failed.data = json!({"state":"s1","argv":["test","-f","fixed"],"command":"test -f fixed","exit":1});
+    failed.data = json!({"state":"01a12290-0000-7000-8001-000000000001","argv":["test","-f","fixed"],"command":"test -f fixed","exit":1});
     let mut second = record(3, "commit");
-    second.states.push(state("s2", StateKind::Commit, &[]));
+    second.states.push(state("01a12290-0000-7000-8001-000000000002", StateKind::Commit, &[]));
     let mut passed = record(4, "check");
-    passed.data = json!({"state":"s2","argv":["true"],"command":"true","exit":0});
+    passed.data = json!({"state":"01a12290-0000-7000-8001-000000000002","argv":["true"],"command":"true","exit":0});
     let mut revoked = record(5, "attest");
-    revoked.data = json!({"attestation":{"format":1,"attestation_id":"record-5","subject":{"kind":"state","id":"s2"},"kind":"revoke","payload_digest":"00","signer":"a","time":5},"revokes":["record-4"]});
+    revoked.data = json!({"attestation":{"format":1,"attestation_id":"record-5","subject":{"kind":"state","id":"01a12290-0000-7000-8001-000000000002"},"kind":"revoke","payload_digest":"00","signer":"a","time":5},"revokes":["record-4"]});
     let p = fold(vec![first, failed.clone(), second, passed, revoked]);
     let show = p.change_show("change", &probes::Context::default()).unwrap();
     assert_eq!(show["versions"][0]["checks"], json!([failed.data]));
     assert_eq!(show["versions"][1]["checks"], json!([]));
-    assert_eq!(show["versions"][0]["checks"], json!(p.checks("s1")));
+    assert_eq!(show["versions"][0]["checks"], json!(p.checks("01a12290-0000-7000-8001-000000000001")));
     assert_eq!(show["versions"][1]["attestations"].as_array().unwrap().len(), 2);
 }
 
 #[test]
 fn record_order_duplicates_and_conflicts() {
     let mut first = record(1, "commit");
-    first.states.push(state("s1", StateKind::Commit, &[]));
-    first.lines.insert("line".into(), line("s1", "a"));
+    first.states.push(state("01a12290-0000-7000-8001-000000000001", StateKind::Commit, &[]));
+    first.lines.insert("line".into(), line("01a12290-0000-7000-8001-000000000001", "a"));
     let mut last = record(2, "commit");
-    last.states.push(state("s2", StateKind::Commit, &["s1"]));
-    last.lines.insert("line".into(), line("s2", "a"));
+    last.states.push(state("01a12290-0000-7000-8001-000000000002", StateKind::Commit, &["01a12290-0000-7000-8001-000000000001"]));
+    last.lines.insert("line".into(), line("01a12290-0000-7000-8001-000000000002", "a"));
     let model = fold(vec![last.clone(), first.clone(), last.clone()]);
-    assert_eq!(model.line_list()[0].head, "s2");
-    assert_eq!(model.change_versions("change").iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
+    assert_eq!(model.line_list()[0].head, "01a12290-0000-7000-8001-000000000002");
+    assert_eq!(model.change_versions("change").iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["01a12290-0000-7000-8001-000000000001", "01a12290-0000-7000-8001-000000000002"]);
     let mut conflict = last.clone();
     conflict.op = "other".into();
     assert!(Project::preview_records("project", vec![last.clone(), conflict], "a").is_err());
@@ -113,12 +108,12 @@ fn heads_and_policy_keep_machine_scope() {
 #[test]
 fn refs_expire_and_history_keeps_deletion() {
     let mut a = record(1, "ref.set");
-    a.data = json!({"ref_change":{"name":"env/prod","before":null,"after":{"name":"env/prod","target":"s1","expires_at":10}}});
+    a.data = json!({"ref_change":{"name":"env/prod","before":null,"after":{"name":"env/prod","target":"01a12290-0000-7000-8001-000000000001","expires_at":10}}});
     let p = fold(vec![a.clone()]);
     assert_eq!(p.ref_list("env/", 9).len(), 1);
     assert!(p.ref_list("env/", 10).is_empty());
     let mut b = record(2, "ref.delete");
-    b.data = json!({"ref_change":{"name":"env/prod","before":{"name":"env/prod","target":"s1","expires_at":10},"after":null}});
+    b.data = json!({"ref_change":{"name":"env/prod","before":{"name":"env/prod","target":"01a12290-0000-7000-8001-000000000001","expires_at":10},"after":null}});
     let p = fold(vec![b, a]);
     assert!(p.ref_list("", 0).is_empty());
     assert!(p.ref_log("env/prod")[0].after.is_none());
@@ -127,50 +122,50 @@ fn refs_expire_and_history_keeps_deletion() {
 #[test]
 fn revocations_bind_subject_actor_machine_and_order() {
     let mut approval = record(1, "approve");
-    approval.data = json!({"state":"s1"});
+    approval.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     let mut wrong_actor = record(2, "approve.withdraw");
     wrong_actor.actor.uid = 11;
-    wrong_actor.data = json!({"state":"s1"});
+    wrong_actor.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     let mut wrong_machine = record(3, "approve.withdraw");
     wrong_machine.machine = "b".into();
-    wrong_machine.data = json!({"state":"s1"});
+    wrong_machine.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     let mut wrong_subject = record(4, "attest");
-    wrong_subject.data = json!({"attestation":{"format":1,"attestation_id":"record-4","subject":{"kind":"state","id":"s2"},"kind":"revoke","payload_digest":"00","signer":"a","time":4},"revokes":["record-1"]});
+    wrong_subject.data = json!({"attestation":{"format":1,"attestation_id":"record-4","subject":{"kind":"state","id":"01a12290-0000-7000-8001-000000000002"},"kind":"revoke","payload_digest":"00","signer":"a","time":4},"revokes":["record-1"]});
     let mut records = vec![approval, wrong_actor, wrong_machine, wrong_subject];
     let p = fold(records.clone());
     assert!(!p.is_revoked("record-1"));
-    assert_eq!(p.approvals("s1"), [(10, 1)]);
+    assert_eq!(p.approvals("01a12290-0000-7000-8001-000000000001"), [(10, 1)]);
     let mut withdraw = record(5, "approve.withdraw");
-    withdraw.data = json!({"state":"s1"});
+    withdraw.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     records.push(withdraw);
     let p = fold(records);
     assert!(p.is_revoked("record-1"));
-    assert!(p.approvals("s1").is_empty());
-    assert_eq!(p.attestations("s1", None).len(), 4);
+    assert!(p.approvals("01a12290-0000-7000-8001-000000000001").is_empty());
+    assert_eq!(p.attestations("01a12290-0000-7000-8001-000000000001", None).len(), 4);
 }
 #[test]
 fn check_arguments_and_legacy_commands_are_exact() {
     let mut a = record(1, "check");
-    a.data = json!({"state":"s1","argv":["sh","-c","true"],"command":"sh -c true","exit":0});
+    a.data = json!({"state":"01a12290-0000-7000-8001-000000000001","argv":["sh","-c","true"],"command":"sh -c true","exit":0});
     let mut b = record(2, "check");
-    b.data = json!({"state":"s1","argv":["sh","-c","true"],"command":"sh -c true","exit":7});
+    b.data = json!({"state":"01a12290-0000-7000-8001-000000000001","argv":["sh","-c","true"],"command":"sh -c true","exit":7});
     let p = fold(vec![b, a]);
     let argv = vec!["sh".into(), "-c".into(), "true".into()];
-    assert_eq!(p.check_exit("s1", &argv, None), Some(7));
-    assert_eq!(p.check_exit("s1", &argv, Some(0)), Some(0));
-    assert_eq!(p.check_exit("s1", &["sh -c true".into()], None), None);
+    assert_eq!(p.check_exit("01a12290-0000-7000-8001-000000000001", &argv, None), Some(7));
+    assert_eq!(p.check_exit("01a12290-0000-7000-8001-000000000001", &argv, Some(0)), Some(0));
+    assert_eq!(p.check_exit("01a12290-0000-7000-8001-000000000001", &["sh -c true".into()], None), None);
     let mut c = record(3, "check");
-    c.data = json!({"state":"s1","command":"true","exit":0});
+    c.data = json!({"state":"01a12290-0000-7000-8001-000000000001","command":"true","exit":0});
     let p = fold(vec![c]);
-    assert_eq!(p.check_exit("s1", &["true".into()], None), Some(0));
+    assert_eq!(p.check_exit("01a12290-0000-7000-8001-000000000001", &["true".into()], None), Some(0));
 }
 #[test]
 fn history_walks_merge_and_auto_states_but_excludes_auxiliary_roots() {
     let mut a = record(1, "commit");
     a.states = vec![
-        state("root", StateKind::Commit, &[]),
-        state("a", StateKind::Commit, &["root"]),
-        state("b", StateKind::Commit, &["root"]),
+        state("01a12290-0000-7000-8001-000000000004", StateKind::Commit, &[]),
+        state("a", StateKind::Commit, &["01a12290-0000-7000-8001-000000000004"]),
+        state("b", StateKind::Commit, &["01a12290-0000-7000-8001-000000000004"]),
         state("merge", StateKind::Commit, &["a", "b"]),
         state("auto", StateKind::Auto, &["merge"]),
         state("derived", StateKind::Derived, &[]),
@@ -180,9 +175,9 @@ fn history_walks_merge_and_auto_states_but_excludes_auxiliary_roots() {
     }
     let p = fold(vec![a]);
     let ids: Vec<_> = p.log(&["merge".into()], Some("line"), 99).into_iter().map(|s| s.id).collect();
-    assert_eq!(ids, ["auto", "merge", "b", "a", "root"]);
+    assert_eq!(ids, ["auto", "merge", "b", "a", "01a12290-0000-7000-8001-000000000004"]);
     assert!(p.log(&["derived".into()], None, 99).is_empty());
-    assert_eq!(p.merge_base("a", "b"), Some("root".into()));
+    assert_eq!(p.merge_base("a", "b"), Some("01a12290-0000-7000-8001-000000000004".into()));
 }
 #[test]
 fn merge_base_agrees_with_the_pairwise_rule_and_is_fast_on_a_long_history() {
@@ -231,7 +226,7 @@ fn merge_base_agrees_with_the_pairwise_rule_and_is_fast_on_a_long_history() {
 }
 #[test]
 fn queue_outcomes_keep_probes_and_removal() {
-    let entry = json!({"id":"q","into":"main","target_line":"line","state":"s1","added_by":10,"time":1,"status":"done","attempts":2,"result":"merged","probes":{"status":"passed","behavior":{"base":"before","head":"merged","base_source":"available","head_source":"available","probes":[]}}});
+    let entry = json!({"id":"q","into":"main","target_line":"line","state":"01a12290-0000-7000-8001-000000000001","added_by":10,"time":1,"status":"done","attempts":2,"result":"merged","probes":{"status":"passed","behavior":{"base":"before","head":"merged","base_source":"available","head_source":"available","probes":[]}}});
     let mut a = record(1, "queue.done");
     a.data = json!({"queue_change":{"id":"q","before":null,"after":entry}});
     let p = fold(vec![a.clone()]);
@@ -243,17 +238,17 @@ fn queue_outcomes_keep_probes_and_removal() {
 #[test]
 fn line_names_stand_next_to_line_ids() {
     let mut first = record(1, "commit");
-    first.states.push(state("s1", StateKind::Commit, &[]));
-    first.lines.insert("line".into(), line("s1", "a"));
-    let entry = json!({"id":"q","into":"main","target_line":"line","state":"s1","added_by":10,"time":1,"status":"pending"});
+    first.states.push(state("01a12290-0000-7000-8001-000000000001", StateKind::Commit, &[]));
+    first.lines.insert("line".into(), line("01a12290-0000-7000-8001-000000000001", "a"));
+    let entry = json!({"id":"q","into":"main","target_line":"line","state":"01a12290-0000-7000-8001-000000000001","added_by":10,"time":1,"status":"pending"});
     let mut queued = record(2, "queue.add");
     queued.data = json!({"queue_change":{"id":"q","before":null,"after":entry}});
-    let mut gone = json!({"id":"g","into":"old","target_line":"gone","state":"s1","added_by":10,"time":2,"status":"pending"});
+    let mut gone = json!({"id":"g","into":"old","target_line":"gone","state":"01a12290-0000-7000-8001-000000000001","added_by":10,"time":2,"status":"pending"});
     let mut queued_gone = record(3, "queue.add");
     queued_gone.data = json!({"queue_change":{"id":"g","before":null,"after":gone.clone()}});
     // A line that only its delete record names: the name comes from the record.
     let mut deleted = record(4, "line.delete");
-    deleted.lines.insert("gone".into(), LineChange { before: None, after: None, working_before: None, working_after: None });
+    deleted.lines.insert("gone".into(), LineChange { transition: crate::LineTransition::Delete { before: None }, working_before: None, working_after: None });
     deleted.data = json!({"name":"old","final_state":null,"staged_state":null});
     let p = fold(vec![first, queued, queued_gone, deleted]);
     assert_eq!(p.line_name("line").as_deref(), Some("main"));
@@ -285,12 +280,12 @@ fn overlays_stay_separate_and_unknown_records_stay_in_log() {
 #[test]
 fn legacy_evidence_keeps_the_change_id_at_its_first_derivation() {
     let mut approval = record(1, "approve");
-    approval.data = json!({"state":"s1"});
+    approval.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     let mut save = record(2, "commit");
-    save.states.push(state("s1", StateKind::Commit, &[]));
+    save.states.push(state("01a12290-0000-7000-8001-000000000001", StateKind::Commit, &[]));
     let p = fold(vec![save, approval]);
     // Db::derive_attestation updates only the local flag on a duplicate attestation.
-    assert_eq!(p.attestations("s1", Some("approval"))[0].change_id, None);
+    assert_eq!(p.attestations("01a12290-0000-7000-8001-000000000001", Some("approval"))[0].change_id, None);
 }
 
 #[test]
@@ -329,17 +324,17 @@ fn protection_checks_and_paths_use_exact_requirements() {
 #[test]
 fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undecided() {
     let mut init = record(1, "project");
-    init.states = vec![state("root", StateKind::Commit, &[]), state("source", StateKind::Commit, &["root"])];
+    init.states = vec![state("01a12290-0000-7000-8001-000000000004", StateKind::Commit, &[]), state("01a12290-0000-7000-8001-000000000005", StateKind::Commit, &["01a12290-0000-7000-8001-000000000004"])];
     for s in &mut init.states {
         s.author.uid = 10;
     }
-    init.lines.insert("line".into(), line("root", "a"));
+    init.lines.insert("line".into(), line("01a12290-0000-7000-8001-000000000004", "a"));
     init.data = json!({"config":{"access":{"user:0":"admin","user:11":"reader"},"protect":{"main":{"update":"writer","check":["gate"],"approvals":1,"approvers":["group:20"],"paths":{"secret":"admin"}}},"check.gate":"true"}});
     let mut approve = record(2, "approve");
     approve.actor.uid = 11;
-    approve.data = json!({"state":"source"});
+    approve.data = json!({"state":"01a12290-0000-7000-8001-000000000005"});
     let mut check = record(3, "check");
-    check.data = json!({"state":"source","argv":["sh","-c","true"],"exit":0});
+    check.data = json!({"state":"01a12290-0000-7000-8001-000000000005","argv":["sh","-c","true"],"exit":0});
     let project = Project::preview_records("project", vec![init, approve, check], "").unwrap();
     let mut context = protection::Context {
         now: 10,
@@ -348,7 +343,7 @@ fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undeci
         changed_paths: vec!["secret".into()],
         candidate: None,
     };
-    let summary = project.merge_status("source", "main", &context).unwrap();
+    let summary = project.merge_status("01a12290-0000-7000-8001-000000000005", "main", &context).unwrap();
     assert_eq!(summary.target_machine.as_deref(), Some("a"));
     assert_eq!(summary.allowed, None);
     assert_eq!(summary.status, "not_decided");
@@ -358,8 +353,8 @@ fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undeci
     assert!(summary.undecided_reasons.iter().any(|s| s.contains("membership not known here")));
     context.actor = Some(policy::Who { uid: 0, groups: vec![] });
     context.approver_groups.insert(11, vec![20]);
-    assert_eq!(project.merge_status("source", "main", &context).unwrap().allowed, Some(true));
-    let unknown = project.merge_status("source", "absent", &context).unwrap();
+    assert_eq!(project.merge_status("01a12290-0000-7000-8001-000000000005", "main", &context).unwrap().allowed, Some(true));
+    let unknown = project.merge_status("01a12290-0000-7000-8001-000000000005", "absent", &context).unwrap();
     assert_eq!(unknown.status, "unavailable");
     assert_eq!(unknown.allowed, None);
 }
@@ -375,7 +370,7 @@ fn hidden_layers_come_only_from_their_own_records() {
     let mut head = record(2, "line.create");
     head.project = "overlay-project".into();
     let mut change = line("hidden-state", "a");
-    change.after.as_mut().unwrap().name = "line-line".into();
+    (match &mut change.transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).name = "line-line".into();
     head.lines.insert("overlay-line".into(), change);
     let reader = Model::preview_records([parent.clone(), own, head], "a").unwrap();
     let other = Model::preview_records([parent], "a").unwrap();
@@ -410,7 +405,7 @@ fn person_evidence(seq: u64, login: &str, key: &ed25519_dalek::SigningKey, withd
             .unwrap();
     let signed = request.sign(key).unwrap();
     let text = String::from_utf8(signed.to_bytes().unwrap()).unwrap();
-    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
+    record.data = json!({"request":text,"request_id":request.id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation {format:1,attestation_id:record.id.clone(),subject:Subject::state(subject).unwrap(),change_id:None,kind:if withdraw {"revoke".into()}else{"approval".into()},payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:record.actor.name.clone(),time:record.time}});
     validation::validate(&record).unwrap();
     record
 }
@@ -526,7 +521,7 @@ fn a_person_proof_cannot_be_reused_for_another_effect() {
     r.machine = "01a12290-0000-7000-8000-000000000005".into();
     r.actor.uid = u32::MAX;
     r.actor.name = "person:ann@example.com".into();
-    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:subject.into()},change_id:None,kind:"approval".into(),payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
+    r.data = json!({"request":text,"request_id":id,"request_digest":hex::encode(ContentAddress::digest(text.as_bytes())),"person_key":hex::encode(key.verifying_key().to_bytes()),"attestation":Attestation { format:1,attestation_id:r.id.clone(),subject:Subject::state(subject).unwrap(),change_id:None,kind:"approval".into(),payload_digest:hex::encode(ContentAddress::digest(signed.r.get().as_bytes())),payload_ref:None,signer:r.actor.name.clone(),time:r.time }});
     validation::validate(&r).unwrap();
     let mut changed = r.clone();
     changed.data["attestation"]["subject"]["id"] = json!(r.id);
@@ -581,20 +576,20 @@ fn admin_machines_of_the_creator_count_as_the_creator() {
     admin.data = json!({"config":{"person.keys":{"ann@example.com":"ann-key"},"admin.machines":["c"]}});
     let mut approval = record(3, "approve");
     approval.machine = "b".into();
-    approval.data = json!({"state":"s1"});
+    approval.data = json!({"state":"01a12290-0000-7000-8001-000000000001"});
     let mut other = record(4, "config");
     other.machine = "c".into();
     other.data = json!({"config":{"person.keys":{"eve@example.com":"eve-key"}}});
     let mut other_approval = record(5, "approve");
     other_approval.machine = "c".into();
-    other_approval.data = json!({"state":"s2"});
+    other_approval.data = json!({"state":"01a12290-0000-7000-8001-000000000002"});
     let p = fold(vec![creator, admin, approval, other, other_approval]);
     assert_eq!(p.config["person.keys"], json!({"ann@example.com":"ann-key"}));
     assert_eq!(p.line_list()[0].head, "two");
-    assert_eq!(p.approvals("s1"), [(10, 3)]);
+    assert_eq!(p.approvals("01a12290-0000-7000-8001-000000000001"), [(10, 3)]);
     // Only the creator names admin machines: c, named by the admin machine b, stays foreign.
     assert_eq!(p.config["person.keys@c"], json!({"eve@example.com":"eve-key"}));
-    assert!(p.approvals("s2").is_empty());
+    assert!(p.approvals("01a12290-0000-7000-8001-000000000002").is_empty());
     assert_eq!(p.admins, BTreeSet::from(["a".to_string(), "b".to_string()]));
 }
 

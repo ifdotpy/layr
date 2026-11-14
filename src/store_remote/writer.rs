@@ -2179,17 +2179,12 @@ mod tests {
         commit.states.push(state);
         commit.lines.insert(
             line_id,
-            LineChange {
-                before: None,
-                after: Some(LineState {
+            LineChange { transition: crate::model::LineTransition::Create { after: LineState {
                     name: "main".into(),
                     head: state_id.clone(),
                     owner: ctx.caller.uid,
                     machine: store.machine.clone(),
-                }),
-                working_before: None,
-                working_after: None,
-            },
+                } }, working_before: None, working_after: None },
         );
         let mut lines = Vec::new();
         for (index, mut record) in [first, project, commit].into_iter().enumerate() {

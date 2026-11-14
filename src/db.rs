@@ -500,7 +500,7 @@ impl Db {
         }
         for (id, ch) in &rec.lines {
             // Heads per machine: each machine's own records, in its order.
-            if let Some(a) = &ch.after {
+            if let Some(a) = ch.after() {
                 if self.state(&a.head)?.map(|s| s.kind.auxiliary()).unwrap_or(false) {
                     anyhow::bail!("line head cannot be a cache or derived state");
                 }
@@ -515,7 +515,7 @@ impl Db {
             if foreign && row_machine.as_deref() == Some(local) {
                 continue;
             }
-            match &ch.after {
+            match ch.after() {
                 Some(a) => {
                     tx.prepare_cached(
                         "INSERT INTO lines(id, name, owner, machine, head, deleted, time, ord) VALUES(?1,?2,?3,?4,?5,0,?6,?7)
@@ -1310,7 +1310,7 @@ impl Db {
             self.conn.prepare_cached("INSERT INTO attestations(id,subject,kind,rec,machine,uid,ord,local) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET local=MAX(attestations.local,excluded.local)")?.execute(
                 params![
                     a.attestation_id,
-                    a.subject.id,
+                    a.subject.id(),
                     a.kind,
                     serde_json::to_string(&a)?,
                     signer,
@@ -1328,7 +1328,7 @@ impl Db {
                             "INSERT OR IGNORE INTO attestation_revocations(id,target,machine,uid,ord)
                          SELECT ?1,?2,?3,CASE WHEN ?4=0 AND machine=?3 THEN uid ELSE ?4 END,?5 FROM attestations WHERE id=?2 AND subject=?6",
                         )?
-                        .execute(params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id])?;
+                        .execute(params![a.attestation_id, id, signer, rec.actor.uid as i64, ord, a.subject.id()])?;
                 }
             }
         }
@@ -1514,7 +1514,7 @@ impl Db {
         let v = st.query_map(params![line], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         for l in v {
             let rec = crate::oplog::parse_line(&l)?.record;
-            if let Some(after) = rec.lines.get(line).and_then(|c| c.after.as_ref()) {
+            if let Some(after) = rec.lines.get(line).and_then(|c| c.after()) {
                 return Ok(Some(after.head.clone()));
             }
         }
@@ -1736,7 +1736,7 @@ mod tests {
             let after =
                 after.map(|name| crate::model::LineState { name: name.into(), head: "h".into(), owner: 1, machine: "m".into() });
             rec.lines
-                .insert(id.into(), crate::model::LineChange { before: None, after, working_before: None, working_after: None });
+                .insert(id.into(), crate::model::LineChange { transition: crate::model::LineTransition::from_endpoints(None, after), working_before: None, working_after: None });
             rec.data = data;
             db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
             db.derive_rows(&rec, &|_| true, "m")
@@ -1838,7 +1838,7 @@ mod tests {
             } else if i % 7 == 0 {
                 rec.lines.insert(
                     "wanted".into(),
-                    crate::model::LineChange { before: None, after: None, working_before: None, working_after: None },
+                    crate::model::LineChange { transition: crate::model::LineTransition::Delete { before: None }, working_before: None, working_after: None },
                 );
             } else {
                 rec.data = serde_json::json!({"line": "other", "note": "wanted"});
@@ -2366,7 +2366,7 @@ mod tests {
             Some(c) => hex::encode(ContentAddress::digest(serde_json::to_vec(c).unwrap())),
             None => "0".repeat(64),
         };
-        r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:kind.into(),payload_digest:digest,payload_ref:None,signer:r.machine.clone(),time:seq as i64}});
+        r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject::state(state).unwrap(),change_id:None,kind:kind.into(),payload_digest:digest,payload_ref:None,signer:r.machine.clone(),time:seq as i64}});
         if let Some(c) = check {
             r.data["check"] = c;
         }
@@ -2411,7 +2411,7 @@ mod tests {
         other.op = "attest".into();
         other.time = 2;
         other.actor.uid = 99;
-        other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
+        other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject::state(state).unwrap(),change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
         db.derive_rows(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
@@ -2428,7 +2428,7 @@ mod tests {
             r.time = seq as i64;
             r.actor.uid = uid;
             r.machine = signer.into();
-            r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:kind.into(),payload_digest:"0".repeat(64),payload_ref:None,signer:signer.into(),time:seq as i64},"revokes":revokes});
+            r.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:r.id.clone(),subject:Subject::state(state).unwrap(),change_id:None,kind:kind.into(),payload_digest:"0".repeat(64),payload_ref:None,signer:signer.into(),time:seq as i64},"revokes":revokes});
             r
         };
         let other_machine = "01a12290-0000-7000-8000-00000000bbbb";
@@ -2479,7 +2479,7 @@ mod tests {
         let mut rec = state_record(1, state, vec![]);
         rec.states.clear();
         rec.op = "attest".into();
-        rec.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:rec.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:1},"declassify":{"path":"a:1","hmac":"digest"}});
+        rec.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:rec.id.clone(),subject:Subject::state(state).unwrap(),change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:1},"declassify":{"path":"a:1","hmac":"digest"}});
         let raw = crate::oplog::sign_line(&rec, &key).unwrap();
         db.insert_record(&rec, &raw).unwrap();
         db.derive_rows(&rec, &|_| true, machine).unwrap();

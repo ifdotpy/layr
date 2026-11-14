@@ -140,10 +140,10 @@ pub enum CleanupEffect {
 
 fn append_effects(effects: &mut Vec<CleanupEffect>, record: &Record) {
     for (id, change) in &record.lines {
-        if let Some(after) = &change.after {
+        if let Some(after) = change.after() {
             effects.push(CleanupEffect::HeadMoved(after.head.clone()));
         }
-        match (&change.before, &change.after) {
+        match (change.before(), change.after()) {
             (Some(before), Some(after)) if before.head != after.head => {
                 effects.push(CleanupEffect::HeadLeft(before.head.clone()))
             }

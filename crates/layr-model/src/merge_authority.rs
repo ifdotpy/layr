@@ -9,14 +9,14 @@ pub(super) fn payload_of(record: &Record) -> layr_store::trust::Payload<'_> {
         .lines
         .iter()
         .map(|(id, change)| {
-            let name = change.after.as_ref().map(|after| after.name.as_str());
-            let after = change.after.as_ref();
+            let name = change.after().map(|after| after.name.as_str());
+            let after = change.after();
             layr_store::trust::LineMove {
                 id,
-                new: change.before.is_none(),
+                new: matches!(change.transition, crate::LineTransition::Create { .. }),
                 name,
                 own: false,
-                renamed: change.before.as_ref().is_some_and(|before| Some(before.name.as_str()) != name),
+                renamed: change.before().is_some_and(|before| Some(before.name.as_str()) != name),
                 head: after.map(|a| a.head.as_str()),
                 owner: after.map(|a| a.owner),
                 machine: after.map(|a| a.machine.as_str()),
@@ -53,7 +53,7 @@ impl Folded {
 
     pub(super) fn apply(&mut self, record: &Record) {
         for (id, change) in &record.lines {
-            match &change.after {
+            match change.after() {
                 Some(line) => {
                     self.lines.insert(id.clone(), (line.name.clone(), line.owner, line.machine.clone()));
                 }
@@ -347,7 +347,7 @@ mod tests {
             &owner,
         ));
         let mut first = completion(&key, &pending);
-        first.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().after.as_mut().unwrap().owner = 0;
+        (match &mut first.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).owner = 0;
         lines.push(sign(first, &key));
         let mut second = completion(&key, &pending2);
         second.id = "01a1c000-0000-7000-9000-000000000103".into();
@@ -357,7 +357,7 @@ mod tests {
         second.data["queue_change"]["after"]["result"] = pending2["state"].clone();
         second.states[0].id = pending2["state"].as_str().unwrap().into();
         second.states[0].parents = vec!["01a1c000-0000-7000-8000-000000000005".into()];
-        second.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().after.as_mut().unwrap().head =
+        (match &mut second.lines.get_mut("01a1c000-0000-7000-8000-000000000006").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head =
             second.states[0].id.clone();
         // The second real pending entry cannot restore ownership from root to uid 1.
         lines.push(sign(second, &key));

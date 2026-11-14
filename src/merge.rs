@@ -10,7 +10,7 @@
 use crate::changes::{self, EntryChange};
 use crate::compare::DataEvidence;
 use crate::fsutil::{self, FType, Meta, Src};
-use crate::model::Conflict;
+use crate::model::{Conflict, ConflictKind, ConflictEntryKind};
 use crate::repo::skip_path;
 use anyhow::{bail, Context, Result};
 use ignore::gitignore::GitignoreBuilder;
@@ -195,29 +195,24 @@ struct Ctx<'a, 'b> {
     attrs: Attrs,
     out: Outcome,
     blocked: BTreeSet<String>,
+    conflict_sides: crate::model::ConflictSides,
 }
 
 impl<'a, 'b> Ctx<'a, 'b> {
-    fn conflict(&mut self, path: &str, kind: &str) {
-        self.out.conflicts.push(Conflict {
-            path: path.to_string(),
-            kind: kind.to_string(),
-            base: Some(self.i.base_id.to_string()),
-            ours: Some(self.i.ours_id.to_string()),
-            theirs: Some(self.i.theirs_id.to_string()),
-        });
-        let label = match kind {
-            "content" => format!("CONFLICT (content): Merge conflict in {path}"),
-            "add/add" => format!("CONFLICT (add/add): Merge conflict in {path}"),
-            "modify/delete" => {
+    fn conflict(&mut self, path: &str, kind: ConflictKind) {
+        let label = match &kind {
+            ConflictKind::Content => format!("CONFLICT (content): Merge conflict in {path}"),
+            ConflictKind::AddAdd => format!("CONFLICT (add/add): Merge conflict in {path}"),
+            ConflictKind::ModifyDelete => {
                 format!("CONFLICT (modify/delete): {path} deleted in {} and modified in head.", self.i.theirs_label)
             }
-            "delete/modify" => {
+            ConflictKind::DeleteModify => {
                 format!("CONFLICT (modify/delete): {path} deleted in head and modified in {}.", self.i.theirs_label)
             }
-            "binary" => format!("CONFLICT (binary): {path} changed on both sides; kept head"),
+            ConflictKind::Binary => format!("CONFLICT (binary): {path} changed on both sides; kept head"),
             k => format!("CONFLICT ({k}): {path}"),
         };
+        self.out.conflicts.push(Conflict::new(path, kind, self.conflict_sides.clone()));
         self.out.messages.push(label);
     }
 
@@ -260,7 +255,10 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
         .iter()
         .filter(|c| matches!(c.path().as_str(), ".gitattributes" | ".layrattributes") == attributes_only)
         .collect();
-    let mut c = Ctx { i, attrs: Attrs::load(i.ours), out: Outcome::default(), blocked: BTreeSet::new() };
+    let conflict_sides = crate::model::ConflictSides::Recorded {
+        base: layr_types::StateId::parse(i.base_id)?, ours: layr_types::StateId::parse(i.ours_id)?, theirs: layr_types::StateId::parse(i.theirs_id)?,
+    };
+    let mut c = Ctx { i, attrs: Attrs::load(i.ours), out: Outcome::default(), blocked: BTreeSet::new(), conflict_sides };
     let derives = if attributes_only { BTreeMap::new() } else { derive_rules(i, &Attrs::load(i.result))? };
     let derived: BTreeSet<String> = derives.values().flat_map(|r| r.outputs.iter().cloned()).collect();
     let mut done: BTreeSet<String> = derived.clone();
@@ -276,18 +274,18 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
         done.insert(dst.clone());
         match ours.at(&src) {
             OursAt::Moved(q) if q != dst => {
-                c.conflict(&src, &format!("rename/rename ({q} vs {dst})"));
+                c.conflict(&src, ConflictKind::RenameRename { destinations: format!("{q} vs {dst}") });
             }
             OursAt::Moved(_) => {
                 file_merge(&mut c, &src, &dst, &dst, ours, theirs)?;
             }
             OursAt::Deleted => {
                 c.take_theirs(&dst, &dst)?;
-                c.conflict(&dst, "rename/delete");
+                c.conflict(&dst, ConflictKind::RenameDelete);
             }
             OursAt::Unchanged | OursAt::Changed => {
                 if fsutil::lmeta(i.result, &dst).is_some() {
-                    c.conflict(&dst, "add/add");
+                    c.conflict(&dst, ConflictKind::AddAdd);
                     continue;
                 }
                 fsutil::make_parents(i.result, &dst, None)?;
@@ -327,17 +325,17 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
                         std::fs::create_dir_all(fsutil::safe_join(i.result, &q)?)?;
                         c.out.changed.insert(q.clone());
                     } else {
-                        c.conflict(&p, "type change (file vs directory)");
+                        c.conflict(&p, ConflictKind::TypeChange { ours: ConflictEntryKind::File, theirs: ConflictEntryKind::Directory });
                         c.blocked.insert(p.clone());
                     }
                 }
                 (_, Some(r)) if !r.is_dir() => {
-                    c.conflict(&p, "type change (file vs directory)");
+                    c.conflict(&p, ConflictKind::TypeChange { ours: ConflictEntryKind::File, theirs: ConflictEntryKind::Directory });
                     c.blocked.insert(p.clone());
                 }
                 (Some(b), None) if b.is_dir() => {
                     if dir_has_entries(i.theirs, &p) {
-                        c.conflict(&p, "directory deleted by ours, theirs added files");
+                        c.conflict(&p, ConflictKind::OursDeletedDirectoryWithAddedFiles);
                     }
                     std::fs::create_dir_all(fsutil::safe_join(i.result, &q)?)?;
                 }
@@ -368,7 +366,7 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
                         fsutil::remove_entry(i.result, &q)?;
                         c.out.changed.insert(q.clone());
                     } else if a_b.is_some() {
-                        c.conflict(&q, "modify/delete");
+                        c.conflict(&q, ConflictKind::ModifyDelete);
                     }
                 }
             }
@@ -383,7 +381,7 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
             && fsutil::lmeta(i.ours, &parent).is_none()
             && !matches!(ours.at(&parent), OursAt::Moved(_))
         {
-            c.conflict(&p, "directory deleted by ours, theirs changed or added a file");
+            c.conflict(&p, ConflictKind::OursDeletedDirectoryWithChangedFile);
             c.take_theirs(&p, &p)?;
             continue;
         }
@@ -401,7 +399,7 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
         }
         if a_r.is_none() {
             c.take_theirs(&p, &q)?;
-            c.conflict(&q, "delete/modify");
+            c.conflict(&q, ConflictKind::DeleteModify);
             continue;
         }
         file_merge(&mut c, &p, &p, &q, ours, theirs)?;
@@ -413,7 +411,7 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
         let rp = fsutil::safe_join(i.result, &p)?;
         if rp.exists() {
             if std::fs::remove_dir(&rp).is_err() {
-                c.conflict(&p, "theirs deleted a directory that ours changed");
+                c.conflict(&p, ConflictKind::TheirsDeletedChangedDirectory);
             } else {
                 c.out.changed.insert(p.clone());
             }
@@ -539,7 +537,7 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryCh
     for name in cyclic {
         for p in &rules[&name].outputs {
             keep_derive_ours(i, p)?;
-            c.conflict(p, "derive dependency cycle");
+            c.conflict(p, ConflictKind::DeriveCycle);
         }
     }
     let mut failed = BTreeSet::new();
@@ -557,7 +555,7 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryCh
             failed.insert(name.clone());
             for p in &rule.outputs {
                 keep_derive_ours(i, p)?;
-                c.conflict(p, &format!("derive {name} failed"));
+                c.conflict(p, ConflictKind::DeriveFailed { name: name.clone() });
             }
         } else {
             c.out.changed.extend(rule.outputs.iter().cloned());
@@ -665,12 +663,12 @@ fn add_add(c: &mut Ctx, p: &str, q: &str) -> Result<()> {
             c.out.changed.insert(q.to_string());
             c.out.messages.push(format!("Auto-merging {q}"));
             if r? > 0 {
-                c.conflict(q, "add/add");
+                c.conflict(q, ConflictKind::AddAdd);
             }
             return Ok(());
         }
     }
-    c.conflict(q, "add/add");
+    c.conflict(q, ConflictKind::AddAdd);
     Ok(())
 }
 
@@ -689,7 +687,7 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
         if mr.ftype == mb.ftype && c.content_same(i.base, bp, i.result, rp)? {
             c.take_theirs(tp, rp)?;
         } else {
-            c.conflict(rp, &format!("type change ({} vs {})", kind(&mr), kind(&mt)));
+            c.conflict(rp, ConflictKind::TypeChange { ours: kind(&mr), theirs: kind(&mt) });
         }
         return Ok(());
     }
@@ -701,7 +699,7 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
         if r == b {
             c.take_theirs(tp, rp)?;
         } else {
-            c.conflict(rp, "symlink target");
+            c.conflict(rp, ConflictKind::SymlinkTarget);
         }
         return Ok(());
     }
@@ -738,17 +736,17 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
         fsutil::set_mode(i.result, rp, m)?;
         c.out.changed.insert(rp.to_string());
     } else if mb.executable() != mt.executable() && mr.executable() != mt.executable() {
-        c.conflict(rp, "mode");
+        c.conflict(rp, ConflictKind::Mode);
     }
     Ok(())
 }
 
-fn kind(m: &Meta) -> &'static str {
+fn kind(m: &Meta) -> ConflictEntryKind {
     match m.ftype {
-        FType::File => "file",
-        FType::Dir => "directory",
-        FType::Symlink => "symlink",
-        FType::Special => "special",
+        FType::File => ConflictEntryKind::File,
+        FType::Dir => ConflictEntryKind::Directory,
+        FType::Symlink => ConflictEntryKind::Symlink,
+        FType::Special => ConflictEntryKind::Special,
     }
 }
 
@@ -838,36 +836,36 @@ fn run_driver(
     c.out.changed.insert(rp.to_string());
     match driver {
         "text" | "union" if [&r_path, &b_path, &t_path].iter().any(|p| too_big(p)) => {
-            c.conflict(rp, &format!("binary (larger than {} MiB)", fsutil::MAX_TEXT >> 20))
+            c.conflict(rp, ConflictKind::BinaryTooLarge { limit_mib: fsutil::MAX_TEXT >> 20 })
         }
         "text" | "union" => {
             c.out.messages.push(format!("Auto-merging {rp}"));
             let n = run_merge_file(i, &r_path, &b_path, &t_path, driver == "union")?;
             if n > 0 {
-                c.conflict(rp, "content");
+                c.conflict(rp, ConflictKind::Content);
             }
         }
         "ours" => {}
         "theirs" => c.take_theirs(tp, rp)?,
-        "binary" => c.conflict(rp, "binary"),
+        "binary" => c.conflict(rp, ConflictKind::Binary),
         "blocks" => {
             c.out.messages.push(format!("Auto-merging {rp} (blocks)"));
             match block_merge(i, bp, tp, rp, ours_ranges, theirs_ranges)? {
                 true => verify(c, rp)?,
-                false => c.conflict(rp, "binary (overlapping blocks)"),
+                false => c.conflict(rp, ConflictKind::BinaryOverlappingBlocks),
             }
         }
         name => {
             let cmd = match (i.config)(&format!("merge.driver.{name}")) {
                 Some(cmd) => cmd,
                 None => {
-                    c.conflict(rp, &format!("unknown merge driver {name}"));
+                    c.conflict(rp, ConflictKind::UnknownMergeDriver { name: name.to_string() });
                     return Ok(());
                 }
             };
             c.out.messages.push(format!("Auto-merging {rp} ({name})"));
             if !run_command_driver(i, &cmd, &b_path, &r_path, &t_path, rp)? {
-                c.conflict(rp, &format!("driver {name}"));
+                c.conflict(rp, ConflictKind::DriverFailed { name: name.to_string() });
             } else {
                 verify(c, rp)?;
             }
@@ -885,7 +883,7 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     let cmd = match (i.config)(&format!("merge.verify.{name}")) {
         Some(c) => c,
         None => {
-            c.conflict(rp, &format!("unknown verify command {name}"));
+            c.conflict(rp, ConflictKind::UnknownVerifyCommand { name: name.to_string() });
             return Ok(());
         }
     };
@@ -899,7 +897,7 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     if !ok {
         // Keep ours: copy back the ours version.
         fsutil::copy_entry(i.ours, rp, i.result, rp, None)?;
-        c.conflict(rp, &format!("verify {name} failed"));
+        c.conflict(rp, ConflictKind::VerifyFailed { name: name.to_string() });
     }
     Ok(())
 }
@@ -1118,9 +1116,9 @@ mod evidence_tests {
             ours: &ours,
             theirs: &theirs,
             result: &result,
-            base_id: "base",
-            ours_id: "ours",
-            theirs_id: "theirs",
+            base_id: "01a12290-0000-7000-8000-000000000001",
+            ours_id: "01a12290-0000-7000-8000-000000000002",
+            theirs_id: "01a12290-0000-7000-8000-000000000003",
             ours_label: "ours",
             theirs_label: "theirs",
             config: &|_| None,
@@ -1229,9 +1227,9 @@ mod derive_tests {
                 ours: &root.join("ours"),
                 theirs: &root.join("theirs"),
                 result: &result,
-                base_id: "b",
-                ours_id: "o",
-                theirs_id: "t",
+                base_id: "01a12290-0000-7000-8000-000000000001",
+                ours_id: "01a12290-0000-7000-8000-000000000002",
+                theirs_id: "01a12290-0000-7000-8000-000000000003",
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &|_| None,
@@ -1328,9 +1326,9 @@ mod merge_sides_tests {
                 ours: &ours,
                 theirs: &theirs,
                 result: &result,
-                base_id: "b",
-                ours_id: "o",
-                theirs_id: "t",
+                base_id: "01a12290-0000-7000-8000-000000000001",
+                ours_id: "01a12290-0000-7000-8000-000000000002",
+                theirs_id: "01a12290-0000-7000-8000-000000000003",
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &config,
@@ -1351,8 +1349,9 @@ mod merge_sides_tests {
             );
             assert_eq!(std::fs::read(result.join("generated"))?, std::fs::read(result.join("source"))?);
             assert_eq!(
-                out.conflicts.iter().map(|c| (c.path.as_str(), c.kind.as_str())).collect::<Vec<_>>(),
+                out.conflicts.iter().map(|c| (c.path.as_str(), c.kind())).collect::<Vec<_>>(),
                 [(".gitattributes", "binary"), ("moved", "rename/delete"), ("source", "content"), ("z", "binary")]
+                    .map(|(path, kind)| (path, std::borrow::Cow::Borrowed(kind)))
             );
             assert_eq!(
                 out.messages,

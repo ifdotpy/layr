@@ -50,9 +50,9 @@ impl Fixture {
             ours: &ours,
             theirs: &theirs,
             result: &result,
-            base_id: "base",
-            ours_id: "ours",
-            theirs_id: "theirs",
+            base_id: "01a12290-0000-7000-8000-000000000001",
+            ours_id: "01a12290-0000-7000-8000-000000000002",
+            theirs_id: "01a12290-0000-7000-8000-000000000003",
             ours_label: "head",
             theirs_label: "topic",
             config: &|key| match key {
@@ -86,7 +86,7 @@ fn object_merges_pair_moves_and_preserve_edits_without_native_states() -> Result
         let out = f.merge(ours_portable, theirs_portable)?;
         assert_eq!(out.conflicts.len(), 1, "{:?}", out.conflicts);
         assert_eq!(out.conflicts[0].path, "Q.txt");
-        assert!(out.conflicts[0].kind.starts_with("rename/rename"));
+        assert!(matches!(&out.conflicts[0].details, crate::model::ConflictDetails::Known { kind: ConflictKind::RenameRename { .. }, .. }));
         assert_eq!(std::fs::read_to_string(f.0.join("result/A2.txt"))?, "one\nOURS\nthree\n");
         assert!(!f.0.join("result/A.txt").exists());
     }

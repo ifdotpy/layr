@@ -627,7 +627,7 @@ fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name:
     let mut record = crate::model::DraftRecord::new(if before.is_some() { "save" } else { "line.create" });
     record.lines.insert(
         line.into(),
-        LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
+        LineChange { transition: crate::model::LineTransition::from_endpoints(before.map(state), Some(state(head))), working_before: None, working_after: None },
     );
     record.data = serde_json::json!({"name":name});
     project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();

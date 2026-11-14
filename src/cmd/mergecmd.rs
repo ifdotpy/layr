@@ -1234,7 +1234,7 @@ fn checks_unlocked(
 /// Only files with markers matter: other kinds stay listed until the next commit.
 fn refuse_open_conflicts(st: &crate::repo::Status) -> Result<()> {
     let paths: Vec<&str> =
-        st.conflicts.iter().filter(|c| c.kind == "content" || c.kind == "add/add").map(|c| c.path.as_str()).collect();
+        st.conflicts.iter().filter(|c| c.uses_markers()).map(|c| c.path.as_str()).collect();
     if paths.is_empty() {
         return Ok(());
     }
@@ -1519,7 +1519,7 @@ impl std::error::Error for ChecksWaiting {}
 /// passed (callers ask `passed_on` first). A queue entry then fails with the reason instead of waiting: no runner
 /// runs that exact check again on its own, so the entry would stay pending for good.
 fn failed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<Option<i64>> {
-    let subject = crate::model::Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = crate::model::Subject::state(state)?;
     Ok(crate::probes::active_checks(repo, &subject)?.into_values().find_map(|(_, r)| {
         let check = &r.data["check"];
         (check["argv"] == serde_json::json!(argv)
@@ -1543,7 +1543,7 @@ fn failed_elsewhere(name: &str, want: &str, code: i64, candidate: &str, line: &L
 }
 
 fn passed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<bool> {
-    let subject = crate::model::Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = crate::model::Subject::state(state)?;
     Ok(crate::probes::active_checks(repo, &subject)?.into_values().any(|(_, r)| {
         let check = &r.data["check"];
         check["argv"] == serde_json::json!(argv)

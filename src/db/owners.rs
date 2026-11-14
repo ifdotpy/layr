@@ -72,7 +72,7 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
         .map(|line| {
             let mut named: Vec<String> = rec.states.iter().map(|s| s.id.clone()).collect();
             if let Some(ch) = rec.lines.get(line) {
-                named.extend([&ch.before, &ch.after].into_iter().flatten().map(|h| h.head.clone()));
+                named.extend([ch.before(), ch.after()].into_iter().flatten().map(|h| h.head.clone()));
                 named.extend([&ch.working_before, &ch.working_after].into_iter().flatten().cloned());
             }
             // An automatic save: undo reads the working state it changes from.
@@ -90,9 +90,9 @@ pub fn undo_entries(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
 pub fn deleted_entry(rec: &Record, ord: &str) -> Vec<(String, Vec<String>)> {
     rec.lines
         .iter()
-        .filter(|(_, ch)| ch.after.is_none())
+        .filter(|(_, ch)| ch.after().is_none())
         .filter_map(|(line, ch)| {
-            let before = ch.before.as_ref()?;
+            let before = ch.before()?;
             let mut named = vec![before.head.clone()];
             named.extend(ch.working_before.clone());
             named.extend(rec.data["staged_state"].as_str().map(str::to_string));
@@ -163,8 +163,8 @@ impl Db {
             rows.push((d.clone(), "derived".into(), state.to_string()));
         }
         for c in &s.conflicts {
-            for x in [&c.base, &c.ours, &c.theirs].into_iter().flatten() {
-                rows.push((x.clone(), "conflict".into(), state.to_string()));
+            for x in c.sides().into_iter().flatten() {
+                rows.push((x.to_string(), "conflict".into(), state.to_string()));
             }
         }
         Ok(rows)
@@ -992,7 +992,7 @@ mod tests {
             r.states.push(state(&id(n), StateKind::Auto, Some(LINE), vec![]));
             r.lines.insert(
                 LINE.into(),
-                LineChange { before: None, after: Some(head(&id(n))), working_before: None, working_after: None },
+                LineChange { transition: crate::model::LineTransition::Create { after: head(&id(n)) }, working_before: None, working_after: None },
             );
             apply(&db, &r);
         }
@@ -1007,8 +1007,8 @@ mod tests {
         let db = memory();
         for n in 1..=(UNDO_OPS_DEFAULT as u64 + 1) {
             let mut r = record(n, "save");
-            let mut ch = LineChange { before: None, after: None, working_before: None, working_after: Some(id(200 + n)) };
-            ch.after = Some(head(&id(100)));
+            let mut ch = LineChange { transition: crate::model::LineTransition::Delete { before: None }, working_before: None, working_after: Some(id(200 + n)) };
+            ch.transition = crate::model::LineTransition::Create { after: head(&id(100)) };
             r.lines.insert(LINE.into(), ch);
             apply(&db, &r);
         }
@@ -1041,14 +1041,14 @@ mod tests {
         r.states.push(state(&id(1), StateKind::Auto, Some(LINE), vec![]));
         r.lines.insert(
             LINE.into(),
-            LineChange { before: None, after: Some(head(&id(1))), working_before: None, working_after: Some(id(1)) },
+            LineChange { transition: crate::model::LineTransition::Create { after: head(&id(1)) }, working_before: None, working_after: Some(id(1)) },
         );
         apply(&db, &r);
         assert_eq!(owners_of(&db, "head", &format!("{LINE}@{MACHINE}")), vec![id(1)]);
         let mut del = record(2, "line.delete");
         del.lines.insert(
             LINE.into(),
-            LineChange { before: Some(head(&id(1))), after: None, working_before: Some(id(1)), working_after: None },
+            LineChange { transition: crate::model::LineTransition::Delete { before: Some(head(&id(1))) }, working_before: Some(id(1)), working_after: None },
         );
         apply(&db, &del);
         assert!(owners_of(&db, "head", &format!("{LINE}@{MACHINE}")).is_empty());
@@ -1064,14 +1064,14 @@ mod tests {
         let mut r1 = record(1, "save");
         r1.states.push(state(&a, StateKind::Commit, None, vec![]));
         r1.lines
-            .insert(LINE.into(), LineChange { before: None, after: Some(head(&a)), working_before: None, working_after: None });
+            .insert(LINE.into(), LineChange { transition: crate::model::LineTransition::Create { after: head(&a) }, working_before: None, working_after: None });
         recs.push(r1);
         let mut r2 = record(2, "save");
         r2.states.push(state(&b, StateKind::Commit, None, vec![a.clone()]));
         r2.states.push(state(&c, StateKind::Auto, Some(LINE), vec![b.clone()]));
         r2.lines.insert(
             LINE.into(),
-            LineChange { before: Some(head(&a)), after: Some(head(&b)), working_before: None, working_after: Some(c.clone()) },
+            LineChange { transition: crate::model::LineTransition::Move { before: head(&a), after: head(&b) }, working_before: None, working_after: Some(c.clone()) },
         );
         recs.push(r2);
         let mut r3 = record(3, "ref.set");
@@ -1106,7 +1106,7 @@ mod tests {
         r.states.push(state(&working, StateKind::Auto, Some(line), vec![]));
         r.lines.insert(
             line.into(),
-            LineChange { before: None, after: Some(head(&head_id)), working_before: None, working_after: Some(working) },
+            LineChange { transition: crate::model::LineTransition::Create { after: head(&head_id) }, working_before: None, working_after: Some(working) },
         );
         apply(db, &r);
     }
@@ -1116,7 +1116,7 @@ mod tests {
         let mut del = record(seq, "line.delete");
         del.lines.insert(
             line.into(),
-            LineChange { before: Some(head(&head_id)), after: None, working_before: Some(working), working_after: None },
+            LineChange { transition: crate::model::LineTransition::Delete { before: Some(head(&head_id)) }, working_before: Some(working), working_after: None },
         );
         apply(db, &del);
         del

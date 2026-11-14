@@ -40,23 +40,51 @@ impl fmt::Display for LineId {
     }
 }
 
-/// A full state UUID, parsed before taking its display prefix.
-pub struct StateId(Uuid);
+/// A full state UUID, stored in canonical form for borrowed catalog lookups.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StateId([u8; 36]);
 
 impl StateId {
     pub fn parse(text: &str) -> Result<Self, uuid::Error> {
-        Uuid::parse_str(text).map(Self)
+        let id = Uuid::parse_str(text)?;
+        let mut canonical = [0; 36];
+        id.hyphenated().encode_lower(&mut canonical);
+        Ok(Self(canonical))
     }
-
-    /// The first seven digits of the UUID's permuted display form.
+    pub fn as_str(&self) -> &str {
+        // Only parse constructs this private array, using UUID's ASCII formatter.
+        std::str::from_utf8(&self.0).expect("UUID formatting produces ASCII")
+    }
     #[must_use]
     pub fn short(&self) -> StatePrefix {
-        let b = self.0.as_bytes();
-        let mut prefix = hex::encode(&b[10..14]);
-        prefix.truncate(7);
-        StatePrefix(prefix)
+        // parse stores Uuid's canonical 36-byte ASCII form; these are digits 0..7
+        // of its final 12-digit group, the existing permuted display prefix.
+        StatePrefix(self.as_str()[24..31].to_owned())
     }
 }
+
+macro_rules! digest_id {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub struct $name([u8; 64]);
+        impl $name {
+            pub fn parse(text: &str) -> Result<Self, &'static str> {
+                if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                    return Err("expected 64 lowercase hexadecimal digits");
+                }
+                let mut canonical = [0; 64];
+                canonical.copy_from_slice(text.as_bytes());
+                Ok(Self(canonical))
+            }
+            pub fn as_str(&self) -> &str {
+                // parse accepts exactly 64 lowercase ASCII hex digits; the field is private.
+                std::str::from_utf8(&self.0).expect("parsed digest is ASCII")
+            }
+        }
+    };
+}
+digest_id!(TreeId);
+digest_id!(ViewId);
 
 /// A display prefix, distinct from a full state identifier.
 pub struct StatePrefix(String);

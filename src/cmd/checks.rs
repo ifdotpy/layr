@@ -479,7 +479,7 @@ fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: boo
     if !watched_lines.is_empty() {
         for record in repo.p.db.records(usize::MAX >> 1)? {
             for (id, movement) in record.lines {
-                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after) {
+                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after()) {
                     for name in names {
                         jobs.insert((after.head.clone(), name.clone()));
                     }
@@ -571,7 +571,7 @@ fn attested_result(
     if repo.p.db.check_exit(state, argv, if passing { Some(0) } else { None })?.is_none() {
         return Ok(false);
     }
-    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = Subject::state(state)?;
     Ok(crate::probes::active_checks(repo, &subject)?
         .into_values()
         .any(|(_, r)| matches_check(&r.data["check"], argv, privileged, want, passing)))
@@ -624,7 +624,7 @@ fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMa
     let Some(list) = after.get(name).and_then(Value::as_array) else {
         return Ok(Needs::Ready);
     };
-    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = Subject::state(state)?;
     let results: Vec<Value> =
         crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
     for need in list.iter().filter_map(Value::as_str) {
@@ -797,7 +797,7 @@ fn creator_policy(project: &str, records: Vec<layr_model::record::AuthorizedReco
         let record = record.record();
         if model.admins.contains(&record.machine) {
             for movement in record.lines.values() {
-                if let Some(after) = &movement.after {
+                if let Some(after) = movement.after() {
                     if after.name == "main" {
                         states.insert(after.head.clone());
                     }

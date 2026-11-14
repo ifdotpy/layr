@@ -453,12 +453,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
-            LineChange {
-                before: Some(repo.line_state(&l, &l.head)),
-                after: Some(after),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&l, &l.head), after: after }, working_before: None, working_after: None },
         );
         rec.data = serde_json::json!({"from": old, "to": new});
         if let Err(e) = repo.commit_record(&_lock, ctx, rec) {
@@ -738,7 +733,7 @@ pub(crate) fn delete_recorded(
     let mut rec = crate::model::DraftRecord::new("line.delete");
     rec.lines.insert(
         l.id.clone(),
-        LineChange { before: Some(repo.line_state(l, &l.head)), after: None, working_before: last.clone(), working_after: None },
+        LineChange { transition: crate::model::LineTransition::Delete { before: Some(repo.line_state(l, &l.head)) }, working_before: last.clone(), working_after: None },
     );
     rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
     repo.commit_record(locked, ctx, rec)?;
@@ -818,12 +813,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut rec = crate::model::DraftRecord::new("line.adopt");
     rec.lines.insert(
         l.id.clone(),
-        LineChange {
-            before: Some(repo.line_state(&l, &l.head)),
-            after: Some(repo.line_state(&moved, &l.head)),
-            working_before: None,
-            working_after: Some(start.clone()),
-        },
+        LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&l, &l.head), after: repo.line_state(&moved, &l.head) }, working_before: None, working_after: Some(start.clone()) },
     );
     let shown = repo.readable_layers(&moved)?;
     rec.data = serde_json::json!({

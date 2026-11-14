@@ -8,7 +8,7 @@ use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Conflict, Line, StateKind};
+use crate::model::{Conflict, ConflictDetails, ConflictKind, Line, StateKind};
 use crate::radar::Overlap;
 use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
@@ -26,12 +26,12 @@ fn xy(c: &EntryChange) -> char {
     }
 }
 
-fn conflict_code(kind: &str) -> &'static str {
-    match kind {
-        "add/add" => "AA",
-        "modify/delete" => "UD",
-        "delete/modify" => "DU",
-        "rename/delete" => "AU",
+fn conflict_code(details: &ConflictDetails) -> &'static str {
+    match details {
+        ConflictDetails::Known { kind: ConflictKind::AddAdd, .. } => "AA",
+        ConflictDetails::Known { kind: ConflictKind::ModifyDelete, .. } => "UD",
+        ConflictDetails::Known { kind: ConflictKind::DeleteModify, .. } => "DU",
+        ConflictDetails::Known { kind: ConflictKind::RenameDelete, .. } => "AU",
         _ => "UU",
     }
 }
@@ -100,7 +100,7 @@ impl<'a> From<&'a EntryChange> for StatusChange<'a> {
 struct StatusConflict<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     base: Option<&'a str>,
-    kind: &'a str,
+    kind: std::borrow::Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ours: Option<&'a str>,
     path: &'a str,
@@ -110,7 +110,8 @@ struct StatusConflict<'a> {
 
 impl<'a> From<&'a Conflict> for StatusConflict<'a> {
     fn from(c: &'a Conflict) -> Self {
-        Self { base: c.base.as_deref(), kind: &c.kind, ours: c.ours.as_deref(), path: &c.path, theirs: c.theirs.as_deref() }
+        let [base, ours, theirs] = c.sides();
+        Self { base, kind: c.kind(), ours, path: &c.path, theirs }
     }
 }
 
@@ -247,7 +248,7 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !matches(&specs, &c.path) {
                 continue;
             }
-            let code = conflict_code(&c.kind);
+            let code = conflict_code(&c.details);
             let b = code.as_bytes();
             rows.insert(c.path.clone(), (b[0] as char, b[1] as char, None));
         }
@@ -334,14 +335,14 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "Unmerged paths:\n  (fix the files, then \"layr add <file>...\" and \"layr save -m <message>\")");
         for c in &st.conflicts {
             if matches(&specs, &c.path) {
-                let what = match c.kind.as_str() {
-                    "content" => "both modified:",
-                    "add/add" => "both added:   ",
-                    "modify/delete" => "deleted by them:",
-                    "delete/modify" => "deleted by us:",
+                let what = match &c.details {
+                    ConflictDetails::Known { kind: ConflictKind::Content, .. } => "both modified:",
+                    ConflictDetails::Known { kind: ConflictKind::AddAdd, .. } => "both added:   ",
+                    ConflictDetails::Known { kind: ConflictKind::ModifyDelete, .. } => "deleted by them:",
+                    ConflictDetails::Known { kind: ConflictKind::DeleteModify, .. } => "deleted by us:",
                     _ => "conflict:     ",
                 };
-                outln!(ctx, "\t{what}   {} ({})", h.rel(&c.path), c.kind);
+                outln!(ctx, "\t{what}   {} ({})", h.rel(&c.path), c.kind());
             }
         }
         outln!(ctx);
@@ -1207,7 +1208,7 @@ pub(crate) fn named_checks(
     // Content conflicts stay listed while the committed file has markers; the commit clears the other kinds.
     let mut cleared = Vec::new();
     for c in &head.conflicts {
-        if (c.kind == "content" || c.kind == "add/add") && conflict_open(new_root, c)? {
+        if (c.uses_markers()) && conflict_open(new_root, c)? {
             state.conflicts.push(c.clone());
         } else {
             cleared.push(c.clone());
@@ -1589,7 +1590,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let staged = changes::with_renames(&head_root, &new_root, staged);
         print_summary(ctx, &head_root, &new_root, &staged)?;
         for c in &cleared {
-            outln!(ctx, " resolved conflict: {} ({})", c.path, c.kind);
+            outln!(ctx, " resolved conflict: {} ({})", c.path, c.kind());
         }
         if !state.conflicts.is_empty() {
             outln!(ctx, "warning: {} file(s) still have conflict markers; see 'layr status'", state.conflicts.len());
@@ -1871,7 +1872,8 @@ pub fn restore_impl(
             if !matches(&specs, &c.path) {
                 continue;
             }
-            let sid = if ours { c.ours.clone() } else { c.theirs.clone() };
+            let [_, our_state, their_state] = c.sides();
+            let sid = if ours { our_state } else { their_state };
             let sid = match sid {
                 Some(s) => s,
                 None => continue,
@@ -2019,12 +2021,7 @@ fn working_record(
     let working_after = repo.after_state(ctx, line, op, &mut rec)?;
     rec.lines.insert(
         line.id.clone(),
-        crate::model::LineChange {
-            before: Some(repo.line_state(line, &line.head)),
-            after: Some(repo.line_state(line, &line.head)),
-            working_before,
-            working_after,
-        },
+        crate::model::LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(line, &line.head), after: repo.line_state(line, &line.head) }, working_before: working_before, working_after: working_after },
     );
     let states = rec.states.clone();
     Ok((rec, states))
@@ -2424,14 +2421,12 @@ mod status_tests {
         let line = line();
         let st = Status {
             conflicts: vec![
-                Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None },
-                Conflict {
-                    path: "other.txt".into(),
-                    kind: "content".into(),
-                    base: Some("base".into()),
-                    ours: Some("ours".into()),
-                    theirs: Some("theirs".into()),
-                },
+                Conflict::new("shared.txt", crate::model::ConflictKind::Content, crate::model::ConflictSides::Unrecorded),
+                Conflict::new("other.txt", crate::model::ConflictKind::Content, crate::model::ConflictSides::Recorded {
+                    base: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000001").unwrap(),
+                    ours: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000002").unwrap(),
+                    theirs: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000003").unwrap(),
+                }),
             ],
             ..Status::default()
         };
@@ -2440,7 +2435,7 @@ mod status_tests {
         let output = StatusJson::new(&line, &st, &[], &overlaps, &options);
         assert_eq!(
             serde_json::to_string(&output).unwrap(),
-            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"base","kind":"content","ours":"ours","path":"other.txt","theirs":"theirs"}],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
+            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"01a12290-0000-7000-8000-000000000001","kind":"content","ours":"01a12290-0000-7000-8000-000000000002","path":"other.txt","theirs":"01a12290-0000-7000-8000-000000000003"}],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
         );
     }
 
@@ -2455,7 +2450,7 @@ mod status_tests {
         let st = Status {
             ignored: vec!["debug.log".into()],
             untracked: vec!["new.txt".into()],
-            conflicts: vec![Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None }],
+            conflicts: vec![Conflict::new("shared.txt", crate::model::ConflictKind::Content, crate::model::ConflictSides::Unrecorded)],
             ..Status::default()
         };
         let overlaps = [Overlap { path: "shared.txt".into(), line: "other".into(), owner: 0, changed_at: 0 }];

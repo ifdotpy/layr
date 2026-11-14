@@ -1,8 +1,8 @@
 {
   "layr": {
-    "clippy::unwrap_used": 2785,
+    "clippy::unwrap_used": 2789,
     "clippy::expect_used": 112,
-    "clippy::panic": 10,
+    "clippy::panic": 13,
     "clippy::cast_possible_truncation": 123,
     "clippy::cast_sign_loss": 27,
     "clippy::cast_possible_wrap": 66,
@@ -24,9 +24,9 @@
     "clippy::cast_sign_loss": 1
   },
   "layr-model": {
-    "clippy::unwrap_used": 286,
+    "clippy::unwrap_used": 300,
     "clippy::expect_used": 4,
-    "clippy::panic": 1,
+    "clippy::panic": 9,
     "clippy::cast_possible_truncation": 14,
     "clippy::cast_sign_loss": 2,
     "clippy::cast_possible_wrap": 13
@@ -58,5 +58,8 @@
     "clippy::expect_used": 4,
     "clippy::cast_possible_truncation": 18,
     "clippy::unwrap_used": 11
+  },
+  "layr-types": {
+    "clippy::expect_used": 2
   }
 }

@@ -370,7 +370,7 @@ impl Project {
         }
         let Some(machine) = principal.strip_prefix("machine:") else { return false };
         self.attestations.iter().any(|(index, a)| {
-            a.subject.id == state
+            a.subject.id() == state
                 && a.kind == "approval"
                 && a.signer == machine
                 && !self.is_revoked(&a.attestation_id)
@@ -468,13 +468,13 @@ mod tests {
     }
     fn versions() -> Vec<Record> {
         let mut first = record(1, "commit");
-        first.states.push(state("s1", StateKind::Commit, &[]));
+        first.states.push(state("01a12290-0000-7000-8001-000000000001", StateKind::Commit, &[]));
         let mut second = record(2, "commit");
-        second.states.push(state("s2", StateKind::Commit, &["s1"]));
+        second.states.push(state("01a12290-0000-7000-8001-000000000002", StateKind::Commit, &["01a12290-0000-7000-8001-000000000001"]));
         vec![first, second]
     }
     fn comment(seq: u64, machine: &str, id: &str, reply_to: Option<&str>) -> Record {
-        let mut c = json!({"id":id,"change_id":"change","version":"s1","text":format!("text {id}")});
+        let mut c = json!({"id":id,"change_id":"change","version":"01a12290-0000-7000-8001-000000000001","text":format!("text {id}")});
         if let Some(to) = reply_to {
             c["reply_to"] = json!(to);
         }
@@ -598,15 +598,15 @@ mod tests {
     fn reviewer_status_follows_approvals_and_comments() {
         let mut records = versions();
         // Uid 10 on the perspective machine `a` approved the newest version, uid 11 an older one.
-        records.push(on(3, "a", 3, "approve", json!({"state":"s2"})));
-        let mut older = on(4, "a", 4, "approve", json!({"state":"s1"}));
+        records.push(on(3, "a", 3, "approve", json!({"state":"01a12290-0000-7000-8001-000000000002"})));
+        let mut older = on(4, "a", 4, "approve", json!({"state":"01a12290-0000-7000-8001-000000000001"}));
         older.actor.uid = 11;
         records.push(older);
         let mut talk = comment(5, "a", "c1", None);
         talk.actor.uid = 12;
         records.push(talk);
         // Machine b approved the newest version.
-        records.push(on(1, "b", 6, "approve", json!({"state":"s2"})));
+        records.push(on(1, "b", 6, "approve", json!({"state":"01a12290-0000-7000-8001-000000000002"})));
         for (seq, who) in
             [(6, "user:10"), (7, "user:11"), (8, "user:12"), (9, "user:13"), (10, "machine:b"), (11, "person:ann@example.com")]
         {

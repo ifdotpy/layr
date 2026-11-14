@@ -193,7 +193,7 @@ impl Store {
                 && after["status"] == "done"
                 && after["target_line"] == main.id
                 && after["result"] == *merged
-                && record.lines.get(&main.id).and_then(|change| change.after.as_ref()).is_some_and(|line| line.head == *merged)
+                && record.lines.get(&main.id).and_then(|change| change.after()).is_some_and(|line| line.head == *merged)
         });
         if !completed {
             bail!("merge machine main head has no matching queue completion");

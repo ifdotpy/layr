@@ -1578,15 +1578,15 @@ impl<'a> Project<'a> {
         let mut lines = Vec::new();
         for (id, change) in &record.lines {
             let own = match self.db.line_machine(id)? {
-                None => change.before.is_none(),
+                None => matches!(change.transition, crate::model::LineTransition::Create { .. }),
                 Some(machine) => machine == record.machine,
             };
-            let name = change.after.as_ref().map(|after| after.name.as_str());
-            let renamed = change.before.as_ref().is_some_and(|before| Some(before.name.as_str()) != name);
-            let after = change.after.as_ref();
+            let name = change.after().map(|after| after.name.as_str());
+            let renamed = change.before().is_some_and(|before| Some(before.name.as_str()) != name);
+            let after = change.after();
             lines.push(layr_store::trust::LineMove {
                 id,
-                new: change.before.is_none(),
+                new: matches!(change.transition, crate::model::LineTransition::Create { .. }),
                 name,
                 own,
                 renamed,

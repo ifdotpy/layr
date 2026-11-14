@@ -289,12 +289,7 @@ impl Repo<'_> {
                 }
                 rec.lines.insert(
                     line.id.clone(),
-                    LineChange {
-                        before: None,
-                        after: Some(self.line_state(line, start)),
-                        working_before: None,
-                        working_after: None,
-                    },
+                    LineChange { transition: crate::model::LineTransition::Create { after: self.line_state(line, start) }, working_before: None, working_after: None },
                 );
                 recs.push(rec);
             }
@@ -533,12 +528,7 @@ mod batch_commit_tests {
             rec.data = serde_json::json!({"name": line.name, "start": start});
             rec.lines.insert(
                 line.id.clone(),
-                LineChange {
-                    before: None,
-                    after: Some(repo.line_state(&line, &start)),
-                    working_before: None,
-                    working_after: None,
-                },
+                LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &start) }, working_before: None, working_after: None },
             );
             lines.push(line);
             tmps.push(tmp);

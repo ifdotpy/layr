@@ -1859,7 +1859,7 @@ impl<'a> Repo<'a> {
         let mut rec = crate::model::DraftRecord::new("line.create");
         rec.lines.insert(
             line.id.clone(),
-            LineChange { before: None, after: Some(self.line_state(&line, start)), working_before: None, working_after: None },
+            LineChange { transition: crate::model::LineTransition::Create { after: self.line_state(&line, start) }, working_before: None, working_after: None },
         );
         rec.data = serde_json::json!({"name": name, "start": start});
         locked.append(rec, &ctx.actor())?;
@@ -1946,12 +1946,7 @@ impl<'a> Repo<'a> {
         let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
-            LineChange {
-                before: Some(self.line_state(&l, &l.head)),
-                after: Some(after),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::model::LineTransition::Move { before: self.line_state(&l, &l.head), after: after }, working_before: None, working_after: None },
         );
         rec.data = serde_json::json!({"from": l.name, "to": name});
         locked.append(rec, &ctx.actor())?;
@@ -2345,7 +2340,7 @@ pub fn move_overlay_line(
     let st = |h: &str| LineState { name: ol.name.clone(), head: h.to_string(), owner: ol.owner, machine: ol.machine.clone() };
     rec.lines.insert(
         ol.id.clone(),
-        LineChange { before: Some(st(&ol.head)), after: Some(st(head)), working_before: None, working_after: None },
+        LineChange { transition: crate::model::LineTransition::Move { before: st(&ol.head), after: st(head) }, working_before: None, working_after: None },
     );
     rec.data = serde_json::json!({"line": ol.id});
     orepo.commit_record(locked, ctx, rec)?;
@@ -2457,7 +2452,7 @@ pub fn commit_layers(
         if let Some(prev) = orepo.p.db.state(&l.state)? {
             let root = orepo.p.state_path(&st.id);
             for c in &prev.conflicts {
-                if (c.kind == "content" || c.kind == "add/add") && crate::repo::conflict_open(&root, c)? {
+                if (c.uses_markers()) && crate::repo::conflict_open(&root, c)? {
                     st.conflicts.push(c.clone());
                 }
             }
@@ -2504,7 +2499,7 @@ pub fn commit_layers(
                 // Content conflicts stay listed while the committed file has markers.
                 let root = repo.p.state_path(&st.id);
                 for c in &head.conflicts {
-                    if (c.kind == "content" || c.kind == "add/add") && crate::repo::conflict_open(&root, c)? {
+                    if (c.uses_markers()) && crate::repo::conflict_open(&root, c)? {
                         st.conflicts.push(c.clone());
                     }
                 }

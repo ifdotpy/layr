@@ -207,7 +207,7 @@ fn page_outputs(
     let mut summary = json!({"id":project.id,"name":project.name.as_ref().context("project has no name record")?,"config":project.config,"overlays":overlays,
         "counts":{"lines":lines.len(),"states":project.states.len(),"changes":project.changes().len(),"refs":project.ref_list("",context.now).len(),"queue":project.queue_list(None).len(),"operations":records.len(),"attestations":records.iter().filter(|r|r.data.get("attestation").is_some() || matches!(r.op.as_str(),"approve"|"approve.withdraw"|"check")).count()}});
     if let Some(initial) =
-        records.iter().rev().flat_map(|r| r.lines.iter()).find(|(_, c)| c.before.is_none() && c.after.is_some())
+        records.iter().rev().flat_map(|r| r.lines.iter()).find(|(_, c)| c.before().is_none() && c.after().is_some())
     {
         if let Some(line) = lines.iter().find(|l| l.id == *initial.0) {
             summary["default_line"] = json!(line.name);
@@ -502,7 +502,6 @@ fn main() -> Result<()> {
     }
     let line = project.line_list().into_iter().find(|line| line.name == request.line).context("requested line is absent")?;
     ensure!(project.change_versions(&request.change).len() == 3, "fixture change must have three versions");
-    let subject = |id: String| Subject { kind: "state".into(), id };
     fs::create_dir_all(&args[2])?;
     write(&args[2], "lines", project.line_list())?;
     write(&args[2], "log", project.log(&[line.head.clone()], None, usize::MAX))?;
@@ -513,8 +512,8 @@ fn main() -> Result<()> {
     write(&args[2], "queue", project.queue_list_json(None)?)?;
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
-    let probe_base = subject(request.probe_base);
-    let probe_head = subject(request.probe_head);
+    let probe_base = Subject::state(&request.probe_base)?;
+    let probe_head = Subject::state(&request.probe_head)?;
     write(&args[2], "probe-diff", probes::diff(project, &probe_base, &probe_head, &context)?)?;
     write(&args[2], "probe-same", probes::diff(project, &probe_head, &probe_head, &context)?)?;
     let mut merge_context = layr_model::protection::Context {

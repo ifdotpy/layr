@@ -692,7 +692,7 @@ fn medium(s: &StateRec, decor: &Decor, date_style: &str, kind_note: bool, human:
     if !s.conflicts.is_empty() {
         o.push_str("\n    Conflicts:\n");
         for c in &s.conflicts {
-            o.push_str(&format!("    \t{} ({})\n", c.path, c.kind));
+            o.push_str(&format!("    \t{} ({})\n", c.path, c.kind()));
         }
     }
     o

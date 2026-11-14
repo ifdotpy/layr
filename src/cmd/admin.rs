@@ -612,10 +612,10 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
     for (lid, ch) in &r.lines {
-        let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before.as_ref().map(|b| b.owner)).unwrap_or(0);
+        let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before().map(|b| b.owner)).unwrap_or(0);
         let probe = Line {
             id: lid.clone(),
-            name: ch.before.as_ref().or(ch.after.as_ref()).map(|s| s.name.clone()).unwrap_or_default(),
+            name: ch.before().or(ch.after()).map(|s| s.name.clone()).unwrap_or_default(),
             head: String::new(),
             owner,
             machine: String::new(),
@@ -674,7 +674,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let now = repo.line_state(&line, &line.head);
     rec.lines.insert(
         lid.clone(),
-        LineChange { before: Some(now.clone()), after: Some(now), working_before: wb.clone(), working_after: Some(before) },
+        LineChange { transition: crate::model::LineTransition::Move { before: now.clone(), after: now }, working_before: wb.clone(), working_after: Some(before) },
     );
     let head0 = line.head.clone();
     let done = match repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec)) {
@@ -723,7 +723,7 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
         return false;
     }
     r.lines.iter().all(|(lid, ch)| {
-        let Some(before) = &ch.before else {
+        let Some(before) = ch.before() else {
             return false;
         };
         match repo.p.db.line_by_id(lid) {
@@ -871,7 +871,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             .map(|l| repo.p.db.line_by_name(&l.name).ok().flatten().map(|x| x.id == l.id).unwrap_or(false))
             .unwrap_or(false);
         let cur_state = if alive { cur_state } else { None };
-        if !force && cur_state.as_ref().map(|s| (&s.name, &s.head)) != ch.after.as_ref().map(|s| (&s.name, &s.head)) {
+        if !force && cur_state.as_ref().map(|s| (&s.name, &s.head)) != ch.after().map(|s| (&s.name, &s.head)) {
             return Err(exit(
                 1,
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
@@ -882,7 +882,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let mut needed: Vec<String> = Vec::new();
     for ch in r.lines.values() {
         needed.extend(
-            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
+            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
                 .into_iter()
                 .flatten(),
         );
@@ -910,7 +910,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let mut written: Vec<(Line, Option<String>)> = Vec::new();
     for (lid, ch, cur, alive, cur_state) in lines {
         let mut wb = None;
-        match (&ch.before, &cur) {
+        match (ch.before(), &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
                 wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
@@ -981,12 +981,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         rec.lines.insert(
             lid.clone(),
-            LineChange {
-                before: cur_state,
-                after: ch.before.clone(),
-                working_before: wb,
-                working_after: ch.working_before.clone(),
-            },
+            LineChange { transition: crate::model::LineTransition::from_endpoints(cur_state, ch.before().cloned()), working_before: wb, working_after: ch.working_before.clone() },
         );
     }
     for (name, ol, parent) in &overlay_back {

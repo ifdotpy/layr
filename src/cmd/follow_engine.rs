@@ -725,12 +725,7 @@ mod tests {
             let mut creation = crate::model::DraftRecord::new("line.create");
             creation.lines.insert(
                 line.id.clone(),
-                LineChange {
-                    before: None,
-                    after: Some(repo.line_state(&line, &line.head)),
-                    working_before: None,
-                    working_after: None,
-                },
+                LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &line.head) }, working_before: None, working_after: None },
             );
             locked.append(creation, &ctx.actor())?;
         }

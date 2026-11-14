@@ -15,9 +15,9 @@ use anyhow::{bail, Result};
 fn subject(repo: &Repo, line: Option<&crate::model::Line>, rev: &str) -> Result<Subject> {
     if let Some(id) = rev.strip_prefix("views/") {
         repo.saved_view(id)?;
-        Ok(Subject { kind: "view".into(), id: id.into() })
+        Ok(Subject::view(id)?)
     } else {
-        Ok(Subject { kind: "state".into(), id: crate::revs::resolve(repo, line, rev)? })
+        Ok(Subject::state(&crate::revs::resolve(repo, line, rev)?)?)
     }
 }
 
@@ -44,12 +44,12 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // A revoke takes the attestations of its own user; root speaks for every user of this machine
         // (a check runner's service user, for example).
         let uid = (!ctx.caller.is_root()).then_some(ctx.caller.uid);
-        let ids = h.repo.p.db.own_attestations(&subject.id, &h.repo.p.store.machine.id, uid, None)?;
+        let ids = h.repo.p.db.own_attestations(subject.id(), &h.repo.p.store.machine.id, uid, None)?;
         if ids.is_empty() {
             eprintln!(
                 "warning: no attestation of {} on this machine for {} to revoke",
                 if uid.is_some() { "this user" } else { "any user" },
-                crate::ids::short(&subject.id)
+                crate::ids::short(subject.id())
             );
         }
         rec.data["revokes"] = serde_json::json!(ids);
@@ -58,7 +58,7 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("--json") {
         outln!(ctx, "{}", rec.data["attestation"]);
     } else {
-        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, subject.id);
+        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, subject.id());
     }
     Ok(0)
 }
@@ -75,7 +75,7 @@ pub fn attestations(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let subject = subject(&h.repo, h.line.as_ref(), &a.pos[0])?;
-    let v = h.repo.p.db.attestations(&subject.id, a.get("--kind"))?;
+    let v = h.repo.p.db.attestations(subject.id(), a.get("--kind"))?;
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&v)?);
     } else {
