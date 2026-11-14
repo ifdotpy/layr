@@ -1226,7 +1226,7 @@ struct NamedPrepared<'p, 's> {
     pending: Option<crate::apfs_commit::PendingCommit<'p, 's>>,
     state: crate::model::StateRec,
     new_root: crate::repo::Snap,
-    all_changes: Vec<Change>,
+    compared: crate::objstore::Compared,
     /// The staged changes and the conflicts that the save clears; None: nothing to save.
     checks: Option<(Vec<Change>, Vec<crate::model::Conflict>)>,
 }
@@ -1268,15 +1268,15 @@ fn prepare_named_save<'p, 's>(
         None => repo.state_src(&state.id)?,
     };
     // An attribute-only change that `add` staged is a change of the state.
-    let all_changes = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root))?;
-    let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &all_changes, opts)?;
+    let compared = crate::objstore::compare(&head_root, new_root.clone())?;
+    let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &compared.files, opts)?;
     // The clone is durable before the project lock: under the lock only the rename and the record.
     #[cfg(target_os = "macos")]
     if let (Some(pc), Some(_)) = (&pending, &checks) {
         pc.sync_tree()?;
         crate::store::failpoint("pending-synced");
     }
-    Ok(NamedPrepared { head_id: line.head.clone(), head_root, pending, state, new_root, all_changes, checks })
+    Ok(NamedPrepared { head_id: line.head.clone(), head_root, pending, state, new_root, compared, checks })
 }
 
 fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1433,7 +1433,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
     #[cfg(not(target_os = "macos"))]
-    let (head_root, mut state, new_root, all_changes) = {
+    let (head_root, mut state, new_root, compared) = {
         let head_root = h.repo.state_src(&line.head)?;
         let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
         let stage = h.repo.current_stage(&line)?;
@@ -1450,24 +1450,24 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(e);
             }
         };
-        let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
+        let compared = match crate::objstore::compare(&head_root, new_root.clone()) {
             Ok(v) => v,
             Err(e) => {
                 h.repo.discard_states(std::slice::from_ref(&state));
                 return Err(e);
             }
         };
-        (head_root, state, new_root, all_changes)
+        (head_root, state, new_root, compared)
     };
     // On APFS the state, its tree and the changes were made before the lock.
     #[cfg(target_os = "macos")]
-    let NamedPrepared { head_root, mut pending, mut state, checks, .. } =
+    let NamedPrepared { head_root, mut pending, mut state, checks, compared, .. } =
         prepared.take().ok_or_else(|| anyhow::anyhow!("internal error: named save was not prepared"))?;
     #[cfg(target_os = "macos")]
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("internal error: named save has no checks"))?;
     #[cfg(not(target_os = "macos"))]
     let (staged, cleared) =
-        match named_checks(ctx, &h.repo, &head, &mut state, &head_root, &new_root, &line, &all_changes, named_opts(&a))? {
+        match named_checks(ctx, &h.repo, &head, &mut state, &head_root, &new_root, &line, &compared.files, named_opts(&a))? {
             Some(checks) => checks,
             None => {
                 h.repo.discard_states(std::slice::from_ref(&state));
@@ -1494,6 +1494,8 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
             target_head: line.head.clone(),
         })?;
     }
+    // Read the checked snapshot before APFS publication moves its private clone.
+    compared.record(&h.repo.p, &mut state)?;
     #[cfg(target_os = "macos")]
     if let Some(pc) = pending.as_mut() {
         let _t = crate::trace::span("publish clone");

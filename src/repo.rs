@@ -5,9 +5,7 @@ use crate::access::{Policy, Role, Rule, Who};
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
 use crate::db::need;
-use crate::fsutil;
-#[cfg(target_os = "macos")]
-use crate::fsutil::Src;
+use crate::fsutil::{self, Src};
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
@@ -1284,18 +1282,6 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// True when state `id` differs from the save base of `line`. Without a base, every state
-    /// differs. Confirmed file changes count: the raw candidates also list folders and files that
-    /// only got new times, such as the working folder after a named state.
-    fn changed_since_save_base(&self, line: &Line, id: &str) -> Result<bool> {
-        let prev = self.save_base(line)?;
-        if !self.tree_available(&prev) {
-            return Ok(true);
-        }
-        let base = self.state_src(&prev)?;
-        changes::any_file_change(&base, &self.state_src(id)?, skip_path)
-    }
-
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
     pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
@@ -1428,8 +1414,26 @@ impl<'a> Repo<'a> {
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
         st.running = running || crate::fsutil::take_unsettled();
         if !force {
-            let changed = match self.changed_since_save_base(line, &st.id) {
-                Ok(changed) => changed,
+            let checked = (|| -> Result<bool> {
+                let prev = self.save_base(line)?;
+                if !self.tree_available(&prev) {
+                    return Ok(true);
+                }
+                let base = self.state_src(&prev)?;
+                let source = self.state_src(&st.id)?;
+                if base.objects().is_some() && source.folder().is_some() && crate::objstore::enabled(&self.p)? {
+                    let compared = crate::objstore::compare(&base, source)?;
+                    let changed = compared.files.iter().any(|c| !skip_path(&c.path));
+                    if changed {
+                        compared.record(&self.p, &mut st)?;
+                    }
+                    Ok(changed)
+                } else {
+                    changes::any_file_change(&base, &source, skip_path)
+                }
+            })();
+            let changed = match checked {
+                Ok(checked) => checked,
                 Err(e) => {
                     self.discard_states(std::slice::from_ref(&st));
                     return Err(e);

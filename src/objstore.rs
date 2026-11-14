@@ -149,16 +149,21 @@ impl layr_objects::write::Source for SnapshotSource<'_> {
     }
 
     fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        use crate::fsutil::Src;
         use std::os::unix::ffi::OsStrExt;
+        if self.0.folder().is_some() {
+            // A complete immutable folder already defines the visible names. Resolving
+            // each sibling here would defeat the changed writer's metadata pruning.
+            return std::fs::read_dir(self.path(relative)?)?
+                .map(|entry| Ok(entry?.file_name().as_bytes().to_vec()))
+                .collect();
+        }
         let rel = std::str::from_utf8(relative).context("a layr path is not UTF-8")?;
         let mut names = std::collections::BTreeSet::new();
         #[cfg(target_os = "macos")]
         let folders: Vec<PathBuf> = self.0.layers.iter().map(|l| l.root.join(rel)).collect();
         #[cfg(not(target_os = "macos"))]
-        let folders = {
-            use crate::fsutil::Src;
-            self.0.folder().map(|p| vec![p.join(rel)]).unwrap_or_default()
-        };
+        let folders = self.0.folder().map(|p| vec![p.join(rel)]).unwrap_or_default();
         #[cfg(target_os = "macos")]
         let objects = self.0.object_base.as_deref();
         #[cfg(not(target_os = "macos"))]
@@ -214,6 +219,77 @@ pub fn enabled(p: &Project) -> Result<bool> {
     Ok(on(crate::db::Db::open(&path)?.config(ENABLED)?))
 }
 
+/// Comparison of an immutable save snapshot. Its delta stays bound to that snapshot
+/// and the object refs it was checked against until publication.
+pub struct Compared {
+    pub files: Vec<crate::changes::Change>,
+    source: crate::repo::Snap,
+    delta: Option<CheckedDelta>,
+}
+
+struct CheckedDelta {
+    refs: StateRef,
+    changed: Vec<Vec<u8>>,
+    dirty: Vec<Vec<u8>>,
+}
+
+pub fn compare(parent: &crate::repo::Snap, source: crate::repo::Snap) -> Result<Compared> {
+    use crate::fsutil::Src;
+    if let (Some(objects), Some(folder)) = (parent.objects(), source.folder()) {
+        let comparison = crate::changes::compare_for_write(parent, folder)?;
+        let delta = CheckedDelta { refs: objects.refs, changed: comparison.changed, dirty: comparison.dirty };
+        return Ok(Compared { files: comparison.files, source, delta: Some(delta) });
+    }
+    #[cfg(target_os = "macos")]
+    let files = crate::storage::with_stored_compare(|| crate::changes::file_changes(parent, &source))?;
+    #[cfg(not(target_os = "macos"))]
+    let files = crate::changes::file_changes(parent, &source)?;
+    Ok(Compared { files, source, delta: None })
+}
+
+impl Compared {
+    /// Store checked object deltas before the record is signed. Other sources keep the
+    /// existing publication fallback. Call only after the save's checks succeed.
+    pub fn record(self, p: &Project, state: &mut crate::model::StateRec) -> Result<()> {
+        let Some(CheckedDelta { refs, changed, dirty }) = self.delta else { return Ok(()) };
+        if !enabled(p)? || state.tree.is_some() {
+            return Ok(());
+        }
+        let store = open(p)?;
+        let options = layr_objects::WriteOptions {
+            temperature: layr_objects::Temperature::Hot,
+            previous: None,
+            exclude: Vec::new(),
+            similar: false,
+        };
+        let _trace = crate::trace::span("write checked objects");
+        let written = layr_objects::write::write_changed_with_dirty_from(
+            &store,
+            &SnapshotSource(&self.source),
+            &layr_objects::write::Base { tree: refs.tree, times: refs.times },
+            &changed,
+            &dirty,
+            &options,
+        )?;
+        attach(p, &store, state, written)
+    }
+}
+
+fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, written: layr_objects::WriteReport) -> Result<()> {
+    let _trace = crate::trace::span(format!("objects write {:?}: {} files", written.mode, written.files));
+    let refs = StateRef {
+        tree: written.tree.context("object write gave no tree")?,
+        times: written.times.context("object write gave no times")?,
+    };
+    store.set_state(&state.id, &refs)?;
+    state.tree = Some(refs.tree.hex());
+    state.times = Some(refs.times.hex());
+    if !p.is_overlay() || state.cache_of.is_some() {
+        queue_native(p, &state.id)?;
+    }
+    Ok(())
+}
+
 /// Attach durable objects before signing each new source state. Native copies remain until
 /// command cleanup, so callers can finish with the paths they already hold.
 pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Result<()> {
@@ -235,11 +311,7 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
             exclude: Vec::new(),
             similar: false,
         };
-        #[cfg(target_os = "macos")]
-        let incremental = incremental_base(p, &store, &state.id)?;
-        #[cfg(not(target_os = "macos"))]
-        // Publication holds the project lock, so retirement cannot remove the parent.
-        let incremental = native_write_base(p, &store, state.parents.first().map(String::as_str), &source)?;
+        let incremental = state_write_base(p, &store, &state.id, state.parents.first().map(String::as_str), &source)?;
         let source = SnapshotSource(&source);
         let written = match incremental {
             Some((refs, paths)) => layr_objects::write::write_changed_from(
@@ -249,21 +321,13 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
                 &paths,
                 &options,
             )?,
-            None => layr_objects::write::write_tree_from(&store, &source, &options)?,
+            None => {
+                let mut report = layr_objects::write::write_tree_from(&store, &source, &options)?;
+                report.mode = layr_objects::write::WriteMode::Full { reason: layr_objects::write::FullReason::NoCheckedDelta };
+                report
+            }
         };
-        let refs = StateRef {
-            tree: written.tree.context("object write gave no tree")?,
-            times: written.times.context("object write gave no times")?,
-        };
-        store.set_state(&state.id, &refs)?;
-        state.tree = Some(refs.tree.hex());
-        state.times = Some(refs.times.hex());
-        // A part of a build-output overlay (`cache_of`) gives up its native copy too: the cache code reads it through
-        // `state_root`, which builds the copy again from these objects. Other overlays keep theirs for now: their
-        // code reads parts as folders.
-        if !p.is_overlay() || state.cache_of.is_some() {
-            queue_native(p, &state.id)?;
-        }
+        attach(p, &store, state, written)?;
     }
     Ok(())
 }
@@ -291,34 +355,39 @@ pub fn write_base(
     parent: Option<&str>,
     source: &crate::repo::Snap,
 ) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
+    let _pin = parent.map(|id| repo.pin(&[id])).transpose()?;
+    state_write_base(&repo.p, store, state, parent, source)
+}
+
+fn state_write_base(
+    p: &Project,
+    store: &Store,
+    state: &str,
+    parent: Option<&str>,
+    source: &crate::repo::Snap,
+) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
     #[cfg(target_os = "macos")]
-    if let Some(base) = incremental_base(&repo.p, store, state)? {
+    if let Some(base) = incremental_base(p, store, state)? {
         return Ok(Some(base));
     }
     #[cfg(not(target_os = "macos"))]
     let _ = state;
     let Some(parent_state) = parent else { return Ok(None) };
     let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
-    if !repo.p.has_state(parent_state) {
-        return Ok(None);
-    }
-    let _pin = repo.pin(&[parent_state])?;
-    changed_write_base(refs, &repo.state_src(parent_state)?, source)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn native_write_base(
-    p: &Project,
-    store: &Store,
-    parent: Option<&str>,
-    source: &crate::repo::Snap,
-) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
-    let Some(parent_state) = parent else { return Ok(None) };
-    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
-    if !p.has_state(parent_state) {
-        return Ok(None);
-    }
-    let parent = crate::repo::snap(&p.state_path(parent_state));
+    let parent = if p.has_state(parent_state) {
+        #[cfg(target_os = "macos")]
+        let source = crate::thin::Layered::of_state(p, parent_state)?;
+        #[cfg(not(target_os = "macos"))]
+        let source = crate::repo::snap(&p.state_path(parent_state));
+        source
+    } else {
+        let tree = crate::object_tree::ObjectTree::new(open(p)?, refs, &p.meta_dir().join("object-reads"))?;
+        #[cfg(target_os = "macos")]
+        let source = crate::thin::Layered::objects(tree);
+        #[cfg(not(target_os = "macos"))]
+        let source = crate::repo::Snap::Objects(tree);
+        source
+    };
     changed_write_base(refs, &parent, source)
 }
 
@@ -327,6 +396,15 @@ fn changed_write_base(
     parent: &crate::repo::Snap,
     source: &crate::repo::Snap,
 ) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
+    use crate::fsutil::Src;
+    if parent.objects().is_some() {
+        let Some(folder) = source.folder() else { return Ok(None) };
+        let comparison = crate::changes::compare_for_write(parent, folder)?;
+        // This older import API has no dirty-folder argument. Including those folders
+        // conservatively imports their subtree and preserves all metadata.
+        let paths = comparison.changed.into_iter().chain(comparison.dirty).collect();
+        return Ok(Some((refs, paths)));
+    }
     // Portable readers can supply ordinary folders. A btrfs send stream requires both
     // roots to be subvolumes; keep ioctl failures visible when those prerequisites hold.
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
@@ -439,12 +517,169 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     Ok(())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    fn options() -> layr_objects::WriteOptions {
+        layr_objects::WriteOptions {
+            temperature: layr_objects::Temperature::Hot,
+            previous: None,
+            exclude: Vec::new(),
+            similar: false,
+        }
+    }
+
+    #[test]
+    fn object_only_parent_writes_five_files_without_resolving_unchanged_files() -> Result<()> {
+        use layr_objects::write::{Source, WriteMode};
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("layr-object-base-{}", crate::ids::new_id()));
+        let folder = root.join("source");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        for i in 0..100 {
+            std::fs::write(folder.join(format!("sub/f{i}")), format!("original {i}"))?;
+        }
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let original = layr_objects::write_tree(&store, &folder, &options())?;
+        let refs = StateRef { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        // Only objects retain the parent; the folder now becomes the new snapshot.
+        let tree = crate::object_tree::ObjectTree::new(store, refs, &root.join("reads"))?;
+        #[cfg(target_os = "macos")]
+        let parent = crate::thin::Layered::objects(tree);
+        #[cfg(not(target_os = "macos"))]
+        let parent = crate::repo::Snap::Objects(tree);
+        for i in 0..5 {
+            std::fs::write(folder.join(format!("sub/f{i}")), format!("changed {i}"))?;
+        }
+        let compared = compare(&parent, crate::repo::snap(&folder))?;
+        assert_eq!(compared.files.len(), 5);
+        let CheckedDelta { refs, changed, dirty } = compared.delta.unwrap();
+        assert_eq!(changed.len(), 5);
+        let snapshot = SnapshotSource(&compared.source);
+        // A readable directory without search permission exposes names but forbids
+        // metadata resolution of its children. Exercise the production enumeration.
+        let sub = folder.join("sub");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o444))?;
+        let blocked = std::fs::symlink_metadata(sub.join("f99")).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        let names = snapshot.names(b"sub");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755))?;
+        assert!(blocked, "the fixture must forbid resolving an unchanged sibling");
+        assert_eq!(names?.len(), 100);
+        struct ChangedOnly<'a>(SnapshotSource<'a>, &'a [Vec<u8>]);
+        impl Source for ChangedOnly<'_> {
+            fn path(&self, relative: &[u8]) -> Result<PathBuf> {
+                anyhow::ensure!(
+                    relative.is_empty() || relative == b"sub" || self.1.iter().any(|p| p == relative),
+                    "unchanged file was resolved"
+                );
+                self.0.path(relative)
+            }
+            fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+                self.0.names(relative)
+            }
+        }
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let report = layr_objects::write::write_changed_with_dirty_from(
+            &store,
+            &ChangedOnly(snapshot, &changed),
+            &layr_objects::write::Base { tree: refs.tree, times: refs.times },
+            &changed,
+            &dirty,
+            &options(),
+        )?;
+        assert_eq!(report.mode, WriteMode::Incremental { changed_paths: 5 });
+        assert_eq!(report.files, 5);
+        let full = layr_objects::write_tree(&store, &folder, &options())?;
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        drop(compared.source);
+        drop(parent);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn object_comparison_preserves_metadata_and_link_topology() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("layr-object-metadata-{}", crate::ids::new_id()));
+        let folder = root.join("source");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        for name in ["time", "mode", "attr", "split", "join", "sub/file"] {
+            std::fs::write(folder.join(name), name)?;
+        }
+        std::fs::hard_link(folder.join("split"), folder.join("split-alias"))?;
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let original = layr_objects::write_tree(&store, &folder, &options())?;
+        let refs = StateRef { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        let tree = crate::object_tree::ObjectTree::new(store, refs, &root.join("reads"))?;
+        #[cfg(target_os = "macos")]
+        let parent = crate::thin::Layered::objects(tree);
+        #[cfg(not(target_os = "macos"))]
+        let parent = crate::repo::Snap::Objects(tree);
+        // Nanosecond-only changes, non-executable mode bits, attributes, empty folders,
+        // replacement types, and groups that split or join despite equal file bytes.
+        layr_objects::times::set(&folder.join("time"), 1_700_000_000_123_456_789)?;
+        layr_objects::times::set(&folder.join("sub"), 1_700_000_000_123_456_789)?;
+        std::fs::set_permissions(folder.join("mode"), std::fs::Permissions::from_mode(0o600))?;
+        layr_objects::fsx::set_xattrs(&folder.join("attr"), &[(b"user.test".to_vec(), b"new".to_vec())])?;
+        std::fs::remove_file(folder.join("split-alias"))?;
+        std::fs::write(folder.join("split-alias"), b"split")?;
+        std::fs::hard_link(folder.join("join"), folder.join("joined"))?;
+        std::fs::create_dir(folder.join("empty"))?;
+        std::fs::remove_file(folder.join("sub/file"))?;
+        std::fs::create_dir(folder.join("sub/file"))?;
+        let compared = compare(&parent, crate::repo::snap(&folder))?;
+        let CheckedDelta { refs, changed, dirty } = compared.delta.unwrap();
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let report = layr_objects::write::write_changed_with_dirty_from(
+            &store,
+            &SnapshotSource(&compared.source),
+            &layr_objects::write::Base { tree: refs.tree, times: refs.times },
+            &changed,
+            &dirty,
+            &options(),
+        )?;
+        let full = layr_objects::write_tree(&store, &folder, &options())?;
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        drop(compared.source);
+        drop(parent);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_hard_link_groups_report_full_write() -> Result<()> {
+        use layr_objects::write::{Base, FullReason, WriteMode};
+        let root = std::env::temp_dir().join(format!("layr-object-links-{}", crate::ids::new_id()));
+        let folder = root.join("source");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("a"), b"old")?;
+        std::fs::hard_link(folder.join("a"), folder.join("b"))?;
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let original = layr_objects::write_tree(&store, &folder, &options())?;
+        let base = Base { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        std::fs::write(folder.join("a"), b"new")?;
+        let report = layr_objects::write::write_changed(&store, &folder, &base, &[b"a".to_vec()], &options())?;
+        assert_eq!(report.mode, WriteMode::Full { reason: FullReason::IncompleteHardLinks });
+        assert_eq!(report.files, 2);
+        let full = layr_objects::write_tree(&store, &folder, &options())?;
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        // Also cover an alias absent from the base group, discovered during the walk.
+        std::fs::remove_file(folder.join("b"))?;
+        std::fs::write(folder.join("b"), b"new")?;
+        let single = layr_objects::write_tree(&store, &folder, &options())?;
+        let base = Base { tree: single.tree.unwrap(), times: single.times.unwrap() };
+        std::fs::remove_file(folder.join("b"))?;
+        std::fs::hard_link(folder.join("a"), folder.join("b"))?;
+        let report = layr_objects::write::write_changed(&store, &folder, &base, &[b"a".to_vec()], &options())?;
+        assert_eq!(report.mode, WriteMode::Full { reason: FullReason::IncompleteHardLinks });
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
+    #[cfg(target_os = "linux")]
     fn native_base_keeps_metadata_changes_and_requires_subvolumes_for_send() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-native-base-{}", crate::ids::new_id()));
         let store = crate::store::Store::open(&root)?;
@@ -480,7 +715,7 @@ mod tests {
         layr_objects::times::set(&child.join("time"), 1_700_000_001_000_000_000)?;
         layr_objects::fsx::set_xattrs(&child.join("attr"), &[(b"user.test".to_vec(), b"new".to_vec())])?;
         let source = crate::repo::snap(&child);
-        let base = native_write_base(&p, &objects, Some(&id), &source)?;
+        let base = state_write_base(&p, &objects, "child", Some(&id), &source)?;
         #[cfg(not(feature = "overlayfs"))]
         assert!(base.is_none(), "ordinary folders cannot supply a btrfs send stream");
         #[cfg(feature = "overlayfs")]

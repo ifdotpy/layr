@@ -199,6 +199,50 @@ pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
     file_changes_of(parent, child, candidates_equal(parent, child)?)
 }
 
+/// A complete object delta and the user-visible changes from the same comparison.
+/// Constructed only against an immutable object base and an immutable folder snapshot.
+pub struct WriteComparison {
+    pub files: Vec<Change>,
+    pub changed: Vec<Vec<u8>>,
+    pub dirty: Vec<Vec<u8>>,
+}
+
+pub fn compare_for_write(parent: &(impl Src + ?Sized), child: &Path) -> Result<WriteComparison> {
+    use std::os::unix::fs::MetadataExt;
+    let objects = parent.objects().ok_or_else(|| anyhow::anyhow!("comparison requires an object base"))?;
+    let child = child.to_path_buf();
+    // Include every previously linked path even when bytes are equal: native inode numbers
+    // cannot be compared with object link identities, and a group may have split or joined.
+    let linked: HashSet<Vec<u8>> = objects.store.get_tree(&objects.refs.tree)?.links.into_iter().flatten().collect();
+    let mut out = WriteComparison { files: Vec::new(), changed: Vec::new(), dirty: Vec::new() };
+    for c in object_change_candidates(parent, &child)? {
+        let both_dirs = c.old.as_ref().is_some_and(Meta::is_dir) && c.new.as_ref().is_some_and(Meta::is_dir);
+        let metadata_changed = match (&c.old, &c.new) {
+            (Some(old), Some(_)) => {
+                let path = child.at(&c.path)?;
+                let meta = std::fs::symlink_metadata(&path)?;
+                let previous = objects.entry(&c.path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?;
+                (!meta.file_type().is_symlink() && old.mode != meta.mode() & 0o7777)
+                    || (meta.file_type().is_symlink() && previous.entry.xattrs != layr_objects::fsx::xattrs(&path)?)
+                    || previous.ns != layr_objects::times::ns_of(&meta)
+                    || (meta.is_file() && (meta.nlink() > 1 || linked.contains(c.path.as_bytes())))
+            }
+            _ => true,
+        };
+        let path = c.path.clone();
+        let changed = file_change(parent, &child, c)?;
+        if metadata_changed || changed.is_some() {
+            if both_dirs {
+                out.dirty.push(path.into_bytes());
+            } else {
+                out.changed.push(path.into_bytes());
+            }
+        }
+        out.files.extend(changed);
+    }
+    Ok(out)
+}
+
 /// `file_changes`, and the files whose metadata changed while their content stayed equal (a new
 /// modification time, for example). A store push keeps their new times (`Tree::times`).
 pub fn file_changes_and_touched(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Change>, Vec<String>)> {

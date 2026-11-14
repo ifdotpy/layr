@@ -122,8 +122,23 @@ impl Similar {
     }
 }
 
-#[derive(Debug, Default)]
+/// The writer actually used, including conservative incremental fallbacks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteMode {
+    Incremental { changed_paths: usize },
+    Full { reason: FullReason },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FullReason {
+    Requested,
+    NoCheckedDelta,
+    IncompleteHardLinks,
+}
+
+#[derive(Debug)]
 pub struct WriteReport {
+    pub mode: WriteMode,
     pub tree: Option<Id>,
     /// The times table of the folder (`crate::times`), in tree order.
     pub times: Option<Id>,
@@ -212,7 +227,9 @@ pub fn write_changed_with_dirty_from(
         |path: &[u8], changed: &[u8]| path == changed || (path.starts_with(changed) && path.get(changed.len()) == Some(&b'/'));
     let touched = |path: &Vec<u8>| changed.iter().any(|change| affects(path, change));
     if previous.links.iter().any(|group| group.iter().any(touched) && !group.iter().all(touched)) {
-        return write_tree_from(store, source, options);
+        let mut report = write_tree_from(store, source, options)?;
+        report.mode = WriteMode::Full { reason: FullReason::IncompleteHardLinks };
+        return Ok(report);
     }
     let mut plan = Plan { changed: HashSet::new(), dirty: HashSet::new() };
     for folder in dirty_folders {
@@ -279,7 +296,9 @@ fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Optio
     // An unseen alias can connect a changed file to an unchanged entry. Only complete
     // observed groups can replace the base groups without reading every file again.
     if base.is_some() && inodes.values().any(|group| group.paths.len() as u64 != group.count) {
-        return write_tree_from(store, source, options);
+        let mut report = write_tree_from(store, source, options)?;
+        report.mode = WriteMode::Full { reason: FullReason::IncompleteHardLinks };
+        return Ok(report);
     }
     let mut groups: Vec<Vec<Vec<u8>>> = inodes.into_values().filter(|group| group.paths.len() > 1).map(|group| group.paths).collect();
     groups.extend(kept_groups);
@@ -290,6 +309,10 @@ fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Optio
     let times =
         store.put_times(&Times { own: walk.source.entry_kind(&root, &meta)?.time(&meta).unwrap_or(0), records: below })?;
     Ok(WriteReport {
+        mode: match base {
+            Some((_, plan)) => WriteMode::Incremental { changed_paths: plan.changed.len() },
+            None => WriteMode::Full { reason: FullReason::Requested },
+        },
         tree: Some(id),
         times: Some(times),
         files: walk.files.into_inner(),
