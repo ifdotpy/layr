@@ -2728,3 +2728,45 @@ mod limit_tests {
         Ok(())
     }
 }
+
+/// Observe a Linux file only while the kernel excludes writable opens and mappings.
+/// std and rustix do not expose F_SETLEASE/F_GETLEASE/F_SETSIG. Keep this small
+/// exception here; leases are never persisted or retained across file observations.
+#[cfg(target_os = "linux")]
+pub(crate) fn leased_metadata(path: &std::path::Path) -> io::Result<Option<std::fs::Metadata>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    // A lease on an overlay inode does not exclude mappings of its backing inode.
+    // The driver must resolve that backing file first, or leave it unverifiable.
+    if rustix::fs::fstatfs(&file)?.f_type == 0x794c_7630 {
+        return Ok(None);
+    }
+    // SAFETY: sigaction only reads the current disposition into initialized storage.
+    // F_SETSIG selects a normally ignored notification BEFORE acquiring the lease.
+    // Never install a handler or change the process's signal disposition.
+    // F_SETSIG is part of Linux fcntl.h but is missing from libc 0.2.183.
+    const F_SETSIG: libc::c_int = 10;
+    // SAFETY: the disposition pointer is null and action is writable initialized storage.
+    let configured = unsafe {
+        let mut action = std::mem::zeroed::<libc::sigaction>();
+        libc::sigaction(libc::SIGURG, std::ptr::null(), &mut action) == 0
+            && matches!(action.sa_sigaction, libc::SIG_DFL | libc::SIG_IGN)
+            && libc::fcntl(file.as_raw_fd(), F_SETSIG, libc::SIGURG) == 0
+    };
+    if !configured {
+        return Ok(None);
+    }
+    // SAFETY: fcntl takes the descriptor and integer lease type; the file owns the
+    // lease and closing it releases it on every path, including metadata errors.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLEASE, libc::F_RDLCK) } != 0 {
+        return Ok(None);
+    }
+    let metadata = file.metadata()?;
+    // A writer may have requested a break after acquisition. Its bytes cannot be
+    // trusted if the lease is breaking; correctness never depends on the signal.
+    // SAFETY: F_GETLEASE takes no additional argument and does not mutate memory.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLEASE) } != libc::F_RDLCK {
+        return Ok(None);
+    }
+    Ok(Some(metadata))
+}

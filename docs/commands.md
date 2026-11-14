@@ -32,6 +32,17 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | store         | `store remove <path> [--force] [-q]` (deletes a whole store folder; see [Remove a store](#remove-a-store)), `store-version [--json]` ([store version](local-store-version.md)) |
 | JSON schemas  | `schema` (lists the schemas), `schema <name>` (prints one; see [JSON output](json.md)) |
 
+### Status validation
+
+`status` caches validated comparison results on every platform. A matching fingerprint
+includes device, inode, size, mode, ownership, link count, and nanosecond mtime/ctime,
+plus backend evidence when available. Files dated within the cache's clock tick are
+compared again. Changing the base, index, ignore rules, or Layr version invalidates the cache.
+Linux briefly takes a read lease while observing each regular file; writable opens and
+memory mappings, unsupported leases, and ambiguous OverlayFS backing files use the
+snapshot fallback. APFS supplies change counters and clone identities. Set
+`LAYR_NO_STATUS_CACHE=1` to force full comparisons.
+
 ### Command line
 
 - Global options come before the command: `-C <folder>`, `--root <store>`, `--project <name>`,
@@ -411,6 +422,7 @@ content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` 
 <rev>:<path>` prints the id of one path in that commit, as `git rev-parse` does: a tree for a
 folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
 folder. A path that the exported commit does not have fails with exit 128.
+
 
 ## Remove a store
 

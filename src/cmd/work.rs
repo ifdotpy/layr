@@ -36,7 +36,6 @@ fn conflict_code(kind: &str) -> &'static str {
 /// The status that `layr status` shows: the comparison of the working folder, minus the files of
 /// quiet overlays. `filtered` is true for a view that shows only the caller's layers.
 fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Status> {
-    #[cfg(target_os = "macos")]
     let mut st = {
         let _t = crate::trace::span("status compare");
         if filtered {
@@ -55,8 +54,6 @@ fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Stat
             }
         }
     };
-    #[cfg(not(target_os = "macos"))]
-    let mut st = if filtered { h.repo.snapshot_status(ctx, line)? } else { h.repo.status(line)?.0 };
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
     let quiet = {
         let _t = crate::trace::span("status quiet paths");

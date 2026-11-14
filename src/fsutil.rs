@@ -755,6 +755,7 @@ fn same_blob(
     if !matches_observation(&opened, meta) {
         return Ok(false);
     }
+    let _hash = crate::trace::named(|| format!("compare file hash {path}"));
     let id = store.hash_open_file(&mut file, opened.len())?;
     #[cfg(test)]
     src.comparison_io(path, ComparisonIo::Hashed(opened.len()));

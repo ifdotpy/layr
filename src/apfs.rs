@@ -2716,3 +2716,60 @@ impl Copier {
 pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
     Ok(())
 }
+
+/// APFS change counters are unavailable while a file is mapped. Keep that evidence
+/// inside the driver rather than teaching the shared status cache about kernel APIs.
+pub(crate) fn status_scan(root: &Path) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    Ok(status_fingerprints(scan_with_data(root, true)?))
+}
+
+pub(crate) fn status_scan_paths(
+    root: &Path,
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    let mut scan = BTreeMap::new();
+    for p in paths {
+        match entry_at(root, p)? {
+            Some(entry) => {
+                scan.insert(p.clone(), entry);
+            }
+            None => {}
+        }
+    }
+    Ok(status_fingerprints(scan))
+}
+
+fn status_fingerprints(scan: BTreeMap<String, ScanEntry>) -> BTreeMap<String, crate::status_cache::FileFingerprint> {
+    use crate::status_cache::{ApfsIdentity, BackendIdentity, FileFingerprint, FileStat, Timestamp};
+    scan.into_iter()
+        .filter(|(p, _)| !crate::repo::skip_path(p))
+        .map(|(p, e)| {
+            let backend = match e.data {
+                Some(data) => match data.generation {
+                    Some(change_counter) => Some(BackendIdentity::Apfs(ApfsIdentity { change_counter, clone_id: data.clone_id })),
+                    None => return (p, FileFingerprint::Unverifiable),
+                },
+                None if e.meta.is_file() => return (p, FileFingerprint::Unverifiable),
+                None => None,
+            };
+            let f = e.fingerprint;
+            let stat = FileStat {
+                dev: f.0,
+                ino: f.1,
+                mode: f.2,
+                size: f.3,
+                uid: e.meta.uid,
+                gid: e.meta.gid,
+                nlink: e.nlink,
+                mtime: Timestamp { seconds: f.4, nanos: f.5 },
+                ctime: Timestamp { seconds: f.6, nanos: f.7 },
+            };
+            (p, FileFingerprint::Verified { stat, backend })
+        })
+        .collect()
+}
+
+pub(crate) fn status_stage_identity(root: &Path) -> Result<Vec<u8>> {
+    let info = subvol_info(root)?;
+    Ok(serde_json::to_vec(&(info.uuid, info.base, crate::thin::removed_of(root)?))?)
+}

@@ -6,6 +6,7 @@ use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::db::need;
 use crate::fsutil::{self, Src};
+use crate::status_cache::{FileFingerprint, StatusCache};
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
@@ -1665,7 +1666,6 @@ impl<'a> Repo<'a> {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    #[allow(dead_code)]
     fn stage_tree(&self, _line: &Line, stage: &Path) -> Result<Snap> {
         Ok(snap(stage))
     }
@@ -1701,7 +1701,7 @@ impl<'a> Repo<'a> {
 
     /// The index to read and the staging folder when there is one. The caller must hold the
     /// project lock while it reads a mutable index.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg(target_os = "macos")]
     pub fn index_source(&self, line: &Line) -> Result<(Snap, Option<PathBuf>)> {
         match self.current_stage(line)? {
             Some(s) => Ok((self.stage_tree(line, &s)?, Some(s))),
@@ -1709,23 +1709,49 @@ impl<'a> Repo<'a> {
         }
     }
 
-    /// The staging content as a read-only snapshot, or the head state when nothing is staged.
-    pub fn index_view(&self, line: &Line) -> Result<(Snap, Option<Temp>)> {
-        match self.current_stage(line)? {
-            Some(s) => {
-                let t = self.temp_snapshot(&s, true)?;
+    fn select_index(&self, line: &Line) -> Result<SelectedIndex> {
+        // Bind the driver identity BEFORE reading complete/thin semantics. Validate
+        // afterward too: a replacement cannot lend its token to the old semantics.
+        let stage = self.current_stage(line)?.map(SelectedStage::capture).transpose()?;
+        let source = match &stage {
+            Some(stage) => self.stage_tree(line, &stage.path)?,
+            None => self.head_src(line)?,
+        };
+        let selected = SelectedIndex { source, stage };
+        selected.validate_stage()?;
+        #[cfg(test)]
+        if let Some(hook) = INDEX_SELECTED_HOOK.with_borrow_mut(Option::take) {
+            hook();
+        }
+        Ok(selected)
+    }
+
+    /// Freeze exactly the selected index. In particular, a head selected without a stage
+    /// stays that immutable head even if another command creates a stage meanwhile.
+    fn snapshot_index(&self, selected: &SelectedIndex) -> Result<(Snap, Option<Temp>)> {
+        selected.validate_stage()?;
+        match &selected.stage {
+            Some(stage) => {
+                let temp = self.temp_snapshot(&stage.path, true)?;
+                // APFS snapshot markers describe a complete clone even when the source
+                // was a sparse layer. Keep the selected layer's base semantics explicitly.
                 #[cfg(target_os = "macos")]
-                let tree = if crate::thin::is_thin(&s) {
-                    crate::thin::Layered::over(&t.path, self.head_src(line)?)?
-                } else {
-                    crate::thin::Layered::complete(&t.path)
+                let tree = match selected.source.below() {
+                    Some(base) => crate::thin::Layered::over(&temp.path, base)?,
+                    None => snap(&temp.path),
                 };
                 #[cfg(not(target_os = "macos"))]
-                let tree = snap(&t.path);
-                Ok((tree, Some(t)))
+                let tree = snap(&temp.path);
+                selected.validate_stage()?;
+                Ok((tree, Some(temp)))
             }
-            None => Ok((self.head_src(line)?, None)),
+            None => Ok((selected.source.clone(), None)),
         }
+    }
+
+    /// The staging content as a read-only snapshot, or the head state when nothing is staged.
+    pub fn index_view(&self, line: &Line) -> Result<(Snap, Option<Temp>)> {
+        self.snapshot_index(&self.select_index(line)?)
     }
 
     // ----- status -----
@@ -1765,6 +1791,10 @@ impl<'a> Repo<'a> {
     }
 
     fn status_of_inner(&self, line: &Line, scan: &Path, index: &Snap, full: bool) -> Result<Status> {
+        self.status_of_with_policy(line, scan, index, full, None)
+    }
+
+    fn status_of_with_policy(&self, line: &Line, scan: &Path, index: &Snap, full: bool, local: Option<&[u8]>) -> Result<Status> {
         let mut st = Status::default();
         if full {
             let head = self.head_src(line)?;
@@ -1779,7 +1809,14 @@ impl<'a> Repo<'a> {
                 st.staged = changes::with_renames(&head, index, staged);
             }
         }
-        classify(scan, changes::file_changes(index, scan)?, &mut st);
+        let list = changes::file_changes(index, scan)?;
+        match local {
+            Some(local) => {
+                let rules = Rules::captured(scan, list.iter().map(|c| c.path().as_str()), local)?;
+                classify_with(&rules, list, &mut st);
+            }
+            None => classify(scan, list, &mut st),
+        }
         self.finish_status(line, scan, index, full, &mut st)?;
         Ok(st)
     }
@@ -1830,83 +1867,86 @@ impl<'a> Repo<'a> {
 
     /// The head and the index content of a line: a read before the store lock is still valid
     /// under it when this did not change.
-    #[cfg(target_os = "macos")]
     pub fn index_token(&self, line: &Line) -> Result<IndexToken> {
-        let stage = match self.current_stage(line)? {
-            Some(s) => Some(btrfs::scan_with_data(&s, true)?.into_iter().map(|(k, v)| (k, v.fingerprint)).collect()),
-            None => None,
-        };
-        Ok((line.head.clone(), stage))
+        self.index_token_for(line, &self.select_index(line)?)
     }
 
-    /// Read the status of a line before the store lock (APFS): its copy of the working folder
-    /// took seconds to minutes under the lock. `locked_status` takes it when the head and the
+    fn index_token_for(&self, line: &Line, selected: &SelectedIndex) -> Result<IndexToken> {
+        selected.validate_stage()?;
+        use layr_hashers::{Digest, GitCompatible};
+        let mut h = GitCompatible::new();
+        h.update(line.head.as_bytes());
+        if let Some(stage) = &selected.stage {
+            let started = crate::status_cache::clock()?;
+            let scan = btrfs::status_scan(&stage.path)?;
+            if !stage.root.trusted(stage.observed_before) || scan.values().any(|f| !f.trusted(started)) {
+                // Unverifiable/racy index contents cannot validate a prepared comparison.
+                h.update(ids::new_id().as_bytes());
+            }
+            h.update(&stage.identity);
+            h.update(serde_json::to_vec(&scan)?);
+        }
+        selected.validate_stage()?;
+        Ok(hex::encode(h.finalize()))
+    }
+
+    /// Read the status of a line before the store lock. `locked_status` takes it when the head and the
     /// index did not change; the lock never covers the working folder.
     pub fn prepare_status(&self, line: &Line) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let token = self.index_token(line)?;
-            let (st, scan, _, _) = self.status(line)?;
-            PREPARED_STATUS
-                .with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan: Some(scan) }));
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = line;
+        PREPARED_STATUS.with_borrow_mut(|p| *p = None);
+        let selected = self.select_index(line)?;
+        let token = self.index_token_for(line, &selected)?;
+        let (st, scan, index_temp, index) = self.status_selected(line, &selected)?;
+        let content = PreparedContent::Snapshot { scan, index_temp, index };
+        PREPARED_STATUS.with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, content }));
         Ok(())
     }
 
-    /// `prepare_status` for a command that needs only the status lists, not the copy of the
-    /// working folder (`locked_status_report`): merge, pick, replay. It reads the folder in place
-    /// (`status_report`), so no copy of the folder is made, sealed and deleted.
+    /// Prepare status lists before the store lock for commands that need no retained bytes.
     pub fn prepare_status_report(&self, line: &Line) -> Result<()> {
+        PREPARED_STATUS.with_borrow_mut(|p| *p = None);
         #[cfg(target_os = "macos")]
-        {
-            let token = self.index_token(line)?;
-            let st = self.status_report(line)?;
-            PREPARED_STATUS.with(|p| *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, scan: None }));
+        if crate::views::of(self, line).is_some() {
+            // A virtual view supplies its own comparison inputs; read it at consumption.
+            return Ok(());
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = line;
+        let selected = self.select_index(line)?;
+        let token = self.index_token_for(line, &selected)?;
+        let st = self.status_report_selected(line, &selected)?;
+        PREPARED_STATUS.with(|p| {
+            *p.borrow_mut() = Some(PreparedStatus { line: line.id.clone(), token, st, content: PreparedContent::Report })
+        });
         Ok(())
     }
 
-    /// `status` under the store lock: the one that `prepare_status` read when it still holds.
+    /// Reuse a prepared snapshot only while its head and index still match.
     pub fn locked_status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
-        #[cfg(target_os = "macos")]
         if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
-            if let (true, Some(scan)) = (p.line == line.id && p.token == self.index_token(line)?, p.scan) {
-                let (index, itemp) = self.index_view(line)?;
-                return Ok((p.st, scan, itemp, index));
+            if p.line == line.id && p.token == self.index_token(line)? {
+                if let PreparedContent::Snapshot { scan, index_temp, index } = p.content {
+                    return Ok((p.st, scan, index_temp, index));
+                }
             }
         }
         self.status(line)
     }
 
-    /// The status lists of a line, for a command that holds its line lock and needs no copy of
-    /// the working folder: the prepared one when the head and the index did not change, else a
-    /// read of the folder in place. On APFS that read needs no copy of the whole folder (seconds
-    /// for 10,000 files); a read that fails (the index changed during it) takes the copy.
+    /// Reuse prepared lists while the head and index match; otherwise validate a new report.
     pub fn locked_status_report(&self, line: &Line) -> Result<Status> {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
-                if p.line == line.id && p.token == self.index_token(line)? {
-                    return Ok(p.st);
-                }
-            }
-            if let Ok(st) = self.status_report(line) {
-                return Ok(st);
+        if let Some(p) = PREPARED_STATUS.with(|p| p.borrow_mut().take()) {
+            if p.line == line.id && p.token == self.index_token(line)? {
+                return Ok(p.st);
             }
         }
-        Ok(self.status(line)?.0)
+        self.status_report(line).or_else(|_| Ok(self.status(line)?.0))
     }
 
     /// Drop what a command prepared before the lock and did not take: a status, and prepared
     /// snapshot copies (to the trash). Call after the lock.
     pub fn discard_prepared(&self) {
+        PREPARED_STATUS.with(|p| p.borrow_mut().take());
         #[cfg(target_os = "macos")]
         {
-            PREPARED_STATUS.with(|p| p.borrow_mut().take());
             PREPARED_CLEAN.with(|p| p.borrow_mut().clear());
             for p in btrfs::take_prepared() {
                 let _ = self.p.trash(&p);
@@ -1918,8 +1958,12 @@ impl<'a> Repo<'a> {
     }
 
     pub fn status(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
+        self.status_selected(line, &self.select_index(line)?)
+    }
+
+    fn status_selected(&self, line: &Line, selected: &SelectedIndex) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         let scan = self.scan(line)?;
-        let (index, itemp) = self.index_view(line)?;
+        let (index, itemp) = self.snapshot_index(selected)?;
         let st = self.status_of(line, &scan.path, &index)?;
         Ok((st, scan, itemp, index))
     }
@@ -1933,163 +1977,179 @@ impl<'a> Repo<'a> {
         Ok((st, scan, itemp, index))
     }
 
-    /// A status report needs no retained snapshot. Call with the project lock held.
-    /// Commands that use the returned file bytes must still call `status`.
-    #[cfg(target_os = "macos")]
+    /// Report from the live folder, validating every content read before caching it.
+    /// Commands that need retained bytes still use `status`.
     pub fn status_report(&self, line: &Line) -> Result<Status> {
+        #[cfg(target_os = "macos")]
         if let Some(view) = crate::views::of(self, line) {
             return crate::views::working_status(self, line, &view);
         }
+        self.status_report_selected(line, &self.select_index(line)?)
+    }
+
+    fn status_report_selected(&self, line: &Line, selected: &SelectedIndex) -> Result<Status> {
+        selected.validate_stage()?;
         let work = self.working(line);
-        let (index, stage) = self.index_source(line)?;
-        // LAYR_NO_STATUS_CACHE=1 compares the whole folder every time (for comparisons).
-        let key = match std::env::var_os("LAYR_NO_STATUS_CACHE") {
-            Some(_) => None,
-            None => self.status_key(line, &work, &stage)?,
-        };
-        // One scan of the working folder: it finds the changed paths for the saved status, and
-        // it is the baseline of the next saved status.
-        let now = match &key {
-            Some(_) => Some(btrfs::scan_with_data(&work, true)?),
-            None => None,
-        };
-        if let (Some(key), Some(now)) = (&key, &now) {
-            match self.cached_status(line, &work, &index, key, now) {
-                Ok(Some(st)) => return Ok(st),
-                Ok(None) => {}
-                Err(e) => eprintln!("warning: saved status failed, comparing the whole folder: {e:#}"),
-            }
+        if std::env::var_os("LAYR_NO_STATUS_CACHE").is_some() {
+            return Ok(self.status_selected(line, selected)?.0);
         }
-        // States are immutable; the lock keeps the index still. Only the working folder moves.
-        let mut roots = vec![work.as_path()];
-        if let Some(s) = &stage {
-            roots.push(s.as_path());
-        }
-        let read = || crate::storage::stable_read(&roots, || self.status_of(line, &work, &index));
-        let st = match match &now {
-            // The scan for the saved status is the first scan of the validated read too.
-            Some(now) => crate::storage::with_known_scan(&work, now, read)?,
-            None => read()?,
-        } {
-            Some(st) => st,
-            None => self.status(line)?.0,
+        let started = crate::status_cache::clock()?;
+        let local = match Rules::new(&work).local_policy() {
+            Ok(local) => local,
+            Err(_) => return Ok(self.status_selected(line, selected)?.0),
         };
-        if let (Some(key), Some(now)) = (key, now) {
-            // `now` comes before the read: a change during the read differs from it next time.
-            let _ = self.save_status_cache(line, &StatusCache::new(key, &now, st.clone()));
+        let Some(key) = self.status_key(line, &work, selected, &local).ok().flatten() else {
+            return Ok(self.status_selected(line, selected)?.0);
+        };
+        let now = match btrfs::status_scan(&work) {
+            Ok(scan) => scan,
+            Err(_) => return Ok(self.status_selected(line, selected)?.0),
+        };
+        match self.cached_status(line, &work, selected, &key, &now, started, &local) {
+            Ok(Some(st)) => return Ok(st),
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: saved status failed, comparing the whole folder: {e:#}"),
+        }
+        // Keep the snapshot fallback for unreadable, mapped, or concurrently written entries.
+        // The baseline precedes the snapshot: a change during it invalidates the next read.
+        let scan = self.scan(line)?;
+        let (frozen_index, _itemp) = self.snapshot_index(selected)?;
+        let st = match self.status_of_with_policy(line, &scan.path, &frozen_index, true, Some(&local)) {
+            Ok(st) => st,
+            Err(_) => return Ok(self.status_selected(line, selected)?.0),
+        };
+        selected.validate_stage()?;
+        let current_stage = self.current_stage(line)?;
+        if current_stage.as_deref() == selected.stage.as_ref().map(|stage| stage.path.as_path())
+            && Rules::new(&work).local_policy().is_ok_and(|current| current == local)
+            && self.status_key(line, &work, selected, &local).ok().flatten().as_ref() == Some(&key)
+            && btrfs::status_scan(&work).is_ok_and(|again| again == now)
+        {
+            let _ = self.save_status_cache(line, &StatusCache::new(key, started, now, st.clone()));
         }
         Ok(st)
     }
 
-    #[cfg(target_os = "macos")]
     fn status_cache_path(&self, line: &Line) -> PathBuf {
         self.p.meta_dir().join("status").join(format!("{}.cache", line.id))
     }
 
-    #[cfg(target_os = "macos")]
     fn save_status_cache(&self, line: &Line, cache: &StatusCache) -> Result<()> {
         // A lost cache costs only time: no fsync, but never a partial file.
         let path = self.status_cache_path(line);
         let dir = path.parent().context("status cache folder")?;
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(".{}.tmp", ids::new_id()));
-        std::fs::write(&tmp, cache.encode()?)?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let result = (|| -> Result<()> {
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            file.write_all(&cache.encode()?)?;
+            std::fs::rename(&tmp, &path)?;
+            Ok(())
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
-        })?;
-        Ok(())
+        }
+        result
     }
 
-    /// What a saved status depends on besides the working folder: the head, the index layer,
-    /// and the working folder itself. `None` when a saved status cannot be used: a line with
-    /// overlays, or a complete index.
-    #[cfg(target_os = "macos")]
-    fn status_key(&self, line: &Line, work: &Path, stage: &Option<PathBuf>) -> Result<Option<String>> {
+    /// Immutable base tree, mutable index, working identity, version and ignore policy.
+    fn status_key(&self, line: &Line, work: &Path, selected: &SelectedIndex, local: &[u8]) -> Result<Option<String>> {
+        selected.validate_stage()?;
         use layr_hashers::{Digest, GitCompatible};
         if self.p.is_overlay() || !self.layers(line)?.is_empty() {
             return Ok(None);
         }
         let mut h = GitCompatible::new();
         let w = std::fs::symlink_metadata(work)?;
-        h.update(format!("{}|{}|{}|{}|", line.head, w.dev(), w.ino(), work.display()));
-        if let Some(s) = stage {
-            if !crate::thin::is_thin(s) {
+        h.update(format!("{}|{}|{}|{}|{}|", env!("CARGO_PKG_VERSION"), line.head, w.dev(), w.ino(), work.display()));
+        if let Some(objects) = selected.source.objects() {
+            h.update(objects.refs.tree.0);
+        }
+        // Local rules may live outside a snapshot (or a nested .git subvolume).
+        h.update(local);
+        if let Some(stage) = &selected.stage {
+            if !stage.root.trusted(stage.observed_before) {
                 return Ok(None);
             }
-            h.update(std::fs::read(self.stage_base_file(line)).unwrap_or_default());
-            h.update(btrfs::subvol_info(s)?.uuid.as_bytes());
-            h.update(serde_json::to_vec(&crate::thin::removed_of(s)?)?);
-            for (k, e) in btrfs::scan_with_data(s, true)? {
-                h.update(format!("{k}|{:?}|{:?}\n", e.fingerprint, e.data).as_bytes());
+            h.update(std::fs::read(self.stage_base_file(line))?);
+            h.update(&stage.identity);
+            let started = crate::status_cache::clock()?;
+            let scan = btrfs::status_scan(&stage.path)?;
+            if scan.values().any(|f| !f.trusted(started)) {
+                return Ok(None);
             }
+            h.update(serde_json::to_vec(&scan)?);
         }
+        selected.validate_stage()?;
         Ok(Some(hex::encode(h.finalize())))
     }
 
-    /// The saved status, brought up to date for the entries of the working folder whose
-    /// metadata, change counter, or clone ID differ from the saved scan (as git's index does
-    /// with stat data). `now` is a scan of the working folder made before this read. `None`
-    /// when the saved status cannot answer: then the caller compares the whole folder.
-    #[cfg(target_os = "macos")]
     fn cached_status(
         &self,
         line: &Line,
         work: &Path,
-        index: &Snap,
+        selected: &SelectedIndex,
         key: &str,
-        now: &BTreeMap<String, btrfs::ScanEntry>,
+        now: &BTreeMap<String, FileFingerprint>,
+        started: u64,
+        local: &[u8],
     ) -> Result<Option<Status>> {
-        let Ok(raw) = std::fs::read(self.status_cache_path(line)) else {
-            return Ok(None);
-        };
-        let Some(cache) = StatusCache::decode(&raw) else {
-            return Ok(None);
-        };
-        if cache.version != STATUS_CACHE_VERSION || cache.key != key {
-            return Ok(None);
-        }
+        let index = &selected.source;
+        let Ok(raw) = std::fs::read(self.status_cache_path(line)) else { return Ok(None) };
+        let Some(cache) = StatusCache::decode(&raw, key) else { return Ok(None) };
         let _t = crate::trace::span("saved status");
         let paths = cache.changed(now);
-        if paths.len() > STATUS_CACHE_MAX_PATHS {
+        if paths.len() > 20_000 || paths.iter().any(|p| matches!(p.rsplit('/').next(), Some(".gitignore" | ".layrignore"))) {
             return Ok(None);
         }
-        for p in &paths {
-            let name = p.rsplit('/').next().unwrap_or("");
-            if name == ".gitignore" || name == ".layrignore" {
-                // Ignore rules decide the state of unchanged paths too.
-                return Ok(None);
-            }
-        }
-        if paths.is_empty() {
-            let _used = crate::trace::span("saved status used for 0 paths");
-            let mut st = cache.status;
-            self.finish_status(line, work, index, true, &mut st)?;
-            return Ok(Some(st));
-        }
-        let below = |p: &str| paths.contains(p) || p.match_indices('/').any(|(i, _)| paths.contains(&p[..i]));
-        let w: BTreeMap<String, btrfs::ScanEntry> =
-            now.iter().filter(|(k, _)| below(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
-        let list =
-            changes::file_changes_of(index, work, btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
-        // The content read must see the entries of the scan.
-        let again = btrfs::scan_paths(work, &paths)?;
-        if paths.iter().any(|p| again.get(p) != now.get(p)) {
+        if paths.iter().any(|p| now.get(p).is_some_and(|f| !f.verifiable())) {
             return Ok(None);
         }
+        // Every child has its own fingerprint, including children of deleted directories.
+        // A directory's changed timestamps must not force hashing its unchanged children.
+        let list = paths
+            .iter()
+            .filter_map(|p| {
+                changes::EntryChange::observed(
+                    p.clone(),
+                    fsutil::lmeta(index, p),
+                    fsutil::lmeta(work, p),
+                    crate::compare::DataEvidence::Unknown,
+                )
+            })
+            .collect();
+        let list = changes::file_changes_of(index, work, list)?;
         let mut st = cache.status;
-        st.unstaged.retain(|c| !below(c.path()) && !c.old_path().map(String::as_str).is_some_and(below));
-        st.untracked.retain(|p| !below(p));
-        st.ignored.retain(|p| !below(p));
-        classify(work, list, &mut st);
+        st.unstaged.retain(|c| !paths.contains(c.path()) && !c.old_path().is_some_and(|p| paths.contains(p)));
+        st.untracked.retain(|p| !paths.contains(p));
+        st.ignored.retain(|p| !paths.contains(p));
+        let rules = Rules::captured(work, paths.iter().map(String::as_str), local)?;
+        classify_with(&rules, list, &mut st);
         st.unstaged.sort_by(|a, b| a.path().cmp(b.path()));
         st.untracked.sort();
         st.ignored.sort();
         self.finish_status(line, work, index, true, &mut st)?;
-        // A new baseline saves work when many paths changed. With few, the old baseline and
-        // its status stay valid: the same paths are compared again next time.
-        if paths.len() >= STATUS_CACHE_RESAVE {
-            let _ = self.save_status_cache(line, &StatusCache::new(key.to_string(), now, st.clone()));
+        if !rules.captured_matches()? {
+            return Ok(None);
+        }
+        // Re-scan the changed paths, and check the mutable index and local rules too.
+        // Unverifiable entries always take a snapshot rather than trusting stat equality.
+        if btrfs::status_scan_paths(work, &paths)?
+            != now.iter().filter(|(p, _)| paths.contains(*p)).map(|(p, f)| (p.clone(), f.clone())).collect()
+        {
+            return Ok(None);
+        }
+        selected.validate_stage()?;
+        let current_stage = self.current_stage(line)?;
+        if current_stage.as_deref() != selected.stage.as_ref().map(|stage| stage.path.as_path())
+            || self.status_key(line, work, selected, local)?.as_deref() != Some(key)
+        {
+            return Ok(None);
+        }
+        if !paths.is_empty() {
+            let _ = self.save_status_cache(line, &StatusCache::new(key.to_string(), started, now.clone(), st.clone()));
         }
         let _used = crate::trace::span(format!("saved status used for {} paths", paths.len()));
         Ok(Some(st))
@@ -3011,151 +3071,12 @@ mod history_tests {
     }
 }
 
-/// A saved status of a line and the scan of its working folder that it matches
-/// (`Repo::status_report`). Each entry keeps its type, inode, mode, size, times, change counter,
-/// and clone ID: a write changes the change counter, as with git's stat data.
-#[cfg(target_os = "macos")]
-struct StatusCache {
-    version: u32,
-    key: String,
-    /// Path, then fingerprint and data identity of each entry, in path order.
-    entries: Vec<(String, [i64; 10])>,
-    status: Status,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StatusHead {
-    version: u32,
-    key: String,
-    status: Status,
-}
-
-#[cfg(target_os = "macos")]
-const STATUS_CACHE_VERSION: u32 = 3;
-#[cfg(target_os = "macos")]
-const STATUS_CACHE_MAGIC: &[u8] = b"layr status cache\n";
-
-/// More changed paths than this compare the whole folder.
-#[cfg(target_os = "macos")]
-const STATUS_CACHE_MAX_PATHS: usize = 20_000;
-
-/// From this many changed paths on, a saved status gets a new baseline.
-#[cfg(target_os = "macos")]
-const STATUS_CACHE_RESAVE: usize = 256;
-
-#[cfg(target_os = "macos")]
-fn entry_key(e: &btrfs::ScanEntry) -> [i64; 10] {
-    let f = e.fingerprint;
-    let d = e.data.unwrap_or_default();
-    [
-        f.0 as i64,
-        f.1 as i64,
-        f.2 as i64,
-        f.3 as i64,
-        f.4,
-        f.5,
-        f.6,
-        f.7,
-        d.generation.map(|g| g as i64).unwrap_or(-1),
-        d.clone_id.map(|c| c as i64).unwrap_or(-1),
-    ]
-}
-
-#[cfg(target_os = "macos")]
-impl StatusCache {
-    fn new(key: String, scan: &BTreeMap<String, btrfs::ScanEntry>, status: Status) -> Self {
-        StatusCache {
-            version: STATUS_CACHE_VERSION,
-            key,
-            entries: scan.iter().map(|(k, e)| (k.clone(), entry_key(e))).collect(),
-            status,
-        }
-    }
-
-    /// A header in JSON, then each entry as a path length, the path, and ten numbers.
-    fn encode(&self) -> Result<Vec<u8>> {
-        let head = serde_json::to_vec(&StatusHead { version: self.version, key: self.key.clone(), status: self.status.clone() })?;
-        let mut out = Vec::with_capacity(head.len() + self.entries.len() * 120);
-        out.extend_from_slice(STATUS_CACHE_MAGIC);
-        out.extend_from_slice(&(head.len() as u64).to_le_bytes());
-        out.extend_from_slice(&head);
-        out.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
-        for (k, v) in &self.entries {
-            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
-            out.extend_from_slice(k.as_bytes());
-            for n in v {
-                out.extend_from_slice(&n.to_le_bytes());
-            }
-        }
-        Ok(out)
-    }
-
-    fn decode(raw: &[u8]) -> Option<Self> {
-        let mut r = raw.strip_prefix(STATUS_CACHE_MAGIC)?;
-        let mut take = |n: usize| -> Option<&[u8]> {
-            let (a, b) = (r.get(..n)?, r.get(n..)?);
-            r = b;
-            Some(a)
-        };
-        let head_len = u64::from_le_bytes(take(8)?.try_into().ok()?) as usize;
-        let head: StatusHead = serde_json::from_slice(take(head_len)?).ok()?;
-        let count = u64::from_le_bytes(take(8)?.try_into().ok()?) as usize;
-        let mut entries = Vec::with_capacity(count.min(10_000_000));
-        for _ in 0..count {
-            let len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-            let path = String::from_utf8(take(len)?.to_vec()).ok()?;
-            let mut v = [0i64; 10];
-            for n in v.iter_mut() {
-                *n = i64::from_le_bytes(take(8)?.try_into().ok()?);
-            }
-            entries.push((path, v));
-        }
-        Some(StatusCache { version: head.version, key: head.key, entries, status: head.status })
-    }
-
-    /// Paths whose entries differ from the saved scan, and files without a change counter (a
-    /// file that a process maps can change without a visible sign). A folder that only changed
-    /// its times is left out: each changed entry inside it is in the list itself.
-    fn changed(&self, now: &BTreeMap<String, btrfs::ScanEntry>) -> BTreeSet<String> {
-        let kind = |v: &[i64; 10]| v[2] & libc::S_IFMT as i64;
-        const DIR: i64 = libc::S_IFDIR as i64;
-        const FILE: i64 = libc::S_IFREG as i64;
-        let mut out = BTreeSet::new();
-        // Both lists are in path order: one walk over both.
-        let mut old = self.entries.iter().peekable();
-        for (k, e) in now {
-            while let Some((ok, _)) = old.peek() {
-                if ok.as_str() < k.as_str() {
-                    out.insert(ok.clone());
-                    old.next();
-                } else {
-                    break;
-                }
-            }
-            let new = entry_key(e);
-            let same = match old.peek() {
-                Some((ok, ov)) if ok == k => {
-                    let same = *ov == new || (kind(ov) == DIR && kind(&new) == DIR);
-                    old.next();
-                    same
-                }
-                _ => false,
-            };
-            let no_counter = kind(&new) == FILE && new[8] < 0;
-            if !k.is_empty() && (!same || no_counter) {
-                out.insert(k.clone());
-            }
-        }
-        out.extend(old.map(|(k, _)| k.clone()));
-        out.remove("");
-        out
-    }
-}
-
 /// Sort index-to-working changes into unstaged, untracked, and ignored paths.
 fn classify(scan: &Path, list: Vec<EntryChange>, st: &mut Status) {
-    let rules = Rules::new(scan);
+    classify_with(&Rules::new(scan), list, st);
+}
+
+fn classify_with(rules: &Rules, list: Vec<EntryChange>, st: &mut Status) {
     for c in changes::without_moves(list) {
         if skip_path(c.path()) {
             continue;
@@ -4579,20 +4500,66 @@ mod cache_platform_tests {
     }
 }
 
+/// An index choice whose presence and source are shared by its token and comparison.
+struct SelectedIndex {
+    source: Snap,
+    stage: Option<SelectedStage>,
+}
+
+struct SelectedStage {
+    path: PathBuf,
+    identity: Vec<u8>,
+    root: FileFingerprint,
+    observed_before: u64,
+}
+
+impl SelectedStage {
+    fn capture(path: PathBuf) -> Result<Self> {
+        let observed_before = crate::status_cache::clock()?;
+        let root = FileFingerprint::Verified {
+            stat: crate::status_cache::FileStat::of(&std::fs::symlink_metadata(&path)?),
+            backend: None,
+        };
+        let identity = btrfs::status_stage_identity(&path)?;
+        Ok(Self { path, identity, root, observed_before })
+    }
+}
+
+impl SelectedIndex {
+    fn validate_stage(&self) -> Result<()> {
+        if let Some(stage) = &self.stage {
+            let root = FileFingerprint::Verified {
+                stat: crate::status_cache::FileStat::of(&std::fs::symlink_metadata(&stage.path)?),
+                backend: None,
+            };
+            if root != stage.root || btrfs::status_stage_identity(&stage.path)? != stage.identity {
+                bail!("index stage was replaced while status was being read");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INDEX_SELECTED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The head and the index content of a line (`Repo::index_token`).
-#[cfg(target_os = "macos")]
-pub type IndexToken = (String, Option<Vec<(String, crate::storage::Fingerprint)>>);
+pub type IndexToken = String;
 
 /// A status read before a store lock (`Repo::prepare_status`).
-#[cfg(target_os = "macos")]
 struct PreparedStatus {
     line: String,
     token: IndexToken,
     st: Status,
-    /// The copy of the working folder that `st` was read from; none for `prepare_status_report`.
-    scan: Option<Temp>,
+    content: PreparedContent,
 }
-#[cfg(target_os = "macos")]
+
+enum PreparedContent {
+    Snapshot { scan: Temp, index_temp: Option<Temp>, index: Snap },
+    Report,
+}
 thread_local! {
     static PREPARED_STATUS: std::cell::RefCell<Option<PreparedStatus>> = const { std::cell::RefCell::new(None) };
 }
@@ -4829,5 +4796,340 @@ mod owner_walk_tests {
         assert!(!owner_walk_skippable(false, 501, 501, 20, Some(501), (501, 20)));
         // The root has another group than the line: the walk runs.
         assert!(!owner_walk_skippable(true, 501, 501, 20, Some(501), (501, 21)));
+    }
+}
+
+#[cfg(test)]
+mod status_policy_tests {
+    use super::*;
+
+    #[test]
+    fn classification_uses_captured_policy_and_validates_after_consuming_it() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-status-policy-{}", ids::new_id()));
+        std::fs::create_dir_all(root.join(".git/info"))?;
+        std::fs::write(root.join("file"), b"new")?;
+        let exclude = root.join(crate::ignore_rules::LOCAL_EXCLUDE);
+        std::fs::write(&exclude, b"")?;
+        let add = || EntryChange::Add {
+            path: "file".into(),
+            new: fsutil::meta_of(&std::fs::symlink_metadata(root.join("file")).unwrap()),
+        };
+
+        // Policy A is captured for the key. B arrives exactly where the old code
+        // reopened rules in classify; restoring A must not leave B's cached result.
+        let policy_a = Rules::new(&root).local_policy()?;
+        let rules = Rules::captured(&root, std::iter::once("file"), &policy_a)?;
+        std::fs::write(&exclude, b"file\n")?;
+        let mut st = Status::default();
+        classify_with(&rules, vec![add()], &mut st);
+        assert_eq!(st.untracked, ["file"]);
+        assert!(st.ignored.is_empty());
+        assert!(!rules.captured_matches()?);
+        std::fs::write(&exclude, b"")?;
+        assert!(rules.captured_matches()?);
+
+        // An absent versioned ignore file is also an input. Appearance after capture
+        // invalidates it even though the changed-file candidate set held no rule file.
+        std::fs::write(root.join(".gitignore"), b"file\n")?;
+        assert!(!rules.captured_matches()?);
+        let rules = Rules::captured(&root, std::iter::once("file"), &policy_a)?;
+        std::fs::write(root.join(".gitignore"), b"")?;
+        let mut st = Status::default();
+        classify_with(&rules, vec![add()], &mut st);
+        assert_eq!(st.ignored, ["file"]);
+        assert!(!rules.captured_matches()?);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn status_cache_keeps_the_selected_index_when_a_stage_appears_then_disappears() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-status-index-{}", ids::new_id()));
+        let store = crate::store::Store::open(&root.join("store"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        std::fs::create_dir_all(dir.join("meta/stage"))?;
+        let repo = Repo {
+            p: Project {
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        let line = Line {
+            id: ids::new_id(),
+            name: "main".into(),
+            head: ids::new_id(),
+            owner: rustix::process::geteuid().as_raw(),
+            machine: store.machine.id.clone(),
+        };
+        let head = root.join("head");
+        let work = root.join("work");
+        std::fs::create_dir(&head)?;
+        std::fs::create_dir(&work)?;
+        std::fs::write(head.join("file"), b"base")?;
+        std::fs::write(work.join("file"), b"edit")?;
+        assert!(repo.current_stage(&line)?.is_none());
+        let selected = SelectedIndex { source: snap(&head), stage: None };
+        let key = repo.status_key(&line, &work, &selected, b"")?.unwrap();
+
+        // add creates a stage after the no-stage key was read. The old independent
+        // index_view lookup would now choose this staged content for cache seeding.
+        let stage = repo.p.stage_path(&line.id);
+        std::fs::create_dir(&stage)?;
+        std::fs::write(stage.join("file"), b"edit")?;
+        repo.mark_stage(&line)?;
+        assert!(repo.current_stage(&line)?.is_some());
+        let (frozen, _temp) = repo.snapshot_index(&selected)?;
+        assert!(same_tree(&selected.source, &frozen));
+
+        // A mixed reset removes the stage before validation: simply rechecking the
+        // current stage would see None again, so the actual captured index must bind it.
+        std::fs::remove_dir_all(&stage)?;
+        std::fs::remove_file(repo.stage_base_file(&line))?;
+        assert!(repo.current_stage(&line)?.is_none());
+        assert_eq!(
+            repo.status_key(&line, &work, &SelectedIndex { source: selected.source.clone(), stage: None }, b"")?,
+            Some(key)
+        );
+        let candidate = EntryChange::observed(
+            "file".into(),
+            fsutil::lmeta(&frozen, "file"),
+            fsutil::lmeta(&work, "file"),
+            crate::compare::DataEvidence::Unknown,
+        )
+        .unwrap();
+        let list = changes::file_changes_of(&frozen, &work, vec![candidate])?;
+        let mut st = Status::default();
+        classify(&work, list, &mut st);
+        assert!(st.staged.is_empty());
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].path(), "file");
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_status_reuses_one_index_and_rejects_replacement() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-prepared-index-{}", ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        if !btrfs::is_supported(&root) {
+            std::fs::remove_dir_all(root).context("remove fixture")?;
+            return Ok(());
+        }
+        let store = crate::store::Store::open(&root.join("store"))?;
+        let dir = store.project_dir("p")?;
+        for path in ["meta/db", "meta/stage", "meta/scan", "meta/work", "lines"] {
+            std::fs::create_dir_all(dir.join(path))?;
+        }
+        let repo = Repo {
+            p: Project {
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        let actor = crate::model::Actor { uid: rustix::process::geteuid().as_raw(), name: "Test".into(), session: None };
+        let mut rec = Record::new("project");
+        rec.data = serde_json::json!({"id": repo.p.id, "name": "p", "config": {"objects.enabled": true}});
+        repo.p.append(rec, &actor)?;
+        let line = Line {
+            id: ids::new_id(),
+            name: "main".into(),
+            head: ids::new_id(),
+            owner: actor.uid,
+            machine: store.machine.id.clone(),
+        };
+        let source = root.join("source");
+        std::fs::create_dir(&source)?;
+        std::fs::write(source.join("file"), b"tracked")?;
+        let objects = crate::objstore::open(&repo.p)?;
+        let written = layr_objects::write::write_tree(
+            &objects,
+            &source,
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        let mut rec = Record::new("state");
+        rec.states.push(serde_json::from_value(serde_json::json!({
+            "id": line.head, "kind": "commit", "subvol": "", "author": crate::model::Author::default(),
+            "time": ids::now_ms(), "tree": written.tree.unwrap().to_string(), "times": written.times.unwrap().to_string(),
+        }))?);
+        rec.lines.insert(
+            line.id.clone(),
+            LineChange {
+                before: None,
+                after: Some(LineState {
+                    name: line.name.clone(),
+                    head: line.head.clone(),
+                    owner: line.owner,
+                    machine: line.machine.clone(),
+                }),
+                working_before: None,
+                working_after: None,
+            },
+        );
+        repo.p.append(rec, &actor)?;
+        let work = repo.working(&line);
+        btrfs::create_subvolume(&work)?;
+        std::fs::write(work.join("file"), b"tracked")?;
+        std::fs::create_dir_all(work.join(".git/info"))?;
+        std::fs::write(work.join(crate::ignore_rules::LOCAL_EXCLUDE), b"")?;
+        for report in [false, true] {
+            let stage = repo.p.stage_path(&line.id);
+            let base = repo.stage_base_file(&line);
+            let hook_stage = stage.clone();
+            let hook_base = base.clone();
+            let head = line.head.clone();
+            INDEX_SELECTED_HOOK.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    // Equivalent to rm --cached: create an index without the tracked file
+                    // after the public preparation selected the original no-stage head.
+                    btrfs::create_subvolume(&hook_stage).unwrap();
+                    std::fs::write(&hook_base, head).unwrap();
+                }))
+            });
+            if report {
+                repo.prepare_status_report(&line).context("prepare report")?;
+            } else {
+                repo.prepare_status(&line).context("prepare snapshot")?;
+            }
+            assert!(repo.current_stage(&line)?.is_some());
+            btrfs::delete_tree(&stage)?;
+            std::fs::remove_file(&base)?;
+            assert!(repo.current_stage(&line)?.is_none());
+            assert!(PREPARED_STATUS.with_borrow(Option::is_some));
+            let st = if report {
+                repo.locked_status_report(&line).context("consume report")?
+            } else {
+                let (st, _scan, _temp, index) = repo.locked_status(&line).context("consume snapshot")?;
+                assert!(fsutil::lmeta(&index, "file").is_some(), "clean keeps the tracked file in its index");
+                st
+            };
+            assert!(st.clean(), "transient stage must not mark a tracked file for clean");
+            assert!(st.untracked.is_empty());
+            assert!(PREPARED_STATUS.with_borrow(Option::is_none));
+            assert_eq!(std::fs::read(work.join("file"))?, b"tracked");
+        }
+        for report in [false, true] {
+            let stage = repo.p.stage_path(&line.id);
+            let old = root.join("old-stage");
+            btrfs::create_subvolume(&stage)?;
+            std::fs::write(stage.join("file"), b"tracked")?;
+            repo.mark_stage(&line)?;
+            let hook_stage = stage.clone();
+            let hook_old = old.clone();
+            #[cfg(target_os = "macos")]
+            let base_root = source.clone();
+            #[cfg(target_os = "macos")]
+            let base_id = line.head.clone();
+            INDEX_SELECTED_HOOK.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    // Complete A was selected. reset/add replaces it with sparse B before
+                    // token capture, and B's timestamps settle before preparation resumes.
+                    std::fs::rename(&hook_stage, &hook_old).unwrap();
+                    #[cfg(target_os = "macos")]
+                    crate::thin::empty_layer(&hook_stage, &base_id, &base_root).unwrap();
+                    #[cfg(not(target_os = "macos"))]
+                    btrfs::create_subvolume(&hook_stage).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(1100));
+                }))
+            });
+            let result = if report { repo.prepare_status_report(&line) } else { repo.prepare_status(&line) };
+            assert!(result.is_err(), "replacement must not lend its token to the old semantics");
+            assert!(PREPARED_STATUS.with_borrow(Option::is_none));
+            #[cfg(target_os = "macos")]
+            assert!(crate::thin::is_thin(&stage));
+            btrfs::delete_tree(&stage)?;
+            btrfs::delete_tree(&old)?;
+            std::fs::remove_file(repo.stage_base_file(&line))?;
+            let st = if report {
+                repo.locked_status_report(&line)?
+            } else {
+                let (st, _scan, _temp, index) = repo.locked_status(&line)?;
+                assert!(fsutil::lmeta(&index, "file").is_some());
+                st
+            };
+            assert!(st.clean());
+            assert!(st.untracked.is_empty());
+            assert_eq!(std::fs::read(work.join("file"))?, b"tracked");
+        }
+        btrfs::delete_tree(&work).context("delete working subvolume")?;
+        // An unprivileged btrfs owner must reopen read-only snapshots before removal.
+        for entry in std::fs::read_dir(repo.p.scan_dir())? {
+            let path = entry?.path();
+            btrfs::set_writable(&path)?;
+            btrfs::delete_tree(&path)?;
+        }
+        drop(objects);
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(root).context("remove fixture")?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thin_stage_snapshot_keeps_its_selected_base_and_inherited_files() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-status-thin-index-{}", ids::new_id()));
+        let store = crate::store::Store::open(&root.join("store"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        std::fs::create_dir_all(dir.join("meta/work"))?;
+        std::fs::create_dir_all(dir.join("meta/scan"))?;
+        let repo = Repo {
+            p: Project {
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        let head = root.join("head");
+        std::fs::create_dir(&head)?;
+        std::fs::write(head.join("inherited"), b"inherited")?;
+        std::fs::write(head.join("edited"), b"base")?;
+        let stage = root.join("stage");
+        crate::thin::empty_layer(&stage, &ids::new_id(), &head)?;
+        std::fs::write(stage.join("edited"), b"staged")?;
+        let selected = SelectedIndex {
+            source: crate::thin::Layered::over(&stage, snap(&head))?,
+            stage: Some(SelectedStage::capture(stage.clone())?),
+        };
+        let (frozen, temp) = repo.snapshot_index(&selected)?;
+        // The sparse snapshot must retain its selected base independently of its marker.
+        assert!(!frozen.is_complete());
+        assert_eq!(fsutil::read_file(&frozen, "inherited")?, b"inherited");
+        let staged = changes::file_changes(&snap(&head), &frozen)?;
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path(), "edited");
+        let work = root.join("work");
+        std::fs::create_dir(&work)?;
+        std::fs::write(work.join("inherited"), b"inherited")?;
+        std::fs::write(work.join("edited"), b"staged")?;
+        let mut st = Status::default();
+        classify(&work, changes::file_changes(&frozen, &work)?, &mut st);
+        assert!(st.untracked.is_empty());
+        assert!(st.unstaged.is_empty());
+        drop(temp);
+        btrfs::delete_tree(&stage)?;
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

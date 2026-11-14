@@ -29,8 +29,9 @@ The store and signed record formats remain compatible with the Linux backend.
 - Scans read each folder with one `getattrlistbulk` call.
 - `status` checks kernel change counters before and after a live read. It uses a temporary snapshot if validation fails.
   Files with an active memory mapping or an unavailable counter also use the snapshot path.
-- `status` saves its result with the stat data of each entry, as git's index does. The next `status` compares only
-  entries whose metadata, change counter, or clone ID differ. `LAYR_NO_STATUS_CACHE=1` compares all.
+- The shared status cache saves each result with typed stat data and APFS change-counter/clone evidence.
+  The next `status` compares entries whose evidence differs or whose timestamps are racy.
+  Unavailable counters retain the snapshot fallback. `LAYR_NO_STATUS_CACHE=1` compares all.
   See [APFS features](apfs-features.md).
 - States are thin layers. A state in `deltas/<id>` keeps only the entries that differ from its base state
   and the paths that it removes. A chain of layers ends at a complete tree in `states/<id>`.

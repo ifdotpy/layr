@@ -633,6 +633,48 @@ pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) use crate::linux_status::status_stage_identity;
+
+fn status_evidence(
+    root: &Path,
+    scan: &mut std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>,
+    inodes: Option<&std::collections::BTreeSet<u64>>,
+) {
+    if let Ok(ids) = crate::btrfs_scan::status_identities(root, inodes) {
+        for entry in scan.values_mut() {
+            if let crate::status_cache::FileFingerprint::Verified { stat, backend } = entry {
+                *backend = ids.get(&stat.ino).cloned().map(crate::status_cache::BackendIdentity::Btrfs);
+            }
+        }
+    }
+}
+
+pub(crate) fn status_scan(root: &Path) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    let mut scan = crate::linux_status::scan(root, None, &mut |p, m| crate::linux_status::native_fingerprint(&root.join(p), m))?;
+    status_evidence(root, &mut scan, None);
+    Ok(scan)
+}
+
+pub(crate) fn status_scan_paths(
+    root: &Path,
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut scan =
+        crate::linux_status::scan(root, Some(paths), &mut |p, m| crate::linux_status::native_fingerprint(&root.join(p), m))?;
+    let inodes = scan
+        .values()
+        .filter_map(|entry| match entry {
+            crate::status_cache::FileFingerprint::Verified { stat, .. } => Some(stat.ino),
+            crate::status_cache::FileFingerprint::Unverifiable => None,
+        })
+        .collect();
+    status_evidence(root, &mut scan, Some(&inodes));
+    Ok(scan)
+}
+
 #[cfg(test)]
 mod placeholder_tests {
     use super::*;

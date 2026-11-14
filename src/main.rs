@@ -73,6 +73,9 @@ mod secrets;
 mod send_cache;
 mod service;
 mod source_times;
+mod status_cache;
+#[cfg(target_os = "linux")]
+mod linux_status;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 #[path = "btrfs.rs"]
 mod storage;

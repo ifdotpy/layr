@@ -2249,3 +2249,96 @@ pub(crate) fn verify_registry(src: &Path, dst: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+pub(crate) use crate::linux_status::status_stage_identity;
+
+/// Resolve only ordinary, unredirected layers. An ambiguous backing file cannot
+/// validate an overlay mapping, so it keeps the snapshot fallback.
+fn status_layers(root: &Path) -> Result<Option<Vec<PathBuf>>> {
+    if rustix::fs::statfs(root)?.f_type as u64 != 0x794c_7630 {
+        return Ok(None);
+    }
+    let state = lock(root)?;
+    let root = absolute(root)?;
+    let e = state.registry.trees.get(&root).context("unregistered overlay status root")?;
+    let mut layers = Vec::new();
+    if !e.info.readonly {
+        layers.push(state.object(&e.info.uuid).join("upper"));
+    }
+    layers.extend(std::iter::once(&e.lower).chain(&e.bases).map(|id| state.object(id).join("data")));
+    Ok(Some(layers))
+}
+
+fn status_scan_with(
+    root: &Path,
+    paths: Option<&std::collections::BTreeSet<String>>,
+) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    use crate::status_cache::{BackendIdentity, FileFingerprint, FileStat};
+    let layers = status_layers(root)?;
+    let mut safe_dirs = HashMap::<PathBuf, bool>::new();
+    crate::linux_status::scan(root, paths, &mut |rel, observed| {
+        let Some(layers) = layers.as_ref().filter(|_| observed.is_file()) else {
+            return crate::linux_status::native_fingerprint(&root.join(rel), observed);
+        };
+        for layer in layers {
+            // Redirects/opaque directories change how lower paths are resolved. Do not
+            // guess a backing file from its name in those cases. Cache each directory check.
+            for parent in Path::new(rel).ancestors().skip(1) {
+                let dir = layer.join(parent);
+                let safe = *safe_dirs.entry(dir.clone()).or_insert_with(|| match fs::symlink_metadata(&dir) {
+                    Ok(m) if m.is_dir() => sys::overlay_xattrs(&dir).is_ok_and(|attrs| {
+                        !attrs.iter().any(|(n, _)| {
+                            matches!(
+                                n.as_slice(),
+                                b"trusted.overlay.redirect" | b"trusted.overlay.opaque" | b"trusted.overlay.metacopy"
+                            )
+                        })
+                    }),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+                    _ => false,
+                });
+                if !safe {
+                    return FileFingerprint::Unverifiable;
+                }
+            }
+            let path = layer.join(rel);
+            let backing = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return FileFingerprint::Unverifiable,
+            };
+            // With xino, or an inode identity retained across copy-up, equality may not
+            // be provable here. Falling back is safe. Never lease the merged inode.
+            let mut stat = FileStat::of(&backing);
+            let merged = FileStat::of(observed);
+            stat.dev = merged.dev;
+            stat.nlink = merged.nlink;
+            if !backing.is_file() || stat != merged {
+                return FileFingerprint::Unverifiable;
+            }
+            match crate::linux_status::native_fingerprint(&path, &backing) {
+                FileFingerprint::Verified { stat, .. }
+                    if fs::symlink_metadata(root.join(rel)).is_ok_and(|m| FileStat::of(&m) == merged) =>
+                {
+                    return FileFingerprint::Verified { stat: merged, backend: Some(BackendIdentity::Overlay(stat)) };
+                }
+                _ => return FileFingerprint::Unverifiable,
+            }
+        }
+        FileFingerprint::Unverifiable
+    })
+}
+
+pub(crate) fn status_scan(root: &Path) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    status_scan_with(root, None)
+}
+
+pub(crate) fn status_scan_paths(
+    root: &Path,
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    status_scan_with(root, Some(paths))
+}

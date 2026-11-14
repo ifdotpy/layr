@@ -156,7 +156,6 @@ thread_local! {
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     let _t = crate::trace::span("prepare merge");
     repo.prepare_save(line)?;
-    repo.prepare_status_report(line)?;
     let theirs = revs::resolve(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
@@ -246,7 +245,6 @@ fn prepare_steps(
 #[cfg(target_os = "macos")]
 fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
     let _t = crate::trace::span("prepare replay");
-    repo.prepare_status_report(line)?;
     if repo.merge_base(&line.head, upstream)?.is_none() {
         return Ok(Vec::new());
     }
@@ -1654,9 +1652,10 @@ fn merge_rev_inner(
     if queue.is_none() {
         repo.hold(repo.pin(&[&revs::resolve(repo, Some(line), rev)?])?);
     }
-    #[cfg(target_os = "macos")]
     if queue.is_none() {
+        #[cfg(target_os = "macos")]
         let _ = prepare_merge(ctx, repo, line, rev);
+        let _ = repo.prepare_status_report(line);
     }
     if let Some(q) = queue {
         if line.head != q.expected_head {
@@ -2085,10 +2084,10 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             return Ok(0);
         }
     }
+    let _ = repo.prepare_status_report(&line);
     #[cfg(target_os = "macos")]
     let prepared = (|| -> Result<Vec<PreparedStep>> {
         let _t = crate::trace::span("prepare pick");
-        repo.prepare_status_report(&line)?;
         let chain = picks.iter().map(|p| pair(p).map(|(b, t)| (b, t, ids::short(p)))).collect::<Result<Vec<_>>>()?;
         prepare_steps(ctx, repo, &line, &line.head, chain)
     })()
@@ -2404,6 +2403,7 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => upstream.clone(),
     };
     repo.hold(repo.pin(&[&line.head, &upstream, &onto])?);
+    let _ = repo.prepare_status_report(&line);
     #[cfg(target_os = "macos")]
     let prepared = (line.head.clone(), prepare_replay(ctx, repo, &line, &upstream, &onto).unwrap_or_default());
     #[cfg(not(target_os = "macos"))]
