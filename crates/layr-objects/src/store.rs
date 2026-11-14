@@ -605,15 +605,20 @@ impl Store {
         let mut f = File::open(path)?;
         let len = f.metadata()?.len();
         let mut h = self.keying.hasher(Kind::Blob, len);
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
+        thread_local! {
+            static BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        Ok((h.finish().with_context(|| path.display().to_string())?, len))
+        BUFFER.with_borrow_mut(|buffer| {
+            let buf = fsx::file_buffer(buffer, len);
+            loop {
+                let n = f.read(buf)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            Ok((h.finish().with_context(|| path.display().to_string())?, len))
+        })
     }
 
     /// Store the file at `path` and return its id. `previous` is the blob of the same path in the
@@ -1552,6 +1557,42 @@ mod tests {
     use super::*;
     use crate::testutil::{noise, scratch};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn hash_file_ids_are_fixed_for_plain_and_keyed_stores() -> anyhow::Result<()> {
+        let dir = scratch("hash-file-ids");
+        let path = dir.join("file");
+        // Independently computed SHA-256 / HMAC-SHA256 of "blob <len>\0" and i * 31 mod 256.
+        let cases: [(u64, &str, &str); 3] = [
+            (
+                0,
+                "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813",
+                "36b663e28418866e8cb27f0d85472e4686f62fdf37f8d0f2988a3f9ea1fc3386",
+            ),
+            (
+                4096,
+                "eab24b561322be2a89ec804dc57ad63eb85754869b0ddd9dd4df3c552cf95560",
+                "79cc741001db4095ae995c97a39fd3bcab2df17de81b62e9920f885d0250d4a2",
+            ),
+            (
+                (1 << 20) + 17,
+                "d424c32a92d46dce1dad6e7c9dcca49b816f9df4f265ea10d7ee00a3810d9f3b",
+                "cca6ed13a5d0e351047d1bc6d716d694dd9e02c2b208f4007402f406eb0f3775",
+            ),
+        ];
+        for (name, keying, column) in [("plain", Keying::Plain, 0), ("keyed", Keying::Keyed([42; 32]), 1)] {
+            let store = Store::open(&dir.join(name), keying)?;
+            // Read large then small files too: stale scratch bytes must never enter the hash.
+            for &(len, plain, keyed) in cases.iter().chain(cases.iter().rev()) {
+                let bytes: Vec<u8> = (0..len).map(|i| (i * 31).to_le_bytes()[0]).collect();
+                fs::write(&path, &bytes)?;
+                let (id, size) = store.hash_file(&path)?;
+                assert_eq!(size, len);
+                assert_eq!(id.hex(), [plain, keyed][column], "{name}, {len} bytes");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn prune_keeps_what_kept_states_reach_and_drops_the_rest() {

@@ -1794,20 +1794,28 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
         return Ok(false);
     }
     let read = if len >= SHARED_MIN { unshared(&a, &b, len) } else { vec![(0, len)] };
-    let (mut ab, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
-    for (from, to) in read {
-        let mut pos = from;
-        while pos < to {
-            let n = ((to - pos).min(ab.len() as u64)) as usize;
-            a.read_exact_at(&mut ab[..n], pos)?;
-            b.read_exact_at(&mut bb[..n], pos)?;
-            if ab[..n] != bb[..n] {
-                return Ok(false);
-            }
-            pos += n as u64;
-        }
+    thread_local! {
+        static BUFFERS: std::cell::RefCell<[Vec<u8>; 2]> = const {
+            std::cell::RefCell::new([Vec::new(), Vec::new()])
+        };
     }
-    Ok(true)
+    BUFFERS.with_borrow_mut(|[a_buf, b_buf]| {
+        let ab = layr_objects::fsx::file_buffer(a_buf, len);
+        let bb = layr_objects::fsx::file_buffer(b_buf, len);
+        for (from, to) in read {
+            let mut pos = from;
+            while pos < to {
+                let n = ((to - pos).min(ab.len() as u64)) as usize;
+                a.read_exact_at(&mut ab[..n], pos)?;
+                b.read_exact_at(&mut bb[..n], pos)?;
+                if ab[..n] != bb[..n] {
+                    return Ok(false);
+                }
+                pos += n as u64;
+            }
+        }
+        Ok(true)
+    })
 }
 
 /// `changed_ranges` of each path, on up to four threads. The results keep the order of `paths`,

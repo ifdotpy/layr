@@ -7,6 +7,18 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+/// Reuse initialized file-read scratch, lending at most 1 MiB and retaining earlier bytes.
+/// Even an empty file needs a one-byte read buffer so a read can detect growth.
+pub fn file_buffer(buf: &mut Vec<u8>, file_len: u64) -> &mut [u8] {
+    let size = file_len.clamp(1, 1 << 20) as usize;
+    if buf.len() < size {
+        // Avoid geometric capacity growth beyond the cap, and only zero new bytes.
+        buf.reserve_exact(size - buf.len());
+        buf.resize(size, 0);
+    }
+    &mut buf[..size]
+}
+
 /// The extended attributes that a tree records. Left out: attributes that the system stamps on
 /// every file (`com.apple.provenance`), layr's own markers, and the classes that need privileges
 /// or name file system internals (`trusted.`, `security.`, `system.`: SELinux labels, POSIX ACLs,
@@ -193,4 +205,26 @@ pub fn clone_or_copy(src: &Path, dst: &Path) -> io::Result<bool> {
     let mut to = std::fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
     io::copy(&mut from, &mut to)?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::file_buffer;
+
+    #[test]
+    fn file_buffer_reuses_initialized_storage_and_caps_growth() {
+        let mut buf = Vec::new();
+        assert_eq!(buf.capacity(), 0);
+        assert_eq!(file_buffer(&mut buf, 0), &[0]);
+        file_buffer(&mut buf, 700_000).fill(37);
+        let bytes = file_buffer(&mut buf, u64::MAX);
+        assert_eq!(bytes.len(), 1 << 20);
+        assert!(bytes[..700_000].iter().all(|&b| b == 37));
+        assert!(bytes[700_000..].iter().all(|&b| b == 0));
+        let ptr = bytes.as_ptr();
+        for len in [4096, 0, 1 << 20] {
+            assert_eq!(file_buffer(&mut buf, len).as_ptr(), ptr);
+        }
+        assert_eq!(buf.capacity(), 1 << 20);
+    }
 }

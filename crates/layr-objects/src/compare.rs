@@ -67,19 +67,27 @@ fn names(dir: &Path) -> Result<BTreeSet<Vec<u8>>> {
     Ok(out)
 }
 
-fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
+fn same_bytes(a: &Path, b: &Path, len: u64) -> Result<bool> {
     let (mut fa, mut fb) = (File::open(a)?, File::open(b)?);
-    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
-    loop {
-        let na = read_full(&mut fa, &mut ba)?;
-        let nb = read_full(&mut fb, &mut bb)?;
-        if na != nb || ba[..na] != bb[..nb] {
-            return Ok(false);
-        }
-        if na == 0 {
-            return Ok(true);
-        }
+    thread_local! {
+        static BUFFERS: std::cell::RefCell<[Vec<u8>; 2]> = const {
+            std::cell::RefCell::new([Vec::new(), Vec::new()])
+        };
     }
+    BUFFERS.with_borrow_mut(|[a, b]| {
+        let ba = fsx::file_buffer(a, len);
+        let bb = fsx::file_buffer(b, len);
+        loop {
+            let na = read_full(&mut fa, ba)?;
+            let nb = read_full(&mut fb, bb)?;
+            if na != nb || ba[..na] != bb[..nb] {
+                return Ok(false);
+            }
+            if na == 0 {
+                return Ok(true);
+            }
+        }
+    })
 }
 
 fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -142,7 +150,7 @@ fn walk(a: &Path, b: &Path, rel: &[u8], acc: &Mutex<Acc>) -> Result<()> {
             }
             if ta.is_file() {
                 bytes = ma.len();
-                if ma.len() != mb.len() || !same_bytes(&pa, &pb)? {
+                if ma.len() != mb.len() || !same_bytes(&pa, &pb, ma.len())? {
                     diffs.push(format!("content differs: {}", show(name)));
                 }
             }
