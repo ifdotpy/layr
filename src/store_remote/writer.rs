@@ -198,7 +198,7 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
     if path.starts_with(&local_root) {
         bail!("the paper key file must be outside the local store and line folders");
     }
-    if let super::backend::Backend::File(root, _, _) = &store.backend {
+    if let super::backend::Backend::File(root, _) = &store.backend {
         let remote_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         if path.starts_with(remote_root) {
             bail!("the paper key file must be outside the remote store");

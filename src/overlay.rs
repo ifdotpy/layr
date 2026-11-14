@@ -341,7 +341,7 @@ impl ListedOverlay<'_> {
             || self
                 .project
                 .as_ref()
-                .is_ok_and(|p| Policy::load(p).check(&Who::of(ctx.caller.uid, ctx.caller.gid), "read").is_ok())
+                .is_ok_and(|p| Policy::load(p).check(&Who::caller(&ctx.caller), "read").is_ok())
     }
 }
 
@@ -1196,7 +1196,11 @@ impl<'a> Repo<'a> {
             return Ok(true);
         }
         let op = self.overlay_project(name)?;
-        Ok(Policy::load(&op).check(&Who::of(uid, gid), "read").is_ok())
+        let who = match self.ctx.filter(|ctx| ctx.caller.uid == uid && ctx.caller.gid == gid) {
+            Some(ctx) => Who::caller(&ctx.caller),
+            None => Who::of(uid, gid),
+        };
+        Ok(Policy::load(&op).check(&who, "read").is_ok())
     }
 
     fn owner_reads(&self, name: &str, owner: u32) -> Result<bool> {
@@ -2702,7 +2706,10 @@ mod read_open_tests {
         fn new() -> Result<Self> {
             let root = std::env::temp_dir().join(format!("layr-read-opens-{}", ids::new_id()));
             let store = Store::open(&root.join("store"))?;
-            let caller = Caller { uid: 1000, gid: 1000, user: "reader".into(), home: root.join("home") };
+            let mut caller = Caller::from_uid(1000);
+            caller.gid = 1000;
+            caller.user = "reader".into();
+            caller.home = root.join("home");
             let actor = crate::model::Actor { uid: caller.uid, name: caller.user.clone(), session: None };
             let create = |name: &str, config: serde_json::Value| -> Result<Project<'_>> {
                 let dir = store.project_dir(name)?;

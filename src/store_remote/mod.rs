@@ -788,7 +788,7 @@ impl Store {
         self.backend = self.backend.root().clone();
         self.epoch = None;
         self.epoch_public = false;
-        self.backend.as_caller(ctx);
+        self.backend.as_caller(ctx)?;
         let public_only = self.force_public
             || (self.public_clone
                 && ctx.env("LAYR_GATEWAY_TOKEN_FILE").is_none()
@@ -813,7 +813,7 @@ impl Store {
             }
             legacy_probe = true;
             self.backend = Backend::open(&self.url)?;
-            self.backend.as_caller(ctx);
+            self.backend.as_caller(ctx)?;
         }
         if let Backend::Gateway(gateway) = &mut self.backend {
             if public_only {

@@ -111,7 +111,7 @@ fn merge_trees_at(
         ours_label: "head",
         theirs_label,
         config: &cfg,
-        run_as: ctx.caller.driver_ids(),
+        run_as: ctx.caller.fs_identity()?,
         allow_root: ctx.caller.is_root(),
     })?;
     if commands_blocked.get() {

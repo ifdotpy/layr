@@ -513,9 +513,9 @@ pub fn exchange(
     let repo = &h.repo;
     let mut c = Command::new(&command[0]);
     c.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
-    crate::privs::command_as(
+    crate::privs::command_as_caller(
         &mut c,
-        ctx.caller.uid,
+        ctx,
         &crate::privs::pick_env(ctx, &["SSH_AUTH_SOCK", "PATH", "LAYR_ROOT", "LAYR_SOCKET"]),
     )?;
     let mut child = c.spawn().context("start the peer command")?;

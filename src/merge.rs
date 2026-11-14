@@ -29,8 +29,8 @@ pub struct Input<'a> {
     pub theirs_label: &'a str,
     /// Project configuration: `merge.driver.<name>` and `merge.verify.<name>` commands.
     pub config: &'a dyn Fn(&str) -> Option<String>,
-    /// Configured drivers run as this user: the caller of the merge (None when root calls).
-    pub run_as: Option<(u32, u32)>,
+    /// Configured drivers run as this resolved caller, including an explicitly permitted root caller.
+    pub run_as: std::sync::Arc<crate::privs::FsIdentity>,
     /// The caller is root: a driver may then run as root.
     pub allow_root: bool,
 }
@@ -571,18 +571,19 @@ fn run_derive(i: &Input, cmd: &str, outputs: &BTreeSet<String>) -> Result<bool> 
             Ok(true)
         })?;
         // The root stays private until all children have their final owner.
-        if let Some((uid, gid)) = i.run_as {
+        if i.run_as.uid() != 0 {
+            let (uid, gid) = (i.run_as.uid(), i.run_as.gid());
             fsutil::walk(&dir, "", &mut |p, _| {
                 fsutil::chown_nofollow(&dir.join(p), uid, gid)?;
                 Ok(true)
             })?;
         }
-        hand_over(&dir, i.run_as)?;
-        if !shell_at(cmd, i.run_as, i.allow_root, Some(&dir))? {
+        hand_over(&dir, i.run_as.as_ref())?;
+        if !shell_at(cmd, i.run_as.as_ref(), i.allow_root, Some(&dir))? {
             return Ok(false);
         }
         // Open every output under the user's permissions before publishing any of them.
-        let opened = as_driver(i.run_as, || {
+        let opened = crate::privs::as_user_fs(i.run_as.as_ref(), || {
             let tree = crate::tree::Tree::open(&dir)?;
             outputs.iter().map(|p| Ok((p.clone(), tree.open_read(p)?))).collect::<Result<Vec<_>>>()
         });
@@ -596,7 +597,7 @@ fn run_derive(i: &Input, cmd: &str, outputs: &BTreeSet<String>) -> Result<bool> 
         }
         Ok(true)
     })();
-    remove_private(&dir, i.run_as);
+    remove_private(&dir, i.run_as.as_ref());
     result
 }
 
@@ -871,9 +872,9 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     let dir = private_dir()?;
     let a = dir.join("result");
     copy_version(&fsutil::safe_join(i.result, rp)?, &a)?;
-    hand_over(&dir, i.run_as)?;
-    let ok = shell(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as, i.allow_root);
-    remove_private(&dir, i.run_as);
+    hand_over(&dir, i.run_as.as_ref())?;
+    let ok = shell_at(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as.as_ref(), i.allow_root, None);
+    remove_private(&dir, i.run_as.as_ref());
     let ok = ok?;
     if !ok {
         // Keep ours: copy back the ours version.
@@ -894,31 +895,22 @@ fn private_dir() -> Result<PathBuf> {
 
 /// Give a private folder and the files in it to the command's user: the files first, the folder
 /// last, so the user cannot change the folder while the service still works in it.
-fn hand_over(d: &Path, run_as: Option<(u32, u32)>) -> Result<()> {
-    if let Some((u, g)) = run_as {
-        if rustix::process::geteuid().is_root() {
-            for e in std::fs::read_dir(d)?.flatten() {
-                fsutil::chown_nofollow(&e.path(), u, g)?;
-            }
-            fsutil::chown_nofollow(d, u, g)?;
+fn hand_over(d: &Path, run_as: &crate::privs::FsIdentity) -> Result<()> {
+    if run_as.uid() != 0 && rustix::process::geteuid().is_root() {
+        for e in std::fs::read_dir(d)?.flatten() {
+            fsutil::chown_nofollow(&e.path(), run_as.uid(), run_as.gid())?;
         }
+        fsutil::chown_nofollow(d, run_as.uid(), run_as.gid())?;
     }
     Ok(())
-}
-
-fn as_driver<T>(run_as: Option<(u32, u32)>, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    match run_as {
-        Some((u, g)) => crate::privs::as_user_fs(u, g, f),
-        None => f(),
-    }
 }
 
 /// Copy the file a command wrote into the result, read with the command user's file
 /// permissions and without following a link: whatever the user leaves at that name, the
 /// service reads only what the user can read.
 /// False when there is no regular file to take.
-fn take_command_output(path: &Path, run_as: Option<(u32, u32)>, result: &Path, rp: &str) -> Result<bool> {
-    let opened = as_driver(run_as, || {
+fn take_command_output(path: &Path, run_as: &crate::privs::FsIdentity, result: &Path, rp: &str) -> Result<bool> {
+    let opened = crate::privs::as_user_fs(run_as, || {
         use std::os::unix::fs::OpenOptionsExt;
         let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
         if !f.metadata()?.is_file() {
@@ -935,8 +927,8 @@ fn take_command_output(path: &Path, run_as: Option<(u32, u32)>, result: &Path, r
     Ok(true)
 }
 
-fn remove_private(d: &Path, run_as: Option<(u32, u32)>) {
-    let _ = as_driver(run_as, || Ok(std::fs::remove_dir_all(d)?));
+fn remove_private(d: &Path, run_as: &crate::privs::FsIdentity) {
+    let _ = crate::privs::as_user_fs(run_as, || Ok(std::fs::remove_dir_all(d)?));
 }
 
 fn sh_quote(p: &Path) -> String {
@@ -949,12 +941,8 @@ fn sh_quote_str(s: &str) -> String {
 
 /// Run a configured command as the caller of the merge, with a clean environment. Never as root
 /// unless the caller is root.
-fn shell(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool) -> Result<bool> {
-    shell_at(cmd, run_as, allow_root, None)
-}
-
-fn shell_at(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool, dir: Option<&Path>) -> Result<bool> {
-    let uid = run_as.map(|r| r.0).unwrap_or(0);
+fn shell_at(cmd: &str, run_as: &crate::privs::FsIdentity, allow_root: bool, dir: Option<&Path>) -> Result<bool> {
+    let uid = run_as.uid();
     if uid == 0 && !allow_root && rustix::process::geteuid().is_root() {
         bail!("refusing to run a merge command as root for another user");
     }
@@ -963,7 +951,7 @@ fn shell_at(cmd: &str, run_as: Option<(u32, u32)>, allow_root: bool, dir: Option
     if let Some(dir) = dir {
         c.current_dir(dir);
     }
-    crate::privs::command_as(&mut c, uid, &[])?;
+    run_as.command(&mut c, &[])?;
     Ok(c.status().with_context(|| format!("run {cmd}"))?.success())
 }
 
@@ -975,20 +963,20 @@ fn run_command_driver(i: &Input, cmd: &str, b: &Path, r: &Path, t: &Path, rp: &s
     copy_version(b, &o)?;
     copy_version(r, &a)?;
     copy_version(t, &bb)?;
-    hand_over(&dir, i.run_as)?;
+    hand_over(&dir, i.run_as.as_ref())?;
     let full = cmd
         .replace("%O", &sh_quote(&o))
         .replace("%A", &sh_quote(&a))
         .replace("%B", &sh_quote(&bb))
         .replace("%P", &sh_quote_str(rp))
         .replace("%L", "7");
-    let ran = shell(&full, i.run_as, i.allow_root);
+    let ran = shell_at(&full, i.run_as.as_ref(), i.allow_root, None);
     // A result the service cannot read as the driver user (a link, a folder) is a failed driver.
     let taken = match ran {
-        Ok(true) => take_command_output(&a, i.run_as, i.result, rp),
+        Ok(true) => take_command_output(&a, i.run_as.as_ref(), i.result, rp),
         _ => Ok(false),
     };
-    remove_private(&dir, i.run_as);
+    remove_private(&dir, i.run_as.as_ref());
     ran?;
     taken
 }
@@ -1116,7 +1104,7 @@ mod derive_tests {
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &|_| None,
-                run_as: Some((uid, gid)),
+                run_as: std::sync::Arc::new(crate::privs::FsIdentity::resolve(uid, gid)?),
                 allow_root: uid == 0,
             };
             let outputs = BTreeSet::from(["output".into()]);
@@ -1203,7 +1191,7 @@ mod merge_sides_tests {
                 ours_label: "ours",
                 theirs_label: "theirs",
                 config: &config,
-                run_as: Some((rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())),
+                run_as: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()).fs_identity()?,
                 // The privileged checks run this as root, where a derive needs the explicit opt-in.
                 allow_root: rustix::process::geteuid().is_root(),
             };
@@ -1286,5 +1274,33 @@ mod sides_measurements {
     #[ignore = "candidate-map measurement; excludes filesystem candidate discovery"]
     fn merge_sides_shared() {
         sides(true)
+    }
+}
+
+#[cfg(test)]
+mod command_identity_tests {
+    use super::*;
+
+    #[test]
+    fn merge_commands_reuse_one_identity_for_root_and_nonroot_callers() -> Result<()> {
+        let uid = rustix::process::geteuid().as_raw();
+        assert_ne!(uid, 0, "this test must run as an ordinary user");
+        for target in [uid, 0] {
+            let caller = crate::ctx::Caller::from_uid(target);
+            let before = crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get());
+            for _ in 0..4 {
+                let identity = caller.fs_identity()?;
+                let result = shell_at("true", &identity, caller.is_root(), None);
+                if caller.is_root() {
+                    // Exercise root command preparation without ever starting a root process.
+                    let error = result.err().ok_or_else(|| anyhow::anyhow!("root command unexpectedly succeeded"))?;
+                    assert!(error.to_string().contains("cannot run a command as uid 0"));
+                } else {
+                    assert!(result?);
+                }
+            }
+            assert_eq!(crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get()) - before, 1);
+        }
+        Ok(())
     }
 }

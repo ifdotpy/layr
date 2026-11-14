@@ -2353,31 +2353,59 @@ fn copy_folder(
     fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
     // Names of one file stay names of one file: the first is copied, the others link to it.
     let mut first: std::collections::HashMap<(u64, u64), String> = Default::default();
-    for (rel, m) in &entries {
-        if m.is_dir() {
-            fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
-            continue;
-        }
-        let link = if m.is_file() {
-            use std::os::unix::fs::MetadataExt;
-            let lm = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(fsutil::safe_join(src, &rel)?)?))?;
-            (lm.nlink() > 1).then(|| (lm.dev(), lm.ino()))
-        } else {
-            None
-        };
-        match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
-            Some((_, f)) => {
-                fsutil::make_parents(dst, &rel, None)?;
-                std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?;
-            }
-            None => {
-                copy_from_caller(ctx, src, rel, dst)?;
-                if let Some(k) = link {
-                    first.insert(k, rel.clone());
+    // The store is closed to the caller. Open a bounded batch of source files under the
+    // caller's credentials, then write through those descriptors with the service's rights.
+    // This also keeps Darwin's process-wide effective-id changes on this one thread.
+    enum Source {
+        Directory,
+        File(std::fs::File),
+        Symlink(std::path::PathBuf),
+    }
+    for batch in entries.chunks(64) {
+        let sources = crate::privs::as_caller_fs(ctx, || {
+            batch
+                .iter()
+                .map(|(rel, m)| {
+                    if m.is_dir() {
+                        return Ok(Source::Directory);
+                    }
+                    let path = fsutil::safe_join(src, rel)?;
+                    let m = std::fs::symlink_metadata(&path)?;
+                    if m.file_type().is_symlink() {
+                        Ok(Source::Symlink(std::fs::read_link(&path)?))
+                    } else {
+                        fsutil::open_regular(&path).map(Source::File)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        for ((rel, _), source) in batch.iter().zip(sources) {
+            match source {
+                Source::Directory => {
+                    fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
+                    continue;
+                }
+                Source::Symlink(target) => fsutil::put_symlink(dst, rel, &target)?,
+                Source::File(file) => {
+                    use std::os::unix::fs::MetadataExt;
+                    let m = file.metadata()?;
+                    let link = (m.nlink() > 1).then(|| (m.dev(), m.ino()));
+                    match link.and_then(|k| first.get(&k)) {
+                        Some(first) => {
+                            fsutil::make_parents(dst, rel, None)?;
+                            std::fs::hard_link(fsutil::safe_join(dst, first)?, fsutil::safe_join(dst, rel)?)?;
+                        }
+                        None => {
+                            fsutil::copy_open_file(&file, dst, rel)?;
+                            if let Some(k) = link {
+                                first.insert(k, rel.clone());
+                            }
+                        }
+                    }
                 }
             }
+            n += 1;
         }
-        n += 1;
     }
     // Set directory modes after their children, so a restrictive mode cannot block the copy.
     for (rel, m) in entries.iter().rev().filter(|(_, m)| m.is_dir()) {
@@ -2386,28 +2414,11 @@ fn copy_folder(
     Ok(n)
 }
 
-/// Copy one file or link of the caller's folder into the store: read with the caller's rights,
-/// write with ours. The daemon runs as root, and the store folders are closed to the caller.
-fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path::Path) -> Result<()> {
-    let path = fsutil::safe_join(src, rel)?;
-    let m = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&path)?))?;
-    if m.file_type().is_symlink() {
-        let target = crate::privs::as_caller_fs(ctx, || Ok(std::fs::read_link(&path)?))?;
-        return fsutil::put_symlink(dst, rel, &target);
-    }
-    let file = crate::privs::as_caller_fs(ctx, || fsutil::open_regular(&path))?;
-    fsutil::copy_open_file(&file, dst, rel)
-}
-
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
     let mut command = std::process::Command::new("git");
     command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
     // The caller's choice of git configuration (the global file and its excludes) applies, as in their shell.
-    crate::privs::command_as(
-        &mut command,
-        ctx.caller.uid,
-        &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]),
-    )?;
+    crate::privs::command_as_caller(&mut command, ctx, &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]))?;
     Ok(command.output()?)
 }
 
@@ -3652,5 +3663,55 @@ mod op_log_tests {
         drop(db);
         std::fs::remove_dir_all(dir)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod caller_import_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn batches_preserve_hard_links_symlinks_modes_and_times() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-caller-import-{}", ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        let result = (|| -> Result<()> {
+            let src = root.join("source");
+            let dst = root.join("destination");
+            std::fs::create_dir_all(src.join("sub"))?;
+            std::fs::create_dir(&dst)?;
+            for i in 0..130 {
+                std::fs::write(src.join(format!("{i:03}")), format!("file {i}"))?;
+            }
+            std::fs::write(src.join("sub/private"), b"private")?;
+            std::fs::set_permissions(src.join("sub/private"), std::fs::Permissions::from_mode(0o600))?;
+            fsutil::set_mtime(&std::fs::File::open(src.join("000"))?, 1_000_000_000, 5)?;
+            std::fs::hard_link(src.join("000"), src.join("last-alias"))?;
+            std::os::unix::fs::symlink("sub/private", src.join("link"))?;
+            std::fs::create_dir(src.join(".git"))?;
+            std::fs::write(src.join(".git/config"), b"excluded")?;
+            let ctx = Ctx {
+                store: crate::store::Store::open(&root.join("store"))?,
+                caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+                cwd: src.clone(),
+                env: Default::default(),
+                author: Default::default(),
+                out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            };
+            assert_eq!(copy_folder(&ctx, &src, &dst, true, None)?, 133);
+            for i in 0..130 {
+                assert_eq!(std::fs::read_to_string(dst.join(format!("{i:03}")))?, format!("file {i}"));
+            }
+            assert_eq!(std::fs::metadata(dst.join("000"))?.ino(), std::fs::metadata(dst.join("last-alias"))?.ino());
+            assert_eq!(std::fs::read_link(dst.join("link"))?, std::path::Path::new("sub/private"));
+            assert_eq!(std::fs::read(dst.join("sub/private"))?, b"private");
+            assert_eq!(std::fs::metadata(dst.join("sub/private"))?.mode() & 0o777, 0o600);
+            let metadata = std::fs::metadata(dst.join("000"))?;
+            assert_eq!((metadata.mtime(), metadata.mtime_nsec()), (1_000_000_000, 5));
+            assert!(!dst.join(".git").exists());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        result
     }
 }

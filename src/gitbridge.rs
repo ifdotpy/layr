@@ -192,7 +192,7 @@ fn as_caller(ctx: &Ctx, c: &mut Command, git_dir: &Path) -> Result<()> {
     }
     env.push(("GIT_DIR".into(), git_dir.to_string_lossy().into_owned()));
     env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-    crate::privs::command_as(c, ctx.caller.uid, &env)
+    crate::privs::command_as_caller(c, ctx, &env)
 }
 
 pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {

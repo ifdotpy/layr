@@ -1,11 +1,13 @@
 //! The caller of a command: identity, environment, working folder and output.
 
 use crate::model::{Actor, Author};
+use crate::privs::FsIdentity;
 use crate::store::Store;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct Caller {
@@ -13,22 +15,29 @@ pub struct Caller {
     pub gid: u32,
     pub user: String,
     pub home: PathBuf,
+    /// Lazy memberships shared by every context derived from this request.
+    fs_identity: Arc<OnceLock<Result<Arc<FsIdentity>, String>>>,
 }
 
 impl Caller {
     pub fn from_uid(uid: u32) -> Caller {
         match crate::sys::user_by_uid(uid) {
-            Some(u) => Caller { uid, gid: u.gid, user: u.name, home: PathBuf::from(u.home) },
-            None => Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/") },
+            Some(u) => Caller { uid, gid: u.gid, user: u.name, home: PathBuf::from(u.home), fs_identity: Default::default() },
+            None => {
+                Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/"), fs_identity: Default::default() }
+            }
         }
     }
     pub fn is_root(&self) -> bool {
         self.uid == 0
     }
-    /// The identity that configured commands (merge drivers and checks) run as for this
-    /// caller: the caller itself, never another user. None for root.
-    pub fn driver_ids(&self) -> Option<(u32, u32)> {
-        (!self.is_root()).then_some((self.uid, self.gid))
+    /// The request's identity for filesystem access and configured commands, including root.
+    pub fn fs_identity(&self) -> Result<Arc<FsIdentity>> {
+        self.fs_identity
+            .get_or_init(|| FsIdentity::resolve(self.uid, self.gid).map(Arc::new).map_err(|e| format!("{e:#}")))
+            .as_ref()
+            .cloned()
+            .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -72,7 +81,7 @@ impl Ctx {
         // Git reads the caller's home, but not global configuration inside a check sandbox.
         let env =
             [("HOME".into(), self.caller.home.to_string_lossy().into_owned()), ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())];
-        crate::privs::command_as(&mut command, self.caller.uid, &env).ok()?;
+        crate::privs::command_as_caller(&mut command, self, &env).ok()?;
         #[cfg(test)]
         GIT_CONFIG_READS.with(|reads| reads.set(reads.get() + 1));
         let out = command.output().ok()?;

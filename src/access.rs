@@ -59,6 +59,12 @@ impl Who {
         Who { uid, groups }
     }
 
+    /// Reuse the request's memberships; keep the existing primary-group fallback on NSS failure.
+    pub fn caller(caller: &crate::ctx::Caller) -> Who {
+        let groups = caller.fs_identity().map(|identity| identity.groups().to_vec()).unwrap_or_else(|_| vec![caller.gid]);
+        Who { uid: caller.uid, groups }
+    }
+
     fn keys(&self) -> Vec<String> {
         let mut k = vec![format!("user:{}", self.uid)];
         k.extend(self.groups.iter().map(|g| format!("group:{g}")));

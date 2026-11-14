@@ -1461,7 +1461,10 @@ mod tests {
         let result = (|| -> Result<()> {
             let store = crate::store::Store::open(&root.join("store"))?;
             // Visibility exercises the ordinary reader policy even when the test runner is root.
-            let caller = crate::ctx::Caller { uid: 1000, gid: 1000, user: "reader".into(), home: root.join("home") };
+            let mut caller = crate::ctx::Caller::from_uid(1000);
+            caller.gid = 1000;
+            caller.user = "reader".into();
+            caller.home = root.join("home");
             let actor = crate::model::Actor { uid: caller.uid, name: caller.user.clone(), session: None };
             let create = |name: &str, config: serde_json::Value| -> Result<Project<'_>> {
                 let dir = store.project_dir(name)?;

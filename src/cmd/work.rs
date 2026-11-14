@@ -1111,7 +1111,11 @@ fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32
         ("GIT_CEILING_DIRECTORIES".to_string(), dir.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned()),
         ("GIT_DIR".to_string(), "/nonexistent-layr".to_string()),
     ]);
-    crate::privs::command_as(&mut c, uid, &env)?;
+    if uid == ctx.caller.uid {
+        crate::privs::command_as_caller(&mut c, ctx, &env)?;
+    } else {
+        crate::privs::command_as(&mut c, uid, &env)?;
+    }
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut ch = c.spawn()?;
     ch.stdin.take().unwrap().write_all(patch)?;
@@ -2415,5 +2419,39 @@ mod status_tests {
             serde_json::to_string(&output).unwrap(),
             r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","line_id":"id","staged":[],"unstaged":[],"untracked":["new.txt"]}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod patch_identity_tests {
+    use super::*;
+
+    #[test]
+    fn patch_validation_and_application_resolve_the_caller_once() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-patch-identity-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        let result = (|| -> Result<()> {
+            let work = root.join("work");
+            std::fs::create_dir(&work)?;
+            std::fs::write(work.join("file"), b"old\n")?;
+            let ctx = Ctx {
+                store: crate::store::Store::open(&root.join("store"))?,
+                caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+                cwd: work.clone(),
+                env: Default::default(),
+                out: std::cell::RefCell::new(Box::new(std::io::sink())),
+                author: Default::default(),
+            };
+            let patch = b"diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+            let before = crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get());
+            run_git_apply(&ctx, &work, patch, &["--check".into()], ctx.caller.uid)?;
+            assert_eq!(std::fs::read(work.join("file"))?, b"old\n");
+            run_git_apply(&ctx, &work, patch, &[], ctx.caller.uid)?;
+            assert_eq!(std::fs::read(work.join("file"))?, b"new\n");
+            assert_eq!(crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get()) - before, 1);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 }

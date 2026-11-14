@@ -197,7 +197,7 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 ours_label: "Updated upstream",
                 theirs_label: "Parked changes",
                 config: &cfg,
-                run_as: ctx.caller.driver_ids(),
+                run_as: ctx.caller.fs_identity()?,
                 allow_root: ctx.caller.is_root(),
             })?;
             let result = repo.temp_snapshot(&work.path, true)?;

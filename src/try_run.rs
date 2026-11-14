@@ -74,7 +74,7 @@ pub fn try_command(
     env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
     env.retain(|(k, _)| k != "LAYR_PROJECT");
     env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
-    crate::privs::command_as(&mut command, ctx.caller.uid, &env)?;
+    crate::privs::command_as_caller(&mut command, ctx, &env)?;
     let status = command.status().map_err(|e| {
         error(ErrorKind::CannotRun, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user))
     })?;

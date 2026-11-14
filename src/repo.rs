@@ -235,7 +235,7 @@ impl<'a> Repo<'a> {
     }
 
     pub fn who(ctx: &Ctx) -> Who {
-        Who::of(ctx.caller.uid, ctx.caller.gid)
+        Who::caller(&ctx.caller)
     }
 
     /// The caller may take a project action (`access::ACTIONS`), or an error that says why not.

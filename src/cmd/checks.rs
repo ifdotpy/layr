@@ -946,7 +946,7 @@ fn execute(
             .args(["/work", "--chdir", "/work", "--"])
             .args(argv)
             .current_dir("/");
-        crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
+        crate::privs::command_as_caller(&mut command, ctx, &[])?;
     }
     let result = run_check(command, limits)?;
     // A privileged copy is a plain folder of root: only a sandboxed check gives its caches back.
@@ -1155,10 +1155,10 @@ fn execute(
     let link = std::path::Path::new("/tmp").join(format!("lct-{:016x}", rand::random::<u64>()));
     std::os::unix::fs::symlink(&scratch, &link)?;
     let _link = TempLink(link);
-    let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
+    let seed = ctx.caller.home.join("Library/Application Support/Layr/checks");
     let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
     command.args(["-p", &macos_profile(&dir, &seed)?, "--"]).args(argv).current_dir(&dir);
-    crate::privs::command_as(&mut command, ctx.caller.uid, &[
+    crate::privs::command_as_caller(&mut command, ctx, &[
         ("HOME".into(), home.display().to_string()),
         ("TMPDIR".into(), _link.0.display().to_string()),
         ("LAYR_CHECK_TMPDIR".into(), _link.0.display().to_string()),
