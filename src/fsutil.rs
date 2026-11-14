@@ -64,8 +64,18 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(cur)
 }
 
+/// Logical comparison I/O; descriptor validation is deliberately measured separately by strace.
+#[cfg(test)]
+pub enum ComparisonIo {
+    Metadata,
+    Open,
+    Hashed(u64),
+}
+
 /// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
 pub trait Src: Sync {
+    #[cfg(test)]
+    fn comparison_io(&self, _path: &str, _io: ComparisonIo) {}
     /// The path to read `rel` from; it may not exist. Fails for a path through a link.
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.
@@ -371,6 +381,8 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
 
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
+    #[cfg(test)]
+    root.comparison_io(rel, ComparisonIo::Metadata);
     if let Some(o) = root.objects() {
         return o.meta(rel).ok().flatten();
     }
@@ -643,21 +655,23 @@ pub fn same_entry(
     pb: &str,
     ranges: Option<&crate::compare::ChangedRanges>,
 ) -> Result<bool> {
-    let left_entry = ra.objects().map(|objects| objects.entry(pa)).transpose()?.flatten();
-    let right_entry = rb.objects().map(|objects| objects.entry(pb)).transpose()?.flatten();
-    let left = match ra.objects() {
-        Some(_) => left_entry.as_ref().map(|e| e.meta()),
-        None => lmeta(ra, pa),
-    };
-    let right = match rb.objects() {
-        Some(_) => right_entry.as_ref().map(|e| e.meta()),
-        None => lmeta(rb, pb),
-    };
+    let left = if let Some(tree) = ra.objects() { tree.meta(pa)? } else { lmeta(ra, pa) };
+    let right = if let Some(tree) = rb.objects() { tree.meta(pb)? } else { lmeta(rb, pb) };
     let (ma, mb) = match (left, right) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
         _ => return Ok(false),
     };
+    same_entry_observed((ra, pa, &ma), (rb, pb, &mb), ranges)
+}
+
+/// Compare observations already supplied by a candidate producer. Descriptor validation and
+/// content reads remain necessary for mutable files, even when their timestamps match.
+pub fn same_entry_observed(
+    (ra, pa, ma): (&(impl Src + ?Sized), &str, &Meta),
+    (rb, pb, mb): (&(impl Src + ?Sized), &str, &Meta),
+    ranges: Option<&crate::compare::ChangedRanges>,
+) -> Result<bool> {
     if ma.ftype != mb.ftype {
         return Ok(false);
     }
@@ -669,29 +683,43 @@ pub fn same_entry(
                 return Ok(false);
             }
             if let Some(o) = ra.objects() {
-                let entry = left_entry.context("missing object entry")?;
+                let entry = o.entry(pa)?.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
                     if let Some(other) = rb.objects() {
-                        if let Some(entry) = right_entry {
+                        if let Some(entry) = other.entry(pb)? {
                             if let layr_objects::Node::File { blob: other_blob, .. } = entry.entry.node {
                                 if blob == other_blob {
                                     return Ok(true);
                                 }
                             }
                         }
+                        #[cfg(test)]
+                        {
+                            ra.comparison_io(pa, ComparisonIo::Open);
+                            rb.comparison_io(pb, ComparisonIo::Open);
+                        }
                         return Ok(o.read(pa)? == other.read(pb)?);
                     }
-                    return Ok(o.store.hash_file(&rb.at(pb)?)?.0 == blob);
+                    return same_blob(rb, pb, mb, &o.store, blob);
                 }
             }
             if let Some(o) = rb.objects() {
-                let entry = right_entry.context("missing object entry")?;
+                let entry = o.entry(pb)?.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
-                    return Ok(o.store.hash_file(&ra.at(pa)?)?.0 == blob);
+                    return same_blob(ra, pa, ma, &o.store, blob);
                 }
             }
-            let mut a = open_ro(&ra.at(pa)?)?;
-            let mut b = open_ro(&rb.at(pb)?)?;
+            #[cfg(test)]
+            {
+                ra.comparison_io(pa, ComparisonIo::Open);
+                rb.comparison_io(pb, ComparisonIo::Open);
+            }
+            let mut a = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(ra.at(pa)?)?;
+            let mut b = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(rb.at(pb)?)?;
+            let (opened_a, opened_b) = (a.metadata()?, b.metadata()?);
+            if !matches_observation(&opened_a, ma) || !matches_observation(&opened_b, mb) {
+                return Ok(false);
+            }
             match ranges {
                 Some(rs) => {
                     for (off, len) in rs.bounded(ma.size) {
@@ -705,6 +733,32 @@ pub fn same_entry(
             }
         }
     }
+}
+
+fn matches_observation(opened: &fs::Metadata, observed: &Meta) -> bool {
+    opened.is_file() && opened.len() == observed.size && (opened.mode() & 0o111 != 0) == observed.executable()
+}
+
+fn same_blob(
+    src: &(impl Src + ?Sized),
+    path: &str,
+    meta: &Meta,
+    store: &layr_objects::Store,
+    blob: layr_objects::Id,
+) -> Result<bool> {
+    // Validate the descriptor rather than reopening its path after checking the observation.
+    // A replacement link is never followed and a replacement FIFO cannot block.
+    #[cfg(test)]
+    src.comparison_io(path, ComparisonIo::Open);
+    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(src.at(path)?)?;
+    let opened = file.metadata()?;
+    if !matches_observation(&opened, meta) {
+        return Ok(false);
+    }
+    let id = store.hash_open_file(&mut file, opened.len())?;
+    #[cfg(test)]
+    src.comparison_io(path, ComparisonIo::Hashed(opened.len()));
+    Ok(id == blob)
 }
 
 /// Create the parent folders of `rel` below `root`, with owner `own`.
@@ -1086,6 +1140,13 @@ pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
 /// Paths are relative to `root`. Folders are reported before their content.
 pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
+    #[cfg(test)]
+    let mut counted = |path: &str, meta: &Meta| {
+        root.comparison_io(path, ComparisonIo::Metadata);
+        f(path, meta)
+    };
+    #[cfg(test)]
+    let f: &mut dyn FnMut(&str, &Meta) -> Result<bool> = &mut counted;
     if let Some(o) = root.objects() {
         return o.walk(rel, f);
     }

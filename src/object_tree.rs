@@ -17,6 +17,8 @@ pub struct ObjectTree {
     trees: Mutex<HashMap<Id, Arc<layr_objects::tree::Tree>>>,
     times: Mutex<HashMap<Id, Arc<layr_objects::times::Times>>>,
     links: BTreeMap<String, (String, u64, u64)>,
+    #[cfg(test)]
+    pub(crate) link_comparisons: std::sync::atomic::AtomicUsize,
 }
 impl std::fmt::Debug for ObjectTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +63,8 @@ impl ObjectTree {
             refs,
             cache,
             links,
+            #[cfg(test)]
+            link_comparisons: Default::default(),
             materialized: Mutex::new(BTreeMap::new()),
             trees: Mutex::new(HashMap::from([(refs.tree, root)])),
             times: Mutex::new(HashMap::new()),
@@ -114,6 +118,18 @@ impl ObjectTree {
             }
         }
         Ok(None)
+    }
+    /// Cross-directory hard-link groups must match before any subtree can be pruned.
+    pub fn same_links(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        self.link_comparisons.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.links == other.links
+    }
+    /// Compare immutable directory entries and their tree/times IDs. The comparison caller
+    /// checks cross-directory hard-link compatibility once before pruning any directories.
+    pub fn same_subtree(&self, other: &Self, rel: &str) -> Result<bool> {
+        let (Some(a), Some(b)) = (self.entry(rel)?, other.entry(rel)?) else { return Ok(false) };
+        Ok(matches!(a.entry.node, Node::Dir { .. }) && a.entry == b.entry && a.folder_times == b.folder_times)
     }
     pub fn meta(&self, rel: &str) -> Result<Option<Meta>> {
         Ok(self.entry(rel)?.map(|e| e.meta()))

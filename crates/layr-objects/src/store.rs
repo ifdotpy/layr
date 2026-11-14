@@ -641,6 +641,11 @@ impl Store {
     pub fn hash_file(&self, path: &Path) -> Result<(Id, u64)> {
         let mut f = File::open(path)?;
         let len = f.metadata()?.len();
+        Ok((self.hash_open_file(&mut f, len).with_context(|| path.display().to_string())?, len))
+    }
+
+    /// Hash an already-open file with the length observed on that descriptor.
+    pub fn hash_open_file(&self, f: &mut File, len: u64) -> Result<Id> {
         let mut h = self.keying.hasher(Kind::Blob, len);
         thread_local! {
             static BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -654,7 +659,7 @@ impl Store {
                 }
                 h.update(&buf[..n]);
             }
-            Ok((h.finish().with_context(|| path.display().to_string())?, len))
+            h.finish()
         })
     }
 

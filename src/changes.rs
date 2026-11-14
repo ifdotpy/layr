@@ -152,27 +152,38 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
         DataEvidence::ChangedRanges(ranges) => Some(ranges),
         _ => None,
     };
-    let equal = fsutil::same_entry(parent, c.src(), child, c.path(), ranges)?;
+    let equal = fsutil::same_entry_observed((parent, c.src(), o), (child, c.path(), n), ranges)?;
     Ok(!equal || (o.is_file() && !stored_same(parent, child, c.path())))
 }
 
 /// True when two entries hold the same stored attributes (and ACL on APFS).
-#[cfg(target_os = "macos")]
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
-    match (parent.at(path), child.at(path)) {
-        (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
-        _ => false,
+    #[cfg(target_os = "macos")]
+    if parent.objects().is_none() && child.objects().is_none() {
+        return match (parent.at(path), child.at(path)) {
+            (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
+            _ => false,
+        };
     }
-}
-#[cfg(target_os = "linux")]
-fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
     fn attrs(src: &(impl Src + ?Sized), path: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         if let Some(tree) = src.objects() {
             return Ok(tree.entry(path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?.entry.xattrs);
         }
-        Ok(layr_objects::fsx::xattrs(&src.at(path)?)?)
+        let path = src.at(path)?;
+        #[cfg(target_os = "macos")]
+        {
+            // Object entries have no native ACL (the writer rejects them). Preserve the
+            // native attribute/ACL comparison without materializing the object side.
+            anyhow::ensure!(crate::sys::apfs_acl_text(&path)?.is_none(), "native ACL differs from object entry");
+            let keep = |name: &[u8]| name != b"com.apple.provenance";
+            let mut attrs = crate::sys::apfs_xattrs_where(&path, keep)?;
+            attrs.retain(|(name, _)| keep(name));
+            attrs.sort();
+            Ok(attrs)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(layr_objects::fsx::xattrs(&path)?)
     }
-    // Keep object-backed entries in the object store during metadata comparisons.
     match (attrs(parent, path), attrs(child, path)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
@@ -669,17 +680,53 @@ mod tests {
 /// Object trees have no native inode stream. Enumerate their entries and let the
 /// content comparison reject unchanged candidates without a checkout.
 fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
+    let objects = parent.objects().zip(child.objects());
+    let prunable = objects.filter(|(a, b)| a.same_links(b));
+    if let Some((a, b)) = prunable {
+        if a.same_subtree(b, "")? {
+            return Ok(Vec::new());
+        }
+    }
     let mut entries: BTreeMap<String, (Option<Meta>, Option<Meta>)> = BTreeMap::new();
+    let mut pruned = HashSet::new();
     fsutil::walk(parent, "", &mut |path, meta| {
+        if meta.is_dir() {
+            if let Some((a, b)) = prunable {
+                if a.same_subtree(b, path)? {
+                    pruned.insert(path.to_owned());
+                    return Ok(false);
+                }
+            }
+        }
         entries.entry(path.to_owned()).or_default().0 = Some(meta.clone());
         Ok(true)
     })?;
     fsutil::walk(child, "", &mut |path, meta| {
+        if pruned.contains(path) {
+            return Ok(false);
+        }
         entries.entry(path.to_owned()).or_default().1 = Some(meta.clone());
         Ok(true)
     })?;
-    Ok(entries
+    entries
         .into_iter()
-        .filter_map(|(path, (old, new))| EntryChange::observed(path, old, new, DataEvidence::Unknown))
-        .collect())
+        .map(|(path, (old, new))| {
+            let data = if old.as_ref().is_some_and(Meta::is_file) && new.as_ref().is_some_and(Meta::is_file) {
+                match objects {
+                    Some((a, b)) if a.entry(&path)?.zip(b.entry(&path)?).is_some_and(|(a, b)| a.entry.node == b.entry.node) => {
+                        DataEvidence::Equal
+                    }
+                    _ => DataEvidence::Unknown,
+                }
+            } else {
+                DataEvidence::Unknown
+            };
+            Ok(EntryChange::observed(path, old, new, data))
+        })
+        .filter_map(|result| result.transpose())
+        .collect()
 }
+
+#[cfg(test)]
+#[path = "compare_source_tests.rs"]
+mod source_tests;
