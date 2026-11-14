@@ -225,7 +225,9 @@ impl Db {
         while let Some((s, k, h)) = work.pop() {
             let n = self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
             if n > 0 && TREE_OWNERS.contains(&k.as_str()) && !FILL_ONLY.with(|c| c.get()) && !self.has_tree_owner(&s)? {
-                self.exec("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", params![s])?;
+                // An unpublished preparation has no catalog row. Its owner handles
+                // rollback; an unknown publication must retain its snapshot for repair.
+                self.exec("INSERT OR IGNORE INTO free_queue(state) SELECT id FROM states WHERE id=?1", params![s])?;
             }
             if n > 0 && !self.owners_live(&s)? {
                 self.mark_dead(&s)?;
@@ -746,6 +748,16 @@ impl Db {
         Ok(())
     }
 
+    /// Reserve a fresh state id before its unpublished snapshot becomes visible.
+    pub fn pin_preparation(&self, state: &str, holder: &str) -> Result<()> {
+        self.with_pin_tx(|| {
+            let exists: bool = self.one("SELECT EXISTS(SELECT 1 FROM states WHERE id=?1)", params![state], |r| r.get(0))?;
+            anyhow::ensure!(!exists && !self.is_owned(state)?, "prepared state id is already in use");
+            self.exec("INSERT INTO owners(state, kind, holder) VALUES(?1,'pin',?2)", params![state, holder])?;
+            Ok(())
+        })
+    }
+
     /// Pin states for a command in one durable transaction (`free.rs`). States without an
     /// owner need no pin. A refused state rolls back the whole batch before the caller reads.
     pub fn pins_add(&self, states: &[&str], holder: &str) -> Result<Vec<String>> {
@@ -1163,6 +1175,20 @@ mod tests {
         let line_undo: Vec<String> = db.all_holders("undo").unwrap().into_iter().filter(|h| h.starts_with(LINE)).collect();
         assert_eq!(line_undo, vec![undo_of_delete], "only the undo of the delete record stays");
         assert_eq!(db.owner_rows().unwrap(), db.recomputed_owners(MACHINE, &|_| Ok(true)).unwrap(), "the replay agrees");
+    }
+
+    #[test]
+    fn preparation_pin_protects_a_fresh_id_without_queueing_an_unknown_publication() -> anyhow::Result<()> {
+        let db = memory();
+        let state = id(100);
+        db.pin_preparation(&state, "preparer")?;
+        assert!(db.is_pinned(&state)?);
+        assert!(db.pin_preparation(&state, "other").is_err());
+        assert!(db.reserve_trees(&[state.clone()], "repair")?.is_empty());
+        db.pins_remove(&[state.clone()], "preparer")?;
+        assert!(!db.is_pinned(&state)?);
+        assert!(db.queued_frees()?.is_empty(), "unknown publication is not queued for deletion");
+        Ok(())
     }
 
     #[test]

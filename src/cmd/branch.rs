@@ -357,65 +357,41 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
-                    {
+                    let current = {
                         let _lock = repo.p.lock_maintenance()?;
-                        target.validate(repo)?;
-                    }
-                    let mut prepared = repo.prepare_final_state(&l)?;
+                        let current = target.validate(repo)?;
+                        repo.authorize_line(ctx, &current, crate::repo::LineOp::Manage)?;
+                        current
+                    };
+                    let prepared = repo.prepare_final_state(ctx, &current)?;
                     // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
                     // test can write into the folder before the lock.
                     if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
-                    let lock = match repo.p.lock_maintenance() {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            repo.discard_final_state(prepared);
-                            return Err(e);
-                        }
-                    };
-                    let checked = (|| -> Result<(crate::repo::FinalState, crate::model::Line)> {
-                        let fresh = target.validate(repo)?;
-                        repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
-                        // Automatic states leave overlay files out: uncommitted changes of them would be lost.
-                        if !discard && repo.is_stacked(&l)? && repo.working(&l).exists() {
-                            let private = repo.private_paths(&l)?;
-                            let (st, _scan, _it, _idx) = repo.status(&l)?;
-                            let changed = st
-                                .staged
-                                .iter()
-                                .chain(st.unstaged.iter())
-                                .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
-                                .flatten()
-                                .any(|p| private.contains(&p));
-                            if changed || !repo.pending_moves(&l).is_empty() {
-                                return Err(exit(
-                                    1,
-                                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard"),
-                                ));
-                            }
-                        }
-                        let state = repo.record_final_state(&lock, ctx, &fresh, &mut prepared)?;
-                        Ok((state, fresh))
-                    })();
-                    match checked {
-                        Err(e) => {
-                            repo.discard_final_state(prepared.take());
-                            return Err(e);
-                        }
-                        Ok((crate::repo::FinalState::Recorded(last), _)) => break (lock, last),
-                        Ok((crate::repo::FinalState::Moved, _)) if attempt < 3 => drop(lock),
-                        Ok((crate::repo::FinalState::Moved, fresh)) => {
-                            return Err(exit(
-                                1,
-                                format!(
-                                    "line {name} moved during the command (head {} -> {}); run it again",
-                                    ids::short(&l.head),
-                                    ids::short(&fresh.head)
-                                ),
-                            ))
+                    let lock = repo.p.lock_maintenance()?;
+                    let fresh = target.validate(repo)?;
+                    repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                    // Automatic states leave overlay files out: uncommitted changes of them would be lost.
+                    if !discard && repo.is_stacked(&fresh)? && repo.working(&fresh).exists() {
+                        let private = repo.private_paths(&fresh)?;
+                        let (st, _scan, _it, _idx) = repo.status(&fresh)?;
+                        let changed = st.staged.iter().chain(st.unstaged.iter())
+                            .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()]).flatten()
+                            .any(|p| private.contains(&p));
+                        if changed || !repo.pending_moves(&fresh).is_empty() {
+                            return Err(exit(1, format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard")));
                         }
                     }
+                    if fresh.head != current.head {
+                        if attempt < 3 {
+                            drop(lock);
+                            continue;
+                        }
+                        return Err(exit(1, format!("line {name} moved during the command; run it again")));
+                    }
+                    let last = prepared.working_state(&lock, ctx, &fresh, "before line delete")?;
+                    break (lock, last);
                 }
             };
             // The final state stays in the `deleted` ring. As a thin layer it keeps the states

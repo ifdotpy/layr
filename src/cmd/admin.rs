@@ -1,19 +1,19 @@
 //! save, undo, op log, try, gc, fsck, reindex, init, projects, config, cache.
 
-pub(crate) use crate::try_run::with_try_copy;
-pub(crate) use crate::try_run::try_command;
 pub(crate) use crate::project_config::set_config;
+pub(crate) use crate::try_run::try_command;
+pub(crate) use crate::try_run::with_try_copy;
 
 use super::{exit, here};
-pub(crate) use crate::byte_size::human_size;
-pub(crate) use crate::retention::{overlay_named_states, drop_trees};
 use crate::args::{parse, Spec};
+pub(crate) use crate::byte_size::human_size;
 use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
 use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::{skip_path, Repo};
+pub(crate) use crate::retention::{drop_trees, overlay_named_states};
 use crate::revs;
 use crate::storage as btrfs;
 use crate::store::Project;
@@ -174,6 +174,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         }
         let mut prepared = None;
+        let mut automatic = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
@@ -193,7 +194,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 }
             };
         } else if !a.has("--force") {
-            repo.prepare_save(&l)?;
+            automatic = Some(repo.prepare_save(ctx, &l)?);
         }
         // Test barrier after cache preparation and before publication.
         if a.has("--caches") {
@@ -278,7 +279,10 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             caches.retain(|p| !refused.contains(p));
             Some(repo.caches_state(&_lock, ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
-            repo.save(&_lock, ctx, &l, &msg, a.has("--running"), a.has("--force"))?
+            match automatic.take() {
+                Some(prepared) => prepared.publish(&_lock, ctx, &l, &msg, a.has("--running"))?,
+                None => repo.save(&_lock, ctx, &l, &msg, a.has("--running"), a.has("--force"))?,
+            }
         };
         if let Some(name) = a.get("--keep") {
             // An unchanged folder makes no state: the keep then holds the state equal to the folder.
@@ -625,10 +629,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // Before the lock: the automatic state of each line's folder and the trees that the undo
     // reads (seconds to minutes each under the lock). Errors only lose the preparation; the
     // states are loaded again under the lock, where an error stops the undo.
-    for (lid, ch) in &r.lines {
-        if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
-            let _ = repo.prepare_save(&l);
-        }
+    for ch in r.lines.values() {
         for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
             let _ = repo.state_root(s);
         }
@@ -663,7 +664,6 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    repo.prepare_save(&line)?;
     let wb = save_before_undo(&_line_lock, None, ctx, repo, &line)?;
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
@@ -747,9 +747,9 @@ fn save_before_undo(
     if let Some(locked) = locked {
         return repo.working_state(locked, ctx, line, "before undo");
     }
-    repo.prepare_save(line)?;
+    let prepared = repo.prepare_save(ctx, line)?;
     let _commit = leases.lock(&repo.p)?;
-    repo.working_state(&_commit, ctx, line, "before undo")
+    prepared.working_state(&_commit, ctx, line, "before undo")
 }
 
 fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
@@ -1583,7 +1583,8 @@ fn repair_project(
     let mut attempts = 0;
     let evicted: Evicted;
     // The key epochs that the store remotes publish now, read before the lock (network).
-    let stores = if repo.p.gc_evicts() && !repo.p.is_overlay() { crate::store_remote::cache_stores(ctx, repo) } else { Vec::new() };
+    let stores =
+        if repo.p.gc_evicts() && !repo.p.is_overlay() { crate::store_remote::cache_stores(ctx, repo) } else { Vec::new() };
     let leaks = loop {
         attempts += 1;
         let (mark, diff) = {
@@ -2092,6 +2093,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let name = e.file_name().to_string_lossy().into_owned();
         let id = name.split('@').next().unwrap_or(&name).to_string();
         match repo.p.db.state(&id)? {
+            None if crate::free::preparing_state(&repo.p, &id)? => continue,
             None => {
                 problems += 1;
                 if a.has("--repair") {
@@ -2159,7 +2161,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         }
         for e in std::fs::read_dir(o.p.states_dir())?.flatten() {
             let id = e.file_name().to_string_lossy().into_owned();
-            if o.p.db.state(&id)?.is_none() {
+            if o.p.db.state(&id)?.is_none() && !crate::free::preparing_state(&o.p, &id)? {
                 problems += 1;
                 if repair {
                     btrfs::delete_tree(&e.path())?;

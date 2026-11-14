@@ -346,10 +346,10 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let _line_lock = repo.line_lock(&line)?;
         let line = repo.line(&line.id)?;
-        repo.prepare_save(&line)?;
+        let prepared = repo.prepare_save(ctx, &line)?;
         let _lock = _line_lock.lock(&repo.p)?;
         let before = line.head.clone();
-        if let Some(st) = repo.working_state(&_lock, ctx, &line, "before layr migrate")? {
+        if let Some(st) = prepared.working_state(&_lock, ctx, &line, "before layr migrate")? {
             if st != before {
                 outln!(ctx, "line {}: unsaved work saved as automatic state {}", line.name, ids::short(&st));
             }

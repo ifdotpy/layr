@@ -550,6 +550,20 @@ pub fn pin(p: &Project, states: &[&str]) -> Result<Pin> {
     pin_using(&p.db, crate::store::db_file(&p.dir), states)
 }
 
+/// Protect an unpublished state with the same process lease as immutable readers.
+/// Repair keeps this pin across catalog rebuilds, and a crash releases it normally.
+pub fn prepare_state(p: &Project, state: &str) -> Result<Pin> {
+    let holder = self_holder();
+    p.db.pin_preparation(state, &holder)?;
+    Ok(Pin { db: crate::store::db_file(&p.dir), holder, states: vec![state.to_string()] })
+}
+
+/// Called after observing an unrecorded snapshot, so a concurrently started
+/// preparation cannot be missed by a cached project-wide set of pins.
+pub fn preparing_state(p: &Project, state: &str) -> Result<bool> {
+    Ok(p.db.owner_rows()?.into_iter().any(|(id, kind, holder)| id == state && kind == "pin" && holder_alive(&holder)))
+}
+
 /// Pin a scoped read. The borrow keeps the reader's database open through release, avoiding
 /// a checkpoint between the read and unpinning. An early error releases through the same guard.
 pub fn pin_borrowed<'a>(p: &'a Project<'_>, states: &[&str]) -> Result<Pin<&'a crate::db::Db>> {
@@ -779,7 +793,8 @@ mod holder_tests {
         // retained because its start time cannot be checked safely.
         assert_eq!(super::holder_alive(&format!("{pid}:1")), super::process_start(pid).is_none());
         assert!(!super::holder_alive("2147483647:1"));
-        let output = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+        let output =
+            std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
         if output.status.success() {
             let legacy = String::from_utf8(output.stdout).unwrap();
             let processes = super::HolderProcesses::new(&[format!("{pid}:")]);

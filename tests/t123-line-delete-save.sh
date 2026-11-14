@@ -20,8 +20,8 @@ cd "$P/main" || exit 1
 trace=$(LAYR_TRACE=1 l line delete -D --discard topic 2>&1)
 no "the line is deleted" test -e "$P/topic"
 has "the lock is taken after the save" "store lock taken" "$trace"
-# The layer written before the lock is an APFS feature (Linux saves a snapshot instead).
-[ "$(uname -s)" = Darwin ] && has "the save is written before the lock" "prepare save" "$trace"
+# Both native snapshots and APFS layers are prepared before the lock.
+has "the save is written before the lock" "prepare save" "$trace"
 eq "no prepared layer stays" "" "$(ls -A "$LAYR_ROOT/projects/del/meta/work" 2>/dev/null)"
 
 ok "undo of the delete" l undo
@@ -42,7 +42,7 @@ printf 'late\n' > "$P/busy/late.txt"
 printf 'changed\n' > "$P/busy/bulk/f1"
 wait $pid
 eq "the busy line is deleted" 0 "$?"
-[ "$(uname -s)" = Darwin ] && eq "the save is prepared once" 1 "$(grep -c "prepare save" "$T/busy.trace")"
+eq "the save is prepared once" 1 "$(grep -c "prepare save" "$T/busy.trace")"
 ok "undo of the busy delete" l undo
 eq "undo brings the file written after the prepare back" late "$(cat "$P/busy/late.txt")"
 eq "undo brings the change made after the prepare back" changed "$(cat "$P/busy/bulk/f1")"
@@ -56,4 +56,18 @@ cd "$P/main" || exit 1
 ok "line delete of a clean line" l line delete -D clean
 no "the clean line is deleted" test -e "$P/clean"
 
+# A moved head is captured again before deletion instead of retrying the old head.
+l line new -q moving main
+LAYR_TEST_LINE_DELETE_PAUSE_MS=1500 LAYR_TRACE=1 l line delete -D --discard moving 2>"$T/moving.trace" &
+pid=$!
+for i in $(seq 1 100); do
+    grep -q "prepare save" "$T/moving.trace" && break
+    sleep 0.05
+done
+(cd "$P/moving" && printf 'new head\n' > moved.txt && l add moved.txt && l save -qm moved)
+wait "$pid"
+eq "delete retries after the head moves" 0 "$?"
+no "the moved line is deleted" test -e "$P/moving"
+ok "undo restores the moved head" l undo
+eq "undo keeps the concurrent save" "new head" "$(cat "$P/moving/moved.txt")"
 finish

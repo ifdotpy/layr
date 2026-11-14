@@ -156,7 +156,6 @@ thread_local! {
 #[cfg(target_os = "macos")]
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
     let _t = crate::trace::span("prepare merge");
-    repo.prepare_save(line)?;
     let theirs = revs::resolve(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
@@ -367,10 +366,8 @@ fn plan_overlays(
             let i = match m.layers.iter().position(|l| l.overlay == tl.overlay) {
                 Some(i) => i,
                 None => {
-                    let own = repo
-                        .overlay_layer(Some(line), &line.head, &tl.overlay)?
-                        .map(|l| l.state)
-                        .unwrap_or(info.root.clone());
+                    let own =
+                        repo.overlay_layer(Some(line), &line.head, &tl.overlay)?.map(|l| l.state).unwrap_or(info.root.clone());
                     if tl.state == own || o.is_ancestor(&tl.state, &own)? {
                         continue;
                     }
@@ -1684,7 +1681,6 @@ fn merge_rev_inner(
     if queue.is_none() {
         #[cfg(target_os = "macos")]
         let _ = prepare_merge(ctx, repo, line, rev);
-        let _ = repo.prepare_status_report(line);
     }
     if let Some(q) = queue {
         if let Some(expected) = &q.entry.expected_head {
@@ -1722,10 +1718,35 @@ fn merge_rev_inner(
         }
     }
     let rule = repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
-    // The automatic save of the working folder is a record: its project lock covers that one step.
-    let w = {
-        let _commit = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
-        repo.working_state(&_commit, ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?
+    repo.prepare_working_caches(line)?;
+    let (prepared, automatic) = if repo.uses_native_hints(line)? {
+        (None, None)
+    } else {
+        let prepared = repo.prepare_status_report(line).ok();
+        let automatic = if prepared.as_ref().map(|p| p.needs_save(repo, line)).transpose()?.unwrap_or(true) {
+            Some(repo.prepare_save(ctx, line)?)
+        } else {
+            None
+        };
+        (prepared, automatic)
+    };
+    {
+        let _ready = crate::trace::span("prepared comparison ready");
+    }
+    crate::store::test_pause();
+    // The frozen comparison is reused by the pre-save and merge checks.
+    let (w, st) = {
+        let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
+        match prepared.map(|p| p.revalidate(repo, &locked)).transpose()?.flatten() {
+            Some(validated) => validated.working_state(repo, ctx, line, "before a layr command", automatic)?,
+            None => {
+                let w = match automatic {
+                    Some(prepared) => prepared.working_state(&locked, ctx, line, "before a layr command")?,
+                    None => repo.working_state(&locked, ctx, line, "before a layr command")?,
+                };
+                (w, repo.status_report(line)?)
+            }
+        }
     };
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     let settled = Settled {
@@ -1782,10 +1803,6 @@ fn merge_rev_inner(
         }
         return Ok(0);
     }
-    let st = {
-        let _t = crate::trace::span("merge: locked status");
-        repo.locked_status_report(line)?
-    };
     if !st.staged.is_empty() {
         return Err(exit(1, "error: you have staged changes; save or park them before merging."));
     }
@@ -2135,7 +2152,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             return Ok(0);
         }
     }
-    let _ = repo.prepare_status_report(&line);
+    let comparison = if repo.uses_native_hints(&line)? { None } else { repo.prepare_status_report(&line).ok() };
     #[cfg(target_os = "macos")]
     let prepared = (|| -> Result<Vec<PreparedStep>> {
         let _t = crate::trace::span("prepare pick");
@@ -2151,7 +2168,9 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         let mut line = repo.line(&line.id)?;
         #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
         let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
-        let st = repo.locked_status_report(&line)?;
+        let locked = _line_lock.lock(&repo.p)?;
+        let st = repo.locked_status_report(&locked, &line, comparison)?;
+        drop(locked);
         if !st.staged.is_empty() {
             return Err(exit(1, "error: you have staged changes; save or park them first."));
         }
@@ -2457,12 +2476,12 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None => upstream.clone(),
     };
     repo.hold(repo.pin(&[&line.head, &upstream, &onto])?);
-    let _ = repo.prepare_status_report(&line);
+    let comparison = if repo.uses_native_hints(&line)? { None } else { repo.prepare_status_report(&line).ok() };
     #[cfg(target_os = "macos")]
     let prepared = (line.head.clone(), prepare_replay(ctx, repo, &line, &upstream, &onto).unwrap_or_default());
     #[cfg(not(target_os = "macos"))]
     let prepared = (String::new(), Vec::new());
-    let r = replay_locked(ctx, repo, &line, &a, up, &upstream, &onto, prepared);
+    let r = replay_locked(ctx, repo, &line, &a, up, &upstream, &onto, prepared, comparison);
     discard_prepared(repo);
     r
 }
@@ -2477,6 +2496,7 @@ fn replay_locked(
     upstream: &str,
     onto: &str,
     prepared: (String, Vec<PreparedStep>),
+    comparison: Option<crate::repo::PreparedComparison>,
 ) -> Result<i32> {
     let (upstream, onto) = (upstream.to_string(), onto.to_string());
     let (_line_lock, w) = work::begin_line(ctx, repo, line, crate::repo::LineOp::Direct)?;
@@ -2485,7 +2505,9 @@ fn replay_locked(
     // The merges prepared before the lock hold when the line did not move.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
     let mut steps: Steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
-    let st = repo.locked_status_report(&line)?;
+    let locked = _line_lock.lock(&repo.p)?;
+    let st = repo.locked_status_report(&locked, &line, comparison)?;
+    drop(locked);
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }

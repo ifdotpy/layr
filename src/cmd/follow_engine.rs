@@ -281,7 +281,7 @@ impl<'a> Repo<'a> {
             }
             {
                 let _lock = self.p.lock_maintenance()?;
-                if has_unsaved(&self.locked_status_report(&now)?) {
+                if has_unsaved(&self.locked_status_report(&_lock, &now, None)?) {
                     return Ok(Some("up to date; caches not saved: unsaved work".into()));
                 }
             }
@@ -310,7 +310,7 @@ impl<'a> Repo<'a> {
         }
         {
             let _lock = self.p.lock_maintenance()?;
-            let st = self.locked_status_report(&self.line(&line.id)?)?;
+            let st = self.locked_status_report(&_lock, &self.line(&line.id)?, None)?;
             if has_unsaved(&st) {
                 return Ok(Some("skipped: unsaved work".into()));
             }
@@ -359,7 +359,7 @@ impl<'a> Repo<'a> {
         let now = {
             let _lock = _line_lock.lock(&self.p)?;
             let now = self.line(&line.id)?;
-            if now.head != head || has_unsaved(&self.locked_status_report(&now)?) {
+            if now.head != head || has_unsaved(&self.locked_status_report(&_lock, &now, None)?) {
                 bail!("line changed during cache fetch");
             }
             now

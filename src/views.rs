@@ -29,7 +29,8 @@ const CONF: &str = "layrfs-view.conf";
 const FS_TYPE: &str = "layrfs";
 /// Folders that macOS services make at the root of a mount. LayrFS refuses them; older upper
 /// folders may hold them. They are no content of the line.
-pub(crate) const SYSTEM_ROOT_NAMES: &[&str] = &[".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100"];
+pub(crate) const SYSTEM_ROOT_NAMES: &[&str] =
+    &[".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100"];
 
 /// The local record of a virtual line.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -408,12 +409,13 @@ pub fn working_snapshot(
     parents: Vec<String>,
     message: &str,
     base: &str,
+    id: String,
 ) -> Result<StateRec> {
     let mut prior = line.clone();
     prior.head = base.to_string();
     let t = trees(repo, &prior, v)?;
     let list = file_changes(&t, v)?;
-    let mut state = write_state(ctx, repo, &prior, &t, &list, StateKind::Auto, message)?;
+    let mut state = write_state_as(ctx, repo, &prior, &t, &list, StateKind::Auto, message, id)?;
     state.parents = parents;
     Ok(state)
 }
@@ -452,6 +454,20 @@ pub(crate) fn write_state(
     kind: StateKind,
     message: &str,
 ) -> Result<StateRec> {
+    write_state_as(ctx, repo, line, t, list, kind, message, ids::new_id())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_state_as(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    t: &Trees,
+    list: &[EntryChange],
+    kind: StateKind,
+    message: &str,
+    id: String,
+) -> Result<StateRec> {
     let _s = crate::trace::span("view write state");
     let is_dir = |m: &Option<Meta>| m.as_ref().is_some_and(|m| m.is_dir());
     let mut d = thin::Diff::default();
@@ -486,7 +502,6 @@ pub(crate) fn write_state(
     })?;
     // A path below a removed folder of the head that comes back is written; the folder is new.
     d.removed = topmost(gone);
-    let id = ids::new_id();
     let dst = repo.p.delta_path(&id);
     // A reverted entry can live only in the lower tree. Hard links also need a complete
     // snapshot so their identity survives. Ordinary edits still write only the upper layer.
@@ -551,7 +566,14 @@ pub(crate) fn write_state(
 
 /// Save the working content without moving the named head. The caller holds the project
 /// lock, as for a folder line. Compare against the last automatic state to avoid duplicates.
-pub fn save_working(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str) -> Result<Option<StateRec>> {
+pub fn save_working(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    v: &View,
+    message: &str,
+) -> Result<Option<StateRec>> {
     let prev = repo.save_base(line)?;
     let mut previous = line.clone();
     previous.head = prev;
@@ -607,7 +629,8 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
     let Some(name) = loc.line else { return Ok(()) };
     let Ok(pdir) = ctx.store.project_dir(&loc.project) else { return Ok(()) };
     if all_in(&pdir.join("meta")).iter().any(|v| v.name == name) {
-        return Err(error(ErrorKind::Failed,
+        return Err(error(
+            ErrorKind::Failed,
             format!(
                 "layr {cmd} does not support virtual lines yet ({ENV}); convert the line first: layr line show {name} --folder"
             ),
@@ -633,12 +656,21 @@ mod tests {
         std::fs::create_dir_all(lower.join("added"))?;
         std::fs::create_dir_all(upper.join("added"))?;
         let store = layr_objects::Store::open(&tmp.join("objects"), layr_objects::Keying::Plain)?;
-        let written = layr_objects::write_tree(&store, &lower, &layr_objects::WriteOptions {
-            temperature: layr_objects::Temperature::Hot, previous: None, exclude: Vec::new(), similar: false,
-        })?;
-        let head = crate::object_tree::ObjectTree::new(store, layr_objects::StateRef {
-            tree: written.tree.unwrap(), times: written.times.unwrap(),
-        }, &tmp.join("reads"))?;
+        let written = layr_objects::write_tree(
+            &store,
+            &lower,
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        let head = crate::object_tree::ObjectTree::new(
+            store,
+            layr_objects::StateRef { tree: written.tree.unwrap(), times: written.times.unwrap() },
+            &tmp.join("reads"),
+        )?;
         crate::sys::apfs_attribute(&upper.join("added"), c"com.apple.quarantine", Some(b"0086;00000000;LayrFS;"))?;
         let trees = Trees {
             upper: upper.clone(),

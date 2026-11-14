@@ -361,7 +361,8 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                     continue;
                 }
                 let Ok(crate::store::LockAttempt::Acquired(_line_lock)) = repo.p.try_line_lock(&l.id, &l.name) else { continue };
-                let Ok(crate::store::LockAttempt::Acquired(_lock)) = _line_lock.try_lock(&repo.p) else { continue };
+                // Refresh briefly, then compare with only the line lease held.
+                let Ok(crate::store::LockAttempt::Acquired(refresh)) = _line_lock.try_lock(&repo.p) else { continue };
                 let Ok(Some(l)) = repo.p.db.line_by_id(&l.id) else { continue };
                 let Ok(l) = repo.localize(l) else { continue };
                 if l.machine != repo.p.store.machine.id || !repo.working(&l).exists() {
@@ -373,6 +374,15 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                 if now - last < interval {
                     continue;
                 }
+                drop(refresh);
+                let prepared = match repo.prepare_save(ctx, &l) {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        eprintln!("layr periodic prepare ({name}/{}): {e:#}", l.name);
+                        continue;
+                    }
+                };
+                let Ok(crate::store::LockAttempt::Acquired(_lock)) = _line_lock.try_lock(&repo.p) else { continue };
                 // Test only (tests/t255-periodic-yields.sh): pause before either save path.
                 if let Some(dir) = std::env::var_os("LAYR_TEST_PERIODIC_SAVE_BARRIER") {
                     let dir = PathBuf::from(dir);
@@ -385,7 +395,7 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
-                match repo.save(&_lock, ctx, &l, "periodic", true, false) {
+                match prepared.publish(&_lock, ctx, &l, "periodic", true) {
                     Ok(None) => {
                         checks.insert(l.id.clone(), now);
                     }

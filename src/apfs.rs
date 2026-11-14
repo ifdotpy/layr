@@ -210,20 +210,6 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Run `f` with a scan of `root` that the caller already has: scans of `root` inside `f`
-/// (`stable_read` too) use it instead of reading the folder again.
-pub fn with_known_scan<T>(root: &Path, scan: &BTreeMap<String, ScanEntry>, f: impl FnOnce() -> T) -> T {
-    let outer = MEMO.with_borrow_mut(|memo| {
-        let outer = memo.clone();
-        memo.retain(|(r, _)| r != root);
-        memo.push((root.to_path_buf(), Arc::new(scan.clone())));
-        outer
-    });
-    let out = f();
-    MEMO.with_borrow_mut(|memo| *memo = outer);
-    out
-}
-
 /// Note that a read inside `stable_read` uses the content of `paths` below `root`: the
 /// validation checks them. Outside `stable_read`, or for another root, it does nothing.
 pub(crate) fn note_read<S: AsRef<str>>(root: &Path, paths: impl IntoIterator<Item = S>) {
@@ -591,7 +577,7 @@ pub fn stable_read<T>(roots: &[&Path], read: impl FnOnce() -> Result<T>) -> Resu
     // The read uses these scans instead of new ones. Its content comes only from paths that
     // differ between the compared trees (`candidates`), copied paths (`copy_selected`) and
     // ignore files; each notes them, and only they are checked again after the read.
-    // An outer `with_known_scan` or `stable_read` keeps its scans and notes for after this one.
+    // An outer `stable_read` keeps its scans and notes for after this one.
     let outer_memo = MEMO.with_borrow_mut(|memo| {
         let outer = memo.clone();
         memo.retain(|(r, _)| !roots.contains(&r.as_path()));
