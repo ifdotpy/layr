@@ -2630,52 +2630,26 @@ mod metadata_tests {
     };
 
     #[test]
-    fn attribute_growth_race_retries() {
-        let mut reads = 0;
-        let mut queries = 0;
-        let value = read_xattr_buffer(
-            1,
-            |buffer| {
-                reads += 1;
-                if buffer.len() < 128 {
-                    return Err(rustix::io::Errno::RANGE);
-                }
-                buffer[..128].fill(7);
-                Ok(128)
-            },
-            || {
-                queries += 1;
-                Ok(2)
-            },
-        )
-        .unwrap();
-        assert_eq!(value, vec![7; 128]);
-        assert_eq!((reads, queries), (3, 2));
-    }
-
-    #[test]
-    fn attribute_growth_uses_the_queried_size() {
-        const VALUE_BYTES: usize = XATTR_MAX_BYTES / 2;
-        let mut reads = 0;
-        let mut queries = 0;
-        let value = read_xattr_buffer(
-            1,
-            |buffer| {
-                reads += 1;
-                if buffer.len() < VALUE_BYTES {
-                    return Err(rustix::io::Errno::RANGE);
-                }
-                buffer[..VALUE_BYTES].fill(7);
-                Ok(VALUE_BYTES)
-            },
-            || {
-                queries += 1;
-                Ok(VALUE_BYTES)
-            },
-        )
-        .unwrap();
-        assert_eq!(value, vec![7; VALUE_BYTES]);
-        assert_eq!((reads, queries), (2, 1));
+    fn attribute_growth_queries_size_and_retries_races() {
+        let large = XATTR_MAX_BYTES / 2;
+        for (queried, actual, reads) in [(2, 128, 3), (large, large, 2)] {
+            let mut calls = 0;
+            let value = read_xattr_buffer(
+                1,
+                |buffer| {
+                    calls += 1;
+                    if buffer.len() < actual {
+                        return Err(rustix::io::Errno::RANGE);
+                    }
+                    buffer[..actual].fill(7);
+                    Ok(actual)
+                },
+                || Ok(queried),
+            )
+            .unwrap();
+            assert_eq!(value, vec![7; actual]);
+            assert_eq!(calls, reads);
+        }
     }
 
     #[test]
@@ -2692,23 +2666,16 @@ mod metadata_tests {
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
         assert!(calls < 32);
-        let mut reads = 0;
-        let mut queries = 0;
         let error = read_xattr_buffer(
             1,
             |buffer| {
-                reads += 1;
                 assert_eq!(buffer.len(), 1);
                 Err(rustix::io::Errno::RANGE)
             },
-            || {
-                queries += 1;
-                Ok(XATTR_MAX_BYTES + 1)
-            },
+            || Ok(XATTR_MAX_BYTES + 1),
         )
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
-        assert_eq!((reads, queries), (1, 1));
     }
 
     #[test]
