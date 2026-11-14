@@ -887,9 +887,8 @@ pub fn daemon(args: &[String]) -> Result<i32> {
                 match crate::sys::fork() {
                     Ok(crate::sys::Fork::Child) => {
                         drop(listener);
-                        if let Err(e) = crate::oci::registry::exec_http(conn, &sock, name, *user) {
-                            eprintln!("layr registry: {e:#}");
-                        }
+                        let Err(e) = crate::oci::registry::exec_http(conn, &sock, name, *user);
+                        eprintln!("layr registry: {e:#}");
                         std::process::exit(1);
                     }
                     Ok(crate::sys::Fork::Parent(pid)) => {

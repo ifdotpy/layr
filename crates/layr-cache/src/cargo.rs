@@ -2,6 +2,8 @@
 //! commands. The listing of their units compiles nothing, and it is the live set that `sweep` keeps.
 //! `prune` applies that to a `target` folder next to `Cargo.toml`. See docs/cache-overlays.md.
 
+pub mod layout;
+
 use crate::{kill_group, run, skip, sweep, wait_child};
 use anyhow::{anyhow, bail, Context, Result};
 use layr_adapter::{CacheAdapter, Host, Outcome, Toolchain};
@@ -164,7 +166,7 @@ pub fn settings(host: &dyn Host, root: &Path) -> Result<Settings> {
             .map(|(k, v)| Ok((k.clone(), v.as_str().context("env: each value is a string")?.to_string())))
             .collect()
     };
-    let mut env: Vec<(String, String)> = match cfg["env"].as_object() {
+    let env: Vec<(String, String)> = match cfg["env"].as_object() {
         Some(obj) => {
             let mut env = entries(obj)?;
             // `macos = { ... }` and `linux = { ... }` apply on that OS only, over the plain values.
@@ -447,7 +449,7 @@ fn list_units_with(
         }
     }
     let mut locks = Vec::new();
-    for dir in profiles.into_iter().filter(|p| p.join(".fingerprint").is_dir()) {
+    for dir in profiles.into_iter().filter(|p| layout::Layout::has_units(p)) {
         let path = dir.join(".cargo-lock");
         let Ok(lock) = std::fs::File::open(&path) else {
             return Ok((Listed::Busy("missing cargo build lock".into()), Vec::new()));
@@ -624,7 +626,6 @@ fn list_units_in(
     {
         let (stop, waited, dirty, errors, refused) =
             (stop.clone(), waited.clone(), dirty.clone(), errors.clone(), refused.clone());
-        let lock_dir = target.join(profile_of(args));
         let home = cargo_home(env);
         let wrapper_line = format!("Running `{} ", wrapper.path.display());
         std::thread::spawn(move || {
@@ -668,10 +669,6 @@ fn list_units_in(
     let (status, late) =
         wait_child(&mut child, Some(host.deadline())).with_context(|| format!("cannot wait for cargo {}", args.join(" ")))?;
     let _ = std::fs::remove_dir_all(profile_scratch(target));
-    let describe = |stopped| match stopped {
-        Listed::Busy(_) => Listed::Busy(lock_holder(&target.join(profile_of(args)).join(".cargo-lock"), pid)),
-        other => other,
-    };
     if let Some(stopped) = stop.lock().unwrap().take() {
         return Ok((stopped, Vec::new()));
     }
@@ -762,7 +759,12 @@ pub fn live_units(
             if !profile.try_exists()? {
                 continue;
             }
-            sweep::merge(&mut live, sweep::Plans::from([(profile.clone(), member_units(&profile, &names)?)]));
+            let mut members = sweep::Live::default();
+            for unit in layout::Layout::units(&profile) {
+                if names.iter().any(|name| name == &unit.name) { members.hashes.insert(unit.hash); }
+            }
+            members.crates.extend(names.iter().map(|name| name.replace('-', "_")));
+            sweep::merge(&mut live, sweep::Plans::from([(profile.clone(), members)]));
         }
     }
     Ok(Listed::Fresh(live))
@@ -822,22 +824,6 @@ fn profile_folder(target: &Path, args: &[String]) -> Result<PathBuf> {
         "unsupported Cargo profile"
     );
     Ok(base.join(profile))
-}
-
-fn member_units(profile: &Path, members: &[String]) -> Result<sweep::Live> {
-    let mut live = sweep::Live::default();
-    let fingerprints = profile.join(".fingerprint");
-    if profile.try_exists()? {
-        for entry in std::fs::read_dir(fingerprints).context("missing Cargo fingerprints")? {
-            let name = entry?.file_name().to_string_lossy().into_owned();
-            let Some((package, hash)) = name.rsplit_once('-') else { continue };
-            if members.iter().any(|m| m == package) && sweep::unit_hash(&name).is_some() {
-                live.hashes.insert(hash.to_string());
-            }
-        }
-    }
-    live.crates.extend(members.iter().map(|m| m.replace('-', "_")));
-    Ok(live)
 }
 
 /// The profile folder that a cargo command builds into: `--profile <name>` (`dev` and `test` are `debug`, `bench`
@@ -902,7 +888,7 @@ pub fn sweep_plans(plans: &sweep::Plans, dry: bool) -> Result<(u64, usize)> {
 /// Whether a build wrote a profile folder in `target` (`<target>/<profile>/.fingerprint`, any profile). The
 /// listing names the profiles itself, so a folder with only a release or a custom profile is swept too.
 pub fn built(target: &Path) -> bool {
-    std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| e.path().join(".fingerprint").is_dir())
+    std::fs::read_dir(target).into_iter().flatten().flatten().any(|e| layout::Layout::has_units(&e.path()))
 }
 
 /// A top-level folder of `target` that no `sweep` command makes (another `--target` triple, a custom profile, `doc`)
@@ -1048,24 +1034,10 @@ impl CacheAdapter for Cargo {
     }
 }
 
-/// The unit of a file in a cargo target folder: `<profile path>/<name>-<hash>` for the files of `deps/`
-/// (`lib<name>-<hash>.rlib`, `.rmeta`, `.d`, test binaries), `.fingerprint/<name>-<hash>/`, `build/<name>-<hash>/`
-/// and `incremental/<name>-<hash>/`. The hash is cargo's 16 hex digits; other paths have no unit.
+/// The identity of a Cargo unit, shared by its fingerprint and outputs in either supported layout.
 pub fn unit_of(path: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split('/').collect();
-    let at = parts.iter().position(|p| matches!(*p, "deps" | ".fingerprint" | "build" | "incremental"))?;
-    let entry = parts.get(at + 1)?;
-    let stem = if parts[at] == "deps" {
-        let s = entry.strip_prefix("lib").filter(|s| s.contains('-')).unwrap_or(entry);
-        s.split('.').next().unwrap_or(s)
-    } else {
-        entry
-    };
-    let (name, hash) = stem.rsplit_once('-')?;
-    if name.is_empty() || hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
-        return None;
-    }
-    Some(format!("{}/{name}-{hash}", parts[..at].join("/")))
+    let unit = layout::Layout::path_unit(path)?;
+    Some(format!("{}/{}", unit.profile, unit.hash))
 }
 
 /// Builds the `sweep` commands of the project into `target`, with the project env. It may fetch crates (a merged
@@ -1236,13 +1208,13 @@ mod pinned_env_tests {
 
     #[test]
     fn the_files_of_one_unit_have_one_unit() {
-        let u = Some("target/debug/foo-0123456789abcdef".to_string());
+        let u = Some("target/debug/0123456789abcdef".to_string());
         assert_eq!(unit_of("target/debug/deps/libfoo-0123456789abcdef.rlib"), u);
         assert_eq!(unit_of("target/debug/deps/libfoo-0123456789abcdef.rmeta"), u);
         assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdef.d"), u);
         assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdef"), u);
         assert_eq!(unit_of("target/debug/.fingerprint/foo-0123456789abcdef/lib-foo.json"), u);
-        assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdee.d"), Some("target/debug/foo-0123456789abcdee".into()));
+        assert_eq!(unit_of("target/debug/deps/foo-0123456789abcdee.d"), Some("target/debug/0123456789abcdee".into()));
         assert_eq!(unit_of("node_modules/x/build/index.js"), None);
         assert_eq!(unit_of("target/debug/foo"), None);
     }

@@ -74,7 +74,7 @@ pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener, Identity)>> {
 }
 
 /// Exec clears the daemon's memory and closes its descriptors before HTTP parsing starts.
-pub fn exec_http(stream: TcpStream, socket: &Path, listen: &str, user: Identity) -> Result<()> {
+pub fn exec_http(stream: TcpStream, socket: &Path, listen: &str, user: Identity) -> Result<!> {
     use std::os::unix::process::CommandExt;
     crate::sys::drop_to_user(user.uid, user.gid)?;
     let fd: std::os::fd::OwnedFd = stream.into();

@@ -1207,29 +1207,6 @@ impl<'a> Repo<'a> {
     }
 }
 
-/// The build unit that a cache file belongs to: the folder above `deps`, `.fingerprint`, `build` or `incremental`
-/// and the hash of the `<name>-<16 hex>` token of the file or of its folder (cargo names every output of a unit
-/// so). A file
-/// outside such a unit is a unit of its own.
-fn unit_of(rel: &str) -> String {
-    let parts: Vec<&str> = rel.split('/').collect();
-    let hashed = |s: &str| {
-        let stem = s.split('.').next().unwrap_or(s);
-        // The hash alone names the unit: its rlib is `lib<name>-<hash>`, its fingerprint folder `<name>-<hash>`.
-        stem.rsplit_once('-')
-            .filter(|(name, hash)| !name.is_empty() && hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(|(_, hash)| hash.to_string())
-    };
-    for (i, part) in parts.iter().enumerate() {
-        if matches!(*part, "deps" | ".fingerprint" | "build" | "incremental") {
-            if let Some(unit) = parts[i + 1..].iter().find_map(|p| hashed(p)) {
-                return format!("{}/{unit}", parts[..i].join("/"));
-            }
-        }
-    }
-    rel.to_string()
-}
-
 /// Delete the least recently used build units below `root` (all files of one unit together, `unit_of`) until the
 /// sizes add up to `limit` at most, then the folders that this left empty. Deleting single files left units with a
 /// fingerprint and no outputs, and empty unit folders.
@@ -1240,7 +1217,7 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
     fsutil::walk(root, "", &mut |rel, m| {
         if !m.is_dir() {
             let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            let unit = units.entry(unit_of(rel)).or_insert((0, 0, Vec::new()));
+            let unit = units.entry(crate::cache_hook::unit_of(rel).unwrap_or_else(|| rel.to_string())).or_insert((0, 0, Vec::new()));
             unit.0 = unit.0.max(used);
             unit.1 += m.size;
             unit.2.push(rel.to_string());
@@ -1306,18 +1283,52 @@ mod tests {
         write("debug/.fingerprint/old-0123456789abcdef/lib-old", 10, 9000);
         write("debug/deps/libold-0123456789abcdef.rlib", 1000, 9000);
         write("debug/build/old-0123456789abcdef/out/gen.rs", 10, 9000);
+        // Cargo 1.100 stores the fingerprint and output together under the unit hash.
+        write("debug/build/other/1234567890abcdef/fingerprint/lib-other", 10, 9000);
+        write("debug/build/other/1234567890abcdef/out/libother-1234567890abcdef.rlib", 10, 9000);
         // A new unit that stays.
         write("debug/.fingerprint/new-fedcba9876543210/lib-new", 10, 10);
         write("debug/deps/libnew-fedcba9876543210.rlib", 1000, 10);
-        assert_eq!(unit_of("debug/deps/libold-0123456789abcdef.rlib"), "debug/0123456789abcdef");
-        assert_eq!(unit_of("debug/.fingerprint/old-0123456789abcdef/lib-old"), "debug/0123456789abcdef");
-        let freed = lru_trim(&root, 1500).unwrap();
-        assert_eq!(freed, 1020, "the whole old unit goes");
+        crate::cache_hook::register(layr_cache::adapters());
+        let freed = lru_trim(&root, 1010).unwrap();
+        assert_eq!(freed, 1040, "the whole old unit goes");
         assert!(!root.join("debug/.fingerprint/old-0123456789abcdef").exists(), "no empty unit folder stays");
         assert!(!root.join("debug/build/old-0123456789abcdef").exists());
+        assert!(!root.join("debug/build/other/1234567890abcdef").exists());
         assert!(root.join("debug/deps/libnew-fedcba9876543210.rlib").exists());
         assert!(root.join("debug/.fingerprint/new-fedcba9876543210/lib-new").exists());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lru_keeps_nested_legacy_unit_files_together() {
+        let root = std::env::temp_dir().join(format!("layr-lru-nested-{}", crate::ids::new_id()));
+        let fingerprint = root.join("debug/.fingerprint/foo-0123456789abcdef/lib-foo");
+        let output = root.join("debug/build/foo-0123456789abcdef/out/build/generated/1111111111111111/file");
+        for path in [&fingerprint, &output] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; 10]).unwrap();
+        }
+        crate::cache_hook::register(layr_cache::adapters());
+        assert_eq!(lru_trim(&root, 10).unwrap(), 20);
+        assert!(!fingerprint.exists() && !output.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lru_keeps_custom_profile_units_whole() {
+        let root = std::env::temp_dir().join(format!("layr-lru-build-profile-{}", crate::ids::new_id()));
+        let base = root.join("build/build/foo/0123456789abcdef");
+        let fingerprint = base.join("fingerprint/lib-foo");
+        let output = base.join("out/libfoo-0123456789abcdef.rlib");
+        for path in [&fingerprint, &output] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; 10]).unwrap();
+        }
+        crate::cache_hook::register(layr_cache::adapters());
+        assert_eq!(lru_trim(&root, 10).unwrap(), 20);
+        assert!(!fingerprint.exists() && !output.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

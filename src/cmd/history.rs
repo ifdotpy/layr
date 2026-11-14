@@ -1185,10 +1185,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Ok(true);
             }
             picked.push(s);
-            if picked.len() >= max && !a.has("--reverse") {
-                return Ok(false);
-            }
-            Ok(true)
+            Ok(picked.len() < max || a.has("--reverse"))
         },
     )?;
     if a.has("--reverse") {

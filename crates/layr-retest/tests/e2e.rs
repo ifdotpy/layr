@@ -196,6 +196,7 @@ fn runs_only_the_stale_test() {
     let debug = line.join("target/retest/debug");
     let (zombie, zombie_meta) =
         (debug.join("deps/libzombie-0123456789abcdef.rlib"), debug.join("deps/zombie-0123456789abcdef.d"));
+    std::fs::create_dir_all(debug.join("deps")).unwrap();
     std::fs::write(&zombie, vec![0u8; 3_000_000]).unwrap();
     std::fs::write(&zombie_meta, "x").unwrap();
     let inc = std::fs::read_dir(debug.join("incremental"))
@@ -213,10 +214,7 @@ fn runs_only_the_stale_test() {
     assert!(err.contains("ran 1, passed 1"), "{err}");
     assert!(err.contains("swept stale build output, freed "), "{err}");
     assert!(!zombie.exists() && !zombie_meta.exists() && !inc.join("s-0-old").exists() && !inc.join("s-0-old.lock").exists());
-    let live = std::fs::read_dir(debug.join("deps"))
-        .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("libtiny-"))
-        .count();
+    let live = output_paths(&debug).into_iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("libtiny-"))).count();
     assert!(live >= 1, "the sweep removed the live rlib of the package");
     assert!(
         std::fs::read_dir(&inc).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("s-")),
@@ -417,7 +415,7 @@ fn workspace_dylib_is_an_export_object() {
     assert!(err.contains("2 tests, 2 selected") && err.contains("failed 0"), "{err}");
     // The test binary of `main.rs` does not use the dylib. Built instrumented, it must link std
     // like the plain build, so that a copy of it runs elsewhere (a dylib itself needs `@rpath/libstd`).
-    let deps_dir = line.join("target/retest/debug/deps");
+    let debug = line.join("target/retest/debug");
     let linkage = |p: &std::path::Path| {
         let p = p.to_str().unwrap();
         if cfg!(target_os = "macos") {
@@ -426,9 +424,7 @@ fn workspace_dylib_is_an_export_object() {
             sh_out("ldd", &[p])
         }
     };
-    let plain: Vec<String> = std::fs::read_dir(&deps_dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
+    let plain: Vec<String> = output_paths(&debug).into_iter()
         .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("dyn_app-") && p.extension().is_none())
         .map(|p| linkage(&p))
         .filter(|l| !l.contains("dyn_deps"))
@@ -863,13 +859,37 @@ fn link_table(dir: &Path) -> String {
 }
 
 /// Names of the entries of `dir/sub`.
+fn output_paths(profile: &Path) -> Vec<PathBuf> {
+    layr_cache::cargo::layout::Layout::output_dirs(profile).into_iter().flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path())).collect()
+}
+
 fn entries(dir: &Path, sub: &str) -> BTreeSet<String> {
+    if sub == ".fingerprint" {
+        return layr_cache::cargo::layout::Layout::units(dir).into_iter().filter(|u| u.fingerprint.is_dir()).map(|u| format!("{}-{}", u.name, u.hash)).collect();
+    }
+    if sub == "deps" {
+        return output_paths(dir).into_iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+    }
     std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
 }
 
 /// Cargo hashes of the entries of `dir/sub`: the text after the last `-` of the name before its first `.`.
-fn hashes(dir: &Path, sub: &str) -> BTreeSet<String> {
-    entries(dir, sub).iter().map(|n| n.rsplit_once('-').unwrap().1.split('.').next().unwrap().to_string()).collect()
+fn hashes(dir: &Path) -> BTreeSet<String> {
+    use layr_cache::cargo::layout::{Layout, Unit};
+    let mut hashes = BTreeSet::new();
+    for Unit { hash, outputs, layout, .. } in Layout::units(dir) {
+        for entry in std::fs::read_dir(outputs).into_iter().flatten().flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) { continue }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if layout == Layout::UnitDirectories {
+                hashes.insert(hash.clone());
+            } else if let Some(hash) = layr_cache::sweep::unit_hash(name) {
+                hashes.insert(hash.to_string());
+            }
+        }
+    }
+    hashes
 }
 
 /// The build ids of the object files of each unit in `dir/deps`: `<name>-<hash>.<cgu>.<build>.rcgu.o`.
@@ -913,7 +933,7 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     let debug = ws.join("target/debug");
 
     cargo(&ws, &build);
-    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug, "deps"));
+    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug));
 
     cargo(&ws, &["build", "--workspace", "--tests", "--bins", "--features", "lib-a/extra"]);
     assert!(entries(&debug, ".fingerprint").len() > units.len());
@@ -932,20 +952,22 @@ fn sweep_removes_the_units_that_no_standard_command_uses() {
     assert!(err.contains("would free"), "{err}");
     assert_eq!(entries(&debug, "deps"), before);
 
-    // Before the sweep, the changed unit has object files of two builds: in `deps` (macOS, split debug info
-    // `unpacked`), or as two finalized incremental sessions of its folder (Linux, `off`: no object file in `deps`).
-    assert!(
-        object_builds(&debug).values().any(|b| b.len() > 1) || sessions_per_folder(&debug).values().any(|n| *n > 1),
-        "{:?}\ndeps: {:?}\nincremental: {:?}",
-        object_builds(&debug),
-        entries(&debug, "deps"),
-        entries(&debug, "incremental")
-    );
+    // Exercise stale object cleanup even when rustc has already removed its previous session.
+    let unit = layr_cache::cargo::layout::Layout::units(&debug).into_iter()
+        .find(|u| u.layout == layr_cache::cargo::layout::Layout::UnitDirectories
+            && units.contains(&format!("{}-{}", u.name, u.hash)))
+        .expect("a live Cargo unit");
+    let old = unit.outputs.join(format!("fixture-{}.a.old.rcgu.o", unit.hash));
+    let new = unit.outputs.join(format!("fixture-{}.a.new.rcgu.o", unit.hash));
+    std::fs::write(&old, b"old").unwrap();
+    std::fs::write(&new, b"new").unwrap();
+    std::fs::File::open(&old).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();
 
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept"), "{err}");
+    assert!(!old.exists() && new.exists());
     assert_eq!(entries(&debug, ".fingerprint"), units, "a non-live unit stays");
-    assert_eq!(hashes(&debug, "deps"), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
+    assert_eq!(hashes(&debug), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
     // The one exception: a live unit keeps only the object files of its newest build.
     let builds = object_builds(&debug);
     assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
@@ -972,7 +994,7 @@ fn sweep_keeps_the_units_of_the_other_standard_commands() {
 
     cargo(&ws, &build);
     cargo(&ws, &lib_test);
-    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug, "deps"));
+    let (units, outputs) = (entries(&debug, ".fingerprint"), hashes(&debug));
 
     // The focused command ran last and has units of its own.
     cargo(&ws, &["build", "-p", "app", "--features", "app-only", "--tests"]);
@@ -980,7 +1002,7 @@ fn sweep_keeps_the_units_of_the_other_standard_commands() {
     sweep_cmd(&ws, &[]);
 
     assert_eq!(entries(&debug, ".fingerprint"), units);
-    assert_eq!(hashes(&debug, "deps"), outputs);
+    assert_eq!(hashes(&debug), outputs);
     let err = cargo(&ws, &build);
     assert!(!err.contains("Compiling"), "the workspace build compiled:\n{err}");
     let err = cargo(&ws, &lib_test);
@@ -1008,7 +1030,7 @@ fn sweep_sweeps_a_release_only_target() {
     let build = ["build", "--release", "--workspace"];
 
     cargo_in(&ws, &target, &env, &build);
-    let (units, outputs, inc) = (entries(&release, ".fingerprint"), hashes(&release, "deps"), entries(&release, "incremental"));
+    let (units, outputs, inc) = (entries(&release, ".fingerprint"), hashes(&release), entries(&release, "incremental"));
 
     cargo_in(&ws, &target, &env, &["build", "--release", "--workspace", "--features", "lib-a/extra"]);
     assert!(entries(&release, ".fingerprint").len() > units.len());
@@ -1019,7 +1041,7 @@ fn sweep_sweeps_a_release_only_target() {
     let err = sweep_cmd(&ws, &[]);
     assert!(err.contains("swept"), "the release folder was not swept:\n{err}");
     assert_eq!(entries(&release, ".fingerprint"), units, "a non-live unit stays");
-    assert_eq!(hashes(&release, "deps"), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
+    assert_eq!(hashes(&release), outputs, "a unit of the feature build stays, or a live unit lost its newest files");
     assert_eq!(entries(&release, "incremental"), inc, "the incremental data of a live unit was removed");
     let builds = object_builds(&release);
     assert!(builds.values().all(|b| b.len() == 1), "{builds:?}");
@@ -1384,8 +1406,6 @@ fn sweep_leaves_only_the_outputs_that_the_standard_command_names() {
     }
     // Every file of the profile folder is a listed output, cargo's lock, or an entry of a listed unit.
     let hash = |n: &str| n.split('.').next().unwrap().rsplit_once('-').map(|(_, h)| h.to_string()).filter(|h| h.len() == 16);
-    let live: BTreeSet<String> =
-        listed.iter().filter_map(|f| hash(Path::new(f).file_name().unwrap().to_str().unwrap())).collect();
     // A hashed file of a unit (a bin has a copy in the folder and a hashed file in `deps`) stays with its fingerprint.
     let fingerprints: BTreeSet<String> = entries(&debug, ".fingerprint").iter().filter_map(|n| hash(n)).collect();
     for sub in ["", "deps", "examples"] {
