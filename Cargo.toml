@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/core/types",
   "crates/layr-api",
   "crates/layr-store",
   "crates/layr-model",
@@ -31,6 +32,7 @@ undocumented_unsafe_blocks = "deny"
 [workspace.metadata.layers]
 layr-adapter = { layer = 0, dependencies = [], leaf = true }
 layr-api = { layer = 0, dependencies = [], leaf = true }
+layr-types = { layer = 0, dependencies = [], leaf = true }
 layr-hashers = { layer = 0, dependencies = [], leaf = true }
 layr-store = { layer = 1, dependencies = ["layr-hashers"] }
 layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
@@ -46,6 +48,7 @@ layr = { layer = 3, dependencies = [
   "layr-objects",
   "layr-retest",
   "layr-store",
+  "layr-types",
 ] }
 
 [workspace.package]
@@ -82,6 +85,7 @@ path = "src/main.rs"
 overlayfs = []
 
 [dependencies]
+layr-types = { path = "crates/core/types" }
 layr-api = { path = "crates/layr-api" }
 layr-store = { path = "crates/layr-store" }
 layr-model = { path = "crates/layr-model" }

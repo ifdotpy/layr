@@ -27,9 +27,22 @@ pub fn display(id: &str) -> String {
 }
 
 pub fn short(id: &str) -> String {
-    display(id)[..7].to_string()
+    match layr_types::StateId::parse(id) {
+        Ok(id) => id.short().to_string(),
+        Err(_) => id.chars().take(7).collect(),
+    }
 }
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn short_handles_invalid_text_without_panicking() {
+        assert_eq!(super::short(""), "");
+        assert_eq!(super::short("éééééééé"), "ééééééé");
+        assert_eq!(super::short("00112233-4455-6677-8899-aabbccddeeff"), "aabbccd");
+    }
 }

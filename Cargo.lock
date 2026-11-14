@@ -1666,6 +1666,7 @@ dependencies = [
  "layr-objects",
  "layr-retest",
  "layr-store",
+ "layr-types",
  "libc",
  "rand 0.8.8",
  "rayon",
@@ -1796,6 +1797,14 @@ dependencies = [
  "ssh-key",
  "uuid",
  "zstd-safe",
+]
+
+[[package]]
+name = "layr-types"
+version = "0.47.0"
+dependencies = [
+ "hex",
+ "uuid",
 ]
 
 [[package]]
