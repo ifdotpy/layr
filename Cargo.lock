@@ -1859,6 +1859,7 @@ dependencies = [
  "layr-adapter",
  "layr-api",
  "layr-cache",
+ "layr-fs-core",
  "layr-hashers",
  "layr-model",
  "layr-objects",
@@ -1911,6 +1912,14 @@ dependencies = [
  "rustix",
  "serde_json",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "layr-fs-core"
+version = "0.47.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

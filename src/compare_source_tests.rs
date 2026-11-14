@@ -220,12 +220,12 @@ struct FakeHints<'a> {
     mode: HintMode,
 }
 impl crate::change_hints::ChangeHints for FakeHints<'_> {
-    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
+    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
         assert_eq!(self.base.folder(), Some(base));
         assert_eq!(self.tree.folder(), Some(tree));
         match self.mode {
             HintMode::Partial => Ok(crate::change_hints::HintSet::Partial),
-            HintMode::Failed => anyhow::bail!("candidate enumeration failed"),
+            HintMode::Failed => Err(layr_fs_core::FsError::Invalid("candidate enumeration failed")),
             HintMode::Complete => Ok(crate::change_hints::HintSet::Complete(
                 self.changed
                     .iter()

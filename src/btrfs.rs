@@ -764,21 +764,24 @@ pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeH
 
 struct SendHints;
 impl crate::change_hints::ChangeHints for SendHints {
-    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
-        if !subvol_info(base)?.readonly || !subvol_info(tree)?.readonly {
-            return Ok(crate::change_hints::HintSet::Partial);
-        }
-        let entries = send_no_data(base, tree)?;
-        let candidates = crate::changes::build(base, tree, entries)?;
-        // A stream names an inode through one alias. Until we expand inode references,
-        // a changed hard-linked inode requires the full scan to find every visible alias.
-        for change in &candidates {
-            for (root, path, meta) in [(base, change.src(), change.old()), (tree, change.path().as_str(), change.new())] {
-                if meta.is_some_and(|m| !m.is_dir()) && fs::symlink_metadata(crate::fsutil::safe_join(root, path)?)?.nlink() > 1 {
-                    return Ok(crate::change_hints::HintSet::Partial);
+    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
+        (|| -> Result<crate::change_hints::HintSet> {
+            if !subvol_info(base)?.readonly || !subvol_info(tree)?.readonly {
+                return Ok(crate::change_hints::HintSet::Partial);
+            }
+            let entries = send_no_data(base, tree)?;
+            let candidates = crate::changes::build(base, tree, entries)?;
+            // A stream names an inode through one alias. Until we expand inode references,
+            // a changed hard-linked inode requires the full scan to find every visible alias.
+            for change in &candidates {
+                for (root, path, meta) in [(base, change.src(), change.old()), (tree, change.path().as_str(), change.new())] {
+                    if meta.is_some_and(|m| !m.is_dir()) && fs::symlink_metadata(crate::fsutil::safe_join(root, path)?)?.nlink() > 1 {
+                        return Ok(crate::change_hints::HintSet::Partial);
+                    }
                 }
             }
-        }
-        Ok(crate::change_hints::HintSet::Complete(candidates))
+            Ok(crate::change_hints::HintSet::Complete(candidates))
+        })()
+        .map_err(layr_fs_core::FsError::backend)
     }
 }

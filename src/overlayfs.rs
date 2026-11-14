@@ -1349,13 +1349,16 @@ pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeH
 
 struct UpperHints;
 impl crate::change_hints::ChangeHints for UpperHints {
-    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
-        let _t = crate::trace::span("OverlayFS candidates");
-        let (base, tree) = (absolute(base)?, absolute(tree)?);
-        let Some(layers) = own_layers(&base, &tree)? else {
-            return Ok(crate::change_hints::HintSet::Partial);
-        };
-        Ok(crate::change_hints::HintSet::Complete(candidates_in(&base, &tree, layers)?))
+    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
+        (|| -> Result<crate::change_hints::HintSet> {
+            let _t = crate::trace::span("OverlayFS candidates");
+            let (base, tree) = (absolute(base)?, absolute(tree)?);
+            let Some(layers) = own_layers(&base, &tree)? else {
+                return Ok(crate::change_hints::HintSet::Partial);
+            };
+            Ok(crate::change_hints::HintSet::Complete(candidates_in(&base, &tree, layers)?))
+        })()
+        .map_err(layr_fs_core::FsError::backend)
     }
 }
 

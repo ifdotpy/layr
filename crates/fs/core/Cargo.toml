@@ -1,0 +1,19 @@
+[package]
+name = "layr-fs-core"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
