@@ -1755,7 +1755,7 @@ impl<'a> Repo<'a> {
             let list = changes::file_changes_of(
                 index,
                 scan,
-                btrfs::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
+                changes::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
             )?;
             classify(scan, list, &mut st);
             self.finish_status(line, scan, index, false, &mut st)?;
@@ -2073,7 +2073,7 @@ impl<'a> Repo<'a> {
         let w: BTreeMap<String, btrfs::ScanEntry> =
             now.iter().filter(|(k, _)| below(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
         let list =
-            changes::file_changes_of(index, work, btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
+            changes::file_changes_of(index, work, changes::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
         // The content read must see the entries of the scan.
         let again = btrfs::scan_paths(work, &paths)?;
         if paths.iter().any(|p| again.get(p) != now.get(p)) {

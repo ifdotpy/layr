@@ -21,6 +21,7 @@ mod attestation;
 mod byte_size;
 mod cache_overlay;
 mod changes;
+mod compare;
 mod cmd;
 mod db;
 mod dedup;

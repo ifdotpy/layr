@@ -1474,17 +1474,20 @@ pub(crate) fn scan_src(s: &(impl Src + ?Sized)) -> Result<BTreeMap<String, ScanE
     }
 }
 /// Candidates with the exact changed ranges of every changed file.
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::compare::EntryChange>> {
     candidates_of(parent, child, true, false)
 }
 
 /// Candidates for callers that only ask whether content differs: a changed file has no ranges.
-pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+pub fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::compare::EntryChange>> {
     candidates_of(parent, child, false, false)
 }
 
 /// Candidate paths for object imports also include nanosecond-only time changes.
-pub fn candidates_with_times(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<crate::changes::Change>> {
+pub fn candidates_with_times(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+) -> Result<Vec<crate::compare::EntryChange>> {
     candidates_of(parent, child, true, true)
 }
 
@@ -1506,7 +1509,7 @@ fn candidates_of(
     child: &(impl Src + ?Sized),
     exact: bool,
     times: bool,
-) -> Result<Vec<crate::changes::Change>> {
+) -> Result<Vec<crate::compare::EntryChange>> {
     let _t = crate::trace::span("APFS candidates");
     let (a, b) = match top_layer_scans(parent, child)? {
         Some(both) => both,
@@ -1596,7 +1599,7 @@ pub(crate) fn candidates_scanned(
     child: &(impl Src + ?Sized),
     a: BTreeMap<String, ScanEntry>,
     b: BTreeMap<String, ScanEntry>,
-) -> Result<Vec<crate::changes::Change>> {
+) -> Result<Vec<crate::compare::EntryChange>> {
     candidates_scanned_with(parent, child, a, b, false, false)
 }
 
@@ -1609,7 +1612,7 @@ fn candidates_scanned_with(
     b: BTreeMap<String, ScanEntry>,
     exact: bool,
     times: bool,
-) -> Result<Vec<crate::changes::Change>> {
+) -> Result<Vec<crate::compare::EntryChange>> {
     // An entry that both trees have with the same metadata and shared data is no candidate, as
     // the btrfs stream would not name it: no `Change` for it.
     let same_meta = |x: &ScanEntry, y: &ScanEntry| {
@@ -1666,17 +1669,14 @@ fn candidates_scanned_with(
     }
     let mut changes: BTreeMap<_, _> = names
         .into_iter()
-        .map(|p| {
-            (
+        .filter_map(|p| {
+            crate::compare::EntryChange::observed(
                 p.clone(),
-                crate::changes::Change {
-                    path: p.clone(),
-                    old_path: None,
-                    old: a.get(p).map(|entry| entry.meta.clone()),
-                    new: b.get(p).map(|entry| entry.meta.clone()),
-                    ranges: None,
-                },
+                a.get(p).map(|e| e.meta.clone()),
+                b.get(p).map(|e| e.meta.clone()),
+                crate::compare::DataEvidence::Unknown,
             )
+            .map(|c| (p.clone(), c))
         })
         .collect();
     // Two passes find moves. A file that moved without a change still shares its clone with
@@ -1705,12 +1705,12 @@ fn candidates_scanned_with(
         let mut removed: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
         let mut added: BTreeMap<(u8, i64, i64), Vec<String>> = BTreeMap::new();
         for (p, c) in &changes {
-            if c.new.is_none() {
+            if c.new().is_none() {
                 if let Some(id) = id_of(&a[p]) {
                     removed.entry(id).or_default().push(p.clone());
                 }
             }
-            if c.old.is_none() {
+            if c.old().is_none() {
                 if let Some(id) = id_of(&b[p]) {
                     added.entry(id).or_default().push(p.clone());
                 }
@@ -1724,17 +1724,11 @@ fn candidates_scanned_with(
                 continue;
             }
             let (src, dst) = (&srcs[0], &dsts[0]);
-            if changes[src].old.as_ref().map(|m| m.ftype) != changes[dst].new.as_ref().map(|m| m.ftype) {
-                continue;
-            }
-            let old = changes.remove(src).unwrap().old;
-            let c = changes.get_mut(dst).unwrap();
-            c.old = old;
-            c.old_path = Some(src.clone());
+            crate::compare::pair_rename(&mut changes, src, dst, crate::compare::DataEvidence::Unknown);
         }
     }
-    let both_files = |c: &crate::changes::Change| {
-        c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file())
+    let both_files = |c: &crate::compare::EntryChange| {
+        c.old_path().is_none() && c.old().is_some_and(|m| m.is_file()) && c.new().is_some_and(|m| m.is_file())
     };
     let shared_at = |p: &str| {
         let (old, new) = (&a[p], &b[p]);
@@ -1758,21 +1752,28 @@ fn candidates_scanned_with(
             if !shared {
                 read.push(p.clone());
             }
-            c.ranges = if shared {
-                Some(Vec::new())
+            let data = if shared {
+                crate::compare::DataEvidence::Equal
             } else if exact {
-                ranged.remove(p.as_str())
+                match ranged.remove(p.as_str()) {
+                    Some(ranges) => crate::compare::DataEvidence::from_native(&ranges, a[p].meta.size, b[p].meta.size)
+                        .map_err(anyhow::Error::msg)?,
+                    None => crate::compare::DataEvidence::Unknown,
+                }
+            } else if same_content(parent, child, p)? {
+                crate::compare::DataEvidence::Equal
             } else {
-                same_content(parent, child, p)?.then(Vec::new)
+                crate::compare::DataEvidence::Unknown
             };
+            c.set_data(data);
         }
     }
     // Content comes only from compared files and from paths that appear, go or move.
     read.extend(
         changes
             .values()
-            .filter(|c| c.old.is_none() || c.new.is_none() || c.old_path.is_some())
-            .flat_map(|c| std::iter::once(c.path.clone()).chain(c.old_path.clone())),
+            .filter(|c| c.old().is_none() || c.new().is_none() || c.old_path().is_some())
+            .flat_map(|c| std::iter::once(c.path().clone()).chain(c.old_path().cloned())),
     );
     for root in [parent.folder(), child.folder()].into_iter().flatten() {
         note_read(root, &read);
@@ -2226,14 +2227,14 @@ mod tests {
         snapshot(&branch, &next, true)?;
         let changes = candidates(&base, &next)?;
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].old_path.as_deref(), Some("file"));
-        assert_eq!(changes[0].path, "moved");
+        assert_eq!(changes[0].old_path().map(String::as_str), Some("file"));
+        assert_eq!(changes[0].path(), "moved");
         fs::rename(branch.join("moved"), branch.join("file"))?;
         let mut data = vec![0u8; 16384];
         data[8192] = 1;
         fs::write(branch.join("file"), data)?;
         let changes = candidates(&base, &branch)?;
-        assert_eq!(changes[0].ranges, Some(vec![(8192, 4096)]));
+        assert_eq!(changes[0].data(), &crate::compare::DataEvidence::from_native(&[(8192, 4096)], 16384, 16384).unwrap());
         Ok(())
     }
 
@@ -2337,7 +2338,7 @@ mod tests {
         fs::write(branch.join("new.js"), b"another package")?;
         fixed(&branch.join("new.js"))?;
         let changes = candidates(&base, &branch)?;
-        assert!(changes.iter().all(|c| c.old_path.is_none()), "{changes:?}");
+        assert!(changes.iter().all(|c| c.old_path().is_none()), "{changes:?}");
         Ok(())
     }
 
@@ -2365,7 +2366,7 @@ mod tests {
         assert_eq!(crate::changes::file_changes(&base, &src)?.len(), 1);
         let exact = candidates(&base, &src)?;
         assert_eq!(exact.len(), 1);
-        assert_eq!(exact[0].ranges, Some(vec![(8192, 4096)]));
+        assert_eq!(exact[0].data(), &crate::compare::DataEvidence::from_native(&[(8192, 4096)], 16384, 16384).unwrap());
         Ok(())
     }
 

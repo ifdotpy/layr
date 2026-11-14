@@ -29,46 +29,7 @@ pub fn take_unsettled() -> bool {
     UNSETTLED.swap(false, Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum FType {
-    File,
-    Dir,
-    Symlink,
-    Special,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)]
-pub struct Meta {
-    pub ftype: FType,
-    pub mode: u32,
-    pub size: u64,
-    pub ino: u64,
-    pub uid: u32,
-    pub gid: u32,
-    pub mtime: i64,
-}
-
-impl Meta {
-    pub fn is_file(&self) -> bool {
-        self.ftype == FType::File
-    }
-    pub fn is_dir(&self) -> bool {
-        self.ftype == FType::Dir
-    }
-    pub fn executable(&self) -> bool {
-        self.mode & 0o111 != 0
-    }
-    /// The git mode of this entry: 100644, 100755, 120000 or 040000.
-    pub fn git_mode(&self) -> u32 {
-        match self.ftype {
-            FType::Symlink => 0o120000,
-            FType::Dir => 0o040000,
-            _ if self.executable() => 0o100755,
-            _ => 0o100644,
-        }
-    }
-}
+pub use crate::compare::{FType, Meta};
 
 pub fn meta_of(m: &fs::Metadata) -> Meta {
     let ft = m.file_type();
@@ -109,7 +70,9 @@ pub trait Src: Sync {
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.
     fn folder(&self) -> Option<&Path>;
-    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> { None }
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
+        None
+    }
     /// The layers, when the tree is not one folder.
     #[cfg(target_os = "macos")]
     fn layered(&self) -> Option<&crate::thin::Layered> {
@@ -145,9 +108,15 @@ impl Src for crate::thin::Layered {
     fn folder(&self) -> Option<&Path> {
         self.is_complete().then(|| self.bottom())
     }
-    fn layered(&self) -> Option<&crate::thin::Layered> { Some(self) }
+    fn layered(&self) -> Option<&crate::thin::Layered> {
+        Some(self)
+    }
     fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
-        if self.layers.is_empty() { self.object_base.as_deref() } else { None }
+        if self.layers.is_empty() {
+            self.object_base.as_deref()
+        } else {
+            None
+        }
     }
 }
 
@@ -402,7 +371,9 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
 
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
-    if let Some(o) = root.objects() { return o.meta(rel).ok().flatten(); }
+    if let Some(o) = root.objects() {
+        return o.meta(rel).ok().flatten();
+    }
     let p = root.at(rel).ok()?;
     exact_metadata(&p, rel).map(|m| meta_of(&m))
 }
@@ -564,7 +535,10 @@ pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io
 
 /// The bytes of an entry for diffs: file content, or the link target for a symbolic link.
 pub fn entry_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
-    let meta = match root.objects() { Some(objects) => objects.meta(rel)?, None => lmeta(root, rel) };
+    let meta = match root.objects() {
+        Some(objects) => objects.meta(rel)?,
+        None => lmeta(root, rel),
+    };
     match meta {
         Some(m) if m.ftype == FType::Symlink => Ok(read_link(root, rel)?.into_bytes()),
         Some(m) if m.ftype == FType::File => read_file(root, rel),
@@ -648,22 +622,6 @@ fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
     })
 }
 
-/// The byte ranges as sorted, disjoint `(offset, length)` pairs inside a file of `size` bytes:
-/// overlapping and adjacent ranges merge, so no byte is compared twice.
-fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
-    let mut v: Vec<(u64, u64)> =
-        ranges.iter().filter(|(off, _)| *off < size).map(|(off, len)| (*off, off.saturating_add(*len).min(size))).collect();
-    v.sort_unstable();
-    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
-    for (start, end) in v {
-        match out.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => out.push((start, end)),
-        }
-    }
-    out.into_iter().map(|(start, end)| (start, end - start)).collect()
-}
-
 fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
     let mut n = 0;
     while n < buf.len() {
@@ -736,7 +694,8 @@ pub fn same_entry(
             let mut b = open_ro(&rb.at(pb)?)?;
             match ranges {
                 Some(rs) => {
-                    for (off, len) in merged_ranges(rs, ma.size) {
+                    for (off, len) in crate::compare::ChangedRanges::from_native(rs).map_err(anyhow::Error::msg)?.bounded(ma.size)
+                    {
                         if !same_range(&mut a, &mut b, off, len)? {
                             return Ok(false);
                         }
@@ -1128,7 +1087,9 @@ pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
 /// Paths are relative to `root`. Folders are reported before their content.
 pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
-    if let Some(o) = root.objects() { return o.walk(rel, f); }
+    if let Some(o) = root.objects() {
+        return o.walk(rel, f);
+    }
     match root.folder() {
         Some(dir) => walk_folder(dir, rel, f),
         #[cfg(target_os = "macos")]
@@ -1574,7 +1535,10 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 
 #[cfg(test)]
 mod range_tests {
-    use super::{copy_index_entry, merged_ranges};
+    use super::copy_index_entry;
+    fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
+        crate::compare::ChangedRanges::from_native(ranges).unwrap().bounded(size)
+    }
     use std::fs;
 
     #[test]

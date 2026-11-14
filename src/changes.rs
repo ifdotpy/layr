@@ -3,6 +3,7 @@
 //! A change list is a candidate list: an entry that kept its inode and path has the changed byte
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
+use crate::compare::{pair_rename, DataEvidence, EntryChange};
 use crate::fsutil::{self, Meta, Src};
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use crate::storage as btrfs;
@@ -25,6 +26,18 @@ pub struct Change {
     pub ranges: Option<Vec<(u64, u64)>>,
 }
 
+// Temporary conversion at the producer/consumer seam, removed in diff-extract-consumers.
+impl From<EntryChange> for Change {
+    fn from(c: EntryChange) -> Self {
+        let ranges = match c.data() {
+            DataEvidence::Unknown => None,
+            DataEvidence::Equal => Some(Vec::new()),
+            DataEvidence::ChangedRanges(ranges) => Some(ranges.native()),
+        };
+        Self { path: c.path().clone(), old_path: c.old_path().cloned(), old: c.old().cloned(), new: c.new().cloned(), ranges }
+    }
+}
+
 impl Change {
     pub fn src(&self) -> &str {
         self.old_path.as_deref().unwrap_or(&self.path)
@@ -37,20 +50,24 @@ impl Change {
 /// Raw candidate list from the stream, without content checks.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
+    if parent.objects().is_some() || child.objects().is_some() {
+        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+    }
     let (parent, child) = (folder(parent)?, folder(child)?);
     let entries = btrfs::send_no_data(parent, child)?;
-    build(parent, child, entries)
+    Ok(build(parent, child, entries)?.into_iter().map(Change::from).collect())
 }
 
-fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<Change>> {
+fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
     // Every path the stream touched, in the parent and in the child. `Some(ranges)` when the only
     // entry at the path kept its inode there, so unchanged byte ranges share extents.
-    let mut paths: BTreeMap<String, Option<Vec<(u64, u64)>>> = BTreeMap::new();
-    let mut moves: Vec<(String, String, Vec<(u64, u64)>)> = Vec::new();
+    let mut paths: BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>> = BTreeMap::new();
+    let mut moves: Vec<(String, String, Vec<(u64, crate::compare::RangeEnd)>)> = Vec::new();
     let mut moved_dirs: Vec<(String, String)> = Vec::new();
     let deleted: HashSet<String> = entries.iter().filter(|e| e.path.is_none()).filter_map(|e| e.origin.clone()).collect();
-    let touch = |paths: &mut BTreeMap<String, Option<Vec<(u64, u64)>>>, p: &str, r: Option<Vec<(u64, u64)>>| match paths.get(p) {
+    let touch = |paths: &mut BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>>,
+                 p: &str,
+                 r: Option<Vec<(u64, crate::compare::RangeEnd)>>| match paths.get(p) {
         Some(_) => {
             paths.insert(p.to_string(), None);
         }
@@ -107,14 +124,19 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
             }
         }
     }
-    let mut out: BTreeMap<String, Change> = BTreeMap::new();
+    let mut out: BTreeMap<String, EntryChange> = BTreeMap::new();
     for (p, ranges) in paths {
         let old = fsutil::lmeta(parent, &p);
         let new = fsutil::lmeta(child, &p);
-        if old.is_none() && new.is_none() {
-            continue;
+        let data = match (ranges, &old, &new) {
+            (Some(ranges), Some(old), Some(new)) => {
+                DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, old.size, new.size)
+            }
+            _ => DataEvidence::Unknown,
+        };
+        if let Some(change) = EntryChange::observed(p.clone(), old, new, data) {
+            out.insert(p, change);
         }
-        out.insert(p.clone(), Change { path: p, old_path: None, old, new, ranges });
     }
     // Moves: the source is gone in the child and the target is new in the parent.
     let mut used: HashSet<String> = HashSet::new();
@@ -122,20 +144,16 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
         if used.contains(&src) || used.contains(&dst) {
             continue;
         }
-        let ok = match (out.get(&src), out.get(&dst)) {
-            (Some(s), Some(d)) => {
-                s.new.is_none() && d.old.is_none() && s.old.as_ref().map(|m| m.ftype) == d.new.as_ref().map(|m| m.ftype)
+        let data = match (out.get(&src).and_then(EntryChange::old), out.get(&dst).and_then(EntryChange::new)) {
+            (Some(old), Some(new)) => {
+                DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, old.size, new.size)
             }
-            _ => false,
+            _ => continue,
         };
-        if !ok {
+        pair_rename(&mut out, &src, &dst, data);
+        if !out.get(&dst).is_some_and(|c| c.old_path().is_some()) {
             continue;
         }
-        let s = out.remove(&src).unwrap();
-        let d = out.get_mut(&dst).unwrap();
-        d.old_path = Some(src.clone());
-        d.old = s.old;
-        d.ranges = Some(ranges);
         used.insert(src);
         used.insert(dst);
     }
@@ -216,6 +234,7 @@ pub fn compare_for_write(parent: &(impl Src + ?Sized), child: &Path) -> Result<W
     let linked: HashSet<Vec<u8>> = objects.store.get_tree(&objects.refs.tree)?.links.into_iter().flatten().collect();
     let mut out = WriteComparison { files: Vec::new(), changed: Vec::new(), dirty: Vec::new() };
     for c in object_change_candidates(parent, &child)? {
+        let c = Change::from(c);
         let both_dirs = c.old.as_ref().is_some_and(Meta::is_dir) && c.new.as_ref().is_some_and(Meta::is_dir);
         let metadata_changed = match (&c.old, &c.new) {
             (Some(old), Some(_)) => {
@@ -420,8 +439,21 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(target_os = "macos")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
-    crate::storage::candidates(parent, child)
+    if parent.objects().is_some() || child.objects().is_some() {
+        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+    }
+    Ok(crate::storage::candidates(parent, child)?.into_iter().map(Change::from).collect())
+}
+
+/// APFS partial scans cross the same temporary producer/consumer seam as full scans.
+#[cfg(target_os = "macos")]
+pub fn candidates_scanned(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    old: BTreeMap<String, crate::storage::ScanEntry>,
+    new: BTreeMap<String, crate::storage::ScanEntry>,
+) -> Result<Vec<Change>> {
+    Ok(crate::storage::candidates_scanned(parent, child, old, new)?.into_iter().map(Change::from).collect())
 }
 
 /// Paths needed for an object import, including time-only changes. A directory whose
@@ -430,7 +462,10 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
     #[cfg(target_os = "macos")]
     let (normal, timed) = {
         let normal = candidates(parent, child)?;
-        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?;
+        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?
+            .into_iter()
+            .map(Change::from)
+            .collect::<Vec<_>>();
         (normal, timed)
     };
     #[cfg(not(target_os = "macos"))]
@@ -467,8 +502,10 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
 /// ranges of changed files. Other backends have the ranges from their stream at no cost.
 #[cfg(target_os = "macos")]
 fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
-    crate::storage::candidates_equal(parent, child)
+    if parent.objects().is_some() || child.objects().is_some() {
+        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+    }
+    Ok(crate::storage::candidates_equal(parent, child)?.into_iter().map(Change::from).collect())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -478,8 +515,10 @@ fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
 
 #[cfg(feature = "overlayfs")]
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
-    if parent.objects().is_some() || child.objects().is_some() { return object_change_candidates(parent, child); }
-    crate::storage::candidates(folder(parent)?, folder(child)?)
+    if parent.objects().is_some() || child.objects().is_some() {
+        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+    }
+    Ok(crate::storage::candidates(folder(parent)?, folder(child)?)?.into_iter().map(Change::from).collect())
 }
 
 /// Linux backends compare complete folders only.
@@ -603,8 +642,8 @@ mod tests {
         std::fs::hard_link(child.join("source"), child.join("link")).unwrap();
         let entry = stream::Entry { path: Some("link".into()), linked_from: Some("source".into()), ..Default::default() };
         let result = build(&parent, &child, vec![entry]).unwrap();
-        assert!(result.iter().any(|c| c.path == "source"));
-        assert!(result.iter().any(|c| c.path == "link"));
+        assert!(result.iter().any(|c| c.path() == "source"));
+        assert!(result.iter().any(|c| c.path() == "link"));
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
@@ -636,7 +675,7 @@ mod tests {
 
 /// Object trees have no native inode stream. Enumerate their entries and let the
 /// content comparison reject unchanged candidates without a checkout.
-fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     let mut entries: BTreeMap<String, (Option<Meta>, Option<Meta>)> = BTreeMap::new();
     fsutil::walk(parent, "", &mut |path, meta| {
         entries.entry(path.to_owned()).or_default().0 = Some(meta.clone());
@@ -646,5 +685,8 @@ fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?S
         entries.entry(path.to_owned()).or_default().1 = Some(meta.clone());
         Ok(true)
     })?;
-    Ok(entries.into_iter().map(|(path, (old, new))| Change { path, old_path: None, old, new, ranges: None }).collect())
+    Ok(entries
+        .into_iter()
+        .filter_map(|(path, (old, new))| EntryChange::observed(path, old, new, DataEvidence::Unknown))
+        .collect())
 }

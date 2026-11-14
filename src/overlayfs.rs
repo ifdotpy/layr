@@ -1352,12 +1352,12 @@ fn changed_entries(
 /// Changes from `parent` to `child`. When both are OverlayFS trees of this store, only the
 /// paths that their unshared layers hold are read: a path in a shared lower layer is the
 /// same file in both. Other trees are walked in full.
-pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
+pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::compare::EntryChange>> {
     let _t = crate::trace::span("OverlayFS candidates");
     candidates_in(parent, child, None)
 }
 
-fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -> Result<Vec<crate::changes::Change>> {
+fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -> Result<Vec<crate::compare::EntryChange>> {
     let (parent, child) = (absolute(parent)?, absolute(child)?);
     let layers = match layers {
         Some(layers) => Some(layers),
@@ -1380,26 +1380,23 @@ fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -
     };
     let mut changes: BTreeMap<_, _> = entries
         .iter()
-        .map(|(path, (old, new))| {
-            (
-                path.clone(),
-                crate::changes::Change {
-                    path: path.clone(),
-                    old_path: None,
-                    old: old.as_ref().map(|e| e.meta.clone()),
-                    new: new.as_ref().map(|e| e.meta.clone()),
-                    ranges: None,
-                },
+        .filter_map(|(p, (old, new))| {
+            crate::compare::EntryChange::observed(
+                p.clone(),
+                old.as_ref().map(|entry| entry.meta.clone()),
+                new.as_ref().map(|entry| entry.meta.clone()),
+                crate::compare::DataEvidence::Unknown,
             )
+            .map(|c| (p.clone(), c))
         })
         .collect();
     let mut removed: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     for (p, c) in &changes {
-        if c.new.is_none() {
+        if c.new().is_none() {
             removed.entry(file_identity(&parent.join(p))?).or_default().push(p.clone());
         }
-        if c.old.is_none() {
+        if c.old().is_none() {
             added.entry(file_identity(&child.join(p))?).or_default().push(p.clone());
         }
     }
@@ -1412,16 +1409,12 @@ fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -
             continue;
         }
         let (src, dst) = (&srcs[0], &dsts[0]);
-        if changes[src].old.as_ref().map(|m| m.ftype) != changes[dst].new.as_ref().map(|m| m.ftype) {
-            continue;
-        }
-        let old = changes.remove(src).unwrap().old;
-        let c = changes.get_mut(dst).unwrap();
-        c.old = old;
-        c.old_path = Some(src.clone());
+        crate::compare::pair_rename(&mut changes, src, dst, crate::compare::DataEvidence::Unknown);
     }
     for (p, c) in &mut changes {
-        if c.old_path.is_none() && c.old.as_ref().is_some_and(|m| m.is_file()) && c.new.as_ref().is_some_and(|m| m.is_file()) {
+        if let (None, Some(old), Some(new)) = (c.old_path(), c.old(), c.new()) {
+            if !old.is_file() || !new.is_file() { continue; }
+            let (old_size, new_size) = (old.size, new.size);
             // Same size, mode, modification and change time (the check git calls racy): equal
             // without a read. Other files get their exact changed ranges, which a merge needs.
             let quick = !exact
@@ -1429,7 +1422,10 @@ fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -
                     .get(p)
                     .and_then(|(old, new)| old.as_ref().zip(new.as_ref()))
                     .is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
-            c.ranges = Some(if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? });
+            let ranges = if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? };
+            c.set_data(
+                crate::compare::DataEvidence::from_native(&ranges, old_size, new_size).map_err(anyhow::Error::msg)?,
+            );
         }
     }
     Ok(changes.into_values().collect())
@@ -1485,8 +1481,8 @@ mod tests {
         }
         let changes = result?;
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].path, "edit");
-        assert_eq!(changes[0].ranges, Some(vec![(0, 7)]));
+        assert_eq!(changes[0].path(), "edit");
+        assert_eq!(changes[0].data(), &crate::compare::DataEvidence::from_native(&[(0, 7)], 6, 7).unwrap());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1519,9 +1515,9 @@ mod tests {
         let layers =
             CandidateLayers { dirs: vec![upper], nested: [parent.join("nested"), child.join("nested")].into_iter().collect() };
         let changes = candidates_in(&parent, &child, Some(layers))?;
-        let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
+        let paths: Vec<_> = changes.iter().map(|c| c.path().as_str()).collect();
         assert_eq!(paths, ["gone", "gone/file", "opaque", "opaque/hidden", "replace", "replace/file"]);
-        assert!(changes.iter().filter(|c| c.path.ends_with("/file") || c.path == "opaque/hidden").all(|c| c.new.is_none()));
+        assert!(changes.iter().filter(|c| c.path().ends_with("/file") || c.path() == "opaque/hidden").all(|c| c.new().is_none()));
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1561,11 +1557,11 @@ mod tests {
             fs::write(upper.join(path), b"")?;
         }
         let changes = candidates_in(&parent, &child, Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }))?;
-        let renamed = changes.iter().find(|c| c.path == "new").unwrap();
-        assert_eq!(renamed.old_path.as_deref(), Some("old"));
-        assert!(!changes.iter().any(|c| c.path == "old"));
-        assert_eq!(changes.iter().filter(|c| c.path.starts_with("link-")).count(), 4);
-        assert!(changes.iter().filter(|c| c.path.starts_with("link-")).all(|c| c.old_path.is_none()));
+        let renamed = changes.iter().find(|c| c.path() == "new").unwrap();
+        assert_eq!(renamed.old_path().map(String::as_str), Some("old"));
+        assert!(!changes.iter().any(|c| c.path() == "old"));
+        assert_eq!(changes.iter().filter(|c| c.path().starts_with("link-")).count(), 4);
+        assert!(changes.iter().filter(|c| c.path().starts_with("link-")).all(|c| c.old_path().is_none()));
         fs::remove_dir_all(root)?;
         Ok(())
     }

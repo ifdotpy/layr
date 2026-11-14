@@ -6,6 +6,7 @@
 //! renamed earlier in the stream. The model replays renames on a tree of touched entries; an
 //! entry that the stream did not create has an origin path in the parent snapshot.
 
+use crate::compare::RangeEnd;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::io::Read;
@@ -53,7 +54,7 @@ pub enum Cmd {
     Link { path: String, target: String },
     Unlink { path: String },
     Rmdir { path: String },
-    Extent { path: String, offset: u64, len: u64 },
+    Extent { path: String, offset: u64, end: RangeEnd },
     Truncate { path: String, size: u64 },
     Chmod { path: String, mode: u32 },
     Metadata { path: String },
@@ -160,10 +161,20 @@ pub fn decode(mut r: impl Read, mut f: impl FnMut(Cmd)) -> Result<()> {
             cmd::LINK => Cmd::Link { path: path(at.path)?, target: path(at.path_link)? },
             cmd::UNLINK => Cmd::Unlink { path: path(at.path)? },
             cmd::RMDIR => Cmd::Rmdir { path: path(at.path)? },
-            cmd::UPDATE_EXTENT => Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: at.size },
-            cmd::CLONE => Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: at.clone_len },
+            cmd::UPDATE_EXTENT => Cmd::Extent {
+                path: path(at.path)?,
+                offset: at.file_offset,
+                end: RangeEnd::Offset(at.file_offset.checked_add(at.size).ok_or_else(|| anyhow::anyhow!("extent overflow"))?),
+            },
+            cmd::CLONE => Cmd::Extent {
+                path: path(at.path)?,
+                offset: at.file_offset,
+                end: RangeEnd::Offset(
+                    at.file_offset.checked_add(at.clone_len).ok_or_else(|| anyhow::anyhow!("extent overflow"))?,
+                ),
+            },
             cmd::WRITE | cmd::ENCODED_WRITE | cmd::FALLOCATE => {
-                Cmd::Extent { path: path(at.path)?, offset: at.file_offset, len: u64::MAX }
+                Cmd::Extent { path: path(at.path)?, offset: at.file_offset, end: RangeEnd::Eof }
             }
             cmd::TRUNCATE => Cmd::Truncate { path: path(at.path)?, size: at.size },
             cmd::CHMOD => Cmd::Chmod { path: path(at.path)?, mode: at.mode as u32 },
@@ -201,7 +212,7 @@ pub struct Entry {
     pub linked_from: Option<String>,
     pub content: bool,
     pub mode: Option<u32>,
-    pub ranges: Vec<(u64, u64)>,
+    pub ranges: Vec<(u64, RangeEnd)>,
     pub truncated: Option<u64>,
 }
 
@@ -316,12 +327,14 @@ impl Model {
                 let id = self.detach(path);
                 self.nodes[id].touched = true;
             }
-            Cmd::Extent { path, offset, len } => {
+            Cmd::Extent { path, offset, end } => {
                 let id = self.lookup(path);
                 let n = &mut self.nodes[id];
                 n.touched = true;
                 n.entry.content = true;
-                n.entry.ranges.push((*offset, *len));
+                if *end > RangeEnd::Offset(*offset) {
+                    n.entry.ranges.push((*offset, *end));
+                }
             }
             Cmd::Truncate { path, size } => {
                 let id = self.lookup(path);
@@ -434,7 +447,7 @@ mod tests {
             vec![
                 Cmd::Create { path: s("a"), kind: Kind::File },
                 Cmd::Rename { from: s("a"), to: s("b") },
-                Cmd::Extent { path: s("b"), offset: 4096, len: 8 },
+                Cmd::Extent { path: s("b"), offset: 4096, end: RangeEnd::Offset(4104) },
                 Cmd::Other,
             ]
         );
@@ -443,8 +456,42 @@ mod tests {
     }
 
     #[test]
+    fn extent_decoder_checks_bounds_and_keeps_eof() {
+        let stream = |code, offset: u64, len: u64| {
+            let mut data = MAGIC.to_vec();
+            data.extend_from_slice(&1u32.to_le_bytes());
+            data.extend(command(
+                code,
+                &[
+                    (attr::PATH, b"file"),
+                    (attr::FILE_OFFSET, &offset.to_le_bytes()),
+                    (attr::SIZE, &len.to_le_bytes()),
+                    (attr::CLONE_LEN, &len.to_le_bytes()),
+                ],
+            ));
+            data
+        };
+        for code in [cmd::WRITE, cmd::ENCODED_WRITE, cmd::FALLOCATE] {
+            let data = stream(code, 8, 0);
+            let entries = entries_from(&data[..]).unwrap();
+            assert_eq!(entries[0].ranges, [(8, RangeEnd::Eof)]);
+        }
+        for code in [cmd::UPDATE_EXTENT, cmd::CLONE] {
+            let data = stream(code, 8, 0);
+            let entries = entries_from(&data[..]).unwrap();
+            assert!(entries[0].ranges.is_empty());
+            assert!(entries[0].content, "zero extents still mark the entry touched");
+            let data = stream(code, u64::MAX - 1, 3);
+            assert!(decode(&data[..], |_| {}).is_err());
+        }
+    }
+
+    #[test]
     fn rename_of_folder_maps_children() {
-        let cmds = vec![Cmd::Rename { from: s("a"), to: s("b") }, Cmd::Extent { path: s("b/x.txt"), offset: 0, len: 10 }];
+        let cmds = vec![
+            Cmd::Rename { from: s("a"), to: s("b") },
+            Cmd::Extent { path: s("b/x.txt"), offset: 0, end: RangeEnd::Offset(10) },
+        ];
         let e = entries(&cmds);
         let x = e.iter().find(|e| e.path.as_deref() == Some("b/x.txt")).unwrap();
         assert_eq!(x.origin.as_deref(), Some("a/x.txt"));
