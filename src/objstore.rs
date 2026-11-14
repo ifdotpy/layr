@@ -8,6 +8,10 @@ use anyhow::{Context, Result};
 use layr_objects::{Id, Keying, Node, StateRef, Store};
 use std::path::{Path, PathBuf};
 
+mod maintenance;
+pub(crate) use maintenance::maintenance_lock;
+pub use maintenance::{hot_states, hot_trees, maintain, periodic, MaintenanceInterval, MaintenanceMode};
+
 /// The folder of the object store of a project.
 pub fn dir(p: &Project) -> PathBuf {
     p.meta_dir().join("objects")
@@ -433,17 +437,6 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     let gone = crate::retention::drop_trees(repo, &ids)?;
     for id in gone { std::fs::remove_file(dir.join(id))?; }
     Ok(())
-}
-
-/// Drop from the object store of `p` what its kept states do not reach (`Store::prune`), under the project lock, so no
-/// save publishes a state while the walk runs. None when `p` has no object store.
-pub fn prune(p: &Project) -> Result<Option<layr_objects::store::PruneReport>> {
-    if !exists(p) {
-        return Ok(None);
-    }
-    let _lock = (!p.holds_lock()).then(|| p.lock()).transpose()?;
-    let keep = p.db.kept_state_ids()?;
-    Ok(Some(open(p)?.prune(&keep)?))
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -83,6 +83,15 @@ pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full:
         }
         None => (layr_objects::write::write_tree_from(store, &root, &options)?, None),
     };
+    // Test a writer after objects exist but before it publishes its state mapping.
+    if let Some(dir) = std::env::var_os("LAYR_TEST_OBJECTS_IMPORT_BARRIER") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::write(dir.join("ready"), b"")?;
+        let start = Instant::now();
+        while !dir.join("release").exists() && start.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     drop(pin);
     let tree = report.tree.expect("a write gives a tree");
     let times = report.times.expect("a write gives times");
@@ -285,44 +294,47 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
-/// The states whose blobs stay hot: the head of each line and the states before it on its first
-/// parent chain, `objects.hot-states` in all (default 5, the size of the undo ring).
-pub const HOT_STATES_DEFAULT: u64 = 5;
-
-pub(crate) fn hot_states(h: &Here) -> Result<std::collections::BTreeSet<String>> {
-    let n = h.repo.p.config_u64("objects.hot-states", HOT_STATES_DEFAULT);
-    let mut out = std::collections::BTreeSet::new();
-    for line in h.repo.lines()? {
-        let mut state = Some(line.head.clone());
-        for _ in 0..n {
-            let Some(id) = state else { break };
-            state = h.repo.p.db.state(&id)?.and_then(|s| s.parents.first().cloned());
-            out.insert(id);
-        }
-    }
-    Ok(out)
-}
-
-fn hot_trees(h: &Here, store: &Store) -> Result<Vec<Id>> {
-    let mut out = Vec::new();
-    for id in hot_states(h)? {
-        if let Some(tree) = store.state_tree(&id)? {
-            out.push(tree);
-        }
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
 /// Turn hot blobs that no hot state names into cold objects, then pack every loose object
 /// (`Store::pack`: zstd blocks, docs/objects.md "Packs"). `layr gc` runs it too.
 pub fn repack_store(h: &Here) -> Result<(layr_objects::store::EvictReport, layr_objects::store::PackReport, f64)> {
     let started = Instant::now();
+    let Some(_maintenance) = crate::objstore::maintenance_lock(&h.repo.p, h.repo.p.holds_lock())? else {
+        bail!("object maintenance lock unavailable");
+    };
+    let lock = (!h.repo.p.holds_lock()).then(|| h.repo.p.lock()).transpose()?;
     let store = open(h)?;
-    let evicted = store.evict_hot(&hot_trees(h, &store)?)?;
+    let hot = crate::objstore::hot_trees(&h.repo.p, &store)?;
+    drop(lock);
+    let evicted = store.evict_hot(&hot)?;
     let packed = store.pack()?;
     Ok((evicted, packed, started.elapsed().as_secs_f64()))
+}
+
+pub fn maintain_for_gc(ctx: &Ctx, repo: &crate::repo::Repo, dry: bool, quiet: bool) -> Result<()> {
+    use crate::objstore::MaintenanceMode;
+    let mode = if dry { MaintenanceMode::Preview } else { MaintenanceMode::Run };
+    let report = |name: &str, p: &crate::store::Project| -> Result<()> {
+        if let Some(plan) = crate::objstore::maintain(p, mode)? {
+            if !quiet {
+                let verb = if dry { "would remove" } else { "removed" };
+                let cold = if dry { "would turn cold" } else { "turned cold" };
+                let pack = if dry { "would pack" } else { "packed" };
+                outln!(ctx, "objects: {name}: {verb} {} state record(s), {} object(s), {} hot blob(s), {} bytes; {cold} {} hot blob(s), {} source bytes; {pack} {} existing loose object(s), {} loose bytes (plus new cold encodings)",
+                    plan.prune.states, plan.prune.objects, plan.prune.blobs, plan.prune.bytes,
+                    plan.evict.blobs, plan.evict.bytes, plan.pack_objects, plan.pack_bytes);
+            }
+        }
+        Ok(())
+    };
+    report("base", &repo.p)?;
+    for name in repo.overlay_names()? {
+        // Another platform's overlay may be described here without a local project.
+        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.try_exists()? {
+            continue;
+        }
+        report(&name, &repo.overlay_project(&name)?)?;
+    }
+    Ok(())
 }
 
 fn repack(ctx: &Ctx, args: &[String]) -> Result<i32> {

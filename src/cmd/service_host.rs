@@ -312,6 +312,9 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
                 eprintln!("layr queue ({name}): {error:#}");
             }
         }
+        // Every object-backed project, including overlays, gets an independent bounded batch.
+        // Try locks just as automatic_states does: a busy project is retried on the next tick.
+        crate::objstore::periodic(&repo);
         if hourly {
             // States left without an owner (a replay, a crash) go now, not at a `gc --repair`.
             match repo.p.db.free_old_leaks(now - LEAK_AGE_MS) {
@@ -451,7 +454,7 @@ fn user_socket_path() -> PathBuf {
 
 /// `layr daemon [--socket <path>] [--tick <seconds>] [--manual-queue]`. Root serves every local user (Linux, or
 /// macOS run as root). On macOS a daemon may run as its user (a LaunchAgent): it serves only that
-/// uid, switches no user and runs no periodic saves, only the follow tick and the daily garbage report.
+/// uid, switches no user and runs no periodic saves; it runs object maintenance, follow and the daily garbage report.
 /// How long a stopping service waits for its running requests. The service managers allow more
 /// (`TimeoutStopSec` of packaging/systemd/layr.service, `ExitTimeOut` of the launchd plist).
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(80);

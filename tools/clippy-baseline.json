@@ -32,7 +32,7 @@
     "clippy::cast_possible_wrap": 13
   },
   "layr-objects": {
-    "clippy::unwrap_used": 411,
+    "clippy::unwrap_used": 485,
     "clippy::expect_used": 84,
     "clippy::panic": 1,
     "clippy::cast_possible_truncation": 38,

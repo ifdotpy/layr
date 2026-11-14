@@ -300,6 +300,19 @@ Two steps, as Git does with loose objects and `git gc`:
    hot blobs outside the hot set turn cold, the first repack trains the store dictionary, then every
    loose object goes into packs (blocks of about 4 MiB, level 19).
 
+The service also prunes and repacks each object-backed project (including overlays) every
+`objects.maintenance-interval` seconds, default **60**; `0` disables automatic maintenance.
+Each prune, cold-conversion and packing phase handles at most **4,096 files and 1 GiB of input**
+(one oversized file is allowed for progress). Reachability still walks all kept roots. Busy project
+or maintenance locks are skipped and retried on the next tick. Open object-store handles also
+protect imports and temporary Cloud objects through publication and consumption: pruning skips
+stores in use, then allows readers/writers to resume before compression. Compression runs without
+the project lock. New cold encodings are packed in the following periodic batch. `layr gc` uses
+the same planner without batch limits and packs new cold encodings immediately; `gc -n` reports
+state records, objects and hot blobs to remove, hot blobs to turn cold, and existing loose objects
+to pack, with their source bytes. Compressed
+output sizes depend on the encoder and are not predicted.
+
 ## 11. Large folders (next step)
 
 A tree lists every entry of its folder, so a change in a folder of 100,000 entries writes a tree of
@@ -401,7 +414,7 @@ layr objects checkout <tree or rev> <folder>
   writes into the caller's folder (`tests/t201-objects-service.sh`).
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
-Garbage collection: `layr gc` prunes the store before the repack (`Store::prune`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
+Garbage collection: `layr gc` prunes the store before the repack (`Store::plan_maintenance`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
 objects that no state names.
 
 ### Migration

@@ -1855,6 +1855,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
             if !dry {
                 crate::objstore::retire_native(&repo)?;
             }
+            super::objects::maintain_for_gc(ctx, &repo, dry, quiet)?;
             Ok(freed)
         });
         match result {
@@ -1932,46 +1933,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
-    // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
-    // without one is not touched.
-    // First what no kept state reaches leaves each object store (the base and every overlay): a dropped part of an overlay
-    // with `history=last` gives its objects back here (docs/overlays.md section 1a, slice 7).
     if !a.has("-n") {
         crate::objstore::retire_native(&h.repo)?;
-        let mut stores = vec![("base".to_string(), crate::objstore::prune(&h.repo.p))];
-        for name in h.repo.overlay_names().unwrap_or_default() {
-            if let Ok(op) = h.repo.overlay_project(&name) {
-                stores.push((name, crate::objstore::prune(&op)));
-            }
-        }
-        for (name, pruned) in stores {
-            match pruned {
-                Ok(Some(r)) if !a.has("-q") && (r.states + r.objects + r.blobs) > 0 => outln!(
-                    ctx,
-                    "objects of {name}: {} state record(s), {} object(s), {} hot blob(s) removed, {} bytes",
-                    r.states,
-                    r.objects,
-                    r.blobs,
-                    r.bytes
-                ),
-                Err(e) => eprintln!("warning: objects of {name} not pruned: {e:#}"),
-                _ => {}
-            }
-        }
     }
-    if !a.has("-n") && h.repo.p.meta_dir().join("objects").is_dir() {
-        let (e, p, seconds) = super::objects::repack_store(&h)?;
-        if !a.has("-q") {
-            outln!(
-                ctx,
-                "objects: {} hot blobs turned cold, {} objects into {} packs in {:.1} s",
-                e.blobs,
-                p.objects,
-                p.packs,
-                seconds
-            );
-        }
-    }
+    super::objects::maintain_for_gc(ctx, &h.repo, a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {

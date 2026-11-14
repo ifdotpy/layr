@@ -408,7 +408,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for id in &omitted {
         outln!(ctx, "left unavailable by request: {id}; its record stays unchanged");
     }
-    let hot = super::objects::hot_states(&h)?;
+    let hot = crate::objstore::hot_states(&h.repo.p)?;
     let stop_after: Option<usize> = ctx.env("LAYR_TEST_MIGRATE_STOP_AFTER").and_then(|v| v.parse().ok());
     let started = Instant::now();
     let mut pending: Vec<String> = p.unrecorded.clone();
@@ -627,7 +627,7 @@ fn dry_run(ctx: &Ctx, h: &Here, delete: bool, leave_missing: &BTreeSet<String>) 
     let store = if crate::objstore::exists(&repo.p) { Some(crate::objstore::open_existing(&repo.p)?) } else { None };
     let states = candidates(repo, store.as_ref())?;
     let mut p = plan(&states, &table.entries);
-    let hot = super::objects::hot_states(h)?;
+    let hot = crate::objstore::hot_states(&h.repo.p)?;
     let copies = crate::store_remote::store_copies(repo).unwrap_or_default();
     let (mut fetch, mut lost) = (0, Vec::new());
     let mut omitted = BTreeSet::new();

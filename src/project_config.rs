@@ -8,6 +8,9 @@ use crate::store::Project;
 use anyhow::Result;
 
 pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    if key == crate::objstore::MaintenanceInterval::KEY && !value.is_null() {
+        crate::objstore::MaintenanceInterval::parse(&value)?;
+    }
     if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
         return Err(error(ErrorKind::Failed, format!("{key} is on or off")));
     }

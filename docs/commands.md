@@ -310,7 +310,15 @@ trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, a
 `gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
 record or auto state needs, and that git builds again. The record stays; the next read builds the
 tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
-only checks.
+only checks owners; the object maintenance below still runs.
+
+For projects with object stores, `gc` also prunes unreachable state records, loose objects and
+hot blobs, turns blobs outside the hot window cold, and packs existing loose objects (including
+overlay stores), including new cold encodings. `gc -n` uses the same plan and
+reports the counts and source bytes for each step, even when no native state can be freed.
+The service runs bounded batches every `objects.maintenance-interval` seconds (default `60`,
+`0` disables them), yields to busy locks and releases the project lock before compression.
+See [objects, section 10](objects.md#10-writes-and-repack) for the batch limits.
 
 `gc` also compares the `bases` table (the base of each thin layer) with the layers on disk, and prints
 each difference. `gc --repair` makes the table match the disk.
