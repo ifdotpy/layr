@@ -39,8 +39,10 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
         repo.move_head(locked, ctx, "commit", now, &st.id, vec![st.clone()], None, serde_json::json!({"line": line.id}))
     });
     if let Err(e) = moved {
-        repo.discard_states(std::slice::from_ref(&st));
-        return Err(e);
+        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+            repo.discard_states(std::slice::from_ref(&st));
+        }
+        return Err(e.into());
     }
     if json {
         let new_root = repo.state_src(&st.id)?;

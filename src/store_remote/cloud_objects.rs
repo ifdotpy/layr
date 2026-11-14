@@ -234,7 +234,7 @@ pub(super) fn fetch_states(store: &Store, repo: &Repo, states: Vec<StateRec>, re
     }
     for (state, r) in refs {
         if repo.p.has_state(&state.id) {
-            repo.p.db.set_present(&state.id, true)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.set_present(&state.id, true))?;
             continue;
         }
         let times = transfer::cloud_times_to_folder(&objects, &r.tree, &r.times)?;

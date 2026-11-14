@@ -32,7 +32,6 @@ mod free;
 mod fsutil;
 mod gitbridge;
 mod ids;
-mod owners;
 use layr_store::http;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_scan;

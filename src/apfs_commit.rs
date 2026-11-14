@@ -313,7 +313,7 @@ pub struct PendingCommit<'p, 's> {
     journal: PendingJournal,
     /// The clone is still in the pending folder (not published).
     in_pending: bool,
-    active: bool,
+    cleanup: crate::repo::PublicationCleanup,
 }
 
 impl<'p, 's> PendingCommit<'p, 's> {
@@ -368,7 +368,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
             thin,
             journal: journal.clone(),
             in_pending: true,
-            active: true,
+            cleanup: crate::repo::PublicationCleanup::Rollback,
         };
         // A failure from here on removes the folder (Drop). The copy is made writable so its ACLs
         // can be set, and it is sealed read-only below.
@@ -437,8 +437,12 @@ impl<'p, 's> PendingCommit<'p, 's> {
         Ok(true)
     }
 
-    /// After the record and the drop of the stage, under the project lock: remove the journal, and
-    /// then the pending folder. Requires the record.
+    /// Retain the journal and clone when publication needs recovery or already committed.
+    pub fn publication_failed(&mut self, error: &crate::db::PublishError) {
+        self.cleanup = crate::repo::PublicationCleanup::from_failure(error);
+    }
+
+    /// Remove the journal and pending folder after the record and the drop of the stage.
     pub fn finish(mut self) -> Result<()> {
         if self.project.db.state(&self.id)?.is_none() {
             bail!("pending save state has no saved record");
@@ -446,7 +450,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
         let dir = pending_dir(self.project, &self.id);
         remove_if_present(&dir.join(PENDING_JOURNAL))?;
         sync_parent(&dir.join(PENDING_JOURNAL))?;
-        self.active = false;
+        self.cleanup = crate::repo::PublicationCleanup::Keep;
         match fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -461,7 +465,7 @@ impl Drop for PendingCommit<'_, '_> {
     fn drop(&mut self) {
         // Not published: the clone goes and the stage stays. Published: the record decides at the
         // next lock (recovery), so the journal and the state stay.
-        if self.active && self.in_pending {
+        if self.cleanup == crate::repo::PublicationCleanup::Rollback && self.in_pending {
             let dir = pending_dir(self.project, &self.id);
             if let Err(e) = self.project.trash(&dir) {
                 eprintln!("warning: pending save folder stays until the next command: {e:#}");

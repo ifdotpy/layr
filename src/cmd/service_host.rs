@@ -317,7 +317,13 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
         crate::objstore::periodic(&repo);
         if hourly {
             // States left without an owner (a replay, a crash) go now, not at a `gc --repair`.
-            match repo.p.db.free_old_leaks(now - LEAK_AGE_MS) {
+            let freed = (|| -> Result<usize> {
+                match repo.p.try_lock()? {
+                    crate::store::LockAttempt::Busy => Ok(0),
+                    crate::store::LockAttempt::Acquired(locked) => Ok(locked.write(|tx| tx.free_old_leaks(now - LEAK_AGE_MS))?),
+                }
+            })();
+            match freed {
                 Ok(0) => {}
                 Ok(n) => eprintln!("layr free ({name}): {n} state(s) without an owner for over an hour are freed"),
                 Err(error) => eprintln!("layr free ({name}): {error:#}"),

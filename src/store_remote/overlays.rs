@@ -262,10 +262,7 @@ fn not_trusted_yet(
 pub(crate) fn trusted_keys(repo: &Repo) -> Result<BTreeMap<String, VerifyingKey>> {
     let mut keys = BTreeMap::new();
     keys.insert(repo.p.store.machine.id.clone(), repo.p.store.machine.key.verifying_key());
-    let mut query = repo.p.db.conn.prepare("SELECT machine,public_key FROM trusted")?;
-    let trusted = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    for entry in trusted {
-        let (machine, public) = entry?;
+    for (machine, public) in repo.p.db.trusted_keys()? {
         let bytes: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| anyhow::anyhow!("invalid trusted key"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }

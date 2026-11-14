@@ -539,7 +539,7 @@ pub(crate) fn write_state(
     }
     let described = (|| -> Result<StateRec> {
         if !complete {
-            repo.p.db.record_base(&id, &line.head)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, &line.head))?;
         }
         repo.describe_state(ctx, id.clone(), kind, vec![line.head.clone()], message, Some(line))
     })();
@@ -568,8 +568,10 @@ pub fn save_working(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &
         "working_before": repo.recorded_working(line)?, "working_after": st.id});
     rec.states.push(st.clone());
     if let Err(error) = repo.commit_record(locked, ctx, rec) {
-        repo.discard_states(std::slice::from_ref(&st));
-        return Err(error);
+        if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+            repo.discard_states(std::slice::from_ref(&st));
+        }
+        return Err(error.into());
     }
     Ok(Some(st))
 }

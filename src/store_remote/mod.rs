@@ -2023,8 +2023,8 @@ mod clone_head_tests {
         adoption.lines.insert(line.clone(), change(&old, &peer));
         for mut record in [creation, update, adoption] {
             record.id = crate::ids::new_id();
-            db.insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
-            db.derive(&record, &|_| false, &store.machine.id)?;
+            db.test_insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
+            db.test_derive(&record, &|_| false, &store.machine.id)?;
         }
         let mut repo = Repo {
             p: crate::store::Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: project, db },
@@ -2046,8 +2046,8 @@ mod clone_head_tests {
         let mut own_change = change(&local_head, &store.machine.id);
         own_change.after.as_mut().unwrap().owner = caller.uid;
         own.lines.insert(line.clone(), own_change);
-        repo.p.db.insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
-        repo.p.db.derive(&own, &|_| false, &store.machine.id)?;
+        repo.p.db.test_insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
+        repo.p.db.test_derive(&own, &|_| false, &store.machine.id)?;
         let local = repo.p.db.line_by_id(&line)?.unwrap();
         let working = repo.working(&local);
         std::fs::create_dir_all(&working)?;

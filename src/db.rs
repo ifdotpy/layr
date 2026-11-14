@@ -18,8 +18,8 @@ static SCHEMA_CHECK: LazyLock<(Vec<&'static str>, String)> = LazyLock::new(|| {
     (wanted, sql)
 });
 
-/// Test hook: the next `with_tx` reports an error after its COMMIT succeeded (sqlite can report
-/// an error after the commit point, on a full disk).
+// Test hook: the next catalog transaction reports an error after its COMMIT succeeded (sqlite can report
+// an error after the commit point, on a full disk).
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_AFTER_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -29,7 +29,7 @@ thread_local! {
 pub(crate) const STATEMENT_CACHE_CAPACITY: usize = 256;
 
 pub struct Db {
-    pub conn: Connection,
+    conn: Connection,
     /// The derived tables are from an older schema: `rebuild` replaces them before use.
     pub stale: bool,
 }
@@ -132,7 +132,37 @@ fn retry_locked<T>(mut step: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::R
     }
 }
 
+pub mod owners;
+mod queries;
+mod transaction;
+#[cfg(test)]
+pub(crate) use transaction::FAIL_RECONCILE;
+pub use transaction::{CleanupEffect, CommitResolution, CommittedEffects, PublishError, PublishResult, WriteTxn};
+
 impl Db {
+    #[cfg(test)]
+    pub(crate) fn test_connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Build disposable query tables in memory, without publishing a local catalog.
+    pub fn from_records(lines: &[String]) -> Result<Self> {
+        let db = Self::open(Path::new(":memory:"))?;
+        for line in lines {
+            db.derive_rows(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
+        }
+        Ok(db)
+    }
+
+    #[cfg(test)]
+    pub fn test_derive(&self, rec: &Record, present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
+        self.derive_rows(rec, present, local)
+    }
+    #[cfg(test)]
+    pub fn test_insert_record(&self, rec: &Record, line: &str) -> Result<bool> {
+        self.insert_record(rec, line)
+    }
+
     /// A disposable disk-backed database for bounded working sets. It has no durable data.
     pub fn scratch() -> Result<Connection> {
         let conn = Connection::open("")?;
@@ -228,83 +258,74 @@ impl Db {
     /// records, write the schema version, COMMIT. Other processes read the old tables until the
     /// COMMIT, and a failure or a crash rolls the whole rebuild back. With `only_older`, nothing
     /// is done when the database is current already (another process rebuilt it); returns false.
-    pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
-        self.begin_rebuild()?;
-        let done = (|| -> Result<bool> {
-            let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
-            if only_older && version >= SCHEMA_VERSION {
-                if version > SCHEMA_VERSION {
-                    anyhow::bail!("written by a newer layr (schema {version})");
-                }
-                return Ok(false);
+    fn rebuild_rows(&self, only_older: bool, replay: impl FnOnce() -> Result<()>) -> Result<bool> {
+        let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
+        if only_older && version >= SCHEMA_VERSION {
+            if version > SCHEMA_VERSION {
+                anyhow::bail!("written by a newer layr (schema {version})");
             }
-            // Pins and removal reservations belong to running processes, not signed records.
-            // Preserve them in this transaction so a replay cannot expose a reader's tree to GC.
-            let has_owners: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owners')",
-                [],
-                |row| row.get(0),
-            )?;
-            let mut local_owners = Vec::new();
-            if has_owners {
-                let mut query = self.conn.prepare_cached("SELECT state, kind, holder FROM owners WHERE kind=?1")?;
-                for kind in crate::owners::LOCAL_OWNERS {
-                    local_owners.extend(
-                        query
-                            .query_map([kind], |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-                            })?
-                            .collect::<rusqlite::Result<Vec<_>>>()?,
-                    );
-                }
-            }
-            self.conn.execute_batch("DROP TRIGGER IF EXISTS records_index_lines")?;
-            for t in DERIVED.iter().chain(RETIRED) {
-                self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
-            }
-            for i in RETIRED_INDEXES {
-                self.conn.execute_batch(&format!("DROP INDEX IF EXISTS {i}"))?;
-            }
-            self.conn.execute_batch(SCHEMA)?;
-            for (state, kind, holder) in local_owners {
-                self.conn
-                    .execute("INSERT OR IGNORE INTO owners(state,kind,holder) VALUES(?1,?2,?3)", params![state, kind, holder])?;
-            }
-            self.conn.execute_batch(r#"
-                INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, rowid, id FROM records WHERE op IN ('push','sync');
-                INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.rowid, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
-                INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, rowid, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
-            "#)?;
-            // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
-            // Keeps come from no record: their table outlives the rebuild, and their owners return after the replay.
-            crate::owners::fill_only(|| -> Result<()> {
-                replay(self)?;
-                self.restore_keeps(self)
-            })?;
-            // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
-            if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-                eprintln!("test: rebuild held for {ms} ms");
-                std::thread::sleep(std::time::Duration::from_millis(ms));
-            }
-            self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            Ok(true)
-        })();
-        let result = done.and_then(|rebuilt| {
-            self.conn.execute_batch("COMMIT")?;
-            Ok(rebuilt)
-        });
-        if result.as_ref().is_ok_and(|rebuilt| *rebuilt) {
-            self.remove_upgrade_copies();
+            return Ok(false);
         }
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
+        // Pins and removal reservations belong to running processes, not signed records.
+        // Preserve them in this transaction so a replay cannot expose a reader's tree to GC.
+        let has_owners: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owners')",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut local_owners = Vec::new();
+        if has_owners {
+            let mut query = self.conn.prepare_cached("SELECT state, kind, holder FROM owners WHERE kind=?1")?;
+            for kind in crate::db::owners::LOCAL_OWNERS {
+                local_owners.extend(
+                    query
+                        .query_map([kind], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+            }
         }
-        result
+        self.conn.execute_batch("DROP TRIGGER IF EXISTS records_index_lines")?;
+        for t in DERIVED.iter().chain(RETIRED) {
+            self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
+        }
+        for i in RETIRED_INDEXES {
+            self.conn.execute_batch(&format!("DROP INDEX IF EXISTS {i}"))?;
+        }
+        self.conn.execute_batch(SCHEMA)?;
+        for (state, kind, holder) in local_owners {
+            self.conn
+                .execute("INSERT OR IGNORE INTO owners(state,kind,holder) VALUES(?1,?2,?3)", params![state, kind, holder])?;
+        }
+        self.conn.execute_batch(r#"
+            INSERT OR IGNORE INTO record_lines SELECT 0, '', time, seq, rowid, id FROM records WHERE op IN ('push','sync');
+            INSERT OR IGNORE INTO record_lines SELECT 1, j.key, r.time, r.seq, r.rowid, r.id FROM records r, json_each(r.raw, '$.r.lines') j WHERE r.op NOT IN ('push','sync');
+            INSERT OR IGNORE INTO record_lines SELECT 1, (SELECT value FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1), time, seq, rowid, id FROM records WHERE op NOT IN ('push','sync') AND (SELECT type FROM json_each(records.raw, '$.r.data') WHERE key='line' ORDER BY id DESC LIMIT 1)='text';
+        "#)?;
+        // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
+        // Keeps come from no record: their table outlives the rebuild, and their owners return after the replay.
+        crate::db::owners::fill_only(|| -> Result<()> {
+            replay()?;
+            self.restore_keeps(self)
+        })?;
+        // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
+        if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            eprintln!("test: rebuild held for {ms} ms");
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
+        transaction::test_rebuild(self, only_older, replay)
     }
 
     /// Older layr versions copied the database before a schema upgrade (`<name>.schema-<version>.bak`
     /// next to it). The records of such a copy are all in the database, so the copies go.
-    fn remove_upgrade_copies(&self) {
+    pub(crate) fn remove_upgrade_copies(&self) {
         let Some(db_path) = self.conn.path().map(PathBuf::from) else {
             return;
         };
@@ -320,52 +341,8 @@ impl Db {
         }
     }
 
-    /// Start the write transaction of a rebuild. Another process may hold the write lock for
-    /// minutes under load: wait and retry, and print one line after a few seconds.
-    fn begin_rebuild(&self) -> Result<()> {
-        self.conn.busy_timeout(std::time::Duration::from_secs(3))?;
-        let mut told = false;
-        let begun = loop {
-            match self.conn.execute_batch("BEGIN IMMEDIATE") {
-                Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {
-                    if !told {
-                        eprintln!("waiting for the database rebuild");
-                        told = true;
-                    }
-                }
-                other => break other,
-            }
-        };
-        self.conn.busy_timeout(std::time::Duration::from_secs(30))?;
-        begun.map_err(Into::into)
-    }
-
-    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): all or nothing.
-    pub fn with_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        retry_locked(|| self.conn.execute_batch("BEGIN IMMEDIATE"))?;
-        match f() {
-            Ok(v) => {
-                // A failed COMMIT (a full disk) can leave the transaction open: roll it back so the
-                // next write can begin. After a COMMIT that did happen, ROLLBACK does nothing.
-                if let Err(e) = self.conn.execute_batch("COMMIT") {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    return Err(e.into());
-                }
-                #[cfg(test)]
-                if FAIL_AFTER_COMMIT.with(|f| f.replace(false)) {
-                    anyhow::bail!("injected: COMMIT reported an error after the commit point");
-                }
-                Ok(v)
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
-    }
-
     /// Insert a stored record line. Returns false if the record exists already.
-    pub fn insert_record(&self, rec: &Record, line: &str) -> Result<bool> {
+    fn insert_record(&self, rec: &Record, line: &str) -> Result<bool> {
         let n = self
             .conn
             .prepare_cached(
@@ -429,33 +406,10 @@ impl Db {
     /// members, merge commands, remotes) and the lines that have their
     /// working folder here change only by this machine's records; the values written by other
     /// machines are kept under `<key>@<machine>`.
-    pub fn derive(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
-        self.derive_rows(rec, state_present, local)?;
-        Self::publish_effects(rec);
-        Ok(())
-    }
-
-    /// Release command cleanup notifications only after the writer has committed these rows.
-    pub(crate) fn publish_effects(rec: &Record) {
-        for (id, ch) in &rec.lines {
-            if let Some(a) = &ch.after {
-                crate::free::head_moved(&a.head);
-            }
-            match (&ch.before, &ch.after) {
-                (Some(b), Some(a)) if b.head != a.head => crate::free::head_left(&b.head),
-                (Some(b), None) => {
-                    crate::free::head_left(&b.head);
-                    crate::free::line_deleted(id);
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Derive database rows without releasing effects from a transaction that may roll back.
-    pub(crate) fn derive_rows(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
+    fn derive_rows(&self, rec: &Record, state_present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         let tx = &self.conn;
-        let ord = crate::owners::record_ord(rec);
+        let ord = crate::db::owners::record_ord(rec);
         let foreign = rec.machine != local;
         for s in &rec.states {
             // A state id names one state forever: a second record with the same id is refused
@@ -846,7 +800,7 @@ impl Db {
     }
 
     fn apply_state_trees(&self, rec: &Record) -> Result<()> {
-        let ord = crate::owners::record_ord(rec);
+        let ord = crate::db::owners::record_ord(rec);
         for (state, tree, times) in layr_model::validation::state_trees(&rec.data)? {
             let raw: Option<String> = self
                 .conn
@@ -926,7 +880,7 @@ impl Db {
             .optional()?)
     }
 
-    pub fn set_present(&self, id: &str, present: bool) -> Result<()> {
+    fn set_present(&self, id: &str, present: bool) -> Result<()> {
         self.conn
             .prepare_cached("UPDATE states SET present=?2, deleted=CASE WHEN ?2=1 THEN 0 ELSE deleted END WHERE id=?1")?
             .execute(params![id, present as i64])?;
@@ -1203,7 +1157,7 @@ impl Db {
 
     /// Fill the base rows of the layers on disk. Runs inside the rebuild transaction (`rebuild`),
     /// after the table was emptied: a row for every thin layer, and none for a missing one.
-    pub fn fill_bases(&self, bases: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    fn fill_bases(&self, bases: &std::collections::BTreeMap<String, String>) -> Result<()> {
         for (state, base) in bases {
             self.conn.execute("INSERT OR REPLACE INTO bases(state, base) VALUES(?1, ?2)", rusqlite::params![state, base])?;
         }
@@ -1233,13 +1187,8 @@ impl Db {
     }
 
     /// Put a dead state in the free queue (its last layer child went).
-    pub fn queue_free(&self, state: &str) -> Result<()> {
-        self.conn.execute("INSERT OR IGNORE INTO free_queue(state) VALUES(?1)", rusqlite::params![state])?;
-        Ok(())
-    }
-
-    /// Remove the base row of a thin layer that was removed from disk.
-    pub fn forget_base(&self, state: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    fn forget_base(&self, state: &str) -> Result<()> {
         self.conn.execute("DELETE FROM bases WHERE state=?1", rusqlite::params![state])?;
         Ok(())
     }
@@ -1760,7 +1709,7 @@ mod tests {
                 .insert(id.into(), crate::model::LineChange { before: None, after, working_before: None, working_after: None });
             rec.data = data;
             db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
-            db.derive(&rec, &|_| true, "m")
+            db.derive_rows(&rec, &|_| true, "m")
         };
         apply(1, "line.create", "kept", Some("w"), serde_json::json!({}))?;
         apply(2, "line.delete", "kept", None, serde_json::json!({"name": "w"}))?;
@@ -1869,7 +1818,7 @@ mod tests {
                 "INSERT INTO records(id,machine,seq,time,op,raw) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![rec.id, rec.machine, rec.seq, rec.time, rec.op, raw],
             )?;
-            db.derive(&rec, &|_| true, "machine")?;
+            db.derive_rows(&rec, &|_| true, "machine")?;
         }
         for line in [None, Some("wanted"), Some("missing")] {
             for limit in [1, 30, 200, 2000] {
@@ -1942,7 +1891,7 @@ mod tests {
         assert!(db.rebuild(true, |db| {
             for raw in db.all_lines()? {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
-                db.derive(&rec, &|_| true, "machine")?;
+                db.derive_rows(&rec, &|_| true, "machine")?;
             }
             Ok(())
         })?);
@@ -2209,17 +2158,17 @@ mod tests {
         let mut gc = Record::new("gc");
         gc.machine = machine.into();
         gc.data = serde_json::json!({"deleted": [state]});
-        db.derive(&creation, &|_| true, machine).unwrap();
-        db.derive(&gc, &|_| false, machine).unwrap();
+        db.derive_rows(&creation, &|_| true, machine).unwrap();
+        db.derive_rows(&gc, &|_| false, machine).unwrap();
         assert_eq!(db.state_flags(state).unwrap(), Some((false, true)));
         db.set_present(state, true).unwrap();
         assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
         // Reindex replays an older gc record against the snapshots that exist now.
-        db.derive(&gc, &|_| true, machine).unwrap();
+        db.derive_rows(&gc, &|_| true, machine).unwrap();
         assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
         // Another machine's gc never deletes the local copy.
         gc.machine = "01a12290-0000-7000-8000-00000000bbbb".into();
-        db.derive(&gc, &|_| false, machine).unwrap();
+        db.derive_rows(&gc, &|_| false, machine).unwrap();
         assert_eq!(db.state_flags(state).unwrap(), Some((true, false)));
         drop(db);
         let _ = std::fs::remove_file(path);
@@ -2242,13 +2191,13 @@ mod tests {
         };
         let (a, b) = ("01a12290-0000-7000-8000-000000000a01", "01a12290-0000-7000-8000-000000000a02");
         let local = "01a12290-0000-7000-8000-00000000aaaa";
-        db.derive(&rec(2, 20, local, b), &|_| true, local).unwrap();
+        db.derive_rows(&rec(2, 20, local, b), &|_| true, local).unwrap();
         // An older record that arrives later does not replace the newer stack.
-        db.derive(&rec(1, 10, local, a), &|_| true, local).unwrap();
+        db.derive_rows(&rec(1, 10, local, a), &|_| true, local).unwrap();
         assert_eq!(db.config(&format!("stack.{line}")).unwrap(), Some(layers(b)));
         // Another machine's stacks stay apart.
         let other = "01a12290-0000-7000-8000-00000000bbbb";
-        db.derive(&rec(3, 30, other, a), &|_| true, local).unwrap();
+        db.derive_rows(&rec(3, 30, other, a), &|_| true, local).unwrap();
         assert_eq!(db.config(&format!("stack.{line}")).unwrap(), Some(layers(b)));
         assert_eq!(db.config(&format!("stack.{line}@{other}")).unwrap(), Some(layers(a)));
         let _ = std::fs::remove_file(&dir);
@@ -2260,7 +2209,7 @@ mod tests {
         let db = Db::open(&dir).unwrap();
         let st = "01a12290-0000-7000-8000-00000000c0c0";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
-        db.derive(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
+        db.derive_rows(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
         let caches = |seq: u64, path: &str, uuid: &str| {
             let mut r = Record::new("save.caches");
             r.id = format!("01a12290-0000-7000-8000-{:012}", seq);
@@ -2272,8 +2221,8 @@ mod tests {
             r
         };
         // Two saves of caches on the same state, one for each folder.
-        db.derive(&caches(2, "target", "01a12290-0000-7000-8000-000000000001"), &|_| true, machine).unwrap();
-        db.derive(&caches(3, ".cache", "01a12290-0000-7000-8000-000000000002"), &|_| true, machine).unwrap();
+        db.derive_rows(&caches(2, "target", "01a12290-0000-7000-8000-000000000001"), &|_| true, machine).unwrap();
+        db.derive_rows(&caches(3, ".cache", "01a12290-0000-7000-8000-000000000002"), &|_| true, machine).unwrap();
         let s = db.state(st).unwrap().unwrap();
         assert_eq!(s.caches.keys().map(|k| k.as_str()).collect::<Vec<_>>(), [".cache", "target"]);
         assert!(s.cache_shared);
@@ -2293,7 +2242,7 @@ mod tests {
         let db = Db::open(&dir).unwrap();
         let st = "01a12290-0000-7000-8000-00000000c1c1";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
-        db.derive(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
+        db.derive_rows(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
         let mut r = Record::new("save.layers");
         r.id = "01a12290-0000-7000-8000-000000000002".into();
         r.machine = machine.into();
@@ -2301,7 +2250,7 @@ mod tests {
         r.time = 2;
         let snap = format!("{st}@target");
         r.data = serde_json::json!({"state": st, "layers": {"target": snap}, "uuids": {snap: "01a12290-0000-7000-8000-000000000003"}, "shared": false, "platform": "macos-aarch64"});
-        db.derive(&r, &|_| true, machine).unwrap();
+        db.derive_rows(&r, &|_| true, machine).unwrap();
         assert_eq!(db.state(st).unwrap().unwrap().cache_platform.as_deref(), Some("macos-aarch64"));
         let _ = std::fs::remove_file(&dir);
     }
@@ -2312,9 +2261,9 @@ mod tests {
         let db = Db::open(&dir).unwrap();
         let st = "01a12290-0000-7000-8000-00000000bbbb";
         let parent = "01a12290-0000-7000-8000-00000000cccc".to_string();
-        db.derive(&state_record(1, st, vec![parent.clone()]), &|_| true, "x").unwrap();
+        db.derive_rows(&state_record(1, st, vec![parent.clone()]), &|_| true, "x").unwrap();
         let other = "01a12290-0000-7000-8000-00000000dddd".to_string();
-        assert!(db.derive(&state_record(2, st, vec![other]), &|_| true, "x").is_err());
+        assert!(db.derive_rows(&state_record(2, st, vec![other]), &|_| true, "x").is_err());
         assert_eq!(db.state(st).unwrap().unwrap().parents, vec![parent]);
         let _ = std::fs::remove_file(&dir);
     }
@@ -2341,7 +2290,7 @@ mod tests {
             let db = memory();
             for record in &records {
                 db.insert_record(record, &serde_json::json!({"r": record}).to_string())?;
-                db.derive(record, &|_| true, &source.machine)?;
+                db.derive_rows(record, &|_| true, &source.machine)?;
             }
             assert_eq!(db.state(state)?.unwrap().tree, Some("3".repeat(64)));
             let model = layr_model::Project::from_records("", records, &source.machine)?;
@@ -2362,8 +2311,8 @@ mod tests {
             r.data = serde_json::json!({"ref_change":RefChange { name:"env/prod".into(),before:None,after:Some(RefState{name:"env/prod".into(),target:target.into(),expires_at:Some(100)}) }});
             r
         };
-        db.derive(&rec(2, b), &|_| true, "local").unwrap();
-        db.derive(&rec(1, a), &|_| true, "local").unwrap();
+        db.derive_rows(&rec(2, b), &|_| true, "local").unwrap();
+        db.derive_rows(&rec(1, a), &|_| true, "local").unwrap();
         assert_eq!(db.ref_value("env/prod", 99).unwrap().unwrap().target, b);
         assert_eq!(db.ref_log("env/prod").unwrap().len(), 2);
         assert!(db.refs("env/", 100).unwrap().is_empty());
@@ -2401,7 +2350,7 @@ mod tests {
             r.data = serde_json::json!({"state":state,"command":"true","argv":["true"],"exit":0});
             let raw = crate::oplog::sign_line(&r, &key).unwrap();
             db.insert_record(&r, &raw).unwrap();
-            db.derive(&r, &|_| true, machine).unwrap();
+            db.derive_rows(&r, &|_| true, machine).unwrap();
         }
         assert!(db.attestations(state, None).unwrap().is_empty());
         assert!(db.approvals(state).unwrap().is_empty());
@@ -2417,7 +2366,7 @@ mod tests {
         let state = "01a12290-0000-7000-8000-000000000003";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         let first = attest_record(1, state, "approval", None);
-        db.derive(&first, &|_| true, machine).unwrap();
+        db.derive_rows(&first, &|_| true, machine).unwrap();
         let mut other = first.clone();
         other.id = "01a12290-0000-7000-8000-000000000002".into();
         other.seq = 2;
@@ -2425,7 +2374,7 @@ mod tests {
         other.time = 2;
         other.actor.uid = 99;
         other.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:other.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"revoke".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:2},"revokes":[first.id]});
-        db.derive(&other, &|_| true, machine).unwrap();
+        db.derive_rows(&other, &|_| true, machine).unwrap();
         assert_eq!(db.approvals(state).unwrap(), vec![(0, 1)]);
     }
     #[test]
@@ -2448,13 +2397,13 @@ mod tests {
         let runner = attest(1, 1001, machine, "check", vec![]);
         let foreign = attest(2, 1001, other_machine, "check", vec![]);
         for r in [&runner, &foreign] {
-            db.derive(r, &|_| true, machine).unwrap();
+            db.derive_rows(r, &|_| true, machine).unwrap();
         }
         assert_eq!(db.own_attestations(state, machine, Some(0), None).unwrap(), Vec::<String>::new());
         assert_eq!(db.own_attestations(state, machine, None, None).unwrap(), vec![runner.id.clone()]);
         // A root revoke of this machine names the runner's check (and, forged, another machine's).
         let revoke = attest(3, 0, machine, "revoke", vec![runner.id.clone(), foreign.id.clone()]);
-        db.derive(&revoke, &|_| true, machine).unwrap();
+        db.derive_rows(&revoke, &|_| true, machine).unwrap();
         // The filter of the evidence reads (`checks`, `check_exit`).
         let mut st = db
             .conn
@@ -2495,7 +2444,7 @@ mod tests {
         rec.data = serde_json::json!({"attestation":Attestation {format:1,attestation_id:rec.id.clone(),subject:Subject{kind:"state".into(),id:state.into()},change_id:None,kind:"approval".into(),payload_digest:"0".repeat(64),payload_ref:None,signer:machine.into(),time:1},"declassify":{"path":"a:1","hmac":"digest"}});
         let raw = crate::oplog::sign_line(&rec, &key).unwrap();
         db.insert_record(&rec, &raw).unwrap();
-        db.derive(&rec, &|_| true, machine).unwrap();
+        db.derive_rows(&rec, &|_| true, machine).unwrap();
         assert!(db.approvals(state).unwrap().is_empty());
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM approvals", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(db.attestations(state, Some("approval")).unwrap().len(), 1);
@@ -2532,12 +2481,12 @@ mod tests {
             rec.data = serde_json::json!({"queue_change":QueueChange{id:id.into(),before:None,after}});
             rec
         };
-        db.derive(&event(3, Some("done")), &|_| true, "local").unwrap();
-        db.derive(&event(1, Some("pending")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(3, Some("done")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(1, Some("pending")), &|_| true, "local").unwrap();
         assert_eq!(db.queue_entry(id).unwrap().unwrap().status, "done");
-        db.derive(&event(4, None), &|_| true, "local").unwrap();
+        db.derive_rows(&event(4, None), &|_| true, "local").unwrap();
         assert!(db.queue_entry(id).unwrap().is_none());
-        db.derive(&event(5, Some("pending")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(5, Some("pending")), &|_| true, "local").unwrap();
         assert_eq!(db.queue_entries(Some(&entry.target_line)).unwrap().len(), 1);
     }
     #[test]
@@ -2550,7 +2499,7 @@ mod tests {
             let rec = attest_record(seq, state, "check", Some(data));
             let raw = crate::oplog::sign_line(&rec, &key).unwrap();
             db.insert_record(&rec, &raw).unwrap();
-            db.derive(&rec, &|_| true, machine).unwrap();
+            db.derive_rows(&rec, &|_| true, machine).unwrap();
         };
         insert(1, serde_json::json!({"state":state,"command":"sh -c exit 1","argv":["sh","-c","exit 1"],"exit":1}));
         assert_eq!(db.check_exit(state, &["sh".into(), "-c".into(), "exit 1".into()], None).unwrap(), Some(1));
@@ -2568,7 +2517,7 @@ mod tests {
 
 // Addressable view descriptors stay in their signed records; no derived schema is needed.
 impl Db {
-    pub fn saved_view(&self, id: &str) -> Result<Option<crate::overlay::View>> {
+    pub fn saved_view(&self, id: &str) -> Result<Option<layr_model::validation::View>> {
         let raw: Option<String> = self
             .conn
             .query_row(
@@ -2591,7 +2540,7 @@ mod view_tests {
         let path = std::env::temp_dir().join(format!("layr-view-db-{}", crate::ids::new_id()));
         std::fs::create_dir(&path)?;
         let db = Db::open(&path.join("test.sqlite"))?;
-        let view = crate::overlay::View::new("01a12290-0000-7000-8000-000000000003".into(), Vec::new());
+        let view = layr_model::validation::View::new("01a12290-0000-7000-8000-000000000003".into(), Vec::new());
         let subject = view.id()?;
         let raw = serde_json::json!({"r":{"data":{"view_id":subject,"view":view}}});
         db.conn.execute("INSERT INTO records(id,op,raw,time,seq) VALUES('view','view.save',?1,1,1)", params![raw.to_string()])?;

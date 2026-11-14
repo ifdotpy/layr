@@ -87,7 +87,7 @@ pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
         return Err(e.context(format!("cannot build state {} from the object store", crate::ids::short(state))));
     }
     queue_native(&repo.p, state)?;
-    repo.p.db.set_present(state, true)?;
+    repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true))?;
     Ok(true)
 }
 

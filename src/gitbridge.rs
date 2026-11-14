@@ -1125,7 +1125,7 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
         let _ = crate::storage::delete_tree(&repo.p.delta_path(state));
         return Err(e);
     }
-    repo.p.db.set_present(state, true)?;
+    repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true))?;
     if let Err(e) = keep_newest_built(&repo.p, state) {
         eprintln!("warning: older built Git trees stay: {e:#}");
     }
@@ -1178,7 +1178,7 @@ fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
     }
     for id in p.delete_states(&drop) {
         if !p.has_state(&id) {
-            p.db.set_present(&id, false)?;
+            p.lock_or_borrow()?.write(|tx| tx.set_present(&id, false))?;
         }
     }
     Ok(())
@@ -1219,7 +1219,7 @@ fn thin_build(
         whole: Default::default(),
     };
     crate::thin::write_layer(work, &repo.p.delta_path(state), &d, base, false, None)?;
-    repo.p.db.record_base(state, base)?;
+    repo.p.lock_or_borrow()?.write(|tx| tx.record_base(state, base))?;
     Ok(true)
 }
 

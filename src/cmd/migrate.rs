@@ -8,7 +8,7 @@ use super::{exit, here, Here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Record, StateKind, StateRec};
+use crate::model::{Record, StateKind};
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_objects::{Id, StateRef, Store};
@@ -210,24 +210,16 @@ fn running_marker(repo: &Repo) -> PathBuf {
 
 /// Every state of the project with what the planner needs.
 fn candidates(repo: &Repo, store: Option<&Store>) -> Result<Vec<Candidate>> {
-    let mut st = repo.p.db.conn.prepare("SELECT rec, deleted FROM states")?;
-    let rows: Vec<(String, bool)> =
-        st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<_, _>>()?;
-    drop(st);
+    let rows = repo.p.db.state_rows()?;
     // A replay fills owners without freeing states, so `deleted` alone cannot
     // identify absent dead states. Keep both recorded and replayed owners:
     // a stale or incomplete owners table must not hide a live missing source.
     let mut owned: BTreeSet<String> = repo.p.db.owner_rows()?.into_iter().map(|r| r.0).collect();
     owned.extend(repo.p.recomputed_owners()?.into_iter().map(|r| r.0));
     // A state in the free queue whose storage is not removed yet: readers are refused (`pins_add`).
-    let queued: BTreeSet<String> = {
-        let mut q = repo.p.db.conn.prepare("SELECT state FROM free_queue")?;
-        let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
-        rows
-    };
+    let queued: BTreeSet<String> = repo.p.db.queued_frees()?.into_iter().collect();
     let mut out = Vec::with_capacity(rows.len());
-    for (raw, deleted) in rows {
-        let s: StateRec = serde_json::from_str(&raw)?;
+    for (s, deleted) in rows {
         let recorded = match (store, &s.tree, &s.times) {
             (Some(store), Some(tree), Some(times)) => store.has(&Id::parse(tree)?) && store.has(&Id::parse(times)?),
             _ => false,

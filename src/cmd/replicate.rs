@@ -263,11 +263,9 @@ fn deletion_states(rec: &crate::model::Record) -> BTreeSet<String> {
 }
 
 fn undo_dependencies(p: &Project) -> Result<BTreeSet<String>> {
-    let mut stmt = p.db.conn.prepare("SELECT raw FROM records WHERE op='line.delete'")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut required = BTreeSet::new();
-    for raw in rows {
-        required.extend(deletion_states(&crate::oplog::parse_line(&raw?, None)?.record));
+    for record in p.db.records_with_op("line.delete")? {
+        required.extend(deletion_states(&record));
     }
     Ok(required)
 }
@@ -468,9 +466,11 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
                     clones.push((identity.0, identity.1, p.state_path(&source)));
                 }
                 receive_one(w, p, &id, &rec.subvol, true, &clones).and_then(|_| {
-                    if let Err(e) = p.db.set_present(&id, true) {
-                        let _ = p.delete_state(&id);
-                        return Err(e);
+                    if let Err(e) = p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true)) {
+                        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                            let _ = p.delete_state(&id);
+                        }
+                        return Err(e.into());
                     }
                     n += 1;
                     w.transfer.states_received += 1;

@@ -2338,8 +2338,8 @@ pub fn move_overlay_line(
     ol: &Line,
     head: &str,
     states: Vec<StateRec>,
-) -> Result<()> {
-        locked.check(&orepo.p)?;
+) -> crate::db::PublishResult<()> {
+    locked.check(&orepo.p)?;
     let mut rec = Record::new(op);
     rec.states = states;
     let st = |h: &str| LineState { name: ol.name.clone(), head: h.to_string(), owner: ol.owner, machine: ol.machine.clone() };
@@ -2812,7 +2812,7 @@ mod read_open_tests {
             let parent = create("p", json!({"access":access}))?;
             let head = ids::new_id();
             let line_id = ids::new_id();
-            parent.db.conn.execute(
+            parent.db.test_connection().execute(
                 "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,'main',?2,?3,?4,0,'1')",
                 (&line_id, caller.uid, &store.machine.id, &head),
             )?;
@@ -2855,7 +2855,7 @@ mod read_open_tests {
         let fixture = Fixture::new()?;
         let repo = Repo::open(&fixture.ctx, "p")?;
         let overlay = repo.overlay_project("private")?;
-        overlay.db.conn.execute(
+        overlay.db.test_connection().execute(
             "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,'main',?2,?3,?4,0,'1')",
             (ids::new_id(), fixture.ctx.caller.uid, &fixture.ctx.store.machine.id, &fixture.head),
         )?;
@@ -2899,7 +2899,7 @@ mod read_open_tests {
         let repo = Repo::open(&fixture.ctx, "p")?;
         let line = repo.line("main")?;
         let overlay = repo.overlay_project("private")?;
-        overlay.db.conn.execute(
+        overlay.db.test_connection().execute(
             "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,?2,?3,?4,?5,0,'1')",
             (ids::new_id(), format!("line-{}", line.id), fixture.ctx.caller.uid, &fixture.ctx.store.machine.id, &fixture.head),
         )?;

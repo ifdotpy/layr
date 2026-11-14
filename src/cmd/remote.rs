@@ -1196,14 +1196,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     // Reopen after fetch so localization uses the freshly received records.
     let h = here(ctx)?;
     let line = h.line()?;
-    let mut heads = h
-        .repo
-        .p
-        .db
-        .conn
-        .prepare("SELECT head FROM line_heads WHERE line=?1 AND machine<>?2 ORDER BY time DESC, machine DESC LIMIT 1")?;
-    let target: Option<String> =
-        heads.query_map(rusqlite::params![line.id, h.repo.p.store.machine.id], |r| r.get(0))?.next().transpose()?;
+    let target = h.repo.p.db.foreign_line_head(&line.id, &h.repo.p.store.machine.id)?;
     let target = target.ok_or_else(|| exit(1, "no head of the current line from another machine"))?;
     let flags = parse(&Spec::new().flag("--ff-only").value("--expect").flag("-q"), &args_for_merge(&a))?;
     if !a.has("--json") {

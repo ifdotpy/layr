@@ -1,6 +1,7 @@
 //! Repository operations on one project: snapshots, lines, staging, status and in-place updates.
-
+use crate::db::{CommitResolution, PublishResult};
 use crate::errors::{error, Kind as ErrorKind};
+
 use crate::access::{Policy, Role, Rule, Who};
 use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
@@ -119,10 +120,30 @@ pub struct WorkingWrite<'a> {
     after: Snap,
     own: Option<(u32, u32)>,
     view: Option<Temp>,
-    done: bool,
+    cleanup: PublicationCleanup,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PublicationCleanup {
+    Rollback,
+    Keep,
+    Recover,
+}
+impl PublicationCleanup {
+    pub fn from_failure(error: &crate::db::PublishError) -> Self {
+        match error {
+            CommitResolution::NotCommitted(_) => Self::Rollback,
+            CommitResolution::Committed(_) => Self::Keep,
+            CommitResolution::Unknown(_) => Self::Recover,
+        }
+    }
 }
 
 impl<'a> WorkingWrite<'a> {
+    pub fn publication_failed(&mut self, error: &crate::db::PublishError) {
+        self.cleanup = PublicationCleanup::from_failure(error);
+    }
+
     /// `view` is the tree of an overlay view that `after` names (kept for the write back).
     pub fn new(
         repo: &'a Repo<'a>,
@@ -132,19 +153,19 @@ impl<'a> WorkingWrite<'a> {
         after: Snap,
         view: Option<Temp>,
     ) -> Self {
-        WorkingWrite { repo, wdir, before, after, own, view, done: false }
+        WorkingWrite { repo, wdir, before, after, own, view, cleanup: PublicationCleanup::Rollback }
     }
 
     /// Keep the write. Returns the overlay view that the write used, if any.
     pub fn commit(mut self) -> Option<Temp> {
-        self.done = true;
+        self.cleanup = PublicationCleanup::Keep;
         self.view.take()
     }
 }
 
 impl Drop for WorkingWrite<'_> {
     fn drop(&mut self) {
-        if self.done {
+        if self.cleanup != PublicationCleanup::Rollback {
             return;
         }
         let none = BTreeSet::new();
@@ -682,7 +703,7 @@ impl<'a> Repo<'a> {
             let src = self.state_src(base)?;
             let dst = self.p.delta_path(&id);
             crate::thin::write_layer(&src.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
-            self.p.db.record_base(&id, base)?;
+            self.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, base))?;
             return self.describe_state(ctx, id, kind, parents, message, line);
         }
         self.new_state(ctx, &self.state_root(base)?, kind, parents, message, line)
@@ -792,12 +813,12 @@ impl<'a> Repo<'a> {
             let dst = self.p.delta_path(&id);
             match crate::thin::snapshot_over(&head, base, &w, &dst, false) {
                 Ok(Some(_)) => {
-                    self.p.db.record_base(&id, base)?;
+                    self.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, base))?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 Ok(None) => {
                     crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
-                    self.p.db.record_base(&id, base)?;
+                    self.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, base))?;
                     return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
                 }
                 // Hard links need a complete tree.
@@ -945,17 +966,15 @@ impl<'a> Repo<'a> {
     }
 
     /// Write a record. On failure, delete the states it names.
-    pub fn commit_record(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, rec: Record) -> Result<Record> {
+    pub fn commit_record(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, rec: Record) -> PublishResult<Record> {
         let states = rec.states.clone();
         locked.check(&self.p)?;
         match locked.append(rec, &ctx.actor()) {
             Ok(r) => Ok(r),
             Err(e) => {
-                // The record and its rows are one transaction, but COMMIT can fail after the commit
-                // point (a full disk). A state that the database names is recorded: keep it.
-                let unrecorded: Vec<StateRec> =
-                    states.into_iter().filter(|s| self.p.db.state(&s.id).is_ok_and(|known| known.is_none())).collect();
-                self.discard_states(&unrecorded);
+                if matches!(e, CommitResolution::NotCommitted(_)) {
+                    discard_unrecorded(self, &states);
+                }
                 Err(e)
             }
         }
@@ -2309,10 +2328,9 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-        let layers =
-            if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line)? };
+        let layers = if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line)? };
         self.materialize_with(&line, start, &dst, &layers, true)?;
-        let res = (|| -> Result<Record> {
+        let res = (|| -> PublishResult<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
             self.take_caches(ctx, &line, start, source, &dst)?;
             let mut rec = Record::new("line.create");
@@ -2334,9 +2352,11 @@ impl<'a> Repo<'a> {
             locked.append(rec, &ctx.actor())
         })();
         if let Err(e) = res {
-            let _ = btrfs::delete_tree(&dst);
-            let _ = self.prune_bases(&line, None, 0);
-            return Err(e);
+            if matches!(e, CommitResolution::NotCommitted(_)) {
+                let _ = btrfs::delete_tree(&dst);
+                let _ = self.prune_bases(&line, None, 0);
+            }
+            return Err(e.into());
         }
         // The owner of the new line may read the git objects (its .git folder uses them).
         crate::gitbridge::sync_store_access(self)?;
@@ -2784,7 +2804,7 @@ impl<'a> Repo<'a> {
         states: Vec<StateRec>,
         working_before: Option<String>,
         data: serde_json::Value,
-    ) -> Result<Record> {
+    ) -> PublishResult<Record> {
         locked.check(&self.p)?;
         let rec = self.head_record(ctx, op, line, new_head, states, working_before, data)?;
         let r = self.commit_record(locked, ctx, rec)?;
@@ -2856,8 +2876,8 @@ impl<'a> Repo<'a> {
         leases: &crate::store::LineLeaseSet,
         line: &Line,
         head: &str,
-        commit: impl FnOnce(&crate::store::LockedProject<'_>, &Line) -> Result<T>,
-    ) -> Result<T> {
+        commit: impl FnOnce(&crate::store::LockedProject<'_>, &Line) -> PublishResult<T>,
+    ) -> PublishResult<T> {
         leases.require_line(&self.p, &line.id)?;
         // Test hooks (tests/t122-line-locks.sh), named by line: a crash after the folder was written
         // and before the record, and a head that another command moved.
@@ -2868,14 +2888,14 @@ impl<'a> Repo<'a> {
         let _lock = leases.lock(&self.p)?;
         let now = match self.p.db.line_by_id(&line.id)? {
             Some(l) => self.localize(l)?,
-            None => return Err(line_gone(&line.name)),
+            None => return Err(line_gone(&line.name).into()),
         };
         if hook("LAYR_TEST_MOVE_HEAD_AT_COMMIT") {
             let parent = self.state(head).ok().and_then(|s| s.parents.first().cloned()).unwrap_or_else(|| head.to_string());
-            return Err(line_moved(&line.name, head, &parent));
+            return Err(line_moved(&line.name, head, &parent).into());
         }
         if now.head != head {
-            return Err(line_moved(&line.name, head, &now.head));
+            return Err(line_moved(&line.name, head, &now.head).into());
         }
         commit(&_lock, &now)
     }
@@ -4729,15 +4749,20 @@ mod commit_record_tests {
     /// so its state must keep its snapshot: a present state without a snapshot is damage.
     #[test]
     fn a_state_that_the_database_names_keeps_its_snapshot_after_a_failed_commit() -> Result<()> {
-        failed_commit_keeps_content(false)
+        failed_commit_keeps_content(false, false)
     }
 
     #[test]
     fn object_state_survives_commit_error_and_deferred_native_cleanup() -> Result<()> {
-        failed_commit_keeps_content(true)
+        failed_commit_keeps_content(true, false)
     }
 
-    fn failed_commit_keeps_content(objects: bool) -> Result<()> {
+    #[test]
+    fn an_unknown_commit_retains_snapshot_and_working_write() -> Result<()> {
+        failed_commit_keeps_content(false, true)
+    }
+
+    fn failed_commit_keeps_content(objects: bool, unknown: bool) -> Result<()> {
         let dir = std::env::temp_dir().join(format!("layr-commit-record-{}", ids::new_id()));
         let ctx = Ctx {
             store: Store::open(&dir)?,
@@ -4807,10 +4832,42 @@ mod commit_record_tests {
                 },
             );
         }
+        let before = dir.join("before");
+        let after = dir.join("after");
+        let work = dir.join("working");
+        for path in [&before, &after, &work] {
+            std::fs::create_dir(path)?;
+        }
+        std::fs::write(before.join("file"), b"before")?;
+        for path in [&after, &work] {
+            std::fs::write(path.join("file"), b"after")?;
+        }
+        let mut write = WorkingWrite::new(&repo, work.clone(), None, snap(&before), snap(&after), None);
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
-        assert!(repo.commit_record(&repo.p.lock_maintenance().unwrap(), &ctx, rec).is_err());
+        crate::db::FAIL_RECONCILE.with(|f| f.set(unknown));
+        let error = repo.commit_record(&repo.p.lock_maintenance().unwrap(), &ctx, rec).unwrap_err();
+        if unknown {
+            assert!(matches!(error, CommitResolution::Unknown(_)));
+        } else {
+            assert!(matches!(error, CommitResolution::Committed(_)));
+        }
+        write.publication_failed(&error);
+        drop(write);
+        assert_eq!(std::fs::read(work.join("file"))?, b"after");
         assert!(repo.p.db.state(&state)?.is_some(), "the database holds the record");
         assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
+        let mut duplicate = Record::new("state");
+        duplicate.states.push(repo.p.db.state(&state)?.unwrap());
+        let mut unrecorded = duplicate.states[0].clone();
+        unrecorded.id = ids::new_id();
+        let unrecorded_path = repo.p.state_path(&unrecorded.id);
+        std::fs::create_dir(&unrecorded_path)?;
+        std::fs::write(unrecorded_path.join("file"), b"uncommitted")?;
+        duplicate.states.push(unrecorded);
+        let duplicate_error = repo.commit_record(&repo.p.lock_maintenance()?, &ctx, duplicate).unwrap_err();
+        assert!(matches!(duplicate_error, CommitResolution::NotCommitted(_)));
+        assert!(repo.p.has_state(&state), "rejecting a reused ID must retain its already-recorded snapshot");
+        assert!(!unrecorded_path.exists(), "only the snapshot with no committed record is discarded");
         if objects {
             let before = repo.state_src(&state)?;
             assert_eq!(fsutil::read_file(&before, "file")?, b"committed content");

@@ -265,8 +265,8 @@ impl Repo<'_> {
         let _t = crate::trace::span("record lines");
         #[cfg(feature = "overlayfs")]
         let source = prepared.source.clone();
-        let PreparedLines { start, lines, tmps, recs, .. } = prepared;
-        let result = (|| -> Result<()> {
+        let PreparedLines { start, lines, tmps, mut recs, .. } = prepared;
+        let result = (|| -> crate::db::PublishResult<()> {
             let names: Vec<String> = lines.iter().map(|l| l.name.clone()).collect();
             self.check_names_free(&names)?;
             self.source_state(&start)?;
@@ -275,10 +275,21 @@ impl Repo<'_> {
                 #[cfg(feature = "overlayfs")]
                 self.take_caches(ctx, line, &start, source.as_ref(), &self.working(line))?;
             }
-            locked.append_batch(recs, &ctx.actor())?;
+            locked.append_batch(&mut recs, &ctx.actor())?;
             Ok(())
         })();
         if let Err(e) = result {
+            match e {
+                crate::db::CommitResolution::Unknown(_) => return Err(e.into()),
+                crate::db::CommitResolution::Committed(error) => {
+                    let _ = crate::gitbridge::sync_store_access(self);
+                    anyhow::bail!(
+                        "{error:#}; batch committed despite the reported error; recorded lines: {}",
+                        lines.iter().map(|line| line.name.as_str()).collect::<Vec<_>>().join(", ")
+                    );
+                }
+                crate::db::CommitResolution::NotCommitted(_) => {}
+            }
             for (line, tmp) in lines.iter().zip(&tmps) {
                 // A moved tmp is ours at the line path; a folder there while tmp exists is not ours.
                 let moved = !tmp.exists();
@@ -290,16 +301,7 @@ impl Repo<'_> {
                     let _ = self.prune_bases(line, None, 0);
                 }
             }
-            let created = lines
-                .iter()
-                .filter(|line| self.p.db.line_by_id(&line.id).ok().flatten().is_some())
-                .map(|line| line.name.as_str())
-                .collect::<Vec<_>>();
-            if !created.is_empty() {
-                let _ = crate::gitbridge::sync_store_access(self);
-                bail!("{e:#}; batch committed despite the reported error; recorded lines: {}", created.join(", "));
-            }
-            return Err(e);
+            return Err(e.into());
         }
         // The store access was synced in `prepare_named_lines`, without the lock.
         Ok(lines)
@@ -487,7 +489,7 @@ mod batch_commit_tests {
             let rec = crate::oplog::parse_line(&raw, None)?.record;
             assert!(rec.lines.contains_key(&line.id));
         }
-        let sync: i64 = repo.p.db.conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+        let sync: i64 = repo.p.db.test_connection().pragma_query_value(None, "synchronous", |r| r.get(0))?;
         assert_eq!(sync, 2, "FULL synchronous is required");
         Ok(())
     }
@@ -498,7 +500,7 @@ mod batch_commit_tests {
         let (repo, prepared) = prepared(&ctx)?;
         let paths: Vec<_> = prepared.lines.iter().map(|line| repo.working(line)).collect();
         let tmps = prepared.tmps.clone();
-        repo.p.db.conn.execute_batch(
+        repo.p.db.test_connection().execute_batch(
             "CREATE TEMP TRIGGER fail_second_line BEFORE INSERT ON lines
             WHEN NEW.name = 'trial-2' BEGIN SELECT RAISE(ABORT, 'injected mid-batch failure'); END;",
         )?;
@@ -527,6 +529,19 @@ mod batch_commit_tests {
             assert!(path.join("content").is_file());
             assert!(message.contains(&format!("trial-{}", index + 1)));
         }
+        Ok(())
+    }
+    #[test]
+    fn an_unknown_commit_keeps_all_prepared_folders_for_recovery() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let paths: Vec<_> = prepared.lines.iter().map(|line| repo.working(line)).collect();
+        let locked = repo.p.lock_maintenance()?;
+        crate::db::FAIL_AFTER_COMMIT.with(|flag| flag.set(true));
+        crate::db::FAIL_RECONCILE.with(|flag| flag.set(true));
+        let error = repo.commit_prepared_lines(&locked, &ctx, prepared).unwrap_err();
+        assert!(error.to_string().contains("commit outcome is unknown"));
+        assert!(paths.iter().all(|path| path.join("content").is_file()));
         Ok(())
     }
 }

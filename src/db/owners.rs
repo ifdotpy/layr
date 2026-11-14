@@ -171,7 +171,7 @@ impl Db {
     }
 
     /// A state was made: if owners already name it, it holds its parents and sources now.
-    pub(crate) fn owners_state_made(&self, state: &str) -> Result<()> {
+    pub(super) fn owners_state_made(&self, state: &str) -> Result<()> {
         if self.owners_live(state)? {
             let rows = self.held_rows(state)?;
             self.add_rows(rows)?;
@@ -427,7 +427,7 @@ impl Db {
 
     /// The owners that one record changes. Runs at the end of `Db::derive`, after the record's own
     /// rows are written.
-    pub(crate) fn owners_after(&self, rec: &Record, ord: &str, foreign: bool) -> Result<()> {
+    pub(super) fn owners_after(&self, rec: &Record, ord: &str, foreign: bool) -> Result<()> {
         let d = &rec.data;
         let mut lines: BTreeSet<String> = rec.lines.keys().cloned().collect();
         lines.extend(rec.states.iter().filter_map(|s| s.line.clone()));
@@ -610,7 +610,7 @@ impl Db {
                 let rec = crate::oplog::parse_line(&raw, None)?.record;
                 mem.insert_record(&rec, &raw)?;
                 if counts(&rec)? {
-                    mem.derive(&rec, &|_| true, local)?;
+                    mem.derive_rows(&rec, &|_| true, local)?;
                 }
             }
             mem.restore_keeps(self)
@@ -628,50 +628,45 @@ impl Db {
 
     /// Make the stored table equal to a replay: add the `missing` rows, remove the `extra` ones
     /// (`owners_diff` against that replay). Pins are not touched.
-    pub fn apply_owners_diff(&self, missing: &[Row], extra: &[Row]) -> Result<()> {
+    pub(super) fn apply_owners_diff(&self, missing: &[Row], extra: &[Row]) -> Result<()> {
         if missing.is_empty() && extra.is_empty() {
             return Ok(());
         }
-        self.with_tx(|| {
-            for (s, k, h) in extra {
-                self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
-            }
-            for (s, k, h) in missing {
-                self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
-            }
-            Ok(())
-        })
+        for (s, k, h) in extra {
+            self.exec("DELETE FROM owners WHERE state=?1 AND kind=?2 AND holder=?3", params![s, k, h])?;
+        }
+        for (s, k, h) in missing {
+            self.exec("INSERT OR IGNORE INTO owners(state, kind, holder) VALUES(?1,?2,?3)", params![s, k, h])?;
+        }
+        Ok(())
     }
 
     /// Record that a thin layer of `state` is made over `base` (APFS only; no other file system
     /// writes this table).
-    pub fn record_base(&self, state: &str, base: &str) -> Result<()> {
+    pub(super) fn record_base(&self, state: &str, base: &str) -> Result<()> {
         self.exec("INSERT OR REPLACE INTO bases(state, base) VALUES(?1,?2)", params![state, base])?;
         Ok(())
     }
 
     /// Replace the layer bases with the ones found on disk (`layr reindex`).
     /// Set the base rows `set` and remove the rows of the layers `gone`, in one transaction.
-    pub fn fix_bases(&self, set: &BTreeMap<String, String>, gone: &[String]) -> Result<()> {
-        self.with_tx(|| {
-            for (state, base) in set {
-                self.record_base(state, base)?;
-            }
-            for state in gone {
-                self.exec("DELETE FROM bases WHERE state=?1", params![state])?;
-            }
-            Ok(())
-        })
+    pub(super) fn fix_bases(&self, set: &BTreeMap<String, String>, gone: &[String]) -> Result<()> {
+        for (state, base) in set {
+            self.record_base(state, base)?;
+        }
+        for state in gone {
+            self.exec("DELETE FROM bases WHERE state=?1", params![state])?;
+        }
+        Ok(())
     }
 
-    pub fn replace_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
-        self.with_tx(|| {
-            self.exec("DELETE FROM bases", [])?;
-            for (state, base) in bases {
-                self.record_base(state, base)?;
-            }
-            Ok(())
-        })
+    #[cfg(target_os = "macos")]
+    pub(super) fn replace_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
+        self.exec("DELETE FROM bases", [])?;
+        for (state, base) in bases {
+            self.record_base(state, base)?;
+        }
+        Ok(())
     }
 
     /// The states in the free queue: dead states whose storage may still be on disk.
@@ -682,13 +677,11 @@ impl Db {
     }
 
     /// Remove states from the free queue (their storage is gone, or they are live again).
-    pub fn dequeue_frees(&self, states: &[String]) -> Result<()> {
-        self.with_tx(|| {
-            for s in states {
-                self.exec("DELETE FROM free_queue WHERE state=?1", params![s])?;
-            }
-            Ok(())
-        })
+    pub(super) fn dequeue_frees(&self, states: &[String]) -> Result<()> {
+        for s in states {
+            self.exec("DELETE FROM free_queue WHERE state=?1", params![s])?;
+        }
+        Ok(())
     }
 
     /// Present states that no owner names. Only a replay of an old database or a crash leaves them.
@@ -731,7 +724,7 @@ impl Db {
     /// gives each state it records an owner within that command; a state without one for longer is left
     /// by a replay (`fill_only`) or a crash. The daemon runs this hourly, so leaks need no `gc --repair`.
     /// The free step of the next command moves their storage. Returns how many states it marked.
-    pub fn free_old_leaks(&self, before_ms: i64) -> Result<usize> {
+    pub(super) fn free_old_leaks(&self, before_ms: i64) -> Result<usize> {
         let old: Vec<String> = {
             let mut st = self.cached(
                 "SELECT id FROM states WHERE present=1 AND deleted=0 AND time<?1 AND id NOT IN (SELECT state FROM owners) ORDER BY id",
@@ -746,19 +739,17 @@ impl Db {
     }
 
     /// Mark present states dead (`gc --repair`: their owners are gone).
-    pub fn free_leaks(&self, states: &[String]) -> Result<()> {
-        self.with_tx(|| {
-            for s in states {
-                self.mark_dead(s)?;
-            }
-            Ok(())
-        })
+    pub(super) fn free_leaks(&self, states: &[String]) -> Result<()> {
+        for s in states {
+            self.mark_dead(s)?;
+        }
+        Ok(())
     }
 
     /// Pin states for a command in one durable transaction (`free.rs`). States without an
     /// owner need no pin. A refused state rolls back the whole batch before the caller reads.
     pub fn pins_add(&self, states: &[&str], holder: &str) -> Result<Vec<String>> {
-        self.with_tx(|| {
+        self.with_pin_tx(|| {
             let mut pinned = Vec::new();
             for state in states {
                 let dropping: bool =
@@ -792,7 +783,7 @@ impl Db {
     /// is left out; a pin after the reservation is refused (`pins_add`) until `release_trees`. So a
     /// reader never reads a tree that goes. Returns the reserved states.
     pub fn reserve_trees(&self, states: &[String], holder: &str) -> Result<Vec<String>> {
-        self.with_tx(|| {
+        self.with_pin_tx(|| {
             let mut reserved = Vec::new();
             for s in states {
                 if !self.is_pinned(s)? {
@@ -808,7 +799,7 @@ impl Db {
     /// absent now. A state that lost its other owners meanwhile is dead. One transaction: a reader pins either before (the tree is there) or after (the
     /// state is absent and comes back from its remote or from git).
     pub fn release_trees(&self, reserved: &[String], gone: &[String], holder: &str) -> Result<()> {
-        self.with_tx(|| {
+        self.with_pin_tx(|| {
             for s in gone {
                 self.set_present(s, false)?;
             }
@@ -819,25 +810,22 @@ impl Db {
 
     /// Release pins in one transaction. States that lose their last owner become dead.
     pub fn pins_remove(&self, states: &[String], holder: &str) -> Result<()> {
-        self.with_tx(|| self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect()))
+        self.with_pin_tx(|| {
+            self.remove_rows(states.iter().map(|state| (state.clone(), "pin".into(), holder.to_string())).collect())
+        })
     }
 
     /// Keep `state` under `name` in `line` (`layr save --keep`), in place of the state it kept before.
     /// The `keeps` table is the source; the `keep` owner `{line}/{name}` follows it.
-    pub fn keep_set(&self, line: &str, name: &str, state: &str) -> Result<()> {
-        self.with_tx(|| {
-            self.exec("INSERT OR REPLACE INTO keeps(line, name, state) VALUES(?1,?2,?3)", params![line, name, state])?;
-            self.set_owners("keep", &format!("{line}/{name}"), &[state.to_string()])
-        })
+    pub(super) fn keep_set(&self, line: &str, name: &str, state: &str) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO keeps(line, name, state) VALUES(?1,?2,?3)", params![line, name, state])?;
+        self.set_owners("keep", &format!("{line}/{name}"), &[state.to_string()])
     }
 
     /// Release the keep `name` of `line`. False: there was none.
-    pub fn keep_drop(&self, line: &str, name: &str) -> Result<bool> {
-        let removed = self.with_tx(|| {
-            let n = self.exec("DELETE FROM keeps WHERE line=?1 AND name=?2", params![line, name])?;
-            self.set_owners("keep", &format!("{line}/{name}"), &[])?;
-            Ok(n)
-        })?;
+    pub(super) fn keep_drop(&self, line: &str, name: &str) -> Result<bool> {
+        let removed = self.exec("DELETE FROM keeps WHERE line=?1 AND name=?2", params![line, name])?;
+        self.set_owners("keep", &format!("{line}/{name}"), &[])?;
         Ok(removed > 0)
     }
 
@@ -851,10 +839,11 @@ impl Db {
     /// Give the keeps of `from` (the project database) their owners here, after a replay into this
     /// database (a rebuild, or the replay of the owners check): a replay makes no keep, and a kept
     /// state the ring dropped holds its parents again. A keep of a deleted line is left out.
-    pub fn restore_keeps(&self, from: &Db) -> Result<()> {
+    pub(super) fn restore_keeps(&self, from: &Db) -> Result<()> {
         let mut st = from.cached("SELECT line, name, state FROM keeps")?;
-        let keeps =
-            st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        let keeps = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
         drop(st);
         for (line, name, state) in keeps {
             if self.line_alive(&line)? {
@@ -871,7 +860,7 @@ impl Db {
 
     /// Release every pin of one holder (its process is gone).
     pub fn release_holder(&self, holder: &str) -> Result<()> {
-        self.with_tx(|| {
+        self.with_pin_tx(|| {
             let mut st = self.cached("SELECT state FROM owners WHERE kind='pin' AND holder=?1")?;
             let rows: Vec<Row> = st
                 .query_map(params![holder], |r| r.get::<_, String>(0))?
@@ -976,7 +965,7 @@ mod tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         let raw = crate::oplog::sign_line(r, &key).unwrap();
         db.insert_record(r, &raw).unwrap();
-        db.derive(r, &|_| true, MACHINE).unwrap();
+        db.derive_rows(r, &|_| true, MACHINE).unwrap();
     }
 
     fn owners_of(db: &Db, kind: &str, holder: &str) -> Vec<String> {
@@ -1092,7 +1081,7 @@ mod tests {
             let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
             let raw = crate::oplog::sign_line(r, &key).unwrap();
             reverse.insert_record(r, &raw).unwrap();
-            reverse.derive(r, &|_| true, MACHINE).unwrap();
+            reverse.derive_rows(r, &|_| true, MACHINE).unwrap();
         }
         assert_eq!(reverse.owner_rows().unwrap(), want, "arrival order does not change the owners");
         // The parent of the newest state is kept by it.

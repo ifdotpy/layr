@@ -633,21 +633,21 @@ pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stag
     let _lock = repo.p.lock_or_borrow()?;
     let destination = repo.p.state_path(id);
     if destination.exists() {
-        repo.p.db.set_present(id, true)?;
+        repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
         return Ok(false);
     }
     // btrfs cannot rename a read-only subvolume. Seal it under the project lock.
     crate::fsutil::rename_tree(stage, &destination)?;
-    let publish = (|| -> Result<()> {
+    let publish = (|| -> crate::db::PublishResult<()> {
         // A tree that the source built from git has no signed UUID (`subvol` is empty): it gets a
         // fresh one here, since no record names its snapshot.
         let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
         crate::storage::mark_received(&destination, &received, transid)?;
         crate::storage::set_readonly(&destination)?;
-        repo.p.db.set_present(id, true)?;
+        repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
         Ok(())
     })();
-    if publish.is_err() {
+    if matches!(&publish, Err(crate::db::CommitResolution::NotCommitted(_))) {
         let _ = crate::storage::delete_tree(&destination);
     }
     publish?;
@@ -907,7 +907,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             continue;
         }
         if repo.p.has_state(id) {
-            repo.p.db.set_present(id, true)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
         } else if api.is_some() {
             // One `POST /states/missing` after the loop tells which of these the server holds.
             asked.push(state);

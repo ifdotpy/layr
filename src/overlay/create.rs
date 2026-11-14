@@ -42,7 +42,7 @@ pub(crate) fn make_overlay(
         "overlay": {"project": repo.p.id, "name": name, "mode": mode.name(), "hidden": hidden},
     });
     let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
-    let made = (|| -> Result<String> {
+    let made = (|| -> crate::db::PublishResult<String> {
         let orepo = Repo { p: op, ctx: Some(ctx) };
         let overlay_lock = orepo.p.lock_maintenance()?;
         // The first state of every overlay line: an empty tree.
@@ -110,10 +110,10 @@ pub(crate) fn make_overlay(
     })();
     if let Err(e) = made {
         // No record of the project names the overlay: its folder goes.
-        if repo.overlay_info(name)?.is_none() {
+        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) && repo.overlay_info(name)?.is_none() {
             let _ = btrfs::delete_tree(&dir);
         }
-        return Err(e);
+        return Err(e.into());
     }
     Ok(())
 }

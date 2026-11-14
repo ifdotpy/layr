@@ -70,6 +70,17 @@ pub fn register(store: &Store, name: &str) {
     }
 }
 
+/// Release only cleanup notifications backed by a confirmed catalog commit.
+pub fn release_effects(effects: crate::db::CommittedEffects) {
+    for effect in effects {
+        match effect {
+            crate::db::CleanupEffect::HeadMoved(state) => head_moved(&state),
+            crate::db::CleanupEffect::HeadLeft(state) => head_left(&state),
+            crate::db::CleanupEffect::LineDeleted(line) => line_deleted(&line),
+        }
+    }
+}
+
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
@@ -355,9 +366,9 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
             }
             // Owned again (a record named it after its death): it is live, if its storage is here.
             if p.has_state(&state) {
-                p.db.set_present(&state, true)?;
+                p.lock_or_borrow()?.write(|tx| tx.set_present(&state, true))?;
             }
-            p.db.dequeue_frees(std::slice::from_ref(&state))?;
+            p.lock_or_borrow()?.write(|tx| tx.dequeue_frees(std::slice::from_ref(&state)))?;
         } else {
             dead.push(state);
         }
@@ -374,7 +385,7 @@ fn free_queued(p: &Project) -> Result<Vec<String>> {
         }
     }
     let mut gone = p.delete_states(&dead);
-    p.db.dequeue_frees(&gone)?;
+    p.lock_or_borrow()?.write(|tx| tx.dequeue_frees(&gone))?;
     gone.extend(gone_trees);
     Ok(gone)
 }
@@ -390,25 +401,25 @@ fn drop_trees(p: &Project, states: Vec<String>) -> Result<Vec<String>> {
     // A tree that git built lately stays (`gitbridge::keep_newest_built` frees it when newer ones push it out).
     let (recent, states): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| crate::gitbridge::recently_built(p, s));
     for state in &recent {
-        p.db.set_present(state, true)?;
+        p.lock_or_borrow()?.write(|tx| tx.set_present(state, true))?;
     }
-    p.db.dequeue_frees(&recent)?;
+    p.lock_or_borrow()?.write(|tx| tx.dequeue_frees(&recent))?;
     let (waiting, candidates): (Vec<String>, Vec<String>) = states.into_iter().partition(|s| bases.contains(s));
     let buildable = crate::gitbridge::buildable_states(p, &candidates)?;
     // Owned again, and not a tree that git can build: it is live, as in `free_queued`.
     let keep: Vec<String> = candidates.iter().filter(|s| !buildable.contains(*s)).cloned().collect();
     for state in &keep {
-        p.db.set_present(state, true)?;
+        p.lock_or_borrow()?.write(|tx| tx.set_present(state, true))?;
     }
-    p.db.dequeue_frees(&keep)?;
+    p.lock_or_borrow()?.write(|tx| tx.dequeue_frees(&keep))?;
     let drop: Vec<String> = buildable.into_iter().collect();
     let gone = p.delete_states(&drop);
     for state in &gone {
         if !p.has_state(state) {
-            p.db.set_present(state, false)?;
+            p.lock_or_borrow()?.write(|tx| tx.set_present(state, false))?;
         }
     }
-    p.db.dequeue_frees(&gone)?;
+    p.lock_or_borrow()?.write(|tx| tx.dequeue_frees(&gone))?;
     let _ = waiting;
     Ok(gone)
 }
@@ -609,7 +620,7 @@ mod inspection_tests {
             id: crate::ids::new_id(),
             db: crate::db::Db::open(&crate::store::db_file(&dir))?,
         };
-        p.db.conn.execute("INSERT INTO free_queue(state) VALUES('dead')", [])?;
+        p.db.test_connection().execute("INSERT INTO free_queue(state) VALUES('dead')", [])?;
         let key = (store.root.clone(), "p".to_string());
         let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.meta_dir().join("lock"))?;
         rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
@@ -643,21 +654,21 @@ mod inspection_tests {
         let path = crate::store::db_file(&dir);
         let db = crate::db::Db::open(&path)?;
         let conn = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.conn.execute("INSERT INTO refs(name, target, expires_at) VALUES('old','dead',0)", [])?;
+        db.test_connection().execute("INSERT INTO refs(name, target, expires_at) VALUES('old','dead',0)", [])?;
         assert!(expired_refs(&conn));
         assert!(!pending(&conn));
         // Expiration on another connection can release owners and queue states between inspections.
-        db.conn.execute_batch(
+        db.test_connection().execute_batch(
             "BEGIN; UPDATE refs SET deleted=1 WHERE name='old'; INSERT INTO free_queue(state) VALUES('dead'); COMMIT;",
         )?;
         assert!(!expired_refs(&conn));
         assert!(pending(&conn));
         LEFT_QUEUED.lock().unwrap().insert((store.root.clone(), "p".into()), vec!["dead".into()]);
         assert!(unchanged_queue(&store, "p", &conn));
-        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES('dead','pin','reader')", [])?;
+        db.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES('dead','pin','reader')", [])?;
         assert!(!unchanged_queue(&store, "p", &conn));
-        db.conn.execute("DELETE FROM owners", [])?;
-        db.conn.execute("DELETE FROM free_queue", [])?;
+        db.test_connection().execute("DELETE FROM owners", [])?;
+        db.test_connection().execute("DELETE FROM free_queue", [])?;
         assert!(!pending(&conn));
         assert!(!unchanged_queue(&store, "p", &conn));
         assert!(conn.is_autocommit());
@@ -683,7 +694,7 @@ mod pin_tests {
         let path = crate::store::db_file(&dir);
         let db = crate::db::Db::open(&path)?;
         let state = crate::ids::new_id();
-        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", [&state])?;
+        db.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", [&state])?;
         let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
         let guard = pin(&project, &[&state, &state])?;
         // Compile-time check: a deferred guard owns a path, not a connection per batch.
@@ -711,7 +722,7 @@ mod pin_tests {
         let path = crate::store::db_file(&dir);
         let db = crate::db::Db::open(&path)?;
         let state = crate::ids::new_id();
-        db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
+        db.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
         let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
         let observer = crate::db::Db::open(&path)?;
         let read = || -> Result<()> {

@@ -20,7 +20,7 @@
 //! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
 //! deletes it. Records leave the database as JSONL lines (replication, remote copies, export).
 
-use crate::db::Db;
+use crate::db::{CommitResolution, Db, PublishResult};
 use crate::ids;
 use crate::model::{Actor, Record};
 use crate::oplog;
@@ -332,6 +332,10 @@ pub struct LockedProject<'p> {
 }
 
 impl LockedProject<'_> {
+    pub(crate) fn catalog(&self) -> &Db {
+        &self.project.db
+    }
+
     pub(crate) fn check(&self, project: &Project) -> Result<()> {
         anyhow::ensure!(std::ptr::eq(self.project, project), "lock belongs to another project handle");
         Ok(())
@@ -1116,7 +1120,7 @@ impl<'a> Project<'a> {
     ) -> Result<Project<'a>> {
         let added = store.place_project(name, volume)?;
         let result = Self::create_folder(store, name, actor, config);
-        if result.is_err() && added {
+        if result.is_err() && added && !store.project_dir(name)?.exists() {
             store.unplace_project(name);
         }
         result
@@ -1146,7 +1150,7 @@ impl<'a> Project<'a> {
             }
             Err(e) => return Err(e.into()),
         }
-        let made = (|| -> Result<Project<'a>> {
+        let made = (|| -> PublishResult<Project<'a>> {
             mkdir_mode(&dir, 0o755)?;
             mkdir_mode(&dir.join("states"), 0o700)?;
             mkdir_mode(&dir.join("deltas"), 0o700)?;
@@ -1168,8 +1172,10 @@ impl<'a> Project<'a> {
         match made {
             Ok(p) => Ok(p),
             Err(e) => {
-                let _ = crate::storage::delete_tree(&dir);
-                Err(e)
+                if matches!(e, CommitResolution::NotCommitted(_)) {
+                    let _ = crate::storage::delete_tree(&dir);
+                }
+                Err(e.into())
             }
         }
     }
@@ -1315,14 +1321,7 @@ impl<'a> Project<'a> {
     }
 
     fn project_id(&self) -> Result<String> {
-        let id: Option<String> = self
-            .db
-            .conn
-            .query_row("SELECT json_extract(raw, '$.r.data.id') FROM records WHERE op='project' ORDER BY time LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .ok();
-        id.ok_or_else(|| anyhow!("project record missing"))
+        self.db.project_id()?.ok_or_else(|| anyhow!("project record missing"))
     }
 
     pub fn line_leases(&self, lines: impl IntoIterator<Item = (String, String)>) -> Result<LineLeaseSet> {
@@ -1627,7 +1626,7 @@ impl<'a> Project<'a> {
     }
 
     /// The owners that the records with an effect give (`Db::recomputed_owners`).
-    pub fn recomputed_owners(&self) -> Result<Vec<crate::owners::Row>> {
+    pub fn recomputed_owners(&self) -> Result<Vec<crate::db::owners::Row>> {
         let terms = self.trust_terms(&[])?;
         self.db.recomputed_owners(&self.store.machine.id, &|record| Ok(self.refusal(&terms, record)?.is_none()))
     }
@@ -2190,6 +2189,22 @@ impl<'p> std::ops::Deref for LockedProject<'p> {
 }
 
 impl LockedProject<'_> {
+    pub fn write<T>(&self, change: impl FnOnce(&crate::db::WriteTxn<'_>) -> Result<T>) -> PublishResult<T> {
+        let tx = self.begin_write()?;
+        let value = change(&tx)?;
+        Self::finish_write(tx)?;
+        Ok(value)
+    }
+
+    fn finish_write(tx: crate::db::WriteTxn<'_>) -> PublishResult<()> {
+        let committed = tx.finish().into_result()?;
+        crate::free::release_effects(committed.effects);
+        match committed.reported_error {
+            Some(error) => Err(CommitResolution::Committed(error)),
+            None => Ok(()),
+        }
+    }
+
     /// Rebuild the derived tables from the records.
     pub fn rebuild_index(&self) -> Result<()> {
         self.rebuild_derived(false).map(|_| ())
@@ -2202,7 +2217,8 @@ impl LockedProject<'_> {
         // The layer bases are not in the records: they come from disk, read before the rebuild.
         let bases = self.layer_bases_on_disk()?;
         let terms = self.trust_terms(&[])?;
-        self.db.rebuild(only_older, |db| {
+        let tx = self.begin_write()?;
+        let rebuilt = tx.rebuild(only_older, |db| {
             for line in db.all_lines()? {
                 let s = oplog::parse_line(&line, None)?;
                 if self.refusal_in_order(&terms, &s.record)?.is_some() {
@@ -2217,28 +2233,35 @@ impl LockedProject<'_> {
             }
             db.fill_bases(&bases)?;
             Ok(())
-        })
+        })?;
+        Self::finish_write(tx)?;
+        if rebuilt {
+            self.db.remove_upgrade_copies();
+        }
+        Ok(rebuilt)
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
     /// The caller holds the project lock and has created all snapshots the record names.
-    pub fn append(&self, rec: Record, actor: &Actor) -> Result<Record> {
-        Ok(self.append_batch(vec![rec], actor)?.remove(0))
+    pub fn append(&self, mut rec: Record, actor: &Actor) -> PublishResult<Record> {
+        self.append_batch(std::slice::from_mut(&mut rec), actor)?;
+        Ok(rec)
     }
 
     /// Sign and derive every record in one FULL transaction, with contiguous sequence numbers.
     /// Snapshots must already exist and the caller must hold the project lock.
-    pub(crate) fn append_batch(&self, mut records: Vec<Record>, actor: &Actor) -> Result<Vec<Record>> {
+    pub(crate) fn append_batch(&self, records: &mut [Record], actor: &Actor) -> PublishResult<()> {
         let _t = crate::trace::span("record batch");
-        crate::objstore::record_states(self, &mut records)?;
-        let Some(first) = records.first() else { return Ok(records) };
+        crate::objstore::record_states(self, records)?;
+        let Some(first) = records.first() else { return Ok(()) };
         let m = &self.store.machine;
         let present = self.state_present();
         let project = if first.op == "project" { first.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
         if project.is_empty() {
-            bail!("project id unknown: the project has no records yet");
+            return Err(anyhow!("project id unknown: the project has no records yet").into());
         }
-        self.db.with_tx(|| {
+        let tx = self.begin_write()?;
+        {
             let mut seq = self.db.last_seq(&m.id)?;
             if seq == 0 {
                 // The first record of this machine publishes its key.
@@ -2251,11 +2274,11 @@ impl LockedProject<'_> {
                 mr.actor = actor.clone();
                 mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
                 let line = oplog::sign_line(&mr, &m.key)?;
-                self.db.insert_record(&mr, &line)?;
-                self.db.derive_rows(&mr, &present, &m.id)?;
+                tx.insert_record(&mr, &line)?;
+                tx.derive(&mr, &present, &m.id)?;
                 seq = 1;
             }
-            for rec in &mut records {
+            for rec in records {
                 rec.id = ids::new_id();
                 rec.machine = m.id.clone();
                 rec.seq = seq + 1;
@@ -2271,23 +2294,20 @@ impl LockedProject<'_> {
                 }
                 crate::model::validate(rec)?;
                 let line = oplog::sign_line(rec, &m.key)?;
-                self.db.insert_record(rec, &line)?;
-                self.db.derive_rows(rec, &present, &m.id)?;
+                tx.insert_record(rec, &line)?;
+                tx.derive(rec, &present, &m.id)?;
                 // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
                 #[cfg(target_os = "macos")]
                 for state in &rec.states {
                     if let Some(base) = crate::thin::layer_base(self, &state.id)? {
-                        self.db.record_base(&state.id, &base)?;
+                        tx.record_base(&state.id, &base)?;
                     }
                 }
                 seq = rec.seq;
             }
-            Ok(())
-        })?;
-        for rec in &records {
-            Db::publish_effects(rec);
         }
-        Ok(records)
+        Self::finish_write(tx)?;
+        Ok(())
     }
 
     /// Records of other machines (replication, restore): check each machine's chain (its key
@@ -2436,9 +2456,10 @@ impl LockedProject<'_> {
         });
         let n = fresh.len();
         let local = self.store.machine.id.clone();
-        self.db.with_tx(|| {
+        let tx = self.begin_write()?;
+        {
             for s in &fresh {
-                if self.db.insert_record(&s.record, &s.line)? {
+                if tx.insert_record(&s.record, &s.line)? {
                     let server_trust = matches!(trust, Trust::Server)
                         && TRUST_OPS.contains(&s.record.op.as_str())
                         && !locally_trusted.contains(&s.record.machine);
@@ -2454,11 +2475,11 @@ impl LockedProject<'_> {
                         }
                         continue;
                     }
-                    self.db.derive(&s.record, &present, &local)?;
+                    tx.derive(&s.record, &present, &local)?;
                 }
             }
-            Ok(())
-        })?;
+        }
+        Self::finish_write(tx)?;
         Ok(n)
     }
 }

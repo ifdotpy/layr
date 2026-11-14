@@ -1499,7 +1499,7 @@ mod tests {
             let parent = create("p", json!({"access":access,"overlay.public":info(false),"overlay.remote":info(false)}))?;
             let line_id = ids::new_id();
             let add_line = |p: &Project, name: &str| -> Result<()> {
-                p.db.conn.execute(
+                p.db.test_connection().execute(
                     "INSERT INTO lines (id,name,owner,machine,head,time,ord) VALUES (?1,?2,?3,?4,'empty',0,'1')",
                     (line_id.as_str(), name, caller.uid, store.machine.id.as_str()),
                 )?;
@@ -1618,7 +1618,7 @@ mod tests {
             (&overlay, "overlay.private.history", "3", "1"),
             (&overlay, "overlay.private.quiet", "true", "1"),
         ] {
-            db.conn.execute("INSERT INTO config (key, value, ord) VALUES (?1, ?2, ?3)", (key, value, ord))?;
+            db.test_connection().execute("INSERT INTO config (key, value, ord) VALUES (?1, ?2, ?3)", (key, value, ord))?;
         }
         let (public, folder) = listing_settings(&parent, "public")?;
         assert_eq!(public.history, Some(4));

@@ -443,10 +443,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         );
         rec.data = serde_json::json!({"from": old, "to": new});
         if let Err(e) = repo.commit_record(&_lock, ctx, rec) {
-            if let Err(b) = repo.p.restore_folder(&l.id, folder_before.as_deref()) {
-                return Err(e.context(format!("the folder record of line {old} could not go back: {b:#}")));
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                if let Err(b) = repo.p.restore_folder(&l.id, folder_before.as_deref()) {
+                    return Err(
+                        anyhow::Error::from(e).context(format!("the folder record of line {old} could not go back: {b:#}"))
+                    );
+                }
             }
-            return Err(e);
+            return Err(e.into());
         }
         // The line has the same name on every overlay. A failure here is no loss: the overlay finds
         // the line by its id, and its next write gives it the new name.

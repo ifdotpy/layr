@@ -172,10 +172,7 @@ impl Browse {
         drop(stage);
         let stage = crate::trace::span("disk metadata");
         // Derived tables exist only in memory. No local project is created.
-        let db = crate::db::Db::open(std::path::Path::new(":memory:"))?;
-        for line in &records.lines {
-            db.derive(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
-        }
+        let db = crate::db::Db::from_records(&records.lines)?;
         drop(stage);
         let stage = crate::trace::span("disk trees");
         let attempts = reader::attempts(&backend)?;
@@ -244,10 +241,7 @@ impl Browse {
                 &records.keys,
             )?;
             if published.key.hidden {
-                let overlay_db = crate::db::Db::open(std::path::Path::new(":memory:"))?;
-                for line in &overlay_records.lines {
-                    overlay_db.derive(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
-                }
+                let overlay_db = crate::db::Db::from_records(&overlay_records.lines)?;
                 hidden_stacks.push((name.clone(), layers.len(), overlay_db));
             }
             layer_names.insert(name, layers.len());

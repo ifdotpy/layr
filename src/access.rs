@@ -353,7 +353,7 @@ mod tests {
         record.seq = 1;
         record.time = 1;
         record.data = serde_json::json!({"config":{"access":{"user:1001":"admin","user:1002":"reader"}}});
-        db.derive(&record, &|_| false, &store.machine.id).unwrap();
+        db.test_derive(&record, &|_| false, &store.machine.id).unwrap();
         let mut project = crate::store::Project {
             lease: Default::default(),
             store: &store,
@@ -368,7 +368,7 @@ mod tests {
         record.seq = 2;
         record.time = 2;
         record.data = serde_json::json!({"config":{"access":{"user:1001":"admin"}}});
-        project.db.derive(&record, &|_| false, &store.machine.id).unwrap();
+        project.db.test_derive(&record, &|_| false, &store.machine.id).unwrap();
         assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_err());
         project.name = "p".into();
         assert!(project.db.config("access").unwrap().is_none());

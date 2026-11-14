@@ -286,7 +286,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 Some(s) => s.id.clone(),
                 None => repo.save_base(&l)?,
             };
-            repo.p.db.keep_set(&l.id, name, &kept)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.keep_set(&l.id, name, &kept))?;
         }
         let mut overlays = Vec::new();
         let saved = st.is_some();
@@ -574,8 +574,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     // An operation with lines is undoable while its undo entry is in the undo.ops ring of its
     // lines (docs/ownership.md). Past the ring, its states may be freed: say so, do not guess.
-    let ord = crate::owners::record_ord(&r);
-    let entries = crate::owners::undo_entries(&r, &ord);
+    let ord = crate::db::owners::record_ord(&r);
+    let entries = crate::db::owners::undo_entries(&r, &ord);
     if !entries.is_empty() {
         let mut in_ring = false;
         for (holder, _) in &entries {
@@ -585,12 +585,12 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             let past = if r.op == "line.delete" {
                 format!(
                     "the newest {} deleted lines (undo.deleted)",
-                    repo.p.config_u64("undo.deleted", crate::owners::UNDO_DELETED_DEFAULT as u64)
+                    repo.p.config_u64("undo.deleted", crate::db::owners::UNDO_DELETED_DEFAULT as u64)
                 )
             } else {
                 format!(
                     "the newest {} operations of its line (undo.ops)",
-                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                    repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
                 )
             };
             return Err(exit(1, format!("error: cannot undo: operation {} is past {past}", ids::short(&r.id))));
@@ -598,7 +598,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     // The states that the undo reads stay on disk while it runs (every line's entry of the record).
     let named: Vec<String> =
-        crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
+        crate::db::owners::undo_entries(&r, &crate::db::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     repo.hold(repo.pin(&named)?);
     if r.op == "save" {
@@ -680,8 +680,10 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let done = match repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec)) {
         Ok(done) => done,
         Err(e) => {
-            super::work::put_back(repo, &line, wb.as_deref());
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                super::work::put_back(repo, &line, wb.as_deref());
+            }
+            return Err(e.into());
         }
     };
     crate::gitbridge::sync_store_access(repo)?;
@@ -892,7 +894,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 1,
                 format!(
                     "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
-                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                    repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
                 ),
             )
         })?;
@@ -994,7 +996,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     }
     let done = if in_place {
         let states = rec.states.clone();
-        let result = (|| -> Result<Record> {
+        let result = (|| -> crate::db::PublishResult<Record> {
             let _commit = leases.lock(&repo.p)?;
             // The heads that the checks saw must still be there: a command that does not take the
             // line lock (line delete, follow, fetch) may have moved one.
@@ -1002,9 +1004,9 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 let now = repo.p.db.line_by_id(lid)?;
                 match (before, now) {
                     (Some((name, from)), Some(now)) if &now.head != from => {
-                        return Err(crate::repo::line_moved(name, from, &now.head));
+                        return Err(crate::repo::line_moved(name, from, &now.head).into());
                     }
-                    (Some((name, _)), None) => return Err(crate::repo::line_gone(name)),
+                    (Some((name, _)), None) => return Err(crate::repo::line_gone(name).into()),
                     _ => {}
                 }
             }
@@ -1013,11 +1015,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         match result {
             Ok(done) => done,
             Err(e) => {
-                crate::repo::discard_unrecorded(repo, &states);
-                for (line, wb) in &written {
-                    super::work::put_back(repo, line, wb.as_deref());
+                if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                    crate::repo::discard_unrecorded(repo, &states);
+                    for (line, wb) in &written {
+                        super::work::put_back(repo, line, wb.as_deref());
+                    }
                 }
-                return Err(e);
+                return Err(e.into());
             }
         }
     } else {
@@ -1293,10 +1297,10 @@ fn run_check_in(
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
-    pub missing: Vec<crate::owners::Row>,
-    pub extra: Vec<crate::owners::Row>,
+    pub missing: Vec<crate::db::owners::Row>,
+    pub extra: Vec<crate::db::owners::Row>,
     /// Undo owners of deleted lines outside the deleted ring (`owners::stale_undo_rows`).
-    pub stale: Vec<crate::owners::Row>,
+    pub stale: Vec<crate::db::owners::Row>,
     /// The present states that `gc --repair` frees: no row of the replay or a live pin names them.
     pub freed: Vec<String>,
 }
@@ -1317,9 +1321,9 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
 
 /// The owner rows that a repair keeps: the replay (keeps included) plus the pins and tree
 /// reservations of live processes.
-fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
+fn kept_rows(repo: &Repo, want: &[crate::db::owners::Row]) -> Result<Vec<crate::db::owners::Row>> {
     let mut rows = want.to_vec();
-    let local = repo.p.db.owner_rows()?.into_iter().filter(|r| crate::owners::LOCAL_OWNERS.contains(&r.1.as_str()));
+    let local = repo.p.db.owner_rows()?.into_iter().filter(|r| crate::db::owners::LOCAL_OWNERS.contains(&r.1.as_str()));
     for (state, kind, holder) in local {
         if crate::free::holder_alive(&holder) {
             rows.push((state, kind, holder));
@@ -1343,10 +1347,7 @@ pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
 /// Run a read-only check in one read transaction (a snapshot in WAL mode). It takes no store
 /// lock: a lock would empty the trash at its end, which a check must not do.
 fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    repo.p.db.conn.execute_batch("BEGIN")?;
-    let v = f();
-    let _ = repo.p.db.conn.execute_batch("COMMIT");
-    v
+    repo.p.db.with_read_snapshot(f)
 }
 
 /// `layr gc` (check): exit 1 when the table and the records differ, or a state has no owner.
@@ -1406,14 +1407,7 @@ fn evict_stored(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
     }
     let db = &repo.p.db;
     let named = overlay_named_states(repo)?;
-    let mut st = db.conn.prepare(
-        "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
-         AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
-         AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
-            AND o.kind IN ('head','auto','undo','deleted','park','overlay','pin','keep'))",
-    )?;
-    let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-    drop(st);
+    let rows = db.stored_eviction_candidates()?;
     let copies = crate::store_remote::store_copies(repo)?;
     let mut evict = Vec::new();
     for id in rows {
@@ -1486,15 +1480,7 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
                 }
             }
         }
-        let rows: Vec<String> = {
-            let mut st = orepo.p.db.conn.prepare(
-                "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
-                 AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
-                    AND o.kind IN ('auto','park','pin','keep','deleted'))",
-            )?;
-            let rows = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            rows
-        };
+        let rows = orepo.p.db.cache_eviction_candidates()?;
         let mut evict = Vec::new();
         for id in rows {
             if live.contains(&id) || !held.contains(&id) || !kept.contains(&id) {
@@ -1543,13 +1529,13 @@ pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
 pub fn repair_table(
     repo: &Repo,
     free: bool,
-    diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>,
+    diff: Option<(Vec<crate::db::owners::Row>, Vec<crate::db::owners::Row>)>,
 ) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
         None => repo.p.db.owners_diff(&repo.p.recomputed_owners()?)?,
     };
-    repo.p.db.apply_owners_diff(&missing, &extra)?;
+    repo.p.lock_or_borrow()?.write(|tx| tx.apply_owners_diff(&missing, &extra))?;
     for holder in repo.p.db.pin_holders()? {
         if !crate::free::holder_alive(&holder) {
             repo.p.db.release_holder(&holder)?;
@@ -1557,7 +1543,7 @@ pub fn repair_table(
     }
     let leaks = repo.p.db.leaked_states()?;
     if free {
-        repo.p.db.free_leaks(&leaks)?;
+        repo.p.lock_or_borrow()?.write(|tx| tx.free_leaks(&leaks))?;
     }
     Ok(leaks)
 }
@@ -1659,11 +1645,7 @@ fn repair_project(
             let mut done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
             // Final states of deleted lines that are still thin: their background keyframe
             // (`free::keyframe_later`) did not run.
-            let finals: Vec<String> = {
-                let mut q = repo.p.db.conn.prepare("SELECT DISTINCT state FROM owners WHERE kind='deleted'")?;
-                let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-                rows
-            };
+            let finals = repo.p.db.deleted_owned_states()?;
             for id in finals.iter().filter(|id| repo.p.delta_path(id).is_dir()) {
                 crate::thin::make_keyframe(&repo.p, id)?;
                 done.keyframes += 1;
@@ -1927,7 +1909,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir())
             .cloned()
             .collect();
-        h.repo.p.db.fix_bases(&set, &gone)?;
+        h.repo.p.lock_or_borrow()?.write(|tx| tx.fix_bases(&set, &gone))?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
         let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };
@@ -1978,7 +1960,7 @@ fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Re
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
 /// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
 /// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
-use crate::owners::TREE_OWNERS;
+use crate::db::owners::TREE_OWNERS;
 
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
@@ -2066,7 +2048,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.require(ctx, "fsck")?;
     let _lock = repo.p.lock_maintenance()?;
     let mut problems = 0;
-    let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    let ic: String = repo.p.db.integrity_check()?;
     if ic != "ok" {
         problems += 1;
         outln!(ctx, "database: {ic}");
@@ -2122,9 +2104,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(_) => {}
         }
     }
-    let mut st = repo.p.db.conn.prepare("SELECT id FROM states WHERE present=1")?;
-    let ids_v: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-    drop(st);
+    let ids_v = repo.p.db.present_states()?.into_iter().map(|(id, _)| id);
     for id in ids_v {
         if !repo.p.has_state(&id) {
             problems += 1;
@@ -2132,7 +2112,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let note = if deleted { " (of a deleted line)" } else { "" };
             outln!(ctx, "state {} is marked present but missing{note}", ids::short(&id));
             if a.has("--repair") {
-                repo.p.db.set_present(&id, false)?;
+                repo.p.lock_or_borrow()?.write(|tx| tx.set_present(&id, false))?;
             }
         }
     }
@@ -2278,8 +2258,8 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     _lock.rebuild_index()?;
     // Layer bases exist on APFS only: elsewhere the table stays empty.
     #[cfg(target_os = "macos")]
-    h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
-    let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
+    h.repo.p.lock_or_borrow()?.write(|tx| tx.replace_bases(&crate::thin::bases(&h.repo.p)?))?;
+    let n = h.repo.p.db.records_count()?;
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
         for name in h.repo.visible_overlay_names(ctx)? {
@@ -2289,7 +2269,7 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
             };
             let _l = o.lock_maintenance()?;
             _l.rebuild_index()?;
-            let n: i64 = o.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
+            let n = o.db.records_count()?;
             outln!(ctx, "overlay {name}: index rebuilt from {n} records");
         }
     }
@@ -3523,7 +3503,7 @@ pub fn keep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let _lock = repo.p.lock_maintenance()?;
             let mut missing = Vec::new();
             for name in &names {
-                if !repo.p.db.keep_drop(&line.id, name)? {
+                if !repo.p.lock_or_borrow()?.write(|tx| tx.keep_drop(&line.id, name))? {
                     missing.push(name.as_str());
                 }
             }
@@ -3584,8 +3564,8 @@ mod op_log_tests {
         project.id = ids::new_id();
         project.machine = store.machine.id.clone();
         project.data = serde_json::json!({"id": ids::new_id()});
-        db.insert_record(&project, &serde_json::json!({"r": project, "s": ""}).to_string())?;
-        db.conn.execute(
+        db.test_insert_record(&project, &serde_json::json!({"r": project, "s": ""}).to_string())?;
+        db.test_connection().execute(
             "INSERT INTO lines(id,name,owner,machine,head,time) VALUES('wanted','main',?1,?2,'',0)",
             rusqlite::params![uid, store.machine.id],
         )?;
@@ -3600,7 +3580,7 @@ mod op_log_tests {
             if i == 1 {
                 raw["r"]["actor"] = serde_json::Value::Null;
             }
-            db.insert_record(&rec, &raw.to_string())?;
+            db.test_insert_record(&rec, &raw.to_string())?;
         }
         let output = dir.join("output");
         let mut ctx = Ctx {

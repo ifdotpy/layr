@@ -292,19 +292,19 @@ impl OverlayMerge {
     fn discard(&self, repo: &Repo) {
         for (name, _, _, st) in &self.moves {
             if let (Some(st), Ok(o)) = (st, repo.overlay_repo(name)) {
-                o.discard_states(std::slice::from_ref(st));
+                crate::repo::discard_unrecorded(&o, std::slice::from_ref(st));
             }
         }
     }
 
     /// The records in the overlays, before the record of the line.
-    fn record(&self, ctx: &Ctx, repo: &Repo, line_id: &str) -> Result<()> {
+    fn record(&self, ctx: &Ctx, repo: &Repo, line_id: &str) -> crate::db::PublishResult<()> {
         for (name, ol, head, st) in &self.moves {
             let o = repo.overlay_repo(name)?;
             let _lock = o.p.lock_maintenance()?;
             match ol {
                 Some(ol) => crate::overlay::move_overlay_line(&_lock, &o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
-                None => anyhow::bail!("line {line_id} has no line in overlay '{name}'"),
+                None => return Err(anyhow::anyhow!("line {line_id} has no line in overlay '{name}'").into()),
             }
         }
         Ok(())
@@ -538,19 +538,32 @@ struct Pending<'a> {
     write: Option<crate::repo::WorkingWrite<'a>>,
     states: Vec<StateRec>,
     ovl: Option<&'a OverlayMerge>,
-    done: bool,
+    cleanup: crate::repo::PublicationCleanup,
+    overlay_cleanup: crate::repo::PublicationCleanup,
+}
+
+impl Pending<'_> {
+    fn publication_failed(&mut self, error: &crate::db::PublishError, parent_attempted: bool) {
+        if parent_attempted {
+            self.cleanup = crate::repo::PublicationCleanup::from_failure(error);
+            if let Some(write) = self.write.as_mut() {
+                write.publication_failed(error);
+            }
+        }
+    }
 }
 
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
-        if self.done {
-            return;
+        if self.cleanup == crate::repo::PublicationCleanup::Rollback {
+            // The folder is written back first: its source is the state that the next step deletes.
+            drop(self.write.take());
+            crate::repo::discard_unrecorded(self.repo, &self.states);
         }
-        // The folder is written back first: its source is the state that the next step deletes.
-        drop(self.write.take());
-        crate::repo::discard_unrecorded(self.repo, &self.states);
-        if let Some(o) = self.ovl {
-            o.discard(self.repo);
+        if self.overlay_cleanup == crate::repo::PublicationCleanup::Rollback {
+            if let Some(o) = self.ovl {
+                o.discard(self.repo);
+            }
         }
     }
 }
@@ -576,7 +589,14 @@ fn finish(
     settled: Option<&Settled<'_>>,
 ) -> Result<Vec<changes::EntryChange>> {
     let op = if queue.is_some() { "queue.result" } else { op };
-    let mut pending = Pending { repo, write: None, states, ovl, done: false };
+    let mut pending = Pending {
+        repo,
+        write: None,
+        states,
+        ovl,
+        cleanup: crate::repo::PublicationCleanup::Rollback,
+        overlay_cleanup: crate::repo::PublicationCleanup::Rollback,
+    };
     repo.check_move(ctx, line, new_head)?;
     if op == "merge" && new_head != line.head {
         let _t = crate::trace::span("finish: secrets check");
@@ -624,6 +644,7 @@ fn finish(
     // The states of the record include the snapshot of the working folder after the move.
     pending.states = rec.states.clone();
     drop(record);
+    let mut parent_attempted = false;
     let view = repo.commit_line(leases, line, &line.head, |locked, now| {
         if let Some(q) = queue {
             rec.data =
@@ -637,15 +658,23 @@ fn finish(
             }
         }
         if let Some(o) = ovl.filter(|o| o.changed()) {
-            o.record(ctx, repo, &line.id)?;
+            if let Err(e) = o.record(ctx, repo, &line.id) {
+                if matches!(e, crate::db::CommitResolution::Unknown(_)) {
+                    pending.overlay_cleanup = crate::repo::PublicationCleanup::Recover;
+                }
+                return Err(e);
+            }
+            pending.overlay_cleanup = crate::repo::PublicationCleanup::Keep;
         }
+        parent_attempted = true;
         repo.commit_record(locked, ctx, rec)?;
         Ok(())
     });
     if let Err(e) = view {
-        return Err(e);
+        pending.publication_failed(&e, parent_attempted);
+        return Err(e.into());
     }
-    pending.done = true;
+    pending.cleanup = crate::repo::PublicationCleanup::Keep;
     let _t = crate::trace::span("finish: after commit");
     let view = pending.write.take().and_then(|w| w.commit());
     if let Some(v) = view {
@@ -1982,9 +2011,11 @@ fn merge_rev_inner(
                 repo.commit_record(locked, ctx, rec).map(|_| ())
             })
         {
-            crate::repo::discard_unrecorded(repo, &states);
-            ovl.discard(repo);
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                crate::repo::discard_unrecorded(repo, &states);
+                ovl.discard(repo);
+            }
+            return Err(e.into());
         }
         // Recorded: the states of the finish below come from the candidate record.
         states.clear();
@@ -2365,9 +2396,11 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     };
     let all_states = rec.states.clone();
     if let Err(e) = repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())) {
-        let _ = undo_work();
-        crate::repo::discard_unrecorded(repo, &all_states);
-        return Err(e);
+        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+            let _ = undo_work();
+            crate::repo::discard_unrecorded(repo, &all_states);
+        }
+        return Err(e.into());
     }
     repo.after_head_moved(&line, &id);
     Ok(Some(id))
@@ -2487,8 +2520,10 @@ fn replay_locked(
         let step_states = rec.states.clone();
         if let Err(e) = repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ()))
         {
-            crate::repo::discard_unrecorded(repo, &step_states);
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                crate::repo::discard_unrecorded(repo, &step_states);
+            }
+            return Err(e.into());
         }
         repo.copy_hidden_parts(ctx, p, &s.id)?;
         states.push(s);
@@ -2530,6 +2565,46 @@ mod approval_tests {
         model::{Author, Record, StateKind, StateRec},
         store::{Project, Store},
     };
+
+    #[test]
+    fn overlay_commit_error_does_not_suppress_parent_rollback() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-overlay-commit-{}", crate::ids::new_id()));
+        let store = Store::open(&root.join("store"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let repo = Repo {
+            p: Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: crate::ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        for parent_attempted in [false, true] {
+            let mut pending = Pending {
+                repo: &repo,
+                write: None,
+                states: Vec::new(),
+                ovl: None,
+                cleanup: crate::repo::PublicationCleanup::Rollback,
+                overlay_cleanup: crate::repo::PublicationCleanup::Rollback,
+            };
+            let error = crate::db::CommitResolution::Committed(anyhow::anyhow!("committed with an error"));
+            pending.publication_failed(&error, parent_attempted);
+            if parent_attempted {
+                assert!(pending.cleanup == crate::repo::PublicationCleanup::Keep);
+            } else {
+                assert!(pending.cleanup == crate::repo::PublicationCleanup::Rollback);
+            }
+        }
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn merge_approval_guard_refuses_derived_source_ancestry() {

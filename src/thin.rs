@@ -1423,7 +1423,7 @@ pub fn delete_states(p: &Project, ids: &[String]) -> Result<BTreeSet<String>> {
 
 /// Remove the layer of `id` from the bases table.
 fn forget_layer(p: &Project, id: &str) -> Result<()> {
-    p.db.forget_base(id)
+    Ok(p.lock_or_borrow()?.write(|tx| tx.forget_base(id))?)
 }
 
 /// Delete the trees of a state now, also when other thin states use it as their base: those

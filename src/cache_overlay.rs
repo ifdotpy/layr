@@ -433,7 +433,7 @@ impl<'a> Repo<'a> {
             let _lock = orepo.p.lock_maintenance()?;
             let mut record = crate::model::Record::new("overlay.readers");
             record.data = serde_json::json!({"config":{"access": crate::overlay::create::access_map(info.owner, &readers)}});
-            orepo.commit_record(&_lock, ctx, record).map(|_| ())
+            orepo.commit_record(&_lock, ctx, record).map(|_| ()).map_err(anyhow::Error::from)
         })();
         if let Err(e) = r {
             eprintln!("warning: overlay '{name}': readers not updated: {e:#}");
@@ -528,8 +528,10 @@ impl<'a> Repo<'a> {
                     times: None,
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "commit", &ol, &id, vec![st]) {
-                    let _ = btrfs::delete_tree(&dst);
-                    return Err(e);
+                    if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                        let _ = btrfs::delete_tree(&dst);
+                    }
+                    return Err(e.into());
                 }
             }
             self.after_overlay_move(ctx, &name);
@@ -952,10 +954,13 @@ impl<'a> Repo<'a> {
                         crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)
                     };
                     if let Err(e) = r
+                        .map_err(crate::db::PublishError::from)
                         .and_then(|_| crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "merge", &ol, &head, states.clone()))
                     {
-                        orepo.discard_states(&states);
-                        return Err(e);
+                        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                            orepo.discard_states(&states);
+                        }
+                        return Err(e.into());
                     }
                     head
                 }

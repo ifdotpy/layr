@@ -1508,6 +1508,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _t = crate::trace::span("move head");
         h.repo.move_head(&lock, ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
+    #[cfg(target_os = "macos")]
+    if let (Err(error), Some(pc)) = (&rec, pending.as_mut()) {
+        pc.publication_failed(error);
+    }
     rec?;
     // The history limit of each overlay counts the parts of the new head: a part of the old head
     // that no state keeps now goes.
@@ -1845,8 +1849,10 @@ pub fn restore_impl(
             return Err(exit(1, "error: no conflict matches the given paths"));
         }
         if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
-            put_back(repo, &line, w.as_deref());
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                put_back(repo, &line, w.as_deref());
+            }
+            return Err(e.into());
         }
         return Ok(0);
     }
@@ -1920,8 +1926,10 @@ pub fn restore_impl(
     }
     if worktree {
         if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
-            put_back(repo, &line, w.as_deref());
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                put_back(repo, &line, w.as_deref());
+            }
+            return Err(e.into());
         }
     }
     Ok(0)
@@ -1950,11 +1958,13 @@ pub fn record_working_checked(
     line: &Line,
     op: &str,
     working_before: Option<String>,
-) -> Result<()> {
+) -> crate::db::PublishResult<()> {
     let (rec, states) = working_record(ctx, repo, line, op, working_before)?;
     let head = line.head.clone();
-    repo.commit_line(leases, line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|_| {
-        crate::repo::discard_unrecorded(repo, &states);
+    repo.commit_line(leases, line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|error| {
+        if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+            crate::repo::discard_unrecorded(repo, &states);
+        }
     })
 }
 
@@ -2136,17 +2146,21 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         data["overlays"] = serde_json::json!(changed);
     }
     let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), data);
-    let committed = rec.and_then(|rec| {
+    let committed = rec.map_err(crate::db::PublishError::from).and_then(|rec| {
         let states = rec.states.clone();
-        repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|_| {
-            crate::repo::discard_unrecorded(repo, &states);
-        })
+        repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(
+            |error| {
+                if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+                    crate::repo::discard_unrecorded(repo, &states);
+                }
+            },
+        )
     });
     if let Err(e) = committed {
-        if wrote {
+        if wrote && matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
             put_back(repo, &line, w.as_deref());
         }
-        return Err(e);
+        return Err(e.into());
     }
     // The line on each overlay follows: it shows the parts of the target from now on.
     if layers != current {
