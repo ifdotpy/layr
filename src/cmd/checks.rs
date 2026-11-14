@@ -370,10 +370,25 @@ fn only_checks(value: Option<&str>) -> Result<Vec<String>> {
     Ok(names)
 }
 
+<<<<<<< head
+=======
+#[derive(Debug)]
+struct CheckLock(std::fs::File);
+
+impl Drop for CheckLock {
+    fn drop(&mut self) {
+        // A concurrently forked child can retain this open file description until exec/exit.
+        // Closing our file alone would leave its lock held; unlock the shared description first.
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+>>>>>>> origin/main
 /// The locks of a check executor. Without `only`: `meta/checks.lock` exclusive, one executor per
 /// project. With `only`: that lock shared, and `meta/checks-<name>.lock` exclusive for each name, so
 /// runs of other checks go on in parallel and a full executor waits for none of them but starts
 /// only when no run is left.
+<<<<<<< head
 fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<std::fs::File>> {
     use rustix::fs::FlockOperation;
     let open = |name: &str| std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join(name));
@@ -384,11 +399,28 @@ fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<std::fs::
         return Ok(vec![project]);
     }
     rustix::fs::flock(&project, FlockOperation::NonBlockingLockShared)
+=======
+fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<CheckLock>> {
+    use rustix::fs::FlockOperation;
+    let open =
+        |name: &str| std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join(name)).map(CheckLock);
+    let project = open("checks.lock")?;
+    if only.is_empty() {
+        rustix::fs::flock(&project.0, FlockOperation::NonBlockingLockExclusive)
+            .context("a check watcher is already active for this project")?;
+        return Ok(vec![project]);
+    }
+    rustix::fs::flock(&project.0, FlockOperation::NonBlockingLockShared)
+>>>>>>> origin/main
         .context("a check watcher is already active for this project")?;
     let mut locks = vec![project];
     for name in only {
         let lock = open(&format!("checks-{name}.lock"))?;
+<<<<<<< head
         rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
+=======
+        rustix::fs::flock(&lock.0, FlockOperation::NonBlockingLockExclusive)
+>>>>>>> origin/main
             .with_context(|| format!("check {name} already runs for this project"))?;
         locks.push(lock);
     }
@@ -1374,11 +1406,23 @@ mod policy_tests {
         assert!(format!("{same:#}").contains("check overlayfs-xfs already runs"), "{same:#}");
         let full = checks_locks(&meta, &[]).unwrap_err();
         assert!(format!("{full:#}").contains("already active"), "{full:#}");
+<<<<<<< head
+=======
+        // fork/dup retains the same open file descriptions after the executor drops its files.
+        let inherited = xfs.iter().chain(&other).map(|lock| lock.0.try_clone().unwrap()).collect::<Vec<_>>();
+>>>>>>> origin/main
         drop((xfs, other));
         let full = checks_locks(&meta, &[]).unwrap();
         let only = checks_locks(&meta, &names(&["unit"])).unwrap_err();
         assert!(format!("{only:#}").contains("already active"), "{only:#}");
+<<<<<<< head
         drop(full);
+=======
+        let inherited_full = full[0].0.try_clone().unwrap();
+        drop(full);
+        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap();
+        drop((xfs, inherited, inherited_full));
+>>>>>>> origin/main
         std::fs::remove_dir_all(meta).unwrap();
     }
 

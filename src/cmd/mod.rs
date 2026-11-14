@@ -288,7 +288,7 @@ Read history:
 Lines and states:
    line new <name> [<rev>] [--count N], line list, line delete, line rename, line move <line> [<path>]
    save -m <message> [-a] [--amend]
-   save [--note <text>] [--all-lines] [--running] [--force] [--caches [--cache <path>]] [--keep <name>]
+   save [--note <text>] [--all-lines] [--running] [--force] [--overlays [--folder <path>]] [--keep <name>]
    keep [list [--json] | drop <name>... | drop --all]
    park [list/show/pop/apply/drop/clear]
    retest run [--full] [--save] [-- <nextest args>], retest init [--yes], retest doctor
@@ -314,7 +314,7 @@ Git bridge:
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
-   init [--allow-root-snapshots], projects, project delete <project>, config, export, gc, du [<line>...] [--json], fsck [--caches], reindex,
+   init [--allow-root-snapshots], projects, project delete <project>, config, export, gc, du [<line>...] [--json], fsck [--overlays], reindex,
    usage [--days <n>] [--json]
    daemon [--allow-root-snapshots] [--manual-queue]
 

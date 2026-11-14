@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0](https://github.com/ifdotpy/layr/compare/v0.46.0...v0.47.0) (2026-11-13)
+
+
+### Features
+
+* **checks:** checks run --only starts the named checks, in parallel with other --only runs
+
 ## [0.46.0](https://github.com/ifdotpy/layr/compare/v0.45.0...v0.46.0) (2026-11-13)
 
 

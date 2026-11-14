@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.package]
 # The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
-version = "0.46.0"
+version = "0.47.0"
 rust-version = "1.99.1"
 
 [workspace.metadata.layr-retest]

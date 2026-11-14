@@ -7,6 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 D=$T/dst-fs
+SHARES_EXTENTS=1
 # Attach an image without a browser window; print its mount point.
 attach_image() { # attach_image <image>
     hdiutil attach "$1" -nobrowse -plist | python3 -c 'import plistlib,sys
@@ -25,9 +26,13 @@ if [ "$(uname -s)" = Darwin ]; then
     MOUNTED="$D"
 elif [ -n "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
     # OverlayFS: a second file system of the same type as the test root, mounted by this test.
-    type=$(findmnt -n -o FSTYPE -T "$T")
+    type=$(findmnt -rn -o FSTYPE -T "$T") || exit 1
     truncate -s 1G "$T/dst.img"
-    if [ "$type" = xfs ]; then mkfs.xfs -q -f "$T/dst.img"; else mkfs.ext4 -q -F "$T/dst.img"; fi
+    case "$type" in
+        xfs) mkfs.xfs -q -f "$T/dst.img" || exit 1 ;;
+        ext4) mkfs.ext4 -q -F "$T/dst.img" || exit 1; SHARES_EXTENTS=0 ;;
+        *) echo "Unsupported OverlayFS test filesystem: $type" >&2; exit 1 ;;
+    esac
     mkdir -p "$D"
     mount -o loop "$T/dst.img" "$D" || exit 1
     mount --make-private "$D" || exit 1
@@ -117,8 +122,9 @@ S=$("$LAYR" __project-space $P); C=$("$LAYR" __project-space $D/p)
 NS=$(echo "$S" | j need); TS=$(echo "$S" | j total); NC=$(echo "$C" | j need)
 echo "space: source need $NS total $TS, copy need $NC"
 ok "the copy keeps the sharing (under 1.5x the source)" test "$NC" -le "$((NS * 3 / 2))"
-# ext4 has no extent sharing: its layers are shared by folder, not by extent.
-if [ "$(findmnt -n -o FSTYPE -T "$D" 2>/dev/null)" = ext4 ]; then
+# ext4 shares layer folders, but cannot reflink the cache into its overlay. Use the filesystem
+# we formatted above: a failed mount-table probe must not enable an extent-sharing assertion.
+if [ "$SHARES_EXTENTS" = 0 ]; then
     echo "SKIP far below a flattened copy (ext4 shares layers, not extents)"
 else
     # The cache is in the line folder and in its overlay: a flattened copy holds it twice.
