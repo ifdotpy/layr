@@ -1207,15 +1207,7 @@ struct ScanEntry {
     meta: crate::fsutil::Meta,
     // Modification and change time (seconds, nanoseconds) and mode, read from the tree itself.
     // A user can restore the modification time, never the change time.
-    stamp: Option<(i64, i64, i64, i64, u32)>,
-}
-fn scan_entries(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
-    let mut out = BTreeMap::new();
-    crate::fsutil::walk(root, "", &mut |rel, m| {
-        out.insert(rel.into(), ScanEntry { meta: m.clone(), stamp: None });
-        Ok(true)
-    })?;
-    Ok(out)
+    stamp: (i64, i64, i64, i64, u32),
 }
 // The entry at `rel` as a tree walk lists it: nested trees and mounts are not listed.
 fn visible_entry(root: &Path, root_dev: u64, nested: &HashSet<PathBuf>, rel: &str) -> Result<Option<ScanEntry>> {
@@ -1230,7 +1222,7 @@ fn visible_entry(root: &Path, root_dev: u64, nested: &HashSet<PathBuf>, rel: &st
     }
     Ok(Some(ScanEntry {
         meta: crate::fsutil::meta_of(&m),
-        stamp: Some((m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode())),
+        stamp: (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec(), m.mode()),
     }))
 }
 // The layers above the ones both trees share, top first. `None` when either tree is not an
@@ -1245,7 +1237,7 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
         return Ok(None);
     };
     let stack = |path: &Path| -> Option<Vec<(String, PathBuf)>> {
-        let e = state.registry.trees.get(path).filter(|e| !e.plain)?;
+        let e = state.registry.trees.get(path).filter(|e| !e.plain && !e.hard_links)?;
         let mut layers = Vec::new();
         if !e.info.readonly {
             layers.push((format!("upper:{}", e.info.uuid), state.object(&e.info.uuid).join("upper")));
@@ -1277,7 +1269,8 @@ fn layer_paths(dir: &Path, rel: &str, out: &mut BTreeMap<String, bool>) -> Resul
     for e in fs::read_dir(dir)? {
         let e = e?;
         let path = e.path();
-        let name = format!("{rel}{}", e.file_name().to_string_lossy());
+        let name = e.file_name().into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 layer entry"))?;
+        let name = format!("{rel}{name}");
         let mut hides = false;
         if e.file_type()?.is_dir() {
             hides = sys::overlay_xattrs(&path)?.iter().any(|(n, _)| {
@@ -1330,7 +1323,8 @@ fn changed_entries(
                 let mut stack = vec![rel.clone()];
                 while let Some(dir) = stack.pop() {
                     for e in fs::read_dir(root.join(&dir))? {
-                        let name = format!("{dir}/{}", e?.file_name().to_string_lossy());
+                        let name = e?.file_name().into_string().map_err(|_| anyhow::anyhow!("non-UTF-8 subtree entry"))?;
+                        let name = format!("{dir}/{name}");
                         if let Some(entry) = visible_entry(root, dev, &layers.nested, &name)? {
                             if entry.meta.is_dir() {
                                 stack.push(name.clone());
@@ -1349,35 +1343,25 @@ fn changed_entries(
     }
     Ok(entries)
 }
-/// Changes from `parent` to `child`. When both are OverlayFS trees of this store, only the
-/// paths that their unshared layers hold are read: a path in a shared lower layer is the
-/// same file in both. Other trees are walked in full.
-pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::compare::EntryChange>> {
-    let _t = crate::trace::span("OverlayFS candidates");
-    candidates_in(parent, child, None)
+pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeHints> {
+    Some(&UpperHints)
 }
 
-fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -> Result<Vec<crate::compare::EntryChange>> {
+struct UpperHints;
+impl crate::change_hints::ChangeHints for UpperHints {
+    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
+        let _t = crate::trace::span("OverlayFS candidates");
+        let (base, tree) = (absolute(base)?, absolute(tree)?);
+        let Some(layers) = own_layers(&base, &tree)? else {
+            return Ok(crate::change_hints::HintSet::Partial);
+        };
+        Ok(crate::change_hints::HintSet::Complete(candidates_in(&base, &tree, layers)?))
+    }
+}
+
+fn candidates_in(parent: &Path, child: &Path, layers: CandidateLayers) -> Result<Vec<crate::compare::EntryChange>> {
     let (parent, child) = (absolute(parent)?, absolute(child)?);
-    let layers = match layers {
-        Some(layers) => Some(layers),
-        None => own_layers(&parent, &child)?,
-    };
-    let (entries, exact) = match layers {
-        Some(layers) => (changed_entries(&parent, &child, &layers)?, false),
-        None => {
-            let (mut a, mut b) = (scan_entries(&parent)?, scan_entries(&child)?);
-            let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).cloned().collect();
-            let entries = names
-                .into_iter()
-                .map(|name| {
-                    let pair = (a.remove(&name), b.remove(&name));
-                    (name, pair)
-                })
-                .collect();
-            (entries, true)
-        }
-    };
+    let entries = changed_entries(&parent, &child, &layers)?;
     let mut changes: BTreeMap<_, _> = entries
         .iter()
         .filter_map(|(p, (old, new))| {
@@ -1390,76 +1374,78 @@ fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -
             .map(|c| (p.clone(), c))
         })
         .collect();
+    // The shared lower layers establish the identity domain for these candidates.
     let mut removed: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
-    for (p, c) in &changes {
-        if c.new().is_none() {
-            removed.entry(file_identity(&parent.join(p))?).or_default().push(p.clone());
+    for (path, change) in changes.iter() {
+        if change.new().is_none() {
+            removed.entry(file_identity(&parent.join(path))?).or_default().push(path.clone());
         }
-        if c.old().is_none() {
-            added.entry(file_identity(&child.join(p))?).or_default().push(p.clone());
+        if change.old().is_none() {
+            added.entry(file_identity(&child.join(path))?).or_default().push(path.clone());
         }
     }
-    for (id, srcs) in removed {
-        let Some(dsts) = added.get(&id) else {
-            continue;
-        };
-        // Multiple hard links have the same identity. Do not invent a unique move.
-        if srcs.len() != 1 || dsts.len() != 1 {
-            continue;
+    for (identity, sources) in removed {
+        let Some(targets) = added.get(&identity) else { continue };
+        // An inode with multiple aliases does not identify a unique rename.
+        if sources.len() == 1 && targets.len() == 1 {
+            crate::compare::pair_rename(&mut changes, &sources[0], &targets[0], crate::compare::DataEvidence::Unknown);
         }
-        let (src, dst) = (&srcs[0], &dsts[0]);
-        crate::compare::pair_rename(&mut changes, src, dst, crate::compare::DataEvidence::Unknown);
     }
     for (p, c) in &mut changes {
         if let (None, Some(old), Some(new)) = (c.old_path(), c.old(), c.new()) {
-            if !old.is_file() || !new.is_file() { continue; }
+            if !old.is_file() || !new.is_file() {
+                continue;
+            }
             let (old_size, new_size) = (old.size, new.size);
             // Same size, mode, modification and change time (the check git calls racy): equal
             // without a read. Other files get their exact changed ranges, which a merge needs.
-            let quick = !exact
-                && entries
-                    .get(p)
-                    .and_then(|(old, new)| old.as_ref().zip(new.as_ref()))
-                    .is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
-            let ranges = if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? };
-            c.set_data(
-                crate::compare::DataEvidence::from_native(&ranges, old_size, new_size).map_err(anyhow::Error::msg)?,
-            );
+            let quick = entries
+                .get(p)
+                .and_then(|(old, new)| old.as_ref().zip(new.as_ref()))
+                .is_some_and(|(x, y)| x.stamp == y.stamp && x.meta.size == y.meta.size);
+            let ranges = if quick { Vec::new() } else { crate::changes::changed_ranges(&parent.join(p), &child.join(p))? };
+            c.set_data(crate::compare::DataEvidence::from_native(&ranges, old_size, new_size).map_err(anyhow::Error::msg)?);
         }
     }
     Ok(changes.into_values().collect())
 }
 
-// Compare fixed blocks when the backend cannot report changed extents.
-fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
-    use std::io::Read;
-    let _t = crate::trace::span("content compare");
-    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
-    let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
-    let mut pos = 0;
-    while pos < alen.max(blen) {
-        let an = (alen.saturating_sub(pos).min(4096)) as usize;
-        let bn = (blen.saturating_sub(pos).min(4096)) as usize;
-        a.read_exact(&mut ab[..an])?;
-        b.read_exact(&mut bb[..bn])?;
-        let len = an.max(bn) as u64;
-        if ab[..an] != bb[..bn] {
-            match ranges.last_mut() {
-                Some((start, n)) if *start + *n == pos => *n += len,
-                _ => ranges.push((pos, len)),
-            }
-        }
-        pos += len;
-    }
-    Ok(ranges)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn candidates_reject_non_utf8_layer_entries_and_opaque_descendants() -> Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("layr-invalid-hints-{}", crate::ids::new_id()));
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xff");
+        for source in ["layer", "opaque"] {
+            let (base, tree, upper) =
+                (root.join(source).join("base"), root.join(source).join("tree"), root.join(source).join("upper"));
+            for path in [&base, &tree, &upper] {
+                fs::create_dir_all(path)?;
+            }
+            if source == "layer" {
+                fs::write(upper.join(bad), b"change")?;
+                fs::write(tree.join(bad), b"change")?;
+            } else {
+                for path in [&base, &tree, &upper] {
+                    fs::create_dir(path.join("opaque"))?;
+                }
+                fs::write(base.join("opaque").join(bad), b"hidden lower")?;
+                sys::overlay_attribute(&upper.join("opaque"), c"user.overlay.opaque", Some(b"y"))?;
+            }
+            let layers = CandidateLayers { dirs: vec![upper], nested: HashSet::new() };
+            assert!(candidates_in(&base, &tree, layers).is_err(), "{source}: incomplete enumeration cannot authorize Complete");
+            assert!(
+                crate::changes::candidates(&base, &tree).is_err(),
+                "{source}: full fallback also rejects the invalid visible path"
+            );
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn candidates_only_read_unshared_entries() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-candidates-{}", crate::ids::new_id()));
@@ -1475,7 +1461,7 @@ mod tests {
             fs::write(tree.join("edit"), if tree == &parent { b"before".as_slice() } else { b"after!!".as_slice() })?;
         }
         fs::write(upper.join("edit"), b"after!!")?;
-        let result = candidates_in(&parent, &child, Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }));
+        let result = candidates_in(&parent, &child, CandidateLayers { dirs: vec![upper], nested: HashSet::new() });
         for tree in [&parent, &child] {
             fs::set_permissions(tree.join("lower"), fs::Permissions::from_mode(0o700))?;
         }
@@ -1514,7 +1500,7 @@ mod tests {
         fs::write(upper.join("nested/cache"), b"private")?;
         let layers =
             CandidateLayers { dirs: vec![upper], nested: [parent.join("nested"), child.join("nested")].into_iter().collect() };
-        let changes = candidates_in(&parent, &child, Some(layers))?;
+        let changes = candidates_in(&parent, &child, layers)?;
         let paths: Vec<_> = changes.iter().map(|c| c.path().as_str()).collect();
         assert_eq!(paths, ["gone", "gone/file", "opaque", "opaque/hidden", "replace", "replace/file"]);
         assert!(changes.iter().filter(|c| c.path().ends_with("/file") || c.path() == "opaque/hidden").all(|c| c.new().is_none()));
@@ -1535,7 +1521,7 @@ mod tests {
             dirs: vec![upper],
             nested: [absolute(&parent)?.join("nested"), absolute(&child)?.join("nested")].into_iter().collect(),
         };
-        assert!(candidates_in(&parent, &child, Some(layers))?.is_empty());
+        assert!(candidates_in(&parent, &child, layers)?.is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1556,7 +1542,7 @@ mod tests {
         for path in ["old", "new", "link-a", "link-b", "link-c", "link-d"] {
             fs::write(upper.join(path), b"")?;
         }
-        let changes = candidates_in(&parent, &child, Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }))?;
+        let changes = candidates_in(&parent, &child, CandidateLayers { dirs: vec![upper], nested: HashSet::new() })?;
         let renamed = changes.iter().find(|c| c.path() == "new").unwrap();
         assert_eq!(renamed.old_path().map(String::as_str), Some("old"));
         assert!(!changes.iter().any(|c| c.path() == "old"));

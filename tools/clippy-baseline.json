@@ -1,6 +1,6 @@
 {
   "layr": {
-    "clippy::unwrap_used": 2767,
+    "clippy::unwrap_used": 2781,
     "clippy::expect_used": 112,
     "clippy::panic": 10,
     "clippy::cast_possible_truncation": 123,

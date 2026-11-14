@@ -143,20 +143,16 @@ impl MergeSides {
 }
 
 fn side(base: &dyn Src, child: &dyn Src) -> Result<(Side, Vec<EntryChange>)> {
-    let list: Vec<EntryChange> = changes::candidates(base, child)?.into_iter().filter(|c| !skip_path(c.path())).collect();
-    // Portable trees have no inode lineage. Recover moves from content before the merge
-    // interprets a missing source as a deletion.
-    let list = if base.objects().is_some() || child.objects().is_some() {
-        let mut changed = Vec::new();
-        for change in list {
-            if changes::really_changed(base, child, &change)? {
-                changed.push(change);
-            }
+    let mut changed = Vec::new();
+    for change in changes::candidates(base, child)?.into_iter().filter(|change| !skip_path(change.path())) {
+        // A full scan can include unchanged entries. Preserve adds, deletes and type changes.
+        if matches!(change, EntryChange::Modify { .. }) && !changes::really_changed(base, child, &change)? {
+            continue;
         }
-        changes::with_renames(base, child, changed)
-    } else {
-        list
-    };
+        changed.push(change);
+    }
+    // Portable and full-scan candidates lack native lineage; recover moves by content.
+    let list = changes::with_renames(base, child, changed);
     Ok((Side::new(&list), list))
 }
 
@@ -1106,6 +1102,39 @@ fn block_merge(
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+    #[test]
+    fn fallback_does_not_resurrect_an_unchanged_file_deleted_by_ours() -> Result<()> {
+        let root = tempfile_path("fallback-deletion")?;
+        for dir in ["base", "ours", "theirs", "result"] {
+            std::fs::create_dir_all(root.join(dir))?;
+        }
+        let (base, ours, theirs, result) = (root.join("base"), root.join("ours"), root.join("theirs"), root.join("result"));
+        std::fs::write(base.join("file"), b"unchanged")?;
+        std::fs::write(theirs.join("file"), b"unchanged")?;
+        std::fs::write(theirs.join("added"), b"new")?;
+        // Ordinary directories cannot provide native send/layer hints: this uses fallback.
+        let i = Input {
+            base: &base,
+            ours: &ours,
+            theirs: &theirs,
+            result: &result,
+            base_id: "base",
+            ours_id: "ours",
+            theirs_id: "theirs",
+            ours_label: "ours",
+            theirs_label: "theirs",
+            config: &|_| None,
+            run_as: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()).fs_identity()?,
+            allow_root: false,
+        };
+        let outcome = merge(&i)?;
+        assert!(outcome.conflicts.is_empty(), "{:?}", outcome.conflicts);
+        assert!(!result.join("file").exists());
+        assert_eq!(std::fs::read(result.join("added"))?, b"new");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn block_merge_bounds_eof_and_rejects_unknown_overlap_and_resize() -> Result<()> {
         let root = tempfile_path("block-evidence")?;

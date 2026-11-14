@@ -1,13 +1,14 @@
-//! Change lists between two read-only snapshots, from `btrfs send --no-data`.
+//! Shared comparison of trees, optionally accelerated by complete filesystem candidates.
 //!
 //! A change list is a candidate list: an entry that kept its inode and path has the changed byte
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
+use crate::compare::pair_rename;
+use crate::compare::DataEvidence;
 pub use crate::compare::EntryChange;
-use crate::compare::{pair_rename, DataEvidence};
 use crate::fsutil::{self, Meta, Src};
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-use crate::storage as btrfs;
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
 use crate::stream;
 use anyhow::Result;
 use layr_hashers::{FastCryptographic, PurposeHasher};
@@ -15,18 +16,78 @@ use layr_hashers::{FastMap, FastSet};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-/// Raw candidate list from the stream, without content checks.
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+/// Candidate observations from a backend capability, or the portable full comparison.
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    if parent.objects().is_some() || child.objects().is_some() {
-        return object_change_candidates(parent, child);
-    }
-    let (parent, child) = (folder(parent)?, folder(child)?);
-    let entries = btrfs::send_no_data(parent, child)?;
-    build(parent, child, entries)
+    candidates_with_hints(parent, child, crate::storage::change_hints())
 }
 
-fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
+fn candidates_with_hints(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    hints: Option<&dyn crate::change_hints::ChangeHints>,
+) -> Result<Vec<EntryChange>> {
+    // Object identities are not native snapshot identities. Never apply native hints to them.
+    if parent.objects().is_none() && child.objects().is_none() {
+        if let (Some(hints), Some(base), Some(tree)) = (hints, parent.folder(), child.folder()) {
+            match hints.between(base, tree) {
+                Ok(crate::change_hints::HintSet::Complete(entries)) => return Ok(entries),
+                Ok(crate::change_hints::HintSet::Partial) | Err(_) => {}
+            }
+        }
+        #[cfg(target_os = "macos")]
+        return crate::storage::candidates(parent, child);
+        #[cfg(not(target_os = "macos"))]
+        return native_candidates(parent, child);
+    }
+    object_change_candidates(parent, child)
+}
+
+/// Full native observations include block ranges; renames require separate evidence.
+#[cfg(not(target_os = "macos"))]
+fn native_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
+    let mut entries = object_change_candidates(parent, child)?;
+    for change in &mut entries {
+        if let (Some(old), Some(new)) = (change.old(), change.new()) {
+            if old.is_file() && new.is_file() {
+                let ranges = changed_ranges(&parent.at(change.src())?, &child.at(change.path())?)?;
+                change.set_data(DataEvidence::from_native(&ranges, old.size, new.size).map_err(anyhow::Error::msg)?);
+            }
+        }
+    }
+    // Native inode numbers have no shared identity domain without backend proof.
+    // Keep Add/Remove here; merge may apply its ordinary content rename detection.
+    Ok(entries)
+}
+
+// Compare fixed blocks when the backend cannot report changed extents.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
+    use std::io::Read;
+    let _t = crate::trace::span("content compare");
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
+    let mut pos = 0;
+    while pos < alen.max(blen) {
+        let an = (alen.saturating_sub(pos).min(4096)) as usize;
+        let bn = (blen.saturating_sub(pos).min(4096)) as usize;
+        a.read_exact(&mut ab[..an])?;
+        b.read_exact(&mut bb[..bn])?;
+        let len = an.max(bn) as u64;
+        if ab[..an] != bb[..bn] {
+            match ranges.last_mut() {
+                Some((start, n)) if *start + *n == pos => *n += len,
+                _ => ranges.push((pos, len)),
+            }
+        }
+        pos += len;
+    }
+    Ok(ranges)
+}
+
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
+pub(crate) fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
     // Every path the stream touched, in the parent and in the child. `Some(ranges)` when the only
     // entry at the path kept its inode there, so unchanged byte ranges share extents.
     let mut paths: BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>> = BTreeMap::new();
@@ -75,11 +136,10 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
     let roots: Vec<&String> = map.keys().filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i]))).collect();
     for p in roots {
         let mut found: Vec<(String, String)> = Vec::new();
-        fsutil::walk(child, p, &mut |rel, _m| {
-            let Some((top, from)) = rel.rmatch_indices('/').find_map(|(i, _)| map.get(&rel[..i]).map(|o| (i, o))) else {
-                return Ok(true);
-            };
-            found.push((format!("{from}/{}", &rel[top + 1..]), rel.to_string()));
+        fsutil::walk(child, p, &mut |rel, _meta| {
+            if let Some((top, from)) = rel.rmatch_indices('/').find_map(|(i, _)| map.get(&rel[..i]).map(|o| (i, o))) {
+                found.push((format!("{from}/{}", &rel[top + 1..]), rel.to_owned()));
+            }
             Ok(true)
         })?;
         for (src, dst) in found {
@@ -92,10 +152,17 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
             }
         }
     }
+    let observe = |root: &Path, path: &str| -> Result<Option<Meta>> {
+        match std::fs::symlink_metadata(fsutil::safe_join(root, path)?) {
+            Ok(meta) => Ok(Some(fsutil::meta_of(&meta))),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    };
     let mut out: BTreeMap<String, EntryChange> = BTreeMap::new();
     for (p, ranges) in paths {
-        let old = fsutil::lmeta(parent, &p);
-        let new = fsutil::lmeta(child, &p);
+        let old = observe(parent, &p)?;
+        let new = observe(child, &p)?;
         let data = match (ranges, &old, &new) {
             (Some(ranges), Some(old), Some(new)) => {
                 DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, old.size, new.size)
@@ -433,14 +500,6 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
     d.split_inclusive(|b| *b == b'\n').collect()
 }
 
-#[cfg(target_os = "macos")]
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    if parent.objects().is_some() || child.objects().is_some() {
-        return object_change_candidates(parent, child);
-    }
-    crate::storage::candidates(parent, child)
-}
-
 /// Paths needed for an object import, including time-only changes. A directory whose
 /// only change is its time is dirty, but does not need a full subtree import.
 pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
@@ -493,20 +552,6 @@ fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -
 #[cfg(not(target_os = "macos"))]
 fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     candidates(parent, child)
-}
-
-#[cfg(feature = "overlayfs")]
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    if parent.objects().is_some() || child.objects().is_some() {
-        return object_change_candidates(parent, child);
-    }
-    crate::storage::candidates(folder(parent)?, folder(child)?)
-}
-
-/// Linux backends compare complete folders only.
-#[cfg(not(target_os = "macos"))]
-fn folder(s: &(impl Src + ?Sized)) -> Result<&Path> {
-    s.folder().ok_or_else(|| anyhow::anyhow!("a layered tree exists only on APFS"))
 }
 
 #[cfg(test)]

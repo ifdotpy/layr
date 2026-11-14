@@ -205,3 +205,134 @@ fn observed_comparison_rejects_replacement_resize_and_still_hashes_restored_time
     assert!(compare().is_err(), "a replacement link must never be followed");
     Ok(())
 }
+
+#[derive(Clone, Copy, Debug)]
+enum HintMode {
+    Complete,
+    Partial,
+    Failed,
+}
+
+struct FakeHints<'a> {
+    base: &'a FakeSource<'a>,
+    tree: &'a FakeSource<'a>,
+    changed: &'a [String],
+    mode: HintMode,
+}
+impl crate::change_hints::ChangeHints for FakeHints<'_> {
+    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
+        assert_eq!(self.base.folder(), Some(base));
+        assert_eq!(self.tree.folder(), Some(tree));
+        match self.mode {
+            HintMode::Partial => Ok(crate::change_hints::HintSet::Partial),
+            HintMode::Failed => anyhow::bail!("candidate enumeration failed"),
+            HintMode::Complete => Ok(crate::change_hints::HintSet::Complete(
+                self.changed
+                    .iter()
+                    .filter_map(|path| {
+                        EntryChange::observed(
+                            path.clone(),
+                            fsutil::lmeta(self.base, path),
+                            fsutil::lmeta(self.tree, path),
+                            DataEvidence::Unknown,
+                        )
+                    })
+                    .collect(),
+            )),
+        }
+    }
+}
+
+fn hint_budget(files: usize) -> Result<()> {
+    let root = std::env::temp_dir().join(format!("layr-hints-{}", crate::ids::new_id()));
+    let (base, tree) = (root.join("base"), root.join("tree"));
+    std::fs::create_dir_all(&base)?;
+    std::fs::create_dir_all(&tree)?;
+    for n in 0..files {
+        std::fs::write(base.join(n.to_string()), b"before")?;
+        std::fs::write(tree.join(n.to_string()), b"before")?;
+    }
+    let (base, tree) = (FakeSource::new(&base), FakeSource::new(&tree));
+    for dirty in [0, 10] {
+        let paths: Vec<_> = (0..dirty).map(|n| n.to_string()).collect();
+        for path in &paths {
+            std::fs::write(tree.at(path)?, b"after!")?;
+        }
+        for mode in [HintMode::Complete, HintMode::Partial, HintMode::Failed] {
+            *base.counts.lock().unwrap() = Counts::default();
+            *tree.counts.lock().unwrap() = Counts::default();
+            let hints = FakeHints { base: &base, tree: &tree, changed: &paths, mode };
+            let candidates = candidates_with_hints(&base, &tree, Some(&hints))?;
+            let compared = base.counts.lock().unwrap().metadata.values().sum::<usize>()
+                + tree.counts.lock().unwrap().metadata.values().sum::<usize>();
+            let expected = match mode {
+                HintMode::Complete => 2 * dirty,
+                HintMode::Partial | HintMode::Failed => 2 * files,
+            };
+            // APFS's existing scanner bypasses Src instrumentation for full fallback.
+            // Keep its correctness assertions below, and measure the instrumented paths.
+            if matches!(mode, HintMode::Complete) || !cfg!(target_os = "macos") {
+                assert_eq!(compared, expected, "{mode:?}, {dirty} dirty files");
+            }
+            let result = file_changes_of(&base, &tree, candidates)?;
+            assert_eq!(result.len(), dirty, "{mode:?}");
+            assert!(result.iter().all(|change| paths.contains(change.path())));
+            eprintln!("hint budget: files={files} dirty={dirty} mode={mode:?} metadata={compared}");
+        }
+    }
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn complete_hints_stat_only_candidates_partial_and_failed_hints_scan_the_rest() -> Result<()> {
+    hint_budget(64)
+}
+
+#[test]
+#[ignore = "50k structural measurement; run explicitly on a native scratch volume"]
+fn change_hints_50k_metadata_measurement() -> Result<()> {
+    hint_budget(50_000)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn fallback_preserves_ranges_renames_and_rejects_incomplete_observations() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new()?;
+    let (base, tree) = (fixture.root.join("base"), fixture.root.join("tree"));
+    for root in [&base, &tree] {
+        std::fs::create_dir_all(root.join("private"))?;
+        std::fs::write(root.join("private/file"), b"private")?;
+        std::fs::write(root.join("file"), [0; 8192])?;
+    }
+    std::fs::write(base.join("old"), b"renamed")?;
+    std::fs::hard_link(base.join("old"), tree.join("new"))?;
+    let mut bytes = [0; 8192];
+    bytes[4096] = 1;
+    std::fs::write(tree.join("file"), bytes)?;
+    let (base, tree) = (FakeSource::new(&base), FakeSource::new(&tree));
+    for mode in [HintMode::Partial, HintMode::Failed] {
+        let hints = FakeHints { base: &base, tree: &tree, changed: &[], mode };
+        let list = candidates_with_hints(&base, &tree, Some(&hints))?;
+        assert!(list.iter().any(|change| matches!(change, EntryChange::Add { path, .. } if path == "new")));
+        assert!(list.iter().any(|change| matches!(change, EntryChange::Remove { path, .. } if path == "old")));
+        let inferred = with_renames(&base, &tree, list.clone());
+        let renamed = inferred.iter().find(|change| change.path() == "new").unwrap();
+        assert_eq!(renamed.old_path().map(String::as_str), Some("old"));
+        let file = list.iter().find(|change| change.path() == "file").unwrap();
+        assert_eq!(file.data(), &DataEvidence::from_native(&[(4096, 4096)], 8192, 8192).unwrap());
+        // Neither one unreadable subtree nor two unreadable subtrees are a complete scan.
+        for unreadable in [&[tree.folder().unwrap()][..], &[base.folder().unwrap(), tree.folder().unwrap()][..]] {
+            for root in unreadable {
+                std::fs::set_permissions(root.join("private"), std::fs::Permissions::from_mode(0o0))?;
+            }
+            let result = candidates_with_hints(&base, &tree, Some(&hints));
+            for root in unreadable {
+                std::fs::set_permissions(root.join("private"), std::fs::Permissions::from_mode(0o755))?;
+            }
+            assert!(result.is_err(), "{mode:?}: failed observation must not become a successful delta");
+        }
+    }
+    Ok(())
+}

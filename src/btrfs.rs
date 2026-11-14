@@ -681,6 +681,35 @@ mod placeholder_tests {
     use layr_objects::{fsx::EntryKind, write::write_tree_from, Keying, Store, Temperature, WriteOptions};
 
     #[test]
+    fn fallback_keeps_independent_changes_with_colliding_subvolume_inodes() -> Result<()> {
+        let tmp = std::env::temp_dir();
+        if !is_supported(&tmp) {
+            return Ok(());
+        }
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = delete_tree(&self.0);
+            }
+        }
+        let fixture = Fixture(tmp.join(format!("layr-unrelated-hints-{}", crate::ids::new_id())));
+        fs::create_dir(&fixture.0)?;
+        let (base, tree) = (fixture.0.join("base"), fixture.0.join("tree"));
+        create_subvolume(&base)?;
+        create_subvolume(&tree)?;
+        fs::write(base.join("old"), b"deleted file")?;
+        fs::write(tree.join("new"), b"independent addition")?;
+        assert_eq!(fs::symlink_metadata(base.join("old"))?.ino(), fs::symlink_metadata(tree.join("new"))?.ino());
+        assert_ne!(subvol_info(&base)?.uuid, subvol_info(&tree)?.uuid);
+        // Writable unrelated roots force Partial without invoking privileged send.
+        let changes = crate::changes::candidates(&base, &tree)?;
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().any(|change| matches!(change, crate::compare::EntryChange::Remove { path, .. } if path == "old")));
+        assert!(changes.iter().any(|change| matches!(change, crate::compare::EntryChange::Add { path, .. } if path == "new")));
+        Ok(())
+    }
+
+    #[test]
     fn snapshot_placeholder_is_classified_at_the_driver_boundary() -> Result<()> {
         let tmp = std::env::temp_dir();
         if !is_supported(&tmp) {
@@ -725,5 +754,31 @@ mod placeholder_tests {
         set_writable(&saved)?;
         delete_tree(&fixture.0)?;
         Ok(())
+    }
+}
+
+/// Native send is evidence only for sealed snapshots; failures select the shared full scan.
+pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeHints> {
+    Some(&SendHints)
+}
+
+struct SendHints;
+impl crate::change_hints::ChangeHints for SendHints {
+    fn between(&self, base: &Path, tree: &Path) -> Result<crate::change_hints::HintSet> {
+        if !subvol_info(base)?.readonly || !subvol_info(tree)?.readonly {
+            return Ok(crate::change_hints::HintSet::Partial);
+        }
+        let entries = send_no_data(base, tree)?;
+        let candidates = crate::changes::build(base, tree, entries)?;
+        // A stream names an inode through one alias. Until we expand inode references,
+        // a changed hard-linked inode requires the full scan to find every visible alias.
+        for change in &candidates {
+            for (root, path, meta) in [(base, change.src(), change.old()), (tree, change.path().as_str(), change.new())] {
+                if meta.is_some_and(|m| !m.is_dir()) && fs::symlink_metadata(crate::fsutil::safe_join(root, path)?)?.nlink() > 1 {
+                    return Ok(crate::change_hints::HintSet::Partial);
+                }
+            }
+        }
+        Ok(crate::change_hints::HintSet::Complete(candidates))
     }
 }

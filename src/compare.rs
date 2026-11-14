@@ -116,7 +116,6 @@ pub enum DataEvidence {
     ChangedRanges(ChangedRanges),
 }
 impl DataEvidence {
-    #[cfg(any(target_os = "macos", feature = "overlayfs", test))]
     pub fn from_native(ranges: &[(u64, u64)], old_size: u64, new_size: u64) -> Result<Self, &'static str> {
         Ok(Self::from_ranges(ChangedRanges::from_native(ranges)?, old_size, new_size))
     }
@@ -192,7 +191,6 @@ impl EntryChange {
             _ => &DataEvidence::Unknown,
         }
     }
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
     pub fn set_data(&mut self, evidence: DataEvidence) {
         match self {
             Self::Modify { data, .. } | Self::Rename { data, .. } => *data = evidence,

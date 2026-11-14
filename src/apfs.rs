@@ -2773,3 +2773,8 @@ pub(crate) fn status_stage_identity(root: &Path) -> Result<Vec<u8>> {
     let info = subvol_info(root)?;
     Ok(serde_json::to_vec(&(info.uuid, info.base, crate::thin::removed_of(root)?))?)
 }
+
+// APFS change counters currently verify individual observations, not a complete path set.
+pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeHints> {
+    None
+}

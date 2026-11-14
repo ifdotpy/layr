@@ -1,4 +1,4 @@
-//! Commands observed in a trusted local metadata stream. Unknown commands are ignored.
+//! Commands observed in a local metadata stream. Unknown commands are rejected.
 use crate::{check_body, Attributes, CommandHeader, DecodeError, DecodeLimits, Result, Version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,7 +24,9 @@ mod cmd {
     pub const CLONE: u16 = 16;
     pub const TRUNCATE: u16 = 17;
     pub const CHMOD: u16 = 18;
+    pub const CHOWN: u16 = 19;
     pub const UTIMES: u16 = 20;
+    pub const FILEATTR: u16 = 24;
     pub const UPDATE_EXTENT: u16 = 22;
     pub const FALLOCATE: u16 = 23;
     pub const ENCODED_WRITE: u16 = 25;
@@ -58,7 +60,7 @@ impl MetadataCommand {
     pub fn decode(header: CommandHeader, body: &[u8], version: Version, limits: DecodeLimits) -> Result<Self> {
         check_body(header, body)?;
         let at = Attributes::decode(body, version, limits)?;
-        let path = |tag| -> Result<String> { Ok(String::from_utf8_lossy(at.require(tag)?).into_owned()) };
+        let path = |tag| -> Result<String> { Ok(std::str::from_utf8(at.require(tag)?).map_err(|_| DecodeError::Path)?.to_owned()) };
         let c = match header.code {
             cmd::MKFILE => MetadataCommand::Create { path: path(15)?, kind: Kind::File },
             cmd::MKDIR => MetadataCommand::Create { path: path(15)?, kind: Kind::Dir },
@@ -85,8 +87,11 @@ impl MetadataCommand {
             cmd::CHMOD => {
                 MetadataCommand::Chmod { path: path(15)?, mode: u32::try_from(at.number(5)?).map_err(|_| DecodeError::Overflow)? }
             }
-            cmd::SET_XATTR | cmd::REMOVE_XATTR | cmd::UTIMES => MetadataCommand::Metadata { path: path(15)? },
-            _ => MetadataCommand::Other,
+            cmd::SET_XATTR | cmd::REMOVE_XATTR | cmd::UTIMES | cmd::CHOWN | cmd::FILEATTR => {
+                MetadataCommand::Metadata { path: path(15)? }
+            }
+            1 | 2 | 21 => MetadataCommand::Other,
+            code => return Err(DecodeError::UnknownCommand(code)),
         };
         Ok(c)
     }

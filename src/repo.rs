@@ -2064,6 +2064,14 @@ impl<'a> Repo<'a> {
             Ok(local) => local,
             Err(_) => return Ok(self.status_selected(line, selected)?.0),
         };
+        // Native hints compare a captured tree with this known native base. Avoid an eager
+        // whole-tree stat scan merely to validate the status cache before that comparison.
+        // Object-only bases have no native relationship and retain stat-cache validation.
+        if selected.source.objects().is_none() && btrfs::change_hints().is_some() {
+            let scan = self.scan(line)?;
+            let (index, _itemp) = self.snapshot_index(selected)?;
+            return self.status_of_with_policy(line, &scan.path, &index, true, Some(&local));
+        }
         let Some(key) = self.status_key(line, &work, selected, &local).ok().flatten() else {
             return Ok(self.status_selected(line, selected)?.0);
         };

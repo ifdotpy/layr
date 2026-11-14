@@ -20,6 +20,7 @@ mod args;
 mod attestation;
 mod byte_size;
 mod cache_overlay;
+mod change_hints;
 mod changes;
 mod compare;
 mod cmd;

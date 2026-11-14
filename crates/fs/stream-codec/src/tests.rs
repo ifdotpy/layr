@@ -44,7 +44,12 @@ fn metadata_commands_and_ranges() {
             Ok(MetadataCommand::Extent { path: "f".into(), offset: 8, end: RangeEnd::Eof })
         );
     }
-    assert_eq!(metadata(&frame(99, &[])), Ok(MetadataCommand::Other));
+    assert_eq!(metadata(&frame(21, &[])), Ok(MetadataCommand::Other));
+    assert_eq!(metadata(&frame(99, &[])), Err(DecodeError::UnknownCommand(99)));
+    assert_eq!(metadata(&frame(20, &[(15, b"bad\xff")])), Err(DecodeError::Path));
+    for code in [19, 24] {
+        assert_eq!(metadata(&frame(code, &[(15, b"file")])), Ok(MetadataCommand::Metadata { path: "file".into() }));
+    }
 }
 
 #[test]

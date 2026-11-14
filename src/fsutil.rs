@@ -1181,26 +1181,18 @@ pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta
 
 fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
     let start = safe_join(root, rel)?;
-    let dev = match fs::symlink_metadata(&start) {
-        Ok(m) => m.dev(),
-        Err(_) => return Ok(()),
-    };
+    let dev = fs::symlink_metadata(&start)?.dev();
     let mut stack = vec![rel.to_string()];
     while let Some(dir) = stack.pop() {
         let p = if dir.is_empty() { root.to_path_buf() } else { root.join(&dir) };
-        let rd = match fs::read_dir(&p) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let mut names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut names = fs::read_dir(&p)?
+            .map(|entry| entry?.file_name().into_string().map_err(|_| anyhow!("non-UTF-8 file name in {}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
         names.sort();
         let mut subdirs = Vec::new();
         for n in names {
             let child = if dir.is_empty() { n.clone() } else { format!("{dir}/{n}") };
-            let m = match fs::symlink_metadata(root.join(&child)) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+            let m = fs::symlink_metadata(root.join(&child))?;
             let meta = meta_of(&m);
             if meta.is_dir()
                 && (m.dev() != dev
