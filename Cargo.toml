@@ -1,6 +1,52 @@
 [workspace]
-members = ["crates/layr-api", "crates/layr-store", "crates/layr-model", "crates/layr-retest", "crates/layr-cache", "crates/layr-adapter", "crates/layr-hashers", "crates/layr-objects"]
+members = [
+  "crates/layr-api",
+  "crates/layr-store",
+  "crates/layr-model",
+  "crates/layr-retest",
+  "crates/layr-cache",
+  "crates/layr-adapter",
+  "crates/layr-hashers",
+  "crates/layr-objects",
+]
 resolver = "2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+manual_let_else = "warn"
+undocumented_unsafe_blocks = "deny"
+
+# Lower numbers may not depend on higher numbers. Leaf packages also reject heavy dependencies.
+[workspace.metadata.layers]
+layr-adapter = { layer = 0, dependencies = [], leaf = true }
+layr-api = { layer = 0, dependencies = [], leaf = true }
+layr-hashers = { layer = 0, dependencies = [], leaf = true }
+layr-store = { layer = 1, dependencies = ["layr-hashers"] }
+layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
+layr-model = { layer = 2, dependencies = ["layr-hashers", "layr-store"] }
+layr-objects = { layer = 2, dependencies = ["layr-hashers", "layr-store"] }
+layr-retest = { layer = 2, dependencies = ["layr-cache"] }
+layr = { layer = 3, dependencies = [
+  "layr-adapter",
+  "layr-api",
+  "layr-cache",
+  "layr-hashers",
+  "layr-model",
+  "layr-objects",
+  "layr-retest",
+  "layr-store",
+] }
 
 [workspace.package]
 # The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
@@ -15,6 +61,9 @@ rust-version = "1.100.0"
 # macOS never builds it, and its stale units would skip the debug folder too.
 sweep = [["build", "--locked"], ["build", "--release", "--locked"], ["test", "--locked", "--no-run"]]
 env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
+
+[lints]
+workspace = true
 
 [package]
 name = "layr"
@@ -84,13 +133,21 @@ uuid = { version = "1", features = ["v7"] }
 zerocopy = { version = "0.8.63", features = ["derive"] }
 # The check runner's connection to a Layr Cloud gateway (src/runner.rs).
 tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = [
+  "connect",
+  "handshake",
+  "rustls-tls-webpki-roots",
+] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 wtransport = { version = "0.7", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 # The runner tests: a self-signed WebTransport server and a client that skips its certificate.
-wtransport = { version = "0.7", default-features = false, features = ["ring", "self-signed", "dangerous-configuration"] }
+wtransport = { version = "0.7", default-features = false, features = [
+  "ring",
+  "self-signed",
+  "dangerous-configuration",
+] }
 
 [profile.release]
 debug = 1

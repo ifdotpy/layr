@@ -1,0 +1,10 @@
+id: no-process-exit-in-leaves
+language: Rust
+severity: error
+message: Return an error instead of terminating the process in a leaf crate.
+files:
+  - crates/layr-adapter/src/**/*.rs
+  - crates/layr-api/src/**/*.rs
+  - crates/layr-hashers/src/**/*.rs
+rule:
+  pattern: std::process::exit($$$)
