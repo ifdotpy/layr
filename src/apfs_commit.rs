@@ -560,7 +560,7 @@ mod tests {
     }
     /// The record of a save, as `commit_state` writes it (the record of `move_head` is not needed).
     fn recorded(locked: &crate::store::LockedProject<'_>, pending: &PendingCommit, line: &str) -> Result<()> {
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.states.push(StateRec {
             id: pending.id.clone(),
             kind: StateKind::Commit,

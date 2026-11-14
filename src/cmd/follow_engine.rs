@@ -668,7 +668,7 @@ mod tests {
     #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
     fn a_local_merge_can_save_caches_under_its_preparation_leases() -> anyhow::Result<()> {
         use crate::ctx::{Caller, Ctx};
-        use crate::model::{Line, LineChange, Record};
+        use crate::model::{Line, LineChange};
         use crate::store::{db_file, Project, Store};
         let root =
             crate::repo::Temp { path: std::env::temp_dir().join(format!("layr-local-cache-leases-{}", crate::ids::new_id())) };
@@ -713,16 +713,16 @@ mod tests {
         let repo = Repo { p, ctx: Some(&ctx) };
         {
             let locked = repo.p.lock_maintenance()?;
-            let mut project = Record::new("project");
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"id":repo.p.id,"name":"p","config":{
                 "access":{format!("user:{}",ctx.caller.uid):"admin"}, "protect":{"main":{}}
             }});
             locked.append(project, &ctx.actor())?;
-            let mut state = Record::new("state");
+            let mut state = crate::model::DraftRecord::new("state");
             state.states.push(serde_json::from_value(serde_json::json!({"id":line.head,"kind":"commit", "subvol":"",
                 "author":ctx.author(),"time":crate::ids::now_ms(),"tree":tree.hex(),"times":times.hex()}))?);
             locked.append(state, &ctx.actor())?;
-            let mut creation = Record::new("line.create");
+            let mut creation = crate::model::DraftRecord::new("line.create");
             creation.lines.insert(
                 line.id.clone(),
                 LineChange {

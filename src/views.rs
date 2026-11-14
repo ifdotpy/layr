@@ -247,7 +247,7 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
             bail!("a line named '{name}' already exists");
         }
         repo.source_state(start)?;
-        let mut rec = Record::new("line.create");
+        let mut rec = crate::model::DraftRecord::new("line.create");
         rec.data = serde_json::json!({"name": name, "start": start});
         rec.lines.insert(
             line.id.clone(),
@@ -585,7 +585,7 @@ pub fn save_working(
     let list = file_changes(&t, v)?;
     crate::secrets::check_changes(ctx, repo, &t.head, &t.merged, &line.head, &list)?;
     let st = write_state(ctx, repo, line, &t, &list, StateKind::Auto, message)?;
-    let mut rec = Record::new("save");
+    let mut rec = crate::model::DraftRecord::new("save");
     rec.data = serde_json::json!({"line": line.id, "head": line.head,
         "working_before": repo.recorded_working(line)?, "working_after": st.id});
     rec.states.push(st.clone());

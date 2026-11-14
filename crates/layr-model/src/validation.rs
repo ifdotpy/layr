@@ -594,7 +594,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn rec() -> Record {
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = "01a12290-0000-7000-8000-000000000001".into();
         r.machine = "01a12290-0000-7000-8000-000000000002".into();
         r.seq = 2;
@@ -643,7 +643,7 @@ mod tests {
         let back: StateRec = serde_json::from_str(&json).unwrap();
         assert_eq!(back.parts, st.parts);
         assert!(back.caches.is_empty(), "parts are not caches (the `layers` key)");
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = id.into();
         r.machine = id.into();
         r.states = vec![st.clone()];
@@ -652,7 +652,7 @@ mod tests {
         assert!(validate(&r).is_err(), "an overlay is a name");
         r.states[0].parts = BTreeMap::from([("notes".to_string(), "../x".to_string())]);
         assert!(validate(&r).is_err(), "a part is an id");
-        let mut m = Record::new(STATE_PARTS_OP);
+        let mut m = Record::untrusted_preview(STATE_PARTS_OP);
         m.id = id.into();
         m.machine = id.into();
         m.data = serde_json::json!({"states": {id: {"notes": part}}});

@@ -4,7 +4,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
-use crate::model::{Line, LineChange, Record, StateKind};
+use crate::model::{Line, LineChange, StateKind};
 use crate::revs;
 use anyhow::Result;
 
@@ -450,7 +450,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         let folder_before = repo.p.keep_folder(&l.id, &l.name, &new)?;
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
-        let mut rec = Record::new("line.rename");
+        let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
             LineChange {
@@ -735,7 +735,7 @@ pub(crate) fn delete_recorded(
     // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
     let staged = staged_state(locked, ctx, repo, l)?;
     // Record first, then delete the folder: the content is in the saved state.
-    let mut rec = Record::new("line.delete");
+    let mut rec = crate::model::DraftRecord::new("line.delete");
     rec.lines.insert(
         l.id.clone(),
         LineChange { before: Some(repo.line_state(l, &l.head)), after: None, working_before: last.clone(), working_after: None },
@@ -815,7 +815,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         eprintln!("warning: caches of line '{name}' not taken: {e:#}");
     }
     crate::gitbridge::sync_store_access(repo)?;
-    let mut rec = Record::new("line.adopt");
+    let mut rec = crate::model::DraftRecord::new("line.adopt");
     rec.lines.insert(
         l.id.clone(),
         LineChange {
@@ -853,7 +853,7 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _lock = repo.p.lock_maintenance()?;
         for t in &a.pos {
             let id = repo.p.db.tag(t)?.ok_or_else(|| exit(1, format!("error: tag '{t}' not found.")))?;
-            let mut rec = Record::new("tag.delete");
+            let mut rec = crate::model::DraftRecord::new("tag.delete");
             rec.data = serde_json::json!({"name": t, "state": id});
             repo.commit_record(&_lock, ctx, rec)?;
             outln!(ctx, "Deleted tag '{t}' (was {})", ids::short(&id));
@@ -884,7 +884,7 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if repo.p.db.tag(name)?.is_some() && !a.has("-f") {
         return Err(exit(128, format!("fatal: tag '{name}' already exists")));
     }
-    let mut rec = Record::new("tag");
+    let mut rec = crate::model::DraftRecord::new("tag");
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});
     repo.commit_record(&_lock, ctx, rec)?;
     Ok(0)
@@ -908,7 +908,7 @@ fn staged_state(
     let mut keep = Vec::new();
     let tree = repo.complete(index, &mut keep)?;
     let st = repo.new_state(ctx, &tree, StateKind::Auto, vec![l.head.clone()], "staged before line delete", Some(l))?;
-    let mut rec = Record::new("save");
+    let mut rec = crate::model::DraftRecord::new("save");
     rec.states.push(st.clone());
     rec.data = serde_json::json!({"line": l.id});
     repo.commit_record(locked, ctx, rec)?;

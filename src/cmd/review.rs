@@ -5,7 +5,7 @@ use super::change::{find, validate_comment, version};
 use super::here;
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::model::{Comment, Record};
+use crate::model::{Comment};
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_model::review::{self as rv, Reaction, ReviewRequest, ThreadStatus};
@@ -103,7 +103,7 @@ fn write_comment(
         bail!("--line needs --file");
     }
     validate_comment(repo, &comment)?;
-    let mut rec = Record::new("comment");
+    let mut rec = crate::model::DraftRecord::new("comment");
     rec.data = json!({"comment":comment});
     if let Some(end) = line_end {
         rec.data["line_end"] = json!(end);
@@ -175,7 +175,7 @@ fn resolve(ctx: &Ctx, args: &[String], resolved: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let mut rec = Record::new(if resolved { rv::RESOLVE_OP } else { rv::UNRESOLVE_OP });
+    let mut rec = crate::model::DraftRecord::new(if resolved { rv::RESOLVE_OP } else { rv::UNRESOLVE_OP });
     rec.data = json!({"thread_status": ThreadStatus { change_id: change.clone(), thread: thread.clone(), resolved, prev }});
     h.repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
@@ -214,7 +214,7 @@ pub fn react(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let writer = layr_model::Project::reaction_writer(ctx.caller.uid, &h.repo.p.store.machine.id);
     let written = model.has_reaction(&change, &writer, &target, name) != on;
     if written {
-        let mut rec = Record::new(if on { rv::REACT_OP } else { rv::UNREACT_OP });
+        let mut rec = crate::model::DraftRecord::new(if on { rv::REACT_OP } else { rv::UNREACT_OP });
         rec.data = json!({"reaction": Reaction { change_id: change.clone(), target: target.clone(), name: name.clone(), on }});
         h.repo.commit_record(&_lock, ctx, rec)?;
     }
@@ -253,7 +253,7 @@ reviewer: person:<login>, user:<name or uid>, <user name>, or machine:<name or i
         let (now, prev) = model.review_request(&change, &reviewer);
         let written = now != active;
         if written {
-            let mut rec = Record::new(if active { rv::REQUEST_OP } else { rv::CANCEL_OP });
+            let mut rec = crate::model::DraftRecord::new(if active { rv::REQUEST_OP } else { rv::CANCEL_OP });
             rec.data =
                 json!({"review_request": ReviewRequest { change_id: change.clone(), reviewer: reviewer.clone(), active, prev }});
             h.repo.commit_record(&_lock, ctx, rec)?;

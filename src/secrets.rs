@@ -419,7 +419,7 @@ pub fn check_history(ctx: &Ctx, repo: &Repo, state: &str) -> Result<()> {
     check_states(ctx, repo, new.iter().map(String::as_str))
 }
 
-pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<crate::model::Record> {
+pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<crate::model::DraftRecord> {
     if !repo.is_admin(ctx) {
         bail!("declassification requires the admin role");
     }

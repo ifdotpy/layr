@@ -11,6 +11,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+layr-types = { path = "../core/types" }
 html5gum = { version = "0.8", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 quick-xml = "0.42"

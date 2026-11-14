@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 pub(super) fn record(seq: u64, op: &str) -> Record {
-    let mut r = Record::new(op);
+    let mut r = Record::untrusted_preview(op);
     r.id = format!("record-{seq}");
     r.project = "project".into();
     r.machine = "a".into();
@@ -46,7 +46,7 @@ fn line(head: &str, machine: &str) -> LineChange {
     }
 }
 pub(super) fn fold(records: Vec<Record>) -> Project {
-    Project::from_records("project", records, "a").unwrap()
+    Project::preview_records("project", records, "a").unwrap()
 }
 
 #[test]
@@ -82,16 +82,16 @@ fn record_order_duplicates_and_conflicts() {
     assert_eq!(model.change_versions("change").iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
     let mut conflict = last.clone();
     conflict.op = "other".into();
-    assert!(Project::from_records("project", vec![last.clone(), conflict], "a").is_err());
+    assert!(Project::preview_records("project", vec![last.clone(), conflict], "a").is_err());
     let mut conflict = last.clone();
     conflict.id = "other".into();
-    assert!(Project::from_records("project", vec![last, conflict], "a").is_err());
+    assert!(Project::preview_records("project", vec![last, conflict], "a").is_err());
     let mut bad = first.clone();
     bad.project = "different".into();
-    assert!(Project::from_records("project", vec![bad], "a").is_err());
+    assert!(Project::preview_records("project", vec![bad], "a").is_err());
     let mut bad = record(3, "commit");
     bad.states = first.states.clone();
-    assert!(Project::from_records("project", vec![first, bad], "a").is_err());
+    assert!(Project::preview_records("project", vec![first, bad], "a").is_err());
 }
 #[test]
 fn heads_and_policy_keep_machine_scope() {
@@ -276,7 +276,7 @@ fn overlays_stay_separate_and_unknown_records_stay_in_log() {
     let mut overlay = record(2, "project");
     overlay.project = "overlay".into();
     overlay.data = json!({"name":"p%keys","config":{"access":{}}});
-    let m = Model::from_records(vec![overlay, parent], "a").unwrap();
+    let m = Model::preview_records(vec![overlay, parent], "a").unwrap();
     assert_eq!(m.projects.len(), 2);
     assert_eq!(m.projects["project"].op_log(None, 10)[0].op, "future.op");
     assert_eq!(m.projects["overlay"].name.as_deref(), Some("p%keys"));
@@ -340,7 +340,7 @@ fn merge_status_selects_target_machine_and_keeps_unknown_actor_and_groups_undeci
     approve.data = json!({"state":"source"});
     let mut check = record(3, "check");
     check.data = json!({"state":"source","argv":["sh","-c","true"],"exit":0});
-    let project = Project::from_records("project", vec![init, approve, check], "").unwrap();
+    let project = Project::preview_records("project", vec![init, approve, check], "").unwrap();
     let mut context = protection::Context {
         now: 10,
         actor: None,
@@ -377,8 +377,8 @@ fn hidden_layers_come_only_from_their_own_records() {
     let mut change = line("hidden-state", "a");
     change.after.as_mut().unwrap().name = "line-line".into();
     head.lines.insert("overlay-line".into(), change);
-    let reader = Model::from_records([parent.clone(), own, head], "a").unwrap();
-    let other = Model::from_records([parent], "a").unwrap();
+    let reader = Model::preview_records([parent.clone(), own, head], "a").unwrap();
+    let other = Model::preview_records([parent], "a").unwrap();
     let line = other.projects["project"].line_list().remove(0);
     assert_eq!(reader.layers("project", &line).unwrap()[0].overlay, "hidden");
     assert!(other.layers("project", &line).unwrap().is_empty());
@@ -392,7 +392,7 @@ fn hidden_layers_come_only_from_their_own_records() {
 
 fn person_evidence(seq: u64, login: &str, key: &ed25519_dalek::SigningKey, withdraw: bool) -> Record {
     use layr_store::request::{Action, Request};
-    let mut record = Record::new("attest");
+    let mut record = Record::untrusted_preview("attest");
     record.id = format!("01a12290-0000-7000-8000-{:012x}", 100 + seq);
     record.project = "01a12290-0000-7000-8000-000000000002".into();
     record.machine = "01a12290-0000-7000-8000-000000000005".into();
@@ -422,7 +422,7 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
     let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
     let ann = person_evidence(3, "ann@example.com", &key, false);
     let bob = person_evidence(4, "bob@example.com", &bob_key, false);
-    let mut source = Record::new("save");
+    let mut source = Record::untrusted_preview("save");
     source.id = "01a12290-0000-7000-8000-000000000001".into();
     source.project = ann.project.clone();
     source.machine = ann.machine.clone();
@@ -451,7 +451,7 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
     foreign_pin.seq = 8;
     foreign_pin.time = 8;
     foreign_pin.data = json!({"config":{"person.keys":{"ann@example.com":hex::encode(attacker_key.verifying_key().to_bytes())}}});
-    let project = Project::from_records(
+    let project = Project::preview_records(
         &ann.project,
         vec![pin, source, ann.clone(), bob.clone(), revoke, fake.clone(), fake_revoke, foreign_pin],
         &ann.machine,
@@ -469,7 +469,7 @@ fn person_approvals_survive_executor_scope_and_keep_revocations_separate() {
     assert_eq!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).len(), 1);
     policy.deny.insert("person:ann@example.com".into(), vec!["*".into()]);
     assert!(project.allowed_person_approvals(subject, None, protection::ApprovalMode::Ref, &policy, &rule).is_empty());
-    let no_pin = Project::from_records(&ann.project, vec![fake.clone()], &ann.machine).unwrap();
+    let no_pin = Project::preview_records(&ann.project, vec![fake.clone()], &ann.machine).unwrap();
     assert!(no_pin.person_approvals(subject).is_empty());
 }
 
@@ -555,7 +555,7 @@ fn project_policy_perspective_requires_one_creator_and_keeps_foreign_config_name
     let records = vec![executor.clone(), creator.clone()];
     let perspective = project_perspective("project", &records).unwrap();
     assert_eq!(perspective, "a");
-    let model = Project::from_records("project", records, &perspective).unwrap();
+    let model = Project::preview_records("project", records, &perspective).unwrap();
     assert_eq!(model.config["person.keys"], creator.data["config"]["person.keys"]);
     assert_eq!(model.config["protect"], json!({"main":{}}));
     assert_eq!(model.config["person.keys@b"], executor.data["config"]["person.keys"]);

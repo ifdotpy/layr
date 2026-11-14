@@ -7,7 +7,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Record, RefChange, RefState};
+use crate::model::{RefChange, RefState};
 use anyhow::{bail, Result};
 
 pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -102,7 +102,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             };
             authorize_update(ctx, repo, name, before.as_ref(), after.as_ref(), a.has("--expect"))?;
             let change = RefChange { name: name.clone(), before, after };
-            let mut rec = Record::new(if set { "ref.set" } else { "ref.delete" });
+            let mut rec = crate::model::DraftRecord::new(if set { "ref.set" } else { "ref.delete" });
             rec.data = serde_json::json!({"ref_change": change});
             repo.commit_record(&_lock, ctx, rec)?;
             if a.has("--json") {

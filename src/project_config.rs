@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::errors::{error, Kind as ErrorKind};
-use crate::model::Record;
+
 use crate::repo::Repo;
 use crate::store::Project;
 use anyhow::Result;
@@ -31,7 +31,7 @@ pub fn set_config(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Re
             }
         }
     }
-    let mut rec = Record::new("config");
+    let mut rec = crate::model::DraftRecord::new("config");
     let mut m = serde_json::Map::new();
     m.insert(key.to_string(), value);
     rec.data = serde_json::json!({"config": m});

@@ -401,7 +401,7 @@ impl Db {
             self.set_owners("deleted", &h, &[])?;
         }
         for raw in self.all_lines()? {
-            let rec = crate::oplog::parse_line(&raw, None)?.record;
+            let rec = crate::oplog::parse_line(&raw)?.record;
             let ord = record_ord(&rec);
             // Deleted owners first: the undo owner of a delete record needs its deleted owner.
             for (h, named) in deleted_entry(&rec, &ord) {
@@ -609,7 +609,7 @@ impl Db {
         mem.conn.execute_batch(SCHEMA)?;
         fill_only(|| -> Result<()> {
             for raw in self.all_lines()? {
-                let rec = crate::oplog::parse_line(&raw, None)?.record;
+                let rec = crate::oplog::parse_line(&raw)?.record;
                 mem.insert_record(&rec, &raw)?;
                 if counts(&rec)? {
                     mem.derive_rows(&rec, &|_| true, local)?;
@@ -937,7 +937,7 @@ mod tests {
 
     /// A record of the test machine. `seq` is also the time.
     fn record(seq: u64, op: &str) -> Record {
-        let mut r = Record::new(op);
+        let mut r = Record::untrusted_preview(op);
         r.id = format!("01a12290-0000-7000-8000-{:012}", 0x100000 + seq);
         r.machine = MACHINE.into();
         r.seq = seq;

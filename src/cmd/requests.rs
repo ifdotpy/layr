@@ -4,7 +4,7 @@ use crate::{
     args::{parse, Spec},
     ctx::Ctx,
     ids,
-    model::{Actor, Comment, QueueChange, QueueEntry, Record, RefChange, RefState},
+    model::{Actor, Comment, QueueChange, QueueEntry, RefChange, RefState},
     repo::Repo,
 };
 use anyhow::{bail, Context, Result};
@@ -308,8 +308,8 @@ pub fn apply(
     Ok(blocked)
 }
 
-fn refusal(reason: &str) -> Record {
-    let mut record = Record::new("request.refused");
+fn refusal(reason: &str) -> crate::model::DraftRecord {
+    let mut record = crate::model::DraftRecord::new("request.refused");
     record.data = json!({"reason":reason});
     record
 }
@@ -357,7 +357,7 @@ fn verify_request(
     Ok((request, public, inner))
 }
 
-fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
+fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<crate::model::DraftRecord> {
     if ids::now_ms() >= request.expires {
         bail!("request has expired");
     }
@@ -410,7 +410,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 title: None,
             };
             let hold = format!("holds/queue/{}", entry.id);
-            let mut record = Record::new("queue.add");
+            let mut record = crate::model::DraftRecord::new("queue.add");
             record.data = json!({"queue_change":QueueChange { id: entry.id.clone(), before: None, after: Some(entry) }, "ref_change":RefChange { name:hold.clone(), before:None, after:Some(RefState { name:hold,target:state.clone(),expires_at:None }) }});
             record
         }
@@ -424,7 +424,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 policy.check_person(login, "line.manage").map_err(anyhow::Error::msg)?;
             }
             let hold = format!("holds/queue/{entry}");
-            let mut record = Record::new("queue.remove");
+            let mut record = crate::model::DraftRecord::new("queue.remove");
             record.data = json!({"queue_change":QueueChange { id:entry.clone(), before:Some(before), after:None }});
             if let Some(value) = repo.p.db.ref_value(&hold, ids::now_ms())? {
                 record.data["ref_change"] = json!(RefChange { name: hold, before: Some(value), after: None });
@@ -443,7 +443,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
             }
             let after = RefState { name: name.clone(), target: target.clone(), expires_at: None };
             super::refs::authorize_person_update(repo, login, name, before.as_ref(), Some(&after))?;
-            let mut record = Record::new("ref.set");
+            let mut record = crate::model::DraftRecord::new("ref.set");
             record.data = json!({"ref_change":RefChange { name:name.clone(),before,after:Some(after) }});
             record
         }
@@ -459,7 +459,7 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 reply_to: reply_to.clone(),
             };
             super::change::validate_comment(repo, &comment)?;
-            let mut record = Record::new("comment");
+            let mut record = crate::model::DraftRecord::new("comment");
             record.data = json!({"comment":comment});
             record
         }
@@ -505,7 +505,7 @@ mod tests {
             ctx: None,
         };
         let key = SigningKey::from_bytes(&[7; 32]);
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = json!({"id":repo.p.id,"name":"p","config":{
             "person.keys":{"ann@example.com":hex::encode(key.verifying_key().to_bytes())}
         }});

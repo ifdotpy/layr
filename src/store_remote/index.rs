@@ -42,7 +42,8 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         trusted.insert(machine.clone(), *key);
     }
     trusted.insert(store.machine.clone(), store.key.verifying_key());
-    let model = layr_model::Model::from_verified_lines(records.lines.iter().map(String::as_str), "")?;
+    let authorized = layr_model::record::authorize_lines(&descriptor.project, &records.lines, &trusted, crate::ids::now_ms())?;
+    let model = layr_model::Model::from_verified_lines(authorized, "")?;
     let project = model.projects.get(&descriptor.project).context("store has no project records; push first")?;
     let wrap = |data| Index { v: 1, project: descriptor.project.clone(), machine: store.machine.clone(), data };
     let publish = |index: Index| -> Result<bool> {
@@ -81,7 +82,7 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         let body = store.backend.get(name)?.context("heads index disappeared")?;
         let snapshot = index::open(&identity, &body, name, &descriptor.project, &trusted)?;
         // Do not reuse even a correctly signed snapshot with an incorrect derived head.
-        layr_model::index::reconcile(&snapshot, &records.lines)?;
+        layr_model::index::reconcile(&snapshot, &records.lines, &trusted, crate::ids::now_ms())?;
         snapshots.push(snapshot);
     }
     let mut heads = layr_model::index::heads(project, watermark, 1)?;

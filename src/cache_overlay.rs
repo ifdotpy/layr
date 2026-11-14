@@ -19,7 +19,7 @@ use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
 use crate::ignore_rules::Rules;
-use crate::model::{Line, LineChange, Record, StateKind, StateRec};
+use crate::model::{Line, LineChange, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
 use crate::storage as btrfs;
@@ -248,7 +248,7 @@ impl<'a> Repo<'a> {
         let orepo = self.overlay_repo(name)?;
         let _lock = orepo.p.lock_maintenance()?;
         for ol in orepo.p.db.lines()? {
-            let mut rec = Record::new("line.delete");
+            let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
                 LineChange {
@@ -268,7 +268,7 @@ impl<'a> Repo<'a> {
             }
         }
         if !deleted.is_empty() {
-            let mut rec = Record::new("gc");
+            let mut rec = crate::model::DraftRecord::new("gc");
             rec.data = serde_json::json!({"deleted": deleted, "overlay": name, "removed": true});
             orepo.commit_record(&_lock, ctx, rec)?;
         }
@@ -341,7 +341,7 @@ impl<'a> Repo<'a> {
         locked.check(&orepo.p)?;
         let mut out = Vec::new();
         for ol in lines {
-            let mut rec = Record::new("line.delete");
+            let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
                 LineChange {
@@ -431,7 +431,7 @@ impl<'a> Repo<'a> {
                 }
             }
             let _lock = orepo.p.lock_maintenance()?;
-            let mut record = crate::model::Record::new("overlay.readers");
+            let mut record = crate::model::DraftRecord::new("overlay.readers");
             record.data = serde_json::json!({"config":{"access": crate::overlay::create::access_map(info.owner, &readers)}});
             orepo.commit_record(&_lock, ctx, record).map(|_| ()).map_err(anyhow::Error::from)
         })();

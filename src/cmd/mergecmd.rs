@@ -7,7 +7,7 @@ use crate::ctx::Ctx;
 use crate::diff;
 use crate::ids;
 use crate::merge;
-use crate::model::{Line, Record, StateKind, StateRec};
+use crate::model::{Line, StateKind, StateRec};
 use crate::overlay::{Layer, MergeKind, Mode};
 use crate::repo::{skip_path, Repo};
 use crate::revs;
@@ -2026,7 +2026,7 @@ fn merge_rev_inner(
         }
         // The result becomes a state of its own record, so the check runs on exactly the content
         // that the line will take, and a failed result stays for inspection.
-        let mut rec = Record::new("merge.candidate");
+        let mut rec = crate::model::DraftRecord::new("merge.candidate");
         rec.states = states.clone();
         rec.data =
             serde_json::json!({"line": line.id, "theirs": theirs, "head": head, "squash": a.has("--squash"), "message": message});
@@ -2543,7 +2543,7 @@ fn replay_locked(
         }
         cur = s.id.clone();
         // Later picks read this state: write its record now, as part of the rebase.
-        let mut rec = Record::new("rebase.step");
+        let mut rec = crate::model::DraftRecord::new("rebase.step");
         rec.states.push(s.clone());
         rec.data = serde_json::json!({"line":line.id,"version":crate::model::VersionOperation {
             state: s.id.clone(), kind: "replay".into(), source: p.clone(),
@@ -2594,7 +2594,7 @@ mod approval_tests {
     use super::*;
     use crate::{
         ctx::Caller,
-        model::{Author, Record, StateKind, StateRec},
+        model::{Author, StateKind, StateRec},
         store::{Project, Store},
     };
 
@@ -2660,7 +2660,7 @@ mod approval_tests {
             id: project_id.clone(),
             db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
         };
-        let mut creation = Record::new("project");
+        let mut creation = crate::model::DraftRecord::new("project");
         creation.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
         p.lock_maintenance().unwrap().append(creation, &ctx.actor()).unwrap();
         let state = |kind, parents| StateRec {
@@ -2691,11 +2691,11 @@ mod approval_tests {
         let derived = state(StateKind::Derived, vec![]);
         let source = state(StateKind::Commit, vec![derived.id.clone()]);
         let ordinary = state(StateKind::Commit, vec![base.id.clone()]);
-        let mut record = Record::new("state");
+        let mut record = crate::model::DraftRecord::new("state");
         // A forward parent reference can arrive before the parent's record during import.
         record.states = vec![base.clone(), source.clone(), ordinary.clone()];
         p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
-        let mut record = Record::new("state");
+        let mut record = crate::model::DraftRecord::new("state");
         record.states = vec![derived.clone()];
         p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let repo = Repo { p, ctx: None };

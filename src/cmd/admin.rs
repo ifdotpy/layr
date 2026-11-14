@@ -669,7 +669,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         super::work::put_back(repo, &line, wb.as_deref());
         return Err(e);
     }
-    let mut rec = Record::new("undo");
+    let mut rec = crate::model::DraftRecord::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op, "keep_stage": true});
     let now = repo.line_state(&line, &line.head);
     rec.lines.insert(
@@ -759,7 +759,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let lines = r.lines.keys().map(|id| repo.p.db.line_by_id(id)).collect::<Result<Vec<_>>>()?;
     let leases = repo.p.line_leases(lines.into_iter().flatten().map(|l| (l.id, l.name)))?;
     let _lock = if in_place { None } else { Some(leases.lock(&repo.p)?) };
-    let mut rec = Record::new("undo");
+    let mut rec = crate::model::DraftRecord::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // An undo of an automatic save keeps the stage, and so does its undo.
     let keep_stage = r.data["keep_stage"].as_bool() == Some(true);
@@ -1615,14 +1615,14 @@ fn repair_project(
         let leaks = repair_table(repo, free, Some(diff))?;
         evicted = evict_stored(repo, &stores)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
-            let mut rec = Record::new("ref.expire");
+            let mut rec = crate::model::DraftRecord::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
             repo.commit_record(&_lock, ctx, rec)?;
         }
         // Old cache snapshots of states (build output; the states stay).
         let caches = trash_excess_caches(&repo.p)?;
         if !caches.is_empty() {
-            let mut rec = Record::new("gc");
+            let mut rec = crate::model::DraftRecord::new("gc");
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
             repo.commit_record(&_lock, ctx, rec)?;
         }
@@ -2562,7 +2562,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // The service writes as root, but later lines and stages belong to the intended owner.
         crate::repo::give_tree(&work, owner_ids.0, owner_ids.1)?;
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
-        let mut rec = Record::new("commit");
+        let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st.clone());
         repo.commit_record(&_lock, ctx, rec)?;
         drop(cleanup);
@@ -3181,7 +3181,7 @@ fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) 
     }
     {
         let _lock = repo.p.lock_maintenance()?;
-        let mut record = Record::new("trust.delegate");
+        let mut record = crate::model::DraftRecord::new("trust.delegate");
         record.data = data.clone();
         _lock.append(record, &ctx.actor())?;
     }
@@ -3570,7 +3570,7 @@ mod op_log_tests {
         std::fs::write(project_dir.join("lines/main/fixture"), "op log fixture\n")?;
         let db = crate::db::Db::open(&crate::store::db_file(&project_dir))?;
         let uid = std::fs::metadata(&dir)?.uid();
-        let mut project = Record::new("project");
+        let mut project = Record::untrusted_preview("project");
         project.id = ids::new_id();
         project.machine = store.machine.id.clone();
         project.data = serde_json::json!({"id": ids::new_id()});
@@ -3580,7 +3580,7 @@ mod op_log_tests {
             rusqlite::params![uid, store.machine.id],
         )?;
         for i in 1..=41 {
-            let mut rec = Record::new("save");
+            let mut rec = Record::untrusted_preview("save");
             rec.id = ids::new_id();
             rec.machine = store.machine.id.clone();
             rec.seq = i;

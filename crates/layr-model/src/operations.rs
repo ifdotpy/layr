@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn validation_refuses_private_urls_wrong_counts_and_unknown_version_kinds() {
         let id = "00000000-0000-4000-8000-000000000001";
-        let mut r = Record::new("push");
+        let mut r = Record::untrusted_preview("push");
         r.id = id.into();
         r.machine = id.into();
         r.project = id.into();

@@ -164,7 +164,7 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let result = serde_json::json!({"good":good,"bad":bad,"first_bad":first.id,"argv":a.paths,"state":first.id,"message":first.message,"kind":crate::db::kind_str(first.kind),"origin":origins,"steps":steps});
     {
         let _lock = repo.p.lock_maintenance()?;
-        let mut rec = crate::model::Record::new("bisect.run");
+        let mut rec = crate::model::DraftRecord::new("bisect.run");
         // The finding is evidence about the first bad state: a `bisect` attestation of it, whose
         // payload is the result. `layr attestations <state> --kind bisect` lists it.
         let finding = super::attest::record(repo, &first.id, "bisect", &serde_json::to_vec(&result)?)?;

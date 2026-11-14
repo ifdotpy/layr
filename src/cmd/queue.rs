@@ -4,7 +4,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
-use crate::model::{QueueChange, QueueEntry, Record, RefChange, RefState};
+use crate::model::{QueueChange, QueueEntry, RefChange, RefState};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
 use std::fs::File;
@@ -201,7 +201,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 after.status = "failed".into();
                 after.reason = Some(conflict.0.clone());
                 after.attempts = 1;
-                let mut rec = Record::new("queue.result");
+                let mut rec = crate::model::DraftRecord::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after.clone())}});
                 repo.commit_record(&_lock, ctx, rec)?;
                 if a.has("--json") {
@@ -284,7 +284,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             };
             {
                 let _lock = repo.p.lock_maintenance()?;
-                let mut rec = Record::new("queue.add");
+                let mut rec = crate::model::DraftRecord::new("queue.add");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:None,after:Some(entry.clone())},"ref_change":RefChange{name:hold(&entry),before:None,after:Some(RefState{name:hold(&entry),target:state,expires_at:None})}});
                 repo.commit_record(&_lock, ctx, rec)?;
             }
@@ -321,7 +321,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if entry.added_by != ctx.caller.uid {
                 repo.require(ctx, "line.manage")?;
             }
-            let mut rec = Record::new("queue.remove");
+            let mut rec = crate::model::DraftRecord::new("queue.remove");
             rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:None}});
             release_hold(repo, &entry, &mut rec.data)?;
             repo.commit_record(&_lock, ctx, rec)?;
@@ -477,7 +477,7 @@ fn run_entries(
             let mut after = entry.clone();
             after.status = "failed".into();
             after.reason = Some(reason);
-            let mut rec = Record::new("queue.result");
+            let mut rec = crate::model::DraftRecord::new("queue.result");
             rec.data =
                 serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
             release_hold(repo, &entry, &mut rec.data)?;
@@ -549,7 +549,7 @@ fn run_entries(
                 after.failure = failure;
                 after.attempts = attempts;
                 after.probes = probes;
-                let mut rec = Record::new("queue.result");
+                let mut rec = crate::model::DraftRecord::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
                 repo.commit_record(&_lock, ctx, rec)?;
             }

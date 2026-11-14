@@ -299,7 +299,7 @@ fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, writte
 
 /// Attach durable objects before signing each new source state. Native copies remain until
 /// command cleanup, so callers can finish with the paths they already hold.
-pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Result<()> {
+pub fn record_states(p: &Project, records: &mut [crate::model::DraftRecord]) -> Result<()> {
     if !enabled(p)? {
         return Ok(());
     }

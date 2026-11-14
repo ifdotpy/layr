@@ -977,14 +977,14 @@ impl<'a> Repo<'a> {
     /// Read the authenticated records of the local database that have an effect here (`effective_records`): a
     /// record that the trust rules refuse is kept in the log but changes no view.
     pub fn read_model(&self) -> Result<layr_model::Project> {
-        let records = self.p.effective_records()?;
-        layr_model::Project::from_records(&self.p.id, records, &self.p.store.machine.id)
+        let records = self.p.authorized_records()?;
+        layr_model::Project::from_authorized_records(&self.p.id, records, &self.p.store.machine.id)
     }
 
     /// Append a completed named transfer through the normal signed record path.
     pub fn record_transfer(&self, ctx: &Ctx, op: &str, remote: &str, url: &str, transfer: &crate::model::Transfer) -> Result<()> {
         let _lock = self.p.lock_maintenance()?;
-        let mut rec = Record::new(op);
+        let mut rec = crate::model::DraftRecord::new(op);
         let mut transfer = transfer.clone();
         if !self.p.is_overlay() {
             transfer.overlays = transfer
@@ -1005,7 +1005,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Write a record. On failure, delete the states it names.
-    pub fn commit_record(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, rec: Record) -> PublishResult<Record> {
+    pub fn commit_record(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, rec: crate::model::DraftRecord) -> PublishResult<Record> {
         let states = rec.states.clone();
         locked.check(&self.p)?;
         match locked.append(rec, &ctx.actor()) {
@@ -1347,7 +1347,7 @@ impl<'a> Repo<'a> {
         }
         // The working content the save changes from: undo of the save goes back to it.
         let before = self.recorded_working(line)?;
-        let mut rec = Record::new("save");
+        let mut rec = crate::model::DraftRecord::new("save");
         rec.states.push(st.clone());
         rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
         self.commit_record(locked, ctx, rec)?;
@@ -1417,7 +1417,7 @@ impl<'a> Repo<'a> {
             return self.state(&line.head);
         }
         st.running = running;
-        let mut rec = Record::new("save");
+        let mut rec = crate::model::DraftRecord::new("save");
         rec.states.push(st.clone());
         // The working state this record leaves: the next save of the line changes from it.
         rec.data = serde_json::json!({"line": line.id, "working_after": st.id});
@@ -2231,7 +2231,7 @@ impl<'a> Repo<'a> {
         let res = (|| -> PublishResult<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
             self.take_caches(ctx, &line, start, source, &dst)?;
-            let mut rec = Record::new("line.create");
+            let mut rec = crate::model::DraftRecord::new("line.create");
             rec.lines.insert(
                 line.id.clone(),
                 LineChange {
@@ -2711,9 +2711,9 @@ impl<'a> Repo<'a> {
         states: Vec<StateRec>,
         working_before: Option<String>,
         data: serde_json::Value,
-    ) -> Result<Record> {
+    ) -> Result<crate::model::DraftRecord> {
         crate::gitbridge::check_git_head(self, line)?;
-        let mut rec = Record::new(op);
+        let mut rec = crate::model::DraftRecord::new(op);
         rec.states = states;
         let working_after = match &working_before {
             Some(_) => self.after_state(ctx, line, op, &mut rec)?,
@@ -2798,7 +2798,7 @@ impl<'a> Repo<'a> {
 
     /// A snapshot of the working content right after an operation, so undo can revert only the
     /// changes of that operation and keep later work.
-    pub fn after_state(&self, ctx: &Ctx, line: &Line, op: &str, rec: &mut Record) -> Result<Option<String>> {
+    pub fn after_state(&self, ctx: &Ctx, line: &Line, op: &str, rec: &mut crate::model::DraftRecord) -> Result<Option<String>> {
         let w = self.working(line);
         if !w.exists() {
             return Ok(None);
@@ -4422,7 +4422,7 @@ mod cache_platform_tests {
             id: id.clone(),
             db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
         };
-        let mut rec = Record::new("project");
+        let mut rec = crate::model::DraftRecord::new("project");
         rec.data = serde_json::json!({"id":id,"name":"p","config":{}});
         p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
         for kind in [StateKind::Cache, StateKind::Derived] {
@@ -4435,7 +4435,7 @@ mod cache_platform_tests {
             if !made {
                 std::fs::create_dir(p.state_path(&id)).unwrap();
             }
-            let mut rec = Record::new("state");
+            let mut rec = crate::model::DraftRecord::new("state");
             rec.states.push(StateRec {
                 id: id.clone(),
                 kind,
@@ -4678,7 +4678,7 @@ impl ValidatedForPublish<'_, '_, PreparedAutomatic<'_, '_>> {
             state.message = message.to_string();
             state.running = running || crate::fsutil::take_unsettled();
             let before = prepared.repo.recorded_working(line)?;
-            let mut rec = Record::new("save");
+            let mut rec = crate::model::DraftRecord::new("save");
             rec.states.push(state.clone());
             rec.data =
                 serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": state.id});
@@ -4806,7 +4806,7 @@ mod commit_record_tests {
             id: id.clone(),
             db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
         };
-        let mut rec = Record::new("project");
+        let mut rec = crate::model::DraftRecord::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {"objects.enabled": objects}});
         p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
         let repo = Repo { p, ctx: None };
@@ -4814,7 +4814,7 @@ mod commit_record_tests {
         let preparation_pin = crate::free::prepare_state(&repo.p, &state)?;
         std::fs::create_dir(repo.p.state_path(&state))?;
         std::fs::write(repo.p.state_path(&state).join("file"), b"committed content")?;
-        let mut rec = Record::new("state");
+        let mut rec = crate::model::DraftRecord::new("state");
         rec.states.push(StateRec {
             id: state.clone(),
             kind: StateKind::Auto,
@@ -4879,7 +4879,7 @@ mod commit_record_tests {
         drop(preparation_pin);
         assert!(!repo.p.db.queued_frees()?.contains(&state), "releasing a preparation must retain an ambiguous publication");
         assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
-        let mut duplicate = Record::new("state");
+        let mut duplicate = crate::model::DraftRecord::new("state");
         duplicate.states.push(repo.p.db.state(&state)?.unwrap());
         let mut unrecorded = duplicate.states[0].clone();
         unrecorded.id = ids::new_id();
@@ -5147,7 +5147,7 @@ mod status_policy_tests {
             ctx: None,
         };
         let actor = crate::model::Actor { uid: rustix::process::geteuid().as_raw(), name: "Test".into(), session: None };
-        let mut rec = Record::new("project");
+        let mut rec = crate::model::DraftRecord::new("project");
         rec.data = serde_json::json!({"id": repo.p.id, "name": "p", "config": {"objects.enabled": true}});
         repo.p.lock_maintenance()?.append(rec, &actor)?;
         let line = Line {
@@ -5171,7 +5171,7 @@ mod status_policy_tests {
                 similar: false,
             },
         )?;
-        let mut rec = Record::new("state");
+        let mut rec = crate::model::DraftRecord::new("state");
         rec.states.push(serde_json::from_value(serde_json::json!({
             "id": line.head, "kind": "commit", "subvol": "", "author": crate::model::Author::default(),
             "time": ids::now_ms(), "tree": written.tree.unwrap().to_string(), "times": written.times.unwrap().to_string(),

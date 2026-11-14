@@ -270,9 +270,9 @@ pub(crate) fn trusted_keys(repo: &Repo) -> Result<BTreeMap<String, VerifyingKey>
 }
 
 fn parse(line: &str, parent: &str, recipient: &str, trusted: &BTreeMap<String, VerifyingKey>) -> Result<Published> {
-    let record = oplog::parse_line(line, None)?.record;
+    let record = oplog::parse_line(line)?.record;
     let signer = trusted.get(&record.machine).context("overlay key signer is not trusted")?;
-    let record = oplog::parse_line(line, Some(signer))?.record;
+    let record = oplog::verify_line(line, signer)?.record;
     crate::model::validate(&record)?;
     if record.op != "overlay.key" {
         bail!("published overlay key is not an overlay.key record");
@@ -648,7 +648,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 readers: readers.clone(),
                 revocation,
             };
-            let mut record = Record::new("overlay.key");
+            let mut record = crate::model::DraftRecord::new("overlay.key");
             record.data = serde_json::to_value(&key)?;
             let record = lock.append(record, &ctx.actor())?;
             let line = orepo.p.db.record_line(&record.machine, record.seq)?.context("overlay key record missing")?;
@@ -660,7 +660,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 published.key.readers = readers.clone();
                 published.key.hidden = hidden;
                 published.key.access_mode = access_mode;
-                let mut record = Record::new("overlay.key");
+                let mut record = crate::model::DraftRecord::new("overlay.key");
                 record.data = serde_json::to_value(&published.key)?;
                 published.record = lock.append(record, &ctx.actor())?;
                 published.line = orepo
@@ -924,7 +924,7 @@ fn previous_key(
 ) -> Result<Option<Published>> {
     let mut previous = remote.cloned();
     for line in orepo.p.effective_jsonl()?.lines() {
-        let rec = oplog::parse_line(line, None)?.record;
+        let rec = oplog::parse_line(line)?.record;
         if rec.op == "overlay.key" && rec.data["store"].as_str() == Some(recipient) {
             let next = parse(line, &repo.p.id, recipient, trusted)?;
             if previous.as_ref().is_none_or(|old| next.order() > old.order()) {
@@ -1162,7 +1162,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             let lines: Vec<String> = records
                 .lines
                 .iter()
-                .filter(|line| oplog::parse_line(line, None).is_ok_and(|s| !waiting.contains(&s.record.machine)))
+                .filter(|line| oplog::parse_line(line).is_ok_and(|s| !waiting.contains(&s.record.machine)))
                 .cloned()
                 .collect();
             if !waiting.is_empty() {
@@ -1330,7 +1330,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
                 let body =
                     api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
                 let line = String::from_utf8(body)?.lines().next().map(str::to_owned).context("empty overlay segment")?;
-                oplog::parse_line(&line, None)?.record.project
+                oplog::parse_line(&line)?.record.project
             } else {
                 op.id.clone()
             };
@@ -1445,7 +1445,7 @@ mod tests {
             .filter(|o| o.key.contains("/keys/"))
             .map(|o| {
                 let line = String::from_utf8(backend.get(&o.key).unwrap().unwrap()).unwrap();
-                oplog::parse_line(&line, None).unwrap().record
+                oplog::parse_line(&line).unwrap().record
             })
             .collect();
         published.sort_by(|a, b| (a.time, &a.machine, a.seq).cmp(&(b.time, &b.machine, b.seq)));
@@ -1500,7 +1500,7 @@ mod tests {
         let parent = crate::ids::new_id();
         let store = keys::recipient_of(&keys::generate_identity()).unwrap();
         let overlay = crate::ids::new_id();
-        let mut rec = Record::new("overlay.key");
+        let mut rec = Record::untrusted_preview("overlay.key");
         rec.id = crate::ids::new_id();
         rec.machine = machine.clone();
         rec.project = overlay.clone();

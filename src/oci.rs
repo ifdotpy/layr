@@ -602,7 +602,7 @@ fn register_layer(
     layer: &Descriptor,
 ) -> Result<()> {
         locked.check(&repo.p)?;
-    use crate::model::{Record, RefChange, RefState, StateKind};
+    use crate::model::{RefChange, RefState, StateKind};
     let key = digest_hex(&layer.digest)?;
     let name = format!("derived/oci-layer-v1/{key}");
     let before = repo.p.db.ref_value(&name, crate::ids::now_ms())?;
@@ -634,7 +634,7 @@ fn register_layer(
         let mut state = repo.new_state(ctx, &work, StateKind::Derived, vec![source.into()], "OCI layer", None)?;
         state.context = Some("oci-layer-v1".into());
         let id = state.id.clone();
-        let mut rec = Record::new("derive");
+        let mut rec = crate::model::DraftRecord::new("derive");
         rec.states.push(state);
         rec.data = json!({"ref_change": RefChange { name: name.clone(), before, after: Some(RefState { name, target: id.clone(), expires_at: None }) }});
         repo.commit_record(locked, ctx, rec)?;

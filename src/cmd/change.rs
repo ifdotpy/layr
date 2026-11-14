@@ -40,7 +40,7 @@ pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
     let next = model.numbering().next;
     let numbers: serde_json::Map<String, serde_json::Value> =
         todo.iter().zip(next..).map(|(change, n)| (change.clone(), serde_json::json!(n))).collect();
-    let mut rec = crate::model::Record::new(layr_model::changes::NUMBER_OP);
+    let mut rec = crate::model::DraftRecord::new(layr_model::changes::NUMBER_OP);
     rec.data = serde_json::json!({ "numbers": numbers });
     repo.commit_record(&_lock, ctx, rec)?;
     Ok(todo.len())
@@ -305,7 +305,7 @@ fn lifecycle(ctx: &Ctx, repo: &Repo, command: &str, which: &str, a: &crate::args
     if !author && repo.require(ctx, "line.manage").is_err() {
         bail!("permission denied: only the author of {name} or a maintainer can {command} it");
     }
-    let mut rec = crate::model::Record::new(match command {
+    let mut rec = crate::model::DraftRecord::new(match command {
         "edit" => EDIT_OP,
         "close" => CLOSE_OP,
         _ => REOPEN_OP,
@@ -396,7 +396,7 @@ fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Resul
                 bail!("the trust of machine '{target}' ends: its numbers would stop counting; use a machine without an end");
             }
         }
-        let mut rec = crate::model::Record::new(layr_model::changes::HANDOFF_OP);
+        let mut rec = crate::model::DraftRecord::new(layr_model::changes::HANDOFF_OP);
         rec.data = serde_json::json!({"machine": machine, "next": model.numbering().next});
         repo.commit_record(&_lock, ctx, rec)?;
     }

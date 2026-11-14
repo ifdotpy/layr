@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Record, StateKind, StateRec};
+use crate::model::{StateKind, StateRec};
 use crate::overlay::{Mode, Props, PROPS};
 use crate::repo::Repo;
 use crate::storage as btrfs;
@@ -75,10 +75,10 @@ pub(crate) fn make_overlay(
             cache_key_parts: Default::default(),
             parts: Default::default(),
         };
-        let mut rec = Record::new("commit");
+        let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st);
         orepo.commit_record(&overlay_lock, ctx, rec)?;
-        let mut rec = Record::new("overlay.create");
+        let mut rec = crate::model::DraftRecord::new("overlay.create");
         let mut cfg = serde_json::Map::new();
         cfg.insert(
             format!("overlay.{name}"),

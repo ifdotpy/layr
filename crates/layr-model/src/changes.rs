@@ -279,8 +279,8 @@ mod tests {
     }
     /// Fold the records in the given order and in the reverse order: both must agree.
     fn both_orders(records: Vec<Record>) -> Project {
-        let one = Project::from_records("project", records.clone(), "a").unwrap();
-        let other = Project::from_records("project", records.into_iter().rev().collect::<Vec<_>>(), "b").unwrap();
+        let one = Project::preview_records("project", records.clone(), "a").unwrap();
+        let other = Project::preview_records("project", records.into_iter().rev().collect::<Vec<_>>(), "b").unwrap();
         assert_eq!(one.change_views(), other.change_views(), "arrival order or perspective changed the views");
         assert_eq!(one.numbering(), other.numbering());
         one

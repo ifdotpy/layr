@@ -435,8 +435,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 size += lines[end].len() + 1;
                 end += 1;
             }
-            let first = oplog::parse_line(&lines[start], None)?.record.seq;
-            let last = oplog::parse_line(&lines[end - 1], None)?.record.seq;
+            let first = oplog::parse_line(&lines[start])?.record.seq;
+            let last = oplog::parse_line(&lines[end - 1])?.record.seq;
             let mut bytes = lines[start..end].join("\n").into_bytes();
             bytes.push(b'\n');
             // Publish ordered, bounded segments. A retry resumes after the last complete segment.
@@ -1269,7 +1269,7 @@ mod tests {
     }
     #[test]
     fn live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option() {
-        use crate::model::{Record, StateRec};
+        use crate::model::{StateRec};
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
@@ -1288,7 +1288,7 @@ mod tests {
             id: store.project.clone(),
             db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
         project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let mut source = None;
@@ -1303,7 +1303,7 @@ mod tests {
                 "parents":if kind=="auto" {source.clone().into_iter().collect::<Vec<_>>()}else{vec![]},
                 "time":crate::ids::now_ms()}))
             .unwrap();
-            let mut record = Record::new("state");
+            let mut record = crate::model::DraftRecord::new("state");
             record.states.push(state);
             project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "commit" {
@@ -1320,7 +1320,7 @@ mod tests {
                     "derived"
                 }
             );
-            let mut record = Record::new("ref.set");
+            let mut record = crate::model::DraftRecord::new("ref.set");
             record.data = serde_json::json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id}}});
             project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "cache" {
@@ -1341,7 +1341,7 @@ mod tests {
     }
 
     fn branch_fixture<'a>(ctx: &'a Ctx, store: &Store) -> Repo<'a> {
-        use crate::model::{Record, StateRec};
+        use crate::model::{StateRec};
         let dir = ctx.store.project_dir("p").unwrap();
         let existing = dir.join("meta/db/layr.sqlite").exists();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
@@ -1355,7 +1355,7 @@ mod tests {
             db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
         };
         if !existing {
-            let mut record = Record::new("project");
+            let mut record = crate::model::DraftRecord::new("project");
             record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
             project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             let mut parents = Vec::<String>::new();
@@ -1379,7 +1379,7 @@ mod tests {
                     "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
                     "parents":parents,"time":crate::ids::now_ms()}))
                 .unwrap();
-                let mut record = Record::new("state");
+                let mut record = crate::model::DraftRecord::new("state");
                 record.states.push(state);
                 project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
                 if n == 0 {
@@ -2084,7 +2084,7 @@ mod tests {
             .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
             .unwrap();
         let descriptor = store.descriptor().unwrap();
-        let mut record = crate::model::Record::new("machine");
+        let mut record = crate::model::Record::untrusted_preview("machine");
         record.id = crate::ids::new_id();
         record.seq = 1;
         record.machine = store.machine.clone();
@@ -2141,7 +2141,7 @@ mod tests {
     #[test]
     #[ignore = "portable-state fixture invoked by t23-store-portable-peer"]
     fn emit_portable_v2_fixture() {
-        use crate::model::{LineChange, LineState, Record, StateRec};
+        use crate::model::{LineChange, LineState, StateRec};
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         // The fixture writer runs only from t23, which sets its folders.
@@ -2171,11 +2171,11 @@ mod tests {
         let line_id = crate::ids::new_id();
         let state:StateRec=serde_json::from_value(serde_json::json!({"id":state_id,"kind":"commit","parents":[],"line":line_id,
             "subvol":crate::ids::new_id(),"author":{"name":"Fixture","email":"fixture@example.test"},"message":"portable source","time":1})).unwrap();
-        let mut first = Record::new("machine");
+        let mut first = crate::model::Record::untrusted_preview("machine");
         first.data = serde_json::json!({"name":"portable","public_key":hex::encode(store.key.verifying_key().to_bytes())});
-        let mut project = Record::new("project");
+        let mut project = crate::model::Record::untrusted_preview("project");
         project.data = serde_json::json!({"id":store.project,"name":"project","config":{}});
-        let mut commit = Record::new("commit");
+        let mut commit = crate::model::Record::untrusted_preview("commit");
         commit.states.push(state);
         commit.lines.insert(
             line_id,

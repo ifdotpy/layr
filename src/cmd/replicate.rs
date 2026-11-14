@@ -897,10 +897,10 @@ fn exchange_overlays<R: Read, W: Write>(
                 let lines = recv_records(w)?;
                 let trusted = crate::store_remote::overlays::trusted_keys(repo)?;
                 for line in &lines {
-                    let signed = crate::oplog::parse_line(line, None)?;
+                    let signed = crate::oplog::parse_line(line)?;
                     let key =
                         trusted.get(&signed.record.machine).context("overlay record signer is not trusted by the parent")?;
-                    crate::oplog::parse_line(line, Some(key))?;
+                    crate::oplog::verify_line(line, key)?;
                     if signed.record.project != id {
                         bail!("overlay record belongs to another project");
                     }
@@ -944,7 +944,7 @@ mod tests {
     #[ignore = "requires a root Btrfs fixture and a built peer binary"]
     fn auxiliary_states_cross_the_peer_protocol() {
         use crate::ctx::Caller;
-        use crate::model::Record;
+        
         // Only a root Btrfs fixture sets this folder.
         let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else {
             return;
@@ -968,10 +968,10 @@ mod tests {
             let mut state = repo.new_state(&ctx, &source, kind, vec![], "peer fixture", None).unwrap();
             state.context = Some("peer-fixture-v1".into());
             let id = state.id.clone();
-            let mut rec = Record::new("fixture");
+            let mut rec = crate::model::DraftRecord::new("fixture");
             rec.states.push(state);
             repo.commit_record(&_lock, &ctx, rec).unwrap();
-            let mut rec = Record::new("ref.set");
+            let mut rec = crate::model::DraftRecord::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id,"expires_at":null}}});
             repo.commit_record(&_lock, &ctx, rec).unwrap();
             ids.push(id);
@@ -1007,7 +1007,7 @@ mod tests {
 
     #[test]
     fn live_refs_include_auto_ancestry_and_gate_only_cache_states() {
-        use crate::model::{Author, Record};
+        use crate::model::{Author};
         let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
         let store = crate::store::Store::open(&dir).unwrap();
         let project_dir = store.project_dir("p").unwrap();
@@ -1022,7 +1022,7 @@ mod tests {
             db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
         };
         let actor = crate::model::Actor { uid: 0, name: "root".into(), session: None };
-        let mut rec = Record::new("project");
+        let mut rec = crate::model::DraftRecord::new("project");
         rec.data = json!({"id":p.id,"name":"p","config":{}});
         p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         let mut all: Vec<String> = Vec::new();
@@ -1031,7 +1031,7 @@ mod tests {
         {
             let id = ids::new_id();
             let parents = if index == 1 { vec![all[0].clone()] } else { vec![] };
-            let mut rec = Record::new("fixture");
+            let mut rec = crate::model::DraftRecord::new("fixture");
             rec.states.push(
                 serde_json::from_value(json!({"id":id,"kind":kind,"parents":parents,
                 "subvol":"","author":Author::default(),"time":index as i64,"context":"peer-fixture-v1"}))
@@ -1043,7 +1043,7 @@ mod tests {
         for (name, index, expires_at) in
             [("pins/auto", 1, None), ("pins/expired", 2, Some(1)), ("caches/test", 3, None), ("derived/test", 4, None)]
         {
-            let mut rec = Record::new("ref.set");
+            let mut rec = crate::model::DraftRecord::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":all[index],"expires_at":expires_at}}});
             p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         }
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test]
     fn deleted_line_snapshots_are_undo_dependencies() {
-        let mut rec = crate::model::Record::new("line.delete");
+        let mut rec = crate::model::Record::untrusted_preview("line.delete");
         rec.lines.insert(
             "line".into(),
             crate::model::LineChange { before: None, after: None, working_before: Some("working".into()), working_after: None },

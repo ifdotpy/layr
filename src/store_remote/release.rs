@@ -1,6 +1,8 @@
 //! Stream built release files through the existing epoch vault and immutable object transport.
 use super::{reader, writer, Options, Store};
-use crate::{ctx::Ctx, ids, model::Record, repo::Repo};
+use crate::{ctx::Ctx, ids, repo::Repo};
+#[cfg(test)]
+use crate::model::Record;
 use anyhow::{bail, Context, Result};
 use layr_hashers::{ContentAddress, Digest};
 use layr_model::release::{self, File, Files};
@@ -95,171 +97,24 @@ impl Out<'_> {
     }
 }
 
-/// What a record changes besides its data, for `layr_store::trust`.
-fn payload_of(record: &crate::model::Record) -> layr_store::trust::Payload<'_> {
-    let lines = record
-        .lines
-        .iter()
-        .map(|(id, change)| {
-            let name = change.after.as_ref().map(|after| after.name.as_str());
-            let after = change.after.as_ref();
-            layr_store::trust::LineMove {
-                id,
-                new: change.before.is_none(),
-                name,
-                own: false,
-                renamed: change.before.as_ref().is_some_and(|before| Some(before.name.as_str()) != name),
-                head: after.map(|a| a.head.as_str()),
-                owner: after.map(|a| a.owner),
-                machine: after.map(|a| a.machine.as_str()),
-            }
-        })
-        .collect();
-    layr_store::trust::Payload { states: record.states.iter().map(|s| s.line.as_deref()).collect(), lines }
-}
-
-/// The accepted history before the record being checked, in the model's time/machine/sequence order.
-struct Folded {
-    lines: BTreeMap<String, (String, u32, String)>,
-    queue: BTreeMap<String, serde_json::Value>,
-    refs: BTreeMap<String, String>,
-    expires: BTreeMap<String, i64>,
-    /// The sole signer in the current target run; a mixed-signature run has none.
-    setters: BTreeMap<String, String>,
-    now: i64,
-    at: i64,
-}
-
-impl Folded {
-    fn new(now: i64) -> Folded {
-        Folded {
-            lines: BTreeMap::new(),
-            queue: BTreeMap::new(),
-            refs: BTreeMap::new(),
-            expires: BTreeMap::new(),
-            setters: BTreeMap::new(),
-            now,
-            at: now,
-        }
-    }
-
-    fn apply(&mut self, record: &Record) {
-        for (id, change) in &record.lines {
-            match &change.after {
-                Some(line) => {
-                    self.lines.insert(id.clone(), (line.name.clone(), line.owner, line.machine.clone()));
-                }
-                None => {
-                    self.lines.remove(id);
-                }
-            }
-        }
-        self.apply_queue(record);
-        let change = &record.data["ref_change"];
-        if let Some(name) = change["name"].as_str() {
-            match change["after"]["expires_at"].as_i64() {
-                Some(end) => {
-                    self.expires.insert(name.to_string(), end);
-                }
-                None => {
-                    self.expires.remove(name);
-                }
-            }
-            match change["after"]["target"].as_str() {
-                Some(target) if self.refs.get(name).map(String::as_str) == Some(target) => {
-                    // Every set in this target run must have the same signer. A retry cannot undo ambiguity.
-                    if self.setters.get(name) != Some(&record.machine) {
-                        self.setters.remove(name);
-                    }
-                }
-                Some(target) => {
-                    self.refs.insert(name.to_string(), target.to_string());
-                    self.setters.insert(name.to_string(), record.machine.clone());
-                }
-                None => {
-                    self.refs.remove(name);
-                    self.setters.remove(name);
-                }
-            };
-        }
-    }
-
-    fn apply_queue(&mut self, record: &Record) {
-        let change = &record.data["queue_change"];
-        if let Some(id) = change["id"].as_str() {
-            match &change["after"] {
-                serde_json::Value::Null => self.queue.remove(id),
-                after => self.queue.insert(id.to_string(), after.clone()),
-            };
-        }
-    }
-}
-
-impl layr_store::trust::Current for Folded {
-    fn line(&self, id: &str) -> Option<(String, u32, String)> {
-        self.lines.get(id).cloned()
-    }
-
-    fn queue_entry(&self, id: &str) -> Option<serde_json::Value> {
-        self.queue.get(id).cloned()
-    }
-
-    fn ref_target(&self, name: &str) -> Option<String> {
-        if self.expires.get(name).is_some_and(|end| self.at >= *end) {
-            return None;
-        }
-        self.refs.get(name).cloned()
-    }
-
-    fn ref_setter(&self, name: &str) -> Option<String> {
-        if self.expires.get(name).is_some_and(|end| self.at >= *end) {
-            return None;
-        }
-        self.setters.get(name).cloned()
-    }
-
-    fn now(&self) -> i64 {
-        self.now
-    }
-}
-
-/// Keep full-writer records and merge records accepted against the earlier signed history.
-/// Input signatures and contiguous machine prefixes must already be verified.
-fn effective_lines(project: &str, lines: &[String], _machine: &str) -> Result<(layr_store::public::Writers, Vec<String>)> {
-    let writers = layr_store::public::release_writers_checked(project, lines)?;
-    let mut parsed: Vec<(&String, crate::model::Record)> =
-        lines.iter().map(|line| crate::oplog::parse_line(line, None).map(|p| (line, p.record))).collect::<Result<_>>()?;
-    parsed.sort_by(|a, b| (a.1.time, &a.1.machine, a.1.seq).cmp(&(b.1.time, &b.1.machine, b.1.seq)));
-    let mut kept = Vec::with_capacity(lines.len());
-    let mut current = Folded::new(ids::now_ms());
-    for (line, record) in parsed {
-        current.at = record.time;
-        if let Some((_, terms)) = writers.merge.get(&record.machine) {
-            if let Some(why) =
-                terms.refusal_in(record.time, &record.op, &record.data, None, &payload_of(&record), &record.machine, &current)
-            {
-                if std::env::var_os("LAYR_TRACE").is_some() {
-                    let (seq, machine, op) = (record.seq, ids::short(&record.machine), &record.op);
-                    eprintln!("trace release: record {seq} of merge machine {machine} ({op}) has no effect: {why}");
-                }
-                continue;
-            }
-        } else if !writers.full.contains_key(&record.machine) {
-            continue;
-        }
-        current.apply(&record);
-        kept.push(line.clone());
-    }
-    Ok((writers, kept))
-}
-
-pub(super) fn model(project: &str, records: &reader::Records, machine: &str) -> Result<layr_model::Project> {
+/// Release readers accept only full writers and limited merge executors. All
+/// ordered role checks run in the shared authorization fold, before these proofs
+/// can enter a model. Unknown signing identities receive no authorization.
+fn authorized_records(
+    project: &str,
+    records: &reader::Records,
+) -> Result<Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>> {
     if !records.gaps.is_empty() {
         bail!("remote record gaps prevent reading release files");
     }
-    let (_, lines) = effective_lines(project, &records.lines, machine)?;
-    let model = layr_model::Model::from_verified_lines(lines.iter().map(String::as_str), machine)?;
-    model.projects.get(project).cloned().context("project is absent from remote history; push it first")
+    Ok(layr_model::record::authorize_lines(project, &records.lines, &records.keys, ids::now_ms())?
+        .into_iter().filter(|record| record.scope().terms().is_none_or(|terms|
+            matches!(terms.role, layr_store::trust::Role::Full | layr_store::trust::Role::Merge)))
+        .collect())
+}
+
+pub(super) fn model(project: &str, records: &reader::Records, machine: &str) -> Result<layr_model::Project> {
+    layr_model::Project::from_authorized_records(project, authorized_records(project, records)?, machine)
 }
 
 impl Store {
@@ -300,11 +155,14 @@ impl Store {
         if !history.gaps.is_empty() {
             bail!("remote record gaps prevent verifying main");
         }
-        let (writers, lines) = effective_lines(&descriptor.project, &history.lines, &self.machine)?;
-        let records: Vec<_> =
-            lines.iter().filter_map(|line| crate::oplog::parse_line(line, None).ok()).map(|parsed| parsed.record).collect();
-        let creator = layr_model::project_perspective(&descriptor.project, &records)?;
-        let project = model(&descriptor.project, &history, &creator)?;
+        let authorized = authorized_records(&descriptor.project, &history)?;
+        let creator = layr_model::project_perspective(&descriptor.project, authorized.iter().map(|r| r.record()))?;
+        let now = ids::now_ms();
+        let writers: BTreeMap<_, _> = authorized.iter()
+            .filter(|r| r.scope().terms().is_none_or(|terms| terms.live(now)))
+            .map(|r| (r.record().machine.clone(), *r.signed().key())).collect();
+        let records: Vec<_> = authorized.iter().map(|r| r.record().clone()).collect();
+        let project = layr_model::Project::from_authorized_records(&descriptor.project, authorized, &creator)?;
         let mains: Vec<_> = project.line_list().into_iter().filter(|line| line.name == "main").collect();
         if mains.len() != 1 {
             bail!("remote must have exactly one main line");
@@ -319,7 +177,7 @@ impl Store {
         let machine = value.as_str().context("invalid queue.merge-machine")?;
         let view = project.lines.get(&main.id).context("remote main line is missing")?;
         let Some(merged) = view.heads.get(machine) else { return Ok((project, main.head.clone())) };
-        if !crate::model::is_uuid(machine) || writers.key(machine, ids::now_ms()).is_none() {
+        if !crate::model::is_uuid(machine) || writers.get(machine).is_none() {
             bail!("queue.merge-machine is not a trusted machine");
         }
         if project.ancestors(&main.head).iter().any(|state| state == merged) {
@@ -501,7 +359,7 @@ impl Store {
         let history = reader::records(&self.backend, &identity, &descriptor.project)?;
         let local = repo.p.db.all_lines()?;
         let trust_source =
-            if history.lines.iter().any(|l| crate::oplog::parse_line(l, None).is_ok_and(|r| r.record.op == "project")) {
+            if history.lines.iter().any(|l| crate::oplog::parse_line(l).is_ok_and(|r| r.record.op == "project")) {
                 &history.lines
             } else {
                 &local
@@ -510,10 +368,10 @@ impl Store {
         if writers.key(&self.machine, ids::now_ms()) != Some(&self.key.verifying_key()) {
             bail!("release attach requires a trusted writer or merge machine");
         }
-        if history.lines.iter().any(|l| crate::oplog::parse_line(l, None).is_ok_and(|r| r.record.op == "project")) {
+        if history.lines.iter().any(|l| crate::oplog::parse_line(l).is_ok_and(|r| r.record.op == "project")) {
             check_ref(&model(&descriptor.project, &history, &self.machine)?, name, &before.target)?;
         } else if !history.gaps.is_empty()
-            || history.lines.iter().any(|l| crate::oplog::parse_line(l, None).is_ok_and(|r| r.record.op != "machine"))
+            || history.lines.iter().any(|l| crate::oplog::parse_line(l).is_ok_and(|r| r.record.op != "machine"))
         {
             bail!("remote history has no project creator");
         }
@@ -594,7 +452,7 @@ impl Store {
                 bail!("{key} already lists other files");
             }
         }
-        let mut record = Record::new("release.files");
+        let mut record = crate::model::DraftRecord::new("release.files");
         record.data = serde_json::to_value(&files)?;
         repo.commit_record(&lock, ctx, record)?;
         writer::push_locked(self, ctx, repo, &Options::default())?;

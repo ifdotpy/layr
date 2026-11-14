@@ -8,7 +8,7 @@ use super::{exit, here, Here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Record, StateKind};
+use crate::model::{StateKind};
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_objects::{Id, StateRef, Store};
@@ -423,7 +423,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 map.insert(id.clone(), serde_json::json!({"times": r.times.hex(), "tree": r.tree.hex()}));
             }
-            let mut rec = Record::new(layr_model::validation::STATE_TREE_OP);
+            let mut rec = crate::model::DraftRecord::new(layr_model::validation::STATE_TREE_OP);
             rec.data = serde_json::json!({ "states": map });
             repo.commit_record(&_lock, ctx, rec)?;
         }

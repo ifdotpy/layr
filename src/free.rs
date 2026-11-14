@@ -280,7 +280,7 @@ fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
     let repo = crate::repo::Repo::from_project(ctx, p)?;
     let crate::store::LockAttempt::Acquired(_lock) = repo.p.try_lock()? else { return Ok(()) };
     for expired in repo.p.db.expired_refs(crate::ids::now_ms())? {
-        let mut rec = crate::model::Record::new("ref.expire");
+        let mut rec = crate::model::DraftRecord::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name: expired.name.clone(), before: Some(expired), after: None }});
         repo.commit_record(&_lock, ctx, rec)?;
     }

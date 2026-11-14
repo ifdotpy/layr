@@ -408,7 +408,7 @@ mod tests {
     }
     #[test]
     fn absence_does_not_claim_a_probe_ran() {
-        let project = Project::from_records("p", vec![], "").unwrap();
+        let project = Project::preview_records("p", vec![], "").unwrap();
         let mut context = Context::default();
         context.sources.insert("s".into(), "available".into());
         context.definitions.insert("s".into(), BTreeMap::from([("test".into(), definition(Kind::Files))]));
@@ -420,7 +420,7 @@ mod tests {
     fn collected_source_definitions_follow_attestation_id_order() {
         let mut records = Vec::new();
         for (seq, id, argv) in [(1, "z", "last-by-id"), (2, "a", "last-by-time")] {
-            let mut record = crate::Record::new("attest");
+            let mut record = crate::Record::untrusted_preview("attest");
             record.id = id.into();
             record.seq = seq;
             record.time = seq as i64;
@@ -431,7 +431,7 @@ mod tests {
             record.data = json!({"attestation":{"format":1,"attestation_id":id,"subject":{"kind":"state","id":"subject"},"kind":"check","payload_digest":"00","signer":"machine","time":seq},"check":{"probe":"test","definition":probe}});
             records.push(record);
         }
-        let project = Project::from_records("project", records, "machine").unwrap();
+        let project = Project::preview_records("project", records, "machine").unwrap();
         let subject = Subject { kind: "state".into(), id: "subject".into() };
         let definitions = Context::default().definitions(&project, &subject);
         assert_eq!(definitions["test"].run, ["last-by-id"]);

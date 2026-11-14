@@ -31,7 +31,7 @@ fn publications(root: &Backend, descriptor: &Descriptor) -> Result<Vec<Published
     for object in root.list("keys/")? {
         let bytes = root.get(&object.key)?.context("project epoch disappeared")?;
         let line = String::from_utf8(bytes)?;
-        let record = oplog::parse_line(&line, None)?.record;
+        let record = oplog::parse_line(&line)?.record;
         if record.op != "project.key" || record.project != descriptor.project {
             bail!("invalid project epoch record");
         }
@@ -134,7 +134,7 @@ fn resolve_chain(
     }
     for p in &chain {
         let signer = trusted.get(&p.record.machine).context("project epoch signer is not a trusted writer")?;
-        oplog::parse_line(&p.line, Some(signer))?;
+        oplog::verify_line(&p.line, signer)?;
         if !current.lines.contains(&p.line) {
             bail!("rotation in progress: epoch discovery is not yet in its encrypted history");
         }
@@ -143,7 +143,7 @@ fn resolve_chain(
         .lines
         .iter()
         .rev()
-        .filter_map(|line| oplog::parse_line(line, None).ok())
+        .filter_map(|line| oplog::parse_line(line).ok())
         .find(|r| r.record.op == "project.readers" && r.record.data["epoch"] == latest.key.epoch)
         .context("project epoch has no encrypted reader set")?;
     let readers: BTreeMap<String, String> = serde_json::from_value(readers.record.data["readers"].clone())?;
@@ -223,7 +223,7 @@ fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Res
 fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
     let mut found = None;
     for line in repo.p.effective_jsonl()?.lines() {
-        let record = oplog::parse_line(line, None)?.record;
+        let record = oplog::parse_line(line)?.record;
         if record.op != "project.key" || record.machine != store.machine {
             continue;
         }
@@ -233,7 +233,7 @@ fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
         if !path.exists() {
             continue;
         }
-        oplog::parse_line(line, Some(&store.key.verifying_key()))?;
+        oplog::verify_line(line, &store.key.verifying_key())?;
         let identity = keys::open_machine_slot(&std::fs::read(&path)?, &store.key)?;
         if key.project != repo.p.id || keys::recipient_of(&identity)? != key.recipient {
             bail!("pending rotation identity differs from its signed record");
@@ -247,7 +247,7 @@ fn pending_rotation(store: &Store, repo: &Repo) -> Result<Option<Published>> {
 fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String, String>> {
     let mut readers = None;
     for line in repo.p.effective_jsonl()?.lines() {
-        let r = oplog::parse_line(line, None)?.record;
+        let r = oplog::parse_line(line)?.record;
         if r.op == "project.readers" && r.data["epoch"] == key.epoch {
             readers = Some(serde_json::from_value(r.data["readers"].clone())?);
         }
@@ -262,7 +262,7 @@ fn pending_readers(repo: &Repo, key: &Key) -> Result<BTreeMap<String, String>> {
 pub(crate) fn project_mode(repo: &Repo) -> Result<Mode> {
     let mut mode = Mode::Private;
     for line in repo.p.effective_jsonl()?.lines() {
-        let r = oplog::parse_line(line, None)?.record;
+        let r = oplog::parse_line(line)?.record;
         if r.op == "project.mode" {
             mode = serde_json::from_value(r.data["mode"].clone())?;
         }
@@ -276,7 +276,7 @@ fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<Str
     let mut map = BTreeMap::new();
     let anchor = store.root_descriptor()?.recipient;
     for line in repo.p.effective_jsonl()?.lines() {
-        let r = oplog::parse_line(line, None)?.record;
+        let r = oplog::parse_line(line)?.record;
         if r.op == "project.reader" && r.data["store"] == anchor {
             map.insert(
                 r.data["principal"].as_str().context("reader principal missing")?.to_string(),
@@ -319,12 +319,12 @@ fn readers(store: &Store, repo: &Repo, remove: &[String]) -> Result<BTreeMap<Str
             if public.is_none() {
                 if let Some(bytes) = store.backend.get(&format!("slots/machine-{id}.key.age"))? {
                     let line = String::from_utf8(keys::decrypt(&identity, &bytes)?)?;
-                    let record = oplog::parse_line(&line, None)?.record;
+                    let record = oplog::parse_line(&line)?.record;
                     if record.op != "machine" || record.seq != 1 || record.machine != id || record.project != descriptor.project {
                         bail!("reader key metadata has invalid machine or project binding");
                     }
                     let key = oplog::machine_key(&record)?;
-                    oplog::parse_line(&line, Some(&key))?;
+                    oplog::verify_line(&line, &key)?;
                     public = Some(hex::encode(key.to_bytes()));
                 }
             }
@@ -524,11 +524,11 @@ impl Store {
                 let path = self.dir.join("project-keys").join(format!("{}.age", key.epoch));
                 std::fs::create_dir_all(path.parent().context("key folder")?)?;
                 crate::fsutil::atomic_write(&path, &keys::machine_slot(&next_identity, &self.key.verifying_key())?, 0o600)?;
-                let mut audience = Record::new("project.readers");
+                let mut audience = crate::model::DraftRecord::new("project.readers");
                 audience.data =
                     serde_json::json!({"epoch":key.epoch,"readers":readers,"store":self.root_descriptor()?.recipient});
                 repo.commit_record(&_lock, ctx, audience)?;
-                let mut record = Record::new("project.key");
+                let mut record = crate::model::DraftRecord::new("project.key");
                 record.data = serde_json::to_value(&key)?;
                 let record = _lock.append(record, &ctx.actor())?;
                 let line = repo.p.db.record_line(&record.machine, record.seq)?.context("epoch record missing")?;
@@ -570,10 +570,10 @@ impl Store {
                 .p
                 .effective_jsonl()?
                 .lines()
-                .filter_map(|line| oplog::parse_line(line, None).ok())
+                .filter_map(|line| oplog::parse_line(line).ok())
                 .any(|r| r.record.op == "project.mode" && r.record.data["epoch"] == key.epoch);
             if !recorded {
-                let mut event = Record::new("project.mode");
+                let mut event = crate::model::DraftRecord::new("project.mode");
                 event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
                 repo.commit_record(&_lock, ctx, event)?;
             }
@@ -595,12 +595,12 @@ impl Store {
             // The writer then appends the local suffix after these exact prefixes.
             let mut by_machine: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for line in &remote.lines {
-                let r = oplog::parse_line(line, None)?.record;
+                let r = oplog::parse_line(line)?.record;
                 by_machine.entry(r.machine).or_default().push(line.clone());
             }
             for (machine, mut lines) in by_machine {
-                lines.sort_by_key(|l| oplog::parse_line(l, None).expect("verified record").record.seq);
-                let last = oplog::parse_line(lines.last().context("empty machine history")?, None)?.record.seq;
+                lines.sort_by_key(|l| oplog::parse_line(l).expect("verified record").record.seq);
+                let last = oplog::parse_line(lines.last().context("empty machine history")?)?.record.seq;
                 let bytes = format!("{}\n", lines.join("\n"));
                 self.backend
                     .put_new(&super::format::segment_name(&machine, 1, last), keys::encrypt(&key.recipient, bytes.as_bytes())?)?;
@@ -613,7 +613,7 @@ impl Store {
             for name in &tightened {
                 let orepo = repo.overlay_repo(name)?;
                 let _overlay_lock = orepo.p.lock_maintenance()?;
-                let mut event = Record::new("overlay.mode");
+                let mut event = crate::model::DraftRecord::new("overlay.mode");
                 event.data = serde_json::json!({"mode":mode,"config":{"overlay.access-mode":mode,"overlay.revocation":crate::ids::new_id()}});
                 orepo.commit_record(&_overlay_lock, ctx, event)?;
             }
@@ -638,7 +638,7 @@ impl Store {
                 self.publish_public(ctx, repo)?;
             }
             if mode != old_mode || project_mode(repo)? != mode {
-                let mut event = Record::new("project.mode");
+                let mut event = crate::model::DraftRecord::new("project.mode");
                 event.data = serde_json::json!({"mode":mode,"reason":reason});
                 repo.commit_record(&_lock, ctx, event)?;
                 writer::push_locked(self, ctx, repo, &Options::default())?;

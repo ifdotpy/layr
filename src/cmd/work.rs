@@ -8,7 +8,7 @@ use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Conflict, Line, Record, StateKind};
+use crate::model::{Conflict, Line, StateKind};
 use crate::radar::Overlap;
 use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
@@ -2014,8 +2014,8 @@ fn working_record(
     line: &Line,
     op: &str,
     working_before: Option<String>,
-) -> Result<(Record, Vec<crate::model::StateRec>)> {
-    let mut rec = Record::new(op);
+) -> Result<(crate::model::DraftRecord, Vec<crate::model::StateRec>)> {
+    let mut rec = crate::model::DraftRecord::new(op);
     let working_after = repo.after_state(ctx, line, op, &mut rec)?;
     rec.lines.insert(
         line.id.clone(),

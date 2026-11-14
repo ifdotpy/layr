@@ -167,7 +167,7 @@ impl Db {
     pub fn from_records(lines: &[String]) -> Result<Self> {
         let db = Self::open(Path::new(":memory:"))?;
         for line in lines {
-            db.derive_rows(&crate::oplog::parse_line(line, None)?.record, &|_| false, "")?;
+            db.derive_rows(&crate::oplog::parse_line(line)?.record, &|_| false, "")?;
         }
         Ok(db)
     }
@@ -1255,7 +1255,7 @@ impl Db {
             WHERE a.kind='approval' AND json_extract(r.raw,'$.r.data.declassify') IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM attestation_revocations v WHERE v.target=a.id AND v.machine=a.machine AND v.uid=a.uid AND v.ord>a.ord)")?;
         let raw = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        raw.into_iter().map(|r| Ok(crate::oplog::parse_line(&r, None)?.record)).collect()
+        raw.into_iter().map(|r| Ok(crate::oplog::parse_line(&r)?.record)).collect()
     }
 
     pub fn checks(&self, state: &str) -> Result<Vec<(String, i64, i64, String)>> {
@@ -1503,7 +1503,7 @@ impl Db {
         let raw: Option<String> =
             self.conn.prepare_cached("SELECT raw FROM records WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
         match raw {
-            Some(l) => Ok(Some(crate::oplog::parse_line(&l, None)?.record)),
+            Some(l) => Ok(Some(crate::oplog::parse_line(&l)?.record)),
             None => Ok(None),
         }
     }
@@ -1513,7 +1513,7 @@ impl Db {
         let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE op='line.create' AND instr(raw, ?1) > 0")?;
         let v = st.query_map(params![line], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         for l in v {
-            let rec = crate::oplog::parse_line(&l, None)?.record;
+            let rec = crate::oplog::parse_line(&l)?.record;
             if let Some(after) = rec.lines.get(line).and_then(|c| c.after.as_ref()) {
                 return Ok(Some(after.head.clone()));
             }
@@ -1525,7 +1525,7 @@ impl Db {
     pub fn records(&self, limit: usize) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare_cached("SELECT raw FROM records ORDER BY time DESC, seq DESC LIMIT ?1")?;
         let v = st.query_map(params![limit as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l)?.record)).collect()
     }
 
     /// Copy the newest outcome per request into a temporary database without loading the log.
@@ -1535,7 +1535,7 @@ impl Db {
         let mut insert = scratch.prepare_cached("INSERT OR IGNORE INTO request_outcomes(id,digest) VALUES(?1,?2)")?;
         while let Some(row) = rows.next()? {
             let raw: String = row.get(0)?;
-            let record = crate::oplog::parse_line(&raw, None)?.record;
+            let record = crate::oplog::parse_line(&raw)?.record;
             if let Some(id) = record.data["request_id"].as_str() {
                 insert.execute(params![id, serde_json::to_string(&record.data["request_digest"])?])?;
             }
@@ -1565,7 +1565,7 @@ impl Db {
             let rows = st.query_map(params![limit], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             rows
         };
-        rows.into_iter().map(|raw| Ok(crate::oplog::parse_line(&raw, None)?.record)).collect()
+        rows.into_iter().map(|raw| Ok(crate::oplog::parse_line(&raw)?.record)).collect()
     }
 
     /// The newest records whose text names `needle` (a line id), newest first, at most `limit`.
@@ -1573,14 +1573,14 @@ impl Db {
         let mut st =
             self.conn.prepare_cached("SELECT raw FROM records WHERE instr(raw, ?1) > 0 ORDER BY time DESC, seq DESC LIMIT ?2")?;
         let v = st.query_map(params![needle, limit as i64], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l)?.record)).collect()
     }
 
     /// The records with one operation name, oldest first.
     pub fn records_with_op(&self, op: &str) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE op=?1 ORDER BY time, machine, seq")?;
         let v = st.query_map(params![op], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l)?.record)).collect()
     }
 
     /// The project creator and the trust records (`machine.trust`, `machine.untrust`, `trust.delegate`), for
@@ -1593,7 +1593,7 @@ impl Db {
         let mut creator = None;
         let mut records = Vec::new();
         for line in raw {
-            let record = crate::oplog::parse_line(&line, None)?.record;
+            let record = crate::oplog::parse_line(&line)?.record;
             if record.op == "project" {
                 creator.get_or_insert(record.machine);
             } else {
@@ -1619,7 +1619,7 @@ impl Db {
     pub fn records_since(&self, time: i64) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare_cached("SELECT raw FROM records WHERE time>=?1 ORDER BY time")?;
         let v = st.query_map(params![time], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l, None)?.record)).collect()
+        v.into_iter().map(|l| Ok(crate::oplog::parse_line(&l)?.record)).collect()
     }
 
     pub fn max_seqs(&self) -> Result<Vec<(String, u64)>> {
@@ -1694,7 +1694,7 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         for (n, request, digest) in [(1, "wanted", Some("old")), (2, "wanted", Some("new")), (3, "missing", None)] {
-            let mut record = Record::new("request.refused");
+            let mut record = Record::untrusted_preview("request.refused");
             record.id = format!("r{n}");
             record.machine = "machine".into();
             record.seq = n;
@@ -1706,7 +1706,7 @@ mod tests {
                 assert!(body.contains(r#""request_id":"wrong","request_id":"wanted""#));
             }
             let line = format!(r#"{{"r":{body},"s":""}}"#);
-            let parsed = crate::oplog::parse_line(&line, None)?.record;
+            let parsed = crate::oplog::parse_line(&line)?.record;
             db.insert_record(&parsed, &line)?;
         }
         let scratch = Db::scratch()?;
@@ -1728,7 +1728,7 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         let apply = |seq: u64, op: &str, id: &str, after: Option<&str>, data: serde_json::Value| -> Result<()> {
-            let mut rec = Record::new(op);
+            let mut rec = Record::untrusted_preview(op);
             rec.id = format!("r{seq}");
             rec.machine = "m".into();
             rec.seq = seq;
@@ -1797,7 +1797,7 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         for (id, op) in [("z-first", "save"), ("a-second", "sync"), ("m-third", "save")] {
-            let mut rec = Record::new(op);
+            let mut rec = Record::untrusted_preview(op);
             rec.id = id.into();
             rec.machine = id.into();
             rec.time = 1;
@@ -1828,7 +1828,7 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..1000 {
-            let mut rec = Record::new(if i % 17 == 0 { "push" } else { "save" });
+            let mut rec = Record::untrusted_preview(if i % 17 == 0 { "push" } else { "save" });
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
             rec.seq = u64::try_from(i)?;
@@ -1882,7 +1882,7 @@ mod tests {
         conn.execute_batch("DROP TRIGGER records_index_lines; DROP TABLE record_lines; DROP INDEX records_time_seq")?;
         conn.pragma_update(None, "user_version", 9)?;
         let old = Db { conn: conn.into(), schema: PhantomData };
-        let mut rec = Record::new("save");
+        let mut rec = Record::untrusted_preview("save");
         rec.id = "main-nine-record".into();
         rec.machine = "machine".into();
         rec.time = 1;
@@ -1909,7 +1909,7 @@ mod tests {
         conn.pragma_update(None, "user_version", 9)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..400 {
-            let mut rec = Record::new(if i % 13 == 0 { "sync" } else { "save" });
+            let mut rec = Record::untrusted_preview(if i % 13 == 0 { "sync" } else { "save" });
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
             rec.seq = u64::try_from(i)?;
@@ -1920,7 +1920,7 @@ mod tests {
         }
         assert!(db.rebuild(true, |db| {
             for raw in db.all_lines()? {
-                let rec = crate::oplog::parse_line(&raw, None)?.record;
+                let rec = crate::oplog::parse_line(&raw)?.record;
                 db.derive_rows(&rec, &|_| true, "machine")?;
             }
             Ok(())
@@ -1957,7 +1957,7 @@ mod tests {
         };
         assert_eq!(ordered, ["last", "first"]);
         for (i, data) in [(1, r#"{"line":"first","line":"last"}"#), (2, r#"{"line":"first","line":null}"#)] {
-            let mut rec = Record::new("save");
+            let mut rec = Record::untrusted_preview("save");
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
             rec.seq = i;
@@ -1965,7 +1965,7 @@ mod tests {
             rec.data = serde_json::json!({"line": "placeholder"});
             let body = serde_json::to_string(&rec)?.replace(r#"{"line":"placeholder"}"#, data);
             let raw = format!(r#"{{"r":{body},"s":""}}"#);
-            let parsed = crate::oplog::parse_line(&raw, None)?.record;
+            let parsed = crate::oplog::parse_line(&raw)?.record;
             db.insert_record(&parsed, &raw)?;
         }
         for rebuild in [false, true] {
@@ -1989,7 +1989,7 @@ mod tests {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..41 {
-            let mut rec = Record::new("save");
+            let mut rec = Record::untrusted_preview("save");
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
             rec.seq = i;
@@ -2154,7 +2154,7 @@ mod tests {
     }
 
     fn state_record(seq: u64, state: &str, parents: Vec<String>) -> Record {
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = format!("01a12290-0000-7000-8000-{:012}", seq);
         r.machine = "01a12290-0000-7000-8000-00000000aaaa".into();
         r.seq = seq;
@@ -2193,7 +2193,7 @@ mod tests {
         let state = "01a12290-0000-7000-8000-00000000c0c0";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         let creation = state_record(1, state, vec![]);
-        let mut gc = Record::new("gc");
+        let mut gc = Record::untrusted_preview("gc");
         gc.machine = machine.into();
         gc.data = serde_json::json!({"deleted": [state]});
         db.derive_rows(&creation, &|_| true, machine).unwrap();
@@ -2219,7 +2219,7 @@ mod tests {
         let line = "01a12290-0000-7000-8000-00000000eeee";
         let layers = |s: &str| serde_json::json!([{"overlay": "keys", "state": s}]);
         let rec = |seq: u64, time: i64, machine: &str, st: &str| {
-            let mut r = Record::new("commit");
+            let mut r = Record::untrusted_preview("commit");
             r.id = format!("01a12290-0000-7000-8000-{:012}", seq);
             r.machine = machine.into();
             r.seq = seq;
@@ -2249,7 +2249,7 @@ mod tests {
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         db.derive_rows(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
         let caches = |seq: u64, path: &str, uuid: &str| {
-            let mut r = Record::new("save.caches");
+            let mut r = Record::untrusted_preview("save.caches");
             r.id = format!("01a12290-0000-7000-8000-{:012}", seq);
             r.machine = machine.into();
             r.seq = seq;
@@ -2281,7 +2281,7 @@ mod tests {
         let st = "01a12290-0000-7000-8000-00000000c1c1";
         let machine = "01a12290-0000-7000-8000-00000000aaaa";
         db.derive_rows(&state_record(1, st, vec![]), &|_| true, machine).unwrap();
-        let mut r = Record::new("save.layers");
+        let mut r = Record::untrusted_preview("save.layers");
         r.id = "01a12290-0000-7000-8000-000000000002".into();
         r.machine = machine.into();
         r.seq = 2;
@@ -2331,7 +2331,7 @@ mod tests {
                 db.derive_rows(record, &|_| true, &source.machine)?;
             }
             assert_eq!(db.state(state)?.unwrap().tree, Some("3".repeat(64)));
-            let model = layr_model::Project::from_records("", records, &source.machine)?;
+            let model = layr_model::Project::preview_records("", records, &source.machine)?;
             assert_eq!(model.states[state].state.tree, Some("3".repeat(64)));
         }
         Ok(())
@@ -2395,7 +2395,7 @@ mod tests {
         assert!(db.checks(state).unwrap().is_empty());
         assert_eq!(db.check_exit(state, &["true".into()], None).unwrap(), None);
         // The original signed bytes are unchanged.
-        assert!(crate::oplog::parse_line(&db.record_line(machine, 2).unwrap().unwrap(), Some(&key.verifying_key())).is_ok());
+        assert!(crate::oplog::verify_line(&db.record_line(machine, 2).unwrap().unwrap(), &key.verifying_key()).is_ok());
     }
 
     #[test]

@@ -1415,7 +1415,7 @@ impl Store {
             }
             if created {
                 let _lock = repo.p.lock_maintenance()?;
-                let mut record = crate::model::Record::new("line.adopt");
+                let mut record = crate::model::DraftRecord::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
                     crate::model::LineChange {
@@ -1492,7 +1492,7 @@ impl Store {
         }
         let created = !existing && self.backend.put_new(&slot, keys::seal_slot(&identity, recipient)?)?;
         let _lock = repo.p.lock_maintenance()?;
-        let mut record = crate::model::Record::new("project.reader");
+        let mut record = crate::model::DraftRecord::new("project.reader");
         record.data = serde_json::json!({"principal":format!("person:{login}"),"recipient":recipient,"store":anchor.recipient});
         repo.commit_record(&_lock, ctx, record)?;
         if let Backend::Gateway(g) = &self.backend {
@@ -1607,7 +1607,7 @@ pub(crate) fn validate_gateway_url(url: &str) -> Result<()> {
 mod pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    use crate::model::Record;
+    
 
     #[test]
     fn changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption() {
@@ -1635,7 +1635,7 @@ mod pin_tests {
             },
             ctx: None,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
         repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
@@ -1704,7 +1704,7 @@ mod pin_tests {
 mod mode_pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    use crate::model::Record;
+    
 
     #[test]
     fn a_pinned_secret_store_rewritten_as_plain_stops_fetch_and_push() {
@@ -1732,7 +1732,7 @@ mod mode_pin_tests {
             },
             ctx: None,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
         repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
@@ -1850,7 +1850,7 @@ fn own_line_moves(repo: &Repo, machine: &str) -> Result<std::collections::BTreeM
     type Move = ((i64, u64), String, Option<String>);
     let mut moves: std::collections::BTreeMap<String, Move> = Default::default();
     for line in repo.p.export_jsonl()?.lines() {
-        let record = crate::oplog::parse_line(line, None)?.record;
+        let record = crate::oplog::parse_line(line)?.record;
         if record.machine != machine {
             continue;
         }
@@ -1979,7 +1979,7 @@ fn fetch_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
 #[cfg(test)]
 mod clone_head_tests {
     use super::*;
-    use crate::model::{LineChange, LineState, Record};
+    use crate::model::{LineChange, LineState};
 
     #[test]
     fn clone_uses_the_creator_head_after_a_later_foreign_adoption() -> Result<()> {
@@ -2002,25 +2002,35 @@ mod clone_head_tests {
             working_before: None,
             working_after: None,
         };
-        let mut creation = Record::new("project");
+        let mut creation = crate::model::Record::untrusted_preview("project");
         creation.project = project.clone();
         creation.machine = creator.clone();
-        creation.seq = 1;
+        creation.seq = 2;
         creation.time = 1;
         creation.data = serde_json::json!({"id":project,"name":"p","config":{}});
         creation.lines.insert(line.clone(), change(&old, &creator));
-        let mut update = Record::new("commit");
+        let mut update = crate::model::Record::untrusted_preview("commit");
         update.project = project.clone();
         update.machine = creator.clone();
-        update.seq = 2;
+        update.seq = 3;
         update.time = 2;
         update.lines.insert(line.clone(), change(&new, &creator));
-        let mut adoption = Record::new("line.adopt");
+        let mut adoption = crate::model::Record::untrusted_preview("line.adopt");
         adoption.project = project.clone();
         adoption.machine = peer.clone();
-        adoption.seq = 1;
+        adoption.seq = 2;
         adoption.time = 3;
         adoption.lines.insert(line.clone(), change(&old, &peer));
+        for machine in [&creator, &peer] {
+            let mut announcement = crate::model::Record::untrusted_preview("machine");
+            announcement.id = crate::ids::new_id();
+            announcement.project = project.clone();
+            announcement.machine = machine.clone();
+            announcement.seq = 1;
+            announcement.data = serde_json::json!({"public_key":hex::encode(key.verifying_key().to_bytes())});
+            db.test_insert_record(&announcement, &crate::oplog::sign_line(&announcement, &key)?)?;
+            db.test_derive(&announcement, &|_| false, &store.machine.id)?;
+        }
         for mut record in [creation, update, adoption] {
             record.id = crate::ids::new_id();
             db.test_insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
@@ -2037,7 +2047,7 @@ mod clone_head_tests {
         assert!(repo.p.db.line_heads(&line)?.contains(&(peer, old)), "the foreign head remains available");
         let caller = crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw());
         let local_head = crate::ids::new_id();
-        let mut own = Record::new("line.adopt");
+        let mut own = crate::model::Record::untrusted_preview("line.adopt");
         own.id = crate::ids::new_id();
         own.project = repo.p.id.clone();
         own.machine = store.machine.id.clone();
@@ -2084,7 +2094,7 @@ mod clone_head_tests {
                       states: Value,
                       key: &SigningKey|
          -> Result<String> {
-            let record: Record = serde_json::from_value(json!({
+            let record: crate::model::Record = serde_json::from_value(json!({
                 "id":crate::ids::new_id(),"project":PROJECT,"machine":machine,"seq":seq,"time":time,"op":op,
                 "actor":{"uid":1,"name":"fixture"},"data":data,"lines":lines,"states":states,
             }))?;

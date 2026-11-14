@@ -59,7 +59,7 @@ impl Fixture {
             id: ids::new_id(),
             db: crate::db::Db::open(&db_file(&dir))?,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"name": "history", "id": p.id, "config": {}});
         p.lock_maintenance().unwrap().append(record, &ctx.actor())?;
         let repo = Repo { p, ctx: Some(&ctx) };

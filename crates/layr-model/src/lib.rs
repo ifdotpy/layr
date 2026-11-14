@@ -7,13 +7,14 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod record;
 pub mod changes;
 pub mod diff;
 pub mod history;
 pub mod index;
 pub mod interdiff;
 pub mod main_head;
-pub mod merge_authority;
+mod merge_authority;
 pub mod operations;
 pub mod overlays;
 pub mod policy;
@@ -66,9 +67,8 @@ pub struct Model {
 }
 
 impl Model {
-    /// Fold authenticated JSON Lines (`{"r":record,"s":signature}`), in any arrival order.
-    /// The caller must verify each signature and authorize its signer first.
-    pub fn from_verified_lines<'a>(lines: impl IntoIterator<Item = &'a str>, machine: &str) -> Result<Self> {
+    /// Inspect untrusted JSON Lines. This preview supplies no authentication or authority.
+    pub fn preview_lines<'a>(lines: impl IntoIterator<Item = &'a str>, machine: &str) -> Result<Self> {
         #[derive(Deserialize)]
         struct Envelope {
             r: Record,
@@ -79,7 +79,27 @@ impl Model {
             validation::validate(&record)?;
             records.push(record);
         }
-        Self::from_records(records, machine)
+        Self::preview_records(records, machine)
+    }
+
+    /// Fold only records carrying project authorization, never caller-promised text.
+    ///
+    /// ```compile_fail
+    /// layr_model::Model::from_verified_lines([r#"{"r":{},"s":""}"#], "");
+    /// ```
+    pub fn from_verified_lines(
+        records: impl IntoIterator<Item = record::AuthorizedRecord<record::ProjectScope>>,
+        machine: &str,
+    ) -> Result<Self> {
+        let mut grouped = BTreeMap::<String, Vec<_>>::new();
+        for record in records {
+            grouped.entry(record.scope().project().to_string()).or_default().push(record);
+        }
+        let mut projects = BTreeMap::new();
+        for (project, records) in grouped {
+            projects.insert(project.clone(), Project::from_authorized_records(&project, records, machine)?);
+        }
+        Ok(Self { projects })
     }
 
     /// Readable overlay projects are discovered only from their own records.
@@ -164,19 +184,19 @@ impl Model {
         Ok(layers)
     }
 
-    /// Fold verified records, including any readable overlay projects.
-    pub fn from_records(records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
+    /// Fold untrusted record DTOs for a preview, including readable overlay projects.
+    pub fn preview_records(records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
         let mut grouped: BTreeMap<String, Vec<Record>> = BTreeMap::new();
         for record in records {
             // The machine announcement has no project in old logs. It belongs to the supplied
-            // project stream. `Project::from_records` handles that case without guessing here.
+            // project stream. `Project::preview_records` handles that case without guessing here.
             grouped.entry(record.project.clone()).or_default().push(record);
         }
         let announcements = grouped.remove("").unwrap_or_default();
         let mut projects = BTreeMap::new();
         for (id, mut records) in grouped {
             records.extend(announcements.iter().cloned());
-            projects.insert(id.clone(), Project::from_records(&id, records, machine)?);
+            projects.insert(id.clone(), Project::preview_records(&id, records, machine)?);
         }
         Ok(Self { projects })
     }
@@ -233,6 +253,19 @@ fn order(r: &Record) -> (i64, &str, u64) {
 }
 
 impl Project {
+    pub fn from_authorized_records(
+        id: &str,
+        records: impl IntoIterator<Item = record::AuthorizedRecord<record::ProjectScope>>,
+        machine: &str,
+    ) -> Result<Self> {
+        let mut checked = Vec::new();
+        for record in records {
+            if record.scope().project().to_string() != id { bail!("record belongs to another project"); }
+            checked.push(record.into_record());
+        }
+        Self::preview_records(id, checked, machine)
+    }
+
     /// Access mode and epochs are folded only from authenticated project records.
     pub fn access_mode(&self) -> layr_store::epochs::Mode {
         self.records
@@ -253,7 +286,7 @@ impl Project {
     /// Build one project from verified records. `machine` selects the CLI policy perspective.
     /// Empty `machine` selects a store view with no preferred local machine.
     /// Exact duplicate records are accepted. Conflicting identities or sequences fail.
-    pub fn from_records(id: &str, records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
+    pub fn preview_records(id: &str, records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
         let mut unique = BTreeMap::<String, Record>::new();
         let mut sequences = BTreeMap::new();
         for record in records {

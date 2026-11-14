@@ -272,7 +272,7 @@ fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
         cfg.insert(format!("overlay.{name}.key-files"), key_files_value(v)?);
     }
     if !cfg.is_empty() {
-        let mut rec = Record::new("config");
+        let mut rec = crate::model::DraftRecord::new("config");
         rec.data = serde_json::json!({"config": cfg});
         if info.hidden {
             let _olock = orepo.p.lock_maintenance()?;
@@ -524,7 +524,7 @@ fn remove(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     cfg.insert(format!("overlay.{name}.removed"), serde_json::json!(info.root));
-    let mut rec = Record::new("config");
+    let mut rec = crate::model::DraftRecord::new("config");
     rec.data = serde_json::json!({"config": cfg});
     repo.commit_record(&_lock, ctx, rec)?;
     // The stacks of the lines drop the overlay, and pending moves into it are cancelled.
@@ -532,7 +532,7 @@ fn remove(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let layers = repo.layers(&line)?;
         if layers.iter().any(|l| l.overlay == name) {
             let kept: Vec<Layer> = layers.into_iter().filter(|l| l.overlay != name).collect();
-            let mut rec = Record::new("overlay.use");
+            let mut rec = crate::model::DraftRecord::new("overlay.use");
             rec.data = serde_json::json!({
                 "folder_view": repo.public_view_data(&line.id, &kept)?,
             });
@@ -586,7 +586,7 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::overlay_managers::of(&h.repo, &name)?.require(&ctx.store.machine.id)?;
     let access = access_map(info.owner, &list);
     let removed = orepo.policy().access.iter().any(|(principal, role)| *role >= Role::Reader && access.get(principal).is_none());
-    let mut record = Record::new("overlay.readers");
+    let mut record = crate::model::DraftRecord::new("overlay.readers");
     record.data = serde_json::json!({"config":{"access":access}});
     if removed {
         record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
@@ -626,7 +626,7 @@ fn access_mode(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = orepo.p.lock_maintenance()?;
     let old = crate::store_remote::epochs::overlay_mode(&orepo)?;
     if old != mode {
-        let mut record = Record::new("overlay.mode");
+        let mut record = crate::model::DraftRecord::new("overlay.mode");
         record.data = serde_json::json!({"mode":mode,"config":{"overlay.access-mode":mode}});
         if mode < old {
             record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
@@ -685,7 +685,7 @@ fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let data = serde_json::to_value(change)?;
     let mut pending = None;
     for line in orepo.p.export_jsonl()?.lines() {
-        let record = crate::oplog::parse_line(line, None)?.record;
+        let record = crate::oplog::parse_line(line)?.record;
         if record.op == "overlay.managers"
             && record.machine == ctx.store.machine.id
             && record.data["previous"] == data["previous"]
@@ -699,7 +699,7 @@ fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let signed = if let Some(signed) = pending {
         signed
     } else {
-        let mut record = Record::new("overlay.managers");
+        let mut record = crate::model::DraftRecord::new("overlay.managers");
         record.data = data;
         let record = _lock.append(record, &ctx.actor())?;
         orepo.p.db.record_line(&record.machine, record.seq)?.ok_or_else(|| exit(1, "manager record is missing"))?
@@ -707,7 +707,7 @@ fn managers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if h.repo.need_overlay(name)?.hidden {
         return Ok(0);
     }
-    let mut parent = Record::new("overlay.authority");
+    let mut parent = crate::model::DraftRecord::new("overlay.authority");
     parent.data = serde_json::json!({"name":name,"authority":signed});
     h.repo.commit_record(&_parent_lock, ctx, parent)?;
     Ok(0)
@@ -741,7 +741,7 @@ fn operation_detail(r: &Record) -> serde_json::Value {
 
 /// Signed records in their application order, independent of UUID spelling and machine export order.
 fn own_records(repo: &Repo) -> Result<Vec<Record>> {
-    repo.p.db.all_lines()?.iter().map(|line| Ok(crate::oplog::parse_line(line, None)?.record)).collect()
+    repo.p.db.all_lines()?.iter().map(|line| Ok(crate::oplog::parse_line(line)?.record)).collect()
 }
 
 fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -831,7 +831,7 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = orepo.p.lock_maintenance()?;
     let own_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let creator = own_lines.iter().find(|line| {
-        crate::oplog::parse_line(line, None).is_ok_and(|s| {
+        crate::oplog::parse_line(line).is_ok_and(|s| {
             s.record.op == "overlay.create" && s.record.data["config"][format!("overlay.{name}")]["hidden"] == true
         })
     });
@@ -852,23 +852,23 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
     public["hidden"] = serde_json::json!(false);
     if metadata["hidden"] != false {
         metadata["hidden"] = serde_json::json!(false);
-        let mut show = Record::new("overlay.show-to-project");
+        let mut show = crate::model::DraftRecord::new("overlay.show-to-project");
         show.data = serde_json::json!({"name":name,"config":{"overlay":metadata,format!("overlay.{name}"):public}});
         orepo.commit_record(&_lock, ctx, show)?;
     }
     let parent_lines: Vec<_> = h.repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let parent_records: Vec<_> =
-        parent_lines.iter().map(|line| crate::oplog::parse_line(line, None).map(|s| s.record)).collect::<Result<_>>()?;
+        parent_lines.iter().map(|line| crate::oplog::parse_line(line).map(|s| s.record)).collect::<Result<_>>()?;
     if !parent_records.iter().any(|r| r.op == "overlay.create" && r.data["name"] == *name) {
-        let mut create = Record::new("overlay.create");
+        let mut create = crate::model::DraftRecord::new("overlay.create");
         create.data = serde_json::json!({"name":name,"config":{format!("overlay.{name}"):public},"hidden_origin":creator});
         h.repo.commit_record(&_parent, ctx, create)?;
     }
     for line in &own_lines {
-        if crate::oplog::parse_line(line, None)?.record.op == "overlay.managers"
+        if crate::oplog::parse_line(line)?.record.op == "overlay.managers"
             && !parent_records.iter().any(|r| r.op == "overlay.authority" && r.data["authority"] == *line)
         {
-            let mut proof = Record::new("overlay.authority");
+            let mut proof = crate::model::DraftRecord::new("overlay.authority");
             proof.data = serde_json::json!({"name":name,"authority":line});
             h.repo.commit_record(&_parent, ctx, proof)?;
         }
@@ -894,7 +894,7 @@ fn show_to_project(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !names.contains(name) {
             let position = selection.as_ref().and_then(|v| v["position"].as_u64()).unwrap_or(u64::MAX);
             names.insert((position as usize).min(names.len()), name.clone());
-            let mut record = Record::new("overlay.use");
+            let mut record = crate::model::DraftRecord::new("overlay.use");
             record.data = serde_json::json!({"folder_view": crate::overlay::view_data(&line.id, &names)});
             h.repo.commit_record(&_parent, ctx, record)?;
         }
@@ -985,7 +985,7 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     if !a.has("-n") {
-        let mut rec = Record::new(layr_model::validation::STATE_PARTS_OP);
+        let mut rec = crate::model::DraftRecord::new(layr_model::validation::STATE_PARTS_OP);
         rec.data = serde_json::json!({ "states": states });
         repo.commit_record(&_lock, ctx, rec)?;
     }
@@ -1014,7 +1014,7 @@ fn move_old_lines(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Re
         if !old.is_empty() && repo.folder_view(l)?.is_none() {
             out.push(format!("the stack of line {} to its view", l.name));
             if !dry {
-                let mut rec = Record::new("overlay.use");
+                let mut rec = crate::model::DraftRecord::new("overlay.use");
                 rec.data = serde_json::json!({"folder_view": repo.public_view_data(&l.id, &old)?});
                 repo.commit_record(locked, ctx, rec)?;
             }
@@ -1058,7 +1058,7 @@ fn move_old_lines(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Re
         }
     }
     if !dry && !cfg.is_empty() {
-        let mut rec = Record::new("config");
+        let mut rec = crate::model::DraftRecord::new("config");
         rec.data = serde_json::json!({ "config": cfg });
         repo.commit_record(locked, ctx, rec)?;
     }
@@ -1156,7 +1156,7 @@ fn order(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(exit(128, format!("error: overlay '{name}' is named twice")));
         }
     }
-    let mut rec = Record::new("config");
+    let mut rec = crate::model::DraftRecord::new("config");
     rec.data = serde_json::json!({"config": {crate::overlay::ORDER_KEY: names}});
     repo.commit_record(&_lock, ctx, rec)?;
     Ok(0)
@@ -1338,7 +1338,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 deleted.push(id.clone());
             }
         }
-        let mut rec = Record::new("gc");
+        let mut rec = crate::model::DraftRecord::new("gc");
         rec.data = serde_json::json!({"deleted": deleted, "purge": "overlay move"});
         repo.commit_record(&_lock, ctx, rec)?;
         if !a.has("-q") {
@@ -1489,7 +1489,7 @@ mod tests {
                     dir,
                     id: ids::new_id(),
                 };
-                let mut record = Record::new("project");
+                let mut record = crate::model::DraftRecord::new("project");
                 record.data = json!({"id":p.id,"name":name,"config":config});
                 p.lock_maintenance().unwrap().append(record, &actor)?;
                 Ok(p)
@@ -1635,7 +1635,7 @@ mod tests {
     #[test]
     fn operation_output_only_contains_public_fields_and_cli_names() {
         for (signed, plain) in [("commit", "state"), ("rebase.step", "replay.step"), ("overlay.key", "overlay.key")] {
-            let mut r = Record::new(signed);
+            let mut r = Record::untrusted_preview(signed);
             r.data = json!({"identity":"secret","recipient":"key material"});
             assert_eq!(operation_detail(&r), json!({"id":r.id,"op":plain,"actor":r.actor,"time":r.time}));
         }

@@ -12,7 +12,7 @@ use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, LineChange, Record, StateKind};
+use crate::model::{Line, LineChange, StateKind};
 use crate::repo::{skip_path, Repo, Snap, Status, Temp};
 use crate::revs;
 use anyhow::{bail, Result};
@@ -92,7 +92,7 @@ fn move_old_entries(ctx: &Ctx, repo: &Repo) -> Result<()> {
             owner: line.owner,
             machine: repo.p.store.machine.id.clone(),
         };
-        let mut rec = Record::new("stash.drop");
+        let mut rec = crate::model::DraftRecord::new("stash.drop");
         rec.data = serde_json::json!({"state": state, "line": line.id, "parked_line": parked.name});
         rec.lines.insert(
             parked.id.clone(),
@@ -326,7 +326,7 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
             repo.drop_stage(&line)?;
         }
         // One record: the parked line and the reset of the working folder.
-        let mut rec = Record::new("park");
+        let mut rec = crate::model::DraftRecord::new("park");
         rec.data = serde_json::json!({"name": parked.name, "start": state.id});
         rec.states.push(state.clone());
         let working_after = repo.after_state(ctx, &line, "park", &mut rec)?;

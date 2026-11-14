@@ -348,7 +348,7 @@ mod tests {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let store = crate::store::Store::open(&root).unwrap();
         let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
-        let mut record = crate::model::Record::new("project");
+        let mut record = crate::model::Record::untrusted_preview("project");
         record.machine = crate::ids::new_id();
         record.seq = 1;
         record.time = 1;

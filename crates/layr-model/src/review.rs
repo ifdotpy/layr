@@ -636,7 +636,7 @@ mod tests {
     fn validation_refuses_bad_review_records() {
         let id = |n: u8| format!("01900000-0000-7000-8000-0000000000{n:02}");
         let base = |op: &str, data: Value| {
-            let mut r = Record::new(op);
+            let mut r = Record::untrusted_preview(op);
             r.id = id(1);
             r.machine = id(2);
             r.seq = 1;

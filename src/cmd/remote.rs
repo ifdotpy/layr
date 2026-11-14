@@ -10,7 +10,7 @@ pub mod git {
     use crate::ctx::Ctx;
     use crate::gitbridge;
     use crate::ids;
-    use crate::model::Record;
+    
     use crate::repo::Repo;
     use crate::revs;
     use anyhow::Result;
@@ -64,7 +64,7 @@ pub mod git {
                 let _lock = repo.p.lock_maintenance()?;
                 set_config(&_lock, ctx, repo, &format!("remote.{n}.url"), serde_json::Value::Null)?;
                 gitbridge::drop_remote_refs(repo, n)?;
-                let mut rec = Record::new("remote.remove");
+                let mut rec = crate::model::DraftRecord::new("remote.remove");
                 rec.data = serde_json::json!({"remote": n});
                 repo.commit_record(&_lock, ctx, rec)?;
                 Ok(0)
@@ -285,7 +285,7 @@ pub mod git {
             // An export without a remote: the record keeps the commits of the states, as a push does.
             let commits: serde_json::Map<String, serde_json::Value> =
                 made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
-            let mut rec = Record::new("export");
+            let mut rec = crate::model::DraftRecord::new("export");
             rec.data = serde_json::json!({"export": ids::new_id(), "state": state.id, "remote": GIT_SYNC_REMOTE, "branch": line.name, "commit": commit, "commits": commits, "status": "local"});
             let _lock = repo.p.lock_maintenance()?;
             repo.commit_record(&_lock, ctx, rec)?;
@@ -450,7 +450,7 @@ pub mod git {
         if let Some((eid, c)) = &prepared {
             if gitbridge::ls_remote(ctx, repo, &url, &branch)?.as_deref() == Some(c.as_str()) {
                 let _lock = repo.p.lock_maintenance()?;
-                let mut rec = Record::new("export");
+                let mut rec = crate::model::DraftRecord::new("export");
                 rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "status": "pushed", "verified": "remote ref"});
                 repo.commit_record(&_lock, ctx, rec)?;
                 outln!(ctx, "Already pushed before: {remote}/{branch} is {} (state {})", &c[..10], ids::short(&state_id));
@@ -478,7 +478,7 @@ pub mod git {
                     made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
                 let eid = ids::new_id();
                 let _lock = repo.p.lock_maintenance()?;
-                let mut rec = Record::new("export");
+                let mut rec = crate::model::DraftRecord::new("export");
                 rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "parent": parent, "squash": a.has("--squash"), "commits": commits, "status": "prepared"});
                 repo.commit_record(&_lock, ctx, rec)?;
                 (eid, c)
@@ -492,7 +492,7 @@ pub mod git {
         gitbridge::push(ctx, repo, &url, &commit, &branch, a.has("-f") || a.has("--force-with-lease"))?;
         {
             let _lock = repo.p.lock_maintenance()?;
-            let mut rec = Record::new("export");
+            let mut rec = crate::model::DraftRecord::new("export");
             rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
             repo.commit_record(&_lock, ctx, rec)?;
         }
@@ -875,7 +875,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             {
                 let _lock = repo.p.lock_maintenance()?;
-                let mut record = crate::model::Record::new("machine.untrust");
+                let mut record = crate::model::DraftRecord::new("machine.untrust");
                 record.data = json!({"machine": full});
                 _lock.append(record, &ctx.actor())?;
             }

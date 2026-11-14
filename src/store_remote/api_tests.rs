@@ -568,7 +568,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
         id: PROJECT.into(),
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
-    let mut record = Record::new("project");
+    let mut record = crate::model::DraftRecord::new("project");
     // These are plain fixture folders, not read-only native snapshots. Record their v2 objects
     // before publication so API transport tests do not require a privileged Btrfs send.
     record.data = serde_json::json!({"id":PROJECT,"name":"p","config":{"objects.enabled":true}});
@@ -588,7 +588,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "parents":states.last().cloned().into_iter().collect::<Vec<_>>(),"time":crate::ids::now_ms()}))
         .unwrap();
-        let mut record = Record::new("state");
+        let mut record = crate::model::DraftRecord::new("state");
         record.states.push(state);
         let saved = project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         assert!(saved.states[0].tree.is_some() && saved.states[0].times.is_some(), "the API fixture uses v2 objects");
@@ -607,7 +607,7 @@ fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String
         "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
         "parents":[parent],"time":crate::ids::now_ms()}))
     .unwrap();
-    let mut record = Record::new("state");
+    let mut record = crate::model::DraftRecord::new("state");
     record.states.push(state);
     project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
     id
@@ -624,7 +624,7 @@ fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name:
         owner: ctx.caller.uid,
         machine: ctx.store.machine.id.clone(),
     };
-    let mut record = Record::new(if before.is_some() { "save" } else { "line.create" });
+    let mut record = crate::model::DraftRecord::new(if before.is_some() { "save" } else { "line.create" });
     record.lines.insert(
         line.into(),
         LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
@@ -901,7 +901,7 @@ fn check_first_cache_fetch(
     opts: &Options,
     cache_of: Option<&str>,
 ) {
-    let mut declaration = Record::new("overlay.create");
+    let mut declaration = crate::model::DraftRecord::new("overlay.create");
     declaration.data = serde_json::json!({"name":name,"config":{
             format!("overlay.{name}"):{"owner":ctx.caller.uid,"root":"target","mode":"follow"},
             format!("overlay.{name}.history"):1,
@@ -919,13 +919,13 @@ fn check_first_cache_fetch(
         id: project_id.clone(),
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
-    let mut creation = Record::new("project");
+    let mut creation = crate::model::DraftRecord::new("project");
     creation.data = serde_json::json!({"id":project_id,"name":name,"config":{"objects.enabled":true}});
     cache.lock_maintenance().unwrap().append(creation, &ctx.actor()).unwrap();
     let state = crate::ids::new_id();
     std::fs::create_dir(cache.state_path(&state)).unwrap();
     std::fs::write(cache.state_path(&state).join("unrelated"), random_bytes(300000)).unwrap();
-    let mut saved = Record::new("commit");
+    let mut saved = crate::model::DraftRecord::new("commit");
     saved.states.push(serde_json::from_value(serde_json::json!({"id":state,"kind":"commit",
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "cache_of":cache_of.map(str::to_owned).unwrap_or_else(crate::ids::new_id),"cache_by":ctx.caller.uid,"time":crate::ids::now_ms()})).unwrap());
@@ -1115,7 +1115,7 @@ fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekey
     let machine = "01a12290-0000-7000-8000-0000000000c1";
     let other = "01a12290-0000-7000-8000-0000000000c2";
     let sign = |seq: u64, op: &str, data: serde_json::Value| {
-        let mut record = Record::new(op);
+        let mut record = Record::untrusted_preview(op);
         record.id = format!("01a12290-0000-7000-8000-{:012x}", 0xd00 + seq);
         record.machine = machine.into();
         record.project = PROJECT.into();
@@ -1135,6 +1135,11 @@ fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekey
     assert!(repo.p.db.record_line(machine, 3).unwrap().is_some(), "every record is stored");
     assert_eq!(repo.p.db.trusted(machine).unwrap(), None, "the server's writer is not trusted here");
     assert_eq!(repo.p.db.trusted(other).unwrap(), None, "its trust record has no effect");
+    let authorized = repo.p.authorized_records().unwrap();
+    assert!(!authorized.iter().any(|r| r.record().machine == machine && r.record().op == "machine.trust"));
+    assert!(authorized.iter().any(|r| r.record().machine == machine && r.record().op == "tag"));
+    let model = layr_model::Project::from_authorized_records(PROJECT, authorized, &ctx.store.machine.id).unwrap();
+    assert!(!model.trusted.contains_key(other), "server-only keys grant no trust in the checked model");
     // The writer key is pinned per remote on first sight; another key for the same machine is refused.
     let dir = root.join("remote");
     let id = machine.to_string();
@@ -1236,7 +1241,7 @@ fn real_gateway_object_round_trip() {
     ctx.env.insert("LAYR_GATEWAY_TOKEN_FILE".into(), source_token.to_string_lossy().into_owned());
     let mut store = api_store_with(&root, &ctx, api.clone());
     let (mut repo, states, line) = project(&ctx);
-    let mut config = Record::new("config");
+    let mut config = crate::model::DraftRecord::new("config");
     config.data = serde_json::json!({"config":{"access":{format!("user:{}", ctx.caller.uid):"admin"}}});
     repo.p.lock_maintenance().unwrap().append(config, &ctx.actor()).unwrap();
     let report = store.push(&ctx, &mut repo, &Options::default()).expect("push through the real gateway");
@@ -2193,7 +2198,7 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
                 access
             }),
         ] {
-            let mut config = Record::new("config");
+            let mut config = crate::model::DraftRecord::new("config");
             config.data = serde_json::json!({"config": {key: value}});
             repo.commit_record(&repo.p.lock_maintenance().unwrap(), &merger_ctx, config).unwrap();
         }

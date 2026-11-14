@@ -26,7 +26,7 @@ pub fn validate_import(project: &crate::store::Project, incoming: &[String], ser
     let id = if project.id.is_empty() {
         incoming
             .first()
-            .map(|line| oplog::parse_line(line, None).map(|signed| signed.record.project))
+            .map(|line| oplog::parse_line(line).map(|signed| signed.record.project))
             .transpose()?
             .unwrap_or_default()
     } else {
@@ -37,7 +37,7 @@ pub fn validate_import(project: &crate::store::Project, incoming: &[String], ser
     let mut signers = keys.clone();
     if server {
         for line in &lines {
-            let record = oplog::parse_line(line, None)?.record;
+            let record = oplog::parse_line(line)?.record;
             if record.op == "machine" && record.seq == 1 && !signers.contains_key(&record.machine) {
                 signers.insert(record.machine.clone(), oplog::machine_key(&record)?);
             }

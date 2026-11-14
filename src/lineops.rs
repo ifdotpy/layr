@@ -2,7 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Line, LineChange, Record};
+use crate::model::{Line, LineChange};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
 #[cfg(not(target_os = "macos"))]
@@ -143,7 +143,7 @@ pub(crate) struct PreparedLines {
     start: String,
     pub(crate) lines: Vec<Line>,
     tmps: Vec<PathBuf>,
-    recs: Vec<Record>,
+    recs: Vec<crate::model::DraftRecord>,
     /// The line that the lines start from: an OverlayFS commit takes its caches (`commit_prepared_lines`).
     #[cfg(feature = "overlayfs")]
     source: Option<Line>,
@@ -235,7 +235,7 @@ impl Repo<'_> {
             })
             .collect();
         let tmps: Vec<PathBuf> = lines.iter().map(|_| self.p.work_dir().join(crate::store::temp_name())).collect();
-        let result = (|| -> Result<Vec<Record>> {
+        let result = (|| -> Result<Vec<crate::model::DraftRecord>> {
             match self.objects_start(start)? {
                 // A migrated state without a snapshot here: each folder is a checkout of its tree
                 // with its times (hot blobs are clones), no snapshot is built first.
@@ -278,7 +278,7 @@ impl Repo<'_> {
                 #[cfg(feature = "overlayfs")]
                 let cached: Vec<String> = Vec::new();
                 self.prepare_at(line, start, tmp, &cached)?;
-                let mut rec = Record::new("line.create");
+                let mut rec = crate::model::DraftRecord::new("line.create");
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {
                     let base = self.temp_snapshot(tmp, true)?;
@@ -504,12 +504,12 @@ mod batch_commit_tests {
             id: ids::new_id(),
             db: crate::db::Db::open(&crate::store::db_file(&dir))?,
         };
-        let mut project = Record::new("project");
+        let mut project = crate::model::DraftRecord::new("project");
         project.data = serde_json::json!({"id": p.id, "name": p.name, "config": {}});
         p.lock_maintenance()?.append(project, &ctx.actor())?;
         let start = ids::new_id();
         std::fs::create_dir(p.state_path(&start))?;
-        let mut state = Record::new("state");
+        let mut state = crate::model::DraftRecord::new("state");
         state.states.push(serde_json::from_value(serde_json::json!({
             "id": start, "kind": "commit", "subvol": "", "author": ctx.author(), "time": ids::now_ms()
         }))?);
@@ -529,7 +529,7 @@ mod batch_commit_tests {
             let tmp = dir.join("work").join(&line.id);
             std::fs::create_dir(&tmp)?;
             std::fs::write(tmp.join("content"), &line.name)?;
-            let mut rec = Record::new("line.create");
+            let mut rec = crate::model::DraftRecord::new("line.create");
             rec.data = serde_json::json!({"name": line.name, "start": start});
             rec.lines.insert(
                 line.id.clone(),
@@ -629,7 +629,7 @@ mod batch_commit_tests {
             assert_eq!(repo.p.db.line_by_id(&line.id)?.unwrap().name, line.name);
             assert_eq!(std::fs::read_to_string(repo.working(line).join("content"))?, line.name);
             let raw = repo.p.db.record_line(&ctx.store.machine.id, before + index as u64 + 1)?.unwrap();
-            let rec = crate::oplog::parse_line(&raw, None)?.record;
+            let rec = crate::oplog::parse_line(&raw)?.record;
             assert!(rec.lines.contains_key(&line.id));
         }
         let sync: i64 = repo.p.db.test_connection().pragma_query_value(None, "synchronous", |r| r.get(0))?;

@@ -109,7 +109,7 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, target: &crate::lineop
     }
     let last_id = match last {
         Some(st) => {
-            let mut rec = Record::new("save");
+            let mut rec = crate::model::DraftRecord::new("save");
             let before = repo.recorded_working(&fresh)?;
             rec.data =
                 serde_json::json!({"line": fresh.id, "head": fresh.head, "working_before": before, "working_after": st.id});

@@ -70,7 +70,7 @@ pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
                 if a.has("--json") {
                     outln!(ctx, "{line}");
                 } else {
-                    let record = crate::oplog::parse_line(&line, None)?.record;
+                    let record = crate::oplog::parse_line(&line)?.record;
                     for state in record.states {
                         outln!(ctx, "{} {} {}", crate::ids::short(&state.id), state.time, state.message);
                     }

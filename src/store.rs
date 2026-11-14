@@ -1164,7 +1164,7 @@ impl<'a> Project<'a> {
             let id = ids::new_id();
             let db = Db::open(&db_file(&dir))?;
             let p = Project { lease: Default::default(), store, name: name.to_string(), dir: dir.clone(), id: id.clone(), db };
-            let mut rec = Record::new("project");
+            let mut rec = crate::model::DraftRecord::new("project");
             rec.data = serde_json::json!({"name": name, "id": id, "config": config});
             p.lock_maintenance()?.append(rec, actor)?;
             Ok(p)
@@ -1619,7 +1619,7 @@ impl<'a> Project<'a> {
         }
         let mut out = String::new();
         for line in all.lines() {
-            if self.refusal(&terms, &oplog::parse_line(line, None)?.record)?.is_none() {
+            if self.refusal(&terms, &oplog::parse_line(line)?.record)?.is_none() {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -1633,7 +1633,7 @@ impl<'a> Project<'a> {
         let terms = self.trust_terms(&[])?;
         let mut out = Vec::new();
         for line in self.db.all_lines()? {
-            let record = oplog::parse_line(&line, None)?.record;
+            let record = oplog::parse_line(&line)?.record;
             if terms.is_empty() || self.refusal(&terms, &record)?.is_none() {
                 out.push(record);
             }
@@ -1641,11 +1641,43 @@ impl<'a> Project<'a> {
         Ok(out)
     }
 
+    pub fn authorized_records(&self) -> Result<Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>> {
+        let mut keys = std::collections::BTreeMap::new();
+        for (machine, key) in self.db.trusted_keys()? {
+            let bytes: [u8; 32] = hex::decode(key)?.try_into().map_err(|_| anyhow!("invalid trusted machine key"))?;
+            keys.insert(machine, ed25519_dalek::VerifyingKey::from_bytes(&bytes)?);
+        }
+        let trust_writers = keys.clone();
+        // Committed catalog chains were admitted by import_lines (including explicit
+        // Trust::All/Server imports). Pin their first announcement, then recheck the
+        // signature before reconstructing local authorization after a restart.
+        for machine in self.db.record_machines()? {
+            if let Some(line) = self.db.record_line(&machine, 1)? {
+                let record = oplog::parse_line(&line)?.record;
+                if record.op == "machine" {
+                    let key = oplog::machine_key(&record)?;
+                    if let Some(known) = keys.insert(machine, key) {
+                        if known != key { bail!("catalog machine key differs from trusted key"); }
+                    }
+                }
+            }
+        }
+        keys.insert(self.store.machine.id.clone(), self.store.machine.key.verifying_key());
+        let terms = self.trust_terms(&[])?;
+        layr_model::record::authorize_local_lines(
+            &self.id, &self.db.all_lines()?, &keys,
+            layr_model::record::LocalAuthority {
+                machine: layr_types::MachineId::parse(&self.store.machine.id)?, trust_writers: &trust_writers, limits: &terms,
+                overlay: self.name.split_once('%').map(|(_, overlay)| overlay),
+            }, ids::now_ms(),
+        )
+    }
+
     /// Machines whose records this project has but does not trust yet, with their keys.
     pub fn machine_keys_of(&self, lines: &[String]) -> Vec<(String, String)> {
         let mut v = Vec::new();
         for l in lines {
-            if let Ok(s) = oplog::parse_line(l, None) {
+            if let Ok(s) = oplog::parse_line(l) {
                 if s.record.op == "machine" {
                     if let Some(k) = s.record.data["public_key"].as_str() {
                         v.push((s.record.machine.clone(), k.to_string()));
@@ -1673,14 +1705,14 @@ impl<'a> Project<'a> {
         let mut out = Vec::new();
         for m in self.db.record_machines()? {
             let lines = self.db.lines_after(&m, 0)?;
-            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?, None)?;
+            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?)?;
             if first.record.op != "machine" {
                 bail!("machine {m}: the first record is not its key");
             }
             let key = oplog::machine_key(&first.record)?;
             let mut seq = 0;
             for l in &lines {
-                let s = oplog::parse_line(l, Some(&key)).with_context(|| format!("machine {m}"))?;
+                let s = oplog::verify_line(l, &key).with_context(|| format!("machine {m}"))?;
                 if s.record.seq != seq + 1 {
                     bail!("machine {m}: sequence gap at {}", s.record.seq);
                 }
@@ -1749,7 +1781,7 @@ mod tests {
                 id: ids::new_id(),
                 db: Db::open(&db_file(&dir))?,
             };
-            let mut record = Record::new("project");
+            let mut record = crate::model::DraftRecord::new("project");
             record.data = serde_json::json!({"id": p.id, "name": name, "config": {}});
             p.lock_maintenance()?.append(record, &actor)?;
         }
@@ -1804,7 +1836,7 @@ mod tests {
             db: Db::open(&db_file(&dir))?,
         };
         let actor = crate::model::Actor { uid: 1000, name: "test".into(), session: None };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id": p.id, "name": "p", "config": {"description": "replayed"}});
         p.lock_maintenance()?.append(record, &actor)?;
         p.db.test_connection().pragma_update(None, "user_version", 9)?;
@@ -1996,17 +2028,17 @@ mod tests {
                 id: id.clone(),
                 db: Db::open(&db_file(&dir))?,
             };
-            let mut project = Record::new("project");
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
             p.lock_maintenance().unwrap().append(project, &actor)?;
             let job_key = SigningKey::from_bytes(&[9u8; 32]);
             let (job, public_key) = (ids::new_id(), hex::encode(job_key.verifying_key().to_bytes()));
-            let mut trust = Record::new("machine.trust");
+            let mut trust = crate::model::DraftRecord::new("machine.trust");
             trust.data = serde_json::json!({"machine": job, "public_key": public_key, "expires_at": ids::now_ms() + 3_600_000,
                 "role": "writer"});
             p.lock_maintenance().unwrap().append(trust, &actor)?;
             let signed = |seq: u64, op: &str, extra: serde_json::Value| -> Result<String> {
-                let mut rec = Record::new(op);
+                let mut rec = Record::untrusted_preview(op);
                 (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), job.clone(), seq, ids::now_ms());
                 (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), extra["data"].clone());
                 if let Some(states) = extra.get("states") {
@@ -2063,13 +2095,13 @@ mod tests {
                 id: id.clone(),
                 db: Db::open(&db_file(&dir))?,
             };
-            let mut project = Record::new("project");
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
             p.lock_maintenance().unwrap().append(project, &actor)?;
             let machine = |seed: u8, role: &str| -> Result<(SigningKey, String)> {
                 let key = SigningKey::from_bytes(&[seed; 32]);
                 let machine = ids::new_id();
-                let mut trust = Record::new("machine.trust");
+                let mut trust = crate::model::DraftRecord::new("machine.trust");
                 trust.data = serde_json::json!({"machine": machine, "public_key": hex::encode(key.verifying_key().to_bytes()),
                     "role": role});
                 p.lock_maintenance().unwrap().append(trust, &actor)?;
@@ -2078,7 +2110,7 @@ mod tests {
             let (merge_key, merge) = machine(11, "merge")?;
             let (writer_key, writer) = machine(12, "writer")?;
             let signed = |key: &SigningKey, machine: &str, seq: u64, op: &str, data: serde_json::Value| -> Result<String> {
-                let mut rec = Record::new(op);
+                let mut rec = Record::untrusted_preview(op);
                 (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), machine.to_string(), seq, ids::now_ms());
                 (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), data);
                 if op == "machine" {
@@ -2087,9 +2119,9 @@ mod tests {
                 oplog::sign_line(&rec, key)
             };
             let numbering = || -> Result<layr_model::changes::Numbering> {
-                Ok(layr_model::Project::from_records(&p.id, p.effective_records()?, &p.store.machine.id)?.numbering().clone())
+                Ok(layr_model::Project::preview_records(&p.id, p.effective_records()?, &p.store.machine.id)?.numbering().clone())
             };
-            let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+            let mut handoff = crate::model::DraftRecord::new(layr_model::changes::HANDOFF_OP);
             handoff.data = serde_json::json!({"machine": merge, "next": 1});
             p.lock_maintenance().unwrap().append(handoff, &actor)?;
             p.lock_maintenance().unwrap().import_lines(
@@ -2114,7 +2146,7 @@ mod tests {
             assert_eq!(n.authority.as_deref(), Some(merge.as_str()), "its handoff does not count");
             // The creator takes the role back from the merge machine, then gives it to the cache writer.
             for to in [&p.store.machine.id, &writer] {
-                let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+                let mut handoff = crate::model::DraftRecord::new(layr_model::changes::HANDOFF_OP);
                 handoff.data = serde_json::json!({"machine": to, "next": 2});
                 p.lock_maintenance().unwrap().append(handoff, &actor)?;
                 assert_eq!(numbering()?.authority.as_deref(), Some(to.as_str()), "a handoff of the creator counts");
@@ -2383,7 +2415,7 @@ impl LockedProject<'_> {
         let present = self.state_present();
         let bases = self.layer_bases_on_disk()?;
         for raw in tx.all_lines()? {
-            let signed = oplog::parse_line(&raw, None)?;
+            let signed = oplog::parse_line(&raw)?;
             if self.refusal_in_order(terms, &signed.record)?.is_none() {
                 tx.derive(&signed.record, &present, &self.store.machine.id)?;
             }
@@ -2398,58 +2430,59 @@ impl LockedProject<'_> {
 
     /// Write a record: sign it and store it with its derived rows in one transaction.
     /// The caller holds the project lock and has created all snapshots the record names.
-    pub fn append(&self, mut rec: Record, actor: &Actor) -> PublishResult<Record> {
-        self.append_batch(std::slice::from_mut(&mut rec), actor)?;
-        Ok(rec)
+    pub fn append(&self, mut rec: crate::model::DraftRecord, actor: &Actor) -> PublishResult<Record> {
+        let mut records = self.append_batch(std::slice::from_mut(&mut rec), actor)?;
+        records.pop().ok_or_else(|| anyhow!("record batch returned no record").into())
     }
 
     /// Sign and derive every record in one FULL transaction, with contiguous sequence numbers.
     /// Snapshots must already exist and the caller must hold the project lock.
-    pub(crate) fn append_batch(&self, records: &mut [Record], actor: &Actor) -> PublishResult<()> {
+    pub(crate) fn append_batch(&self, records: &mut [crate::model::DraftRecord], actor: &Actor) -> PublishResult<Vec<Record>> {
         let _t = crate::trace::span("record batch");
         crate::objstore::record_states(self, records)?;
-        let Some(first) = records.first() else { return Ok(()) };
+        let Some(first) = records.first() else { return Ok(Vec::new()) };
         let m = &self.store.machine;
         let present = self.state_present();
         let project = if first.op == "project" { first.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
         if project.is_empty() {
             return Err(anyhow!("project id unknown: the project has no records yet").into());
         }
+        let mut published = Vec::new();
+        let identity = |seq, time| -> Result<crate::model::RecordIdentity> {
+            Ok(crate::model::RecordIdentity {
+                id: layr_types::RecordId::parse(&ids::new_id())?,
+                machine: layr_types::MachineId::parse(&m.id)?,
+                project: layr_types::ProjectId::parse(&project)?,
+                seq: std::num::NonZeroU64::new(seq).context("record sequence must be positive")?,
+                time, actor: actor.clone(),
+            })
+        };
         let tx = self.begin_write()?;
         {
             let mut seq = self.db.last_seq(&m.id)?;
             if seq == 0 {
                 // The first record of this machine publishes its key.
-                let mut mr = Record::new("machine");
-                mr.id = ids::new_id();
-                mr.machine = m.id.clone();
-                mr.seq = 1;
-                mr.time = ids::now_ms();
-                mr.project = project.clone();
-                mr.actor = actor.clone();
+                let mut mr = crate::model::DraftRecord::new("machine");
                 mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
-                let line = oplog::sign_line(&mr, &m.key)?;
-                tx.insert_record(&mr, &line)?;
+                let signed = mr.sign(identity(1, ids::now_ms())?, &m.key)?;
+                let mr: Record = serde_json::from_str(signed.get())?;
+                tx.insert_record(&mr, signed.line())?;
                 tx.derive(&mr, &present, &m.id)?;
                 seq = 1;
             }
-            for rec in records {
-                rec.id = ids::new_id();
-                rec.machine = m.id.clone();
-                rec.seq = seq + 1;
-                rec.time = ids::now_ms();
-                rec.project = project.clone();
-                rec.actor = actor.clone();
-                if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
-                    a.insert("attestation_id".into(), serde_json::json!(rec.id));
+            for draft in records {
+                let identity = identity(seq.checked_add(1).context("record sequence overflow")?, ids::now_ms())?;
+                if let Some(a) = draft.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
+                    a.insert("attestation_id".into(), serde_json::json!(identity.id.to_string()));
                     if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
                         a.insert("signer".into(), serde_json::json!(m.id));
                     }
-                    a.insert("time".into(), serde_json::json!(rec.time));
+                    a.insert("time".into(), serde_json::json!(identity.time));
                 }
-                crate::model::validate(rec)?;
-                let line = oplog::sign_line(rec, &m.key)?;
-                tx.insert_record(rec, &line)?;
+                let signed = draft.clone().sign(identity, &m.key)?;
+                let record: Record = serde_json::from_str(signed.get())?;
+                let rec = &record;
+                tx.insert_record(rec, signed.line())?;
                 tx.derive(rec, &present, &m.id)?;
                 // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
                 #[cfg(target_os = "macos")]
@@ -2459,10 +2492,11 @@ impl LockedProject<'_> {
                     }
                 }
                 seq = rec.seq;
+                published.push(record);
             }
         }
         Self::finish_write(tx)?;
-        Ok(())
+        Ok(published)
     }
 
     /// Records of other machines (replication, restore): check each machine's chain (its key
@@ -2475,7 +2509,7 @@ impl LockedProject<'_> {
         use std::collections::{BTreeMap, BTreeSet};
         let mut parsed: Vec<oplog::Signed> = Vec::new();
         for l in lines {
-            parsed.push(oplog::parse_line(l, None)?);
+            parsed.push(oplog::parse_line(l)?);
         }
         let project = if self.id.is_empty() {
             parsed
@@ -2509,7 +2543,7 @@ impl LockedProject<'_> {
             let mut last = self.db.last_seq(machine)?;
             let key = if last > 0 {
                 let first = self.db.record_line(machine, 1)?.ok_or_else(|| anyhow!("no records"))?;
-                oplog::machine_key(&oplog::parse_line(&first, None)?.record)?
+                oplog::machine_key(&oplog::parse_line(&first)?.record)?
             } else {
                 let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
                 if f.record.op != "machine" || f.record.seq != 1 {
@@ -2538,7 +2572,7 @@ impl LockedProject<'_> {
                 if s.record.seq != last + 1 {
                     bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
                 }
-                oplog::parse_line(&s.line, Some(&key))
+                oplog::verify_line(&s.line, &key)
                     .with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
                 for st in &s.record.states {
                     if self.db.state(&st.id)?.is_some() || fresh.iter().any(|f| f.record.states.iter().any(|x| x.id == st.id)) {

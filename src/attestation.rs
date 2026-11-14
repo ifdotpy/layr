@@ -1,21 +1,21 @@
 //! Signed attestation construction and lookup, without command dispatch.
 
 use crate::ids;
-use crate::model::{Attestation, Record, Subject, ATTESTATION_KINDS};
+use crate::model::{Attestation, DraftRecord, Subject, ATTESTATION_KINDS};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
 use layr_hashers::{ContentAddress, Digest};
 
 /// The project appender stamps the signer, record id and time before it signs the record.
-pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<Record> {
+pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
     record_subject(repo, Subject { kind: "state".into(), id: state.into() }, kind, payload)
 }
 
-pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload: &[u8]) -> Result<Record> {
+pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
     record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
 }
 
-pub(crate) fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {
+pub(crate) fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<DraftRecord> {
     if !ATTESTATION_KINDS.contains(&kind) {
         bail!("unknown attestation kind '{kind}'");
     }
@@ -25,7 +25,7 @@ pub(crate) fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload:
         repo.saved_view(&subject.id)?;
         None
     };
-    let mut rec = Record::new("attest");
+    let mut rec = crate::model::DraftRecord::new("attest");
     rec.data = serde_json::json!({"attestation": Attestation {
         format: 1, attestation_id: ids::new_id(), subject, change_id,
         kind: kind.into(), payload_digest: hex::encode(ContentAddress::digest(payload)),

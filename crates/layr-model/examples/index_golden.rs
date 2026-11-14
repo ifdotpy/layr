@@ -26,7 +26,7 @@ fn main() -> Result<()> {
         let object = index::open(&identity, bytes, name, &descriptor.project, &trusted)?;
         match &object.data {
             index::Data::Heads(_) => {
-                model_index::reconcile(&object, &lines)?;
+                model_index::reconcile(&object, &lines, &trusted, i64::MAX)?;
                 snapshots.push(object);
             }
             index::Data::Paths(p) => {
@@ -38,9 +38,9 @@ fn main() -> Result<()> {
         }
     }
     let newest = index::newest(&snapshots)?.context("no heads snapshot")?;
-    let loaded = model_index::load_or_full(Ok(newest.clone()), &descriptor.project, &lines)?;
+    let loaded = model_index::load_or_full(Ok(newest.clone()), &descriptor.project, &lines, &trusted, i64::MAX)?;
     ensure!(loaded.used_index, "index was not used");
-    let model = Model::from_verified_lines(lines.iter().map(String::as_str), "")?;
+    let model = Model::from_verified_lines(layr_model::record::authorize_lines(&descriptor.project, &lines, &trusted, i64::MAX)?, "")?;
     let project = model.projects.get(&descriptor.project).context("missing project")?;
     let mut source = store(objects, identity, trusted);
     let mut attempts = BTreeMap::new();

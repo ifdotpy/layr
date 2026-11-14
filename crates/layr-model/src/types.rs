@@ -303,16 +303,68 @@ pub struct Record {
     pub data: serde_json::Value,
 }
 
+/// An operation being prepared, before the appender assigns its identity and sequence.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct DraftRecord {
+    pub op: String,
+    pub states: Vec<StateRec>,
+    pub lines: BTreeMap<String, LineChange>,
+    pub data: serde_json::Value,
+}
+
+/// Identity assigned under the project lock. Zero is reserved for untrusted previews
+/// and legacy machine bootstrap records read from the wire, never for a new append.
+pub struct RecordIdentity {
+    pub id: layr_types::RecordId,
+    pub machine: layr_types::MachineId,
+    pub project: layr_types::ProjectId,
+    pub seq: std::num::NonZeroU64,
+    pub time: i64,
+    pub actor: Actor,
+}
+
+impl DraftRecord {
+    pub fn new(op: &str) -> Self {
+        Self { op: op.into(), states: Vec::new(), lines: BTreeMap::new(), data: serde_json::Value::Null }
+    }
+
+    pub fn sign(
+        self,
+        identity: RecordIdentity,
+        key: &ed25519_dalek::SigningKey,
+    ) -> anyhow::Result<layr_store::record::SignedRecord> {
+        let record = Record {
+            id: identity.id.to_string(),
+            machine: identity.machine.to_string(),
+            project: identity.project.to_string(),
+            seq: identity.seq.get(),
+            time: identity.time,
+            actor: identity.actor,
+            op: self.op,
+            states: self.states,
+            lines: self.lines,
+            data: self.data,
+        };
+        crate::validation::validate(&record)?;
+        let body = serde_json::to_string(&record)?;
+        let signature = layr_store::keys::sign_bytes(body.as_bytes(), key);
+        layr_store::record::parse_line(&format!("{{\"r\":{body},\"s\":\"{signature}\"}}"))
+    }
+}
+
 impl Record {
-    pub fn new(op: &str) -> Record {
-        Record {
+    /// An explicitly untrusted preview/fixture, with no publishable identity. This
+    /// never supplies signature or authorization proof and must not be appended.
+    pub fn untrusted_preview(op: &str) -> Self {
+        Self {
             id: String::new(),
             machine: String::new(),
+            project: String::new(),
             seq: 0,
             time: 0,
-            op: op.to_string(),
-            project: String::new(),
             actor: Actor { uid: 0, name: String::new(), session: None },
+            op: op.into(),
             states: Vec::new(),
             lines: BTreeMap::new(),
             data: serde_json::Value::Null,

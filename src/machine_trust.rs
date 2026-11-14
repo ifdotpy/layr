@@ -30,7 +30,7 @@ pub fn trust(
             return Ok(false);
         }
     }
-    let mut rec = crate::model::Record::new("machine.trust");
+    let mut rec = crate::model::DraftRecord::new("machine.trust");
     rec.data = json!({"machine": machine, "public_key": key});
     if let Some(Value::Object(limits)) = limits {
         for (k, v) in limits {

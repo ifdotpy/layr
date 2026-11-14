@@ -1937,6 +1937,7 @@ dependencies = [
  "image",
  "layr-hashers",
  "layr-store",
+ "layr-types",
  "quick-xml",
  "serde",
  "serde_json",

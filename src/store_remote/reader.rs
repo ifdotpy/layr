@@ -49,7 +49,7 @@ pub(super) fn records_with_local(
     let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
-            let record = oplog::parse_line(line, None)?.record;
+            let record = oplog::parse_line(line)?.record;
             have.entry(record.machine).or_default().insert(record.seq);
         }
     }
@@ -78,7 +78,7 @@ pub(super) fn records_with_local(
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
         for line in body.lines() {
-            let signed = oplog::parse_line(line, None)?;
+            let signed = oplog::parse_line(line)?;
             if signed.record.machine != machine || signed.record.seq != expected || expected > last {
                 bail!("segment {} has an invalid sequence", key);
             }
@@ -104,14 +104,14 @@ pub(super) fn records_with_local(
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
     for line in local {
-        let record = oplog::parse_line(line, None)?.record;
+        let record = oplog::parse_line(line)?.record;
         if record.project != project {
             bail!("local records belong to another project");
         }
         let by_seq = machines.entry(record.machine.clone()).or_default();
         if let Some(existing) = by_seq.get(&record.seq).filter(|existing| *existing != line) {
             if record.seq == 1 {
-                let remote = oplog::parse_line(existing, None)?.record;
+                let remote = oplog::parse_line(existing)?.record;
                 if oplog::machine_key(&remote)? != oplog::machine_key(&record)? {
                     bail!("remote machine {}: first-record key does not match the known public key", record.machine);
                 }
@@ -128,14 +128,14 @@ pub(super) fn records_with_local(
             gaps.push(format!("machine {machine}: missing record 1"));
             continue;
         };
-        let first = oplog::parse_line(first, None)?;
+        let first = oplog::parse_line(first)?;
         if first.record.op != "machine" {
             bail!("machine {machine}: first record is not its key");
         }
         let key = oplog::machine_key(&first.record)?;
         // Verify the complete segment set, including records beyond a gap.
         for line in by_seq.values() {
-            oplog::parse_line(line, Some(&key))?;
+            oplog::verify_line(line, &key)?;
         }
         let mut seq = 1;
         while let Some(line) = by_seq.get(&seq) {
@@ -148,7 +148,7 @@ pub(super) fn records_with_local(
         keys.insert(machine, key);
     }
     lines.sort_by_key(|l| {
-        let r = oplog::parse_line(l, None).expect("record checked").record;
+        let r = oplog::parse_line(l).expect("record checked").record;
         (r.time, r.machine, r.seq)
     });
     if let Some(path) = seen {
@@ -377,7 +377,7 @@ impl<'a> Reader<'a> {
 /// each machine that a member trusts with a `machine.trust` record naming the key it really has. A machine that a
 /// server serves but nobody in this chain vouched for is not in it.
 pub(super) fn project_trust_chain(lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeSet<String>> {
-    let records: Vec<Record> = lines.iter().map(|line| Ok(oplog::parse_line(line, None)?.record)).collect::<Result<_>>()?;
+    let records: Vec<Record> = lines.iter().map(|line| Ok(oplog::parse_line(line)?.record)).collect::<Result<_>>()?;
     let mut chain: BTreeSet<String> = records.iter().filter(|r| r.op == "project").map(|r| r.machine.clone()).take(1).collect();
     loop {
         let vouched: Vec<String> = records
@@ -461,7 +461,7 @@ pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
 pub(super) fn deletion_dependencies(lines: &[String]) -> Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for line in lines {
-        let record = oplog::parse_line(line, None)?.record;
+        let record = oplog::parse_line(line)?.record;
         if record.op != "line.delete" {
             continue;
         }
@@ -695,23 +695,17 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
     if repo.p.is_overlay() {
         return repo.p.db.lines();
     }
-    let lines = repo.p.effective_jsonl()?.lines().map(str::to_owned).collect::<Vec<_>>();
-    let effective = if store.is_api() {
-        // The API has already authorized its records; published refs select the head below.
-        layr_model::merge_authority::Effective { lines, merge_keys: BTreeMap::new() }
-    } else {
-        layr_model::merge_authority::effective_lines(&repo.p.id, &lines, crate::ids::now_ms())?
-    };
-    let records = effective.lines.iter()
-        .map(|line| oplog::parse_line(line, None).map(|signed| signed.record))
-        .collect::<Result<Vec<_>>>()?;
+    let authorized = repo.p.authorized_records()?;
+    // These proof keys authorize canonical-main selection only. Reader and cache
+    // writer identities cannot act as merge executors or manifest authorities.
+    let trusted = authorized.iter().filter(|r| r.scope().terms().is_none_or(|terms|
+        matches!(terms.role, layr_store::trust::Role::Full | layr_store::trust::Role::Merge)))
+        .map(|r| (r.record().machine.clone(), *r.signed().key())).collect();
+    let records = authorized.iter().map(|r| r.record().clone()).collect::<Vec<_>>();
     let creator = layr_model::project_perspective(&repo.p.id, &records)?;
-    let mut model = layr_model::Project::from_records(&repo.p.id, records.clone(), &creator)?;
+    let mut model = layr_model::Project::from_authorized_records(&repo.p.id, authorized, &creator)?;
     let Some(api) = store.backend.api() else {
         if model.config.contains_key("queue.merge-machine") {
-            // Merge keys authorize canonical-main selection only, never manifests or epochs.
-            let mut trusted = layr_store::public::trusted_writers_checked(&repo.p.id, &effective.lines)?;
-            trusted.extend(effective.merge_keys);
             layr_model::main_head::select(&mut model, &records, &trusted)?;
         }
         return Ok(model.line_list());
@@ -1005,7 +999,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
                 continue;
             }
             if repo.p.db.trusted(machine)?.is_none() {
-                let mut record = Record::new("machine.trust");
+                let mut record = crate::model::DraftRecord::new("machine.trust");
                 record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
                 repo.commit_record(&repo.p.lock_maintenance()?, ctx, record)?;
             }
@@ -1017,7 +1011,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             // a public key for resealing this existing reader slot, never writer trust.
             let enroll = || -> Result<()> {
                 if let Some(line) = repo.p.db.record_line(&store.machine, 1)? {
-                    let record = oplog::parse_line(&line, None)?.record;
+                    let record = oplog::parse_line(&line)?.record;
                     if record.op != "machine" {
                         bail!("local machine announcement missing");
                     }
@@ -1048,7 +1042,7 @@ pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
     let known: BTreeMap<String, String> = records
         .lines
         .iter()
-        .map(|line| oplog::parse_line(line, None).expect("checked").record)
+        .map(|line| oplog::parse_line(line).expect("checked").record)
         .flat_map(|r| r.states.into_iter().map(|s| (s.id, s.subvol)))
         .collect();
     for object in store.backend.list("states/")? {
@@ -1210,7 +1204,7 @@ mod tests {
         (Backend::file(root.clone()), keys::generate_identity(), ed25519_dalek::SigningKey::from_bytes(&[9; 32]), root)
     }
     fn line(seq: u64, key: &ed25519_dalek::SigningKey) -> String {
-        let mut record = Record::new(if seq == 1 { "machine" } else { "config" });
+        let mut record = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
         record.id = format!("01a12290-0000-7000-8000-{seq:012x}");
         record.machine = MACHINE.into();
         record.project = PROJECT.into();
@@ -1246,7 +1240,7 @@ mod tests {
         std::fs::File::options().write(true).open(&object).unwrap().set_modified(time).unwrap();
         assert_eq!(records_with_local(&backend, &identity, PROJECT, &lines, Some(&seen)).unwrap().lines.len(), 2);
         // A replaced object has another time: it is read and checked again.
-        let mut other = Record::new("config");
+        let mut other = Record::untrusted_preview("config");
         other.id = "01a12290-0000-7000-8000-0000000000ff".into();
         other.machine = MACHINE.into();
         other.project = PROJECT.into();
@@ -1283,7 +1277,7 @@ mod tests {
         let lines: Vec<String> = (1..=3).map(|seq| line(seq, &key)).collect();
         segment(&backend, &identity, 1, 2, &lines[..2]);
         let mut fork = lines;
-        let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+        let mut record = oplog::parse_line(&fork[1]).unwrap().record;
         record.actor.name = "a different signed record".into();
         fork[1] = oplog::sign_line(&record, &key).unwrap();
         segment(&backend, &identity, 1, 3, &fork);

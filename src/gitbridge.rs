@@ -12,7 +12,7 @@ use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, Record, StateKind, StateRec};
+use crate::model::{Line, StateKind, StateRec};
 use crate::repo::{skip_path, Repo};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -785,7 +785,7 @@ impl std::error::Error for Moved {}
 /// The records of one import, planned with no project lock. `commit_import` writes them.
 pub struct ImportPlan {
     /// Each planned record with the Git commit it imports, parents first.
-    records: Vec<(String, Record)>,
+    records: Vec<(String, crate::model::DraftRecord)>,
     /// The Git commit that was asked for, its state, and the remote ref to move (if any).
     commit: String,
     tip: String,
@@ -959,7 +959,7 @@ pub fn commit_import(
             continue;
         }
         if guard.is_some() && expected.as_deref() != Some(tip.as_str()) {
-            let mut rec = Record::new("remote.ref");
+            let mut rec = crate::model::DraftRecord::new("remote.ref");
             rec.data = serde_json::json!({"ref": refname, "state": tip, "commit": commit});
             repo.commit_record(&locked, ctx, rec)?;
         }
@@ -983,7 +983,7 @@ fn import_record(
     parents: Vec<String>,
     objects: GitImport,
     changes: Changes,
-) -> Result<(String, Record)> {
+) -> Result<(String, crate::model::DraftRecord)> {
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
@@ -991,7 +991,7 @@ fn import_record(
     let mut st = repo.state_record(ctx, ids::new_id(), StateKind::Import, parents, &msg, None, String::new());
     st.author = crate::model::Author { name, email, uid: 0, session: None };
     st.time = time.max(1);
-    let mut rec = Record::new("import");
+    let mut rec = crate::model::DraftRecord::new("import");
     let id = st.id.clone();
     rec.states.push(st);
     rec.data = serde_json::json!({"ref": refname, "commit": commit, "state": id, "git": objects});
@@ -3156,7 +3156,7 @@ mod export_tests {
             };
             let actor =
                 crate::model::Actor { uid: rustix::process::getuid().as_raw(), name: "Export Test".into(), session: None };
-            let mut project = Record::new("project");
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"name": "export", "id": p.id, "config": {}});
             p.lock_maintenance()?.append(project, &actor)?;
             let repo = Repo { p, ctx: None };
@@ -3194,7 +3194,7 @@ mod export_tests {
                     "author": {"name": "Author", "email": "author@example.test"}, "message": contents,
                     "tree": refs.tree.to_string(), "times": refs.times.to_string()
                 }))?;
-                let mut record = Record::new("state");
+                let mut record = crate::model::DraftRecord::new("state");
                 record.states.push(state);
                 repo.p.lock_maintenance()?.append(record, &actor)?;
                 if version == 2 {

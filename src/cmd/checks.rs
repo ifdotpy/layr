@@ -424,7 +424,7 @@ fn required_checks(value: Option<&str>, state: Option<&str>, passing: bool) -> R
 }
 
 fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: bool) -> Result<Plan> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, main_states) = creator_policy(&repo.p.id, records)?;
     let changes = names("checks.changes", &setting(&policy, "checks.changes", json!([]))?)?;
     let lines = setting(&policy, "checks.lines", json!({}))?;
@@ -579,14 +579,14 @@ fn attested_result(
 
 /// A queue gate uses the creator's privilege policy and requires a passing executor result.
 pub(crate) fn passing_required(repo: &Repo, state: &str, name: &str, argv: &[String], want: Option<&str>) -> Result<bool> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     let privileged = names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?;
     attested_result(repo, state, argv, privileged.iter().any(|check| check == name), want, true)
 }
 
 pub(crate) fn creator_project(repo: &Repo) -> Result<layr_model::Project> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     Ok(policy)
 }
@@ -788,12 +788,13 @@ fn scan(
     Ok(Scan { checks: results, pending, pending_privileged })
 }
 
-fn creator_policy(project: &str, records: Vec<crate::model::Record>) -> Result<(layr_model::Project, BTreeSet<String>)> {
-    let creator = layr_model::project_perspective(project, &records)
+fn creator_policy(project: &str, records: Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>) -> Result<(layr_model::Project, BTreeSet<String>)> {
+    let creator = layr_model::project_perspective(project, records.iter().map(|r| r.record()))
         .context("automatic checks refuse to run without an unambiguous verified project creator")?;
-    let model = layr_model::Project::from_records(project, records.clone(), &creator)?;
+    let model = layr_model::Project::from_authorized_records(project, records.clone(), &creator)?;
     let mut states = BTreeSet::new();
     for record in &records {
+        let record = record.record();
         if model.admins.contains(&record.machine) {
             for movement in record.lines.values() {
                 if let Some(after) = &movement.after {
@@ -1424,14 +1425,26 @@ mod policy_tests {
         );
     }
 
-    fn record(machine: &str, op: &str, data: Value) -> crate::model::Record {
-        let mut record = crate::model::Record::new(op);
+    const PROJECT: &str = "01a12290-0000-7000-8000-000000000001";
+
+    fn record(machine: &str, op: &str, mut data: Value) -> layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope> {
+        let n = match machine { "owner" => 1, "runner" => 2, _ => 3 };
+        let machine = format!("01a12290-0000-7000-8001-{n:012}");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
+        if op == "project" { data["id"] = json!(PROJECT); }
+        let mut record = crate::model::Record::untrusted_preview(op);
         record.id = crate::ids::new_id();
-        record.project = "project".into();
-        record.machine = machine.into();
+        record.project = PROJECT.into();
+        record.machine = machine.clone();
         record.seq = 1;
         record.data = data;
-        record
+        let lines = vec![crate::oplog::sign_line(&record, &key).unwrap()];
+        let keys = BTreeMap::from([(machine.clone(), key.verifying_key())]);
+        let rules = Default::default();
+        layr_model::record::authorize_local_lines(PROJECT, &lines, &keys,
+            layr_model::record::LocalAuthority {
+                machine: layr_types::MachineId::parse(&machine).unwrap(), trust_writers: &keys, limits: &rules, overlay: None,
+            }, 0).unwrap().remove(0)
     }
 
     #[test]
@@ -1450,13 +1463,13 @@ mod policy_tests {
                 "check.unit":"echo local", "checks.changes":["local"], "protect":{}
             }}),
         );
-        let (policy, _) = creator_policy("project", vec![creator.clone(), runner.clone()])?;
+        let (policy, _) = creator_policy(PROJECT, vec![creator.clone(), runner.clone()])?;
         assert_eq!(policy.setting("check.unit"), Some(&json!("echo creator")));
         assert_eq!(policy.setting("checks.changes"), Some(&json!(["unit"])));
         assert!(policy.access_policy(0, false).rule_for("main").is_some());
-        assert!(creator_policy("project", vec![runner]).is_err());
+        assert!(creator_policy(PROJECT, vec![runner]).is_err());
         let conflicting = record("other", "project", json!({"id":"project","config":{}}));
-        assert!(creator_policy("project", vec![creator, conflicting]).is_err());
+        assert!(creator_policy(PROJECT, vec![creator, conflicting]).is_err());
         Ok(())
     }
 }

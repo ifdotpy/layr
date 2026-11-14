@@ -1,66 +1,10 @@
 //! Validate limited merge records before deriving reader policy.
 //! Input signatures and contiguous machine prefixes must already be verified.
-use crate::{changes, Record};
-use anyhow::Result;
-use ed25519_dalek::VerifyingKey;
-use layr_store::{public, record};
-use std::collections::{BTreeMap, BTreeSet};
-
-pub struct Effective {
-    pub lines: Vec<String>,
-    /// Keys for canonical-main selection only, never manifest or epoch authority.
-    pub merge_keys: BTreeMap<String, VerifyingKey>,
-}
-
-pub fn effective_lines(project: &str, lines: &[String], now: i64) -> Result<Effective> {
-    let parsed = lines
-        .iter()
-        .map(|line| -> Result<(&String, Record)> { Ok((line, serde_json::from_str(record::parse_line(line, None)?.get())?)) })
-        .collect::<Result<Vec<_>>>()?;
-    // Change numbers count only from a full or a merge machine, as in the store's trust rules
-    // (`layr_store::trust`): a reader or a cache writer that holds the numbering role gives no number.
-    let limited: BTreeSet<&str> = parsed
-        .iter()
-        .filter(|(_, r)| r.op == "machine.trust" && layr_store::trust::Terms::of_trust(&r.data).is_some())
-        .filter_map(|(_, r)| r.data["machine"].as_str())
-        .collect();
-    let numbering = |r: &Record| matches!(r.op.as_str(), changes::NUMBER_OP | changes::HANDOFF_OP);
-    let limited_numbers = parsed.iter().any(|(_, r)| numbering(r) && limited.contains(r.machine.as_str()));
-    // Preserve existing reader contracts when the project has no merge-role trust.
-    if !parsed.iter().any(|(_, r)| r.op == "machine.trust" && r.data["role"] == "merge") {
-        if !limited_numbers {
-            return Ok(Effective { lines: lines.to_vec(), merge_keys: BTreeMap::new() });
-        }
-        let writers = public::release_writers_checked(project, lines)?;
-        let kept = parsed
-            .iter()
-            .filter(|(_, r)| !numbering(r) || writers.full.contains_key(&r.machine))
-            .map(|(line, _)| (*line).clone())
-            .collect();
-        return Ok(Effective { lines: kept, merge_keys: BTreeMap::new() });
-    }
-    let writers = public::release_writers_checked(project, lines)?;
-    let mut ordered = parsed.iter().collect::<Vec<_>>();
-    ordered.sort_by(|a, b| (a.1.time, &a.1.machine, a.1.seq).cmp(&(b.1.time, &b.1.machine, b.1.seq)));
-    let mut kept = Vec::with_capacity(lines.len());
-    let mut current = Folded::new(now);
-    for (line, r) in ordered {
-        current.at = r.time;
-        if let Some((_, terms)) = writers.merge.get(&r.machine) {
-            if terms.refusal_in(r.time, &r.op, &r.data, None, &payload_of(r), &r.machine, &current).is_some() {
-                continue;
-            }
-        } else if limited_numbers && numbering(r) && !writers.full.contains_key(&r.machine) {
-            continue;
-        }
-        current.apply(r);
-        kept.push((*line).clone());
-    }
-    Ok(Effective { lines: kept, merge_keys: writers.merge.into_iter().map(|(id, (key, _))| (id, key)).collect() })
-}
+use crate::Record;
+use std::collections::BTreeMap;
 
 /// What a record changes besides its data, for `layr_store::trust`.
-fn payload_of(record: &Record) -> layr_store::trust::Payload<'_> {
+pub(super) fn payload_of(record: &Record) -> layr_store::trust::Payload<'_> {
     let lines = record
         .lines
         .iter()
@@ -83,7 +27,7 @@ fn payload_of(record: &Record) -> layr_store::trust::Payload<'_> {
 }
 
 /// The accepted history before the record being checked, in the model's time/machine/sequence order.
-struct Folded {
+pub(super) struct Folded {
     lines: BTreeMap<String, (String, u32, String)>,
     queue: BTreeMap<String, serde_json::Value>,
     refs: BTreeMap<String, String>,
@@ -91,11 +35,11 @@ struct Folded {
     /// The sole signer in the current target run; a mixed-signature run has none.
     setters: BTreeMap<String, String>,
     now: i64,
-    at: i64,
+    pub(super) at: i64,
 }
 
 impl Folded {
-    fn new(now: i64) -> Folded {
+    pub(super) fn new(now: i64) -> Folded {
         Folded {
             lines: BTreeMap::new(),
             queue: BTreeMap::new(),
@@ -107,7 +51,7 @@ impl Folded {
         }
     }
 
-    fn apply(&mut self, record: &Record) {
+    pub(super) fn apply(&mut self, record: &Record) {
         for (id, change) in &record.lines {
             match &change.after {
                 Some(line) => {
@@ -190,12 +134,13 @@ impl layr_store::trust::Current for Folded {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Model, Project};
+    use crate::{changes, Model, Project};
+    use layr_store::record;
     use ed25519_dalek::SigningKey;
     use serde_json::{json, Value};
 
     fn signed(machine: &str, seq: u64, time: i64, op: &str, data: Value, key: &SigningKey) -> String {
-        let mut r = Record::new(op);
+        let mut r = Record::untrusted_preview(op);
         r.id = format!("01a1c000-0000-7000-9000-{:012x}", seq + if machine.ends_with("2") { 100 } else { 0 });
         r.project = "01a1c000-0000-7000-8000-000000000003".into();
         r.machine = machine.into();
@@ -210,7 +155,7 @@ mod tests {
         format!(r#"{{"r":{body},"s":"{signature}"}}"#)
     }
     fn decode(line: &str) -> Record {
-        serde_json::from_str(record::parse_line(line, None).unwrap().get()).unwrap()
+        serde_json::from_str(record::parse_line(line).unwrap().get()).unwrap()
     }
     fn fixture() -> (Vec<String>, SigningKey, Value) {
         let owner = SigningKey::from_bytes(&[7; 32]);
@@ -272,24 +217,21 @@ mod tests {
         r.lines=serde_json::from_value(json!({"01a1c000-0000-7000-8000-000000000006":{"before":{"name":"main","head":"01a1c000-0000-7000-8000-000000000004","owner":1,"machine":"01a1c000-0000-7000-8000-000000000001"},"after":{"name":"main","head":"01a1c000-0000-7000-8000-000000000005","owner":1,"machine":"01a1c000-0000-7000-8000-000000000001"}}})).unwrap();
         r
     }
-    fn model(lines: &[String]) -> (Effective, Project) {
+    fn model(lines: &[String]) -> (Vec<Record>, Project) {
         // Match the signature boundary of the real readers before filtering.
         let mut keys = BTreeMap::new();
         for line in lines {
             let r = decode(line);
             if r.op == "machine" && r.seq == 1 {
-                keys.insert(r.machine, record::machine_key(record::parse_line(line, None).unwrap()).unwrap());
+                keys.insert(r.machine, record::machine_key(record::parse_line(line).unwrap().raw()).unwrap());
             }
         }
-        for line in lines {
-            let r = decode(line);
-            record::verify_line(line.as_bytes(), &keys[&r.machine]).unwrap();
-        }
-        let effective = effective_lines("01a1c000-0000-7000-8000-000000000003", lines, 100).unwrap();
-        let m = Model::from_verified_lines(effective.lines.iter().map(String::as_str), "01a1c000-0000-7000-8000-000000000001")
-            .unwrap();
-        (effective, m.projects["01a1c000-0000-7000-8000-000000000003"].clone())
+        let authorized = crate::record::authorize_lines("01a1c000-0000-7000-8000-000000000003", lines, &keys, 100).unwrap();
+        let records = authorized.iter().map(|r| r.record().clone()).collect();
+        let m = Model::from_verified_lines(authorized, "01a1c000-0000-7000-8000-000000000001").unwrap();
+        (records, m.projects["01a1c000-0000-7000-8000-000000000003"].clone())
     }
+
     #[test]
     fn numbers_count_from_a_merge_machine_but_not_its_handoff_nor_a_cache_writer() {
         let (owner, merge, writer) = (
@@ -324,7 +266,7 @@ mod tests {
         lines.push(own(7, 9, changes::HANDOFF_OP, json!({"machine": writer, "next": 2}), &owner_key, owner));
         lines.push(own(2, 10, changes::NUMBER_OP, json!({"numbers": {"c2": 2}}), &writer_key, writer));
         let (effective, project) = model(&lines);
-        let kept = |machine: &str, op: &str| effective.lines.iter().any(|l| decode(l).machine == machine && decode(l).op == op);
+        let kept = |machine: &str, op: &str| effective.iter().any(|l| l.machine == machine && l.op == op);
         assert!(kept(merge, changes::NUMBER_OP) && !kept(merge, changes::HANDOFF_OP));
         assert!(!kept(writer, changes::NUMBER_OP));
         let n = project.numbering();
@@ -337,19 +279,19 @@ mod tests {
         let done = completion(&key, &pending);
         lines.push(sign(done.clone(), &key));
         let (effective, mut project) = model(&lines);
-        let records = effective.lines.iter().map(|l| decode(l)).collect::<Vec<_>>();
-        crate::main_head::select(&mut project, &records, &effective.merge_keys).unwrap();
+        let trusted = BTreeMap::from([("01a1c000-0000-7000-8000-000000000002".into(), key.verifying_key())]);
+        crate::main_head::select(&mut project, &effective, &trusted).unwrap();
         assert_eq!(project.line_list()[0].head, "01a1c000-0000-7000-8000-000000000005");
         // Newer/unknown queue fields must survive the older typed model.
-        assert!(effective.lines.iter().any(|line| decode(line).id == done.id));
+        assert!(effective.iter().any(|line| line.id == done.id));
         let mut forged = done;
         forged.data["queue_change"]["before"]["title"] = json!("forged");
         lines.pop();
         lines.push(sign(forged, &key));
-        let raw = Model::from_verified_lines(lines.iter().map(String::as_str), "01a1c000-0000-7000-8000-000000000001").unwrap();
+        let raw = Model::preview_lines(lines.iter().map(String::as_str), "01a1c000-0000-7000-8000-000000000001").unwrap();
         assert_eq!(raw.projects["01a1c000-0000-7000-8000-000000000003"].queue_list(None)[0].status, "done");
         let (effective, project) = model(&lines);
-        assert!(!effective.lines.iter().any(|l| decode(l).op == "queue.result"));
+        assert!(!effective.iter().any(|l| l.op == "queue.result"));
         assert_eq!(project.line_list()[0].head, "01a1c000-0000-7000-8000-000000000004");
     }
     #[test]
@@ -381,7 +323,7 @@ mod tests {
             reference("env/production", "01a1c000-0000-7000-8000-000000000004"),
             &key,
         ));
-        let raw = Model::from_verified_lines(lines.iter().map(String::as_str), "01a1c000-0000-7000-8000-000000000001").unwrap();
+        let raw = Model::preview_lines(lines.iter().map(String::as_str), "01a1c000-0000-7000-8000-000000000001").unwrap();
         assert_eq!(raw.projects["01a1c000-0000-7000-8000-000000000003"].ref_list("", 100).len(), 2);
         let (_, project) = model(&lines);
         let refs = project.ref_list("", 100);
@@ -420,7 +362,7 @@ mod tests {
         // The second real pending entry cannot restore ownership from root to uid 1.
         lines.push(sign(second, &key));
         let (effective, project) = model(&lines);
-        assert_eq!(effective.lines.iter().filter(|l| decode(l).op == "queue.result").count(), 1);
+        assert_eq!(effective.iter().filter(|l| l.op == "queue.result").count(), 1);
         assert!(project.state("01a1c000-0000-7000-8000-000000000009").is_none());
     }
     #[test]
@@ -474,7 +416,7 @@ mod tests {
         lines.push(signed("01a1c000-0000-7000-8000-000000000002",4,7,"release.files",json!({"reference":"release/v1","state":target,"files":[{"name":"artifact","size":1,"sha256":"a".repeat(64),"object":"files/01a1c000-0000-7000-8000-000000000010.age"}]}),&key));
         lines.push(signed("01a1c000-0000-7000-8000-000000000001", 6, 9, "ref.set", reference(Value::Null), &owner));
         let (effective, project) = model(&lines);
-        assert!(effective.lines.iter().any(|l| decode(l).op == "release.files"));
+        assert!(effective.iter().any(|l| l.op == "release.files"));
         assert_eq!(project.release_files("release/v1", 100).unwrap().len(), 1);
     }
     #[test]
@@ -490,6 +432,6 @@ mod tests {
         lines.push(signed("01a1c000-0000-7000-8000-000000000002", 4, 8, "ref.set", reference, &key));
         lines.push(signed("01a1c000-0000-7000-8000-000000000002",5,9,"release.files",json!({"reference":"release/v1","state":target,"files":[{"name":"artifact","size":1,"sha256":"a".repeat(64),"object":"files/01a1c000-0000-7000-8000-000000000010.age"}]}),&key));
         let (effective, _) = model(&lines);
-        assert!(!effective.lines.iter().any(|line| decode(line).op == "release.files"));
+        assert!(!effective.iter().any(|line| line.op == "release.files"));
     }
 }

@@ -30,7 +30,7 @@ use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, LineChange, LineState, Record, StateKind, StateRec};
+use crate::model::{Line, LineChange, LineState, StateKind, StateRec};
 use crate::repo::{skip_path, Repo, Temp};
 use crate::storage as btrfs;
 use crate::store::Project;
@@ -726,7 +726,7 @@ impl<'a> Repo<'a> {
             for name in self.overlay_names()? {
                 let op = self.overlay_project(&name)?;
                 for line in op.export_jsonl()?.lines() {
-                    let record = crate::oplog::parse_line(line, None)?.record;
+                    let record = crate::oplog::parse_line(line)?.record;
                     if record.op != "view.hidden" || record.data["view_id"] != id {
                         continue;
                     }
@@ -769,18 +769,18 @@ impl<'a> Repo<'a> {
                 let orepo = self.overlay_repo(&layer.overlay)?;
                 let _lock = orepo.p.lock_maintenance()?;
                 if orepo.p.export_jsonl()?.lines().any(|line| {
-                    crate::oplog::parse_line(line, None)
+                    crate::oplog::parse_line(line)
                         .is_ok_and(|s| s.record.op == "view.hidden" && s.record.data["view_id"] == id)
                 }) {
                     continue;
                 }
-                let mut record = Record::new("view.hidden");
+                let mut record = crate::model::DraftRecord::new("view.hidden");
                 record.data =
                     serde_json::json!({"view_id":id,"shared":view.shared,"public":public,"position":position,"layer":layer});
                 orepo.commit_record(&_lock, ctx, record)?;
             }
         } else if self.p.db.saved_view(&id)?.is_none() {
-            let mut record = Record::new("view.save");
+            let mut record = crate::model::DraftRecord::new("view.save");
             record.data = serde_json::json!({"view_id":id,"view":view});
             self.commit_record(locked, ctx, record)?;
         }
@@ -1155,7 +1155,7 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let _lock = orepo.p.lock_maintenance()?;
-            let mut record = Record::new("overlay.use");
+            let mut record = crate::model::DraftRecord::new("overlay.use");
             record.data = serde_json::json!({"config":{key:value}});
             orepo.commit_record(&_lock, ctx, record)?;
         }
@@ -1178,7 +1178,7 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let _lock = orepo.p.lock_maintenance()?;
-            let mut record = Record::new("overlay.use");
+            let mut record = crate::model::DraftRecord::new("overlay.use");
             record.data = serde_json::json!({"config":{key:l.state}});
             orepo.commit_record(&_lock, ctx, record)?;
         }
@@ -1856,7 +1856,7 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-        let mut rec = Record::new("line.create");
+        let mut rec = crate::model::DraftRecord::new("line.create");
         rec.lines.insert(
             line.id.clone(),
             LineChange { before: None, after: Some(self.line_state(&line, start)), working_before: None, working_after: None },
@@ -1943,7 +1943,7 @@ impl<'a> Repo<'a> {
         locked.check(&self.p)?;
         let mut after = self.line_state(&l, &l.head);
         after.name = name.to_string();
-        let mut rec = Record::new("line.rename");
+        let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
             LineChange {
@@ -2084,7 +2084,7 @@ impl<'a> Repo<'a> {
             }
         }
         if !deleted.is_empty() {
-            let mut rec = Record::new("gc");
+            let mut rec = crate::model::DraftRecord::new("gc");
             rec.data = serde_json::json!({"deleted": deleted, "history": keep_n});
             orepo.commit_record(locked, ctx, rec)?;
         }
@@ -2340,7 +2340,7 @@ pub fn move_overlay_line(
     states: Vec<StateRec>,
 ) -> crate::db::PublishResult<()> {
     locked.check(&orepo.p)?;
-    let mut rec = Record::new(op);
+    let mut rec = crate::model::DraftRecord::new(op);
     rec.states = states;
     let st = |h: &str| LineState { name: ol.name.clone(), head: h.to_string(), owner: ol.owner, machine: ol.machine.clone() };
     rec.lines.insert(
@@ -2591,7 +2591,7 @@ pub fn set_layers(
     let mut local = st.local_paths();
     local.extend(st.ignored.iter().cloned());
     let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &local, force)?;
-    let mut rec = Record::new(op);
+    let mut rec = crate::model::DraftRecord::new(op);
     rec.data = serde_json::json!({
         "line": line.id,
         "folder_view": repo.public_view_data(&line.id, layers)?,
@@ -2803,7 +2803,7 @@ mod read_open_tests {
                     dir,
                     id: ids::new_id(),
                 };
-                let mut record = Record::new("project");
+                let mut record = crate::model::DraftRecord::new("project");
                 record.data = json!({"id":p.id,"name":name,"config":config});
                 p.lock_maintenance()?.append(record, &actor)?;
                 Ok(p)
@@ -2926,7 +2926,7 @@ mod read_open_tests {
         }
         // Public metadata remains readable without a local overlay project; hidden settings
         // and stack discovery still propagate an explicitly declared hidden project's open error.
-        let mut record = Record::new("config");
+        let mut record = crate::model::DraftRecord::new("config");
         record.data = json!({"config":{
             "overlay.remote":{"hidden":false},"overlay.remote.quiet":true,
             "overlay.unavailable":{"hidden":true}
