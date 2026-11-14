@@ -1041,7 +1041,7 @@ pub(crate) fn save_back_caches(
     // The source times of this copy go with its build output (docs/cache-overlays.md, section 20). The
     // `.layr-times` that came with the cache names the sources of an older build: a line that takes this
     // cache would give a changed source an older time than the new build output, and the tool would skip it.
-    crate::source_times::record(dir, &folders)?;
+    crate::source_times::record(dir, &folders, (ctx.caller.uid, gid))?;
     let _lock = repo.p.lock_maintenance()?;
     let checks_line = match repo.p.db.line_by_name(&name)? {
         Some(l) => l,

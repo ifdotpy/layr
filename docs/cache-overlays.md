@@ -791,7 +791,8 @@ the write (as `git checkout` does), so a warm cache looked stale and one or more
   cache folder before the snapshot: path, time, size and content hash (git blob id) of each tracked
   file of the working copy (the ignore rules keep it). It runs before the project lock.
 - The file goes with the cache: snapshots, copies and overlay layers carry it, and it goes away
-  with the cache state. No other record holds it.
+  with the cache state. No other record holds it. In a working folder it belongs to the line
+  owner, including when the root service records it; it is not private service metadata.
 - A line that takes caches (`line new`, `merge`, the follow pass, `merge --caches-only`) gives each
   tracked file whose size and content hash equal the recorded ones the recorded time back. A file
   with other bytes must look newer than the build output, so the tool builds it again: it keeps

@@ -1082,8 +1082,9 @@ fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, Stri
 /// ancestor with the changed paths (other file systems). Without such an ancestor it is the full
 /// tree of the commit. `source` is a folder with the content of the commit (`init --from`); its
 /// files are cloned where their bytes match the Git objects. The caller holds the project lock, or
-/// this function takes it.
-pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()> {
+/// this function takes it. `own` normalizes a new private import before sealing it for the
+/// initial line; rebuilding an existing shared state keeps its recorded metadata.
+pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>, own: Option<(u32, u32)>) -> Result<()> {
     let _lock = repo.p.lock_or_borrow()?;
     if repo.p.has_state(state) {
         return Ok(());
@@ -1104,7 +1105,9 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
     let made = (|| -> Result<()> {
         match &base {
             Some((b, _)) => {
-                if thin_build(repo, &mut cat, &changes, &work, b, source, state)? {
+                // Owner normalization needs a complete private copy, never a write into
+                // an inherited immutable base. Ordinary rebuilds still use thin imports.
+                if own.is_none() && thin_build(repo, &mut cat, &changes, &work, b, source, state)? {
                     return Ok(());
                 }
                 repo.snapshot_state(b, &work, false)?;
@@ -1116,6 +1119,9 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
                 crate::storage::create_subvolume(&work)?;
                 materialize(&s, &commit, &work, None, None, source)?;
             }
+        }
+        if let Some((uid, gid)) = own {
+            crate::repo::give_tree(&work, uid, gid)?;
         }
         crate::storage::snapshot(&work, &repo.p.state_path(state), true)
     })();

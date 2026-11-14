@@ -484,7 +484,7 @@ impl<'a> Repo<'a> {
         // An imported state is built from git (docs/ownership.md, "States imported from Git"). A
         // copy on a store remote is the fallback when git cannot give the objects.
         if crate::gitbridge::buildable(self, id) {
-            return crate::gitbridge::build_tree(self, id, None).or_else(|e| {
+            return crate::gitbridge::build_tree(self, id, None, None).or_else(|e| {
                 crate::store_remote::restore_state(self, id)
                     .map_err(|_| e.context(format!("cannot build state {} from Git", ids::short(id))))
             });
@@ -1688,6 +1688,10 @@ impl<'a> Repo<'a> {
         } else {
             btrfs::snapshot(&self.head_tree(line)?, &p, false)?;
         }
+        // Keep the owner in the private index, so sealing a sparse save retains the
+        // unchanged entries' ownership instead of making the next line copy them up.
+        let (uid, gid) = self.owner_ids(line);
+        give_tree(&p, uid, gid)?;
         crate::fsutil::atomic_write(&basef, key.as_bytes(), 0o600)?;
         Ok(p)
     }
@@ -1702,6 +1706,8 @@ impl<'a> Repo<'a> {
             let tmp = self.p.work_dir().join(crate::store::temp_name());
             tree.materialize(&tmp, false)?;
             let done = (|| -> Result<()> {
+                let (uid, gid) = self.owner_ids(line);
+                give_tree(&tmp, uid, gid)?;
                 let info = btrfs::SubvolInfo {
                     uuid: ids::new_id(),
                     received_uuid: None,
@@ -2428,23 +2434,12 @@ impl<'a> Repo<'a> {
     /// copied again from a warm cache.
     pub(crate) fn prepare_at(&self, line: &Line, state: &str, w: &Path, cached: &[String]) -> Result<()> {
         let (uid, gid) = self.owner_ids(line);
-        let root_meta = std::fs::symlink_metadata(w)?;
-        if root_meta.uid() != uid {
-            // Files of another owner: give the whole tree to the line owner.
-            let mut paths = Vec::new();
-            fsutil::walk(w, "", &mut |rel, m| {
-                if m.uid != uid {
-                    paths.push(rel.to_string());
-                }
-                Ok(true)
-            })?;
-            for p in paths {
-                fsutil::chown_nofollow(&w.join(p), uid, gid)?;
-            }
-        }
+        // A matching root does not prove that inherited entries have matching owners.
+        // Walk every private copy, but do not chown matching entries: on OverlayFS even
+        // an ownership-only change copies a lower file into the writable upper.
+        give_tree(w, uid, gid)?;
         #[cfg(target_os = "macos")]
         crate::sys::apfs_clear_acl(w)?;
-        fsutil::chown_nofollow(w, uid, gid)?;
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
         crate::gitbridge::make_git_folder(self, line, state, w)?;
         // The caches of this machine's setting always get a folder: the cache overlays fill it, or
@@ -3250,8 +3245,6 @@ fn prune_empty_parents(target: &Path, to: &(impl fsutil::Src + ?Sized), rel: &st
     Ok(())
 }
 
-/// Give every entry of a tree (a new cache copy, still private) to `uid:gid`, without following
-/// links and without entering nested subvolumes.
 /// Whether a cache copy may keep the owners that its clone gave, without a walk. Every condition
 /// is needed:
 /// - `uniform`: the copy is one clone, not a copy file by file;
@@ -3279,19 +3272,26 @@ pub(crate) fn give_cache_tree(root: &Path, uniform: bool, source_owner: Option<u
     give_tree(root, uid, gid)
 }
 
+/// Normalize a private writable tree before publication, without following links or
+/// entering nested storage roots. Matching entries keep their metadata and shared lowers.
+/// The parent must remain private for the entire walk, including after the root is chowned.
 pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
     let _t = crate::trace::span(format!("give tree {}", root.display()));
-    let mut paths = Vec::new();
+    let tree = Tree::open(root)?;
     fsutil::walk(root, "", &mut |rel, m| {
+        if fsutil::is_layer(root, rel, m) {
+            return Ok(false);
+        }
         if m.uid != uid || m.gid != gid {
-            paths.push(rel.to_string());
+            tree.chown(rel, uid, gid)?;
         }
         Ok(true)
     })?;
-    for p in paths {
-        fsutil::chown_nofollow(&root.join(p), uid, gid)?;
+    let m = tree.stat_checked("")?;
+    if m.uid != uid || m.gid != gid {
+        tree.chown("", uid, gid)?;
     }
-    fsutil::chown_nofollow(root, uid, gid)
+    Ok(())
 }
 
 /// The folders of the working folder `w` that `.layrattributes` files make `regenerable` and
@@ -4939,8 +4939,59 @@ mod leftover_name_tests {
     }
 }
 
+#[cfg(test)]
 mod owner_walk_tests {
-    use super::owner_walk_skippable;
+    use super::{give_tree, owner_walk_skippable};
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn matching_entries_are_not_chowned_and_symlinks_are_not_followed() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-owner-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("tree/sub"))?;
+        std::fs::write(root.join("tree/sub/file"), b"content")?;
+        std::fs::write(root.join("outside"), b"outside")?;
+        std::fs::hard_link(root.join("tree/sub/file"), root.join("tree/twin"))?;
+        std::os::unix::fs::symlink("../../outside", root.join("tree/sub/link"))?;
+        let paths = ["tree", "tree/sub", "tree/sub/file", "tree/twin", "tree/sub/link", "outside"];
+        let before: Vec<_> = paths.iter().map(|p| std::fs::symlink_metadata(root.join(p))).collect::<std::io::Result<_>>()?;
+        give_tree(&root.join("tree"), before[0].uid(), before[0].gid())?;
+        for (path, old) in paths.iter().zip(&before) {
+            let new = std::fs::symlink_metadata(root.join(path))?;
+            assert_eq!(
+                (new.uid(), new.gid(), new.ino(), new.ctime(), new.ctime_nsec()),
+                (old.uid(), old.gid(), old.ino(), old.ctime(), old.ctime_nsec()),
+                "{path}"
+            );
+        }
+        assert!(give_tree(&root.join("tree/sub/link"), before[0].uid(), before[0].gid()).is_err());
+        assert_eq!(std::fs::read(root.join("outside"))?, b"outside");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn matching_root_does_not_hide_a_different_entry_group() -> anyhow::Result<()> {
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        // Changing a file to a supplementary group needs no privileged test process.
+        let Some(other) = rustix::process::getgroups()?.into_iter().find(|g| g.as_raw() != gid) else {
+            return Ok(());
+        };
+        let root = std::env::temp_dir().join(format!("layr-owner-group-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("file"), b"content")?;
+        std::os::unix::fs::symlink("file", root.join("link"))?;
+        let tree = crate::tree::Tree::open(&root)?;
+        tree.chown("file", uid, other.as_raw())?;
+        tree.chown("link", uid, other.as_raw())?;
+        give_tree(&root, uid, gid)?;
+        for path in ["", "file", "link"] {
+            let m = tree.stat_checked(path)?;
+            assert_eq!((m.uid, m.gid), (uid, gid));
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn the_walk_is_skipped_only_when_every_condition_holds() {

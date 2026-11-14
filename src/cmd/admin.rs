@@ -381,7 +381,7 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     }
     // The source times that the caches saw go with them (docs/cache-overlays.md, section 20). A failure costs a build
     // only, so it is a warning.
-    if let Err(e) = crate::source_times::record(&w, &ready) {
+    if let Err(e) = crate::source_times::record(&w, &ready, (u, g)) {
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
     // The copy of each cache folder that the overlay save takes under the lock is made here, before it.
@@ -2404,6 +2404,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(_) => return Err(exit(128, "fatal: only root can create a project for another user")),
         None => ctx.caller.uid,
     };
+    let owner_ids = (owner, crate::ctx::Caller::from_uid(owner).gid);
     let actor = ctx.actor();
     // A missing source is an error, not an empty project. Checked before the project folder exists.
     if let Some(from) = a.get("--from") {
@@ -2449,7 +2450,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
             let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"))?;
             // The line starts at this commit: its tree is built now (the others are built on read).
-            crate::gitbridge::build_tree(&repo, &st, None)?;
+            crate::gitbridge::build_tree(&repo, &st, None, Some(owner_ids))?;
             drop(cleanup);
             return finish(&_lock, st);
         }
@@ -2495,7 +2496,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let (st, _) =
                         crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"))?;
                     // The line starts at the HEAD commit: its tree is built now, from the folder copy.
-                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path))?;
+                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path), Some(owner_ids))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
                     btrfs::delete_tree(&work)?;
@@ -2555,6 +2556,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 copy_folder(ctx, &src, &work, a.has("--include-ignored"), None)?;
             }
         }
+        // Normalize while the import is private, before its immutable layers are shared.
+        // The service writes as root, but later lines and stages belong to the intended owner.
+        crate::repo::give_tree(&work, owner_ids.0, owner_ids.1)?;
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
         let mut rec = Record::new("commit");
         rec.states.push(st.clone());
