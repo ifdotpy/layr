@@ -34,6 +34,7 @@ jobs:
           taplo fmt --check
           lychee --no-progress 'docs/*.md' README.md
           ast-grep scan
+          python3 tools/ast-grep/check-command-cycle-cuts.py
   test:
     runs-on: ubuntu-24.04
     steps:

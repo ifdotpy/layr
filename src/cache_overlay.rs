@@ -14,7 +14,7 @@
 //!   older layr made, and the old cache fields of state records (`cache_by`, `cache_shared`).
 //! - Prune and size limits of the folder, and the cleanup of lines that are gone.
 
-use crate::cmd::exit;
+use crate::errors::{error, Kind as ErrorKind};
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
@@ -362,7 +362,7 @@ impl<'a> Repo<'a> {
         }
         // The project setting `cache.key-files` gives new cache overlays their key files.
         let key_files = self.p.config_value("cache.key-files")?.filter(|v| v.is_array());
-        crate::cmd::overlaycmd::make_overlay(
+        crate::overlay::create::make_overlay(
             ctx,
             self,
             &name,
@@ -422,7 +422,7 @@ impl<'a> Repo<'a> {
             }
             let _lock = orepo.p.lock()?;
             let mut record = crate::model::Record::new("overlay.readers");
-            record.data = serde_json::json!({"config":{"access": crate::cmd::overlaycmd::access_map(info.owner, &readers)}});
+            record.data = serde_json::json!({"config":{"access": crate::overlay::create::access_map(info.owner, &readers)}});
             orepo.commit_record(ctx, record).map(|_| ())
         })();
         if let Err(e) = r {
@@ -889,7 +889,7 @@ impl<'a> Repo<'a> {
                 let cp = fsutil::safe_join(&w, &folder)?;
                 if ol.head == sid && matches!(from, Source::ExactState(_, _, _)) {
                     if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
-                        return Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")));
+                        return Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")));
                     }
                     let src = orepo.state_root(&sid)?;
                     if cp.symlink_metadata().is_err() {
@@ -920,7 +920,7 @@ impl<'a> Repo<'a> {
                     let src = orepo.state_root(&sid)?;
                     let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
-                        Err(exit(1, format!("error: {folder} holds files of the line's head; it is no cache")))
+                        Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")))
                     } else if empty {
                         (|| -> Result<()> {
                             if cp.symlink_metadata().is_ok() {

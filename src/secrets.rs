@@ -435,7 +435,7 @@ pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<cr
         bail!("declassify id is unknown or ambiguous; repeat the refused operation");
     }
     let payload = serde_json::json!({"declassify":{"path":path,"hmac":found[0]}});
-    let mut rec = crate::cmd::attest::record(repo, state, "approval", &serde_json::to_vec(&payload)?)?;
+    let mut rec = crate::attestation::record(repo, state, "approval", &serde_json::to_vec(&payload)?)?;
     rec.data["declassify"] = payload["declassify"].clone();
     Ok(rec)
 }

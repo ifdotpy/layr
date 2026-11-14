@@ -1,5 +1,7 @@
 //! Named remotes and the Git bridge.
 
+pub use crate::remote_config::{kind, remote_url, Kind};
+
 pub mod git {
 
     use crate::args::{parse, Spec};
@@ -556,55 +558,9 @@ use super::admin::set_config;
 use super::{exit, here, mergecmd, replicate};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::oci;
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Kind {
-    Peer { host: String, project: String },
-    Store,
-    Registry,
-}
-
-pub fn kind(url: &str) -> Result<Kind> {
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| exit(128, "use layr git remote for Git URLs"))?;
-    if rest.is_empty() || url.chars().any(char::is_control) {
-        bail!("invalid remote URL");
-    }
-    match scheme {
-        "ssh" => {
-            let (host, project) = rest.split_once('/').ok_or_else(|| exit(128, "use ssh://<host>/<project>"))?;
-            if host.is_empty()
-                || host.starts_with('-')
-                || host.chars().any(|c| !c.is_ascii_alphanumeric() && !".@_-:[]".contains(c))
-            {
-                bail!("invalid peer host");
-            }
-            crate::store::check_name("project", project)?;
-            Ok(Kind::Peer { host: host.into(), project: project.into() })
-        }
-        "file" if rest.starts_with('/') => Ok(Kind::Store),
-        "s3" if !rest.starts_with('/') && !rest.contains(['?', '#', '@', ':']) => Ok(Kind::Store),
-        "layr+https" => {
-            crate::store_remote::validate_gateway_url(url)?;
-            Ok(Kind::Store)
-        }
-        "oci" if !rest.starts_with('/') && rest.contains('/') => Ok(Kind::Registry),
-        _ => bail!("unsupported remote URL; use ssh://, file:///, s3://, layr+https:// or oci://"),
-    }
-}
-
-pub fn remote_url(repo: &Repo, name: &str) -> Result<String> {
-    if let Some(url) = repo.p.config_value(&format!("cloud.remote.{name}.url"))?.and_then(|v| v.as_str().map(str::to_owned)) {
-        return Ok(url);
-    }
-    if repo.p.config_value(&format!("remote.{name}.url"))?.is_some() {
-        return Err(exit(128, format!("{name} is a Git remote; use layr git <fetch|pull|push> {name}")));
-    }
-    Err(exit(128, format!("remote '{name}' is not configured; use layr remote add {name} <url>")))
-}
 
 pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
@@ -1228,9 +1184,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let rev = a.pos.get(1).map(String::as_str).unwrap_or("head");
             return if a.has("--json") {
-                oci::push_json(ctx, &url, rev, a.get("--runnable"))
+                super::oci::push(ctx, &url, rev, a.get("--runnable"), true)
             } else {
-                oci::push(ctx, &url, rev, a.get("--runnable"))
+                super::oci::push(ctx, &url, rev, a.get("--runnable"), false)
             };
         }
     }
@@ -1285,7 +1241,6 @@ fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
         None => Ok(()),
     }
 }
-
 
 fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_output: bool, quiet: bool) -> Result<()> {
     if json_output {

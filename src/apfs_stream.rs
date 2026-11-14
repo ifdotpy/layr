@@ -416,7 +416,7 @@ fn path(root: &Path, bytes: &[u8], follow: bool) -> Result<std::path::PathBuf> {
 }
 /// Validate before applying. All writes stay in a private temporary directory.
 /// Only a complete, sealed tree becomes visible under its state name.
-pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -> Result<()> {
+pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream::Expect) -> Result<()> {
     use std::{
         io::{Seek, SeekFrom},
         os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -426,7 +426,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
     let result = (|| -> Result<()> {
         let mut spool =
             fs::OpenOptions::new().create_new(true).read(true).write(true).mode(0o600).open(staging.join("stream"))?;
-        let parent = crate::recv::check(src, &mut spool, expected)?;
+        let parent = crate::receive_stream::check(src, &mut spool, expected)?;
         spool.seek(SeekFrom::Start(0))?;
         let root = staging.join("tree");
         let mut head = [0; 17];
@@ -475,7 +475,7 @@ pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -
             if crc(&checked) != checksum {
                 bail!("stream checksum mismatch");
             }
-            let at = crate::recv::attrs(&body, version)?;
+            let at = crate::receive_stream::attrs(&body, version)?;
             if code == 1 || code == 2 {
                 continue;
             }
@@ -701,7 +701,7 @@ mod tests {
         send(&src, None, &mut bytes)?;
         let dir = s.0.join("received");
         fs::create_dir(&dir)?;
-        let e = crate::recv::Expect { name: "state", uuid: &id, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &id, parent: &|_| None, clones: &[] };
         receive(&mut &bytes[..], &dir, &e)?;
         let dst = dir.join("state");
         assert_eq!(fs::read(dst.join("dir/f"))?, b"content");
@@ -760,7 +760,7 @@ mod tests {
         let dir = s.0.join("received");
         fs::create_dir(&dir)?;
         let find = |u: &str| (u == parent_id).then(|| parent.clone());
-        let e = crate::recv::Expect { name: "child", uuid: &id, parent: &find, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "child", uuid: &id, parent: &find, clones: &[] };
         receive(&mut &diff[..], &dir, &e)?;
         let got = dir.join("child");
         let tree = |root: &Path| -> Result<BTreeMap<String, (u32, Vec<u8>)>> {
@@ -836,11 +836,11 @@ mod tests {
             ],
         )?;
         command(&mut bytes, 21, &[])?;
-        let e = crate::recv::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
         assert!(receive(&mut &bytes[..], &dir, &e).is_err());
         assert_eq!(fs::read_dir(&dir)?.count(), 0);
         let clones = [(source_id, None, source)];
-        let e = crate::recv::Expect { clones: &clones, ..e };
+        let e = crate::receive_stream::Expect { clones: &clones, ..e };
         receive(&mut &bytes[..], &dir, &e)?;
         assert_eq!(fs::read(dir.join("state/file"))?, b"source data");
         Ok(())
@@ -857,7 +857,7 @@ mod tests {
         fs::write(outside.join("keep"), b"keep")?;
         let id = uuid::Uuid::now_v7();
         let text = id.to_string();
-        let e = crate::recv::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
         for (code, attrs) in [
             (3, vec![(15, b"link/new".as_slice())]),
             (15, vec![(15, b"link/keep".as_slice()), (18, b"\0\0\0\0\0\0\0\0".as_slice()), (19, b"bad".as_slice())]),

@@ -147,7 +147,7 @@ impl Fixture {
         let deltas = deltas_of(&repo, Some(&self.parent), &self.commit)?;
         let sides = sides_of(&repo, &deltas)?;
         let specs = specs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let changes = sides.changes.into_iter().filter(|c| crate::cmd::matches(&specs, &c.path)).collect::<Vec<_>>();
+        let changes = sides.changes.into_iter().filter(|c| crate::pathspec::matches(&specs, &c.path)).collect::<Vec<_>>();
         let diffs = crate::diff::file_diffs(&Entries::Git(sides.old), &Entries::Git(sides.new), &changes)?;
         // Match the command's default unified context.
         const CONTEXT_LINES: usize = 3;

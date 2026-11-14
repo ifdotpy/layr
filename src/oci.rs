@@ -16,15 +16,9 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// Transport boundary used by the generic remote dispatcher.
-pub fn push(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
-    crate::cmd::oci::push(ctx, url, rev, runnable, false)
-}
 
-/// JSON output variant for a remote command with --json.
-pub fn push_json(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
-    crate::cmd::oci::push(ctx, url, rev, runnable, true)
-}
+
+
 
 pub const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
@@ -344,13 +338,13 @@ fn select(all: &[Entry], paths: &[String]) -> Result<Vec<Entry>> {
     }
     let specs: Vec<String> = paths.iter().map(|p| if p == "." { "".into() } else { p.clone() }).collect();
     for p in &specs {
-        if !p.is_empty() && !all.iter().any(|e| crate::cmd::matches(std::slice::from_ref(p), &e.path)) {
+        if !p.is_empty() && !all.iter().any(|e| crate::pathspec::matches(std::slice::from_ref(p), &e.path)) {
             bail!("runnable layer path '{p}' matches no snapshot entries");
         }
     }
     let mut keep = BTreeSet::new();
     for e in all {
-        if crate::cmd::matches(&specs, &e.path) {
+        if crate::pathspec::matches(&specs, &e.path) {
             keep.insert(e.path.clone());
             let mut p = Path::new(&e.path).parent();
             while let Some(parent) = p.filter(|p| !p.as_os_str().is_empty()) {

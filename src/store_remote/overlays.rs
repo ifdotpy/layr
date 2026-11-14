@@ -1041,7 +1041,7 @@ fn sweep_layer(repo: &Repo, name: &str, orepo: &Repo, scoped: &Store, dry_run: b
 /// Delete (with `dry_run`: only list) the dead cache states of each cache overlay of `repo` in the
 /// store `store`: the dead states of the current epoch of each overlay, and all cache states of its
 /// older epochs. The current epoch of an overlay that this machine cannot read is skipped.
-pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
+pub(crate) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
     let descriptor = store.root_descriptor()?;
     let trusted = trusted_keys(repo)?;
     let mut objects = Vec::new();
@@ -1190,7 +1190,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             }
             let mut orepo = Repo { p: op, ctx: None };
             for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
-                crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
+                crate::machine_trust::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
             let opts = &fetch_selection(repo, &name, opts)?;

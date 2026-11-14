@@ -1,5 +1,6 @@
 //! Repository operations on one project: snapshots, lines, staging, status and in-place updates.
 
+use crate::errors::{error, Kind as ErrorKind};
 use crate::access::{Policy, Role, Rule, Who};
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
@@ -164,23 +165,31 @@ pub fn discard_unrecorded(repo: &Repo, states: &[StateRec]) {
     repo.discard_states(&unrecorded);
 }
 
+#[derive(Debug)]
+pub struct TargetMoved;
+impl std::fmt::Display for TargetMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("target head changed")
+    }
+}
+impl std::error::Error for TargetMoved {}
+
 /// The error of a command whose line head moved during the command. It names both heads.
 /// `TargetMoved` lets the merge queue retry the entry once.
 pub fn line_moved(name: &str, from: &str, to: &str) -> anyhow::Error {
-    crate::cmd::exit(
-        1,
+    error(ErrorKind::Failed,
         format!(
             "error: line {name} moved during the command (head {} -> {}); run it again",
             crate::ids::short(from),
             crate::ids::short(to)
         ),
     )
-    .context(crate::cmd::mergecmd::TargetMoved)
+    .context(TargetMoved)
 }
 
 /// The error of a command whose line was deleted during the command.
 pub fn line_gone(name: &str) -> anyhow::Error {
-    crate::cmd::exit(1, format!("error: line {name} was deleted during the command; run it again"))
+    error(ErrorKind::Failed, format!("error: line {name} was deleted during the command; run it again"))
 }
 
 pub fn skip_path(p: &str) -> bool {
@@ -1475,7 +1484,7 @@ impl<'a> Repo<'a> {
             if let Some(p) = prepared {
                 self.discard_states(std::slice::from_ref(&p.st));
             }
-            return Err(crate::cmd::exit(1, format!("error: the line '{}' has no working folder", line.name)));
+            return Err(error(ErrorKind::Failed, format!("error: the line '{}' has no working folder", line.name)));
         }
         #[cfg(target_os = "macos")]
         let fresh = match prepared {
@@ -2115,8 +2124,7 @@ impl<'a> Repo<'a> {
             }
             if !hit.is_empty() {
                 let names: Vec<String> = hit.into_iter().map(|p| format!("\t{p}")).collect();
-                return Err(crate::cmd::exit(
-                    1,
+                return Err(error(ErrorKind::Failed,
                     format!(
                         "error: Your local changes to the following files would be overwritten:\n{}\nPlease save your changes or park them.",
                         names.join("\n")
@@ -3651,7 +3659,7 @@ fn recover_cache_replacement(t: &Tree, path: &str) -> Result<()> {
             } else {
                 eprintln!(
                     "layr: {path} was written by another process while it was copied; the previous folder is kept at {old} ({})",
-                    crate::cmd::admin::human_size(tree_bytes(&t.path.join(&old)))
+                    crate::byte_size::human_size(tree_bytes(&t.path.join(&old)))
                 );
             }
         } else {

@@ -8,6 +8,8 @@
 //!
 //! A principal is `user:<uid>`, `group:<gid>` or `*` (everyone).
 
+pub(crate) mod refs;
+
 use crate::store::Project;
 use std::collections::BTreeMap;
 

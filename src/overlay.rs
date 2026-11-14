@@ -23,6 +23,8 @@
 //! reflink copies, read-only. So the shared set never holds an overlay file. Automatic states of a
 //! line with overlays leave the overlay files out.
 
+pub(crate) mod create;
+
 use crate::access::{Policy, Who};
 use crate::changes::{self, Change};
 use crate::ctx::Ctx;
@@ -451,7 +453,7 @@ pub fn folder_path(s: &str) -> Result<String> {
         || t == ".git"
         || t.starts_with(".git/");
     if bad {
-        return Err(crate::cmd::exit(128, format!("fatal: invalid folder '{s}': use a relative path inside the line")));
+        return Err(crate::errors::error(crate::errors::Kind::Invalid, format!("fatal: invalid folder '{s}': use a relative path inside the line")));
     }
     Ok(t.to_string())
 }
@@ -959,7 +961,7 @@ impl<'a> Repo<'a> {
 
     pub fn need_overlay(&self, name: &str) -> Result<Info> {
         self.overlay_info(name)?
-            .ok_or_else(|| crate::cmd::exit(1, format!("error: no overlay '{name}' in project {}", self.p.name)))
+            .ok_or_else(|| crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name)))
     }
 
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
@@ -972,7 +974,7 @@ impl<'a> Repo<'a> {
     /// Keep the project that supplied hidden metadata while reading its settings.
     fn hidden_settings_project(&self, name: &str) -> Result<Option<Project<'a>>> {
         let (info, project) = self.open_overlay_info(name)?;
-        let info = info.ok_or_else(|| crate::cmd::exit(1, format!("error: no overlay '{name}' in project {}", self.p.name)))?;
+        let info = info.ok_or_else(|| crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name)))?;
         if info.hidden {
             return project.map(Ok).unwrap_or_else(|| self.overlay_project(name)).map(Some);
         }
@@ -1537,8 +1539,7 @@ impl<'a> Repo<'a> {
     pub fn check_stack(&self, line: &Line, layers: &[Layer]) -> Result<()> {
         for l in layers {
             if self.overlay_info(&l.overlay)?.is_none() || self.layer_root(l).is_none() {
-                return Err(crate::cmd::exit(
-                    1,
+                return Err(crate::errors::error(crate::errors::Kind::Failed,
                     format!(
                         "error: line '{}' shows overlay '{}', which is not on this machine; run 'layr overlay use --remove {}'",
                         line.name, l.overlay, l.overlay
@@ -1546,8 +1547,7 @@ impl<'a> Repo<'a> {
                 ));
             }
             if !self.owner_reads(&l.overlay, line.owner)? {
-                return Err(crate::cmd::exit(
-                    1,
+                return Err(crate::errors::error(crate::errors::Kind::Failed,
                     format!(
                         "error: line '{}' shows overlay '{}', which its owner no longer reads; run 'layr overlay use' without it",
                         line.name, l.overlay
@@ -1572,8 +1572,7 @@ impl<'a> Repo<'a> {
         }
         for l in self.layers(line)? {
             if !self.need_overlay(&l.overlay)?.hidden && !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
-                return Err(crate::cmd::exit(
-                    1,
+                return Err(crate::errors::error(crate::errors::Kind::Failed,
                     format!("permission denied: line '{}' shows overlays that you do not read", line.name),
                 ));
             }
@@ -2362,8 +2361,7 @@ pub fn commit_layers(
         };
         if ol.as_ref().is_some_and(|ol| ol.head != l.state) {
             discard(&made, &orepos);
-            return Err(crate::cmd::exit(
-                1,
+            return Err(crate::errors::error(crate::errors::Kind::Failed,
                 format!(
                     "error: overlay '{}' changed in another line since this line took it; run 'layr overlay use {}' to take its newest state, then save",
                     l.overlay,
@@ -2786,13 +2784,13 @@ mod read_open_tests {
             std::fs::create_dir(&queue)?;
             let marker = queue.join(&fixture.head);
             std::fs::write(&marker, b"")?;
-            assert!(crate::cmd::admin::overlay_named_states_maintenance(&repo)?.is_none());
+            assert!(crate::retention::overlay_named_states_maintenance(&repo)?.is_none());
             crate::objstore::retire_native_maintenance(&repo)?;
             assert!(marker.exists());
             std::fs::remove_dir(&pending)?;
             drop(held);
         }
-        let named = crate::cmd::admin::overlay_named_states_maintenance(&repo)?.expect("available overlays");
+        let named = crate::retention::overlay_named_states_maintenance(&repo)?.expect("available overlays");
         assert!(named.contains(&fixture.head));
         Ok(())
     }

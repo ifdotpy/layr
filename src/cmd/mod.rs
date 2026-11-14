@@ -9,6 +9,16 @@ pub mod checks;
 pub mod du;
 pub mod help;
 pub mod followcmd;
+pub mod follow_engine;
+pub mod usage;
+pub mod service_host;
+pub mod store_maintenance;
+#[cfg(target_os = "macos")]
+#[path = "view_ops_macos.rs"]
+pub mod view_ops;
+#[cfg(target_os = "linux")]
+#[path = "view_ops_linux.rs"]
+pub mod view_ops;
 pub mod history;
 pub mod layerpush;
 pub mod mergecmd;
@@ -32,6 +42,7 @@ pub mod view;
 pub mod volume;
 pub mod work;
 
+pub use crate::pathspec::{glob, matches};
 use crate::ctx::{Ctx, Loc};
 use crate::model::Line;
 use crate::repo::Repo;
@@ -47,6 +58,20 @@ impl std::fmt::Display for Exit {
     }
 }
 impl std::error::Error for Exit {}
+
+pub(crate) fn diagnostic(error: &anyhow::Error) -> Option<(i32, &str)> {
+    if let Some(exit) = error.downcast_ref::<Exit>() {
+        return Some((exit.0, &exit.1));
+    }
+    let failure = error.downcast_ref::<crate::errors::OperationError>()?;
+    let code = match failure.kind() {
+        crate::errors::Kind::Failed => 1,
+        crate::errors::Kind::Unsupported => 2,
+        crate::errors::Kind::CannotRun => 127,
+        crate::errors::Kind::Invalid => 128,
+    };
+    Some((code, failure.message()))
+}
 
 pub fn exit(code: i32, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Exit(code, msg.into()))
@@ -103,7 +128,6 @@ pub fn overlay_args(op: &str, args: &[String], renames: &[(&str, &str)]) -> Resu
         .map(|a| renames.iter().find(|(_, new)| a == new).map(|(old, _)| old.to_string()).unwrap_or_else(|| a.clone()))
         .collect())
 }
-
 
 pub struct Here<'a> {
     pub repo: Repo<'a>,
@@ -202,79 +226,6 @@ pub fn relative_to(sub: &str, p: &str) -> String {
     let mut out: Vec<&str> = std::iter::repeat_n("..", s.len() - i).collect();
     out.extend_from_slice(&t[i..]);
     out.join("/")
-}
-
-/// A simple glob: `*` and `?` (both match `/` too, as in git pathspecs) and `[...]`.
-/// Iterative, with one backtrack point (the last `*`): time O(pattern * text), no recursion.
-pub fn glob(pat: &str, s: &str) -> bool {
-    let (p, s) = (pat.as_bytes(), s.as_bytes());
-    // One pattern item at p[i] against byte c: Some(length of the item) if it matches.
-    let item = |i: usize, c: u8| -> Option<usize> {
-        match p[i] {
-            b'?' => Some(1),
-            b'[' => match p[i + 1..].iter().position(|x| *x == b']') {
-                Some(off) => {
-                    let end = i + 1 + off;
-                    let set = &p[i + 1..end];
-                    let (neg, set) =
-                        if set.first() == Some(&b'!') || set.first() == Some(&b'^') { (true, &set[1..]) } else { (false, set) };
-                    let mut hit = false;
-                    let mut k = 0;
-                    while k < set.len() {
-                        if k + 2 < set.len() && set[k + 1] == b'-' {
-                            hit |= c >= set[k] && c <= set[k + 2];
-                            k += 3;
-                        } else {
-                            hit |= c == set[k];
-                            k += 1;
-                        }
-                    }
-                    (hit != neg).then_some(end + 1 - i)
-                }
-                None => (c == b'[').then_some(1),
-            },
-            x => (x == c).then_some(1),
-        }
-    };
-    let (mut i, mut j) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while j < s.len() {
-        if i < p.len() && p[i] == b'*' {
-            star = Some((i, j));
-            i += 1;
-            continue;
-        }
-        if i < p.len() {
-            if let Some(n) = item(i, s[j]) {
-                i += n;
-                j += 1;
-                continue;
-            }
-        }
-        match star {
-            // Let the last `*` take one more byte and try again from there.
-            Some((si, sj)) => {
-                i = si + 1;
-                j = sj + 1;
-                star = Some((si, sj + 1));
-            }
-            None => return false,
-        }
-    }
-    while i < p.len() && p[i] == b'*' {
-        i += 1;
-    }
-    i == p.len()
-}
-
-/// True if `path` matches one of the pathspecs (empty list matches everything).
-pub fn matches(specs: &[String], path: &str) -> bool {
-    if specs.is_empty() {
-        return true;
-    }
-    specs.iter().any(|s| {
-        s.is_empty() || path == s || path.starts_with(&format!("{s}/")) || (s.contains(['*', '?', '[']) && glob(s, path))
-    })
 }
 
 pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json]
@@ -430,7 +381,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "follow" => followcmd::follow(ctx, rest),
         "volume" => volume::volume(ctx, rest),
         "project" => project::project(ctx, rest),
-        "usage" => crate::usage::show(ctx, rest),
+        "usage" => crate::cmd::usage::show(ctx, rest),
         "fetch" => remote::fetch(ctx, rest),
         "pull" => remote::pull(ctx, rest),
         "push" => remote::push(ctx, rest),
@@ -456,6 +407,18 @@ pub fn version_line() -> String {
 #[cfg(test)]
 mod tests {
     use super::{glob, version_line};
+
+    #[test]
+    fn domain_failures_keep_their_process_diagnostics_through_retry_context() {
+        use crate::errors::{error, Kind};
+        for (kind, code) in [(Kind::Failed, 1), (Kind::Unsupported, 2), (Kind::CannotRun, 127), (Kind::Invalid, 128)] {
+            let failure = error(kind, "unchanged diagnostic").context(crate::repo::TargetMoved);
+            assert_eq!(super::diagnostic(&failure), Some((code, "unchanged diagnostic")));
+            assert!(failure.downcast_ref::<crate::repo::TargetMoved>().is_some());
+        }
+        assert_eq!(super::diagnostic(&super::exit(3, "CLI diagnostic")), Some((3, "CLI diagnostic")));
+        assert_eq!(super::diagnostic(&anyhow::anyhow!("ordinary failure")), None);
+    }
 
     #[test]
     fn version_line_names_the_build() {

@@ -36,7 +36,7 @@ pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return line_move(ctx, rest);
     }
     if sub == "show" {
-        return crate::views::show(ctx, rest);
+        return crate::cmd::view_ops::show(ctx, rest);
     }
     if !matches!(sub.as_str(), "new" | "list" | "delete" | "rename") {
         return Err(exit(2, "usage: layr line new/list/delete/rename/move/show"));
@@ -305,7 +305,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
             if let Some(v) = view {
-                crate::views::delete(ctx, repo, &l, &v)?;
+                crate::cmd::view_ops::delete(ctx, repo, &l, &v)?;
                 outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
                 continue;
             }

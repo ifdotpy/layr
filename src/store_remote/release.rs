@@ -375,12 +375,12 @@ impl Store {
         if expect.is_some_and(|expected| expected != before.target) {
             bail!("release ref '{name}' changed: --expect does not match");
         }
-        crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+        crate::access::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
         repo.require(ctx, "push")?;
         self.connect(ctx)?;
         self.require_private_access()?;
         if let Some(person) = &self.person {
-            crate::cmd::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
+            crate::access::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
         }
         let descriptor = self.descriptor()?;
         let identity = self.identity(&descriptor, None)?;
@@ -452,9 +452,9 @@ impl Store {
             bail!("release files changed on the remote during publication");
         }
         super::epochs::check_current(self)?;
-        crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+        crate::access::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
         if let Some(person) = &self.person {
-            crate::cmd::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
+            crate::access::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
         }
         self.publish_plain(&files, plain)?;
         Ok(files.files)
@@ -481,7 +481,7 @@ impl Store {
         if expect.is_some_and(|expected| expected != before.target) {
             bail!("release ref '{name}' changed: --expect does not match");
         }
-        crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+        crate::access::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
         repo.require(ctx, "push")?;
         if repo.p.is_overlay() {
             bail!("release files belong to the parent project");
@@ -489,9 +489,9 @@ impl Store {
         self.connect(ctx)?;
         self.require_private_access()?;
         let authorize = || -> Result<()> {
-            crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+            crate::access::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
             if let Some(person) = &self.person {
-                crate::cmd::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
+                crate::access::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
             }
             Ok(())
         };
@@ -578,9 +578,9 @@ impl Store {
         }
         check_ref(&self.release_model()?, name, &before.target)?;
         super::epochs::check_current(self)?;
-        crate::cmd::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
+        crate::access::refs::authorize_update(ctx, repo, name, Some(&before), Some(&before), true)?;
         if let Some(person) = &self.person {
-            crate::cmd::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
+            crate::access::refs::authorize_person_update(repo, &person.login, name, Some(&before), Some(&before))?;
         }
         let files = Files { reference: name.into(), state: before.target, files };
         files.validate()?;

@@ -345,13 +345,13 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
         if source_status(repo, input) != "available" {
             bail!("{}; probe '{name}' has no retained result", source_status(repo, input));
         }
-        let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, false, |dir| {
+        let result = crate::try_run::with_try_copy(ctx, repo, &input.state, &input.layers, false, false, |dir| {
             if source_status(repo, input) != "available" {
                 bail!("{}", source_status(repo, input));
             }
             let env =
                 if input.subject.kind == "view" { vec![("LAYR_TRY_VIEW".into(), input.subject.id.clone())] } else { vec![] };
-            let code = crate::cmd::admin::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
+            let code = crate::try_run::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
             // Freeze outputs before root reads them; the command may have left a child process.
             let snapshot = repo.temp_snapshot(dir, true)?;
             let work = repo.p.work_dir().join(crate::store::temp_name());
@@ -378,9 +378,9 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             check["probes"] = manifest.clone();
             let payload = serde_json::to_vec(&check)?;
             let mut rec = if input.subject.kind == "view" {
-                crate::cmd::attest::record_view(repo, &input.view(), "check", &payload)?
+                crate::attestation::record_view(repo, &input.view(), "check", &payload)?
             } else {
-                crate::cmd::attest::record(repo, &input.state, "check", &payload)?
+                crate::attestation::record(repo, &input.state, "check", &payload)?
             };
             rec.states.push(state.clone());
             rec.data["check"] = check;

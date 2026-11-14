@@ -1322,7 +1322,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
             return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
         }
-        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"), json);
+        return crate::cmd::view_ops::save(ctx, &h, &line, &v, &message, a.has("-q"), json);
     }
     #[cfg(target_os = "linux")]
     let virtual_save = {

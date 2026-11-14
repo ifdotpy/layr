@@ -495,7 +495,7 @@ impl Db {
                 // deletes a state it holds, so the owner is never released.
                 if d["result"].as_str() == Some("success") {
                     if let Some(url) = d["url"].as_str() {
-                        if matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+                        if matches!(crate::remote_config::kind(url), Ok(crate::remote_config::Kind::Store)) {
                             let remote = d["remote"].as_str().unwrap_or_default().to_string();
                             let rows: Vec<Row> = d["state_ids_sent"]
                                 .as_array()

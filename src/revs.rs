@@ -2,6 +2,10 @@
 //! state ids and their prefixes, git commit ids, `park@{n}`, `head@{n}` (automatic states,
 //! newest first) and the suffixes `~n`, `^` and `^n`.
 
+pub(crate) mod parked;
+pub(crate) mod change;
+
+use crate::errors::{error, Kind as ErrorKind};
 use crate::model::{Line, StateKind};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
@@ -24,7 +28,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
                 .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
         } else if name == "park" {
             let l = need_line(line, rev)?;
-            match crate::cmd::park::parked_lines(repo, l)?.get(n) {
+            match crate::revs::parked::parked_lines(repo, l)?.get(n) {
                 Some(parked) => parked.head.clone(),
                 None => bail!("park@{{{n}}} does not exist"),
             }
@@ -99,10 +103,10 @@ pub fn reject_old(rev: &str) -> Result<()> {
     let rev = rev.trim_start_matches('^');
     let base = rev.split(['~', '^', ':']).next().unwrap_or(rev);
     if base == "HEAD" || base.starts_with("HEAD@{") {
-        return Err(crate::cmd::exit(2, "HEAD was removed. Use head."));
+        return Err(error(ErrorKind::Unsupported, "HEAD was removed. Use head."));
     }
     if base == "stash" || base.starts_with("stash@{") {
-        return Err(crate::cmd::exit(2, "stash revisions were removed. Use park@{n}."));
+        return Err(error(ErrorKind::Unsupported, "stash revisions were removed. Use park@{n}."));
     }
     Ok(())
 }
@@ -135,17 +139,17 @@ fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
     }
     if name == "park" {
         let l = need_line(line, name)?;
-        return match crate::cmd::park::parked_lines(repo, l)?.first() {
+        return match crate::revs::parked::parked_lines(repo, l)?.first() {
             Some(parked) => Ok(parked.head.clone()),
             None => bail!("no park entries"),
         };
     }
     if let Some(rest) = name.strip_prefix("changes/") {
         let (id, version) = match rest.split_once('/') {
-            Some((id, v)) => (id, Some(crate::cmd::change::version(v)?)),
+            Some((id, v)) => (id, Some(crate::revs::change::version(v)?)),
             None => (rest, None),
         };
-        let id = crate::cmd::change::find(repo, id)?;
+        let id = crate::revs::change::find(repo, id)?;
         let states = repo.p.db.change_versions(&id)?;
         return states
             .get(version.unwrap_or(states.len().saturating_sub(1)))

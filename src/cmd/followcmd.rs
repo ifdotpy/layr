@@ -4,7 +4,7 @@ use super::admin::set_config;
 use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::follow::{self, Last};
+use crate::cmd::follow_engine::{self as follow, Last};
 use crate::gitbridge;
 use crate::model::Line;
 use crate::repo::{LineOp, Repo};

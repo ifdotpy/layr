@@ -1514,14 +1514,7 @@ fn passed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<bo
     }))
 }
 
-#[derive(Debug)]
-pub struct TargetMoved;
-impl std::fmt::Display for TargetMoved {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("target head changed")
-    }
-}
-impl std::error::Error for TargetMoved {}
+pub use crate::repo::TargetMoved;
 
 fn target_moved(name: &str) -> anyhow::Error {
     exit(1, format!("error: line '{name}' moved while its merge ran; merge again")).context(TargetMoved)

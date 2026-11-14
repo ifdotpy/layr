@@ -379,7 +379,7 @@ pub fn retire_native(repo: &Repo) -> Result<()> {
     if !repo.p.meta_dir().join("object-native").is_dir() {
         return Ok(());
     }
-    retire_native_locked(repo, crate::cmd::admin::overlay_named_states(repo)?)
+    retire_native_locked(repo, crate::retention::overlay_named_states(repo)?)
 }
 
 /// A command's free step leaves busy native copies for the next pass.
@@ -393,7 +393,7 @@ pub fn retire_native_maintenance(repo: &Repo) -> Result<()> {
         let Some(lock) = repo.p.try_lock()? else { return Ok(()) };
         Some(lock)
     };
-    let Some(keep) = crate::cmd::admin::overlay_named_states_maintenance(repo)? else { return Ok(()) };
+    let Some(keep) = crate::retention::overlay_named_states_maintenance(repo)? else { return Ok(()) };
     retire_native_locked(repo, keep)
 }
 
@@ -414,7 +414,7 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
         if verified(&repo.p, &id)?.is_none() { continue; }
         ids.push(id);
     }
-    let gone = crate::cmd::admin::drop_trees(repo, &ids)?;
+    let gone = crate::retention::drop_trees(repo, &ids)?;
     for id in gone { std::fs::remove_file(dir.join(id))?; }
     Ok(())
 }

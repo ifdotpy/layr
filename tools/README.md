@@ -10,6 +10,7 @@ cargo deny check
 taplo fmt --check
 lychee --no-progress 'docs/*.md' README.md
 ast-grep scan
+python3 tools/ast-grep/check-command-cycle-cuts.py
 tokei # reporting only
 ```
 

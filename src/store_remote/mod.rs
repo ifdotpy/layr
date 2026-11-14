@@ -280,7 +280,7 @@ impl Store {
 }
 
 pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
-    let url = crate::cmd::remote::remote_url(repo, name)?;
+    let url = crate::remote_config::remote_url(repo, name)?;
     let pin = repo
         .p
         .config_value(&format!("cloud.remote.{name}.store"))?
@@ -304,10 +304,10 @@ pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Ve
     for rec in repo.p.db.records_with_op("push")? {
         let data = &rec.data;
         let (Some(name), Some(url)) = (data["remote"].as_str(), data["url"].as_str()) else { continue };
-        if data["result"] != "success" || !matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+        if data["result"] != "success" || !matches!(crate::remote_config::kind(url), Ok(crate::remote_config::Kind::Store)) {
             continue;
         }
-        if crate::cmd::remote::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file()
+        if crate::remote_config::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file()
         {
             continue;
         }
@@ -360,7 +360,7 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
     // A `--heads` clone or fetch left the state on the remote that it read.
     for (key, _) in repo.p.db.config_all()? {
         let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
-        let Ok(url) = crate::cmd::remote::remote_url(repo, name) else { continue };
+        let Ok(url) = crate::remote_config::remote_url(repo, name) else { continue };
         let left = std::fs::read_to_string(states_left_file(&store_dir(repo, &url))).unwrap_or_default();
         if left.lines().any(|line| line == id) && !names.iter().any(|n| n == name) {
             names.push(name.to_string());
@@ -477,7 +477,7 @@ fn fetch_caches_inner(
     }
     let mut errors = Vec::new();
     for name in store_remote_names(repo)? {
-        let url = crate::cmd::remote::remote_url(repo, &name)?;
+        let url = crate::remote_config::remote_url(repo, &name)?;
         let mut marks = read_on_demand_marks(repo, &url);
         let now = crate::ids::now_ms();
         if marks.failed_at.is_some_and(|at| now - at < FAILED_FOR) {
@@ -584,7 +584,7 @@ pub fn cache_stores(ctx: &Ctx, repo: &Repo) -> Vec<CacheStore> {
     let Ok(names) = store_remote_names(repo) else { return out };
     for name in names {
         let read = (|| -> Result<Option<CacheStore>> {
-            let url = crate::cmd::remote::remote_url(repo, &name)?;
+            let url = crate::remote_config::remote_url(repo, &name)?;
             if !store_dir(repo, &url).join("read").is_file() {
                 return Ok(None);
             }
@@ -678,8 +678,8 @@ pub fn store_remote_names(repo: &Repo) -> Result<Vec<String>> {
         .into_iter()
         .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")).map(str::to_owned))
         .filter(|name| {
-            crate::cmd::remote::remote_url(repo, name)
-                .is_ok_and(|url| matches!(crate::cmd::remote::kind(&url), Ok(crate::cmd::remote::Kind::Store)))
+            crate::remote_config::remote_url(repo, name)
+                .is_ok_and(|url| matches!(crate::remote_config::kind(&url), Ok(crate::remote_config::Kind::Store)))
         })
         .collect();
     remotes.sort();
@@ -779,7 +779,7 @@ impl Store {
         // the next free number), and it can take minutes on a large store.
         index::write(self, repo)
     }
-    fn connect(&mut self, ctx: &Ctx) -> Result<()> {
+    pub(crate) fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.connect_transport(ctx)?;
         epochs::connect(self)
     }
@@ -1029,7 +1029,7 @@ impl Store {
                         .ok()
                         .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(current_recipient.as_str()))
                     {
-                        crate::cmd::admin::set_config(
+                        crate::project_config::set_config(
                             ctx,
                             repo,
                             &format!("cloud.remote.{name}.public"),
@@ -1041,7 +1041,7 @@ impl Store {
             let key = format!("cloud.remote.{name}.store");
             let value = serde_json::to_value(&pin)?;
             if repo.p.config_value(&key)?.as_ref() != Some(&value) {
-                crate::cmd::admin::set_config(ctx, repo, &key, value)?;
+                crate::project_config::set_config(ctx, repo, &key, value)?;
             }
         }
         Ok(())
@@ -1528,110 +1528,7 @@ impl Store {
     }
 }
 
-/// The CLI commands use the same named-remote configuration as push and fetch.
-pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
-    let args = &crate::cmd::overlay_args(operation, args, &[("--caches", "--overlays")])?;
-    let spec = crate::args::Spec::new()
-        .value("--remote")
-        .flag("--files")
-        .flag("--json")
-        .flag("-n|--dry-run")
-        .flag("-q|--quiet")
-        .flag("--caches");
-    let a = crate::args::parse(&spec, args)?;
-    let name = a.get("--remote").context("name a remote with --remote <name>")?;
-    let h = crate::cmd::here(ctx)?;
-    h.repo.require(ctx, if operation == "gc" { "gc" } else { "fsck" })?;
-    let mut store = open_named(name, &h.repo)?;
-    store.connect(ctx)?;
-    match operation {
-        "fsck" if a.has("--caches") => {
-            // Read only: what a sweep would delete (`sweep`).
-            let (mut trees, mut bytes) = (0, 0);
-            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, true)? {
-                outln!(
-                    ctx,
-                    "remote {name} overlay {overlay}: {} unreachable cache state(s), {} part(s), {} bytes; {} unreachable chunk(s) in {} pack object(s), {} bytes; {} tree(s) with missing chunks; {} state(s) not known here kept",
-                    swept.trees.len(),
-                    swept.parts.len(),
-                    swept.bytes,
-                    swept.chunks,
-                    swept.packs.len(),
-                    swept.chunk_bytes,
-                    swept.missing,
-                    swept.unknown
-                );
-                trees += swept.trees.len() + swept.parts.len() + swept.packs.len() + swept.missing;
-                bytes += swept.bytes + swept.chunk_bytes;
-            }
-            outln!(ctx, "remote {name}: unreachable cache data: {trees} object(s), {bytes} bytes");
-            if trees > 0 {
-                return Ok(1);
-            }
-        }
-        "fsck" => {
-            let report = store.verify(a.has("--files"))?;
-            if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&report)?);
-            } else {
-                outln!(
-                    ctx,
-                    "remote {name}: {} records, {} states, {} verified files, {} overlaps",
-                    report.records,
-                    report.states,
-                    report.files,
-                    report.overlaps
-                );
-                for gap in &report.gaps {
-                    outln!(ctx, "gap: {gap}");
-                }
-            }
-            if !report.gaps.is_empty() {
-                return Ok(1);
-            }
-        }
-        "log" => {
-            for line in store.log()? {
-                if a.has("--json") {
-                    outln!(ctx, "{line}");
-                } else {
-                    let record = crate::oplog::parse_line(&line, None)?.record;
-                    for state in record.states {
-                        outln!(ctx, "{} {} {}", crate::ids::short(&state.id), state.time, state.message);
-                    }
-                }
-            }
-        }
-        "gc" => {
-            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, a.has("-n"))? {
-                if let Some(refused) = &swept.refused {
-                    eprintln!("warning: overlay {overlay}: the remote refused a delete ({refused}); the rest stays");
-                }
-                if !a.has("-q") && (!swept.trees.is_empty() || !swept.packs.is_empty()) {
-                    let verb = if a.has("-n") { "would delete" } else { "deleted" };
-                    outln!(
-                        ctx,
-                        "overlay {overlay}: {verb} {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes; {} dead chunk(s) wait for a later pass",
-                        swept.trees.len(),
-                        swept.bytes,
-                        swept.chunks,
-                        swept.packs.len(),
-                        swept.chunk_bytes,
-                        swept.chunks_waiting
-                    );
-                }
-            }
-            let deleted = store.gc(a.has("-n"))?;
-            if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&deleted)?);
-            } else if !a.has("-q") {
-                outln!(ctx, "{} {} orphan remote parts", if a.has("-n") { "would delete" } else { "deleted" }, deleted.len());
-            }
-        }
-        _ => bail!("unknown remote store operation"),
-    }
-    Ok(0)
-}
+
 
 /// The daemon's pass (docs/cache-overlays.md): for each project of the store at `root` and each of its
 /// store remotes, delete the dead cache states, so a remote that nobody pushes to loses them too. A
@@ -1660,7 +1557,7 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             .filter_map(|(k, _)| {
                 // A setting of this machine is `<key>@<machine>`.
                 let name = k.split('@').next()?.strip_prefix("cloud.remote.")?.strip_suffix(".url")?.to_string();
-                let url = crate::cmd::remote::remote_url(&repo, &name).ok()?;
+                let url = crate::remote_config::remote_url(&repo, &name).ok()?;
                 ["file://", "s3://", "layr+https://"].iter().any(|s| url.starts_with(s)).then_some(name)
             })
             .collect::<std::collections::BTreeSet<_>>()
@@ -1735,7 +1632,7 @@ mod pin_tests {
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
+        crate::project_config::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
         store.save_pin(&ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         let pin = store.pin.clone().unwrap();
@@ -1824,7 +1721,7 @@ mod mode_pin_tests {
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
+        crate::project_config::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
         store.save_pin(&ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         assert_eq!(store.pin.as_ref().unwrap().mode, Mode::Secret);

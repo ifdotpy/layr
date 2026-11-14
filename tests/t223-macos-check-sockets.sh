@@ -27,9 +27,9 @@ test "$TMPDIR" = "$LAYR_CHECK_TMPDIR"
 /usr/bin/ruby --disable-gems -rsocket -e 'p=File.join(ENV.fetch("TMPDIR"),"check.sock"); s=UNIXServer.new(p); c=UNIXSocket.new(p); c.close; s.close'
 if [ -x ./unit-test-bin ]; then
   ./unit-test-bin repo::cache_copy_tests::incomplete_cache_directories_are_private --exact
-  ./unit-test-bin service::request_tests::client_trace_is_isolated_and_stdout_stays_json --exact
-  ./unit-test-bin service::request_tests::incompatible_client_schemas_are_refused_before_opening_the_store --exact
-  ./unit-test-bin service::request_tests::malformed_environment_is_an_error --exact
+  ./unit-test-bin cmd::service_host::request_tests::client_trace_is_isolated_and_stdout_stays_json --exact
+  ./unit-test-bin cmd::service_host::request_tests::incompatible_client_schemas_are_refused_before_opening_the_store --exact
+  ./unit-test-bin cmd::service_host::request_tests::malformed_environment_is_an_error --exact
   ./unit-test-bin ctx::author_tests
   ./unit-test-bin free::holder_tests::current_holder_has_start_when_system_lookup_succeeds --exact
   ./unit-test-bin store_remote::gateway::tests --skip epoch_slot_staging_uses_the_project_grant_before_a_new_proof_exists --skip missing_descriptor_keeps_optional_person_reads_and_hints_machine_grants

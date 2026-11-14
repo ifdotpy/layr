@@ -54,6 +54,7 @@ pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener, Identity)>> {
     for (name, user) in names {
         match crate::sys::fork()? {
             crate::sys::Fork::Child => {
+                crate::pools::mark_worker();
                 std::process::exit(if crate::sys::drop_to_user(user.uid, user.gid).is_ok() { 0 } else { 1 })
             }
             crate::sys::Fork::Parent(pid) => {

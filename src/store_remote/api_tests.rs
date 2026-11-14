@@ -1834,7 +1834,7 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
         "unexpected refusal: {}", String::from_utf8_lossy(&untrusted.stderr));
     {
         let mut repo = Repo::open(&ctx, "p").unwrap();
-        crate::cmd::replicate::trust(&ctx, &repo.p, &focused_ctx.store.machine.id,
+        crate::machine_trust::trust(&ctx, &repo.p, &focused_ctx.store.machine.id,
             &hex::encode(focused_ctx.store.machine.key.verifying_key().to_bytes()), Some(&serde_json::json!({"role": "merge"}))).unwrap();
         focused_store.push(&ctx, &mut repo, &Options::default()).unwrap();
     }

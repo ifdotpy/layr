@@ -1,6 +1,12 @@
 //! save, undo, op log, try, gc, fsck, reindex, init, projects, config, cache.
 
+pub(crate) use crate::try_run::with_try_copy;
+pub(crate) use crate::try_run::try_command;
+pub(crate) use crate::project_config::set_config;
+
 use super::{exit, here};
+pub(crate) use crate::byte_size::human_size;
+pub(crate) use crate::retention::{overlay_named_states, drop_trees};
 use crate::args::{parse, Spec};
 use crate::changes;
 use crate::ctx::Ctx;
@@ -13,7 +19,6 @@ use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 pub(super) fn operation_name(op: &str) -> String {
     let (name, suffix) = op.split_once('.').unwrap_or((op, ""));
@@ -1281,78 +1286,6 @@ fn run_check_in(
     })
 }
 
-/// Create a private try copy, run the callback, then remove the copy unless requested otherwise.
-pub fn with_try_copy<T>(
-    ctx: &Ctx,
-    repo: &Repo,
-    state: &str,
-    layers: &[crate::overlay::Layer],
-    keep: bool,
-    caches: bool,
-    run: impl FnOnce(&Path) -> Result<T>,
-) -> Result<T> {
-    let name = format!(".try-{:016x}", rand::random::<u64>());
-    let dir = repo.p.line_path(&name);
-    let tmp_line = Line {
-        id: format!("try-{name}"),
-        name,
-        head: state.into(),
-        owner: ctx.caller.uid,
-        machine: repo.p.store.machine.id.clone(),
-    };
-    if layers.is_empty() {
-        repo.materialize(&tmp_line, state, &dir)?;
-    } else {
-        let view = crate::overlay::View::new(state.to_string(), layers.to_vec());
-        repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
-    }
-    if caches {
-        // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
-        // the records of a cache overlay, so the cache comes now from the store remote.
-        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
-        if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
-            let _ = btrfs::delete_tree(&dir);
-            return Err(e);
-        }
-    }
-    let result = run(&dir);
-    if keep {
-        eprintln!("layr try: kept {}", dir.display());
-    } else {
-        let _ = btrfs::delete_tree(&dir);
-    }
-    result
-}
-
-/// Use the try identity and environment rules for commands from an exact tree.
-pub fn try_command(
-    ctx: &Ctx,
-    repo: &Repo,
-    state: &str,
-    argv: &[String],
-    dir: &Path,
-    env: &[(String, String)],
-    json: bool,
-) -> Result<i32> {
-    if argv.is_empty() || argv[0].is_empty() {
-        anyhow::bail!("a command needs a nonempty argv");
-    }
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]).current_dir(dir);
-    if json {
-        command.stdout(std::process::Stdio::from(rustix::io::dup(std::io::stderr())?));
-    }
-    let mut env = env.to_vec();
-    env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
-    env.retain(|(k, _)| k != "LAYR_PROJECT");
-    env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
-    crate::privs::command_as(&mut command, ctx.caller.uid, &env)?;
-    let status = command
-        .status()
-        .map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
-    Ok(status.code().unwrap_or(128))
-}
-
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
@@ -1574,72 +1507,6 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
         bytes += b;
     }
     Ok((gone, bytes))
-}
-
-/// The project states that a cache overlay names through its heads and records: eviction and
-/// `layr migrate --delete-old` keep their trees.
-pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
-    let mut overlays = Vec::new();
-    for name in repo.overlay_names()? {
-        // An overlay of another platform that this machine never fetched has no project here and names no state.
-        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
-            continue;
-        }
-        overlays.push(repo.overlay_project(&name)?);
-    }
-    overlay_project_named_states(overlays)
-}
-
-/// Defer native retirement if an overlay needs recovery under a busy lock.
-pub(crate) fn overlay_named_states_maintenance(repo: &Repo) -> Result<Option<BTreeSet<String>>> {
-    repo.maintenance_overlay_projects()?.map(overlay_project_named_states).transpose()
-}
-
-fn overlay_project_named_states(overlays: Vec<Project<'_>>) -> Result<BTreeSet<String>> {
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for overlay in overlays {
-        for line in overlay.db.lines()? {
-            named.insert(line.head);
-        }
-        for raw in overlay.db.all_lines()? {
-            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                named.insert(token.to_string());
-            }
-        }
-    }
-    Ok(named)
-}
-
-/// Remove the trees of states whose records stay (eviction, imports that git builds again) and
-/// mark them absent. The states are reserved first, in one transaction with the check for pins
-/// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
-/// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
-/// the states whose trees went.
-pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
-    let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
-        if !crate::free::holder_alive(&holder) {
-            left.entry(holder).or_default().push(state);
-        }
-    }
-    for (holder, states) in left {
-        let gone = absent_after_delete(repo, &states);
-        repo.p.db.release_trees(&states, &gone, &holder)?;
-    }
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let holder = crate::free::self_holder();
-    let reserved = repo.p.db.reserve_trees(ids, &holder)?;
-    let gone = absent_after_delete(repo, &reserved);
-    repo.p.db.release_trees(&reserved, &gone, &holder)?;
-    Ok(gone)
-}
-
-/// Delete the trees of `ids`; the states whose trees are gone after it (a state kept as the base
-/// of a thin layer stays).
-fn absent_after_delete(repo: &Repo, ids: &[String]) -> Vec<String> {
-    repo.p.delete_states(ids).into_iter().filter(|id| !repo.p.has_state(id)).collect()
 }
 
 /// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --overlays` would find, in
@@ -2005,7 +1872,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::EMPTY_TRASH_FULLY.store(true, std::sync::atomic::Ordering::SeqCst);
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
-        return crate::store_remote::command(ctx, "gc", args);
+        return crate::cmd::store_maintenance::command(ctx, "gc", args);
     }
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--repair").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
@@ -2217,7 +2084,7 @@ fn print_trash_errors(store: &crate::store::Store) {
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
-        return crate::store_remote::command(ctx, "fsck", args);
+        return crate::cmd::store_maintenance::command(ctx, "fsck", args);
     }
     let args = &super::overlay_args("fsck", args, &[("--caches", "--overlays")])?;
     if args.iter().any(|v| v == "--caches") {
@@ -3065,34 +2932,6 @@ fn default_branch(repo: &Repo) -> Option<String> {
     names.first().map(|s| s.to_string())
 }
 
-pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
-    if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
-        return Err(exit(1, format!("{key} is on or off")));
-    }
-    if !repo.p.is_overlay() {
-        if let Some(rest) = key.strip_prefix("overlay.") {
-            let name = rest.split('.').next().unwrap_or("");
-            if let Some(info) = repo.overlay_info(name)? {
-                if rest == name || rest == format!("{name}.hidden") {
-                    return Err(exit(1, "overlay visibility changes only through overlay show-to-project"));
-                }
-                if info.hidden {
-                    let orepo = repo.overlay_repo(name)?;
-                    orepo.require(ctx, "access")?;
-                    let _lock = orepo.p.lock()?;
-                    return set_config(ctx, &orepo, key, value);
-                }
-            }
-        }
-    }
-    let mut rec = Record::new("config");
-    let mut m = serde_json::Map::new();
-    m.insert(key.to_string(), value);
-    rec.data = serde_json::json!({"config": m});
-    repo.commit_record(ctx, rec)?;
-    Ok(())
-}
-
 pub fn projects(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     for n in ctx.store.project_names()? {
         match Repo::open(ctx, &n) {
@@ -3658,23 +3497,6 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => Err(exit(128, "usage: layr debug changes <a> <b> | layr debug receive <name> <uuid> < stream")),
     }
 }
-
-/// A byte count for people: `812 MiB`.
-pub(crate) fn human_size(n: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i + 1 < units.len() {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", units[i])
-    }
-}
-
 
 /// A keep name: printable, without whitespace, at most 255 bytes (a tool's own refs fit).
 fn valid_keep_name(name: &str) -> Result<()> {
