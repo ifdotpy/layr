@@ -1395,8 +1395,12 @@ fn check_commit(repo: &Repo, commit: &str) -> Result<()> {
     Ok(())
 }
 fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
+    let _verify = crate::trace::span("git reachable-object verification");
     let s = store(repo);
-    let objects = git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?;
+    let objects = {
+        let _order = crate::trace::span("git reachable-object enumeration");
+        git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?
+    };
     let mut cat = CatFile::new(&s)?;
     for oid in objects.lines() {
         check_object(&s, &mut cat, oid, "")?;
@@ -1719,6 +1723,8 @@ pub fn export_commit(repo: &Repo, state: &str) -> Result<String> {
 }
 
 fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
+    let _export = crate::trace::span("git export history");
+    let dag = crate::trace::span("git export DAG ordering");
     repo.source_state(state)?;
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1757,6 +1763,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             stack.push((p.clone(), false));
         }
     }
+    drop(dag);
     if !order.is_empty() {
         let export = ExportContext::new(repo)?;
         for s in order {
@@ -1887,6 +1894,7 @@ fn commit_tree(
     message: Option<&str>,
     refname: &str,
 ) -> Result<String> {
+    let _state = crate::trace::span("git export state");
     let s = &export.store;
     let src = repo.state_src(&state.id)?;
     let tmp_idx = std::env::temp_dir().join(format!("layr-index-{}", ids::new_id()));
@@ -1924,7 +1932,10 @@ fn commit_tree(
                 }
             }
             None => {
-                let root = repo.complete(src.clone(), &mut keep)?;
+                let root = {
+                    let _source = crate::trace::span("git export source materialization");
+                    repo.complete(src.clone(), &mut keep)?
+                };
                 full = Some(root.clone());
                 let rules = crate::ignore_rules::Rules::new(&root);
                 fsutil::walk(&root, "", &mut |rel, m| {
@@ -1945,10 +1956,14 @@ fn commit_tree(
         }
         let root = match full {
             Some(root) => root,
-            None => work_tree(repo, &src, &paths, &mut keep)?,
+            None => {
+                let _source = crate::trace::span("git export source materialization");
+                work_tree(repo, &src, &paths, &mut keep)?
+            }
         };
         // Changed paths are hashed again: see FORGET_CHANGED.
         let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
+        let index_command = crate::trace::span("git export index command");
         for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
             let mut c = base_cmd(s);
             c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
@@ -1960,14 +1975,19 @@ fn commit_tree(
                 bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
             }
         }
+        drop(index_command);
+        let tree_write = crate::trace::span("git export tree write");
         let tree = String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
             .trim()
             .to_string();
         if tree.is_empty() {
             bail!("git write-tree failed");
         }
+        drop(tree_write);
+        let commit_write = crate::trace::span("git export commit and ref write");
         let commit = export.commit(state, &tree, parents, message)?;
         git_out(s, &["update-ref", refname, &commit])?;
+        drop(commit_write);
         // Keep the index for the next export and for lines made from this state.
         keep_index(repo, &state.id, &tmp_idx, inherited)?;
         Ok(commit)
@@ -1980,6 +2000,7 @@ fn commit_tree(
 /// earlier index gets its stat data from one refresh. The file appears complete or not at
 /// all: other processes copy kept indexes without the project lock.
 fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
+    let _retain = crate::trace::span("git export index retention");
     let dst = index_path(repo, state);
     if dst.exists() {
         return Ok(());
@@ -2045,7 +2066,11 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
     }
     let _t = crate::trace::span("git index refresh");
     let s = store(repo);
-    let root = repo.state_root(state)?;
+    let root = {
+        let _source = crate::trace::span("git index refresh source materialization");
+        repo.state_root(state)?
+    };
+    let _command = crate::trace::span("git index refresh command");
     base_cmd(&s)
         .env("GIT_INDEX_FILE", index_path(repo, state))
         .env("GIT_WORK_TREE", &root)
@@ -2058,6 +2083,7 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
 
 /// Push a prepared commit to `refs/heads/<branch>` of the remote, as the caller.
 pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force: bool) -> Result<()> {
+    let _push = crate::trace::span("git push prepared commit");
     if let Err(error) = check_reachable(repo, commit) {
         if !repair_cache(repo)? {
             return Err(error);
@@ -2087,7 +2113,10 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         check_reachable(repo, commit)?;
     }
     let s = store(repo);
-    let before = ls_remote(ctx, repo, url, branch)?;
+    let before = {
+        let _remote = crate::trace::span("git push remote discovery");
+        ls_remote(ctx, repo, url, branch)?
+    };
     if !force {
         if let Some(remote) = &before {
             if remote != commit
@@ -2107,7 +2136,10 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     let spec = format!("{}{commit}:refs/heads/{branch}", if force { "+" } else { "" });
     c.arg(spec);
     as_caller(ctx, &mut c, &s)?;
-    let out = c.stdin(Stdio::null()).output().context("run git push")?;
+    let out = {
+        let _subprocess = crate::trace::span("git push subprocess");
+        c.stdin(Stdio::null()).output().context("run git push")?
+    };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("rejected") {
