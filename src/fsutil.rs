@@ -983,14 +983,14 @@ pub fn copy_metadata(src: &File, dst: &File) -> Result<()> {
 /// Copy extended attributes through descriptors without replacing a layer identity.
 pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
     let directory = src.metadata()?.is_dir();
-    let size = rustix::fs::flistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::flistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|name| !name.is_empty()) {
         if directory && name == b"com.layr.subvolume" {
             continue;
         }
-        let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1003,11 +1003,11 @@ pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
 /// either: setting one can need privileges, and the policy labels new files.
 #[cfg(target_os = "linux")]
 fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
-    let size = rustix::fs::flistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::flistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_")) {
-        let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1019,7 +1019,7 @@ fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
     let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let size = rustix::fs::flistxattr_query(file)?;
         let mut bytes = vec![0; size];
         let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
         Ok(bytes[..size]
@@ -1041,7 +1041,7 @@ fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
     let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let size = rustix::fs::flistxattr_query(file)?;
         let mut bytes = vec![0; size];
         let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
         Ok(bytes[..size]
@@ -1057,7 +1057,7 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
         }
     }
     for name in source {
-        let size = rustix::fs::fgetxattr(src, name.as_slice(), &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name.as_slice())?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name.as_slice(), value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1068,11 +1068,11 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
 /// Linux symlink descriptors do not support fgetxattr. The caller pins both parent folders.
 #[cfg(target_os = "linux")]
 pub fn copy_symlink_xattrs(src: &Path, dst: &Path) -> Result<()> {
-    let size = rustix::fs::llistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::llistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::llistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|name| !name.is_empty()) {
-        let size = rustix::fs::lgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::lgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::lgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::lsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1576,6 +1576,35 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 mod range_tests {
     use super::{copy_index_entry, merged_ranges};
     use std::fs;
+
+    #[test]
+    fn copying_metadata_keeps_empty_and_nonempty_attributes() {
+        let root = std::env::temp_dir().join(format!("layr-metadata-attributes-{}", crate::ids::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        for directory in [false, true] {
+            let source = root.join(format!("source-{directory}"));
+            let destination = root.join(format!("destination-{directory}"));
+            for path in [&source, &destination] {
+                if directory {
+                    fs::create_dir(path).unwrap();
+                } else {
+                    fs::write(path, b"data").unwrap();
+                }
+            }
+            let source = fs::File::open(source).unwrap();
+            let destination = fs::File::open(destination).unwrap();
+            for (name, value) in [("user.layr-empty", b"".as_slice()), ("user.layr-value", b"value".as_slice())] {
+                rustix::fs::fsetxattr(&source, name, value, rustix::fs::XattrFlags::empty()).unwrap();
+            }
+            super::copy_metadata(&source, &destination).unwrap();
+            for (name, expected) in [("user.layr-empty", b"".as_slice()), ("user.layr-value", b"value".as_slice())] {
+                let mut value = [0; 32];
+                let len = rustix::fs::fgetxattr(&destination, name, &mut value[..]).unwrap();
+                assert_eq!(&value[..len], expected);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
