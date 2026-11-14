@@ -1595,7 +1595,11 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
 
 // Retry when an attribute grows between the size query and read.
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> io::Result<Vec<u8>> {
+fn read_xattr_buffer(
+    initial_bytes: usize,
+    mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>,
+    mut query: impl FnMut() -> rustix::io::Result<usize>,
+) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     resize_lookup_buffer(&mut buffer, initial_bytes, XATTR_MAX_BYTES, "xattr bytes")?;
     loop {
@@ -1605,7 +1609,7 @@ fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> ru
                 return Ok(buffer);
             }
             Err(rustix::io::Errno::RANGE) => {
-                let size = read(&mut [])?;
+                let size = query()?;
                 if buffer.len() == XATTR_MAX_BYTES || size > XATTR_MAX_BYTES {
                     return Err(io::Error::other(format!("xattr bytes exceed the limit of {XATTR_MAX_BYTES}")));
                 }
@@ -1627,7 +1631,11 @@ pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>)
         rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
         return Ok(Vec::new());
     }
-    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
+    read_xattr_buffer(
+        XATTR_INITIAL_VALUE_BYTES,
+        |buffer| rustix::fs::lgetxattr(path, name, buffer),
+        || rustix::fs::lgetxattr_query(path, name),
+    )
 }
 /// Set (`readonly`) or clear the immutable flag of the entry itself. Clearing also removes the
 /// seal entry of its ACL (`apfs_seal_entry`): a copy of a sealed entry can carry either seal, and
@@ -2074,7 +2082,11 @@ pub fn apfs_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>
 /// `read_value` refuses stays empty. Reading a value costs a system call of its own.
 #[cfg(target_os = "macos")]
 pub fn apfs_xattrs_where(path: &std::path::Path, read_value: impl Fn(&[u8]) -> bool) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
+    let names = read_xattr_buffer(
+        XATTR_INITIAL_NAMES_BYTES,
+        |buffer| rustix::fs::llistxattr(path, buffer),
+        || rustix::fs::llistxattr_query(path),
+    )?;
     names
         .split(|b| *b == 0)
         .filter(|name| !name.is_empty())
@@ -2316,7 +2328,11 @@ pub fn overlay_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8
         rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
         return Ok(Vec::new());
     }
-    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
+    read_xattr_buffer(
+        XATTR_INITIAL_VALUE_BYTES,
+        |buffer| rustix::fs::lgetxattr(path, name, buffer),
+        || rustix::fs::lgetxattr_query(path, name),
+    )
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
@@ -2324,7 +2340,11 @@ pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Resu
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
+    let names = read_xattr_buffer(
+        XATTR_INITIAL_NAMES_BYTES,
+        |buffer| rustix::fs::llistxattr(path, buffer),
+        || rustix::fs::llistxattr_query(path),
+    )?;
     names
         .split(|b| *b == 0)
         .filter(|name| !name.is_empty())
@@ -2611,49 +2631,84 @@ mod metadata_tests {
 
     #[test]
     fn attribute_growth_race_retries() {
-        let mut calls = 0;
-        let value = read_xattr_buffer(1, |buffer| {
-            calls += 1;
-            if buffer.is_empty() {
-                return Ok(2);
-            }
-            if buffer.len() < 128 {
-                return Err(rustix::io::Errno::RANGE);
-            }
-            buffer[..128].fill(7);
-            Ok(128)
-        })
+        let mut reads = 0;
+        let mut queries = 0;
+        let value = read_xattr_buffer(
+            1,
+            |buffer| {
+                reads += 1;
+                if buffer.len() < 128 {
+                    return Err(rustix::io::Errno::RANGE);
+                }
+                buffer[..128].fill(7);
+                Ok(128)
+            },
+            || {
+                queries += 1;
+                Ok(2)
+            },
+        )
         .unwrap();
         assert_eq!(value, vec![7; 128]);
-        assert_eq!(calls, 5);
+        assert_eq!((reads, queries), (3, 2));
+    }
+
+    #[test]
+    fn attribute_growth_uses_the_queried_size() {
+        const VALUE_BYTES: usize = XATTR_MAX_BYTES / 2;
+        let mut reads = 0;
+        let mut queries = 0;
+        let value = read_xattr_buffer(
+            1,
+            |buffer| {
+                reads += 1;
+                if buffer.len() < VALUE_BYTES {
+                    return Err(rustix::io::Errno::RANGE);
+                }
+                buffer[..VALUE_BYTES].fill(7);
+                Ok(VALUE_BYTES)
+            },
+            || {
+                queries += 1;
+                Ok(VALUE_BYTES)
+            },
+        )
+        .unwrap();
+        assert_eq!(value, vec![7; VALUE_BYTES]);
+        assert_eq!((reads, queries), (2, 1));
     }
 
     #[test]
     fn attribute_growth_stops_at_the_size_limit() {
         let mut calls = 0;
-        let error = read_xattr_buffer(1, |buffer| {
-            calls += 1;
-            if buffer.is_empty() {
-                Ok(0)
-            } else {
+        let error = read_xattr_buffer(
+            1,
+            |_| {
+                calls += 1;
                 Err(rustix::io::Errno::RANGE)
-            }
-        })
+            },
+            || Ok(0),
+        )
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
-        assert!(calls < 64);
+        assert!(calls < 32);
+        let mut reads = 0;
+        let mut queries = 0;
         let error = read_xattr_buffer(
             1,
             |buffer| {
-                if buffer.is_empty() {
-                    Ok(XATTR_MAX_BYTES + 1)
-                } else {
-                    Err(rustix::io::Errno::RANGE)
-                }
+                reads += 1;
+                assert_eq!(buffer.len(), 1);
+                Err(rustix::io::Errno::RANGE)
+            },
+            || {
+                queries += 1;
+                Ok(XATTR_MAX_BYTES + 1)
             },
         )
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
+        assert_eq!((reads, queries), (1, 1));
     }
 
     #[test]
