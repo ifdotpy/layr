@@ -698,7 +698,7 @@ fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bo
     let cur = repo.scan(line)?;
     let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
         .into_iter()
-        .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+        .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
         .flatten()
         .collect();
     repo.apply_delta(&repo.state_root(after)?, &repo.state_root(before)?, &repo.working(line), repo.own(line), &later, force)?;
@@ -1052,14 +1052,14 @@ pub(crate) fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<(
     let list: Vec<_> = changes::file_changes(&scan.path, &target)?
         .into_iter()
         .filter(|c| {
-            !(skip_path(&c.path)
-                || private.contains(&c.path)
-                || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false))
+            !(skip_path(c.path()) || private.contains(c.path()) || c.old_path().map(|o| private.contains(o)).unwrap_or(false))
         })
         .collect();
-    let gone: Vec<&str> =
-        list.iter().flat_map(|c| c.old_path.as_deref().into_iter().chain(c.new.is_none().then_some(c.path.as_str()))).collect();
-    let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+    let gone: Vec<&str> = list
+        .iter()
+        .flat_map(|c| c.old_path().map(String::as_str).into_iter().chain(c.new().is_none().then_some(c.path().as_str())))
+        .collect();
+    let write: Vec<&str> = list.iter().filter(|c| c.new().is_some()).map(|c| c.path().as_str()).collect();
     fsutil::replace_work_entries(&target, &w, &gone, &write, own)
 }
 
@@ -2253,8 +2253,8 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         let in_cache = |p: &str| caches.iter().any(|c| p == c || p.starts_with(&format!("{c}/")));
         let diff: Vec<String> = changes::file_changes(&base, &fresh.path)?
             .into_iter()
-            .filter(|c| !skip_path(&c.path) && !in_cache(&c.path))
-            .map(|c| c.path)
+            .filter(|c| !skip_path(c.path()) && !in_cache(c.path()))
+            .map(|c| c.path().clone())
             .collect();
         if !diff.is_empty() {
             problems += 1;
@@ -3440,15 +3440,15 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let a = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
             let b = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
-                let k = |m: &Option<fsutil::Meta>| m.as_ref().map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
+                let k = |m: Option<&fsutil::Meta>| m.map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
                 outln!(
                     ctx,
                     "{}\t{}\t{}\t{}\t{:?}",
-                    c.old_path.clone().unwrap_or_default(),
-                    c.path,
-                    k(&c.old),
-                    k(&c.new),
-                    c.ranges
+                    c.old_path().cloned().unwrap_or_default(),
+                    c.path(),
+                    k(c.old()),
+                    k(c.new()),
+                    c.data()
                 );
             }
             Ok(0)

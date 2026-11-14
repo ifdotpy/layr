@@ -206,16 +206,22 @@ pub fn status(repo: &Repo, line: &Line, view: &View) -> Result<crate::repo::Stat
     Ok(crate::repo::Status { staged, conflicts, ..Default::default() })
 }
 
-pub fn diff_input(repo: &Repo, line: &Line, _view: &View, keep: &mut Vec<crate::repo::Temp>) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::Change>)> {
+pub fn diff_input(
+    repo: &Repo,
+    line: &Line,
+    _view: &View,
+    keep: &mut Vec<crate::repo::Temp>,
+) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::EntryChange>)> {
     ensure_no_pending_move(repo, line)?;
     let head = repo.state_src(&line.head)?;
     let scan = repo.scan(line)?;
     let working = scan.path.clone();
     keep.push(scan);
     let rules = crate::ignore_rules::Rules::new(&working);
-    let list = crate::changes::file_changes(&head, &working)?.into_iter()
-        .filter(|c| !crate::repo::skip_path(&c.path))
-        .filter(|c| c.old.is_some() || !rules.ignored(&c.path, false))
+    let list = crate::changes::file_changes(&head, &working)?
+        .into_iter()
+        .filter(|c| !crate::repo::skip_path(c.path()))
+        .filter(|c| c.old().is_some() || !rules.ignored(c.path(), false))
         .collect();
     Ok((head, working, list))
 }

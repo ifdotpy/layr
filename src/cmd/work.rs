@@ -3,7 +3,7 @@
 
 use super::{exit, here, matches, Here};
 use crate::args::{parse, Spec};
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
@@ -16,13 +16,10 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-fn xy(c: &Change) -> char {
-    match (&c.old, &c.new) {
-        (None, Some(_)) => 'A',
-        (Some(_), None) => 'D',
-        _ if c.old_path.is_some() => 'R',
-        (Some(o), Some(n)) if o.ftype != n.ftype => 'T',
-        _ => 'M',
+fn xy(c: &EntryChange) -> char {
+    match c {
+        EntryChange::Add { .. } => 'A', EntryChange::Remove { .. } => 'D', EntryChange::Rename { .. } => 'R',
+        EntryChange::ReplaceType { .. } => 'T', EntryChange::Modify { .. } => 'M',
     }
 }
 
@@ -88,14 +85,14 @@ struct StatusOptions {
 
 #[derive(serde::Serialize)]
 struct StatusChange<'a> {
-    old_path: &'a Option<String>,
+    old_path: Option<&'a str>,
     path: &'a str,
     status: char,
 }
 
-impl<'a> From<&'a Change> for StatusChange<'a> {
-    fn from(c: &'a Change) -> Self {
-        Self { path: &c.path, old_path: &c.old_path, status: xy(c) }
+impl<'a> From<&'a EntryChange> for StatusChange<'a> {
+    fn from(c: &'a EntryChange) -> Self {
+        Self { path: c.path(), old_path: c.old_path().map(String::as_str), status: xy(c) }
     }
 }
 
@@ -154,8 +151,8 @@ impl<'a> StatusJson<'a> {
             line: &line.name,
             line_id: &line.id,
             head: &line.head,
-            staged: st.staged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
-            unstaged: st.unstaged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
+            staged: st.staged.iter().filter(|c| matches(specs, c.path())).map(StatusChange::from).collect(),
+            unstaged: st.unstaged.iter().filter(|c| matches(specs, c.path())).map(StatusChange::from).collect(),
             untracked: st.untracked.iter().filter(|p| matches(specs, p)).collect(),
             // Ignore classification is shared with the other status entries. Keep it intact;
             // the opt-out avoids constructing and serializing its output list.
@@ -234,16 +231,16 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let mut rows: BTreeMap<String, (char, char, Option<String>)> = BTreeMap::new();
         for c in &st.staged {
-            if !matches(&specs, &c.path) {
+            if !matches(&specs, c.path()) {
                 continue;
             }
-            rows.insert(c.path.clone(), (xy(c), ' ', c.old_path.clone()));
+            rows.insert(c.path().clone(), (xy(c), ' ', c.old_path().cloned()));
         }
         for c in &st.unstaged {
-            if !matches(&specs, &c.path) {
+            if !matches(&specs, c.path()) {
                 continue;
             }
-            let e = rows.entry(c.path.clone()).or_insert((' ', ' ', None));
+            let e = rows.entry(c.path().clone()).or_insert((' ', ' ', None));
             e.1 = xy(c);
         }
         for c in &st.conflicts {
@@ -300,21 +297,22 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !head.conflicts.is_empty() && !st.conflicts.is_empty() {
         outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr save -m <message>\")\n");
     }
-    let staged: Vec<&Change> = st.staged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
-    let unstaged: Vec<&Change> =
-        st.unstaged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
+    let staged: Vec<&EntryChange> =
+        st.staged.iter().filter(|c| matches(&specs, c.path()) && !conflicted.contains(c.path())).collect();
+    let unstaged: Vec<&EntryChange> =
+        st.unstaged.iter().filter(|c| matches(&specs, c.path()) && !conflicted.contains(c.path())).collect();
     let untracked: Vec<String> = if untracked_mode == "no" {
         vec![]
     } else {
         untracked_list(&st, &untracked_mode).into_iter().filter(|u| matches(&specs, u.trim_end_matches('/'))).collect()
     };
-    let label = |c: &Change| -> String {
+    let label = |c: &EntryChange| -> String {
         match xy(c) {
-            'A' => format!("new file:   {}", h.rel(&c.path)),
-            'D' => format!("deleted:    {}", h.rel(&c.path)),
-            'R' => format!("renamed:    {} -> {}", h.rel(c.old_path.as_deref().unwrap_or("")), h.rel(&c.path)),
-            'T' => format!("typechange: {}", h.rel(&c.path)),
-            _ => format!("modified:   {}", h.rel(&c.path)),
+            'A' => format!("new file:   {}", h.rel(c.path())),
+            'D' => format!("deleted:    {}", h.rel(c.path())),
+            'R' => format!("renamed:    {} -> {}", h.rel(c.old_path().map(String::as_str).unwrap_or("")), h.rel(c.path())),
+            'T' => format!("typechange: {}", h.rel(c.path())),
+            _ => format!("modified:   {}", h.rel(c.path())),
         }
     };
     if !staged.is_empty() {
@@ -588,8 +586,8 @@ fn select_add(
 ) -> Result<(BTreeSet<String>, Vec<String>)> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for c in &st.unstaged {
-        if matches(specs, &c.path) {
-            paths.insert(c.path.clone());
+        if matches(specs, c.path()) {
+            paths.insert(c.path().clone());
         }
     }
     if !a.has("-u") {
@@ -1176,10 +1174,10 @@ pub(crate) fn named_checks(
     head_root: &crate::repo::Snap,
     new_root: &crate::repo::Snap,
     line: &Line,
-    all_changes: &[Change],
+    all_changes: &[EntryChange],
     opts: NamedOpts,
-) -> Result<Option<(Vec<Change>, Vec<crate::model::Conflict>)>> {
-    let staged: Vec<Change> = all_changes.iter().filter(|c| !skip_path(&c.path)).cloned().collect();
+) -> Result<Option<(Vec<EntryChange>, Vec<crate::model::Conflict>)>> {
+    let staged: Vec<EntryChange> = all_changes.iter().filter(|c| !skip_path(c.path())).cloned().collect();
     if staged.is_empty() && !opts.allow_empty && !opts.amend {
         return Ok(None);
     }
@@ -1188,11 +1186,11 @@ pub(crate) fn named_checks(
         let _t = crate::trace::span("conflict markers");
         let mut marked = Vec::new();
         for c in &staged {
-            if !c.new.as_ref().is_some_and(|m| m.is_file() && m.size <= fsutil::MAX_TEXT) {
+            if !c.new().is_some_and(|m| m.is_file() && m.size <= fsutil::MAX_TEXT) {
                 continue;
             }
-            if crate::repo::has_markers(&fsutil::read_file(new_root, &c.path)?) {
-                marked.push(c.path.clone());
+            if crate::repo::has_markers(&fsutil::read_file(new_root, c.path())?) {
+                marked.push(c.path().clone());
             }
         }
         if !marked.is_empty() {
@@ -1228,7 +1226,7 @@ struct NamedPrepared<'p, 's> {
     new_root: crate::repo::Snap,
     compared: crate::objstore::Compared,
     /// The staged changes and the conflicts that the save clears; None: nothing to save.
-    checks: Option<(Vec<Change>, Vec<crate::model::Conflict>)>,
+    checks: Option<(Vec<EntryChange>, Vec<crate::model::Conflict>)>,
 }
 
 /// Clone the index of `line` and compare the clone with the head. Call with the line lock held and
@@ -1367,7 +1365,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !st2.unstaged.is_empty() {
             outln!(ctx, "Changes not staged for a state:");
             for c in &st2.unstaged {
-                outln!(ctx, "\tmodified:   {}", h.rel(&c.path));
+                outln!(ctx, "\tmodified:   {}", h.rel(c.path()));
             }
             outln!(ctx, "\nno changes added to a state (use \"layr add\" and/or \"layr save -a -m <message>\")");
         } else if !st2.untracked.is_empty() {
@@ -1407,7 +1405,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
     if (a.has("-a") || virtual_save) && !stacked && !cfg!(target_os = "macos") {
         let (st, scan, _it, index) = h.repo.status_light(&line)?;
-        let mut paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
+        let mut paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path().clone()).collect();
         if virtual_save {
             paths.extend(st.untracked.iter().cloned());
         }
@@ -1576,7 +1574,7 @@ fn warn_left_out(ctx: &Ctx) -> Result<()> {
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
     let untracked: Vec<String> = untracked_list(&st, "normal").iter().map(|p| h.rel(p)).collect();
     let mut modified: Vec<String> =
-        st.unstaged.iter().filter(|c| !conflicted.contains(&c.path)).map(|c| h.rel(&c.path)).collect();
+        st.unstaged.iter().filter(|c| !conflicted.contains(c.path())).map(|c| h.rel(c.path())).collect();
     modified.sort();
     for msg in [left_out_line("untracked", &untracked), left_out_line("modified, not added", &modified)].into_iter().flatten() {
         eprintln!("{msg}");
@@ -1598,7 +1596,7 @@ fn left_out_line(kind: &str, paths: &[String]) -> Option<String> {
 }
 
 /// The summary of a commit: the short statistics and the created, deleted and moved files.
-fn print_summary(ctx: &Ctx, old: &Snap, new: &Snap, list: &[Change]) -> Result<()> {
+fn print_summary(ctx: &Ctx, old: &Snap, new: &Snap, list: &[EntryChange]) -> Result<()> {
     print_fds(ctx, &diff::file_diffs(old, new, list)?);
     Ok(())
 }
@@ -1647,9 +1645,9 @@ fn commit_stacked(
         let (st, scan, _it, _index) = repo.status(line)?;
         let mut paths: BTreeSet<String> = BTreeSet::new();
         if all {
-            paths.extend(st.unstaged.iter().map(|c| c.path.clone()));
+            paths.extend(st.unstaged.iter().map(|c| c.path().clone()));
         }
-        paths.extend(st.unstaged.iter().filter(|c| quiet_files.contains(&c.path)).map(|c| c.path.clone()));
+        paths.extend(st.unstaged.iter().filter(|c| quiet_files.contains(c.path())).map(|c| c.path().clone()));
         paths.extend(pending.keys().cloned());
         let work = repo.temp_work(&src)?;
         stage_into(repo, line, &work.path, &scan.path, &paths)?;
@@ -1758,24 +1756,24 @@ fn restore_paths(
     let own = repo.own(line);
     let mut done = Vec::new();
     for c in changes::without_moves(changes::file_changes(target_view, source)?) {
-        if skip_path(&c.path) || !matches(specs, &c.path) {
+        if skip_path(c.path()) || !matches(specs, c.path()) {
             continue;
         }
-        if c.new.is_none() {
+        if c.new().is_none() {
             if let Some(k) = known {
-                if fsutil::lmeta(k, &c.path).is_none() {
+                if fsutil::lmeta(k, c.path()).is_none() {
                     continue;
                 }
             }
-            fsutil::remove_entry(target, &c.path)?;
+            fsutil::remove_entry(target, c.path())?;
         } else {
             if to_work {
-                fsutil::copy_work_entry(source, &c.path, target, &c.path, own)?;
+                fsutil::copy_work_entry(source, c.path(), target, c.path(), own)?;
             } else {
-                fsutil::copy_entry(source, &c.path, target, &c.path, own)?;
+                fsutil::copy_entry(source, c.path(), target, c.path(), own)?;
             }
         }
-        done.push(c.path.clone());
+        done.push(c.path().clone());
     }
     Ok(done)
 }
@@ -1985,7 +1983,7 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     let head = repo.head_src(&line)?;
     let tree = repo.state_src(target)?;
     // Equal trees: no entry differs (the root folder is not state content).
-    if changes::candidates(&head, &tree)?.iter().any(|x| !x.path.is_empty() && !skip_path(&x.path)) {
+    if changes::candidates(&head, &tree)?.iter().any(|x| !x.path().is_empty() && !skip_path(x.path())) {
         return Ok(false);
     }
     // The working folder matches the head: a local change needs the full reset. The walk for
@@ -1994,7 +1992,7 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     if !local.is_empty() {
         let regen = repo.cache_paths(&w)?;
         let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
-        if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
+        if local.iter().any(|x| keep(x.path()) || x.old_path().map(String::as_str).is_some_and(keep)) {
             return Ok(false);
         }
     }
@@ -2061,7 +2059,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         None
     };
     #[cfg(not(target_os = "macos"))]
-    let prepared: Option<(Temp, Vec<Change>)> = None;
+    let prepared: Option<(Temp, Vec<EntryChange>)> = None;
     let (_, w) = begin_line(ctx, &h.repo, &line, reset_op(&line, &target))?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
@@ -2099,10 +2097,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let own = repo.own(&line);
                 let gone: Vec<&str> = list
                     .iter()
-                    .filter(|c| c.new.is_none() && fsutil::lmeta(&index, &c.path).is_some())
-                    .map(|c| c.path.as_str())
+                    .filter(|c| c.new().is_none() && fsutil::lmeta(&index, c.path()).is_some())
+                    .map(|c| c.path().as_str())
                     .collect();
-                let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+                let write: Vec<&str> = list.iter().filter(|c| c.new().is_some()).map(|c| c.path().as_str()).collect();
                 fsutil::replace_work_entries(&target_root, &wdir, &gone, &write, own)?;
             }
             true
@@ -2171,7 +2169,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !st.unstaged.is_empty() {
             outln!(ctx, "Unstaged changes after reset:");
             for c in st.unstaged.iter().take(20) {
-                outln!(ctx, "{}\t{}", if c.new.is_none() { 'D' } else { 'M' }, c.path);
+                outln!(ctx, "{}\t{}", if c.new().is_none() { 'D' } else { 'M' }, c.path());
             }
             if st.unstaged.len() > 20 {
                 outln!(ctx, "... and {} more", st.unstaged.len() - 20);
@@ -2194,11 +2192,11 @@ pub(crate) fn put_back(repo: &Repo, line: &Line, w: Option<&str>) {
 
 /// The changes from the working folder to `target_root` that `reset --hard` applies: every
 /// tracked path; untracked and ignored files stay. The scan stays alive with the list.
-fn hard_reset_changes(repo: &Repo, line: &Line, target_root: &std::path::Path) -> Result<(Temp, Vec<Change>)> {
+fn hard_reset_changes(repo: &Repo, line: &Line, target_root: &std::path::Path) -> Result<(Temp, Vec<EntryChange>)> {
     let scan = repo.scan(line)?;
     let list = changes::without_moves(changes::file_changes(&scan.path, target_root)?)
         .into_iter()
-        .filter(|c| !skip_path(&c.path))
+        .filter(|c| !skip_path(c.path()))
         .collect();
     Ok((scan, list))
 }

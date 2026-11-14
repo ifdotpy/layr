@@ -641,7 +641,7 @@ pub fn same_entry(
     pa: &str,
     rb: &(impl Src + ?Sized),
     pb: &str,
-    ranges: Option<&[(u64, u64)]>,
+    ranges: Option<&crate::compare::ChangedRanges>,
 ) -> Result<bool> {
     let left_entry = ra.objects().map(|objects| objects.entry(pa)).transpose()?.flatten();
     let right_entry = rb.objects().map(|objects| objects.entry(pb)).transpose()?.flatten();
@@ -694,8 +694,7 @@ pub fn same_entry(
             let mut b = open_ro(&rb.at(pb)?)?;
             match ranges {
                 Some(rs) => {
-                    for (off, len) in crate::compare::ChangedRanges::from_native(rs).map_err(anyhow::Error::msg)?.bounded(ma.size)
-                    {
+                    for (off, len) in rs.bounded(ma.size) {
                         if !same_range(&mut a, &mut b, off, len)? {
                             return Ok(false);
                         }

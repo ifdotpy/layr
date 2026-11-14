@@ -222,7 +222,7 @@ pub fn enabled(p: &Project) -> Result<bool> {
 /// Comparison of an immutable save snapshot. Its delta stays bound to that snapshot
 /// and the object refs it was checked against until publication.
 pub struct Compared {
-    pub files: Vec<crate::changes::Change>,
+    pub files: Vec<crate::compare::EntryChange>,
     source: crate::repo::Snap,
     delta: Option<CheckedDelta>,
 }
@@ -423,10 +423,10 @@ fn changed_write_base(
         // turn those candidates into full subtree reads. Linked files remain candidates:
         // equal bytes and link counts alone do not prove equal hard-link groups.
         #[cfg(feature = "overlayfs")]
-        if change.old_path.is_none() && change.old.is_some() && change.new.is_some() {
+        if change.old_path().is_none() && change.old().is_some() && change.new().is_some() {
             use std::os::unix::fs::MetadataExt;
-            let a = crate::fsutil::Src::at(parent, &change.path)?;
-            let b = crate::fsutil::Src::at(source, &change.path)?;
+            let a = crate::fsutil::Src::at(parent, change.path())?;
+            let b = crate::fsutil::Src::at(source, change.path())?;
             let am = std::fs::symlink_metadata(&a)?;
             let bm = std::fs::symlink_metadata(&b)?;
             let same_data = (am.is_dir() && bm.is_dir())
@@ -434,7 +434,7 @@ fn changed_write_base(
                     && bm.is_file()
                     && am.nlink() == 1
                     && bm.nlink() == 1
-                    && change.ranges.as_ref().is_some_and(|r| r.is_empty()));
+                    && matches!(change.data(), crate::compare::DataEvidence::Equal));
             if same_data
                 && am.mode() == bm.mode()
                 && (am.mtime(), am.mtime_nsec()) == (bm.mtime(), bm.mtime_nsec())
@@ -443,8 +443,8 @@ fn changed_write_base(
                 continue;
             }
         }
-        paths.insert(change.path);
-        paths.extend(change.old_path);
+        paths.insert(change.path().clone());
+        paths.extend(change.old_path().cloned());
     }
     #[cfg(target_os = "macos")]
     {

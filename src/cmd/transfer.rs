@@ -103,13 +103,13 @@ fn sync_folder(
         Some(f) => {
             let mut paths: BTreeSet<String> = stale.iter().cloned().collect();
             for c in changes::file_changes(f, to)? {
-                if skip_path(&c.path) {
+                if skip_path(c.path()) {
                     continue;
                 }
-                if let Some(o) = &c.old_path {
+                if let Some(o) = c.old_path() {
                     paths.insert(o.clone());
                 }
-                paths.insert(c.path.clone());
+                paths.insert(c.path().clone());
             }
             for p in paths {
                 if bad.contains(&p) {

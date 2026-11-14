@@ -26,7 +26,7 @@
 pub(crate) mod create;
 
 use crate::access::{Policy, Who};
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
@@ -612,14 +612,14 @@ pub struct Split {
     pub shared: Ops,
     pub overlays: Vec<Ops>,
     /// The change list of the whole tree (with renames), for the summary.
-    pub list: Vec<Change>,
+    pub list: Vec<EntryChange>,
 }
 
 /// Split the changes from `base` (the line's full tree) to `new` by layer. `shared` and `roots`
 /// are the previous states of the layers; `pending` names paths that `layr overlay move` sends to
 /// an overlay.
 pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending: &BTreeMap<String, usize>) -> Result<Split> {
-    let list: Vec<Change> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+    let list: Vec<EntryChange> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(c.path())).collect();
     let list = changes::with_renames(base, new, list);
     let all = |p: &str| -> Vec<Owner> {
         let mut v: Vec<Owner> = Vec::new();
@@ -643,13 +643,13 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
     }
     let mut handled: BTreeSet<String> = BTreeSet::new();
     for c in &list {
-        handled.insert(c.path.clone());
-        let forced = pending.get(&c.path).map(|i| Owner::Overlay(*i));
-        match (&c.old, &c.new, &c.old_path) {
+        handled.insert(c.path().clone());
+        let forced = pending.get(c.path()).map(|i| Owner::Overlay(*i));
+        match (c.old(), c.new(), c.old_path()) {
             // A delete goes to every layer that has the path, so no lower file shows again.
             (_, None, _) => {
-                for o in all(&c.path) {
-                    ops(&mut s, o).dels.insert(c.path.clone());
+                for o in all(c.path()) {
+                    ops(&mut s, o).dels.insert(c.path().clone());
                 }
             }
             // A moved file stays in the layer of its old path: a move never publishes it.
@@ -658,25 +658,25 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
                 let owner = forced.or(top(old)).unwrap_or(Owner::Shared);
                 for o in all(old) {
                     if o == owner {
-                        ops(&mut s, o).moves.push((old.clone(), c.path.clone()));
+                        ops(&mut s, o).moves.push((old.clone(), c.path().clone()));
                     } else {
                         ops(&mut s, o).dels.insert(old.clone());
                     }
                 }
-                ops(&mut s, owner).puts.insert(c.path.clone());
+                ops(&mut s, owner).puts.insert(c.path().clone());
             }
             // A new path goes to the shared set, unless `overlay move` named it.
             (None, Some(_), _) => {
-                ops(&mut s, forced.unwrap_or(Owner::Shared)).puts.insert(c.path.clone());
+                ops(&mut s, forced.unwrap_or(Owner::Shared)).puts.insert(c.path().clone());
             }
             // A change goes to the highest layer that has the path.
             (Some(_), Some(_), None) => {
-                let owner = forced.or(top(&c.path)).unwrap_or(Owner::Shared);
-                ops(&mut s, owner).puts.insert(c.path.clone());
+                let owner = forced.or(top(c.path())).unwrap_or(Owner::Shared);
+                ops(&mut s, owner).puts.insert(c.path().clone());
                 if forced.is_some() {
-                    for o in all(&c.path) {
+                    for o in all(c.path()) {
                         if o != owner {
-                            ops(&mut s, o).dels.insert(c.path.clone());
+                            ops(&mut s, o).dels.insert(c.path().clone());
                         }
                     }
                 }
@@ -2503,7 +2503,7 @@ pub fn commit_layers(
 /// Change the stack of a line to `layers` and its working folder with it: overlay files come and
 /// go, local changes stay (a change in the way refuses, unless `force`). The caller holds the
 /// project lock and owns the line.
-pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: bool, op: &str) -> Result<Vec<Change>> {
+pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: bool, op: &str) -> Result<Vec<EntryChange>> {
     let old = repo.head_tree(line)?;
     let (st, _scan, _it, _idx) = repo.status(line)?;
     let view = repo.assemble(line, &line.head, layers)?;

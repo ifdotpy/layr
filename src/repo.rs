@@ -2,7 +2,7 @@
 
 use crate::errors::{error, Kind as ErrorKind};
 use crate::access::{Policy, Role, Rule, Who};
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::db::need;
 use crate::fsutil::{self, Src};
@@ -68,8 +68,8 @@ impl Drop for Temp {
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Status {
-    pub staged: Vec<Change>,
-    pub unstaged: Vec<Change>,
+    pub staged: Vec<EntryChange>,
+    pub unstaged: Vec<EntryChange>,
     pub untracked: Vec<String>,
     pub untracked_dirs: Vec<String>,
     pub ignored: Vec<String>,
@@ -81,8 +81,8 @@ impl Status {
     pub fn local_paths(&self) -> BTreeSet<String> {
         let mut s = BTreeSet::new();
         for c in self.unstaged.iter().chain(self.staged.iter()) {
-            s.insert(c.path.clone());
-            if let Some(o) = &c.old_path {
+            s.insert(c.path().clone());
+            if let Some(o) = c.old_path() {
                 s.insert(o.clone());
             }
         }
@@ -96,8 +96,8 @@ impl Status {
         if paths.is_empty() {
             return;
         }
-        self.staged.retain(|c| !paths.contains(&c.path));
-        self.unstaged.retain(|c| !paths.contains(&c.path));
+        self.staged.retain(|c| !paths.contains(c.path()));
+        self.unstaged.retain(|c| !paths.contains(c.path()));
         self.untracked.retain(|p| !paths.contains(p));
         self.conflicts.retain(|c| !paths.contains(&c.path));
     }
@@ -884,18 +884,15 @@ impl<'a> Repo<'a> {
         }
         let mut out = Vec::new();
         for c in changes::file_changes(&base, snap)? {
-            let n = match &c.new {
-                Some(n) => n,
-                None => continue,
-            };
-            if c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false) {
-                out.push(c.path.clone());
+            let Some(n) = c.new() else { continue };
+            if c.old_path().map(|o| private.contains(o)).unwrap_or(false) {
+                out.push(c.path().clone());
                 continue;
             }
-            if c.old.is_none() {
+            if c.old().is_none() {
                 for p in by_size.get(&n.size).into_iter().flatten() {
-                    if fsutil::same_entry(&base, p, snap, &c.path, None)? {
-                        out.push(c.path.clone());
+                    if fsutil::same_entry(&base, p, snap, c.path(), None)? {
+                        out.push(c.path().clone());
                         break;
                     }
                 }
@@ -1156,12 +1153,13 @@ impl<'a> Repo<'a> {
     fn thin_changed(&self, base: &Snap, w: &Path, d: &crate::thin::Diff) -> Result<bool> {
         let wp = w.to_path_buf();
         for p in d.write.iter().chain(d.removed.iter()).filter(|p| !skip_path(p)) {
-            let c = changes::Change {
-                path: p.clone(),
-                old_path: None,
-                old: fsutil::lmeta(base, p),
-                new: fsutil::lmeta(&wp, p),
-                ranges: None,
+            let Some(c) = EntryChange::observed(
+                p.clone(),
+                fsutil::lmeta(base, p),
+                fsutil::lmeta(&wp, p),
+                crate::compare::DataEvidence::Unknown,
+            ) else {
+                continue;
             };
             if !changes::file_changes_of(base, &wp, vec![c])?.is_empty() {
                 return Ok(true);
@@ -1423,7 +1421,7 @@ impl<'a> Repo<'a> {
                 let source = self.state_src(&st.id)?;
                 if base.objects().is_some() && source.folder().is_some() && crate::objstore::enabled(&self.p)? {
                     let compared = crate::objstore::compare(&base, source)?;
-                    let changed = compared.files.iter().any(|c| !skip_path(&c.path));
+                    let changed = compared.files.iter().any(|c| !skip_path(c.path()));
                     if changed {
                         compared.record(&self.p, &mut st)?;
                     }
@@ -1571,9 +1569,9 @@ impl<'a> Repo<'a> {
                 let made = self.state_src(&st.id)?;
                 let rules = Rules::of(&made);
                 let changed = changes::file_changes(&base, &made)?.into_iter().any(|c| {
-                    !skip_path(&c.path)
-                        && !in_cache(&c.path)
-                        && (fsutil::lmeta(&base, c.src()).is_some() || !rules.ignored(&c.path, false))
+                    !skip_path(c.path())
+                        && !in_cache(c.path())
+                        && (fsutil::lmeta(&base, c.src()).is_some() || !rules.ignored(c.path(), false))
                 });
                 return Ok((st, !changed));
             }
@@ -1755,7 +1753,7 @@ impl<'a> Repo<'a> {
             let list = changes::file_changes_of(
                 index,
                 scan,
-                changes::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
+                btrfs::candidates_scanned(index, scan, btrfs::scan_paths(index, paths)?, btrfs::scan_paths(scan, paths)?)?,
             )?;
             classify(scan, list, &mut st);
             self.finish_status(line, scan, index, false, &mut st)?;
@@ -1777,7 +1775,7 @@ impl<'a> Repo<'a> {
                 let diff = btrfs::with_stored_compare(|| changes::file_changes(&head, index))?;
                 #[cfg(not(target_os = "macos"))]
                 let diff = changes::file_changes(&head, index)?;
-                let staged: Vec<Change> = diff.into_iter().filter(|c| !skip_path(&c.path)).collect();
+                let staged: Vec<EntryChange> = diff.into_iter().filter(|c| !skip_path(c.path())).collect();
                 st.staged = changes::with_renames(&head, index, staged);
             }
         }
@@ -2073,18 +2071,18 @@ impl<'a> Repo<'a> {
         let w: BTreeMap<String, btrfs::ScanEntry> =
             now.iter().filter(|(k, _)| below(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
         let list =
-            changes::file_changes_of(index, work, changes::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
+            changes::file_changes_of(index, work, btrfs::candidates_scanned(index, work, btrfs::scan_paths(index, &paths)?, w)?)?;
         // The content read must see the entries of the scan.
         let again = btrfs::scan_paths(work, &paths)?;
         if paths.iter().any(|p| again.get(p) != now.get(p)) {
             return Ok(None);
         }
         let mut st = cache.status;
-        st.unstaged.retain(|c| !below(&c.path) && !c.old_path.as_deref().is_some_and(below));
+        st.unstaged.retain(|c| !below(c.path()) && !c.old_path().map(String::as_str).is_some_and(below));
         st.untracked.retain(|p| !below(p));
         st.ignored.retain(|p| !below(p));
         classify(work, list, &mut st);
-        st.unstaged.sort_by(|a, b| a.path.cmp(&b.path));
+        st.unstaged.sort_by(|a, b| a.path().cmp(b.path()));
         st.untracked.sort();
         st.ignored.sort();
         self.finish_status(line, work, index, true, &mut st)?;
@@ -2110,13 +2108,13 @@ impl<'a> Repo<'a> {
         own: Option<(u32, u32)>,
         local: &BTreeSet<String>,
         force: bool,
-    ) -> Result<Vec<Change>> {
+    ) -> Result<Vec<EntryChange>> {
         let _t = crate::trace::span("write working folder");
-        let list: Vec<Change> = changes::file_changes(from, to)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+        let list: Vec<EntryChange> = changes::file_changes(from, to)?.into_iter().filter(|c| !skip_path(c.path())).collect();
         if !force {
             let mut hit = BTreeSet::new();
             for c in &list {
-                for p in [Some(c.path.as_str()), c.old_path.as_deref()].into_iter().flatten() {
+                for p in [Some(c.path().as_str()), c.old_path().map(String::as_str)].into_iter().flatten() {
                     if local.contains(p) {
                         hit.insert(p.to_string());
                     }
@@ -2141,11 +2139,11 @@ impl<'a> Repo<'a> {
         }
         // Moves keep the inode; then deletes (a folder can replace a file); then writes.
         for c in &list {
-            if let Some(src) = &c.old_path {
+            if let Some(src) = c.old_path() {
                 let t = Tree::open(target)?;
-                if t.stat(src).is_some() && t.stat(&c.path).is_none() {
-                    t.mkdirs_for(&c.path, own)?;
-                    t.rename(src, &c.path)?;
+                if t.stat(src).is_some() && t.stat(c.path()).is_none() {
+                    t.mkdirs_for(c.path(), own)?;
+                    t.rename(src, c.path())?;
                 } else {
                     fsutil::remove_entry(target, src)?;
                 }
@@ -2153,16 +2151,16 @@ impl<'a> Repo<'a> {
             }
         }
         for c in &list {
-            if c.old_path.is_some() {
+            if c.old_path().is_some() {
                 continue;
-            } else if c.new.is_none() {
-                fsutil::remove_entry(target, &c.path)?;
-                prune_empty_parents(target, to, &c.path)?;
+            } else if c.new().is_none() {
+                fsutil::remove_entry(target, c.path())?;
+                prune_empty_parents(target, to, c.path())?;
             }
         }
         for c in &list {
-            if c.new.is_some() {
-                fsutil::copy_work_entry(to, &c.path, target, &c.path, own)?;
+            if c.new().is_some() {
+                fsutil::copy_work_entry(to, c.path(), target, c.path(), own)?;
             }
         }
         Ok(list)
@@ -2820,10 +2818,10 @@ impl<'a> Repo<'a> {
         Ok(list
             .into_iter()
             .filter(|c| {
-                let dir = c.new.as_ref().or(c.old.as_ref()).is_some_and(|m| m.is_dir());
-                !skip_path(&c.path) && !rules.ignored(&c.path, dir)
+                let dir = c.new().or(c.old()).is_some_and(|m| m.is_dir());
+                !skip_path(c.path()) && !rules.ignored(c.path(), dir)
             })
-            .map(|c| c.path)
+            .map(|c| c.path().clone())
             .collect())
     }
 
@@ -3034,7 +3032,7 @@ struct StatusHead {
 }
 
 #[cfg(target_os = "macos")]
-const STATUS_CACHE_VERSION: u32 = 2;
+const STATUS_CACHE_VERSION: u32 = 3;
 #[cfg(target_os = "macos")]
 const STATUS_CACHE_MAGIC: &[u8] = b"layr status cache\n";
 
@@ -3156,17 +3154,17 @@ impl StatusCache {
 }
 
 /// Sort index-to-working changes into unstaged, untracked, and ignored paths.
-fn classify(scan: &Path, list: Vec<Change>, st: &mut Status) {
+fn classify(scan: &Path, list: Vec<EntryChange>, st: &mut Status) {
     let rules = Rules::new(scan);
     for c in changes::without_moves(list) {
-        if skip_path(&c.path) {
+        if skip_path(c.path()) {
             continue;
         }
-        if c.old.is_none() {
-            if rules.ignored(&c.path, false) {
-                st.ignored.push(c.path.clone());
+        if c.old().is_none() {
+            if rules.ignored(c.path(), false) {
+                st.ignored.push(c.path().clone());
             } else {
-                st.untracked.push(c.path.clone());
+                st.untracked.push(c.path().clone());
             }
             continue;
         }

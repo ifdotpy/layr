@@ -460,7 +460,7 @@ fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
         Some(p) => repo.state_src(p)?,
         None => crate::repo::snap(&empty.as_ref().unwrap().path),
     };
-    let changes: Vec<_> = crate::changes::file_changes(&old, &new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+    let changes: Vec<_> = crate::changes::file_changes(&old, &new)?.into_iter().filter(|c| !skip_path(c.path())).collect();
     diff::file_diffs(&old, &new, &changes)
 }
 

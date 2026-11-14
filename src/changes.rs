@@ -3,7 +3,8 @@
 //! A change list is a candidate list: an entry that kept its inode and path has the changed byte
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
-use crate::compare::{pair_rename, DataEvidence, EntryChange};
+pub use crate::compare::EntryChange;
+use crate::compare::{pair_rename, DataEvidence};
 use crate::fsutil::{self, Meta, Src};
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 use crate::storage as btrfs;
@@ -14,48 +15,15 @@ use layr_hashers::{FastMap, FastSet};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Change {
-    /// Path in the child (or in the parent for a delete).
-    pub path: String,
-    /// Path in the parent when it differs from `path` (a move detected at inode level).
-    pub old_path: Option<String>,
-    pub old: Option<Meta>,
-    pub new: Option<Meta>,
-    /// Changed byte ranges when the entry kept its inode and path; `None` means "compare all".
-    pub ranges: Option<Vec<(u64, u64)>>,
-}
-
-// Temporary conversion at the producer/consumer seam, removed in diff-extract-consumers.
-impl From<EntryChange> for Change {
-    fn from(c: EntryChange) -> Self {
-        let ranges = match c.data() {
-            DataEvidence::Unknown => None,
-            DataEvidence::Equal => Some(Vec::new()),
-            DataEvidence::ChangedRanges(ranges) => Some(ranges.native()),
-        };
-        Self { path: c.path().clone(), old_path: c.old_path().cloned(), old: c.old().cloned(), new: c.new().cloned(), ranges }
-    }
-}
-
-impl Change {
-    pub fn src(&self) -> &str {
-        self.old_path.as_deref().unwrap_or(&self.path)
-    }
-    pub fn is_rename(&self) -> bool {
-        self.old_path.is_some() && self.old.is_some() && self.new.is_some()
-    }
-}
-
 /// Raw candidate list from the stream, without content checks.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     if parent.objects().is_some() || child.objects().is_some() {
-        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+        return object_change_candidates(parent, child);
     }
     let (parent, child) = (folder(parent)?, folder(child)?);
     let entries = btrfs::send_no_data(parent, child)?;
-    Ok(build(parent, child, entries)?.into_iter().map(Change::from).collect())
+    build(parent, child, entries)
 }
 
 fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
@@ -162,12 +130,9 @@ fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec
 
 /// True when the entry changed in a way git would see: type, content, link target or the
 /// executable bit of a file.
-pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), c: &Change) -> Result<bool> {
-    let (o, n) = match (&c.old, &c.new) {
-        (Some(o), Some(n)) => (o, n),
-        _ => return Ok(true),
-    };
-    if c.old_path.is_some() {
+pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), c: &EntryChange) -> Result<bool> {
+    let (Some(o), Some(n)) = (c.old(), c.new()) else { return Ok(true) };
+    if c.old_path().is_some() {
         return Ok(true);
     }
     if o.ftype != n.ftype {
@@ -177,16 +142,18 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
         return Ok(true);
     }
     if o.is_dir() {
-        return Ok(!stored_same(parent, child, &c.path));
+        return Ok(!stored_same(parent, child, c.path()));
     }
-    // The backend already proved equal data while it built these ranges.
-    // APFS also uses kernel clone IDs; live status reads validate generations.
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-    if o.is_file() && o.size == n.size && c.ranges.as_ref().is_some_and(|ranges| ranges.is_empty()) {
-        return Ok(!stored_same(parent, child, &c.path));
+    // Equal data does not imply equal lengths or equal stored attributes.
+    if o.is_file() && o.size == n.size && matches!(c.data(), DataEvidence::Equal) {
+        return Ok(!stored_same(parent, child, c.path()));
     }
-    let equal = fsutil::same_entry(parent, c.src(), child, &c.path, c.ranges.as_deref())?;
-    Ok(!equal || (o.is_file() && !stored_same(parent, child, &c.path)))
+    let ranges = match c.data() {
+        DataEvidence::ChangedRanges(ranges) => Some(ranges),
+        _ => None,
+    };
+    let equal = fsutil::same_entry(parent, c.src(), child, c.path(), ranges)?;
+    Ok(!equal || (o.is_file() && !stored_same(parent, child, c.path())))
 }
 
 /// True when two entries hold the same stored attributes (and ACL on APFS).
@@ -213,14 +180,14 @@ fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: 
 }
 
 /// File level changes (folders dropped), confirmed by content. A move keeps `old_path`.
-pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+pub fn file_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     file_changes_of(parent, child, candidates_equal(parent, child)?)
 }
 
 /// A complete object delta and the user-visible changes from the same comparison.
 /// Constructed only against an immutable object base and an immutable folder snapshot.
 pub struct WriteComparison {
-    pub files: Vec<Change>,
+    pub files: Vec<EntryChange>,
     pub changed: Vec<Vec<u8>>,
     pub dirty: Vec<Vec<u8>>,
 }
@@ -234,21 +201,20 @@ pub fn compare_for_write(parent: &(impl Src + ?Sized), child: &Path) -> Result<W
     let linked: HashSet<Vec<u8>> = objects.store.get_tree(&objects.refs.tree)?.links.into_iter().flatten().collect();
     let mut out = WriteComparison { files: Vec::new(), changed: Vec::new(), dirty: Vec::new() };
     for c in object_change_candidates(parent, &child)? {
-        let c = Change::from(c);
-        let both_dirs = c.old.as_ref().is_some_and(Meta::is_dir) && c.new.as_ref().is_some_and(Meta::is_dir);
-        let metadata_changed = match (&c.old, &c.new) {
+        let both_dirs = c.old().is_some_and(Meta::is_dir) && c.new().is_some_and(Meta::is_dir);
+        let metadata_changed = match (c.old(), c.new()) {
             (Some(old), Some(_)) => {
-                let path = child.at(&c.path)?;
+                let path = child.at(c.path())?;
                 let meta = std::fs::symlink_metadata(&path)?;
-                let previous = objects.entry(&c.path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?;
+                let previous = objects.entry(c.path())?.ok_or_else(|| anyhow::anyhow!("object path missing"))?;
                 (!meta.file_type().is_symlink() && old.mode != meta.mode() & 0o7777)
                     || (meta.file_type().is_symlink() && previous.entry.xattrs != layr_objects::fsx::xattrs(&path)?)
                     || previous.ns != layr_objects::times::ns_of(&meta)
-                    || (meta.is_file() && (meta.nlink() > 1 || linked.contains(c.path.as_bytes())))
+                    || (meta.is_file() && (meta.nlink() > 1 || linked.contains(c.path().as_bytes())))
             }
             _ => true,
         };
-        let path = c.path.clone();
+        let path = c.path().clone();
         let changed = file_change(parent, &child, c)?;
         if metadata_changed || changed.is_some() {
             if both_dirs {
@@ -264,69 +230,67 @@ pub fn compare_for_write(parent: &(impl Src + ?Sized), child: &Path) -> Result<W
 
 /// `file_changes`, and the files whose metadata changed while their content stayed equal (a new
 /// modification time, for example). A store push keeps their new times (`Tree::times`).
-pub fn file_changes_and_touched(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Change>, Vec<String>)> {
+pub fn file_changes_and_touched(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+) -> Result<(Vec<EntryChange>, Vec<String>)> {
     let list = candidates_equal(parent, child)?;
-    let files = |m: &Option<fsutil::Meta>| m.as_ref().is_some_and(|m| !m.is_dir());
-    let both: Vec<String> = list.iter().filter(|c| files(&c.old) && files(&c.new)).map(|c| c.path.clone()).collect();
+    let files = |m: Option<&fsutil::Meta>| m.is_some_and(|m| !m.is_dir());
+    let both: Vec<String> = list.iter().filter(|c| files(c.old()) && files(c.new())).map(|c| c.path().clone()).collect();
     let changes = file_changes_of(parent, child, list)?;
-    let changed: std::collections::HashSet<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+    let changed: std::collections::HashSet<&str> = changes.iter().map(|c| c.path().as_str()).collect();
     let touched = both.into_iter().filter(|p| !changed.contains(p.as_str())).collect();
     Ok((changes, touched))
 }
 
 /// File level changes of a candidate list (`file_changes`).
-pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), list: Vec<Change>) -> Result<Vec<Change>> {
+pub fn file_changes_of(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    list: Vec<EntryChange>,
+) -> Result<Vec<EntryChange>> {
     list.into_iter().filter_map(|c| file_change(parent, child, c).transpose()).collect()
 }
 
 /// Stop at the first confirmed change outside the skipped paths.
 pub fn any_file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), skip: impl Fn(&str) -> bool) -> Result<bool> {
     for c in candidates_equal(parent, child)? {
-        if !skip(&c.path) && file_change(parent, child, c)?.is_some() {
+        if !skip(c.path()) && file_change(parent, child, c)?.is_some() {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), mut c: Change) -> Result<Option<Change>> {
-    let is_dir_only = c.old.as_ref().map(|m| m.is_dir()).unwrap_or(true) && c.new.as_ref().map(|m| m.is_dir()).unwrap_or(true);
-    if is_dir_only {
-        return Ok((c.old.as_ref().is_some_and(|m| m.is_dir())
-            && c.new.as_ref().is_some_and(|m| m.is_dir())
-            && c.old_path.is_none()
-            && !stored_same(parent, child, &c.path))
-        .then_some(c));
+fn file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), c: EntryChange) -> Result<Option<EntryChange>> {
+    // Directories appear only when their stored attributes changed.
+    if c.old().is_none_or(Meta::is_dir) && c.new().is_none_or(Meta::is_dir) {
+        return Ok(matches!(&c, EntryChange::Modify { .. }).then_some(c).filter(|c| !stored_same(parent, child, c.path())));
     }
-    // A folder replaced by a file or the reverse: report only the non-folder side.
-    if c.old.as_ref().is_some_and(|m| m.is_dir()) {
-        c.old = None;
-        c.old_path = None;
-    }
-    if c.new.as_ref().is_some_and(|m| m.is_dir()) {
-        c.new = None;
-    }
-    if c.old.is_none() && c.new.is_none() {
-        return Ok(None);
-    }
-    if c.old.is_some() && c.new.is_some() && !really_changed(parent, child, &c)? {
+    // Report the non-directory side of a type replacement, as before.
+    let c = match c {
+        EntryChange::ReplaceType { path, old, new } if old.is_dir() => EntryChange::Add { path, new },
+        EntryChange::ReplaceType { path, old, new } if new.is_dir() => EntryChange::Remove { path, old },
+        c => c,
+    };
+    if c.old().is_some() && c.new().is_some() && !really_changed(parent, child, &c)? {
         return Ok(None);
     }
     Ok(Some(c))
 }
 
 /// Split moves into a delete and an add (git shows unstaged moves this way).
-pub fn without_moves(v: Vec<Change>) -> Vec<Change> {
-    let mut out: BTreeMap<String, Change> = BTreeMap::new();
+pub fn without_moves(v: Vec<EntryChange>) -> Vec<EntryChange> {
+    let mut out = BTreeMap::new();
     for c in v {
-        if let Some(src) = c.old_path.clone() {
-            out.insert(src.clone(), Change { path: src, old_path: None, old: c.old.clone(), new: None, ranges: None });
-            out.insert(
-                c.path.clone(),
-                Change { path: c.path.clone(), old_path: None, old: None, new: c.new.clone(), ranges: None },
-            );
-        } else {
-            out.insert(c.path.clone(), c);
+        match c {
+            EntryChange::Rename { path, old_path, old, new, .. } => {
+                out.insert(old_path.clone(), EntryChange::Remove { path: old_path, old });
+                out.insert(path.clone(), EntryChange::Add { path, new });
+            }
+            c => {
+                out.insert(c.path().clone(), c);
+            }
         }
     }
     out.into_values().collect()
@@ -334,18 +298,17 @@ pub fn without_moves(v: Vec<Change>) -> Vec<Change> {
 
 /// Pair deleted and added files as moves when the content is equal, then (for small lists)
 /// when at least half of the lines are equal, as git's rename detection does.
-pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v: Vec<Change>) -> Vec<Change> {
+pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v: Vec<EntryChange>) -> Vec<EntryChange> {
     // Files larger than MAX_TEXT are not compared by content.
-    let is_file = |m: &Option<Meta>| {
-        m.as_ref().map(|x| x.ftype == crate::fsutil::FType::File && x.size <= crate::fsutil::MAX_TEXT).unwrap_or(false)
-    };
+    let is_file =
+        |m: Option<&Meta>| m.map(|x| x.ftype == crate::fsutil::FType::File && x.size <= crate::fsutil::MAX_TEXT).unwrap_or(false);
     let dels: Vec<usize> = v
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.new.is_none() && c.old_path.is_none() && is_file(&c.old))
+        .filter(|(_, c)| c.new().is_none() && c.old_path().is_none() && is_file(c.old()))
         .map(|(i, _)| i)
         .collect();
-    let adds: Vec<usize> = v.iter().enumerate().filter(|(_, c)| c.old.is_none() && is_file(&c.new)).map(|(i, _)| i).collect();
+    let adds: Vec<usize> = v.iter().enumerate().filter(|(_, c)| c.old().is_none() && is_file(c.new())).map(|(i, _)| i).collect();
     if dels.is_empty() || adds.is_empty() {
         return v;
     }
@@ -358,25 +321,27 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
     // is compared byte by byte.
     let hash = |bytes: &[u8]| <FastCryptographic as PurposeHasher>::hash(bytes);
     let mut by_key: FastMap<(u64, [u8; 32]), Vec<usize>> = FastMap::default();
-    let del_sizes: HashSet<u64> = dels.iter().map(|&d| v[d].old.as_ref().unwrap().size).collect();
-    let add_sizes: HashSet<u64> = adds.iter().map(|&a| v[a].new.as_ref().unwrap().size).collect();
+    let del_sizes: HashSet<u64> = dels.iter().filter_map(|&d| v[d].old().map(|m| m.size)).collect();
+    let add_sizes: HashSet<u64> = adds.iter().filter_map(|&a| v[a].new().map(|m| m.size)).collect();
     for &d in &dels {
-        let size = v[d].old.as_ref().unwrap().size;
+        let Some(old) = v[d].old() else { continue };
+        let size = old.size;
         if add_sizes.contains(&size) {
-            if let Some(x) = read_parent(&v[d].path) {
+            if let Some(x) = read_parent(v[d].path()) {
                 by_key.entry((size, hash(&x))).or_default().push(d);
             }
         }
     }
     for &a in &adds {
-        let size = v[a].new.as_ref().unwrap().size;
+        let Some(new) = v[a].new() else { continue };
+        let size = new.size;
         if !del_sizes.contains(&size) {
             continue;
         }
-        let Some(ad) = read_child(&v[a].path) else { continue };
+        let Some(ad) = read_child(v[a].path()) else { continue };
         let Some(ds) = by_key.get(&(size, hash(&ad))) else { continue };
         for &d in ds {
-            if !used_d.contains(&d) && read_parent(&v[d].path).as_ref() == Some(&ad) {
+            if !used_d.contains(&d) && read_parent(v[d].path()).as_ref() == Some(&ad) {
                 pairs.push((d, a));
                 used_d.insert(d);
                 used_a.insert(a);
@@ -390,12 +355,12 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
     if !rd.is_empty() && !ra.is_empty() && rd.len() * ra.len() <= 400 {
         let mut scored: Vec<(f32, usize, usize)> = Vec::new();
         for &d in &rd {
-            let dd = match read_parent(&v[d].path) {
+            let dd = match read_parent(v[d].path()) {
                 Some(x) if !crate::fsutil::is_binary(&x) => x,
                 _ => continue,
             };
             for &a in &ra {
-                let ad = match read_child(&v[a].path) {
+                let ad = match read_child(v[a].path()) {
                     Some(x) if !crate::fsutil::is_binary(&x) => x,
                     _ => continue,
                 };
@@ -416,20 +381,24 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
             }
         }
     }
-    let mut out: Vec<Change> = Vec::new();
+    let mut out: Vec<EntryChange> = Vec::new();
     for (d, a) in &pairs {
-        let mut c = v[*a].clone();
-        c.old_path = Some(v[*d].path.clone());
-        c.old = v[*d].old.clone();
-        c.ranges = None;
-        out.push(c);
+        if let (EntryChange::Remove { path: old_path, old }, EntryChange::Add { path, new }) = (&v[*d], &v[*a]) {
+            out.push(EntryChange::Rename {
+                path: path.clone(),
+                old_path: old_path.clone(),
+                old: old.clone(),
+                new: new.clone(),
+                data: DataEvidence::Unknown,
+            });
+        }
     }
     for (i, c) in v.into_iter().enumerate() {
         if !used_d.contains(&i) && !used_a.contains(&i) {
             out.push(c);
         }
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out.sort_by(|a, b| a.path().cmp(b.path()));
     out
 }
 
@@ -438,22 +407,11 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     if parent.objects().is_some() || child.objects().is_some() {
-        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+        return object_change_candidates(parent, child);
     }
-    Ok(crate::storage::candidates(parent, child)?.into_iter().map(Change::from).collect())
-}
-
-/// APFS partial scans cross the same temporary producer/consumer seam as full scans.
-#[cfg(target_os = "macos")]
-pub fn candidates_scanned(
-    parent: &(impl Src + ?Sized),
-    child: &(impl Src + ?Sized),
-    old: BTreeMap<String, crate::storage::ScanEntry>,
-    new: BTreeMap<String, crate::storage::ScanEntry>,
-) -> Result<Vec<Change>> {
-    Ok(crate::storage::candidates_scanned(parent, child, old, new)?.into_iter().map(Change::from).collect())
+    crate::storage::candidates(parent, child)
 }
 
 /// Paths needed for an object import, including time-only changes. A directory whose
@@ -462,10 +420,7 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
     #[cfg(target_os = "macos")]
     let (normal, timed) = {
         let normal = candidates(parent, child)?;
-        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?
-            .into_iter()
-            .map(Change::from)
-            .collect::<Vec<_>>();
+        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?;
         (normal, timed)
     };
     #[cfg(not(target_os = "macos"))]
@@ -475,18 +430,18 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
         (normal, timed)
     };
     let known: HashSet<&str> =
-        normal.iter().flat_map(|c| std::iter::once(c.path.as_str()).chain(c.old_path.as_deref())).collect();
+        normal.iter().flat_map(|c| std::iter::once(c.path().as_str()).chain(c.old_path().map(String::as_str))).collect();
     let (mut changed, mut dirty) = (Vec::new(), Vec::new());
     for c in &timed {
-        if !known.contains(c.path.as_str())
-            && c.old_path.is_none()
-            && c.old.as_ref().is_some_and(|m| m.is_dir())
-            && c.new.as_ref().is_some_and(|m| m.is_dir())
+        if !known.contains(c.path().as_str())
+            && c.old_path().is_none()
+            && c.old().is_some_and(|m| m.is_dir())
+            && c.new().is_some_and(|m| m.is_dir())
         {
-            dirty.push(c.path.as_bytes().to_vec());
+            dirty.push(c.path().as_bytes().to_vec());
         } else {
-            changed.push(c.path.as_bytes().to_vec());
-            if let Some(old) = &c.old_path {
+            changed.push(c.path().as_bytes().to_vec());
+            if let Some(old) = c.old_path() {
                 changed.push(old.as_bytes().to_vec());
             }
         }
@@ -501,24 +456,24 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
 /// Candidates for a caller that only asks whether content differs: APFS then skips the exact
 /// ranges of changed files. Other backends have the ranges from their stream at no cost.
 #[cfg(target_os = "macos")]
-fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     if parent.objects().is_some() || child.objects().is_some() {
-        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+        return object_change_candidates(parent, child);
     }
-    Ok(crate::storage::candidates_equal(parent, child)?.into_iter().map(Change::from).collect())
+    crate::storage::candidates_equal(parent, child)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     candidates(parent, child)
 }
 
 #[cfg(feature = "overlayfs")]
-pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<Change>> {
+pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     if parent.objects().is_some() || child.objects().is_some() {
-        return Ok(object_change_candidates(parent, child)?.into_iter().map(Change::from).collect());
+        return object_change_candidates(parent, child);
     }
-    Ok(crate::storage::candidates(folder(parent)?, folder(child)?)?.into_iter().map(Change::from).collect())
+    crate::storage::candidates(folder(parent)?, folder(child)?)
 }
 
 /// Linux backends compare complete folders only.
@@ -614,14 +569,52 @@ mod tests {
     fn file_candidate_normalization_keeps_file_sides_and_moves() -> Result<()> {
         let root = Path::new("/");
         let dir = Meta { ftype: fsutil::FType::Dir, ..meta(0) };
-        let change = |old, new| Change { path: "child".into(), old_path: Some("parent".into()), old, new, ranges: None };
-        let c = file_change(root, root, change(Some(dir.clone()), Some(meta(1))))?.unwrap();
-        assert!(c.old.is_none() && c.old_path.is_none() && c.new.is_some());
-        let c = file_change(root, root, change(Some(meta(1)), Some(dir.clone())))?.unwrap();
-        assert!(c.old.is_some() && c.old_path.as_deref() == Some("parent") && c.new.is_none());
-        assert!(file_change(root, root, change(None, Some(dir)))?.is_none());
-        let c = file_change(root, root, change(Some(meta(1)), Some(meta(1))))?.unwrap();
-        assert_eq!(c.old_path.as_deref(), Some("parent"));
+        let c =
+            file_change(root, root, EntryChange::ReplaceType { path: "child".into(), old: dir.clone(), new: meta(1) })?.unwrap();
+        assert!(matches!(c, EntryChange::Add { .. }));
+        let c =
+            file_change(root, root, EntryChange::ReplaceType { path: "child".into(), old: meta(1), new: dir.clone() })?.unwrap();
+        assert!(matches!(c, EntryChange::Remove { .. }));
+        assert!(file_change(root, root, EntryChange::Add { path: "child".into(), new: dir })?.is_none());
+        let c = file_change(
+            root,
+            root,
+            EntryChange::Rename {
+                path: "child".into(),
+                old_path: "parent".into(),
+                old: meta(1),
+                new: meta(1),
+                data: DataEvidence::Unknown,
+            },
+        )?
+        .unwrap();
+        assert_eq!(c.old_path().map(String::as_str), Some("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn equal_data_does_not_hide_length_or_attribute_changes() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-equal-data-{}", crate::ids::new_id()));
+        let (parent, child) = (tmp.join("parent"), tmp.join("child"));
+        std::fs::create_dir_all(&parent)?;
+        std::fs::create_dir_all(&child)?;
+        std::fs::write(parent.join("file"), b"a")?;
+        std::fs::write(child.join("file"), b"ab")?;
+        let change = || {
+            EntryChange::observed(
+                "file".into(),
+                fsutil::lmeta(&parent, "file"),
+                fsutil::lmeta(&child, "file"),
+                DataEvidence::Equal,
+            )
+            .unwrap()
+        };
+        assert!(really_changed(&parent, &child, &change())?);
+        std::fs::write(child.join("file"), b"a")?;
+        assert!(!really_changed(&parent, &child, &change())?);
+        layr_objects::fsx::set_xattrs(&child.join("file"), &[(b"user.test".to_vec(), b"value".to_vec())])?;
+        assert!(really_changed(&parent, &child, &change())?);
+        std::fs::remove_dir_all(tmp)?;
         Ok(())
     }
 
@@ -660,12 +653,12 @@ mod tests {
             // All files have the same size and different bytes.
             std::fs::write(p.join(format!("old{i}")), format!("{i:08}")).unwrap();
             std::fs::write(c.join(format!("new{i}")), format!("{:08}", n - 1 - i)).unwrap();
-            changes.push(Change { path: format!("old{i}"), old_path: None, old: Some(meta(8)), new: None, ranges: None });
-            changes.push(Change { path: format!("new{i}"), old_path: None, old: None, new: Some(meta(8)), ranges: None });
+            changes.push(EntryChange::Remove { path: format!("old{i}"), old: meta(8) });
+            changes.push(EntryChange::Add { path: format!("new{i}"), new: meta(8) });
         }
         let (parent, child) = (Counting(p, AtomicUsize::new(0)), Counting(c, AtomicUsize::new(0)));
         let out = with_renames(&parent, &child, changes);
-        let moves = out.iter().filter(|c| c.old_path.is_some()).count();
+        let moves = out.iter().filter(|c| c.old_path().is_some()).count();
         assert_eq!(moves, n, "every file pairs with its equal");
         let reads = parent.1.load(Ordering::Relaxed) + child.1.load(Ordering::Relaxed);
         assert!(reads <= 4 * n + 2, "{reads} reads for {n} + {n} candidates");

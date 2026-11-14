@@ -180,8 +180,8 @@ fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
     st.drop_paths(&repo.quiet_paths(l)?);
     let mut out = std::collections::BTreeSet::new();
     for c in st.staged.iter().chain(st.unstaged.iter()) {
-        out.insert(c.path.clone());
-        if let Some(o) = &c.old_path {
+        out.insert(c.path().clone());
+        if let Some(o) = c.old_path() {
             out.insert(o.clone());
         }
     }
@@ -347,7 +347,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                                 .staged
                                 .iter()
                                 .chain(st.unstaged.iter())
-                                .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+                                .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
                                 .flatten()
                                 .any(|p| private.contains(&p));
                             if changed || !repo.pending_moves(&l).is_empty() {
@@ -873,7 +873,7 @@ fn staged_state(ctx: &Ctx, repo: &crate::repo::Repo, l: &crate::model::Line) -> 
     }
     let (index, _temp) = repo.index_view(l)?;
     let head = repo.head_src(l)?;
-    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(&c.path)) {
+    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(c.path())) {
         return Ok(None);
     }
     let mut keep = Vec::new();

@@ -910,14 +910,14 @@ fn upload_state_journal(
     }
     if let Some(changes) = &changed {
         for change in changes {
-            if let Some(old) = &change.old_path {
+            if let Some(old) = change.old_path() {
                 files.remove(old);
                 times.remove(old);
                 chunks.remove(old);
             }
-            files.remove(&change.path);
-            times.remove(&change.path);
-            chunks.remove(&change.path);
+            files.remove(change.path());
+            times.remove(change.path());
+            chunks.remove(change.path());
         }
     }
     // A delta keeps the entries of the base. A framed entry of the base in a layer that goes up as chunks (a cache
@@ -1015,8 +1015,8 @@ fn upload_state_journal(
     };
     if let Some(changes) = &changed {
         for change in changes {
-            if let Some(meta) = &change.new {
-                visit(&change.path, meta)?;
+            if let Some(meta) = change.new() {
+                visit(change.path(), meta)?;
             }
         }
         for path in &framed {

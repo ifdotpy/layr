@@ -7,7 +7,8 @@
 //! the change lists, for formats marked safe) or a configured command. A merge never stops on a
 //! conflict: the result keeps markers or the ours version and lists each conflict.
 
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
+use crate::compare::DataEvidence;
 use crate::fsutil::{self, FType, Meta};
 use crate::model::Conflict;
 use crate::repo::skip_path;
@@ -122,15 +123,15 @@ enum OursAt {
 }
 
 struct Side {
-    by_path: HashMap<String, Change>,
+    by_path: HashMap<String, EntryChange>,
     moved_from: HashMap<String, String>,
 }
 
 struct MergeSides {
     ours: Side,
     theirs: Side,
-    ours_changes: Vec<Change>,
-    theirs_changes: Vec<Change>,
+    ours_changes: Vec<EntryChange>,
+    theirs_changes: Vec<EntryChange>,
 }
 
 impl MergeSides {
@@ -141,20 +142,20 @@ impl MergeSides {
     }
 }
 
-fn side(base: &Path, child: &Path) -> Result<(Side, Vec<Change>)> {
-    let list: Vec<Change> = changes::candidates(base, child)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+fn side(base: &Path, child: &Path) -> Result<(Side, Vec<EntryChange>)> {
+    let list: Vec<EntryChange> = changes::candidates(base, child)?.into_iter().filter(|c| !skip_path(c.path())).collect();
     Ok((Side::new(&list), list))
 }
 
 impl Side {
-    fn new(list: &[Change]) -> Self {
+    fn new(list: &[EntryChange]) -> Self {
         let mut by_path = HashMap::new();
         let mut moved_from = HashMap::new();
         for c in list {
-            if let Some(o) = &c.old_path {
-                moved_from.insert(o.clone(), c.path.clone());
+            if let Some(o) = c.old_path() {
+                moved_from.insert(o.clone(), c.path().clone());
             }
-            by_path.insert(c.path.clone(), c.clone());
+            by_path.insert(c.path().clone(), c.clone());
         }
         Self { by_path, moved_from }
     }
@@ -163,16 +164,16 @@ impl Side {
             return OursAt::Moved(q.clone());
         }
         match self.by_path.get(p) {
-            Some(c) if c.new.is_none() => OursAt::Deleted,
-            Some(c) if c.old_path.is_none() => OursAt::Changed,
+            Some(c) if c.new().is_none() => OursAt::Deleted,
+            Some(c) if c.old_path().is_none() => OursAt::Changed,
             _ => OursAt::Unchanged,
         }
     }
-    fn ranges(&self, p: &str) -> Option<Vec<(u64, u64)>> {
+    fn ranges(&self, p: &str) -> DataEvidence {
         match self.by_path.get(p) {
-            Some(c) if c.old_path.is_none() => c.ranges.clone(),
-            Some(_) => None,
-            None => Some(Vec::new()),
+            Some(c) if c.old_path().is_none() => c.data().clone(),
+            Some(_) => DataEvidence::Unknown,
+            None => DataEvidence::Equal,
         }
     }
 }
@@ -242,10 +243,10 @@ fn merge_sides(i: &Input, sides: &MergeSides) -> Result<Outcome> {
 
 fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Outcome> {
     let (ours, theirs) = (&sides.ours, &sides.theirs);
-    let tlist: Vec<&Change> = sides
+    let tlist: Vec<&EntryChange> = sides
         .theirs_changes
         .iter()
-        .filter(|c| matches!(c.path.as_str(), ".gitattributes" | ".layrattributes") == attributes_only)
+        .filter(|c| matches!(c.path().as_str(), ".gitattributes" | ".layrattributes") == attributes_only)
         .collect();
     let mut c = Ctx { i, attrs: Attrs::load(i.ours), out: Outcome::default(), blocked: BTreeSet::new() };
     let derives = if attributes_only { BTreeMap::new() } else { derive_rules(i, &Attrs::load(i.result))? };
@@ -254,8 +255,8 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
 
     // 1. Moves made by theirs.
     for t in tlist.iter().filter(|t| t.is_rename()) {
-        let src = t.old_path.clone().unwrap();
-        let dst = t.path.clone();
+        let EntryChange::Rename { old_path, path, .. } = t else { continue };
+        let (src, dst) = (old_path.clone(), path.clone());
         if derived.contains(&src) || derived.contains(&dst) {
             continue;
         }
@@ -291,7 +292,7 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
     // 2. Adds, changes and deletes made by theirs.
     let mut dir_deletes = Vec::new();
     for t in &tlist {
-        let p = t.path.clone();
+        let p = t.path().clone();
         if done.contains(&p) || t.is_rename() {
             continue;
         }
@@ -485,7 +486,7 @@ fn derive_order(rules: &BTreeMap<String, DeriveRule>, root: &Path) -> (Vec<Strin
     (order, pending)
 }
 
-fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[Change], theirs: &[Change]) -> Result<()> {
+fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryChange], theirs: &[EntryChange]) -> Result<()> {
     if rules.is_empty() {
         return Ok(());
     }
@@ -494,8 +495,8 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[Change]
     for (root, list) in [(i.ours, ours), (i.theirs, theirs)] {
         for change in list {
             if changes::really_changed(i.base, root, change)? {
-                changed.insert(change.path.clone());
-                if let Some(old) = &change.old_path {
+                changed.insert(change.path().clone());
+                if let Some(old) = change.old_path() {
                     changed.insert(old.clone());
                 }
             }
@@ -808,8 +809,8 @@ fn run_driver(
     bp: &str,
     tp: &str,
     rp: &str,
-    ours_ranges: Option<Vec<(u64, u64)>>,
-    theirs_ranges: Option<Vec<(u64, u64)>>,
+    ours_ranges: DataEvidence,
+    theirs_ranges: DataEvidence,
 ) -> Result<()> {
     let i = c.i;
     let r_path = fsutil::safe_join(i.result, rp)?;
@@ -996,23 +997,23 @@ fn overlaps(a: &[(u64, u64)], b: &[(u64, u64)]) -> bool {
 
 /// Merge a binary file by byte ranges: allowed when both sides kept the inode, the size did not
 /// change and the changed ranges do not overlap. Theirs ranges are copied onto ours.
-fn block_merge(
-    i: &Input,
-    bp: &str,
-    tp: &str,
-    rp: &str,
-    ours_ranges: Option<Vec<(u64, u64)>>,
-    theirs_ranges: Option<Vec<(u64, u64)>>,
-) -> Result<bool> {
-    let (or, tr) = match (ours_ranges, theirs_ranges) {
-        (Some(o), Some(t)) => (o, t),
-        _ => return Ok(false),
-    };
+fn block_merge(i: &Input, bp: &str, tp: &str, rp: &str, ours_ranges: DataEvidence, theirs_ranges: DataEvidence) -> Result<bool> {
+    if matches!(ours_ranges, DataEvidence::Unknown) || matches!(theirs_ranges, DataEvidence::Unknown) {
+        return Ok(false);
+    }
     let (mb, mo, mt) = match (fsutil::lmeta(i.base, bp), fsutil::lmeta(i.ours, rp), fsutil::lmeta(i.theirs, tp)) {
         (Some(b), Some(o), Some(t)) => (b, o, t),
         _ => return Ok(false),
     };
-    if mb.size != mo.size || mb.size != mt.size || overlaps(&or, &tr) {
+    if mb.size != mo.size || mb.size != mt.size {
+        return Ok(false);
+    }
+    let bounded = |data: DataEvidence| match data {
+        DataEvidence::ChangedRanges(ranges) => ranges.bounded(mb.size),
+        _ => Vec::new(),
+    };
+    let (or, tr) = (bounded(ours_ranges), bounded(theirs_ranges));
+    if overlaps(&or, &tr) {
         return Ok(false);
     }
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -1024,10 +1025,6 @@ fn block_merge(
     let mut dst =
         std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
     for (off, len) in tr {
-        if off >= mt.size {
-            continue;
-        }
-        let len = len.min(mt.size - off);
         if crate::storage::clone_range(&src, off, len, &dst, off).is_ok() {
             continue;
         }
@@ -1039,6 +1036,46 @@ fn block_merge(
     }
     dst.sync_all()?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    #[test]
+    fn block_merge_bounds_eof_and_rejects_unknown_overlap_and_resize() -> Result<()> {
+        let root = tempfile_path("block-evidence")?;
+        for dir in ["base", "ours", "theirs", "result"] {
+            std::fs::create_dir_all(root.join(dir))?;
+        }
+        let (base, ours, theirs, result) = (root.join("base"), root.join("ours"), root.join("theirs"), root.join("result"));
+        std::fs::write(base.join("file"), b"0000000000000000")?;
+        std::fs::write(ours.join("file"), b"ours000000000000")?;
+        std::fs::write(result.join("file"), b"ours000000000000")?;
+        std::fs::write(theirs.join("file"), b"00000000theirs00")?;
+        let i = Input {
+            base: &base,
+            ours: &ours,
+            theirs: &theirs,
+            result: &result,
+            base_id: "base",
+            ours_id: "ours",
+            theirs_id: "theirs",
+            ours_label: "ours",
+            theirs_label: "theirs",
+            config: &|_| None,
+            run_as: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()).fs_identity()?,
+            allow_root: false,
+        };
+        let ranges = |start, len| DataEvidence::from_native(&[(start, len)], 16, 16).unwrap();
+        assert!(!block_merge(&i, "file", "file", "file", DataEvidence::Unknown, ranges(8, u64::MAX))?);
+        assert!(!block_merge(&i, "file", "file", "file", ranges(0, 10), ranges(8, u64::MAX))?);
+        assert!(block_merge(&i, "file", "file", "file", ranges(0, 4), ranges(8, u64::MAX))?);
+        assert_eq!(std::fs::read(result.join("file"))?, b"ours0000theirs00");
+        std::fs::write(theirs.join("file"), b"short")?;
+        assert!(!block_merge(&i, "file", "file", "file", DataEvidence::Equal, DataEvidence::Equal)?);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1153,12 +1190,24 @@ mod merge_sides_tests {
             for name in [".gitattributes", ".layrattributes", "z", "source"] {
                 std::fs::copy(ours.join(name), result.join(name))?;
             }
-            let change = |path: &str, old_path: Option<&str>, child: &Path| Change {
-                path: path.into(),
-                old_path: old_path.map(String::from),
-                old: fsutil::lmeta(&base, old_path.unwrap_or(path)),
-                new: fsutil::lmeta(child, path),
-                ranges: None,
+            let change = |path: &str, old_path: Option<&str>, child: &Path| {
+                if let Some(src) = old_path {
+                    EntryChange::Rename {
+                        path: path.into(),
+                        old_path: src.into(),
+                        old: fsutil::lmeta(&base, src).unwrap(),
+                        new: fsutil::lmeta(child, path).unwrap(),
+                        data: DataEvidence::Unknown,
+                    }
+                } else {
+                    EntryChange::observed(
+                        path.into(),
+                        fsutil::lmeta(&base, path),
+                        fsutil::lmeta(child, path),
+                        DataEvidence::Unknown,
+                    )
+                    .unwrap()
+                }
             };
             let ours_changes = vec![
                 change(".gitattributes", None, &ours),
@@ -1235,12 +1284,9 @@ mod sides_measurements {
 
     fn sides(reuse: bool) {
         let changes: Vec<_> = (0..100_000)
-            .map(|n| Change {
+            .map(|n| EntryChange::Add {
                 path: format!("folder/file-{n}"),
-                old_path: None,
-                old: None,
-                new: None,
-                ranges: Some(vec![(0, 4096)]),
+                new: Meta { ftype: FType::File, mode: 0o644, size: 4096, ino: 0, uid: 0, gid: 0, mtime: 0 },
             })
             .collect();
         let build = || (Side::new(&changes), changes.clone());

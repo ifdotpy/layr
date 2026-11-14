@@ -300,7 +300,7 @@ fn check_tree(
     old: Option<&Snap>,
     new: &Snap,
     rev: &str,
-    changes: Option<&[crate::changes::Change]>,
+    changes: Option<&[crate::changes::EntryChange]>,
 ) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
@@ -321,7 +321,7 @@ fn check_indexed(
     key: &[u8],
     hashes: &Index,
     approvals: &BTreeSet<(String, String)>,
-    changes: Option<&[crate::changes::Change]>,
+    changes: Option<&[crate::changes::EntryChange]>,
 ) -> Result<()> {
     let files = match old {
         Some(old) => match changes {
@@ -368,7 +368,7 @@ pub fn check_changes(
     old: &Snap,
     new: &Snap,
     rev: &str,
-    changes: &[crate::changes::Change],
+    changes: &[crate::changes::EntryChange],
 ) -> Result<()> {
     check_tree(ctx, repo, Some(old), new, rev, Some(changes))
 }

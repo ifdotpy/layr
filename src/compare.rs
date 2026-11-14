@@ -41,14 +41,15 @@ impl Meta {
 }
 
 /// The end of an extent; btrfs writes without a known length extend through EOF.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum RangeEnd {
     Offset(u64),
     Eof,
 }
 
 /// Sorted, disjoint extents with nonempty intervals. Construction checks arithmetic and merges overlap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Vec<(u64, RangeEnd)>", into = "Vec<(u64, RangeEnd)>")]
 pub struct ChangedRanges(Vec<(u64, RangeEnd)>);
 
 impl TryFrom<Vec<(u64, RangeEnd)>> for ChangedRanges {
@@ -66,6 +67,11 @@ impl TryFrom<Vec<(u64, RangeEnd)>> for ChangedRanges {
             }
         }
         Ok(Self(merged))
+    }
+}
+impl From<ChangedRanges> for Vec<(u64, RangeEnd)> {
+    fn from(ranges: ChangedRanges) -> Self {
+        ranges.0
     }
 }
 impl ChangedRanges {
@@ -101,24 +107,9 @@ impl ChangedRanges {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    // Temporary compatibility at the producer/consumer seam; removed with the consumers.
-    pub fn native(&self) -> Vec<(u64, u64)> {
-        self.0
-            .iter()
-            .map(|(start, end)| {
-                (
-                    *start,
-                    match end {
-                        RangeEnd::Offset(end) => end - start,
-                        RangeEnd::Eof => u64::MAX,
-                    },
-                )
-            })
-            .collect()
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DataEvidence {
     Unknown,
     Equal,
@@ -139,7 +130,7 @@ impl DataEvidence {
 }
 
 /// Observed changes carry every side required by their kind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EntryChange {
     Add { path: String, new: Meta },
     Remove { path: String, old: Meta },
@@ -157,6 +148,12 @@ impl EntryChange {
             (Some(old), Some(new)) if old.ftype != new.ftype => Self::ReplaceType { path, old, new },
             (Some(old), Some(new)) => Self::Modify { path, old, new, data },
         })
+    }
+    pub fn src(&self) -> &str {
+        self.old_path().unwrap_or(self.path())
+    }
+    pub fn is_rename(&self) -> bool {
+        matches!(self, Self::Rename { .. })
     }
     pub fn path(&self) -> &String {
         match self {
@@ -228,6 +225,19 @@ mod tests {
         assert!(ChangedRanges::from_native(&[(u64::MAX - 1, 3)]).is_err());
         assert!(ChangedRanges::try_from(vec![(5, RangeEnd::Offset(4))]).is_err());
     }
+    #[test]
+    fn cache_evidence_round_trips_and_rejects_invalid_ranges() {
+        for evidence in
+            [DataEvidence::Unknown, DataEvidence::Equal, DataEvidence::from_native(&[(0, 4), (8, u64::MAX)], 16, 16).unwrap()]
+        {
+            let encoded = serde_json::to_vec(&evidence).unwrap();
+            assert_eq!(serde_json::from_slice::<DataEvidence>(&encoded).unwrap(), evidence);
+        }
+        for malformed in [r#"[[5,{"Offset":4}]]"#, r#"[[5,{"Offset":5}]]"#] {
+            assert!(serde_json::from_str::<ChangedRanges>(malformed).is_err());
+        }
+    }
+
     fn meta(ftype: FType) -> Meta {
         Meta { ftype, mode: 0o644, size: 1, ino: 0, uid: 0, gid: 0, mtime: 0 }
     }

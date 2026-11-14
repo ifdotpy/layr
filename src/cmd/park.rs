@@ -139,7 +139,7 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let Some(parent) = s.parents.first() else { bail!("state {} has no parent", ids::short(&id)) };
             let parent = repo.state_src(parent)?;
             let root = repo.state_src(&id)?;
-            let list = changes::file_changes(&parent, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect::<Vec<_>>();
+            let list = changes::file_changes(&parent, &root)?.into_iter().filter(|c| !skip_path(c.path())).collect::<Vec<_>>();
             let fds = diff::file_diffs(&parent, &root, &list)?;
             if a.has("-p") {
                 for f in &fds {
@@ -204,16 +204,16 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let wdir = repo.working(&line);
             let own = repo.own(&line);
             for c in changes::file_changes(&scan.path, &result.path)? {
-                if skip_path(&c.path) {
+                if skip_path(c.path()) {
                     continue;
                 }
-                if let Some(src) = &c.old_path {
+                if let Some(src) = c.old_path() {
                     fsutil::remove_entry(&wdir, src)?;
                 }
-                if c.new.is_none() {
-                    fsutil::remove_entry(&wdir, &c.path)?;
+                if c.new().is_none() {
+                    fsutil::remove_entry(&wdir, c.path())?;
                 } else {
-                    fsutil::copy_work_entry(&result.path, &c.path, &wdir, &c.path, own)?;
+                    fsutil::copy_work_entry(&result.path, c.path(), &wdir, c.path(), own)?;
                 }
             }
             for m in &out.messages {
@@ -373,8 +373,8 @@ fn park_tree(
     let own = repo.own(line);
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for c in st.staged.iter().chain(st.unstaged.iter()) {
-        paths.insert(c.path.clone());
-        if let Some(o) = &c.old_path {
+        paths.insert(c.path().clone());
+        if let Some(o) = c.old_path() {
             paths.insert(o.clone());
         }
     }

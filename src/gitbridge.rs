@@ -1291,7 +1291,7 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
             let prev_src = repo.state_src(ps)?;
             let mut paths = Vec::new();
             for c in changes::file_changes(&prev_src, &src)? {
-                for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+                for p in [Some(c.path().clone()), c.old_path().cloned()].into_iter().flatten() {
                     if !skip_path(&p) {
                         paths.push(p);
                     }
@@ -1901,12 +1901,12 @@ fn commit_tree(
                 let aroot = repo.state_src(ast)?;
                 let rules = crate::ignore_rules::Rules::of(&src);
                 for c in changes::file_changes(&aroot, &src)? {
-                    for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+                    for p in [Some(c.path().clone()), c.old_path().cloned()].into_iter().flatten() {
                         if skip_path(&p) {
                             continue;
                         }
                         // Ignored paths are never exported, unless the ancestor tracked them.
-                        if c.old.is_none() && rules.ignored(&p, false) {
+                        if c.old().is_none() && rules.ignored(&p, false) {
                             continue;
                         }
                         paths.push(p);
@@ -2778,7 +2778,7 @@ impl GitFiles {
 pub struct Sides {
     pub old: GitFiles,
     pub new: GitFiles,
-    pub changes: Vec<crate::changes::Change>,
+    pub changes: Vec<crate::changes::EntryChange>,
 }
 
 /// Metadata of a changed file of a git side: the type and mode of its tree entry, and its size.
@@ -2837,7 +2837,11 @@ pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
             new_files.insert(d.path.clone(), data.clone());
             git_meta(mode, data.len())
         });
-        changes.push(crate::changes::Change { path: d.path.clone(), old_path: None, old: old_meta, new: new_meta, ranges: None });
+        if let Some(change) =
+            crate::changes::EntryChange::observed(d.path.clone(), old_meta, new_meta, crate::compare::DataEvidence::Unknown)
+        {
+            changes.push(change);
+        }
     }
     Ok(Sides { old: GitFiles { files: old_files }, new: GitFiles { files: new_files }, changes })
 }

@@ -2,7 +2,7 @@
 
 use super::{exit, here, matches, Here};
 use crate::args::{parse, Spec};
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::diff::{self, FileDiff};
 use crate::fsutil;
@@ -56,14 +56,14 @@ fn empty_root() -> Result<Temp> {
 }
 
 /// All files of a root as additions.
-fn all_files(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<Change>> {
+fn all_files(root: &(impl fsutil::Src + ?Sized)) -> Result<Vec<EntryChange>> {
     let mut v = Vec::new();
     fsutil::walk(root, "", &mut |rel, m| {
         if skip_path(rel) {
             return Ok(false);
         }
         if !m.is_dir() {
-            v.push(Change { path: rel.to_string(), old_path: None, old: None, new: Some(m.clone()), ranges: None });
+            v.push(EntryChange::Add { path: rel.to_string(), new: m.clone() });
         }
         Ok(true)
     })?;
@@ -288,11 +288,12 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 _ => (head, list),
             };
-            let list: Vec<Change> = list
+            let list: Vec<EntryChange> = list
                 .into_iter()
                 .filter(|c| {
-                    !skip_path(&c.path)
-                        && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+                    !skip_path(c.path())
+                        && (matches(&specs, c.path())
+                            || c.old_path().map(String::as_str).map(|o| matches(&specs, o)).unwrap_or(false))
                 })
                 .collect();
             let list = if a.has("--no-renames") { list } else { changes::with_renames(&old, &merged, list) };
@@ -411,30 +412,31 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let sides = tracked.as_ref().map(|(o, n)| if reverse { (n, o) } else { (o, n) });
         // A tracked file stays in the diff even where an ignore rule matches it, as in git.
         let untracked = |root: Option<&Snap>, path: &str| root.is_none_or(|r| fsutil::lmeta(r, path).is_none());
-        let ignored = |c: &Change| match &rules {
-            Some((old_rules, new_rules)) => match &c.new {
-                Some(m) => new_rules.ignored(&c.path, m.is_dir()) && untracked(sides.map(|s| s.1), &c.path),
+        let ignored = |c: &EntryChange| match &rules {
+            Some((old_rules, new_rules)) => match c.new() {
+                Some(m) => new_rules.ignored(c.path(), m.is_dir()) && untracked(sides.map(|s| s.1), c.path()),
                 None => {
-                    let path = c.old_path.as_deref().unwrap_or(&c.path);
+                    let path = c.old_path().map(String::as_str).unwrap_or(c.path());
                     old_rules.ignored(path, false) && untracked(sides.map(|s| s.0), path)
                 }
             },
             None => false,
         };
-        let mut list: Vec<Change> = changes::file_changes(old, new)?
+        let mut list: Vec<EntryChange> = changes::file_changes(old, new)?
             .into_iter()
             .filter(|c| {
-                !skip_path(&c.path)
+                !skip_path(c.path())
                     && !ignored(c)
-                    && !quiet_paths.contains(&c.path)
-                    && (matches(&specs, &c.path) || c.old_path.as_deref().map(|o| matches(&specs, o)).unwrap_or(false))
+                    && !quiet_paths.contains(c.path())
+                    && (matches(&specs, c.path())
+                        || c.old_path().map(String::as_str).map(|o| matches(&specs, o)).unwrap_or(false))
             })
             .collect();
         if working {
             // Untracked files are not part of a working tree diff.
             let idx = index_root.as_ref().unwrap();
             list = changes::without_moves(list);
-            list.retain(|c| !(c.old.is_none() && fsutil::lmeta(idx, &c.path).is_none()));
+            list.retain(|c| !(c.old().is_none() && fsutil::lmeta(idx, c.path()).is_none()));
         }
         let list = if renames { changes::with_renames(old, new, list) } else { list };
         diff::file_diffs(old, new, &list)
@@ -748,17 +750,17 @@ fn git_sides(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<crate
 }
 
 /// The changes of a state against its first parent, and the two sides.
-fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries, Entries, Vec<Change>)> {
+fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries, Entries, Vec<EntryChange>)> {
     repo.source_state(&s.id)?;
     if let Some(sides) = git_sides(repo, s, specs)? {
-        let changes = sides.changes.into_iter().filter(|c| !skip_path(&c.path)).collect();
+        let changes = sides.changes.into_iter().filter(|c| !skip_path(c.path())).collect();
         return Ok((Entries::Git(sides.old), Entries::Git(sides.new), changes));
     }
     let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => {
             let pr = repo.state_src(p)?;
-            let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+            let v = changes::file_changes(&pr, &root)?.into_iter().filter(|c| !skip_path(c.path())).collect();
             let v = changes::with_renames(&pr, &root, v);
             Ok((Entries::Tree(pr), Entries::Tree(root), v))
         }
@@ -996,7 +998,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         }
         let (old, new, list) = state_changes(repo, &s, &specs)?;
-        let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
+        let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path())).collect();
         if list.is_empty() {
             continue;
         }
@@ -1173,7 +1175,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Ok(Vec::new());
             }
             let (_o, _n, list) = state_changes(repo, s, &specs)?;
-            Ok(list.into_iter().flat_map(|c| std::iter::once(c.path).chain(c.old_path)).collect())
+            Ok(list.into_iter().flat_map(|c| std::iter::once(c.path().clone()).chain(c.old_path().cloned())).collect())
         },
         |path| specs.is_empty() || matches(&specs, path),
         |s| {
@@ -1223,7 +1225,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         first = false;
         if want_diff && crate::gitbridge::readable(repo, &s.id)? {
             let (old, new, list) = state_changes(repo, s, &specs)?;
-            let list: Vec<Change> = list.into_iter().filter(|c| matches(&specs, &c.path)).collect();
+            let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path())).collect();
             if !list.is_empty() {
                 if blank {
                     outln!(ctx);
@@ -1881,9 +1883,9 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
         if a.has("-m") || a.has("-d") {
             for c in &st.unstaged {
-                if (a.has("-m") || c.new.is_none()) && matches(&specs, &c.path) {
+                if (a.has("-m") || c.new().is_none()) && matches(&specs, c.path()) {
                     printed += 1;
-                    out!(ctx, "{}{}", show(&c.path), end);
+                    out!(ctx, "{}{}", show(c.path()), end);
                 }
             }
         }

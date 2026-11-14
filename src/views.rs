@@ -7,9 +7,9 @@
 //! read the upper folder and the head; they never scan the merged tree.
 //!
 //! The kind of view is local to this machine: `meta/vlines/<line id>/view.json`, never a record.
-use crate::changes::{self, Change};
-use crate::errors::{error, Kind as ErrorKind};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
+use crate::errors::{error, Kind as ErrorKind};
 use crate::fsutil::{self, Meta};
 use crate::ids;
 use crate::model::{Line, LineChange, Record, StateKind, StateRec};
@@ -340,16 +340,16 @@ fn candidates(t: &Trees, v: &View, rules: &crate::ignore_rules::Rules) -> Result
 }
 
 /// The confirmed file changes of the merged view against the head, without ignored new files.
-pub(crate) fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
+pub(crate) fn file_changes(t: &Trees, v: &View) -> Result<Vec<EntryChange>> {
     let rules = crate::ignore_rules::Rules::of(&t.merged);
     let list = match candidates(t, v, &rules)? {
         Some(set) => {
             strip_quarantine(&t.upper, &set);
-            let raw: Vec<Change> = set
+            let raw: Vec<EntryChange> = set
                 .into_iter()
                 .filter_map(|p| {
                     let (old, new) = (fsutil::lmeta(&t.head, &p), fsutil::lmeta(&t.merged, &p));
-                    (old.is_some() || new.is_some()).then_some(Change { path: p, old_path: None, old, new, ranges: None })
+                    EntryChange::observed(p, old, new, crate::compare::DataEvidence::Unknown)
                 })
                 .collect();
             changes::file_changes_of(&t.head, &t.merged, raw)?
@@ -374,8 +374,8 @@ pub(crate) fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
     };
     Ok(list
         .into_iter()
-        .filter(|c| !skip_path(&c.path) && !system_path(&c.path))
-        .filter(|c| c.old.is_some() || !rules.ignored(&c.path, false))
+        .filter(|c| !skip_path(c.path()) && !system_path(c.path()))
+        .filter(|c| c.old().is_some() || !rules.ignored(c.path(), false))
         .collect())
 }
 
@@ -424,7 +424,7 @@ pub fn diff_input(
     line: &Line,
     v: &View,
     _keep: &mut Vec<crate::repo::Temp>,
-) -> Result<(Layered, Layered, Vec<Change>)> {
+) -> Result<(Layered, Layered, Vec<EntryChange>)> {
     let t = trees(repo, line, v)?;
     let list = file_changes(&t, v)?;
     Ok((t.head, t.merged, list))
@@ -448,7 +448,7 @@ pub(crate) fn write_state(
     repo: &Repo,
     line: &Line,
     t: &Trees,
-    list: &[Change],
+    list: &[EntryChange],
     kind: StateKind,
     message: &str,
 ) -> Result<StateRec> {
@@ -457,13 +457,13 @@ pub(crate) fn write_state(
     let mut d = thin::Diff::default();
     let mut gone = BTreeSet::new();
     for c in list {
-        if c.new.is_some() {
-            d.write.insert(c.path.clone());
+        if c.new().is_some() {
+            d.write.insert(c.path().clone());
         }
-        if c.old.is_some() && (c.new.is_none() || c.old.as_ref().map(|m| m.ftype) != c.new.as_ref().map(|m| m.ftype)) {
-            gone.insert(c.path.clone());
+        if c.old().is_some() && (c.new().is_none() || c.old().map(|m| m.ftype) != c.new().map(|m| m.ftype)) {
+            gone.insert(c.path().clone());
         }
-        if let Some(o) = &c.old_path {
+        if let Some(o) = c.old_path() {
             gone.insert(o.clone());
         }
     }

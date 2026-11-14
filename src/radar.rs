@@ -101,16 +101,16 @@ pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), r
     #[cfg(test)]
     let candidates = test_probe::candidates(base, child)?;
     for change in candidates {
-        let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
-        if skip_path(&change.path) || rules.ignored(&change.path, is_dir) {
+        let is_dir = change.new().or(change.old()).is_some_and(|m| m.is_dir());
+        if skip_path(change.path()) || rules.ignored(change.path(), is_dir) {
             continue;
         }
         if !changes::really_changed(base, child, &change)? {
             continue;
         }
-        let time = change.new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
-        let (added, removed) = (change.old.is_none(), change.new.is_none());
-        out.push(Found { path: change.path, old_path: change.old_path, is_dir, time, added, removed });
+        let time = change.new().map(|m| m.mtime * 1000).unwrap_or(0);
+        let (added, removed) = (change.old().is_none(), change.new().is_none());
+        out.push(Found { path: change.path().clone(), old_path: change.old_path().cloned(), is_dir, time, added, removed });
     }
     Ok(out)
 }
@@ -133,7 +133,9 @@ pub(crate) fn recheck(
     }
     let time = new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
     let (added, removed) = (old.is_none(), new.is_none());
-    let change = changes::Change { path: path.to_string(), old_path: None, old, new, ranges: None };
+    let Some(change) = changes::EntryChange::observed(path.to_string(), old, new, crate::compare::DataEvidence::Unknown) else {
+        return Ok(None);
+    };
     if !changes::really_changed(base, live, &change)? {
         return Ok(None);
     }
@@ -178,18 +180,19 @@ fn combine(
     let Some(merged) = merge_changes(saved, head_live, |path| recheck(base, live, rules, path))? else {
         return Ok(None);
     };
-    let lone: Vec<changes::Change> = merged
+    let lone: Vec<changes::EntryChange> = merged
         .iter()
         .filter(|f| !f.is_dir && (f.added || f.removed))
-        .map(|f| changes::Change {
-            path: f.path.clone(),
-            old_path: None,
-            old: if f.removed { fsutil::lmeta(base, &f.path) } else { None },
-            new: if f.added { fsutil::lmeta(live, &f.path) } else { None },
-            ranges: None,
+        .filter_map(|f| {
+            changes::EntryChange::observed(
+                f.path.clone(),
+                if f.removed { fsutil::lmeta(base, &f.path) } else { None },
+                if f.added { fsutil::lmeta(live, &f.path) } else { None },
+                crate::compare::DataEvidence::Unknown,
+            )
         })
         .collect();
-    if changes::with_renames(base, live, lone).iter().any(|c| c.old_path.is_some()) {
+    if changes::with_renames(base, live, lone).iter().any(|c| c.old_path().is_some()) {
         let _t = crate::trace::span("overlap combine paired rename fallback");
         return Ok(None);
     }
@@ -728,7 +731,7 @@ mod test_probe {
         pub fallbacks: usize,
         pub cache_reads: usize,
         pub cache_writes: usize,
-        pub streams: VecDeque<Vec<changes::Change>>,
+        pub streams: VecDeque<Vec<changes::EntryChange>>,
     }
 
     thread_local! {
@@ -739,7 +742,7 @@ mod test_probe {
         PROBE.with(|p| f(&mut p.borrow_mut()));
     }
 
-    pub(super) fn candidates(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<changes::Change>> {
+    pub(super) fn candidates(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<changes::EntryChange>> {
         let mut stream = None;
         record(|p| {
             p.candidates += 1;
@@ -824,7 +827,7 @@ mod tests {
         }
     }
 
-    fn reset_probe(streams: Vec<Vec<changes::Change>>) {
+    fn reset_probe(streams: Vec<Vec<changes::EntryChange>>) {
         test_probe::record(|p| *p = test_probe::Probe { streams: streams.into(), ..Default::default() });
     }
 
@@ -840,20 +843,14 @@ mod tests {
         std::fs::write(live.join("new"), "rename content").unwrap();
         std::fs::write(live.join("private"), "hidden content").unwrap();
         let stream = vec![
-            changes::Change {
+            changes::EntryChange::Rename {
                 path: "new".into(),
-                old_path: Some("old".into()),
-                old: fsutil::lmeta(&head, "old"),
-                new: fsutil::lmeta(&live, "new"),
-                ranges: None,
+                old_path: "old".into(),
+                old: fsutil::lmeta(&head, "old").unwrap(),
+                new: fsutil::lmeta(&live, "new").unwrap(),
+                data: crate::compare::DataEvidence::Unknown,
             },
-            changes::Change {
-                path: "private".into(),
-                old_path: None,
-                old: None,
-                new: fsutil::lmeta(&live, "private"),
-                ranges: None,
-            },
+            changes::EntryChange::Add { path: "private".into(), new: fsutil::lmeta(&live, "private").unwrap() },
         ];
         let rules = Rules::new(&live);
         reset_probe(vec![stream.clone()]);

@@ -575,7 +575,7 @@ fn finish(
     ovl: Option<&OverlayMerge>,
     queue: Option<&QueuedMerge<'_>>,
     settled: Option<&Settled<'_>>,
-) -> Result<Vec<changes::Change>> {
+) -> Result<Vec<changes::EntryChange>> {
     let op = if queue.is_some() { "queue.result" } else { op };
     let mut pending = Pending { repo, write: None, states, ovl, done: false };
     repo.check_move(ctx, line, new_head)?;
@@ -669,7 +669,7 @@ fn check_paths(ctx: &Ctx, repo: &Repo, line: &Line, rule: Option<&crate::access:
     };
     let role = repo.policy().role(&Repo::who(ctx));
     for c in changes::file_changes(&repo.state_src(head)?, &repo.state_src(result)?)? {
-        for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+        for p in [Some(c.path().clone()), c.old_path().cloned()].into_iter().flatten() {
             let requirement =
                 layr_model::protection::path_requirements([p.as_str()], role, |path| rule.role_for_path(path)).remove(0);
             let need = requirement.role;
@@ -779,7 +779,7 @@ fn queue_approvals(
             let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
             let paths: Vec<_> = changed
                 .iter()
-                .flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()])
+                .flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)])
                 .flatten()
                 .filter(|path| patterns.iter().any(|pattern| crate::access::path_matches(pattern, path)))
                 .collect();
@@ -856,7 +856,8 @@ fn check_creator_approvals(
     if !rule.owners.is_empty() {
         let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_owned());
         let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
-        let paths: Vec<_> = changed.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()]).flatten().collect();
+        let paths: Vec<_> =
+            changed.iter().flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)]).flatten().collect();
         for (pattern, principals) in rule.owners_for(paths.iter().copied()) {
             let mut approved = false;
             for principal in principals {
@@ -962,7 +963,8 @@ fn approval_subjects(
             continue;
         }
         let changed = changes::file_changes(&repo.state_src(&version.id)?, &new)?;
-        if rule.keeps_approval(changed.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()]).flatten()) {
+        if rule.keeps_approval(changed.iter().flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)]).flatten())
+        {
             subjects.push(version.id);
         }
     }
@@ -1025,7 +1027,8 @@ fn missing_owner(
     }
     let base = repo.merge_base(head, theirs)?.unwrap_or_else(|| head.to_string());
     let changed = changes::file_changes(&repo.state_src(&base)?, &repo.state_src(theirs)?)?;
-    let paths: Vec<&str> = changed.iter().flat_map(|c| [Some(c.path.as_str()), c.old_path.as_deref()]).flatten().collect();
+    let paths: Vec<&str> =
+        changed.iter().flat_map(|c| [Some(c.path().as_str()), c.old_path().map(String::as_str)]).flatten().collect();
     for (pattern, who) in rule.owners_for(paths.iter().copied()) {
         let mut met = false;
         for principal in &who {
@@ -1217,7 +1220,7 @@ fn local_paths(repo: &Repo, line: &Line, st: &crate::repo::Status) -> Result<std
 fn print_stat(ctx: &Ctx, repo: &Repo, from: &str, to: &str) -> Result<()> {
     let a = repo.state_src(from)?;
     let b = repo.state_src(to)?;
-    let list: Vec<changes::Change> = changes::file_changes(&a, &b)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
+    let list: Vec<changes::EntryChange> = changes::file_changes(&a, &b)?.into_iter().filter(|c| !skip_path(c.path())).collect();
     let fds = diff::file_diffs(&a, &b, &list)?;
     ctx.print(&diff::stat(&fds, 80));
     for f in &fds {
@@ -2219,19 +2222,19 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     if !local.is_empty() {
         let regen = repo.cache_paths(&w)?;
         let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
-        if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
+        if local.iter().any(|x| keep(x.path()) || x.old_path().map(String::as_str).is_some_and(keep)) {
             return declined("local change");
         }
     }
     let base_src = repo.state_src(&base)?;
     let pick_src = repo.state_src(pick)?;
     let cands = changes::candidates(&base_src, &pick_src)?;
-    if cands.iter().any(|x| x.old.as_ref().is_some_and(|m| m.is_dir()) || x.new.as_ref().is_some_and(|m| m.is_dir())) {
+    if cands.iter().any(|x| x.old().is_some_and(|m| m.is_dir()) || x.new().is_some_and(|m| m.is_dir())) {
         return declined("directory change");
     }
-    let theirs: Vec<changes::Change> = changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?)
+    let theirs: Vec<changes::EntryChange> = changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?)
         .into_iter()
-        .filter(|x| !skip_path(&x.path))
+        .filter(|x| !skip_path(x.path()))
         .collect();
     let attributes = |p: &str| p.ends_with(".layrattributes") || p.ends_with(".gitattributes");
     // Only a derive rule changes the merge of other paths; the merge reads the root attributes.
@@ -2243,18 +2246,18 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
             }
         }
     }
-    if derive || theirs.iter().any(|x| attributes(&x.path) || x.old_path.as_deref().is_some_and(attributes)) {
+    if derive || theirs.iter().any(|x| attributes(x.path()) || x.old_path().map(String::as_str).is_some_and(attributes)) {
         return declined("attributes");
     }
     let mut ours: Vec<String> = Vec::new();
     if line.head != base {
         for x in changes::without_moves(changes::file_changes(&base_src, &head_src)?) {
-            ours.push(x.path);
+            ours.push(x.path().clone());
         }
     }
     let overlaps = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"));
     for x in &theirs {
-        if ours.iter().any(|o| overlaps(&x.path, o)) {
+        if ours.iter().any(|o| overlaps(x.path(), o)) {
             return declined("overlap");
         }
     }
@@ -2275,12 +2278,12 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
         let mut write = std::collections::BTreeSet::new();
         let mut removed = std::collections::BTreeSet::new();
         for x in &theirs {
-            if x.new.is_some() {
-                write.insert(x.path.clone());
+            if x.new().is_some() {
+                write.insert(x.path().clone());
             } else {
-                removed.insert(x.path.clone());
+                removed.insert(x.path().clone());
             }
-            if let Some(o) = &x.old_path {
+            if let Some(o) = x.old_path() {
                 removed.insert(o.clone());
             }
         }
@@ -2309,7 +2312,7 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     let own = repo.own(&line);
     let undo_work = || -> Result<()> {
         for x in &theirs {
-            for p in x.old_path.iter().chain(std::iter::once(&x.path)) {
+            for p in x.old_path().into_iter().chain(std::iter::once(x.path())) {
                 if crate::fsutil::lmeta(&head_src, p).is_some() {
                     crate::fsutil::copy_work_entry(&head_src, p, &w, p, own)?;
                 } else {
@@ -2321,14 +2324,14 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
     };
     let work = (|| -> Result<()> {
         for x in &theirs {
-            for gone in x.old_path.iter().chain(x.new.is_none().then_some(&x.path)) {
+            for gone in x.old_path().into_iter().chain(x.new().is_none().then_some(x.path())) {
                 if view.find(gone)?.is_none() {
                     crate::fsutil::remove_entry(&w, gone)?;
                 }
             }
         }
-        for x in theirs.iter().filter(|x| x.new.is_some()) {
-            crate::fsutil::copy_work_entry(&view, &x.path, &w, &x.path, own)?;
+        for x in theirs.iter().filter(|x| x.new().is_some()) {
+            crate::fsutil::copy_work_entry(&view, x.path(), &w, x.path(), own)?;
         }
         Ok(())
     })();
