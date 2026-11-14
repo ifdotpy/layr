@@ -52,6 +52,7 @@ impl Fixture {
             out: RefCell::new(Box::new(output.clone())),
         };
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "history".into(),
             dir: dir.clone(),
@@ -60,7 +61,7 @@ impl Fixture {
         };
         let mut record = Record::new("project");
         record.data = serde_json::json!({"name": "history", "id": p.id, "config": {}});
-        p.append(record, &ctx.actor())?;
+        p.lock_maintenance().unwrap().append(record, &ctx.actor())?;
         let repo = Repo { p, ctx: Some(&ctx) };
         let git = repo.p.git_dir();
         let source = root.join("source");
@@ -111,7 +112,7 @@ impl Fixture {
             let raw = cat.object(oid, "commit")?;
             let (objects, changes) = import_changes(&raw, old, &mut cat)?;
             let (id, rec) = import_record(&ctx, &repo, oid, &raw, "origin/main", states.clone(), objects, changes)?;
-            repo.p.append(rec, &ctx.actor())?;
+            repo.p.lock_maintenance().unwrap().append(rec, &ctx.actor())?;
             states = vec![id];
         }
         let state = states.pop().unwrap();

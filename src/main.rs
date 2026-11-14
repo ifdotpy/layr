@@ -86,6 +86,9 @@ mod storage;
 #[path = "apfs.rs"]
 mod storage;
 mod store;
+// The binary examples are checked against its real types without another permanent Cargo target.
+#[cfg(layr_doctest)]
+pub use store::Project;
 mod store_remote;
 mod store_remove;
 mod store_version;

@@ -555,7 +555,7 @@ mod tests {
         fsutil::atomic_write(&path, &serde_json::to_vec(&j).unwrap(), 0o600).unwrap();
     }
     /// The record of a save, as `commit_state` writes it (the record of `move_head` is not needed).
-    fn recorded(p: &Project, pending: &PendingCommit, line: &str) -> Result<()> {
+    fn recorded(locked: &crate::store::LockedProject<'_>, pending: &PendingCommit, line: &str) -> Result<()> {
         let mut r = Record::new("commit");
         r.states.push(StateRec {
             id: pending.id.clone(),
@@ -581,7 +581,7 @@ mod tests {
             cache_key_parts: Default::default(),
             parts: Default::default(),
         });
-        p.append(r, &actor())?;
+        locked.append(r, &actor())?;
         Ok(())
     }
 
@@ -591,7 +591,7 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let line = ids::new_id();
         let inode = stage(&p, &line)?;
         let old_info = storage::subvol_info(&p.stage_path(&line))?;
@@ -633,7 +633,7 @@ mod tests {
         let stage_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage_inode = stage(&p, &line)?;
             let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
@@ -666,7 +666,7 @@ mod tests {
             let stage_inode;
             {
                 let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-                let _lock = p.lock()?;
+                let _lock = p.lock_maintenance()?;
                 stage_inode = stage(&p, &line)?;
                 let mut pc = PendingCommit::prepare(&p, &line)?;
                 if phase >= 1 {
@@ -702,13 +702,13 @@ mod tests {
         let clone_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage(&p, &line)?;
             let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
             clone_inode = fs::metadata(&pc.tree)?.ino();
             assert!(pc.publish()?);
-            recorded(&p, &pc, &line)?;
+            recorded(&_lock, &pc, &line)?;
             // The stage is dropped after the record; the crash comes before the journal is removed.
             storage::delete_tree(&p.stage_path(&line))?;
             die(&pending_dir(&p, &pc.id));
@@ -731,7 +731,7 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let line = ids::new_id();
         stage(&p, &line)?;
         let mut pc = PendingCommit::prepare(&p, &line)?;
@@ -760,7 +760,7 @@ mod tests {
         let stage_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage_inode = stage(&p, &line)?;
             let pc = PendingCommit::prepare(&p, &line)?;
             let path = pending_dir(&p, &pc.id).join(PENDING_JOURNAL);
@@ -783,7 +783,7 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let root = pending_root(&p);
         fs::create_dir_all(&root)?;
         // A folder made by this process, before its journal exists (the window of `prepare`).

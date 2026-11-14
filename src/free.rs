@@ -204,7 +204,7 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_stat
         return Ok(());
     }
     {
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let max = p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
         if !p.delta_path(id).is_dir() || (!final_state && crate::thin::chain_len(&p, id) <= max) {
             return Ok(());
@@ -216,7 +216,7 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_stat
     let wait = p.config_u64("thin.view_seconds", crate::thin::VIEW_IN_USE_SECONDS);
     std::thread::sleep(std::time::Duration::from_secs(wait));
     {
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         // A command can remove the view in the wait: then the state stays thin and the next save tries again.
         if p.state_path(id).is_dir() && p.delta_path(id).is_dir() {
             crate::thin::make_keyframe(&p, id)?;
@@ -267,16 +267,11 @@ fn expired_refs(conn: &rusqlite::Connection) -> bool {
 fn expire_refs(ctx: &crate::ctx::Ctx, name: &str) -> Result<()> {
     let Some(p) = Project::open_maintenance(&ctx.store, name)? else { return Ok(()) };
     let repo = crate::repo::Repo::from_project(ctx, p)?;
-    let _lock = if repo.p.holds_lock() {
-        None
-    } else {
-        let Some(lock) = repo.p.try_lock()? else { return Ok(()) };
-        Some(lock)
-    };
+    let crate::store::LockAttempt::Acquired(_lock) = repo.p.try_lock()? else { return Ok(()) };
     for expired in repo.p.db.expired_refs(crate::ids::now_ms())? {
         let mut rec = crate::model::Record::new("ref.expire");
         rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name: expired.name.clone(), before: Some(expired), after: None }});
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
     }
     Ok(())
 }
@@ -308,7 +303,7 @@ fn unchanged_queue(store: &Store, name: &str, conn: &rusqlite::Connection) -> bo
 /// the number of states whose storage went.
 pub fn finish_project(p: &Project) -> Result<usize> {
     hold_before_free();
-    let _lock = if p.holds_lock() { None } else { Some(p.lock()?) };
+    let _lock = p.lock_or_borrow()?;
     let gone = finish_project_locked(p)?;
     drop(_lock);
     if gone != 0 {
@@ -319,12 +314,7 @@ pub fn finish_project(p: &Project) -> Result<usize> {
 
 fn finish_project_maintenance(p: &Project) -> Result<usize> {
     hold_before_free();
-    let _lock = if p.holds_lock() {
-        None
-    } else {
-        let Some(lock) = p.try_lock()? else { return Ok(0) };
-        Some(lock)
-    };
+    let crate::store::LockAttempt::Acquired(_lock) = p.try_lock()? else { return Ok(0) };
     let gone = finish_project_locked(p)?;
     drop(_lock);
     if gone != 0 {
@@ -612,6 +602,7 @@ mod inspection_tests {
         let dir = store.project_dir("p")?;
         std::fs::create_dir_all(dir.join("meta/db"))?;
         let p = Project {
+            lease: Default::default(),
             store: &store,
             name: "p".into(),
             dir: dir.clone(),
@@ -693,7 +684,7 @@ mod pin_tests {
         let db = crate::db::Db::open(&path)?;
         let state = crate::ids::new_id();
         db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'store','cloud')", [&state])?;
-        let project = Project { store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
+        let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
         let guard = pin(&project, &[&state, &state])?;
         // Compile-time check: a deferred guard owns a path, not a connection per batch.
         let _: &PathBuf = &guard.db;
@@ -721,7 +712,7 @@ mod pin_tests {
         let db = crate::db::Db::open(&path)?;
         let state = crate::ids::new_id();
         db.conn.execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
-        let project = Project { store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
+        let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
         let observer = crate::db::Db::open(&path)?;
         let read = || -> Result<()> {
             let guard = pin_borrowed(&project, &[&state])?;

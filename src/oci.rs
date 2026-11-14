@@ -529,12 +529,14 @@ pub struct Export {
 
 /// Only this boundary translates a revision into an exportable shared snapshot.
 pub fn export(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &crate::ctx::Ctx,
     repo: &Repo,
     rev: &str,
     line: Option<&crate::model::Line>,
     name: Option<&str>,
 ) -> Result<Export> {
+    locked.check(&repo.p)?;
     if repo.p.is_overlay() {
         bail!("OCI export refuses private overlays");
     }
@@ -582,7 +584,7 @@ pub fn export(
         None => (None, None),
     };
     for layer in img.layers.iter().chain(chart.iter().flat_map(|c| c.layers.iter())) {
-        register_layer(ctx, repo, &cache, &id, layer)?;
+        register_layer(locked, ctx, repo, &cache, &id, layer)?;
     }
     let restrictions = restriction_key(repo, &id)?;
     let e = Export { image: img, chart, chart_version, cache, state: id, runnable: name, restrictions };
@@ -591,7 +593,15 @@ pub fn export(
 }
 
 /// The Core ref is the cache root. A local locator only avoids a database lookup for blob reads.
-fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &str, layer: &Descriptor) -> Result<()> {
+fn register_layer(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &crate::ctx::Ctx,
+    repo: &Repo,
+    cache: &Cache,
+    source: &str,
+    layer: &Descriptor,
+) -> Result<()> {
+        locked.check(&repo.p)?;
     use crate::model::{Record, RefChange, RefState, StateKind};
     let key = digest_hex(&layer.digest)?;
     let name = format!("derived/oci-layer-v1/{key}");
@@ -627,7 +637,7 @@ fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &st
         let mut rec = Record::new("derive");
         rec.states.push(state);
         rec.data = json!({"ref_change": RefChange { name: name.clone(), before, after: Some(RefState { name, target: id.clone(), expires_at: None }) }});
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(locked, ctx, rec)?;
         drop(cleanup);
         id
     };

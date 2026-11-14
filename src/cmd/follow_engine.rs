@@ -234,7 +234,7 @@ impl<'a> Repo<'a> {
             Ok(None) => return Ok(None),
             Err(e) => Last { time: ids::now_ms(), ok: false, text: format!("{e:#}"), refused: pending },
         };
-        let _lock = self.p.lock()?;
+        let _lock = self.p.lock_maintenance()?;
         let mut all = last_results(self)?;
         all.insert(line.id.clone(), last.clone());
         crate::fsutil::atomic_write(&results_path(self), &serde_json::to_vec(&all)?, 0o600)?;
@@ -280,7 +280,7 @@ impl<'a> Repo<'a> {
                 return Ok(Some("up to date".into()));
             }
             {
-                let _lock = self.p.lock()?;
+                let _lock = self.p.lock_maintenance()?;
                 if has_unsaved(&self.locked_status_report(&now)?) {
                     return Ok(Some("up to date; caches not saved: unsaved work".into()));
                 }
@@ -309,7 +309,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         {
-            let _lock = self.p.lock()?;
+            let _lock = self.p.lock_maintenance()?;
             let st = self.locked_status_report(&self.line(&line.id)?)?;
             if has_unsaved(&st) {
                 return Ok(Some("skipped: unsaved work".into()));
@@ -357,7 +357,7 @@ impl<'a> Repo<'a> {
         }
         let _line_lock = self.line_lock(line)?;
         let now = {
-            let _lock = self.p.lock()?;
+            let _lock = _line_lock.lock(&self.p)?;
             let now = self.line(&line.id)?;
             if now.head != head || has_unsaved(&self.locked_status_report(&now)?) {
                 bail!("line changed during cache fetch");
@@ -422,7 +422,7 @@ impl<'a> Repo<'a> {
         warm: bool,
     ) -> Result<(Vec<(String, String)>, Option<String>)> {
         // Cache saves wait for this build, while ordinary head saves can trigger a retry.
-        let _cache_lock = if warm { Some(self.cache_build_lock(line)?) } else { None };
+        let _cache_lock = self.cache_build_lock(line)?;
         let preparation_lock = self.line_lock(line)?;
         let line = &self.line(&line.id)?;
         // A crash at any later step must leave a followed line due for another build.
@@ -542,7 +542,7 @@ impl<'a> Repo<'a> {
     ) -> Result<std::result::Result<Vec<(String, String)>, String>> {
         let theirs = self.localize(cand)?;
         let refused = {
-            let _lock = self.p.lock()?;
+            let _lock = self.p.lock_maintenance()?;
             let now = self.line(&line.id)?;
             let mut reason = None;
             if let Some(rule) = self.policy().rule_for(&now.name) {
@@ -663,6 +663,84 @@ mod tests {
     use super::{build_for_stable_head, repo_key, StoreCaches};
     use crate::repo::Repo;
     use std::time::Duration;
+
+    #[test]
+    #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
+    fn a_local_merge_can_save_caches_under_its_preparation_leases() -> anyhow::Result<()> {
+        use crate::ctx::{Caller, Ctx};
+        use crate::model::{Line, LineChange, Record};
+        use crate::store::{db_file, Project, Store};
+        let root =
+            crate::repo::Temp { path: std::env::temp_dir().join(format!("layr-local-cache-leases-{}", crate::ids::new_id())) };
+        std::fs::create_dir_all(&root.path)?;
+        if !crate::storage::is_supported(&root.path) {
+            return Ok(());
+        }
+        let store = Store::open(&root.path.join("store"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        std::fs::create_dir_all(dir.join("states"))?;
+        std::fs::create_dir_all(dir.join("lines"))?;
+        let working = dir.join("lines/main");
+        crate::storage::create_subvolume(&working)?;
+        let ctx = Ctx {
+            store,
+            caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: working,
+            env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into()), ("LAYR_LINE".into(), "main".into())]),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            author: Default::default(),
+        };
+        let p = Project {
+            lease: Default::default(),
+            store: &ctx.store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: crate::ids::new_id(),
+            db: crate::db::Db::open(&db_file(&dir))?,
+        };
+        let line = Line {
+            id: crate::ids::new_id(),
+            name: "main".into(),
+            head: crate::ids::new_id(),
+            owner: ctx.caller.uid,
+            machine: ctx.store.machine.id.clone(),
+        };
+        // An object-backed head avoids requiring privileged native send streams.
+        let objects = crate::objstore::open(&p)?;
+        let tree = objects.put_tree(&layr_objects::Tree::default())?;
+        let times = objects.put_times(&layr_objects::times::Times { own: 0, records: Vec::new() })?;
+        let repo = Repo { p, ctx: Some(&ctx) };
+        {
+            let locked = repo.p.lock_maintenance()?;
+            let mut project = Record::new("project");
+            project.data = serde_json::json!({"id":repo.p.id,"name":"p","config":{
+                "access":{format!("user:{}",ctx.caller.uid):"admin"}, "protect":{"main":{}}
+            }});
+            locked.append(project, &ctx.actor())?;
+            let mut state = Record::new("state");
+            state.states.push(serde_json::from_value(serde_json::json!({"id":line.head,"kind":"commit", "subvol":"",
+                "author":ctx.author(),"time":crate::ids::now_ms(),"tree":tree.hex(),"times":times.hex()}))?);
+            locked.append(state, &ctx.actor())?;
+            let mut creation = Record::new("line.create");
+            creation.lines.insert(
+                line.id.clone(),
+                LineChange {
+                    before: None,
+                    after: Some(repo.line_state(&line, &line.head)),
+                    working_before: None,
+                    working_after: None,
+                },
+            );
+            locked.append(creation, &ctx.actor())?;
+        }
+        let before = repo.p.db.last_seq(&ctx.store.machine.id)?;
+        let result = repo.take_follow_caches(&ctx, &line, Vec::new(), None, false);
+        crate::free::finish(&ctx);
+        assert_eq!(result?, (Vec::new(), None));
+        assert!(repo.p.db.last_seq(&ctx.store.machine.id)? > before, "the nested save published its cache state");
+        Ok(())
+    }
 
     #[test]
     fn a_follow_build_retries_a_moved_head_and_stops_after_three_moves() {

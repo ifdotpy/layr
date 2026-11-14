@@ -212,7 +212,11 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
         if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        let _lock = match repo.p.lock() {
+        let acquired = match &_line_lock {
+            Some(leases) => leases.lock(&repo.p),
+            None => repo.p.lock_maintenance(),
+        };
+        let _lock = match acquired {
             Ok(lock) => lock,
             Err(e) => {
                 repo.discard_prepared_caches(prepared);
@@ -272,9 +276,9 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 }
             }
             caches.retain(|p| !refused.contains(p));
-            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
+            Some(repo.caches_state(&_lock, ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
-            repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
+            repo.save(&_lock, ctx, &l, &msg, a.has("--running"), a.has("--force"))?
         };
         if let Some(name) = a.get("--keep") {
             // An unchanged folder makes no state: the keep then holds the state equal to the folder.
@@ -293,7 +297,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                     let shared = repo.policy().rule_for(&l.name).is_some();
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
-                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
+                    for (p, name, id) in repo.save_cache_overlays(&_lock, ctx, &l, &caches, shared, &s.id)? {
                         if json {
                             overlays.push(serde_json::json!({"path": p, "overlay": name, "state": id, "short": ids::short(&id)}));
                         } else if !a.has("-q") {
@@ -660,7 +664,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
     repo.prepare_save(&line)?;
-    let wb = save_before_undo(ctx, repo, &line, false)?;
+    let wb = save_before_undo(&_line_lock, None, ctx, repo, &line)?;
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
         return Err(e);
@@ -673,7 +677,7 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         LineChange { before: Some(now.clone()), after: Some(now), working_before: wb.clone(), working_after: Some(before) },
     );
     let head0 = line.head.clone();
-    let done = match repo.commit_line(&line, &head0, |_| repo.commit_record(ctx, rec)) {
+    let done = match repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec)) {
         Ok(done) => done,
         Err(e) => {
             super::work::put_back(repo, &line, wb.as_deref());
@@ -731,28 +735,28 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
 
 /// The automatic save of a line before its undo. An in-place undo takes the project lock for the
 /// save alone (the copy of the folder is made before it); the caller holds no project lock then.
-fn save_before_undo(ctx: &Ctx, repo: &Repo, line: &Line, in_place: bool) -> Result<Option<String>> {
-    if !in_place {
-        return repo.working_state(ctx, line, "before undo");
+fn save_before_undo(
+    leases: &crate::store::LineLeaseSet,
+    locked: Option<&crate::store::LockedProject<'_>>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+) -> Result<Option<String>> {
+    if let Some(locked) = locked {
+        return repo.working_state(locked, ctx, line, "before undo");
     }
     repo.prepare_save(line)?;
-    let _commit = repo.p.lock()?;
-    repo.working_state(ctx, line, "before undo")
+    let _commit = leases.lock(&repo.p)?;
+    repo.working_state(&_commit, ctx, line, "before undo")
 }
 
 fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let in_place = undo_in_place(repo, r);
     // The lines of the undo, in id order, for their folders. An in-place undo takes the project lock
     // for its checks and its record only; any other undo keeps the project lock for all of it.
-    let mut ids: Vec<&String> = r.lines.keys().collect();
-    ids.sort();
-    let mut _line_locks = Vec::new();
-    for lid in ids {
-        if let Some(l) = repo.p.db.line_by_id(lid)? {
-            _line_locks.push(repo.line_lock(&l)?);
-        }
-    }
-    let _lock = if in_place { None } else { Some(repo.p.lock()?) };
+    let lines = r.lines.keys().map(|id| repo.p.db.line_by_id(id)).collect::<Result<Vec<_>>>()?;
+    let leases = repo.p.line_leases(lines.into_iter().flatten().map(|l| (l.id, l.name)))?;
+    let _lock = if in_place { None } else { Some(leases.lock(&repo.p)?) };
     let mut rec = Record::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // An undo of an automatic save keeps the stage, and so does its undo.
@@ -907,7 +911,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         match (&ch.before, &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
-                wb = save_before_undo(ctx, repo, l, in_place)?;
+                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
                 written.push((l.clone(), wb.clone()));
                 // A name change keeps the folder where it is, as `line rename` does.
                 if b.name != l.name {
@@ -967,7 +971,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
-                wb = save_before_undo(ctx, repo, l, in_place)?;
+                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
                 repo.p.trash(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
@@ -985,13 +989,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     }
     for (name, ol, parent) in &overlay_back {
         let o = repo.overlay_repo(name)?;
-        let _l = o.p.lock()?;
-        crate::overlay::move_overlay_line(&o, ctx, "undo", ol, parent, Vec::new())?;
+        let _l = o.p.lock_maintenance()?;
+        crate::overlay::move_overlay_line(&_l, &o, ctx, "undo", ol, parent, Vec::new())?;
     }
     let done = if in_place {
         let states = rec.states.clone();
         let result = (|| -> Result<Record> {
-            let _commit = repo.p.lock()?;
+            let _commit = leases.lock(&repo.p)?;
             // The heads that the checks saw must still be there: a command that does not take the
             // line lock (line delete, follow, fetch) may have moved one.
             for (lid, before) in &seen {
@@ -1004,7 +1008,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                     _ => {}
                 }
             }
-            repo.commit_record(ctx, rec)
+            repo.commit_record(&_commit, ctx, rec)
         })();
         match result {
             Ok(done) => done,
@@ -1017,7 +1021,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             }
         }
     } else {
-        repo.commit_record(ctx, rec)?
+        repo.commit_record(_lock.as_ref().ok_or_else(|| anyhow::anyhow!("missing undo lock"))?, ctx, rec)?
     };
     for line in &stage_drops {
         repo.drop_stage(line)?;
@@ -1077,8 +1081,8 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let data = super::work::read_caller_file(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("-"), 512 << 20)?;
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
-        let _lock = h.repo.p.lock()?;
-        let n = h.repo.p.import_lines(&lines, crate::store::Trust::Known)?;
+        let _lock = h.repo.p.lock_maintenance()?;
+        let n = _lock.import_lines(&lines, crate::store::Trust::Known)?;
         outln!(ctx, "imported {n} new record(s) of {}", lines.len());
         return Ok(0);
     }
@@ -1169,12 +1173,12 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     };
     let view = {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let current = h.line.as_ref().map(|line| repo.line(&line.id)).transpose()?;
         let view = revs::resolve_view(repo, current.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
         repo.check_view_read(ctx, &view)?;
         if !view.layers.is_empty() {
-            repo.save_view(ctx, &view)?;
+            repo.save_view(&_lock, ctx, &view)?;
         }
         view
     };
@@ -1233,12 +1237,12 @@ pub fn run_check_view(
     quiet: bool,
 ) -> Result<i32> {
     {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         repo.require(ctx, "try")?;
         repo.check_view_collected(view)?;
         repo.check_view_read(ctx, view)?;
         if !view.layers.is_empty() {
-            repo.save_view(ctx, view)?;
+            repo.save_view(&_lock, ctx, view)?;
         }
     }
     run_check_in(ctx, repo, &view.shared, argv, command, &[], quiet, false, false, (!view.layers.is_empty()).then_some(view))
@@ -1271,14 +1275,14 @@ fn run_check_in(
             env.push(("LAYR_TRY_VIEW".into(), view.id()?));
         }
         let code = try_command(ctx, repo, state, argv, dir, &env, json)?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let result = serde_json::json!({"command":command,"argv":argv,"exit":code,"seconds":started.elapsed().as_secs_f64()});
         let mut rec = match view {
             Some(view) => super::attest::record_view(repo, view, "check", &serde_json::to_vec(&result)?)?,
             None => super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?,
         };
         rec.data["check"] = result;
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         if !quiet {
             eprintln!("layr: state {} exit {code}", ids::short(state));
         }
@@ -1468,7 +1472,7 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
         }
         let Some(info) = repo.overlay_info(&name)? else { continue };
         let Ok(orepo) = repo.overlay_repo(&name) else { continue };
-        let _lock = orepo.p.lock()?;
+        let _lock = orepo.p.lock_maintenance()?;
         let held = crate::store_remote::cache_store_copies(repo, &orepo, &name, stores)?;
         if held.is_empty() {
             continue;
@@ -1614,7 +1618,7 @@ fn repair_project(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if repo.p.db.records_mark()? != mark {
             if attempts < 3 {
                 continue;
@@ -1626,14 +1630,14 @@ fn repair_project(
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
             let mut rec = Record::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         // Old cache snapshots of states (build output; the states stay).
         let caches = trash_excess_caches(&repo.p)?;
         if !caches.is_empty() {
             let mut rec = Record::new("gc");
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
@@ -1782,7 +1786,7 @@ fn cache_garbage(repo: &Repo) -> Result<(usize, u64)> {
 
 /// `cache_garbage`, with a line for each kind to `say`.
 fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize, u64)> {
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let (mut states, mut bytes) = (0usize, 0u64);
     for name in repo.overlay_names()? {
         if !repo.limited_history(&name)? {
@@ -1911,7 +1915,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // rows that differ from that read change, and only while the disk still agrees with it: the row
     // of a layer made since stays, a row is removed only while its layer is still not on disk.
     if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
-        let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
+        let _lock = h.repo.p.lock_or_borrow()?;
         let rows = h.repo.p.db.bases_rows()?;
         let set: BTreeMap<String, String> = disk_bases
             .iter()
@@ -1979,7 +1983,7 @@ use crate::owners::TREE_OWNERS;
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
 fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
+    let _lock = (!dry).then(|| repo.p.lock_maintenance()).transpose()?;
     let freed = drop_built_imports(repo, dry)?;
     if !dry && !freed.is_empty() {
         repo.prune_all_bases()?;
@@ -2060,7 +2064,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     repo.require(ctx, "fsck")?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut problems = 0;
     let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     if ic != "ok" {
@@ -2270,8 +2274,8 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
 pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "fsck")?;
-    let _lock = h.repo.p.lock()?;
-    h.repo.p.rebuild_index()?;
+    let _lock = h.repo.p.lock_maintenance()?;
+    _lock.rebuild_index()?;
     // Layer bases exist on APFS only: elsewhere the table stays empty.
     #[cfg(target_os = "macos")]
     h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
@@ -2283,8 +2287,8 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
             let Ok(o) = h.repo.overlay_project(&name) else {
                 continue;
             };
-            let _l = o.lock()?;
-            o.rebuild_index()?;
+            let _l = o.lock_maintenance()?;
+            _l.rebuild_index()?;
             let n: i64 = o.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
             outln!(ctx, "overlay {name}: index rebuilt from {n} records");
         }
@@ -2439,19 +2443,19 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let dir = p.dir.clone();
     let repo = Repo { p, ctx: Some(ctx) };
     // The last step of every path: the line of the new state. Runs under the project lock.
-    let finish = |state: String| -> Result<(Line, String)> {
-        let l = repo.create_line(ctx, &line_name, &state, owner)?;
+    let finish = |locked: &crate::store::LockedProject<'_>, state: String| -> Result<(Line, String)> {
+        let l = repo.create_line(locked, ctx, &line_name, &state, owner)?;
         Ok((l, state))
     };
     let res = (|| -> Result<(Line, String)> {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
         btrfs::create_subvolume(&work)?;
         let cleanup = crate::repo::Temp { path: work.clone() };
         let mut parents = Vec::new();
         let mut msg = a.get("-m").unwrap_or("initial state").to_string();
         if let Some(url) = a.get("--git") {
-            set_config(ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
+            set_config(&_lock, ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
             let refs = crate::gitbridge::fetch(ctx, &repo, "origin")?;
             let branch = a.get("-b").map(|s| s.to_string()).or_else(|| default_branch(&repo)).unwrap_or_else(|| "main".into());
             let state = refs
@@ -2459,11 +2463,11 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"))?;
             // The line starts at this commit: its tree is built now (the others are built on read).
             crate::gitbridge::build_tree(&repo, &st, None)?;
             drop(cleanup);
-            return finish(st);
+            return finish(&_lock, st);
         }
         if let Some(from) = a.get("--from") {
             let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
@@ -2475,9 +2479,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     .ok()
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .filter(|s| !s.is_empty());
-                set_config(ctx, &repo, "remote.local.url", serde_json::json!(src.to_string_lossy()))?;
+                set_config(&_lock, ctx, &repo, "remote.local.url", serde_json::json!(src.to_string_lossy()))?;
                 if let Some(u) = &url {
-                    set_config(ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
+                    set_config(&_lock, ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
                 }
                 let refs = crate::gitbridge::fetch(ctx, &repo, "local")?;
                 let head = caller_git(ctx, &src, &["rev-parse", "HEAD"])?;
@@ -2504,7 +2508,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let _t2 = crate::repo::Temp { path: tmp.clone() };
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
                     let snap = repo.temp_snapshot(&tmp, true)?;
-                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
+                    let (st, _) =
+                        crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"))?;
                     // The line starts at the HEAD commit: its tree is built now, from the folder copy.
                     crate::gitbridge::build_tree(&repo, &st, Some(&snap.path))?;
                     parents.push(st.clone());
@@ -2556,7 +2561,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     changed |= !copies.is_empty() || !directories.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);
-                        return finish(st);
+                        return finish(&_lock, st);
                     }
                     msg = "unsaved changes of the imported folder".into();
                 } else {
@@ -2569,9 +2574,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
         let mut rec = Record::new("commit");
         rec.states.push(st.clone());
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         drop(cleanup);
-        finish(st.id)
+        finish(&_lock, st.id)
     })();
     let (l, state) = match res {
         Ok(x) => x,
@@ -2699,16 +2704,16 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let w = repo.working(&line);
     let tracking = crate::gitbridge::fetch_tracking(ctx, &repo, &src, "origin").unwrap_or_default();
     if !local.is_empty() {
-        set_config(ctx, &repo, "ignore.local", serde_json::json!(local))?;
+        set_config(&repo.p.lock_maintenance()?, ctx, &repo, "ignore.local", serde_json::json!(local))?;
         let exclude = w.join(crate::ignore_rules::LOCAL_EXCLUDE);
         if exclude.parent().is_some_and(|p| p.is_dir()) {
             std::fs::write(&exclude, local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
         }
     }
     // The folder of the `local` remote is the kept checkout.
-    set_config(ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
+    set_config(&repo.p.lock_maintenance()?, ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
     if !caches.is_empty() {
-        set_config(ctx, &repo, "regenerable", serde_json::json!(caches))?;
+        set_config(&repo.p.lock_maintenance()?, ctx, &repo, "regenerable", serde_json::json!(caches))?;
         for c in &caches {
             let dst = w.join(c);
             if let Some(parent) = dst.parent() {
@@ -2966,9 +2971,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     if let Some(k) = a.get("--unset") {
-        set_config(ctx, repo, k, serde_json::Value::Null)?;
+        set_config(&_lock, ctx, repo, k, serde_json::Value::Null)?;
         return Ok(0);
     }
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
@@ -2998,7 +3003,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
             crate::store::check_name("line", name)?;
         }
     }
-    set_config(ctx, repo, k, val)?;
+    set_config(&_lock, ctx, repo, k, val)?;
     if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
@@ -3038,10 +3043,10 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("invalid person login");
             }
             layr_store::person::verifying_key(&rest[1])?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut pins = repo.p.config_value("person.keys")?.unwrap_or_else(|| serde_json::json!({}));
             pins[login] = serde_json::json!(rest[1]);
-            set_config(ctx, repo, "person.keys", pins)?;
+            set_config(&_lock, ctx, repo, "person.keys", pins)?;
             outln!(ctx, "pinned person {login}");
             Ok(0)
         }
@@ -3077,7 +3082,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "grant" | "revoke" | "deny" | "allow" => {
             repo.require(ctx, "access")?;
             let k = principal(rest.first())?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let pol = repo.policy();
             match sub {
                 "grant" => {
@@ -3090,21 +3095,21 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             // A role for a time adds to the principal's role and ends by itself.
                             let d = rest.get(i + 1).ok_or_else(|| exit(128, "usage: --until <30m|2h|1d>"))?;
                             pol.grants.insert(k, (role, ids::now_ms() + duration_ms(d)?));
-                            set_config(ctx, repo, "grants", pol.grants_json())?;
+                            set_config(&_lock, ctx, repo, "grants", pol.grants_json())?;
                         }
                         None => {
                             pol.access.insert(k, role);
-                            set_config(ctx, repo, "access", pol.access_json())?;
+                            set_config(&_lock, ctx, repo, "access", pol.access_json())?;
                         }
                     }
                 }
                 "revoke" => {
                     let mut pol = pol.clone();
                     if pol.grants.remove(&k).is_some() {
-                        set_config(ctx, repo, "grants", pol.grants_json())?;
+                        set_config(&_lock, ctx, repo, "grants", pol.grants_json())?;
                     }
                     pol.access.remove(&k);
-                    set_config(ctx, repo, "access", pol.access_json())?;
+                    set_config(&_lock, ctx, repo, "access", pol.access_json())?;
                 }
                 _ => {
                     let actions: Vec<String> = rest[1..].to_vec();
@@ -3131,7 +3136,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     if e.is_empty() {
                         d.remove(&k);
                     }
-                    set_config(ctx, repo, "deny", serde_json::to_value(d)?)?;
+                    set_config(&_lock, ctx, repo, "deny", serde_json::to_value(d)?)?;
                 }
             }
             crate::gitbridge::sync_store_access(repo)?;
@@ -3185,10 +3190,10 @@ fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) 
         }
     }
     {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let mut record = Record::new("trust.delegate");
         record.data = data.clone();
-        repo.p.append(record, &ctx.actor())?;
+        _lock.append(record, &ctx.actor())?;
     }
     if a.has("--json") {
         outln!(ctx, "{data}");
@@ -3215,7 +3220,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("--withdraw and --declassify cannot be combined");
     }
     let s = repo.state(&state)?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let withdraw = a.has("--withdraw");
     let mut rec = match a.get("--declassify") {
         Some(scope) => crate::secrets::declassify(ctx, repo, scope, &state)?,
@@ -3229,7 +3234,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some("approval")
         )?);
     }
-    let rec = repo.commit_record(ctx, rec)?;
+    let rec = repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", rec.data);
     } else if !a.has("-q") {
@@ -3342,7 +3347,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("ref protection does not accept --direct, --no-direct, --rewrite, --path, --owner or --keep-approvals");
     }
     repo.require(ctx, "access")?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut all = repo.policy().protect;
     if a.has("--remove") {
         all.remove(&pattern);
@@ -3422,7 +3427,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         all.insert(pattern, r);
     }
-    set_config(ctx, repo, "protect", serde_json::to_value(all)?)?;
+    set_config(&_lock, ctx, repo, "protect", serde_json::to_value(all)?)?;
     Ok(0)
 }
 
@@ -3515,7 +3520,7 @@ pub fn keep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if names.is_empty() && !a.has("--all") {
                 return Err(exit(2, "usage: layr keep drop <name>... | --all"));
             }
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut missing = Vec::new();
             for name in &names {
                 if !repo.p.db.keep_drop(&line.id, name)? {

@@ -630,7 +630,7 @@ fn restore_one(
 /// when the state was there already (`stage` stays for the caller to delete).
 pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stage: &Path, transid: u64) -> Result<bool> {
     let id = &state.id;
-    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let _lock = repo.p.lock_or_borrow()?;
     let destination = repo.p.state_path(id);
     if destination.exists() {
         repo.p.db.set_present(id, true)?;
@@ -758,7 +758,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     }
     let count;
     {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
         // the key that the writer registered; local machine trust is not asked and does not grow
         // (docs/cloud-rfc.md 7.0). Each writer key is pinned per remote on first sight.
@@ -772,7 +772,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         } else {
             crate::store::Trust::Known
         };
-        count = repo.p.import_lines(&records.lines, trust)?;
+        count = _lock.import_lines(&records.lines, trust)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -1007,7 +1007,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
             if repo.p.db.trusted(machine)?.is_none() {
                 let mut record = Record::new("machine.trust");
                 record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
-                repo.commit_record(ctx, record)?;
+                repo.commit_record(&repo.p.lock_maintenance()?, ctx, record)?;
             }
         }
         // A Private or Public store has no vault key, so there is nothing to seal in a slot.

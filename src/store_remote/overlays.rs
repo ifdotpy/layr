@@ -596,7 +596,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             _ => None,
         };
-        let lock = orepo.p.lock()?;
+        let lock = orepo.p.lock_maintenance()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
             authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
@@ -653,7 +653,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             };
             let mut record = Record::new("overlay.key");
             record.data = serde_json::to_value(&key)?;
-            let record = orepo.p.append(record, &ctx.actor())?;
+            let record = lock.append(record, &ctx.actor())?;
             let line = orepo.p.db.record_line(&record.machine, record.seq)?.context("overlay key record missing")?;
             Published { key, record, line }
         } else {
@@ -665,7 +665,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 published.key.access_mode = access_mode;
                 let mut record = Record::new("overlay.key");
                 record.data = serde_json::to_value(&published.key)?;
-                published.record = orepo.p.append(record, &ctx.actor())?;
+                published.record = lock.append(record, &ctx.actor())?;
                 published.line = orepo
                     .p
                     .db
@@ -1185,12 +1185,19 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             )?;
             // An epoch includes the complete log, so a new reader needs no older layer identity.
             if op.id.is_empty() {
-                op.import_lines(&lines, crate::store::Trust::All)?;
+                op.lock_maintenance()?.import_lines(&lines, crate::store::Trust::All)?;
                 op.reload_id()?;
             }
             let mut orepo = Repo { p: op, ctx: None };
             for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
-                crate::machine_trust::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
+                crate::machine_trust::trust(
+                    &orepo.p.lock_maintenance()?,
+                    ctx,
+                    &orepo.p,
+                    machine,
+                    &hex::encode(key.to_bytes()),
+                    None,
+                )?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
             let opts = &fetch_selection(repo, &name, opts)?;

@@ -1281,6 +1281,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
         let project = crate::store::Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: dir.clone(),
@@ -1289,7 +1290,7 @@ mod tests {
         };
         let mut record = Record::new("project");
         record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
-        project.append(record, &ctx.actor()).unwrap();
+        project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let mut source = None;
         let mut cache = String::new();
         for kind in ["commit", "auto", "derived", "cache"] {
@@ -1304,7 +1305,7 @@ mod tests {
             .unwrap();
             let mut record = Record::new("state");
             record.states.push(state);
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "commit" {
                 source = Some(id);
                 continue;
@@ -1321,7 +1322,7 @@ mod tests {
             );
             let mut record = Record::new("ref.set");
             record.data = serde_json::json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id}}});
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "cache" {
                 cache = id;
             }
@@ -1346,6 +1347,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
         let project = crate::store::Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: dir.clone(),
@@ -1355,7 +1357,7 @@ mod tests {
         if !existing {
             let mut record = Record::new("project");
             record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             let mut parents = Vec::<String>::new();
             let mut first = None;
             for n in 0..4 {
@@ -1379,7 +1381,7 @@ mod tests {
                 .unwrap();
                 let mut record = Record::new("state");
                 record.states.push(state);
-                project.append(record, &ctx.actor()).unwrap();
+                project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
                 if n == 0 {
                     first = Some(id.clone());
                 }

@@ -245,7 +245,7 @@ pub fn apply(
             report(json!({"id":id,"status":"ignored"}))?;
             return Ok(true);
         }
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let (bytes, epoch, identity) = backend.request_object(&object.key, &identity)?;
         let hash = digest(&bytes);
         let claim = claim(ctx, repo, backend, id)?;
@@ -290,7 +290,7 @@ pub fn apply(
             "INSERT OR REPLACE INTO request_outcomes(id,digest) VALUES(?1,?2)",
             rusqlite::params![id, serde_json::to_string(&hash)?],
         )?;
-        let record = repo.p.append(record, &actor)?;
+        let record = _lock.append(record, &actor)?;
         report(json!({"id":id,"status":status,"record":record.id,"reason":record.data.get("reason")}))?;
         Ok(true)
     })?;
@@ -493,6 +493,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let repo = Repo {
             p: crate::store::Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -506,7 +507,7 @@ mod tests {
         record.data = json!({"id":repo.p.id,"name":"p","config":{
             "person.keys":{"ann@example.com":hex::encode(key.verifying_key().to_bytes())}
         }});
-        repo.p.append(record, &ctx.actor()).unwrap();
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let identity = layr_store::keys::generate_identity();
         let recipient = layr_store::keys::recipient_of(&identity).unwrap();
         let request = Request::new(

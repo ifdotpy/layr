@@ -89,10 +89,10 @@ pub fn overlay_remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else {
                 serde_json::Value::Null
             };
-            let _lock = orepo.p.lock()?;
+            let _lock = orepo.p.lock_maintenance()?;
             let mut rec = Record::new("config");
             rec.data = serde_json::json!({"config": {format!("overlay.{overlay}.git.{name}"): value}});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&_lock, ctx, rec)?;
             Ok(0)
         }
         _ => Err(exit(128, USAGE)),
@@ -193,7 +193,7 @@ fn overlay_head(repo: &Repo, line: &Line, name: &str) -> Result<Option<String>> 
 /// Export the history of an overlay state to its git store and push it to `url` `branch`.
 fn push_overlay_git(ctx: &Ctx, repo: &Repo, name: &str, remote: &OverlayRemote, state: &str, branch: &str) -> Result<String> {
     let orepo = repo.overlay_repo(name)?;
-    let _lock = orepo.p.lock()?;
+    let _lock = orepo.p.lock_maintenance()?;
     gitbridge::init_store(&orepo)?;
     let (commit, made) = gitbridge::export_history(&orepo, state)?;
     let commits: serde_json::Map<String, serde_json::Value> =
@@ -201,11 +201,11 @@ fn push_overlay_git(ctx: &Ctx, repo: &Repo, name: &str, remote: &OverlayRemote, 
     let eid = ids::new_id();
     let mut rec = Record::new("export");
     rec.data = serde_json::json!({"export": eid, "state": state, "remote": remote.name, "branch": branch, "commit": commit, "commits": commits, "status": "prepared"});
-    orepo.commit_record(ctx, rec)?;
+    orepo.commit_record(&_lock, ctx, rec)?;
     gitbridge::push(ctx, &orepo, &remote.url, &commit, branch, false)?;
     let mut rec = Record::new("export");
     rec.data = serde_json::json!({"export": eid, "state": state, "remote": remote.name, "branch": branch, "commit": commit, "status": "pushed"});
-    orepo.commit_record(ctx, rec)?;
+    orepo.commit_record(&_lock, ctx, rec)?;
     Ok(commit)
 }
 

@@ -38,7 +38,7 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(file) => super::work::read_caller_file(ctx, file, 8 << 20)?,
         None => Vec::new(),
     };
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let mut rec = record_subject(&h.repo, subject.clone(), kind, &payload)?;
     if kind == "revoke" {
         // A revoke takes the attestations of its own user; root speaks for every user of this machine
@@ -54,7 +54,7 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         rec.data["revokes"] = serde_json::json!(ids);
     }
-    let rec = h.repo.commit_record(ctx, rec)?;
+    let rec = h.repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", rec.data["attestation"]);
     } else {

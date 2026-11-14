@@ -301,9 +301,9 @@ impl OverlayMerge {
     fn record(&self, ctx: &Ctx, repo: &Repo, line_id: &str) -> Result<()> {
         for (name, ol, head, st) in &self.moves {
             let o = repo.overlay_repo(name)?;
-            let _lock = o.p.lock()?;
+            let _lock = o.p.lock_maintenance()?;
             match ol {
-                Some(ol) => crate::overlay::move_overlay_line(&o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
+                Some(ol) => crate::overlay::move_overlay_line(&_lock, &o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
                 None => anyhow::bail!("line {line_id} has no line in overlay '{name}'"),
             }
         }
@@ -383,8 +383,8 @@ fn plan_overlays(
             }
             // The line of this line on the overlay, made at the state that this line shows when missing.
             let ol = {
-                let _lock = o.p.lock()?;
-                o.ensure_overlay_line(ctx, &info, line, &ours_s)?
+                let _lock = o.p.lock_maintenance()?;
+                o.ensure_overlay_line(&_lock, ctx, &info, line, &ours_s)?
             };
             let write_line = ol.clone();
             let ol = Some(ol);
@@ -561,6 +561,7 @@ impl Drop for Pending<'_> {
 /// head and the write of the folder come before it, and a failed commit writes the folder back.
 #[allow(clippy::too_many_arguments)]
 fn finish(
+    leases: &crate::store::LineLeaseSet,
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
@@ -623,7 +624,7 @@ fn finish(
     // The states of the record include the snapshot of the working folder after the move.
     pending.states = rec.states.clone();
     drop(record);
-    let view = repo.commit_line(line, &line.head, |now| {
+    let view = repo.commit_line(leases, line, &line.head, |locked, now| {
         if let Some(q) = queue {
             rec.data =
                 super::queue::complete_data(repo, q.entry, new_head, q.attempts, q.probes.borrow().clone(), rec.data.clone())?;
@@ -638,7 +639,7 @@ fn finish(
         if let Some(o) = ovl.filter(|o| o.changed()) {
             o.record(ctx, repo, &line.id)?;
         }
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(locked, ctx, rec)?;
         Ok(())
     });
     if let Err(e) = view {
@@ -1178,7 +1179,7 @@ fn checks_unlocked(
     settled: &Settled<'_>,
     quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
-    held: &mut Option<crate::store::LineLock>,
+    held: &mut Option<crate::store::LineLeaseSet>,
 ) -> Result<std::collections::BTreeSet<String>> {
     held.take();
     run_line_checks(ctx, repo, line, head, candidate, settled, quiet, queue)?;
@@ -1304,7 +1305,7 @@ fn caches_only(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, quiet: bool) -> R
     // A plain fetch takes only the records of a cache overlay: the caches of the line come now from the store remote,
     // before the lock.
     crate::store_remote::fetch_caches_on_demand(ctx, repo, &theirs.head, Some(&theirs), quiet);
-    let lock = repo.p.lock()?;
+    let lock = repo.p.lock_maintenance()?;
     let line = repo.line(&line.id)?;
     if let Some(rule) = repo.policy().rule_for(&line.name) {
         if !merge_met_rule(repo, &rule, &line.head, &line.head, &theirs.head)? {
@@ -1684,8 +1685,8 @@ fn merge_rev_inner(
     let rule = repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     // The automatic save of the working folder is a record: its project lock covers that one step.
     let w = {
-        let _commit = repo.p.lock()?;
-        repo.working_state(ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?
+        let _commit = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
+        repo.working_state(&_commit, ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })?
     };
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     let settled = Settled {
@@ -1722,6 +1723,7 @@ fn merge_rev_inner(
                 checks_unlocked(ctx, repo, line, &head, &head, &settled, true, queue, &mut held)?;
             }
             finish(
+                held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
                 ctx,
                 repo,
                 line,
@@ -1794,6 +1796,7 @@ fn merge_rev_inner(
         }
         // Only the overlays changed: the shared set stays.
         finish(
+            held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
             ctx,
             repo,
             line,
@@ -1833,6 +1836,7 @@ fn merge_rev_inner(
             local = checks_unlocked(ctx, repo, line, &head, &theirs, &settled, quiet, queue, &mut held)?;
         }
         finish(
+            held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
             ctx,
             repo,
             line,
@@ -1890,6 +1894,7 @@ fn merge_rev_inner(
             verify_candidate(queue, &sid)?;
             local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
             finish(
+                held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
                 ctx,
                 repo,
                 line,
@@ -1972,7 +1977,11 @@ fn merge_rev_inner(
         if queue.is_some_and(|q| q.candidate_only) {
             rec.data["commands_disabled"] = serde_json::json!(true);
         }
-        if let Err(e) = repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+        if let Err(e) =
+            repo.commit_line(held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?, line, &head, |locked, _| {
+                repo.commit_record(locked, ctx, rec).map(|_| ())
+            })
+        {
             crate::repo::discard_unrecorded(repo, &states);
             ovl.discard(repo);
             return Err(e);
@@ -1986,6 +1995,7 @@ fn merge_rev_inner(
         local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
     }
     finish(
+        held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
         ctx,
         repo,
         line,
@@ -2131,6 +2141,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             let sid = state.id.clone();
             let n = out.conflicts.len();
             finish(
+                &_line_lock,
                 ctx,
                 repo,
                 &line,
@@ -2353,7 +2364,7 @@ fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool)
         }
     };
     let all_states = rec.states.clone();
-    if let Err(e) = repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+    if let Err(e) = repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())) {
         let _ = undo_work();
         crate::repo::discard_unrecorded(repo, &all_states);
         return Err(e);
@@ -2474,7 +2485,8 @@ fn replay_locked(
             target_line: target_line.clone(), target_head: onto.clone(),
         }});
         let step_states = rec.states.clone();
-        if let Err(e) = repo.commit_line(&line, &head0, |_| repo.commit_record(ctx, rec).map(|_| ())) {
+        if let Err(e) = repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ()))
+        {
             crate::repo::discard_unrecorded(repo, &step_states);
             return Err(e);
         }
@@ -2483,6 +2495,7 @@ fn replay_locked(
     }
     let local = st.local_paths();
     finish(
+        &_line_lock,
         ctx,
         repo,
         &line,
@@ -2533,6 +2546,7 @@ mod approval_tests {
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         let project_id = crate::ids::new_id();
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: project_dir.clone(),
@@ -2541,7 +2555,7 @@ mod approval_tests {
         };
         let mut creation = Record::new("project");
         creation.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
-        p.append(creation, &ctx.actor()).unwrap();
+        p.lock_maintenance().unwrap().append(creation, &ctx.actor()).unwrap();
         let state = |kind, parents| StateRec {
             id: crate::ids::new_id(),
             kind,
@@ -2573,10 +2587,10 @@ mod approval_tests {
         let mut record = Record::new("state");
         // A forward parent reference can arrive before the parent's record during import.
         record.states = vec![base.clone(), source.clone(), ordinary.clone()];
-        p.append(record, &ctx.actor()).unwrap();
+        p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let mut record = Record::new("state");
         record.states = vec![derived.clone()];
-        p.append(record, &ctx.actor()).unwrap();
+        p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let repo = Repo { p, ctx: None };
         let line = Line {
             id: crate::ids::new_id(),

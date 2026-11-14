@@ -447,8 +447,8 @@ fn backend(root: &Path, peer: u32, query: Query) -> Result<Reply> {
                     Err(_) => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
                 let source_line = repo.p.db.line_by_name(&revision)?;
-                let _lock = repo.p.lock()?;
-                let e = match super::export(&ctx, &repo, &state, source_line.as_ref(), Some(&runnable)) {
+                let _lock = repo.p.lock_maintenance()?;
+                let e = match super::export(&_lock, &ctx, &repo, &state, source_line.as_ref(), Some(&runnable)) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("layr registry: export failed: {e:#}");

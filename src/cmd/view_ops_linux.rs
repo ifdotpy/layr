@@ -24,7 +24,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("run this command outside the line's folder: its view changes");
     }
     let _line_lock = repo.line_lock(&line)?;
-    let _lock = repo.p.lock()?;
+    let _lock = _line_lock.lock(&repo.p)?;
     let line = repo.line(&line.id)?;
     recover_move(repo, &line)?;
     let hidden = dir(repo, &line.id).join("tree");

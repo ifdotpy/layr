@@ -245,10 +245,6 @@ fn missing_lines(p: &Project, peer: &BTreeMap<String, u64>) -> Result<Vec<String
 }
 
 /// Check and store records from the peer.
-fn take_lines(p: &Project, lines: &[String], trust: Trust) -> Result<usize> {
-    p.import_lines(lines, trust)
-}
-
 fn own_key(p: &Project) -> String {
     hex::encode(p.store.machine.key.verifying_key().to_bytes())
 }
@@ -436,7 +432,7 @@ fn receive_one<R: Read, W: Write>(
 }
 
 fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) -> Result<usize> {
-    let _lock = p.lock()?;
+    let _lock = p.lock_maintenance()?;
     let mut n = 0;
     loop {
         let v = w.recv_json()?;
@@ -549,13 +545,13 @@ pub fn exchange(
         // The admin chose this peer: its records are taken, and after they passed the checks its
         // machine is trusted from now on.
         let got_records = {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             if direction == "push" && !lines.is_empty() {
                 bail!("the peer sent records during push");
             }
-            let n = take_lines(&repo.p, &lines, Trust::Peer(&peer.0, &peer.1))?;
+            let n = _lock.import_lines(&lines, Trust::Peer(&peer.0, &peer.1))?;
             if direction != "push" && !peer.0.is_empty() && repo.p.db.machine_key(&peer.0)?.as_deref() == Some(peer.1.as_str()) {
-                trust(ctx, &repo.p, &peer.0, &peer.1, None)?;
+                trust(&_lock, ctx, &repo.p, &peer.0, &peer.1, None)?;
             }
             n
         };
@@ -702,9 +698,11 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     {
         // A new replica trusts the machines of the project it copies; an existing one only takes
         // records of machines it trusts.
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let bootstrap = !exists;
-        let taken = take_lines(&repo.p, &lines, if bootstrap { Trust::All } else { Trust::Known }).and_then(|n| {
+        let imported = _lock.import_lines(&lines, if bootstrap { Trust::All } else { Trust::Known });
+        drop(_lock);
+        let taken = imported.and_then(|n| {
             if repo.p.id.is_empty() {
                 repo.p.reload_id()?;
             }
@@ -716,15 +714,15 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         });
         if let Err(e) = taken {
             if bootstrap {
-                drop(_lock);
                 let _ = std::fs::remove_dir_all(&repo.p.dir);
             }
             let _ = w.json(&json!({"op": "error", "message": e.to_string()}));
             return Err(e);
         }
         if bootstrap {
+            let _lock = repo.p.lock_maintenance()?;
             for (m, k) in repo.p.machine_keys_of(&lines) {
-                trust(ctx, &repo.p, &m, &k, None)?;
+                trust(&_lock, ctx, &repo.p, &m, &k, None)?;
             }
         }
     }
@@ -907,18 +905,20 @@ fn exchange_overlays<R: Read, W: Write>(
                         bail!("overlay record belongs to another project");
                     }
                 }
-                let _lock = project.lock()?;
+                let _lock = project.lock_maintenance()?;
                 let bootstrap = project.id.is_empty();
                 // Parent trust is checked above, before the overlay's first project record exists.
-                project.import_lines(&lines, Trust::All)?;
+                _lock.import_lines(&lines, Trust::All)?;
+                drop(_lock);
                 if bootstrap {
                     project.reload_id()?;
                 }
                 if project.id != id {
                     bail!("overlay project id differs");
                 }
+                let _lock = project.lock_maintenance()?;
                 for (machine, key) in &trusted {
-                    trust(ctx, &project, machine, &hex::encode(key.to_bytes()), None)?;
+                    trust(&_lock, ctx, &project, machine, &hex::encode(key.to_bytes()), None)?;
                 }
                 drop(_lock);
                 w.json(&json!({"op":"overlay.ready"}))?;
@@ -964,16 +964,16 @@ mod tests {
         let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap(), ctx: None };
         let mut ids = Vec::new();
         for (kind, name) in [(StateKind::Cache, "caches/peer"), (StateKind::Derived, "derived/peer")] {
-            let _lock = repo.p.lock().unwrap();
+            let _lock = repo.p.lock_maintenance().unwrap();
             let mut state = repo.new_state(&ctx, &source, kind, vec![], "peer fixture", None).unwrap();
             state.context = Some("peer-fixture-v1".into());
             let id = state.id.clone();
             let mut rec = Record::new("fixture");
             rec.states.push(state);
-            repo.commit_record(&ctx, rec).unwrap();
+            repo.commit_record(&_lock, &ctx, rec).unwrap();
             let mut rec = Record::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id,"expires_at":null}}});
-            repo.commit_record(&ctx, rec).unwrap();
+            repo.commit_record(&_lock, &ctx, rec).unwrap();
             ids.push(id);
         }
         drop(repo);
@@ -1014,6 +1014,7 @@ mod tests {
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         std::fs::create_dir(project_dir.join("states")).unwrap();
         let p = Project {
+            lease: Default::default(),
             store: &store,
             name: "p".into(),
             dir: project_dir.clone(),
@@ -1023,7 +1024,7 @@ mod tests {
         let actor = crate::model::Actor { uid: 0, name: "root".into(), session: None };
         let mut rec = Record::new("project");
         rec.data = json!({"id":p.id,"name":"p","config":{}});
-        p.append(rec, &actor).unwrap();
+        p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         let mut all: Vec<String> = Vec::new();
         for (index, kind) in
             [StateKind::Auto, StateKind::Auto, StateKind::Auto, StateKind::Cache, StateKind::Derived].into_iter().enumerate()
@@ -1036,7 +1037,7 @@ mod tests {
                 "subvol":"","author":Author::default(),"time":index as i64,"context":"peer-fixture-v1"}))
                 .unwrap(),
             );
-            p.append(rec, &actor).unwrap();
+            p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
             all.push(id);
         }
         for (name, index, expires_at) in
@@ -1044,7 +1045,7 @@ mod tests {
         {
             let mut rec = Record::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":all[index],"expires_at":expires_at}}});
-            p.append(rec, &actor).unwrap();
+            p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         }
         let required = required_states(&p).unwrap();
         assert!(required.contains(&all[0]) && required.contains(&all[1]));

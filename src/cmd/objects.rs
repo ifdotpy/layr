@@ -301,7 +301,7 @@ pub fn repack_store(h: &Here) -> Result<(layr_objects::store::EvictReport, layr_
     let Some(_maintenance) = crate::objstore::maintenance_lock(&h.repo.p, h.repo.p.holds_lock())? else {
         bail!("object maintenance lock unavailable");
     };
-    let lock = (!h.repo.p.holds_lock()).then(|| h.repo.p.lock()).transpose()?;
+    let lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock_maintenance()?) };
     let store = open(h)?;
     let hot = crate::objstore::hot_trees(&h.repo.p, &store)?;
     drop(lock);

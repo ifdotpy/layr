@@ -312,8 +312,8 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
     repo.require(ctx, "try")?;
     shared_outputs(repo, &input.layers)?;
     if !input.layers.is_empty() {
-        let _lock = repo.p.lock()?;
-        repo.save_view(ctx, &input.view())?;
+        let _lock = repo.p.lock_maintenance()?;
+        repo.save_view(&_lock, ctx, &input.view())?;
     }
     let definitions = comparison_definitions(repo, input)?;
     if definitions.is_empty() && source_status(repo, input) != "available" {
@@ -359,7 +359,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             let cleanup = Temp { path: work.clone() };
             collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;
             validate_outputs(&work, &probe)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut state =
                 repo.new_state(ctx, &work, StateKind::Derived, vec![input.state.clone()], &format!("probe {name}"), None)?;
             state.derived_from = Some(input.subject.id.clone());
@@ -390,7 +390,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
                 before: repo.p.db.ref_value(&key, crate::ids::now_ms())?,
                 after: Some(RefState { name: key, target: state.id, expires_at: None }),
             })?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             drop(cleanup);
             Ok(result)
         })?;

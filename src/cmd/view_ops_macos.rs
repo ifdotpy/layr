@@ -35,8 +35,8 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
         repo.discard_states(std::slice::from_ref(&st));
         return Err(error);
     }
-    let moved = repo.commit_line(&line, &line.head, |now| {
-        repo.move_head(ctx, "commit", now, &st.id, vec![st.clone()], None, serde_json::json!({"line": line.id}))
+    let moved = repo.commit_line(&_line_lock, &line, &line.head, |locked, now| {
+        repo.move_head(locked, ctx, "commit", now, &st.id, vec![st.clone()], None, serde_json::json!({"line": line.id}))
     });
     if let Err(e) = moved {
         repo.discard_states(std::slice::from_ref(&st));
@@ -89,7 +89,7 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
             return Err(e);
         }
     }
-    let _lock = repo.p.lock()?;
+    let _lock = _line_lock.lock(&repo.p)?;
     let fresh = repo.line(&l.id)?;
     let last_id = match last {
         Some(st) => {
@@ -98,12 +98,12 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
             rec.data =
                 serde_json::json!({"line": fresh.id, "head": fresh.head, "working_before": before, "working_after": st.id});
             rec.states.push(st.clone());
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             Some(st.id)
         }
         None => None,
     };
-    crate::cmd::branch::delete_recorded(ctx, repo, &fresh, last_id, at.exists())?;
+    crate::cmd::branch::delete_recorded(&_lock, ctx, repo, &fresh, last_id, at.exists())?;
     repo.p.trash(&dir(&repo.p, &fresh.id))?;
     Ok(())
 }
@@ -200,7 +200,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let dst = target.clone().unwrap_or_else(|| at.clone());
     crate::fsutil::rename_tree(&tmp, &dst)?;
     if let Some(p) = &target {
-        let _lock = repo.p.lock()?;
+        let _lock = _line_lock.lock(&repo.p)?;
         repo.p.set_moved_path(&l.id, Some(p))?;
     }
     repo.p.trash(&dir(&repo.p, &l.id))?;

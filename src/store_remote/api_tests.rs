@@ -561,6 +561,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
     std::fs::create_dir_all(dir.join("meta/db")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project = crate::store::Project {
+        lease: Default::default(),
         store: &ctx.store,
         name: "p".into(),
         dir: dir.clone(),
@@ -571,7 +572,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
     // These are plain fixture folders, not read-only native snapshots. Record their v2 objects
     // before publication so API transport tests do not require a privileged Btrfs send.
     record.data = serde_json::json!({"id":PROJECT,"name":"p","config":{"objects.enabled":true}});
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
     let mut states = Vec::new();
     for n in 0..3 {
         let id = crate::ids::new_id();
@@ -589,7 +590,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
         .unwrap();
         let mut record = Record::new("state");
         record.states.push(state);
-        let saved = project.append(record, &ctx.actor()).unwrap();
+        let saved = project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         assert!(saved.states[0].tree.is_some() && saved.states[0].times.is_some(), "the API fixture uses v2 objects");
         states.push(id);
     }
@@ -608,7 +609,7 @@ fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String
     .unwrap();
     let mut record = Record::new("state");
     record.states.push(state);
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
     id
 }
 
@@ -629,7 +630,7 @@ fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name:
         LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
     );
     record.data = serde_json::json!({"name":name});
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
 }
 
 fn push(store: &Store, ctx: &Ctx, repo: &Repo) -> anyhow::Result<super::Report> {
@@ -905,12 +906,13 @@ fn check_first_cache_fetch(
             format!("overlay.{name}"):{"owner":ctx.caller.uid,"root":"target","mode":"follow"},
             format!("overlay.{name}.history"):1,
             format!("overlay.{name}.trust"):"protected"}});
-    repo.p.append(declaration, &ctx.actor()).unwrap();
+    repo.p.lock_maintenance().unwrap().append(declaration, &ctx.actor()).unwrap();
     let dir = ctx.store.project_dir(&format!("p%{name}")).unwrap();
     std::fs::create_dir_all(dir.join("meta/db")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project_id = crate::ids::new_id();
     let cache = crate::store::Project {
+        lease: Default::default(),
         store: &ctx.store,
         name: format!("p%{name}"),
         dir: dir.clone(),
@@ -918,36 +920,23 @@ fn check_first_cache_fetch(
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
     let mut creation = Record::new("project");
-    creation.data =
-        serde_json::json!({"id":project_id,"name":name,"config":{"objects.enabled":true}});
-    cache.append(creation, &ctx.actor()).unwrap();
+    creation.data = serde_json::json!({"id":project_id,"name":name,"config":{"objects.enabled":true}});
+    cache.lock_maintenance().unwrap().append(creation, &ctx.actor()).unwrap();
     let state = crate::ids::new_id();
     std::fs::create_dir(cache.state_path(&state)).unwrap();
-    std::fs::write(
-        cache.state_path(&state).join("unrelated"),
-        random_bytes(300000),
-    )
-    .unwrap();
+    std::fs::write(cache.state_path(&state).join("unrelated"), random_bytes(300000)).unwrap();
     let mut saved = Record::new("commit");
     saved.states.push(serde_json::from_value(serde_json::json!({"id":state,"kind":"commit",
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "cache_of":cache_of.map(str::to_owned).unwrap_or_else(crate::ids::new_id),"cache_by":ctx.caller.uid,"time":crate::ids::now_ms()})).unwrap());
-    cache.append(saved, &ctx.actor()).unwrap();
+    cache.lock_maintenance().unwrap().append(saved, &ctx.actor()).unwrap();
     // The cache is on an overlay line of another line: the overlay line `main` would be main's own cache line.
     move_named_line(&cache, &ctx, &crate::ids::new_id(), "other", None, &state);
     let mut layer = api_store_with(root, ctx, store.backend.api().unwrap().clone());
     layer.backend = layer.backend.scoped(&format!("overlays/{name}")).unwrap();
     layer.project = project_id;
     layer.dir = root.join(format!("layer-remote-{name}"));
-    push(
-        &layer,
-        &ctx,
-        &Repo {
-            p: cache,
-            ctx: None,
-        },
-    )
-    .unwrap();
+    push(&layer, &ctx, &Repo { p: cache, ctx: None }).unwrap();
     std::fs::rename(&dir, root.join(format!("original-{name}"))).unwrap();
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
@@ -1141,8 +1130,8 @@ fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekey
         sign(3, "machine.trust", serde_json::json!({"machine":other,"public_key":hex::encode(third.verifying_key().to_bytes())})),
     ];
     // `Trust::Known` refuses this batch; `Trust::Server` takes it.
-    assert!(repo.p.import_lines(&lines, crate::store::Trust::Known).is_err());
-    assert_eq!(repo.p.import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
+    assert!(repo.p.lock_maintenance().unwrap().import_lines(&lines, crate::store::Trust::Known).is_err());
+    assert_eq!(repo.p.lock_maintenance().unwrap().import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
     assert!(repo.p.db.record_line(machine, 3).unwrap().is_some(), "every record is stored");
     assert_eq!(repo.p.db.trusted(machine).unwrap(), None, "the server's writer is not trusted here");
     assert_eq!(repo.p.db.trusted(other).unwrap(), None, "its trust record has no effect");
@@ -1249,7 +1238,7 @@ fn real_gateway_object_round_trip() {
     let (mut repo, states, line) = project(&ctx);
     let mut config = Record::new("config");
     config.data = serde_json::json!({"config":{"access":{format!("user:{}", ctx.caller.uid):"admin"}}});
-    repo.p.append(config, &ctx.actor()).unwrap();
+    repo.p.lock_maintenance().unwrap().append(config, &ctx.actor()).unwrap();
     let report = store.push(&ctx, &mut repo, &Options::default()).expect("push through the real gateway");
     assert_eq!(report.states, 3);
     let refs = api.refs("", "lines/").unwrap();
@@ -1274,6 +1263,7 @@ fn real_gateway_object_round_trip() {
     std::fs::create_dir_all(dir.join("meta/work")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project = crate::store::Project {
+        lease: Default::default(),
         store: &receiver_ctx.store,
         name: "p".into(),
         dir: dir.clone(),
@@ -1828,14 +1818,25 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
     run_focused(&["--project", "p", "fetch", "origin", "--heads", "--only-line", "main"]);
     run_focused(&["--project", "p", "--line", "main", "ref", "set", "release/v9.9.9", "main"]);
     run_focused(&["--project", "p", "--line", "main", "push", "origin"]);
-    let untrusted = focused(&["--project", "p", "--line", "main", "release", "verify-main", "release/v9.9.9", "--expect", "main"]);
+    let untrusted =
+        focused(&["--project", "p", "--line", "main", "release", "verify-main", "release/v9.9.9", "--expect", "main"]);
     assert!(!untrusted.status.success(), "an untrusted merge machine's release ref was accepted");
-    assert!(String::from_utf8_lossy(&untrusted.stderr).contains("release ref does not exist on the remote"),
-        "unexpected refusal: {}", String::from_utf8_lossy(&untrusted.stderr));
+    assert!(
+        String::from_utf8_lossy(&untrusted.stderr).contains("release ref does not exist on the remote"),
+        "unexpected refusal: {}",
+        String::from_utf8_lossy(&untrusted.stderr)
+    );
     {
         let mut repo = Repo::open(&ctx, "p").unwrap();
-        crate::machine_trust::trust(&ctx, &repo.p, &focused_ctx.store.machine.id,
-            &hex::encode(focused_ctx.store.machine.key.verifying_key().to_bytes()), Some(&serde_json::json!({"role": "merge"}))).unwrap();
+        crate::machine_trust::trust(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo.p,
+            &focused_ctx.store.machine.id,
+            &hex::encode(focused_ctx.store.machine.key.verifying_key().to_bytes()),
+            Some(&serde_json::json!({"role": "merge"})),
+        )
+        .unwrap();
         focused_store.push(&ctx, &mut repo, &Options::default()).unwrap();
     }
     run_focused(&["--project", "p", "fetch", "origin", "--heads", "--only-line", "main"]);
@@ -2194,7 +2195,7 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
         ] {
             let mut config = Record::new("config");
             config.data = serde_json::json!({"config": {key: value}});
-            repo.commit_record(&merger_ctx, config).unwrap();
+            repo.commit_record(&repo.p.lock_maintenance().unwrap(), &merger_ctx, config).unwrap();
         }
     }
     let run_job = |args: &[&str]| {

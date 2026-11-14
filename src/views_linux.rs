@@ -50,8 +50,8 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         let _ = std::fs::remove_dir_all(&vdir);
         return Err(e);
     }
-    let _lock = repo.p.lock()?;
-    match repo.commit_prepared_lines(ctx, prepared) {
+    let _lock = repo.p.lock_maintenance()?;
+    match repo.commit_prepared_lines(&_lock, ctx, prepared) {
         Ok(mut lines) => Ok(lines.remove(0)),
         Err(e) => {
             if repo.p.db.line_by_id(&line.id)?.is_none() {

@@ -47,7 +47,7 @@ fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Stat
             match h.repo.status_report(line) {
                 Ok(st) => st,
                 Err(_) => {
-                    let _lock = h.repo.p.lock()?;
+                    let _lock = h.repo.p.lock_maintenance()?;
                     let line = h.repo.line(&line.id)?;
                     h.repo.status_report(&line)?
                 }
@@ -394,27 +394,28 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// The locks of a command that keeps the project lock for all of its records (`begin_change`).
-/// The line lock is taken first.
-pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
-
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands
 /// whose records are written under the project lock they hold: stash, clean, rm and mv.
-pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(ChangeLocks, Option<String>)> {
+pub fn begin_change<'p>(ctx: &Ctx, repo: &'p Repo<'p>, line: &Line) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
     begin(ctx, repo, line, crate::repo::LineOp::Direct)
 }
 
 /// `begin_change` for another kind of change.
-pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(ChangeLocks, Option<String>)> {
+pub fn begin<'p>(
+    ctx: &Ctx,
+    repo: &'p Repo<'p>,
+    line: &Line,
+    op: crate::repo::LineOp,
+) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
     // The copy of changed files goes before the project lock; under it the save takes it by a rename.
     repo.prepare_save(&line)?;
-    let lock = repo.p.lock()?;
-    let w = repo.working_state(ctx, &line, "before a layr command")?;
-    Ok((ChangeLocks(line_lock, lock), w))
+    let lock = line_lock.into_locked(&repo.p)?;
+    let w = repo.working_state(&lock, ctx, &line, "before a layr command")?;
+    Ok((lock, w))
 }
 
 /// `begin` for a command that writes the working folder or moves the head of the line. It holds the
@@ -425,15 +426,15 @@ pub fn begin_line(
     repo: &Repo,
     line: &Line,
     op: crate::repo::LineOp,
-) -> Result<(crate::store::LineLock, Option<String>)> {
+) -> Result<(crate::store::LineLeaseSet, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
     repo.prepare_save(&line)?;
     let w = {
-        let _commit = repo.p.lock()?;
-        repo.working_state(ctx, &line, "before a layr command")?
+        let _commit = line_lock.lock(&repo.p)?;
+        repo.working_state(&_commit, ctx, &line, "before a layr command")?
     };
     Ok((line_lock, w))
 }
@@ -722,7 +723,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let token = h.repo.index_token(&line)?;
         read(&line)?.map(|r| (token, r))
     };
-    let _lock = h.repo.p.lock()?;
+    let _lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
     let quiet = h.repo.quiet_paths(&line)?;
     #[cfg(target_os = "macos")]
@@ -1382,7 +1383,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         prepared = None;
         return nothing(&h, &line);
     }
-    let lock = h.repo.p.lock()?;
+    let lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
     #[cfg(target_os = "macos")]
     if let Some(np) = &prepared {
@@ -1423,7 +1424,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             Output::Text
         };
-        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
+        return commit_stacked(&lock, ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
@@ -1475,7 +1476,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     // The part of each build-output overlay (docs/overlays.md, section 1a, slice 6): a folder that
     // changed gets a new part saved with this state; the state names the parts.
-    for (overlay, part) in h.repo.save_named_cache_parts(ctx, &line, &state.id) {
+    for (overlay, part) in h.repo.save_named_cache_parts(&lock, ctx, &line, &state.id) {
         state.parts.entry(overlay).or_insert(part);
     }
     // `named_checks` checked the conflicts and the secrets of this content.
@@ -1505,7 +1506,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::failpoint("before-record");
     let rec = {
         let _t = crate::trace::span("move head");
-        h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
+        h.repo.move_head(&lock, ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
     rec?;
     // The history limit of each overlay counts the parts of the new head: a part of the old head
@@ -1614,6 +1615,7 @@ fn print_fds(ctx: &Ctx, fds: &[diff::FileDiff]) {
 /// changed layer (docs/overlays.md, section 3.2).
 #[allow(clippy::too_many_arguments)]
 fn commit_stacked(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &Ctx,
     h: &Here,
     line: &Line,
@@ -1653,10 +1655,11 @@ fn commit_stacked(
         repo.temp_snapshot(&src, true)?
     };
     let summary = out != Output::Quiet;
-    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
-        Some(d) => d,
-        None => return nothing(h, line),
-    };
+    let done =
+        match crate::overlay::commit_layers(locked, ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
+            Some(d) => d,
+            None => return nothing(h, line),
+        };
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
     if out == Output::Json {
@@ -1841,7 +1844,7 @@ pub fn restore_impl(
         if n == 0 {
             return Err(exit(1, "error: no conflict matches the given paths"));
         }
-        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
+        if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
             put_back(repo, &line, w.as_deref());
             return Err(e);
         }
@@ -1916,7 +1919,7 @@ pub fn restore_impl(
         }
     }
     if worktree {
-        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
+        if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
             put_back(repo, &line, w.as_deref());
             return Err(e);
         }
@@ -1925,18 +1928,32 @@ pub fn restore_impl(
 }
 
 /// Record a change of the working content only (for undo). The caller holds the project lock.
-pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+pub fn record_working(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: &str,
+    working_before: Option<String>,
+) -> Result<()> {
     let (rec, _) = working_record(ctx, repo, line, op, working_before)?;
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(locked, ctx, rec)?;
     Ok(())
 }
 
 /// `record_working` for a command that holds the line lock only (restore): the snapshot of the
 /// folder is made first, and the record takes the project lock alone.
-pub fn record_working_checked(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+pub fn record_working_checked(
+    leases: &crate::store::LineLeaseSet,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: &str,
+    working_before: Option<String>,
+) -> Result<()> {
     let (rec, states) = working_record(ctx, repo, line, op, working_before)?;
     let head = line.head.clone();
-    repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
+    repo.commit_line(leases, line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|_| {
         crate::repo::discard_unrecorded(repo, &states);
     })
 }
@@ -1998,7 +2015,7 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     drop(_c);
     let head = line.head.clone();
     let rec = repo.head_record(ctx, "reset", &line, target, vec![], None, serde_json::json!({"mode": "hard"}))?;
-    repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ()))?;
+    repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ()))?;
     repo.after_head_moved(&line, target);
     Ok(true)
 }
@@ -2121,7 +2138,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), data);
     let committed = rec.and_then(|rec| {
         let states = rec.states.clone();
-        repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
+        repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|_| {
             crate::repo::discard_unrecorded(repo, &states);
         })
     });
@@ -2248,7 +2265,7 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         if !targets.is_empty() {
-            record_working(ctx, &h.repo, &line, "clean", w)?;
+            record_working(&_lock, ctx, &h.repo, &line, "clean", w)?;
         }
         Ok(0)
     })();

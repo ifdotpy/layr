@@ -8,7 +8,15 @@ use serde_json::{json, Value};
 
 /// Record that this project trusts a machine's records (its id and key), with `limits` (`expires_at`, `role`,
 /// `overlays`, docs/ci-trust.md) when given.
-pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str, limits: Option<&Value>) -> Result<bool> {
+pub fn trust(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    p: &Project,
+    machine: &str,
+    key: &str,
+    limits: Option<&Value>,
+) -> Result<bool> {
+    locked.check(&p)?;
     if machine == p.store.machine.id {
         return Ok(false);
     }
@@ -29,6 +37,6 @@ pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str, limits: Option<&V
             rec.data[k] = v.clone();
         }
     }
-    p.append(rec, &ctx.actor())?;
+    locked.append(rec, &ctx.actor())?;
     Ok(true)
 }

@@ -7,7 +7,8 @@ use crate::repo::Repo;
 use crate::store::Project;
 use anyhow::Result;
 
-pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+pub fn set_config(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
+    locked.check(&repo.p)?;
     if key == crate::objstore::MaintenanceInterval::KEY && !value.is_null() {
         crate::objstore::MaintenanceInterval::parse(&value)?;
     }
@@ -24,8 +25,8 @@ pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -
                 if info.hidden {
                     let orepo = repo.overlay_repo(name)?;
                     orepo.require(ctx, "access")?;
-                    let _lock = orepo.p.lock()?;
-                    return set_config(ctx, &orepo, key, value);
+                    let _lock = orepo.p.lock_maintenance()?;
+                    return set_config(&_lock, ctx, &orepo, key, value);
                 }
             }
         }
@@ -34,6 +35,6 @@ pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -
     let mut m = serde_json::Map::new();
     m.insert(key.to_string(), value);
     rec.data = serde_json::json!({"config": m});
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(locked, ctx, rec)?;
     Ok(())
 }

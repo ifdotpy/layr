@@ -923,7 +923,7 @@ impl<'a> Repo<'a> {
 
     /// Append a completed named transfer through the normal signed record path.
     pub fn record_transfer(&self, ctx: &Ctx, op: &str, remote: &str, url: &str, transfer: &crate::model::Transfer) -> Result<()> {
-        let _lock = self.p.lock()?;
+        let _lock = self.p.lock_maintenance()?;
         let mut rec = Record::new(op);
         let mut transfer = transfer.clone();
         if !self.p.is_overlay() {
@@ -940,14 +940,15 @@ impl<'a> Repo<'a> {
         if let Some((_, overlay)) = self.p.name.split_once('%') {
             rec.data["overlay"] = serde_json::json!(overlay);
         }
-        self.commit_record(ctx, rec)?;
+        self.commit_record(&_lock, ctx, rec)?;
         Ok(())
     }
 
     /// Write a record. On failure, delete the states it names.
-    pub fn commit_record(&self, ctx: &Ctx, rec: Record) -> Result<Record> {
+    pub fn commit_record(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, rec: Record) -> Result<Record> {
         let states = rec.states.clone();
-        match self.p.append(rec, &ctx.actor()) {
+        locked.check(&self.p)?;
+        match locked.append(rec, &ctx.actor()) {
             Ok(r) => Ok(r),
             Err(e) => {
                 // The record and its rows are one transaction, but COMMIT can fail after the commit
@@ -1065,7 +1066,14 @@ impl<'a> Repo<'a> {
     /// prepared state stays as an automatic state and the state under the lock copies only what
     /// changed since it, as a named save does. A moved head discards the state, and the caller
     /// prepares again. Without a prepared state, the lock makes the working state as before.
-    pub fn record_final_state(&self, ctx: &Ctx, line: &Line, prepared: &mut Option<FinalPrepared>) -> Result<FinalState> {
+    pub fn record_final_state(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        line: &Line,
+        prepared: &mut Option<FinalPrepared>,
+    ) -> Result<FinalState> {
+        locked.check(&self.p)?;
         #[cfg(target_os = "macos")]
         if let Some(pre) = prepared.take() {
             let w = self.working(line);
@@ -1087,9 +1095,9 @@ impl<'a> Repo<'a> {
             let mut rec = Record::new("save");
             rec.states.push(st.clone());
             rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
-            self.commit_record(ctx, rec)?;
+            self.commit_record(locked, ctx, rec)?;
             if !changed {
-                if let Err(e) = self.save_cache_states(ctx, line, &st.id) {
+                if let Err(e) = self.save_cache_states(locked, ctx, line, &st.id) {
                     eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
                 }
                 clear_regenerable_memo();
@@ -1098,7 +1106,7 @@ impl<'a> Repo<'a> {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = prepared;
-        Ok(FinalState::Recorded(self.working_state(ctx, line, "before line delete")?))
+        Ok(FinalState::Recorded(self.working_state(locked, ctx, line, "before line delete")?))
     }
 
     /// Discards a prepared state that is not recorded (a failed command, or moved inputs). Under the
@@ -1112,11 +1120,18 @@ impl<'a> Repo<'a> {
         let _ = prepared;
     }
 
-    pub fn working_state(&self, ctx: &Ctx, line: &Line, message: &str) -> Result<Option<String>> {
+    pub fn working_state(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        line: &Line,
+        message: &str,
+    ) -> Result<Option<String>> {
+        locked.check(&self.p)?;
         if !self.working(line).exists() {
             return Ok(None);
         }
-        Ok(match self.save(ctx, line, message, false, false)? {
+        Ok(match self.save(locked, ctx, line, message, false, false)? {
             Some(s) => Some(s.id),
             None => Some(self.save_base(line)?),
         })
@@ -1283,26 +1298,44 @@ impl<'a> Repo<'a> {
 
     /// Save the working content as an automatic state if it changed since the previous one.
     /// The caller holds the project lock.
-    pub fn save(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+    pub fn save(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        line: &Line,
+        message: &str,
+        running: bool,
+        force: bool,
+    ) -> Result<Option<StateRec>> {
+        locked.check(&self.p)?;
         #[cfg(target_os = "macos")]
         if let Some(view) = crate::views::of(self, line) {
-            return crate::views::save_working(ctx, self, line, &view, message);
+            return crate::views::save_working(locked, ctx, self, line, &view, message);
         }
-        let st = self.save_working(ctx, line, message, running, force)?;
+        let st = self.save_working(locked, ctx, line, message, running, force)?;
         // A cache folder that has no cache overlay state on this line yet gets its first one
         // (the cache of the line, as `save --overlays` makes it). A failure keeps the state.
         let of = match &st {
             Some(s) => s.id.clone(),
             None => self.save_base(line)?,
         };
-        if let Err(e) = self.save_cache_states(ctx, line, &of) {
+        if let Err(e) = self.save_cache_states(locked, ctx, line, &of) {
             eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
         }
         clear_regenerable_memo();
         Ok(st)
     }
 
-    fn save_working(&self, ctx: &Ctx, line: &Line, message: &str, running: bool, force: bool) -> Result<Option<StateRec>> {
+    fn save_working(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        line: &Line,
+        message: &str,
+        running: bool,
+        force: bool,
+    ) -> Result<Option<StateRec>> {
+        locked.check(&self.p)?;
         let _t = crate::trace::span("save working state");
         let w = self.working(line);
         if !w.exists() {
@@ -1407,7 +1440,7 @@ impl<'a> Repo<'a> {
             rec.states.extend(earlier);
             rec.states.push(st.clone());
             rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
-            self.commit_record(ctx, rec)?;
+            self.commit_record(locked, ctx, rec)?;
             return Ok(Some(st));
         }
         let mut st = self.working_snapshot(ctx, line, vec![line.head.clone()], message)?;
@@ -1448,7 +1481,7 @@ impl<'a> Repo<'a> {
         let mut rec = Record::new("save");
         rec.states.push(st.clone());
         rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
-        self.commit_record(ctx, rec)?;
+        self.commit_record(locked, ctx, rec)?;
         Ok(Some(st))
     }
 
@@ -1478,6 +1511,7 @@ impl<'a> Repo<'a> {
     /// and the working folder are the ones it was made from; else the work is done here.
     pub fn caches_state(
         &self,
+        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         line: &Line,
         message: &str,
@@ -1485,6 +1519,7 @@ impl<'a> Repo<'a> {
         caches: &[String],
         prepared: Option<PreparedCaches>,
     ) -> Result<StateRec> {
+        locked.check(&self.p)?;
         let w = self.working(line);
         if !w.exists() {
             if let Some(p) = prepared {
@@ -1517,7 +1552,7 @@ impl<'a> Repo<'a> {
         rec.states.push(st.clone());
         // The working state this record leaves: the next save of the line changes from it.
         rec.data = serde_json::json!({"line": line.id, "working_after": st.id});
-        self.commit_record(ctx, rec)?;
+        self.commit_record(locked, ctx, rec)?;
         Ok(st)
     }
 
@@ -2229,13 +2264,30 @@ impl<'a> Repo<'a> {
     // ----- lines -----
 
     /// Create a line from a state: a writable snapshot at `lines/<name>`.
-    pub fn create_line(&self, ctx: &Ctx, name: &str, start: &str, owner: u32) -> Result<Line> {
-        self.create_line_from(ctx, name, start, owner, None)
+    pub fn create_line(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        name: &str,
+        start: &str,
+        owner: u32,
+    ) -> Result<Line> {
+        locked.check(&self.p)?;
+        self.create_line_from(locked, ctx, name, start, owner, None)
     }
 
     /// Create a line; a line made from another line (`source`) shows the overlays of the source
     /// that its owner reads (docs/overlays.md).
-    pub fn create_line_from(&self, ctx: &Ctx, name: &str, start: &str, owner: u32, source: Option<&Line>) -> Result<Line> {
+    pub fn create_line_from(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        name: &str,
+        start: &str,
+        owner: u32,
+        source: Option<&Line>,
+    ) -> Result<Line> {
+        locked.check(&self.p)?;
         check_name("line", name)?;
         // The start state and its caches (their snapshots go with the state) stay for the command.
         self.hold(self.pin(&[start])?);
@@ -2279,7 +2331,7 @@ impl<'a> Repo<'a> {
                     rec.data["folder_view"] = self.public_view_data(&line.id, &layers)?;
                 }
             }
-            self.p.append(rec, &ctx.actor())
+            locked.append(rec, &ctx.actor())
         })();
         if let Err(e) = res {
             let _ = btrfs::delete_tree(&dst);
@@ -2589,13 +2641,14 @@ impl<'a> Repo<'a> {
 
     /// The first cache state of each cache folder of `line` that has none (`unsaved_cache_layers`),
     /// saved with the automatic state `of`. The caller holds the project lock.
-    fn save_cache_states(&self, ctx: &Ctx, line: &Line, of: &str) -> Result<()> {
+    fn save_cache_states(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, line: &Line, of: &str) -> Result<()> {
+        locked.check(&self.p)?;
         let paths = self.unsaved_cache_layers(line)?;
         if paths.is_empty() {
             return Ok(());
         }
         let shared = self.policy().rule_for(&line.name).is_some();
-        let made = self.save_cache_overlays(ctx, line, &paths, shared, of);
+        let made = self.save_cache_overlays(locked, ctx, line, &paths, shared, of);
         // Copies that no snapshot took (prepared before the lock) go to the trash.
         #[cfg(target_os = "macos")]
         for p in btrfs::take_prepared() {
@@ -2671,7 +2724,13 @@ impl<'a> Repo<'a> {
     /// `of`; the overlay is made for this platform when it is missing (`regenerable`). An unchanged
     /// folder names the part that the line has. Returns the parts for the state record. A failure
     /// is a warning: the named save goes on without that part. The caller holds the project lock.
-    pub fn save_named_cache_parts(&self, ctx: &Ctx, line: &Line, of: &str) -> BTreeMap<String, String> {
+    pub fn save_named_cache_parts(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        line: &Line,
+        of: &str,
+    ) -> BTreeMap<String, String> {
         let mut parts = BTreeMap::new();
         let r = (|| -> Result<()> {
             let overlays = self.named_cache_overlays(line)?;
@@ -2686,7 +2745,7 @@ impl<'a> Repo<'a> {
             }
             if !due.is_empty() {
                 let shared = self.policy().rule_for(&line.name).is_some();
-                let made = self.save_cache_overlays(ctx, line, &due, shared, of);
+                let made = self.save_cache_overlays(locked, ctx, line, &due, shared, of);
                 #[cfg(target_os = "macos")]
                 for p in btrfs::take_prepared() {
                     let _ = self.p.trash(&p);
@@ -2717,6 +2776,7 @@ impl<'a> Repo<'a> {
     /// Move the head of `line` to `new_head` and record it, under the project lock.
     pub fn move_head(
         &self,
+        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         op: &str,
         line: &Line,
@@ -2725,8 +2785,9 @@ impl<'a> Repo<'a> {
         working_before: Option<String>,
         data: serde_json::Value,
     ) -> Result<Record> {
+        locked.check(&self.p)?;
         let rec = self.head_record(ctx, op, line, new_head, states, working_before, data)?;
-        let r = self.commit_record(ctx, rec)?;
+        let r = self.commit_record(locked, ctx, rec)?;
         self.after_head_moved(line, new_head);
         Ok(r)
     }
@@ -2777,11 +2838,11 @@ impl<'a> Repo<'a> {
     /// The lock of `line` for a whole command: it moves the head of the line or writes its working
     /// folder. Take it before anything else, and never under the project lock (store.rs `LineLock`).
     /// Serialize cache builders and cache saves without blocking ordinary head saves.
-    pub fn cache_build_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+    pub fn cache_build_lock(&self, line: &Line) -> Result<crate::store::LineLeaseSet> {
         self.p.line_lock(&format!("{}-cache", line.id), &format!("{} cache", line.name))
     }
 
-    pub fn line_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+    pub fn line_lock(&self, line: &Line) -> Result<crate::store::LineLeaseSet> {
         self.p.line_lock(&line.id, &line.name)
     }
 
@@ -2790,17 +2851,21 @@ impl<'a> Repo<'a> {
     /// The caller holds the line lock, so the head can change only by a command that does not take
     /// it (line delete, follow, fetch). Such a change is refused: nothing is recorded, and the error
     /// names the move. The caller undoes its working folder change.
-    pub fn commit_line<T>(&self, line: &Line, head: &str, commit: impl FnOnce(&Line) -> Result<T>) -> Result<T> {
-        if self.p.holds_lock() {
-            bail!("internal error: line {} committed while the project lock is held", line.name);
-        }
+    pub fn commit_line<T>(
+        &self,
+        leases: &crate::store::LineLeaseSet,
+        line: &Line,
+        head: &str,
+        commit: impl FnOnce(&crate::store::LockedProject<'_>, &Line) -> Result<T>,
+    ) -> Result<T> {
+        leases.require_line(&self.p, &line.id)?;
         // Test hooks (tests/t122-line-locks.sh), named by line: a crash after the folder was written
         // and before the record, and a head that another command moved.
         let hook = |name: &str| std::env::var(name).ok().is_some_and(|v| v == line.name);
         if hook("LAYR_TEST_CRASH_BEFORE_COMMIT") {
             std::process::exit(86);
         }
-        let _lock = self.p.lock()?;
+        let _lock = leases.lock(&self.p)?;
         let now = match self.p.db.line_by_id(&line.id)? {
             Some(l) => self.localize(l)?,
             None => return Err(line_gone(&line.name)),
@@ -2812,7 +2877,7 @@ impl<'a> Repo<'a> {
         if now.head != head {
             return Err(line_moved(&line.name, head, &now.head));
         }
-        commit(&now)
+        commit(&_lock, &now)
     }
 
     /// A snapshot of the working content right after an operation, so undo can revert only the
@@ -4437,6 +4502,7 @@ mod cache_platform_tests {
         std::fs::create_dir(project_dir.join("states")).unwrap();
         let id = ids::new_id();
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: project_dir.clone(),
@@ -4445,7 +4511,7 @@ mod cache_platform_tests {
         };
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"id":id,"name":"p","config":{}});
-        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
+        p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None }).unwrap();
         for kind in [StateKind::Cache, StateKind::Derived] {
             let id = ids::new_id();
             // A state is a subvolume where the store can make one (btrfs): a plain folder there reads as a rollback.
@@ -4481,7 +4547,7 @@ mod cache_platform_tests {
                 cache_key_parts: Default::default(),
                 parts: Default::default(),
             });
-            p.append(rec, &ctx.actor()).unwrap();
+            p.lock_maintenance().unwrap().append(rec, &ctx.actor()).unwrap();
             let repo = Repo::open(&ctx, "p").unwrap();
             assert!(repo.state_root(&id).is_ok());
             assert_eq!(crate::revs::resolve(&repo, None, &id).unwrap(), id);
@@ -4686,6 +4752,7 @@ mod commit_record_tests {
         std::fs::create_dir(project_dir.join("states"))?;
         let id = ids::new_id();
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: project_dir.clone(),
@@ -4694,7 +4761,7 @@ mod commit_record_tests {
         };
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {"objects.enabled": objects}});
-        p.append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
+        p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
         let repo = Repo { p, ctx: None };
         let state = ids::new_id();
         std::fs::create_dir(repo.p.state_path(&state))?;
@@ -4725,14 +4792,23 @@ mod commit_record_tests {
             parts: Default::default(),
         });
         if objects {
-            rec.lines.insert(ids::new_id(), crate::model::LineChange {
-                before: None,
-                after: Some(LineState { name: "main".into(), head: state.clone(), owner: ctx.caller.uid, machine: ctx.store.machine.id.clone() }),
-                working_before: None, working_after: None,
-            });
+            rec.lines.insert(
+                ids::new_id(),
+                crate::model::LineChange {
+                    before: None,
+                    after: Some(LineState {
+                        name: "main".into(),
+                        head: state.clone(),
+                        owner: ctx.caller.uid,
+                        machine: ctx.store.machine.id.clone(),
+                    }),
+                    working_before: None,
+                    working_after: None,
+                },
+            );
         }
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
-        assert!(repo.commit_record(&ctx, rec).is_err());
+        assert!(repo.commit_record(&repo.p.lock_maintenance().unwrap(), &ctx, rec).is_err());
         assert!(repo.p.db.state(&state)?.is_some(), "the database holds the record");
         assert!(repo.p.has_state(&state), "a state that the record names keeps its snapshot");
         if objects {
@@ -4851,6 +4927,7 @@ mod status_policy_tests {
         std::fs::create_dir_all(dir.join("meta/stage"))?;
         let repo = Repo {
             p: Project {
+                lease: Default::default(),
                 store: &store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -4929,6 +5006,7 @@ mod status_policy_tests {
         }
         let repo = Repo {
             p: Project {
+                lease: Default::default(),
                 store: &store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -4940,7 +5018,7 @@ mod status_policy_tests {
         let actor = crate::model::Actor { uid: rustix::process::geteuid().as_raw(), name: "Test".into(), session: None };
         let mut rec = Record::new("project");
         rec.data = serde_json::json!({"id": repo.p.id, "name": "p", "config": {"objects.enabled": true}});
-        repo.p.append(rec, &actor)?;
+        repo.p.lock_maintenance()?.append(rec, &actor)?;
         let line = Line {
             id: ids::new_id(),
             name: "main".into(),
@@ -4981,7 +5059,7 @@ mod status_policy_tests {
                 working_after: None,
             },
         );
-        repo.p.append(rec, &actor)?;
+        repo.p.lock_maintenance()?.append(rec, &actor)?;
         let work = repo.working(&line);
         btrfs::create_subvolume(&work)?;
         std::fs::write(work.join("file"), b"tracked")?;
@@ -5091,6 +5169,7 @@ mod status_policy_tests {
         std::fs::create_dir_all(dir.join("meta/scan"))?;
         let repo = Repo {
             p: Project {
+                lease: Default::default(),
                 store: &store,
                 name: "p".into(),
                 dir: dir.clone(),

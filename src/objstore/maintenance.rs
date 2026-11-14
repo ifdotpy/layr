@@ -112,12 +112,12 @@ pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_object
     }
     let Some(_maintenance) = maintenance_lock(p, periodic || p.holds_lock())? else { return Ok(None) };
     let lock = if periodic {
-        let Some(lock) = p.try_lock()? else { return Ok(None) };
+        let crate::store::LockAttempt::Acquired(lock) = p.try_lock()? else { return Ok(None) };
         Some(lock)
     } else if p.holds_lock() {
         None
     } else {
-        Some(p.lock()?)
+        Some(p.lock_maintenance()?)
     };
     if periodic && !due()? {
         return Ok(None);

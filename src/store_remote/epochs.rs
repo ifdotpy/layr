@@ -474,7 +474,7 @@ impl Store {
                 tightened.push(overlay);
             }
         }
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if rotated {
             let mut readers =
                 if let Some(pending) = &pending { pending_readers(repo, &pending.key)? } else { readers(self, repo, remove)? };
@@ -527,10 +527,10 @@ impl Store {
                 let mut audience = Record::new("project.readers");
                 audience.data =
                     serde_json::json!({"epoch":key.epoch,"readers":readers,"store":self.root_descriptor()?.recipient});
-                repo.commit_record(ctx, audience)?;
+                repo.commit_record(&_lock, ctx, audience)?;
                 let mut record = Record::new("project.key");
                 record.data = serde_json::to_value(&key)?;
-                let record = repo.p.append(record, &ctx.actor())?;
+                let record = _lock.append(record, &ctx.actor())?;
                 let line = repo.p.db.record_line(&record.machine, record.seq)?.context("epoch record missing")?;
                 (key, record, line, next_identity)
             };
@@ -575,7 +575,7 @@ impl Store {
             if !recorded {
                 let mut event = Record::new("project.mode");
                 event.data = serde_json::json!({"mode":mode,"epoch":key.epoch,"reason":reason});
-                repo.commit_record(ctx, event)?;
+                repo.commit_record(&_lock, ctx, event)?;
             }
             // Publish routing only after slots, descriptor and sealed history exist.
             // An older proof must never be used to list or read the new namespace.
@@ -612,10 +612,10 @@ impl Store {
             }
             for name in &tightened {
                 let orepo = repo.overlay_repo(name)?;
-                let _overlay_lock = orepo.p.lock()?;
+                let _overlay_lock = orepo.p.lock_maintenance()?;
                 let mut event = Record::new("overlay.mode");
                 event.data = serde_json::json!({"mode":mode,"config":{"overlay.access-mode":mode,"overlay.revocation":crate::ids::new_id()}});
-                orepo.commit_record(ctx, event)?;
+                orepo.commit_record(&_overlay_lock, ctx, event)?;
             }
             if !tightened.is_empty() {
                 let mut report = super::Report::default();
@@ -640,7 +640,7 @@ impl Store {
             if mode != old_mode || project_mode(repo)? != mode {
                 let mut event = Record::new("project.mode");
                 event.data = serde_json::json!({"mode":mode,"reason":reason});
-                repo.commit_record(ctx, event)?;
+                repo.commit_record(&_lock, ctx, event)?;
                 writer::push_locked(self, ctx, repo, &Options::default())?;
             }
         }

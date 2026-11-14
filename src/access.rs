@@ -354,8 +354,14 @@ mod tests {
         record.time = 1;
         record.data = serde_json::json!({"config":{"access":{"user:1001":"admin","user:1002":"reader"}}});
         db.derive(&record, &|_| false, &store.machine.id).unwrap();
-        let mut project =
-            crate::store::Project { store: &store, name: "p%private".into(), dir: root.clone(), id: crate::ids::new_id(), db };
+        let mut project = crate::store::Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p%private".into(),
+            dir: root.clone(),
+            id: crate::ids::new_id(),
+            db,
+        };
         assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_ok());
         assert!(Policy::load(&project).check(&who(1003, &[]), "read").is_err());
         record.op = "config".into();

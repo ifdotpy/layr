@@ -355,9 +355,9 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let _line_lock = repo.line_lock(&line)?;
         let line = repo.line(&line.id)?;
         repo.prepare_save(&line)?;
-        let _lock = repo.p.lock()?;
+        let _lock = _line_lock.lock(&repo.p)?;
         let before = line.head.clone();
-        if let Some(st) = repo.working_state(ctx, &line, "before layr migrate")? {
+        if let Some(st) = repo.working_state(&_lock, ctx, &line, "before layr migrate")? {
             if st != before {
                 outln!(ctx, "line {}: unsaved work saved as automatic state {}", line.name, ids::short(&st));
             }
@@ -396,7 +396,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 
     // 3. Under the project lock for the rest of the run: other commands wait until it ends.
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     std::fs::create_dir_all(table_dir(repo))?;
     std::fs::write(&marker, serde_json::json!({"pid": std::process::id(), "since_ms": ids::now_ms()}).to_string())?;
     // The plan again under the lock: a command may have saved since.
@@ -433,7 +433,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             let mut rec = Record::new(layr_model::validation::STATE_TREE_OP);
             rec.data = serde_json::json!({ "states": map });
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         pending.clear();
         Ok(())
@@ -529,7 +529,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     );
     outln!(ctx, "object store: {} ({} bytes)", human(stat.total_bytes()), stat.total_bytes());
     outln!(ctx, "{} absent source state(s) have no owner; their records stay unchanged", p.unowned_missing);
-    super::admin::set_config(ctx, repo, crate::objstore::ENABLED, serde_json::json!(true))?;
+    super::admin::set_config(&_lock, ctx, repo, crate::objstore::ENABLED, serde_json::json!(true))?;
     delete_old(ctx, &h, a.has("--delete-old"), false)?;
     std::fs::remove_file(&marker)?;
     Ok(0)

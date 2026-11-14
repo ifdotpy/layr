@@ -85,6 +85,7 @@ impl Repo<'_> {
     /// calls `prepare_named_lines` first and `commit_prepared_lines` under the lock.
     pub(crate) fn create_named_lines(
         &self,
+        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         names: Vec<String>,
         start: &str,
@@ -92,8 +93,9 @@ impl Repo<'_> {
         source: Option<&Line>,
         view: Option<&crate::overlay::View>,
     ) -> Result<Vec<Line>> {
+        locked.check(&self.p)?;
         let prepared = self.prepare_named_lines(ctx, names, start, owner, source, view)?;
-        self.commit_prepared_lines(ctx, prepared)
+        self.commit_prepared_lines(locked, ctx, prepared)
     }
 
     /// The object store and tree of `start` when the state has no snapshot here and `layr migrate`
@@ -253,7 +255,13 @@ impl Repo<'_> {
 
     /// The caller holds the project lock. Checks that the names are still free and the start
     /// state is still there, then publishes every prepared folder and records the whole batch in one transaction.
-    pub(crate) fn commit_prepared_lines(&self, ctx: &Ctx, prepared: PreparedLines) -> Result<Vec<Line>> {
+    pub(crate) fn commit_prepared_lines(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        prepared: PreparedLines,
+    ) -> Result<Vec<Line>> {
+        locked.check(&self.p)?;
         let _t = crate::trace::span("record lines");
         #[cfg(feature = "overlayfs")]
         let source = prepared.source.clone();
@@ -267,7 +275,7 @@ impl Repo<'_> {
                 #[cfg(feature = "overlayfs")]
                 self.take_caches(ctx, line, &start, source.as_ref(), &self.working(line))?;
             }
-            self.p.append_batch(recs, &ctx.actor())?;
+            locked.append_batch(recs, &ctx.actor())?;
             Ok(())
         })();
         if let Err(e) = result {
@@ -413,6 +421,7 @@ mod batch_commit_tests {
             std::fs::create_dir_all(dir.join(name))?;
         }
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "batch".into(),
             dir: dir.clone(),
@@ -421,14 +430,14 @@ mod batch_commit_tests {
         };
         let mut project = Record::new("project");
         project.data = serde_json::json!({"id": p.id, "name": p.name, "config": {}});
-        p.append(project, &ctx.actor())?;
+        p.lock_maintenance()?.append(project, &ctx.actor())?;
         let start = ids::new_id();
         std::fs::create_dir(p.state_path(&start))?;
         let mut state = Record::new("state");
         state.states.push(serde_json::from_value(serde_json::json!({
             "id": start, "kind": "commit", "subvol": "", "author": ctx.author(), "time": ids::now_ms()
         }))?);
-        p.append(state, &ctx.actor())?;
+        p.lock_maintenance()?.append(state, &ctx.actor())?;
         let repo = Repo { p, ctx: None };
         let mut lines = Vec::new();
         let mut tmps = Vec::new();
@@ -466,9 +475,9 @@ mod batch_commit_tests {
     fn a_batch_publishes_all_lines_with_contiguous_records_and_full_sync() -> Result<()> {
         let (_root, ctx) = context()?;
         let (repo, prepared) = prepared(&ctx)?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let before = repo.p.db.last_seq(&ctx.store.machine.id)?;
-        let lines = repo.commit_prepared_lines(&ctx, prepared)?;
+        let lines = repo.commit_prepared_lines(&_lock, &ctx, prepared)?;
         assert_eq!(lines.len(), 3);
         assert_eq!(repo.p.db.last_seq(&ctx.store.machine.id)?, before + lines.len() as u64);
         for (index, line) in lines.iter().enumerate() {
@@ -493,9 +502,9 @@ mod batch_commit_tests {
             "CREATE TEMP TRIGGER fail_second_line BEFORE INSERT ON lines
             WHEN NEW.name = 'trial-2' BEGIN SELECT RAISE(ABORT, 'injected mid-batch failure'); END;",
         )?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let before = repo.p.db.last_seq(&ctx.store.machine.id)?;
-        let err = repo.commit_prepared_lines(&ctx, prepared).unwrap_err();
+        let err = repo.commit_prepared_lines(&_lock, &ctx, prepared).unwrap_err();
         assert!(err.to_string().contains("injected mid-batch failure"));
         assert!(repo.p.db.lines()?.is_empty());
         assert_eq!(repo.p.db.last_seq(&ctx.store.machine.id)?, before);
@@ -508,9 +517,9 @@ mod batch_commit_tests {
         let (_root, ctx) = context()?;
         let (repo, prepared) = prepared(&ctx)?;
         let paths: Vec<_> = prepared.lines.iter().map(|line| repo.working(line)).collect();
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         crate::db::FAIL_AFTER_COMMIT.with(|f| f.set(true));
-        let err = repo.commit_prepared_lines(&ctx, prepared).unwrap_err();
+        let err = repo.commit_prepared_lines(&_lock, &ctx, prepared).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("batch committed despite the reported error"), "{message}");
         assert_eq!(repo.p.db.lines()?.len(), 3);

@@ -996,7 +996,7 @@ impl Store {
     }
 
     /// Caller holds the project lock. Config records carry the machine signature.
-    pub fn save_pin(&self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
+    pub fn save_pin(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
         if let Some(pin) = &self.pin {
             let mut pin = pin.clone();
             // Learn the public paper recipient once. LAYR_PAPER_KEY_FILE may hold the paper key of
@@ -1030,6 +1030,7 @@ impl Store {
                         .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(current_recipient.as_str()))
                     {
                         crate::project_config::set_config(
+                            locked,
                             ctx,
                             repo,
                             &format!("cloud.remote.{name}.public"),
@@ -1041,13 +1042,20 @@ impl Store {
             let key = format!("cloud.remote.{name}.store");
             let value = serde_json::to_value(&pin)?;
             if repo.p.config_value(&key)?.as_ref() != Some(&value) {
-                crate::project_config::set_config(ctx, repo, &key, value)?;
+                crate::project_config::set_config(locked, ctx, repo, &key, value)?;
             }
         }
         Ok(())
     }
 
-    pub fn trust_store(&mut self, ctx: &Ctx, repo: &Repo, name: &str, recipient: &str) -> Result<()> {
+    pub fn trust_store(
+        &mut self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        repo: &Repo,
+        name: &str,
+        recipient: &str,
+    ) -> Result<()> {
         recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
         let previous = self.pin.take();
         let descriptor = self.connect(ctx).and_then(|_| self.root_descriptor());
@@ -1067,7 +1075,7 @@ impl Store {
             recipient: descriptor.recipient,
             paper_recipient: None,
         });
-        self.save_pin(ctx, repo, name)
+        self.save_pin(locked, ctx, repo, name)
     }
 
     fn root_descriptor(&self) -> Result<Descriptor> {
@@ -1406,7 +1414,7 @@ impl Store {
                 }
             }
             if created {
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 let mut record = crate::model::Record::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
@@ -1421,7 +1429,7 @@ impl Store {
                 record.data = serde_json::json!({
                     "folder_view": repo.public_view_data(&local.id, &shown)?,
                 });
-                repo.commit_record(ctx, record)?;
+                repo.commit_record(&_lock, ctx, record)?;
             }
         }
         crate::fsutil::atomic_write(&self.dir.join("pending-lines.json"), &serde_json::to_vec(&pending)?, 0o600)?;
@@ -1483,10 +1491,10 @@ impl Store {
             crate::privs::as_caller_fs(ctx, || crate::person::create(path, &invite))?;
         }
         let created = !existing && self.backend.put_new(&slot, keys::seal_slot(&identity, recipient)?)?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let mut record = crate::model::Record::new("project.reader");
         record.data = serde_json::json!({"principal":format!("person:{login}"),"recipient":recipient,"store":anchor.recipient});
-        repo.commit_record(ctx, record)?;
+        repo.commit_record(&_lock, ctx, record)?;
         if let Backend::Gateway(g) = &self.backend {
             g.person_call(reqwest::Method::POST,&format!("/api/people/{login}/inbox"),None,Some(&serde_json::json!({"data":base64::engine::general_purpose::STANDARD.encode(invite)})))
                 .context("the person slot is in place, but the invite did not reach the inbox; register the person key and run grant again")?;
@@ -1618,6 +1626,7 @@ mod pin_tests {
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
             p: crate::store::Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -1628,12 +1637,19 @@ mod pin_tests {
         };
         let mut record = Record::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
-        repo.p.append(record, &ctx.actor()).unwrap();
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::project_config::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
-        store.save_pin(&ctx, &repo, "archive").unwrap();
+        crate::project_config::set_config(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo,
+            "cloud.remote.archive.url",
+            serde_json::json!(url),
+        )
+        .unwrap();
+        store.save_pin(&repo.p.lock_maintenance().unwrap(), &ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         let pin = store.pin.clone().unwrap();
         let attacker = keys::generate_identity();
@@ -1707,6 +1723,7 @@ mod mode_pin_tests {
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
             p: crate::store::Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -1717,12 +1734,19 @@ mod mode_pin_tests {
         };
         let mut record = Record::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
-        repo.p.append(record, &ctx.actor()).unwrap();
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::project_config::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
-        store.save_pin(&ctx, &repo, "archive").unwrap();
+        crate::project_config::set_config(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo,
+            "cloud.remote.archive.url",
+            serde_json::json!(url),
+        )
+        .unwrap();
+        store.save_pin(&repo.p.lock_maintenance().unwrap(), &ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         assert_eq!(store.pin.as_ref().unwrap().mode, Mode::Secret);
         // Someone with write access to the folder rewrites store.json as a plain Private store.
@@ -2002,7 +2026,10 @@ mod clone_head_tests {
             db.insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
             db.derive(&record, &|_| false, &store.machine.id)?;
         }
-        let mut repo = Repo { p: crate::store::Project { store: &store, name: "p".into(), dir, id: project, db }, ctx: None };
+        let mut repo = Repo {
+            p: crate::store::Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: project, db },
+            ctx: None,
+        };
         assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, old, "the foreign row reproduces the stale selection");
         let remote = open(&format!("file://{}", root.join("remote").display()), &repo)?;
         let selected = reader::clone_lines(&remote, &repo)?;
@@ -2048,7 +2075,15 @@ mod clone_head_tests {
         const MERGED: &str = "01a1c000-0000-7000-8000-000000000005";
         const LINE: &str = "01a1c000-0000-7000-8000-000000000006";
         const QUEUE: &str = "01a1c000-0000-7000-8000-000000000007";
-        let signed = |machine: &str, seq: u64, time: i64, op: &str, data: Value, lines: Value, states: Value, key: &SigningKey| -> Result<String> {
+        let signed = |machine: &str,
+                      seq: u64,
+                      time: i64,
+                      op: &str,
+                      data: Value,
+                      lines: Value,
+                      states: Value,
+                      key: &SigningKey|
+         -> Result<String> {
             let record: Record = serde_json::from_value(json!({
                 "id":crate::ids::new_id(),"project":PROJECT,"machine":machine,"seq":seq,"time":time,"op":op,
                 "actor":{"uid":1,"name":"fixture"},"data":data,"lines":lines,"states":states,
@@ -2063,27 +2098,95 @@ mod clone_head_tests {
             let store = crate::store::Store::open(&root.join("local"))?;
             let dir = store.project_dir("p")?;
             std::fs::create_dir_all(dir.join("meta/db"))?;
-            let mut repo = Repo { p: crate::store::Project { store: &store, name:"p".into(), dir:dir.clone(), id:PROJECT.into(), db:crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))? }, ctx:None };
-            let owner = SigningKey::from_bytes(&[7;32]);
-            let merger = SigningKey::from_bytes(&[8;32]);
+            let mut repo = Repo {
+                p: crate::store::Project {
+                    lease: Default::default(),
+                    store: &store,
+                    name: "p".into(),
+                    dir: dir.clone(),
+                    id: PROJECT.into(),
+                    db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+                },
+                ctx: None,
+            };
+            let owner = SigningKey::from_bytes(&[7; 32]);
+            let merger = SigningKey::from_bytes(&[8; 32]);
             let mut trust = json!({"machine":MERGER,"public_key":hex::encode(merger.verifying_key().to_bytes())});
-            if let Some(role) = role { trust["role"] = json!(role); }
-            let pending = json!({"id":QUEUE,"into":"main","target_line":LINE,"state":MERGED,"added_by":1,"time":4,"status":"pending"});
+            if let Some(role) = role {
+                trust["role"] = json!(role);
+            }
+            let pending =
+                json!({"id":QUEUE,"into":"main","target_line":LINE,"state":MERGED,"added_by":1,"time":4,"status":"pending"});
             let mut done = pending.clone();
-            done["status"] = json!("done"); done["result"] = json!(MERGED);
+            done["status"] = json!("done");
+            done["result"] = json!(MERGED);
             let records = vec![
-                signed(OWNER,1,1,"machine",json!({"public_key":hex::encode(owner.verifying_key().to_bytes())}),json!({}),json!([]),&owner)?,
-                signed(MERGER,1,1,"machine",json!({"public_key":hex::encode(merger.verifying_key().to_bytes())}),json!({}),json!([]),&merger)?,
-                signed(OWNER,2,2,"project",json!({"id":PROJECT,"name":"p","config":{"queue.merge-machine":MERGER}}),json!({LINE:{"before":null,"after":head(BASE,OWNER)}}),json!([state(BASE,vec![])]),&owner)?,
-                signed(OWNER,3,3,"machine.trust",trust,json!({}),json!([]),&owner)?,
-                signed(OWNER,4,4,"queue.add",json!({"queue_change":{"id":QUEUE,"before":null,"after":pending}}),json!({}),json!([]),&owner)?,
-                signed(MERGER,2,5,"queue.result",json!({"queue_change":{"id":QUEUE,"before":pending,"after":done}}),json!({LINE:{"before":head(BASE,OWNER),"after":head(MERGED,OWNER)}}),json!([state(MERGED,vec![BASE])]),&merger)?,
-                signed(MERGER,3,6,"line.adopt",json!({"line":LINE}),json!({LINE:{"before":head(MERGED,OWNER),"after":head(BASE,MERGER)}}),json!([]),&merger)?,
+                signed(
+                    OWNER,
+                    1,
+                    1,
+                    "machine",
+                    json!({"public_key":hex::encode(owner.verifying_key().to_bytes())}),
+                    json!({}),
+                    json!([]),
+                    &owner,
+                )?,
+                signed(
+                    MERGER,
+                    1,
+                    1,
+                    "machine",
+                    json!({"public_key":hex::encode(merger.verifying_key().to_bytes())}),
+                    json!({}),
+                    json!([]),
+                    &merger,
+                )?,
+                signed(
+                    OWNER,
+                    2,
+                    2,
+                    "project",
+                    json!({"id":PROJECT,"name":"p","config":{"queue.merge-machine":MERGER}}),
+                    json!({LINE:{"before":null,"after":head(BASE,OWNER)}}),
+                    json!([state(BASE, vec![])]),
+                    &owner,
+                )?,
+                signed(OWNER, 3, 3, "machine.trust", trust, json!({}), json!([]), &owner)?,
+                signed(
+                    OWNER,
+                    4,
+                    4,
+                    "queue.add",
+                    json!({"queue_change":{"id":QUEUE,"before":null,"after":pending}}),
+                    json!({}),
+                    json!([]),
+                    &owner,
+                )?,
+                signed(
+                    MERGER,
+                    2,
+                    5,
+                    "queue.result",
+                    json!({"queue_change":{"id":QUEUE,"before":pending,"after":done}}),
+                    json!({LINE:{"before":head(BASE,OWNER),"after":head(MERGED,OWNER)}}),
+                    json!([state(MERGED, vec![BASE])]),
+                    &merger,
+                )?,
+                signed(
+                    MERGER,
+                    3,
+                    6,
+                    "line.adopt",
+                    json!({"line":LINE}),
+                    json!({LINE:{"before":head(MERGED,OWNER),"after":head(BASE,MERGER)}}),
+                    json!([]),
+                    &merger,
+                )?,
             ];
-            repo.p.import_lines(&records, crate::store::Trust::All)?;
-            let remote = open(&format!("file://{}",root.join("remote").display()), &repo)?;
+            repo.p.lock_maintenance().unwrap().import_lines(&records, crate::store::Trust::All)?;
+            let remote = open(&format!("file://{}", root.join("remote").display()), &repo)?;
             let lines = reader::clone_lines(&remote, &repo)?;
-            assert_eq!(lines.iter().find(|line| line.id==LINE).unwrap().head, MERGED, "role {role:?}");
+            assert_eq!(lines.iter().find(|line| line.id == LINE).unwrap().head, MERGED, "role {role:?}");
             drop(repo);
             std::fs::remove_dir_all(root)?;
         }

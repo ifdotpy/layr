@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 /// `cache`: the cache overlay of a cache path (`save --overlays`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_overlay(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &Ctx,
     repo: &Repo,
     name: &str,
@@ -25,6 +26,7 @@ pub(crate) fn make_overlay(
     folder: Option<&str>,
     key_files: Option<&serde_json::Value>,
 ) -> Result<()> {
+        locked.check(&repo.p)?;
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
@@ -42,6 +44,7 @@ pub(crate) fn make_overlay(
     let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
     let made = (|| -> Result<String> {
         let orepo = Repo { p: op, ctx: Some(ctx) };
+        let overlay_lock = orepo.p.lock_maintenance()?;
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();
         let dst = orepo.p.state_path(&id);
@@ -74,7 +77,7 @@ pub(crate) fn make_overlay(
         };
         let mut rec = Record::new("commit");
         rec.states.push(st);
-        orepo.commit_record(ctx, rec)?;
+        orepo.commit_record(&overlay_lock, ctx, rec)?;
         let mut rec = Record::new("overlay.create");
         let mut cfg = serde_json::Map::new();
         cfg.insert(
@@ -99,9 +102,9 @@ pub(crate) fn make_overlay(
         }
         rec.data = serde_json::json!({"name": name, "parent":repo.p.id, "config": cfg});
         if hidden {
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&overlay_lock, ctx, rec)?;
         } else {
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(locked, ctx, rec)?;
         }
         Ok(id)
     })();

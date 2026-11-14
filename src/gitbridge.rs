@@ -795,8 +795,7 @@ pub struct ImportPlan {
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports. Each commit
 /// becomes a state record without a tree; its tree is built from git when a command reads it
 /// (`build_tree`, through `Repo::check_state`).
-pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    let _ = author_uid; // Git author metadata is preserved; the record actor remains the caller.
+pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Result<(String, bool)> {
     import_with_repair(ctx, repo, commit, refname, None)
 }
 
@@ -829,7 +828,13 @@ fn import_with_repair(
     }
 }
 
-fn import_planned(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, guard: Option<Option<String>>) -> Result<(String, bool)> {
+fn import_planned(
+    ctx: &Ctx,
+    repo: &Repo,
+    commit: &str,
+    refname: &str,
+    guard: Option<Option<String>>,
+) -> Result<(String, bool)> {
     let plan = plan_import(ctx, repo, commit, refname)?;
     test_sleep("LAYR_TEST_PLAN_SLEEP_MS");
     commit_import(ctx, repo, plan, guard)
@@ -919,13 +924,18 @@ pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Resul
 /// writes only. With a guard, the remote ref must still hold the expected state before each chunk,
 /// and it ends at the tip. A commit that another command imported meanwhile is `Moved`, so the
 /// records never repeat it. Returns the tip state and whether this plan imported the tip.
-pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Option<String>>) -> Result<(String, bool)> {
+pub fn commit_import(
+    ctx: &Ctx,
+    repo: &Repo,
+    plan: ImportPlan,
+    guard: Option<Option<String>>,
+) -> Result<(String, bool)> {
     let fresh = plan.records.iter().any(|(oid, _)| *oid == plan.commit);
     let ImportPlan { records, commit, tip, refname } = plan;
     let mut expected: Option<String> = guard.clone().flatten();
     let mut pending = records.into_iter();
     loop {
-        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+        let locked = repo.p.lock_or_borrow()?;
         if guard.is_some() {
             let current = repo.p.db.remote_ref(&refname)?.map(|r| r.0);
             if current != expected {
@@ -941,7 +951,7 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
                 bail_moved(format!("commit {} of {refname} was imported by another command; run it again", &oid[..10]))?;
             }
             let st = rec.states.first().map(|s| s.id.clone()).unwrap_or_default();
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&locked, ctx, rec)?;
             expected = Some(st);
             written += 1;
         }
@@ -951,7 +961,7 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
         if guard.is_some() && expected.as_deref() != Some(tip.as_str()) {
             let mut rec = Record::new("remote.ref");
             rec.data = serde_json::json!({"ref": refname, "state": tip, "commit": commit});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&locked, ctx, rec)?;
         }
         return Ok((tip, fresh));
     }
@@ -1074,7 +1084,7 @@ fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, Stri
 /// files are cloned where their bytes match the Git objects. The caller holds the project lock, or
 /// this function takes it.
 pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()> {
-    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let _lock = repo.p.lock_or_borrow()?;
     if repo.p.has_state(state) {
         return Ok(());
     }

@@ -165,7 +165,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     if cfg!(target_os = "macos") && key == Some(LOCAL_KEY) && enabled {
         bail!("privileged automatic checks are unavailable on macOS");
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut settings = local_settings(repo)?;
     if key == Some(RUNNER_KEY) {
         settings.runner = enabled;
@@ -761,7 +761,7 @@ fn scan(
             crate::storage::create_subvolume(&work)?;
             let cleanup = crate::repo::Temp { path: work.clone() };
             std::fs::write(work.join("check.log"), &log)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut output =
                 repo.new_state(ctx, &work, StateKind::Derived, vec![state.clone()], &format!("check {name} log"), None)?;
             output.derived_from = Some(state.clone());
@@ -779,7 +779,7 @@ fn scan(
                 before: None,
                 after: Some(RefState { name: log_ref, target: output.id, expires_at: None }),
             })?;
-            repo.commit_record(ctx, record)?;
+            repo.commit_record(&_lock, ctx, record)?;
             drop(cleanup);
             Ok(result)
         })?;
@@ -1042,17 +1042,17 @@ pub(crate) fn save_back_caches(
     // `.layr-times` that came with the cache names the sources of an older build: a line that takes this
     // cache would give a changed source an older time than the new build output, and the tool would skip it.
     crate::source_times::record(dir, &folders)?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let checks_line = match repo.p.db.line_by_name(&name)? {
         Some(l) => l,
-        None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+        None => repo.create_line(&_lock, ctx, &name, state, ctx.caller.uid)?,
     };
     // Checks run newest state first: the cache of an older head saved last would replace (and free) the
     // cache that a newer head gave back, and `line new` from that head would start cold.
     if let Some(newer) = newer_cache_given_back(repo, &checks_line, state, &folders)? {
         bail!("the newer head {} gave its caches back already", crate::ids::short(&newer));
     }
-    let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
+    let saved = repo.save_cache_overlays_in(&_lock, ctx, &checks_line, dir, &folders, true, state)?;
     Ok((name, saved))
 }
 

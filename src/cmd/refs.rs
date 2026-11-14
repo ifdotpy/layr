@@ -67,7 +67,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !crate::model::is_ref(name) {
                 bail!("invalid ref name '{name}'");
             }
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             if repo.p.db.line_by_name(name)?.is_some() || repo.p.db.line_by_id(name)?.is_some() {
                 bail!("'{name}' is a line; use save, merge or reset");
             }
@@ -103,7 +103,7 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let change = RefChange { name: name.clone(), before, after };
             let mut rec = Record::new(if set { "ref.set" } else { "ref.delete" });
             rec.data = serde_json::json!({"ref_change": change});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::to_string(&change)?);
             } else if let Some(r) = change.after {

@@ -140,7 +140,7 @@ fn write_conf(vdir: &Path, lower: &Path, ctx: &Ctx) -> Result<()> {
 }
 
 /// Serialize mount lifecycle changes with commands that need a working mount.
-pub(crate) fn lifecycle_lock(repo: &Repo, line: &Line) -> Result<crate::store::LineLock> {
+pub(crate) fn lifecycle_lock(repo: &Repo, line: &Line) -> Result<crate::store::LineLeaseSet> {
     repo.p.line_lock(&format!("view-{}", line.id), &line.name)
 }
 
@@ -241,7 +241,7 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         return Err(e);
     }
     let recorded = (|| -> Result<()> {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if repo.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");
         }
@@ -252,7 +252,7 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
             line.id.clone(),
             LineChange { before: None, after: Some(repo.line_state(&line, start)), working_before: None, working_after: None },
         );
-        repo.p.append(rec, &ctx.actor())?;
+        _lock.append(rec, &ctx.actor())?;
         write_view(
             &repo.p,
             &View { line: line.id.clone(), name: name.to_string(), base: start.to_string(), lower, mounted: true },
@@ -551,7 +551,7 @@ pub(crate) fn write_state(
 
 /// Save the working content without moving the named head. The caller holds the project
 /// lock, as for a folder line. Compare against the last automatic state to avoid duplicates.
-pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str) -> Result<Option<StateRec>> {
+pub fn save_working(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str) -> Result<Option<StateRec>> {
     let prev = repo.save_base(line)?;
     let mut previous = line.clone();
     previous.head = prev;
@@ -567,7 +567,7 @@ pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str
     rec.data = serde_json::json!({"line": line.id, "head": line.head,
         "working_before": repo.recorded_working(line)?, "working_after": st.id});
     rec.states.push(st.clone());
-    if let Err(error) = repo.commit_record(ctx, rec) {
+    if let Err(error) = repo.commit_record(locked, ctx, rec) {
         repo.discard_states(std::slice::from_ref(&st));
         return Err(error);
     }

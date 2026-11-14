@@ -31,7 +31,7 @@ pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
     if unnumbered(&repo.read_model()?).is_empty() {
         return Ok(0);
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let model = repo.read_model()?;
     let todo = unnumbered(&model);
     if todo.is_empty() {
@@ -42,7 +42,7 @@ pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
         todo.iter().zip(next..).map(|(change, n)| (change.clone(), serde_json::json!(n))).collect();
     let mut rec = crate::model::Record::new(layr_model::changes::NUMBER_OP);
     rec.data = serde_json::json!({ "numbers": numbers });
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(&_lock, ctx, rec)?;
     Ok(todo.len())
 }
 
@@ -295,7 +295,7 @@ fn lifecycle(ctx: &Ctx, repo: &Repo, command: &str, which: &str, a: &crate::args
     {
         bail!("the text has more than {} KiB", MAX_DESCRIPTION >> 10);
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let model = repo.read_model()?;
     let view = model.change_view(&id).ok_or_else(|| anyhow::anyhow!("unknown change '{which}'"))?;
     let name = label(&model, &id);
@@ -336,7 +336,7 @@ fn lifecycle(ctx: &Ctx, repo: &Repo, command: &str, which: &str, a: &crate::args
         }
         _ => {}
     }
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(&_lock, ctx, rec)?;
     let view = repo.read_model()?.change_view(&id).ok_or_else(|| anyhow::anyhow!("unknown change '{which}'"))?;
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&view)?);
@@ -363,7 +363,7 @@ fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Resul
             None if repo.p.db.trusted(target)?.is_some() => target.to_string(),
             None => bail!("unknown machine '{target}'"),
         };
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let model = repo.read_model()?;
         let n = model.numbering();
         let terms = repo.p.trust_terms(&[])?;
@@ -398,7 +398,7 @@ fn numbering(ctx: &Ctx, repo: &Repo, hand_to: Option<&str>, json: bool) -> Resul
         }
         let mut rec = crate::model::Record::new(layr_model::changes::HANDOFF_OP);
         rec.data = serde_json::json!({"machine": machine, "next": model.numbering().next});
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
     }
     let model = repo.read_model()?;
     let n = model.numbering();

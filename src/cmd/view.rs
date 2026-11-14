@@ -17,7 +17,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if show && (a.get("--overlay").is_some() || a.get("--folder").is_some()) {
         bail!("view show takes no --overlay or --folder");
     }
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let current = h.line.as_ref().map(|line| h.repo.line(&line.id)).transpose()?;
     let mut view = if show {
         let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: layr view show <id> [--json]"))?;
@@ -83,7 +83,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
         !h.repo.need_overlay(&layer.overlay).is_ok_and(|i| i.hidden)
             || h.repo.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
     });
-    let id = if save { h.repo.save_view(ctx, &view)? } else { view.id()? };
+    let id = if save { h.repo.save_view(&_lock, ctx, &view)? } else { view.id()? };
     // A folder with the files of the view: a copy to read and build in, not a working folder of
     // the line (it has no status and no save).
     if let Some(dir) = a.get("--folder") {

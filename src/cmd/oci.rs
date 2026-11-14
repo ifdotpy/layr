@@ -24,8 +24,8 @@ pub fn push(ctx: &Ctx, url: &str, rev: &str, runnable: Option<&str>, json: bool)
         let remote = remote.as_deref();
         h.repo.require(ctx, "push")?;
         h.repo.require(ctx, "export")?;
-        let _lock = h.repo.p.lock()?;
-        let e = oci::export(ctx, &h.repo, rev, h.line.as_ref(), runnable)?;
+        let _lock = h.repo.p.lock_maintenance()?;
+        let e = oci::export(&_lock, ctx, &h.repo, rev, h.line.as_ref(), runnable)?;
         // An image carries the selected tree only, so check its whole contents.
         crate::secrets::check_contents(ctx, &h.repo, &e.state)?;
         let cfg = |key: &str| -> Result<Option<String>> {
@@ -103,13 +103,13 @@ pub fn token(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .ok_or_else(|| exit(128, "registry tokens require a user principal"))?;
     let h = here(ctx)?;
     h.repo.require(ctx, "access")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let mut tokens: BTreeMap<String, TokenRecord> =
         h.repo.p.config_value("registry.tokens")?.map(serde_json::from_value).transpose()?.unwrap_or_default();
     // Rotation also revokes credentials that this principal had on this machine.
     tokens.retain(|_, r| r.uid != uid || r.machine != ctx.store.machine.id);
     if a.has("--revoke") {
-        super::admin::set_config(ctx, &h.repo, "registry.tokens", serde_json::to_value(tokens)?)?;
+        super::admin::set_config(&_lock, ctx, &h.repo, "registry.tokens", serde_json::to_value(tokens)?)?;
         if a.has("--json") {
             outln!(ctx, "{}", json!({"principal": principal, "revoked": true}));
         }
@@ -128,7 +128,7 @@ pub fn token(ctx: &Ctx, args: &[String]) -> Result<i32> {
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let token = hex::encode(bytes);
     tokens.insert(oci::digest(token.as_bytes()), TokenRecord { uid, machine: ctx.store.machine.id.clone(), until });
-    super::admin::set_config(ctx, &h.repo, "registry.tokens", serde_json::to_value(tokens)?)?;
+    super::admin::set_config(&_lock, ctx, &h.repo, "registry.tokens", serde_json::to_value(tokens)?)?;
     if a.has("--json") {
         outln!(ctx, "{}", json!({"principal": principal, "until": until, "token": token}));
     } else {

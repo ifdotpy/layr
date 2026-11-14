@@ -246,7 +246,7 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         let orepo = self.overlay_repo(name)?;
-        let _lock = orepo.p.lock()?;
+        let _lock = orepo.p.lock_maintenance()?;
         for ol in orepo.p.db.lines()? {
             let mut rec = Record::new("line.delete");
             rec.lines.insert(
@@ -259,7 +259,7 @@ impl<'a> Repo<'a> {
                 },
             );
             rec.data = serde_json::json!({"name": ol.name});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&_lock, ctx, rec)?;
         }
         let mut deleted = Vec::new();
         for (id, _) in orepo.p.db.present_states()? {
@@ -270,7 +270,7 @@ impl<'a> Repo<'a> {
         if !deleted.is_empty() {
             let mut rec = Record::new("gc");
             rec.data = serde_json::json!({"deleted": deleted, "overlay": name, "removed": true});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&_lock, ctx, rec)?;
         }
         Ok(())
     }
@@ -294,9 +294,9 @@ impl<'a> Repo<'a> {
             }
             let orepo = self.overlay_repo(&name)?;
             let dropped = {
-                let _lock = orepo.p.lock()?;
+                let _lock = orepo.p.lock_maintenance()?;
                 let orphans = self.orphan_cache_lines(&orepo)?;
-                self.drop_overlay_lines(ctx, &orepo, &name, &orphans)?
+                self.drop_overlay_lines(&_lock, ctx, &orepo, &name, &orphans)?
             };
             // Their states go at once: `history` keeps only the heads of the overlay lines that stay
             // and the states that lines show (it takes the overlay's lock itself).
@@ -330,7 +330,15 @@ impl<'a> Repo<'a> {
 
     /// Delete these lines of the overlay project `orepo`. Returns the overlay and line names. The
     /// caller holds the locks of the project and of the overlay project.
-    pub fn drop_overlay_lines(&self, ctx: &Ctx, orepo: &Repo, name: &str, lines: &[Line]) -> Result<Vec<(String, String)>> {
+    pub fn drop_overlay_lines(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        orepo: &Repo,
+        name: &str,
+        lines: &[Line],
+    ) -> Result<Vec<(String, String)>> {
+        locked.check(&orepo.p)?;
         let mut out = Vec::new();
         for ol in lines {
             let mut rec = Record::new("line.delete");
@@ -344,14 +352,15 @@ impl<'a> Repo<'a> {
                 },
             );
             rec.data = serde_json::json!({"name": ol.name});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(locked, ctx, rec)?;
             out.push((name.to_string(), ol.name.clone()));
         }
         Ok(out)
     }
 
     /// The cache overlay of `folder`, made when missing. The caller holds the project lock.
-    fn ensure_cache_overlay(&self, ctx: &Ctx, folder: &str) -> Result<String> {
+    fn ensure_cache_overlay(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, folder: &str) -> Result<String> {
+        locked.check(&self.p)?;
         if let Some(n) = self.folder_overlay_of(folder)? {
             self.sync_cache_readers(ctx, &n);
             return Ok(n);
@@ -363,6 +372,7 @@ impl<'a> Repo<'a> {
         // The project setting `cache.key-files` gives new cache overlays their key files.
         let key_files = self.p.config_value("cache.key-files")?.filter(|v| v.is_array());
         crate::overlay::create::make_overlay(
+            locked,
             ctx,
             self,
             &name,
@@ -420,10 +430,10 @@ impl<'a> Repo<'a> {
                     readers.push(m);
                 }
             }
-            let _lock = orepo.p.lock()?;
+            let _lock = orepo.p.lock_maintenance()?;
             let mut record = crate::model::Record::new("overlay.readers");
             record.data = serde_json::json!({"config":{"access": crate::overlay::create::access_map(info.owner, &readers)}});
-            orepo.commit_record(ctx, record).map(|_| ())
+            orepo.commit_record(&_lock, ctx, record).map(|_| ())
         })();
         if let Err(e) = r {
             eprintln!("warning: overlay '{name}': readers not updated: {e:#}");
@@ -447,18 +457,21 @@ impl<'a> Repo<'a> {
     /// the overlay and the new state of each.
     pub fn save_cache_overlays(
         &self,
+        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         line: &Line,
         paths: &[String],
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
-        self.save_cache_overlays_in(ctx, line, &self.working(line), paths, shared, project_state)
+        locked.check(&self.p)?;
+        self.save_cache_overlays_in(locked, ctx, line, &self.working(line), paths, shared, project_state)
     }
 
     /// `save_cache_overlays` from the folder `w` instead of the line's working folder (a check copy).
     pub fn save_cache_overlays_in(
         &self,
+        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         line: &Line,
         w: &Path,
@@ -466,20 +479,21 @@ impl<'a> Repo<'a> {
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
+        locked.check(&self.p)?;
         let mut out = Vec::new();
         for p in paths {
             let cp = fsutil::safe_join(w, p)?;
             if !btrfs::is_subvolume(&cp) {
                 continue;
             }
-            let name = self.ensure_cache_overlay(ctx, p)?;
+            let name = self.ensure_cache_overlay(locked, ctx, p)?;
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
             let id = ids::new_id();
             {
-                let _lock = orepo.p.lock()?;
-                let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &info.root)?;
+                let _lock = orepo.p.lock_maintenance()?;
+                let ol = self.ensure_build_line(&_lock, ctx, &orepo, &name, &info, line, &info.root)?;
                 let dst = orepo.p.state_path(&id);
                 let made = btrfs::snapshot(&cp, &dst, true).and_then(|_| btrfs::subvol_info(&dst));
                 let sub = match made {
@@ -513,7 +527,7 @@ impl<'a> Repo<'a> {
                     tree: None,
                     times: None,
                 };
-                if let Err(e) = crate::overlay::move_overlay_line(&orepo, ctx, "commit", &ol, &id, vec![st]) {
+                if let Err(e) = crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "commit", &ol, &id, vec![st]) {
                     let _ = btrfs::delete_tree(&dst);
                     return Err(e);
                 }
@@ -760,11 +774,11 @@ impl<'a> Repo<'a> {
         for (name, folder, sid) in self.place_caches(ctx, line, start, source, w)? {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let _lock = orepo.p.lock()?;
-            let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &sid)?;
+            let _lock = orepo.p.lock_maintenance()?;
+            let ol = self.ensure_build_line(&_lock, ctx, &orepo, &name, &info, line, &sid)?;
             // A line of the same name that an earlier line left starts again at the cache it takes.
             if ol.head != sid {
-                crate::overlay::move_overlay_line(&orepo, ctx, "line.create", &ol, &sid, Vec::new())?;
+                crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "line.create", &ol, &sid, Vec::new())?;
             }
             taken.push(folder);
         }
@@ -884,12 +898,15 @@ impl<'a> Repo<'a> {
                 continue;
             }
             let made = {
-                let _lock = orepo.p.lock()?;
-                let ol = self.ensure_build_line(ctx, &orepo, &name, &info, line, &info.root)?;
+                let _lock = orepo.p.lock_maintenance()?;
+                let ol = self.ensure_build_line(&_lock, ctx, &orepo, &name, &info, line, &info.root)?;
                 let cp = fsutil::safe_join(&w, &folder)?;
                 if ol.head == sid && matches!(from, Source::ExactState(_, _, _)) {
                     if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
-                        return Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")));
+                        return Err(error(
+                            ErrorKind::Failed,
+                            format!("error: {folder} holds files of the line's head; it is no cache"),
+                        ));
                     }
                     let src = orepo.state_root(&sid)?;
                     if cp.symlink_metadata().is_err() {
@@ -934,8 +951,8 @@ impl<'a> Repo<'a> {
                         let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
                         crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)
                     };
-                    if let Err(e) =
-                        r.and_then(|_| crate::overlay::move_overlay_line(&orepo, ctx, "merge", &ol, &head, states.clone()))
+                    if let Err(e) = r
+                        .and_then(|_| crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "merge", &ol, &head, states.clone()))
                     {
                         orepo.discard_states(&states);
                         return Err(e);
@@ -1119,7 +1136,7 @@ impl<'a> Repo<'a> {
 
     /// The lock of one line for the cache hook. The hooks of a line run one at a time. It is the line lock
     /// (`Project::line_lock`): a command that already holds it in this process takes it again without waiting.
-    fn prune_lock(&self, line: &Line) -> Result<crate::store::LineLock> {
+    fn prune_lock(&self, line: &Line) -> Result<crate::store::LineLeaseSet> {
         self.p.line_lock(&line.id, &line.name)
     }
 

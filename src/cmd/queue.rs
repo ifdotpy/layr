@@ -190,7 +190,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Ok(_) => bail!("queue candidate unexpectedly completed a merge"),
             };
             if let Some(conflict) = error.downcast_ref::<super::mergecmd::CandidateConflict>() {
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) || target(repo, &entry)?.head != head {
                     bail!("queue entry or target changed while preparing the candidate");
                 }
@@ -200,7 +200,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 after.attempts = 1;
                 let mut rec = Record::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after.clone())}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
                 if a.has("--json") {
                     outln!(ctx, "{}", serde_json::json!({"entry":entry.id,"status":"failed","reason":conflict.0}));
                 } else {
@@ -271,10 +271,10 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 title,
             };
             {
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 let mut rec = Record::new("queue.add");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:None,after:Some(entry.clone())},"ref_change":RefChange{name:hold(&entry),before:None,after:Some(RefState{name:hold(&entry),target:state,expires_at:None})}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
             }
             if !a.has("--no-run-queue") {
                 if let Err(error) = run_configured(ctx, repo, Some(&entry.target_line)) {
@@ -304,7 +304,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "remove" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
             let _queue_lock = require_lock(repo)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let entry = find(repo, &a.pos[1])?;
             if entry.added_by != ctx.caller.uid {
                 repo.require(ctx, "line.manage")?;
@@ -312,7 +312,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut rec = Record::new("queue.remove");
             rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:None}});
             release_hold(repo, &entry, &mut rec.data)?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::json!({"removed":entry.id}));
             } else {
@@ -457,7 +457,7 @@ fn run_entries(
             None => None,
         };
         if let Some(reason) = closed {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
                 bail!("queue entry '{}' changed", entry.id);
             }
@@ -468,7 +468,7 @@ fn run_entries(
             rec.data =
                 serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
             release_hold(repo, &entry, &mut rec.data)?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
             if guard.is_some() {
                 break;
@@ -519,7 +519,7 @@ fn run_entries(
                     Err(error) => format!("{error:#}"),
                     Ok(code) => format!("merge failed (exit {code})"),
                 };
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
                     bail!("queue entry '{}' changed", entry.id);
                 }
@@ -530,7 +530,7 @@ fn run_entries(
                 after.probes = probes;
                 let mut rec = Record::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
             }
         }
         results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);

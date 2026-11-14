@@ -7,6 +7,7 @@
 // start with "usage: layr ", as the commands print them on a wrong call (src/cmd/help.rs). They are
 // collected here, so each text has one source.
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(layr_doctest)");
     for var in ["LAYR_BUILD_ID", "LAYR_BUILD_DATE"] {
         println!("cargo:rerun-if-env-changed={var}");
     }

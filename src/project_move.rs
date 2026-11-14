@@ -236,15 +236,11 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     // Line locks come first (`Project::line_lock` refuses one under the project lock): every line
     // in id order, the order that undo uses. No line command runs while the folder moves.
     let _t = crate::trace::begin(format!("project move {project}: line locks"));
-    let mut lines = handle.db.lines()?;
-    lines.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut line_locks = Vec::new();
-    for line in &lines {
-        line_locks.push(handle.line_lock(&line.id, &line.name)?);
-    }
+    let lines = handle.db.lines()?;
+    let line_locks = handle.line_leases(lines.iter().map(|line| (line.id.clone(), line.name.clone())))?;
     drop(_t);
     let _t = crate::trace::begin(format!("project move {project}: project lock"));
-    let _lock = handle.lock()?;
+    let _lock = line_locks.lock(&handle)?;
     drop(_t);
     let moved = handle.moved_paths();
     let mut watch = vec![src.clone()];
@@ -318,7 +314,7 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
         bail!("project '{project}' is moving to another volume; run any layr command to finish the move, then delete it");
     }
     let handle = Project::open(store, project)?;
-    let _lock = handle.lock()?;
+    let _lock = handle.lock_maintenance()?;
     let lines = handle.db.lines()?;
     if !lines.is_empty() {
         let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();

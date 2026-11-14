@@ -66,7 +66,7 @@ pub fn verified(p: &Project, state: &str) -> Result<Option<(Store, StateRef)>> {
 /// the work folder, then a read-only snapshot at `states/<id>`, as a state built from Git
 /// (`gitbridge::build_tree`). Returns false when the object store has no tree for the state.
 pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
-    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let _lock = repo.p.lock_or_borrow()?;
     if repo.p.has_state(state) {
         return Ok(true);
     }
@@ -473,7 +473,7 @@ fn queue_native(p: &Project, state: &str) -> Result<()> {
 /// Retire native copies after command readers release their pins. The existing reservation
 /// protocol prevents another reader from taking a path while it is removed.
 pub fn retire_native(repo: &Repo) -> Result<()> {
-    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+    let _lock = repo.p.lock_or_borrow()?;
     if !repo.p.meta_dir().join("object-native").is_dir() {
         return Ok(());
     }
@@ -485,12 +485,7 @@ pub fn retire_native_maintenance(repo: &Repo) -> Result<()> {
     if !repo.p.meta_dir().join("object-native").is_dir() {
         return Ok(());
     }
-    let _lock = if repo.p.holds_lock() {
-        None
-    } else {
-        let Some(lock) = repo.p.try_lock()? else { return Ok(()) };
-        Some(lock)
-    };
+    let crate::store::LockAttempt::Acquired(_lock) = repo.p.try_lock()? else { return Ok(()) };
     let Some(keep) = crate::retention::overlay_named_states_maintenance(repo)? else { return Ok(()) };
     retire_native_locked(repo, keep)
 }
@@ -686,6 +681,7 @@ mod tests {
         let dir = store.project_dir("p")?;
         std::fs::create_dir_all(dir.join("meta/db"))?;
         let p = Project {
+            lease: Default::default(),
             store: &store,
             name: "p".into(),
             dir: dir.clone(),

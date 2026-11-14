@@ -79,7 +79,7 @@ fn move_old_entries(ctx: &Ctx, repo: &Repo) -> Result<()> {
     if repo.p.db.old_park_entries()?.is_empty() {
         return Ok(());
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     for (state, line_id) in repo.p.db.old_park_entries()? {
         let Some(line) = repo.p.db.line_by_id(&line_id)? else { continue };
         if line.machine != repo.p.store.machine.id || repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct).is_err() {
@@ -98,7 +98,7 @@ fn move_old_entries(ctx: &Ctx, repo: &Repo) -> Result<()> {
             parked.id.clone(),
             LineChange { before: None, after: Some(repo.line_state(&parked, &state)), working_before: None, working_after: None },
         );
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         eprintln!("park entry {} is now the line {}", ids::short(&state), parked.name);
     }
     Ok(())
@@ -159,9 +159,9 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 vec![entry(repo, &line, arg)?
                     .ok_or_else(|| exit(1, format!("error: {} is no park entry of this line", arg.unwrap_or("park@{0}"))))?]
             };
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             for (i, l) in targets {
-                drop_entry(ctx, repo, &l)?;
+                drop_entry(&_lock, ctx, repo, &l)?;
                 if sub == "drop" {
                     outln!(ctx, "Dropped park@{{{i}}} {} ({})", l.name, ids::short(&l.head));
                 }
@@ -219,13 +219,13 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             for m in &out.messages {
                 outln!(ctx, "{m}");
             }
-            record_working(ctx, repo, &line, &format!("park.{sub}"), w)?;
+            record_working(&_lock, ctx, repo, &line, &format!("park.{sub}"), w)?;
             if !out.conflicts.is_empty() {
                 outln!(ctx, "The park entry is kept in case you need it again.");
                 return Ok(1);
             }
             if let (Some((i, parked)), "pop") = (found, sub) {
-                drop_entry(ctx, repo, &repo.line(&parked.id)?)?;
+                drop_entry(&_lock, ctx, repo, &repo.line(&parked.id)?)?;
                 outln!(ctx, "Dropped park@{{{i}}} {} ({})", parked.name, ids::short(&id));
             }
             Ok(0)
@@ -236,9 +236,9 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// Delete a parked line. The caller holds the project lock. A parked line has no folder: the
 /// record alone deletes it, and `undo` brings it back without a folder.
-fn drop_entry(ctx: &Ctx, repo: &Repo, parked: &Line) -> Result<()> {
+fn drop_entry(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, parked: &Line) -> Result<()> {
     let made = repo.working(parked).exists();
-    super::branch::delete_recorded(ctx, repo, parked, None, made)
+    super::branch::delete_recorded(locked, ctx, repo, parked, None, made)
 }
 
 /// `park [-m <message>] [-u] [-a] [-k]`: save the changes as the head of a new parked line, then
@@ -348,7 +348,7 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
                 working_after: None,
             },
         );
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         if !a.has("-q") {
             outln!(ctx, "Saved working directory and index state {msg} as line {}", parked.name);
         }
