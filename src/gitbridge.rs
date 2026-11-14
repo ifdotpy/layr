@@ -2717,11 +2717,13 @@ fn with_objects<T>(repo: &Repo, f: impl FnOnce(&mut CatFile) -> Result<T>) -> Re
     })
 }
 
-/// True when a read can take the state's changes: its tree is on disk, or it is an imported state
-/// whose commit is known (the record names it). Reads no git object; a missing object shows when the
-/// read happens.
+/// True when a read can take the state's changes: a native tree, retained portable objects,
+/// or an imported commit known by its record. Reads no Git blobs or portable file content;
+/// a missing blob shows when the read happens.
 pub fn readable(repo: &Repo, state: &str) -> Result<bool> {
-    Ok(repo.p.has_state(state) || imported_commit(repo, state)?.is_some())
+    Ok(repo.p.has_state(state)
+        || (!matches!(repo.p.db.state_flags(state)?, Some((_, true))) && crate::objstore::verified(&repo.p, state)?.is_some())
+        || imported_commit(repo, state)?.is_some())
 }
 
 /// Forgets the object reader (the store changed on disk: a damaged cache went aside).

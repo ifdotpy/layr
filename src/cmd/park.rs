@@ -182,8 +182,8 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let (_lock, w) = begin_change(ctx, repo, &line)?;
             let line = repo.line(&line.id)?;
             let scan = repo.scan(&line)?;
-            let base = repo.state_root(&base_id)?;
-            let theirs = repo.state_root(&id)?;
+            let base = repo.state_src(&base_id)?;
+            let theirs = repo.state_src(&id)?;
             let work = repo.temp_work(&scan.path)?;
             let cfg = |k: &str| repo.p.config_value(k).ok().flatten().and_then(|v| v.as_str().map(|s| s.to_string()));
             let out = crate::merge::merge(&crate::merge::Input {

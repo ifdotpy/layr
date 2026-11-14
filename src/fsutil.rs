@@ -465,14 +465,19 @@ fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
     }
 }
 
-pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+pub fn read_link_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
     if let Some(o) = root.objects() {
         let entry = o.entry(rel)?.context("object path does not exist")?;
         let layr_objects::Node::Symlink { target } = entry.entry.node else { bail!("object path is not a symbolic link") };
-        return Ok(String::from_utf8_lossy(&target).into_owned());
+        return Ok(target);
     }
     let p = root.at(rel)?;
-    Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.to_string_lossy().into_owned())
+    Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.as_os_str().as_bytes().to_vec())
+}
+
+pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+    Ok(String::from_utf8_lossy(&read_link_bytes(root, rel)?).into_owned())
 }
 
 /// Files larger than this are binary for diff, grep, blame, rename detection and merge: their

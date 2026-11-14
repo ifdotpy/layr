@@ -998,7 +998,7 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         }
         let (old, new, list) = state_changes(repo, &s, &specs)?;
-        let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path())).collect();
+        let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old))).collect();
         if list.is_empty() {
             continue;
         }
@@ -1225,7 +1225,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         first = false;
         if want_diff && crate::gitbridge::readable(repo, &s.id)? {
             let (old, new, list) = state_changes(repo, s, &specs)?;
-            let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path())).collect();
+            let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old))).collect();
             if !list.is_empty() {
                 if blank {
                     outln!(ctx);

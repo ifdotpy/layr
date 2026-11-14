@@ -320,9 +320,6 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
         .map(|(i, _)| i)
         .collect();
     let adds: Vec<usize> = v.iter().enumerate().filter(|(_, c)| c.old().is_none() && is_file(c.new())).map(|(i, _)| i).collect();
-    if dels.is_empty() || adds.is_empty() {
-        return v;
-    }
     let read_parent = |p: &str| crate::fsutil::read_file(parent, p).ok();
     let read_child = |p: &str| crate::fsutil::read_file(child, p).ok();
     let mut pairs: Vec<(usize, usize)> = Vec::new();
@@ -389,6 +386,25 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
                 pairs.push((d, a));
                 used_d.insert(d);
                 used_a.insert(a);
+            }
+        }
+    }
+    // Symlinks are moves only when their targets match exactly.
+    for (d, deleted) in v.iter().enumerate() {
+        if !deleted.old().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink) || deleted.new().is_some() {
+            continue;
+        }
+        let Ok(target) = crate::fsutil::read_link_bytes(parent, deleted.path()) else { continue };
+        for (a, added) in v.iter().enumerate() {
+            if !used_a.contains(&a)
+                && added.old().is_none()
+                && added.new().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink)
+                && crate::fsutil::read_link_bytes(child, added.path()).ok().as_ref() == Some(&target)
+            {
+                pairs.push((d, a));
+                used_d.insert(d);
+                used_a.insert(a);
+                break;
             }
         }
     }

@@ -87,8 +87,9 @@ fn merge_trees_at(
     theirs_label: &str,
     allow_commands: bool,
 ) -> Result<(crate::repo::Temp, merge::Outcome)> {
-    let base_root = repo.state_root(base)?;
-    let theirs_root = repo.state_root(theirs)?;
+    let base_root = repo.state_src(base)?;
+    let theirs_root = repo.state_src(theirs)?;
+    let ours_source = if ours.is_empty() { crate::repo::snap(ours_root) } else { repo.state_src(ours)? };
     let work = repo.temp_work(ours_root)?;
     let commands_blocked = std::cell::Cell::new(false);
     let cfg = |k: &str| {
@@ -102,7 +103,7 @@ fn merge_trees_at(
     };
     let out = merge::merge(&merge::Input {
         base: &base_root,
-        ours: ours_root,
+        ours: &ours_source,
         theirs: &theirs_root,
         result: &work.path,
         base_id: base,

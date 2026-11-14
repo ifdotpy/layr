@@ -9,7 +9,7 @@
 
 use crate::changes::{self, EntryChange};
 use crate::compare::DataEvidence;
-use crate::fsutil::{self, FType, Meta};
+use crate::fsutil::{self, FType, Meta, Src};
 use crate::model::Conflict;
 use crate::repo::skip_path;
 use anyhow::{bail, Context, Result};
@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct Input<'a> {
-    pub base: &'a Path,
-    pub ours: &'a Path,
-    pub theirs: &'a Path,
+    pub base: &'a dyn Src,
+    pub ours: &'a dyn Src,
+    pub theirs: &'a dyn Src,
     pub result: &'a Path,
     pub base_id: &'a str,
     pub ours_id: &'a str,
@@ -54,7 +54,7 @@ pub struct Attrs {
 }
 
 impl Attrs {
-    pub fn load(root: &Path) -> Attrs {
+    pub fn load(root: &(impl Src + ?Sized)) -> Attrs {
         let mut rules = Vec::new();
         for name in [".gitattributes", ".layrattributes"] {
             let data = match fsutil::lmeta(root, name) {
@@ -71,7 +71,7 @@ impl Attrs {
                     Some(p) => p,
                     None => continue,
                 };
-                let mut b = GitignoreBuilder::new(root);
+                let mut b = GitignoreBuilder::new("");
                 if b.add_line(None, pat).is_err() {
                     continue;
                 }
@@ -97,10 +97,10 @@ impl Attrs {
     }
 
     /// The value of an attribute for a path: the last matching rule wins.
-    pub fn get(&self, root: &Path, path: &str, key: &str) -> Option<String> {
+    pub fn get(&self, path: &str, key: &str) -> Option<String> {
         let mut out = None;
         for r in &self.rules {
-            if r.matcher.matched(root.join(path), false).is_ignore() {
+            if r.matcher.matched(path, false).is_ignore() {
                 for (k, v) in &r.attrs {
                     if k == key {
                         out = Some(v.clone().unwrap_or_else(|| "true".into()));
@@ -142,8 +142,21 @@ impl MergeSides {
     }
 }
 
-fn side(base: &Path, child: &Path) -> Result<(Side, Vec<EntryChange>)> {
+fn side(base: &dyn Src, child: &dyn Src) -> Result<(Side, Vec<EntryChange>)> {
     let list: Vec<EntryChange> = changes::candidates(base, child)?.into_iter().filter(|c| !skip_path(c.path())).collect();
+    // Portable trees have no inode lineage. Recover moves from content before the merge
+    // interprets a missing source as a deletion.
+    let list = if base.objects().is_some() || child.objects().is_some() {
+        let mut changed = Vec::new();
+        for change in list {
+            if changes::really_changed(base, child, &change)? {
+                changed.push(change);
+            }
+        }
+        changes::with_renames(base, child, changed)
+    } else {
+        list
+    };
     Ok((Side::new(&list), list))
 }
 
@@ -170,6 +183,9 @@ impl Side {
         }
     }
     fn ranges(&self, p: &str) -> DataEvidence {
+        if self.moved_from.contains_key(p) {
+            return DataEvidence::Unknown;
+        }
         match self.by_path.get(p) {
             Some(c) if c.old_path().is_none() => c.data().clone(),
             Some(_) => DataEvidence::Unknown,
@@ -215,7 +231,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         Ok(())
     }
 
-    fn same(&self, ra: &Path, pa: &str, rb: &Path, pb: &str) -> Result<bool> {
+    fn same(&self, ra: &(impl Src + ?Sized), pa: &str, rb: &(impl Src + ?Sized), pb: &str) -> Result<bool> {
         let (ma, mb) = (fsutil::lmeta(ra, pa), fsutil::lmeta(rb, pb));
         match (&ma, &mb) {
             (Some(a), Some(b)) if a.ftype == FType::File && a.executable() != b.executable() => Ok(false),
@@ -223,7 +239,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    fn content_same(&self, ra: &Path, pa: &str, rb: &Path, pb: &str) -> Result<bool> {
+    fn content_same(&self, ra: &(impl Src + ?Sized), pa: &str, rb: &(impl Src + ?Sized), pb: &str) -> Result<bool> {
         fsutil::same_entry(ra, pa, rb, pb, None)
     }
 }
@@ -364,7 +380,9 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
         }
         // Theirs added or changed a file or a link.
         let parent = parent_of(&p);
-        if !parent.is_empty()
+        // A paired file move already routes this edit to its surviving parent at `q`.
+        if q == p
+            && !parent.is_empty()
             && fsutil::lmeta(i.base, &parent).map(|m| m.is_dir()).unwrap_or(false)
             && fsutil::lmeta(i.ours, &parent).is_none()
             && !matches!(ours.at(&parent), OursAt::Moved(_))
@@ -421,7 +439,8 @@ fn derive_rules(i: &Input, attrs: &Attrs) -> Result<BTreeMap<String, DeriveRule>
         return Ok(BTreeMap::new());
     }
     let mut paths = BTreeSet::new();
-    for root in [i.base, i.ours, i.theirs, i.result] {
+    let result = i.result.to_path_buf();
+    for root in [i.base, i.ours, i.theirs, &result] {
         fsutil::walk(root, "", &mut |p, m| {
             if skip_path(p) {
                 return Ok(false);
@@ -443,7 +462,7 @@ fn derive_rules(i: &Input, attrs: &Attrs) -> Result<BTreeMap<String, DeriveRule>
         }
     }
     for p in paths {
-        let name = attrs.get(i.result, &p, "derive");
+        let name = attrs.get(&p, "derive");
         let name = match name {
             Some(n) if n != "false" => n,
             _ => continue,
@@ -609,11 +628,17 @@ fn parent_of(p: &str) -> String {
     }
 }
 
-fn dir_has_entries(root: &Path, p: &str) -> bool {
-    fsutil::safe_join(root, p).ok().and_then(|d| std::fs::read_dir(d).ok()).map(|mut r| r.next().is_some()).unwrap_or(false)
+fn dir_has_entries(root: &dyn Src, p: &str) -> bool {
+    let mut found = false;
+    fsutil::walk(root, p, &mut |_, _| {
+        found = true;
+        Ok(false)
+    })
+    .is_ok()
+        && found
 }
 
-fn prune(result: &Path, theirs: &Path, rel: &str) -> Result<()> {
+fn prune(result: &Path, theirs: &dyn Src, rel: &str) -> Result<()> {
     let mut comps: Vec<&str> = rel.split('/').collect();
     comps.pop();
     while !comps.is_empty() {
@@ -634,13 +659,12 @@ fn add_add(c: &mut Ctx, p: &str, q: &str) -> Result<()> {
     let i = c.i;
     let (mr, mt) = (fsutil::lmeta(i.result, q).unwrap(), fsutil::lmeta(i.theirs, p).unwrap());
     if mr.ftype == FType::File && mt.ftype == FType::File {
-        let driver = driver_for(c, q, i.result, q, i.theirs, p, None);
-        let small = !too_big(&fsutil::safe_join(i.result, q)?) && !too_big(&fsutil::safe_join(i.theirs, p)?);
+        let driver = driver_for(c, q, i.result, q, i.theirs, p);
+        let small = !too_big(&fsutil::safe_join(i.result, q)?) && !too_big(&i.theirs.at(p)?);
         if (driver == "text" || driver == "union") && small {
             let empty = tempfile_path("base")?;
             std::fs::write(&empty, b"")?;
-            let r =
-                run_merge_file(i, &fsutil::safe_join(i.result, q)?, &empty, &fsutil::safe_join(i.theirs, p)?, driver == "union");
+            let r = run_merge_file(i, &fsutil::safe_join(i.result, q)?, &empty, &i.theirs.at(p)?, driver == "union");
             let _ = std::fs::remove_file(&empty);
             c.out.changed.insert(q.to_string());
             c.out.messages.push(format!("Auto-merging {q}"));
@@ -706,8 +730,8 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
             c.out.changed.insert(rp.to_string());
         } else if !c.content_same(i.result, rp, i.theirs, tp)? {
             let tr = theirs.ranges(tp);
-            let or = ours.ranges(rp);
-            let driver = driver_for(c, rp, i.result, rp, i.theirs, tp, Some(i.base));
+            let or = ours.ranges(bp);
+            let driver = driver_for(c, rp, i.result, rp, i.theirs, tp);
             run_driver(c, &driver, bp, tp, rp, or, tr)?;
         }
     }
@@ -732,15 +756,14 @@ fn kind(m: &Meta) -> &'static str {
     }
 }
 
-fn driver_for(c: &Ctx, attr_path: &str, ra: &Path, pa: &str, rb: &Path, pb: &str, base: Option<&Path>) -> String {
-    if let Some(d) = c.attrs.get(c.i.ours, attr_path, "merge") {
+fn driver_for(c: &Ctx, attr_path: &str, ra: &(impl Src + ?Sized), pa: &str, rb: &(impl Src + ?Sized), pb: &str) -> String {
+    if let Some(d) = c.attrs.get(attr_path, "merge") {
         return match d.as_str() {
             "false" => "binary".into(),
             "true" => "text".into(),
             x => x.to_string(),
         };
     }
-    let _ = base;
     if fsutil::is_binary_file(ra, pa) || fsutil::is_binary_file(rb, pb) {
         "binary".into()
     } else {
@@ -814,8 +837,8 @@ fn run_driver(
 ) -> Result<()> {
     let i = c.i;
     let r_path = fsutil::safe_join(i.result, rp)?;
-    let b_path = fsutil::safe_join(i.base, bp)?;
-    let t_path = fsutil::safe_join(i.theirs, tp)?;
+    let b_path = i.base.at(bp)?;
+    let t_path = i.theirs.at(tp)?;
     c.out.changed.insert(rp.to_string());
     match driver {
         "text" | "union" if [&r_path, &b_path, &t_path].iter().any(|p| too_big(p)) => {
@@ -859,7 +882,7 @@ fn run_driver(
 
 fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     let i = c.i;
-    let name = match c.attrs.get(i.ours, rp, "merge-verify") {
+    let name = match c.attrs.get(rp, "merge-verify") {
         Some(n) => n,
         None => return Ok(()),
     };
@@ -995,17 +1018,62 @@ fn overlaps(a: &[(u64, u64)], b: &[(u64, u64)]) -> bool {
     false
 }
 
-/// Merge a binary file by byte ranges: allowed when both sides kept the inode, the size did not
-/// change and the changed ranges do not overlap. Theirs ranges are copied onto ours.
-fn block_merge(i: &Input, bp: &str, tp: &str, rp: &str, ours_ranges: DataEvidence, theirs_ranges: DataEvidence) -> Result<bool> {
-    if matches!(ours_ranges, DataEvidence::Unknown) || matches!(theirs_ranges, DataEvidence::Unknown) {
-        return Ok(false);
+/// Compare fixed blocks when portable states have no native extent evidence. Adjacent
+/// changed blocks coalesce; reading bounded buffers also supports large binary files.
+fn changed_blocks(
+    base: &(impl Src + ?Sized),
+    bp: &str,
+    child: &(impl Src + ?Sized),
+    cp: &str,
+    size: u64,
+) -> Result<DataEvidence> {
+    use std::io::Read;
+    let (mut a, mut b) = (fsutil::open_regular(&base.at(bp)?)?, fsutil::open_regular(&child.at(cp)?)?);
+    let (mut ab, mut bb) = ([0; 4096], [0; 4096]);
+    let mut ranges: Vec<(u64, crate::compare::RangeEnd)> = Vec::new();
+    let mut pos = 0;
+    while pos < size {
+        let len = usize::try_from((size - pos).min(ab.len() as u64))?;
+        a.read_exact(&mut ab[..len])?;
+        b.read_exact(&mut bb[..len])?;
+        let end = pos + len as u64;
+        if ab[..len] != bb[..len] {
+            match ranges.last_mut() {
+                Some((_, previous)) if *previous == crate::compare::RangeEnd::Offset(pos) => {
+                    *previous = crate::compare::RangeEnd::Offset(end);
+                }
+                _ => ranges.push((pos, crate::compare::RangeEnd::Offset(end))),
+            }
+        }
+        pos = end;
     }
-    let (mb, mo, mt) = match (fsutil::lmeta(i.base, bp), fsutil::lmeta(i.ours, rp), fsutil::lmeta(i.theirs, tp)) {
-        (Some(b), Some(o), Some(t)) => (b, o, t),
+    Ok(DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, size, size))
+}
+
+/// Merge equal-sized binary files when their changed blocks do not overlap. Native
+/// comparisons supply extent evidence; object-backed comparisons read blocks on demand.
+fn block_merge(
+    i: &Input,
+    bp: &str,
+    tp: &str,
+    rp: &str,
+    mut ours_ranges: DataEvidence,
+    mut theirs_ranges: DataEvidence,
+) -> Result<bool> {
+    let (mb, mo, mt) = match (fsutil::lmeta(i.base, bp), fsutil::lmeta(i.result, rp), fsutil::lmeta(i.theirs, tp)) {
+        (Some(b), Some(o), Some(t)) if b.is_file() && o.is_file() && t.is_file() => (b, o, t),
         _ => return Ok(false),
     };
     if mb.size != mo.size || mb.size != mt.size {
+        return Ok(false);
+    }
+    if matches!(ours_ranges, DataEvidence::Unknown) && (i.base.objects().is_some() || i.ours.objects().is_some()) {
+        ours_ranges = changed_blocks(i.base, bp, i.result, rp, mb.size)?;
+    }
+    if matches!(theirs_ranges, DataEvidence::Unknown) && (i.base.objects().is_some() || i.theirs.objects().is_some()) {
+        theirs_ranges = changed_blocks(i.base, bp, i.theirs, tp, mb.size)?;
+    }
+    if matches!(ours_ranges, DataEvidence::Unknown) || matches!(theirs_ranges, DataEvidence::Unknown) {
         return Ok(false);
     }
     let bounded = |data: DataEvidence| match data {
@@ -1018,10 +1086,7 @@ fn block_merge(i: &Input, bp: &str, tp: &str, rp: &str, ours_ranges: DataEvidenc
     }
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::OpenOptionsExt;
-    if mb.ftype != FType::File || mo.ftype != FType::File || mt.ftype != FType::File {
-        return Ok(false);
-    }
-    let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.theirs, tp)?)?;
+    let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(i.theirs.at(tp)?)?;
     let mut dst =
         std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
     for (off, len) in tr {
@@ -1350,3 +1415,7 @@ mod command_identity_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "merge_source_tests.rs"]
+mod source_tests;
