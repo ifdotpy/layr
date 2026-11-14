@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/core/types",
+  "crates/store/object-format",
   "crates/layr-api",
   "crates/layr-store",
   "crates/layr-model",
@@ -34,10 +35,18 @@ layr-adapter = { layer = 0, dependencies = [], leaf = true }
 layr-api = { layer = 0, dependencies = [], leaf = true }
 layr-types = { layer = 0, dependencies = [], leaf = true }
 layr-hashers = { layer = 0, dependencies = [], leaf = true }
-layr-store = { layer = 1, dependencies = ["layr-hashers"] }
+layr-object-format = { layer = 1, dependencies = [
+  "layr-hashers",
+  "layr-types",
+], leaf = true, normal-dependencies = [
+  "layr-types",
+  "layr-hashers",
+  "hmac",
+] }
+layr-store = { layer = 1, dependencies = ["layr-hashers", "layr-object-format"] }
 layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
 layr-model = { layer = 2, dependencies = ["layr-hashers", "layr-store"] }
-layr-objects = { layer = 2, dependencies = ["layr-hashers", "layr-store"] }
+layr-objects = { layer = 2, dependencies = ["layr-hashers", "layr-object-format", "layr-store"] }
 layr-retest = { layer = 2, dependencies = ["layr-cache"] }
 layr = { layer = 3, dependencies = [
   "layr-adapter",

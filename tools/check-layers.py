@@ -14,6 +14,12 @@ if set(policy) != names:
 errors = []
 for p in workspace:
     rule = policy[p["name"]]
+    normal_allowlist = rule.get("normal-dependencies")
+    if normal_allowlist is not None:
+        actual = {d["name"] for d in p["dependencies"] if d["kind"] != "dev"}
+        unexpected = actual - set(normal_allowlist)
+        if unexpected:
+            errors.append(f'{p["name"]}: unlisted normal/build dependencies {unexpected}')
     for d in p["dependencies"]:  # Includes optional, target-specific, build and dev edges.
         if d["name"] in names:
             if d["name"] not in rule["dependencies"] or policy[d["name"]]["layer"] > rule["layer"]:
@@ -22,7 +28,7 @@ for p in workspace:
         errors.append(f'{p["name"]}: unknown allowed dependencies {set(rule["dependencies"]) - names}')
 
 nodes = {n["id"]: n for n in m["resolve"]["nodes"]}
-heavy = {"anyhow", "tokio", "clap", "rayon", "reqwest", "hyper", "image", "rusqlite"}
+heavy = {"anyhow", "tokio", "clap", "rayon", "reqwest", "hyper", "image", "rusqlite", "age", "ssh-key", "ed25519-dalek", "rustls", "openssl", "zstd-safe"}
 for p in workspace:
     if not policy[p["name"]].get("leaf"):
         continue

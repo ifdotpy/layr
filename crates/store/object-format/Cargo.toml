@@ -1,0 +1,22 @@
+[package]
+name = "layr-object-format"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+layr-types = { path = "../../core/types" }
+layr-hashers = { path = "../../layr-hashers", default-features = false, features = ["sha256"] }
+hmac = "0.12"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "criterion"
+harness = false

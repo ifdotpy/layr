@@ -36,17 +36,7 @@ impl EntryKind {
     }
 }
 
-/// The extended attributes that a tree records. Left out: attributes that the system stamps on
-/// every file (`com.apple.provenance`), layr's own markers, and the classes that need privileges
-/// or name file system internals (`trusted.`, `security.`, `system.`: SELinux labels, POSIX ACLs,
-/// overlayfs whiteouts). docs/objects.md lists them.
-pub fn keep_xattr(name: &[u8]) -> bool {
-    name != b"com.apple.provenance"
-        && !name.starts_with(b"com.layr.")
-        && !name.starts_with(b"trusted.")
-        && !name.starts_with(b"security.")
-        && !name.starts_with(b"system.")
-}
+pub use layr_object_format::tree::keep_xattr;
 
 fn read_buffer(mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> io::Result<Vec<u8>> {
     let mut size = 256;

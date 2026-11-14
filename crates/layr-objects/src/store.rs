@@ -30,12 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 mod maintenance;
 pub use maintenance::{MaintenanceLimit, MaintenancePlan};
 
-const MAGIC: &[u8; 4] = b"LOB1";
-const WHOLE: u8 = b'z';
-const DELTA: u8 = b'd';
-const CHUNKED: u8 = b'c';
-/// A whole small blob compressed with the store dictionary: dict-id:32, then the frame.
-const WHOLE_DICT: u8 = b'y';
+use layr_object_format::loose::{self, Header, CHUNKED, DELTA, MAGIC, WHOLE, WHOLE_DICT};
 /// Project storage v1 uses snapshots; v2 uses content-addressed objects.
 pub const FORMAT_VERSION: u64 = 2;
 
@@ -480,11 +475,13 @@ impl Store {
     fn payload(&self, id: &Id) -> Result<Payload> {
         match fs::read(self.object_path(id)) {
             Ok(data) => {
-                ensure!(data.len() >= 6 && &data[..4] == MAGIC, "object {id} has no valid header");
-                let kind = Kind::from_byte(data[4])?;
-                return Ok(match data[5] {
-                    WHOLE => Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? },
-                    WHOLE_DICT => {
+                let header = Header::decode(&data).with_context(|| format!("object {id} has no valid header"))?;
+                let kind = header.kind;
+                return Ok(match header.form {
+                    loose::Form::Whole => {
+                        Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? }
+                    }
+                    loose::Form::Dictionary => {
                         ensure!(data.len() > 6 + 32, "object {id} is cut short");
                         let dict_id = Id(data[6..38].try_into().expect("32 bytes"));
                         let dict = self.dict_bytes(&dict_id)?;
@@ -496,9 +493,8 @@ impl Store {
                         ensure!(size <= DICT_FILE_MAX as u64, "object {id} is too large for a dictionary frame");
                         Payload { kind, form: pack::RAW, bytes: crate::zstdx::decompress(frame, Some(&dict), size as usize)? }
                     }
-                    DELTA => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
-                    CHUNKED => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
-                    other => bail!("object {id} has unknown form {other:#x}"),
+                    loose::Form::Delta => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
+                    loose::Form::Chunked => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
                 });
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -553,8 +549,7 @@ impl Store {
         let tmp = self.temp();
         let written = (|| -> Result<u64> {
             let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o444).open(&tmp)?;
-            f.write_all(MAGIC)?;
-            f.write_all(&[kind.byte(), form])?;
+            f.write_all(&Header { kind, form: loose::Form::from_byte(form)? }.encode())?;
             let mut n = 6;
             for part in body {
                 f.write_all(part)?;
@@ -606,7 +601,7 @@ impl Store {
     }
 
     pub fn get_times(&self, id: &Id) -> Result<crate::times::Times> {
-        crate::times::Times::decode(&self.times_bytes(id)?)
+        Ok(crate::times::Times::decode(&self.times_bytes(id)?)?)
     }
 
     #[cfg(test)]
@@ -634,7 +629,7 @@ impl Store {
         let p = self.payload(id)?;
         ensure!(p.kind == Kind::Tree && p.form == pack::RAW, "object {id} is not a tree");
         ensure!(self.keying.id(Kind::Tree, &p.bytes) == *id, "tree {id} does not match its id");
-        Tree::decode(&p.bytes)
+        Ok(Tree::decode(&p.bytes)?)
     }
 
     /// The id of the file at `path`, read once.
@@ -646,20 +641,12 @@ impl Store {
 
     /// Hash an already-open file with the length observed on that descriptor.
     pub fn hash_open_file(&self, f: &mut File, len: u64) -> Result<Id> {
-        let mut h = self.keying.hasher(Kind::Blob, len);
         thread_local! {
             static BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
         BUFFER.with_borrow_mut(|buffer| {
             let buf = fsx::file_buffer(buffer, len);
-            loop {
-                let n = f.read(buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            h.finish()
+            Ok(self.keying.hash_reader(Kind::Blob, len, f, buf)?)
         })
     }
 
@@ -1017,7 +1004,7 @@ impl Store {
         let field = |name: &str| -> Result<Id> {
             let key = format!("\"{name}\":\"");
             let at = text.find(&key).ok_or_else(|| anyhow::anyhow!("state {state} has no {name}"))? + key.len();
-            Id::parse(text.get(at..at + 64).unwrap_or(""))
+            Ok(Id::parse(text.get(at..at + 64).unwrap_or(""))?)
         };
         let mut r = StateRef { tree: field("tree")?, times: field("times")? };
         ensure!(text == format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree), "state {state} is not canonical");
@@ -1387,13 +1374,14 @@ impl Store {
             }
             let mut head = [0u8; 6];
             let n = read_up_to(&mut File::open(&path)?, &mut head)?;
-            ensure!(n == 6 && &head[..4] == MAGIC, "{} has no valid header", path.display());
-            let (count, bytes) = match (Kind::from_byte(head[4])?, head[5]) {
+            ensure!(n == 6, "{} has no valid header", path.display());
+            let header = Header::decode(&head).with_context(|| format!("{} has no valid header", path.display()))?;
+            let (count, bytes) = match (header.kind, header.form) {
                 (Kind::Tree, _) => (&mut s.trees, &mut s.tree_bytes),
                 (Kind::Chunk, _) => (&mut s.chunks, &mut s.chunk_bytes),
-                (Kind::Blob, WHOLE | WHOLE_DICT) => (&mut s.whole_blobs, &mut s.whole_bytes),
-                (Kind::Blob, DELTA) => (&mut s.delta_blobs, &mut s.delta_bytes),
-                (Kind::Blob, _) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
+                (Kind::Blob, loose::Form::Whole | loose::Form::Dictionary) => (&mut s.whole_blobs, &mut s.whole_bytes),
+                (Kind::Blob, loose::Form::Delta) => (&mut s.delta_blobs, &mut s.delta_bytes),
+                (Kind::Blob, loose::Form::Chunked) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
                 (Kind::Times, _) => (&mut s.times, &mut s.times_bytes),
                 (Kind::Opaque, _) => bail!("{} is an opaque object, which is never loose", path.display()),
             };

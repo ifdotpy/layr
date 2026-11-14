@@ -16,6 +16,7 @@ native = ["dep:chrono", "dep:rand", "dep:reqwest", "dep:zstd-safe", "ed25519-dal
 wasm = ["dep:getrandom", "dep:ruzstd"]
 
 [dependencies]
+layr-object-format = { path = "../store/object-format" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 bech32 = "0.11"

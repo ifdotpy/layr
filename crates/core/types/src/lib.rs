@@ -1,4 +1,4 @@
-//! Parsed state and line identifiers.
+//! Parsed state, line, and object identifiers.
 #![forbid(unsafe_code)]
 
 use std::fmt;
@@ -76,3 +76,46 @@ mod tests {
         Ok(())
     }
 }
+
+/// A 32-byte object id. Text form: 64 lowercase hex digits.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ObjectId(pub [u8; 32]);
+
+impl ObjectId {
+    pub fn hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    pub fn parse(text: &str) -> Result<ObjectId, ParseObjectIdError> {
+        if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(ParseObjectIdError(text.to_owned()));
+        }
+        let mut out = [0u8; 32];
+        // The check above accepts exactly 32 pairs of hex digits.
+        hex::decode_to_slice(text, &mut out).map_err(|_| ParseObjectIdError(text.to_owned()))?;
+        Ok(ObjectId(out))
+    }
+}
+
+impl fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.hex())
+    }
+}
+
+impl fmt::Debug for ObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Id({})", &self.hex()[..12])
+    }
+}
+
+/// An object identifier outside the canonical lowercase hexadecimal form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseObjectIdError(String);
+
+impl fmt::Display for ParseObjectIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "an object id has 64 lowercase hex digits: {}", self.0)
+    }
+}
+impl std::error::Error for ParseObjectIdError {}

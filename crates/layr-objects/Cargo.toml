@@ -11,17 +11,17 @@ license = "MIT"
 publish = false
 
 [dependencies]
+layr-object-format = { path = "../store/object-format" }
 anyhow = "1"
-hex = "0.4"
 hmac = "0.12"
 layr-hashers = { path = "../layr-hashers" }
 layr-store = { path = "../layr-store" }
 rayon = "1"
 rustix = { version = "1", features = ["fs", "process"] }
-sha2 = "0.10"
 zstd-safe = { version = "7", features = ["std"] }
 
 [dev-dependencies]
+hex = "0.4"
 
 [[example]]
 name = "objects-bench"
