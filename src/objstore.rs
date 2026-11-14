@@ -6,7 +6,7 @@ use crate::repo::Repo;
 use crate::store::Project;
 use anyhow::{Context, Result};
 use layr_objects::{Id, Keying, Node, StateRef, Store};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The folder of the object store of a project.
 pub fn dir(p: &Project) -> PathBuf {
@@ -116,8 +116,24 @@ pub fn entry(store: &Store, root: &Id, path: &str) -> Result<crate::gitbridge::E
 /// updated writers also keep new history in the portable format.
 pub const ENABLED: &str = "objects.enabled";
 
+// Select the native reader once; backends without placeholders use the ordinary kind.
+pub(crate) const ENTRY_KIND: fn(&Path, &std::fs::Metadata) -> Result<layr_objects::fsx::EntryKind> = {
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    {
+        crate::storage::entry_kind
+    }
+    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
+    {
+        |_, _| Ok(layr_objects::fsx::EntryKind::Ordinary)
+    }
+};
+
 pub struct SnapshotSource<'a>(pub &'a crate::repo::Snap);
 impl layr_objects::write::Source for SnapshotSource<'_> {
+    fn entry_kind(&self, path: &Path, meta: &std::fs::Metadata) -> Result<layr_objects::fsx::EntryKind> {
+        ENTRY_KIND(path, meta)
+    }
+
     fn path(&self, relative: &[u8]) -> Result<PathBuf> {
         use crate::fsutil::Src;
         let path = self.0.at(std::str::from_utf8(relative).context("a layr path is not UTF-8")?)?;

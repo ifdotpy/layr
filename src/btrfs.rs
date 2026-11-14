@@ -14,6 +14,21 @@ use std::process::Command;
 const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 const FIRST_FREE_OBJECTID: u64 = 256;
 
+/// A nested subvolume leaves inode 2 at its boundary in a parent snapshot. Unlike a real
+/// subvolume root (256), its inode times are invented whenever the kernel instantiates it.
+pub fn entry_kind(path: &Path, meta: &fs::Metadata) -> Result<layr_objects::fsx::EntryKind> {
+    use layr_objects::fsx::EntryKind;
+    const EMPTY_SUBVOL_DIR_OBJECTID: u64 = 2;
+    if meta.is_dir()
+        && meta.ino() == EMPTY_SUBVOL_DIR_OBJECTID
+        && rustix::fs::statfs(path)?.f_type as i64 == BTRFS_SUPER_MAGIC
+        && fs::symlink_metadata(path.join(".."))?.dev() != meta.dev()
+    {
+        return Ok(EntryKind::SubvolumePlaceholder);
+    }
+    Ok(EntryKind::Ordinary)
+}
+
 thread_local! {
     // New snapshots can still be discarded by this command. Do not persist their diffs.
     static NEW_SNAPSHOTS: std::cell::RefCell<std::collections::HashSet<PathBuf>> = Default::default();
@@ -616,4 +631,57 @@ fn nested_subvolumes(root: &Path) -> Result<Vec<PathBuf>> {
 /// btrfs has no layer registry: nothing to verify beyond the tree.
 pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use layr_objects::{fsx::EntryKind, write::write_tree_from, Keying, Store, Temperature, WriteOptions};
+
+    #[test]
+    fn snapshot_placeholder_is_classified_at_the_driver_boundary() -> Result<()> {
+        let tmp = std::env::temp_dir();
+        if !is_supported(&tmp) {
+            return Ok(());
+        }
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = set_writable(&self.0.join("snapshot"));
+                let _ = delete_tree(&self.0);
+            }
+        }
+        let fixture = Fixture(tmp.join(format!("layr-placeholder-{}", crate::ids::new_id())));
+        fs::create_dir(&fixture.0)?;
+        let source = fixture.0.join("source");
+        let saved = fixture.0.join("snapshot");
+        create_subvolume(&source)?;
+        create_subvolume(&source.join(".git"))?;
+        fs::write(source.join(".git/marker"), "not in the parent snapshot")?;
+        fs::write(source.join("file"), "saved content")?;
+        snapshot(&source, &saved, true)?;
+        assert_eq!(entry_kind(&source.join(".git"), &fs::symlink_metadata(source.join(".git"))?)?, EntryKind::Ordinary);
+        let stub = saved.join(".git");
+        assert_eq!(entry_kind(&stub, &fs::symlink_metadata(&stub)?)?, EntryKind::SubvolumePlaceholder);
+        let objects = Store::open(&fixture.0.join("objects"), Keying::Plain)?;
+        let snap = crate::repo::snap(&saved);
+        let source = crate::objstore::SnapshotSource(&snap);
+        let options = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false };
+        let written = write_tree_from(&objects, &source, &options)?;
+        let copy = fixture.0.join("copy");
+        layr_objects::checkout_with(
+            &objects,
+            &written.tree.ok_or_else(|| anyhow::anyhow!("missing tree"))?,
+            Some(&written.times.ok_or_else(|| anyhow::anyhow!("missing times"))?),
+            &copy,
+        )?;
+        assert_eq!(layr_objects::times::ns_of(&fs::symlink_metadata(copy.join(".git"))?), 0);
+        assert!(fs::read_dir(copy.join(".git"))?.next().is_none());
+        layr_objects::times::set(&copy.join(".git"), 123_456_789)?;
+        assert!(layr_objects::compare::compare_with_kinds(&saved, &copy, true, entry_kind)?.differences.is_empty());
+        assert!(layr_objects::compare::compare_with_kinds(&copy, &saved, true, entry_kind)?.differences.is_empty());
+        set_writable(&saved)?;
+        delete_tree(&fixture.0)?;
+        Ok(())
+    }
 }

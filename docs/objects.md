@@ -151,6 +151,15 @@ record = 0x00 delta:zigzag-varint     a file or a symbolic link
 - To send a state, walk the tables from its root table (`Store::times_ids`): the root id alone does
   not reach them.
 
+A nested btrfs subvolume leaves an empty placeholder in its parent's snapshot. Its inode (2,
+`BTRFS_EMPTY_SUBVOL_DIR_OBJECTID`) has times invented by the kernel on each instantiation. The
+btrfs driver identifies it as a placeholder using the filesystem and subvolume boundary. The
+shared writer records zero for its folder time, and the shared comparison excludes its time when
+either side is a placeholder.
+Zero is padding in the existing table format, not a marker: an ordinary folder at the Unix epoch
+still has its time checked. Names, types, modes, attributes and contents are checked as usual.
+APFS and OverlayFS do not produce these placeholders.
+
 The local per-folder format uses version 2. Cloud V1 uses its original flat version 1 table. On transfer, Layr converts between the two. A local version 1 state is checked against both older forms and converted. If both forms match but describe different times, Layr refuses the state.
 
 A checkout with a times table sets every modification time: the entries of a folder first, then

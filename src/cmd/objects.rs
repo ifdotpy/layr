@@ -215,7 +215,7 @@ pub(crate) fn compare_checkout(
     let made = layr_objects::checkout_with(store, &r.tree, Some(&r.times), &tmp.path)?;
     let checkout_seconds = started.elapsed().as_secs_f64();
     let pin = h.repo.pin(&[state])?;
-    let cmp = layr_objects::compare_with(&h.repo.state_root(state)?, &tmp.path, true);
+    let cmp = layr_objects::compare::compare_with_kinds(&h.repo.state_root(state)?, &tmp.path, true, crate::objstore::ENTRY_KIND);
     drop(pin);
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
     // Read-only folders of the copy must open again before the copy goes.

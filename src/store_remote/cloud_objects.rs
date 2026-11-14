@@ -46,7 +46,8 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
         _ => None,
     };
     let _pin = repo.pin(&[state.id.as_str()])?;
-    let root = repo.state_root(&state.id)?;
+    let snapshot = repo.state_src(&state.id)?;
+    let source = crate::objstore::SnapshotSource(&snapshot);
     let options = WriteOptions {
         temperature: Temperature::Cold,
         previous: base.as_ref().map(|(_, r)| r.tree),
@@ -56,17 +57,17 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
     let report = match base {
         Some((parent, r)) => {
             let _parent_pin = repo.pin(&[parent.as_str()])?;
-            let (paths, dirty) = crate::changes::object_candidates(&repo.state_src(&parent)?, &repo.state_src(&state.id)?)?;
-            layr_objects::write::write_changed_with_dirty(
+            let (paths, dirty) = crate::changes::object_candidates(&repo.state_src(&parent)?, &snapshot)?;
+            layr_objects::write::write_changed_with_dirty_from(
                 objects,
-                &root,
+                &source,
                 &layr_objects::write::Base { tree: r.tree, times: r.times },
                 &paths,
                 &dirty,
                 &options,
             )?
         }
-        None => layr_objects::write_tree(objects, &root, &options)?,
+        None => layr_objects::write::write_tree_from(objects, &source, &options)?,
     };
     let found = StateRef {
         tree: report.tree.context("a write gives a tree")?,

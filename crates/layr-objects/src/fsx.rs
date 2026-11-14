@@ -19,6 +19,23 @@ pub fn file_buffer(buf: &mut Vec<u8>, file_len: u64) -> &mut [u8] {
     &mut buf[..size]
 }
 
+/// Storage semantics supplied by the filesystem reader, independent of the object format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Ordinary,
+    /// An empty boundary entry whose times do not belong to persistent filesystem metadata.
+    SubvolumePlaceholder,
+}
+
+impl EntryKind {
+    pub(crate) fn time(self, meta: &std::fs::Metadata) -> Option<i64> {
+        match self {
+            Self::Ordinary => Some(crate::times::ns_of(meta)),
+            Self::SubvolumePlaceholder => None,
+        }
+    }
+}
+
 /// The extended attributes that a tree records. Left out: attributes that the system stamps on
 /// every file (`com.apple.provenance`), layr's own markers, and the classes that need privileges
 /// or name file system internals (`trusted.`, `security.`, `system.`: SELinux labels, POSIX ACLs,

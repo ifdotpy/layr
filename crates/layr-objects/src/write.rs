@@ -4,7 +4,7 @@
 use crate::fsx;
 use crate::id::Id;
 use crate::store::{Store, Temperature};
-use crate::times::{ns_of, Record, Times};
+use crate::times::{Record, Times};
 use crate::tree::{Entry, Node, Tree, MODE_BITS};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -21,6 +21,10 @@ use std::sync::Mutex;
 pub trait Source: Sync {
     fn path(&self, relative: &[u8]) -> Result<PathBuf>;
     fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>>;
+    /// Classify resolved metadata without adding filesystem knowledge to the object writer.
+    fn entry_kind(&self, _path: &Path, _meta: &fs::Metadata) -> Result<fsx::EntryKind> {
+        Ok(fsx::EntryKind::Ordinary)
+    }
 }
 
 struct Folder<'a>(&'a Path);
@@ -183,17 +187,6 @@ pub fn write_changed(
     write_changed_from(store, &Folder(root), base, changed, options)
 }
 
-pub fn write_changed_with_dirty(
-    store: &Store,
-    root: &Path,
-    base: &Base,
-    changed: &[Vec<u8>],
-    dirty_folders: &[Vec<u8>],
-    options: &WriteOptions,
-) -> Result<WriteReport> {
-    write_changed_with_dirty_from(store, &Folder(root), base, changed, dirty_folders, options)
-}
-
 pub fn write_changed_from(
     store: &Store,
     source: &dyn Source,
@@ -272,14 +265,14 @@ fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Optio
     }
     let mut kept_groups = Vec::new();
     let (mut tree, below) = match base {
-        None => walk.folder(&root, b"", options.previous)?,
+        None => walk.folder(b"", options.previous)?,
         Some((base, plan)) => {
             let base_tree = store.get_tree(&base.tree)?;
             let base_times = store.get_times(&base.times)?;
             let touched =
                 |p: &Vec<u8>| plan.changed.iter().any(|c| p == c || (p.starts_with(c) && p.get(c.len()) == Some(&b'/')));
             kept_groups = base_tree.links.iter().filter(|g| !g.iter().any(touched)).cloned().collect();
-            walk.folder_changed(&root, b"", &base_tree, &base_times, plan)?
+            walk.folder_changed(b"", &base_tree, &base_times, plan)?
         }
     };
     let inodes = walk.inodes.into_inner().expect("no panic holds the lock");
@@ -294,7 +287,8 @@ fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Optio
     tree.links = groups;
     tree.normalize();
     let id = store.put_tree(&tree)?;
-    let times = store.put_times(&Times { own: ns_of(&meta), records: below })?;
+    let times =
+        store.put_times(&Times { own: walk.source.entry_kind(&root, &meta)?.time(&meta).unwrap_or(0), records: below })?;
     Ok(WriteReport {
         tree: Some(id),
         times: Some(times),
@@ -335,7 +329,7 @@ fn join(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 impl Walk<'_> {
     /// A folder read again from `base`: entries that did not change keep their base entry and
     /// times record; folders on the way to a change are read the same way; the rest is new.
-    fn folder_changed(&self, dir: &Path, rel: &[u8], base: &Tree, times: &Times, plan: &Plan) -> Result<(Tree, Vec<Record>)> {
+    fn folder_changed(&self, rel: &[u8], base: &Tree, times: &Times, plan: &Plan) -> Result<(Tree, Vec<Record>)> {
         if base.entries.len() != times.records.len() {
             bail!("the base times do not match the base tree");
         }
@@ -366,16 +360,14 @@ impl Walk<'_> {
                             && matches!(e.node, Node::Dir { .. }) =>
                     {
                         let (Node::Dir { tree }, Record::Folder(sub_times)) = (&e.node, r) else { unreachable!() };
-                        let (mut sub, below) = self.folder_changed(
-                            &path,
-                            &child,
-                            &self.store.get_tree(tree)?,
-                            &self.store.get_times(sub_times)?,
-                            plan,
-                        )?;
+                        let (mut sub, below) =
+                            self.folder_changed(&child, &self.store.get_tree(tree)?, &self.store.get_times(sub_times)?, plan)?;
                         sub.normalize();
                         let xattrs = fsx::xattrs(&path)?;
-                        let record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
+                        let record = Record::Folder(self.store.put_times(&Times {
+                            own: self.source.entry_kind(&path, &meta)?.time(&meta).unwrap_or(0),
+                            records: below,
+                        })?);
                         self.dirs.fetch_add(1, Ordering::Relaxed);
                         let entry = Entry {
                             name,
@@ -385,7 +377,7 @@ impl Walk<'_> {
                         };
                         Ok((entry, record))
                     }
-                    _ => self.entry(dir, rel, name, meta, &before),
+                    _ => self.entry(rel, name, meta, &before),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -395,7 +387,7 @@ impl Walk<'_> {
 
     /// The tree of one folder, without hard link groups (the root gets them), and the times
     /// records of its entries, in the tree's order.
-    fn folder(&self, dir: &Path, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
+    fn folder(&self, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
         let names = list(self.source, rel, self.options)?;
         let before: HashMap<Vec<u8>, Node> = match previous {
             Some(id) => self.store.get_tree(&id)?.entries.into_iter().map(|e| (e.name, e.node)).collect(),
@@ -403,33 +395,28 @@ impl Walk<'_> {
         };
         let done = names
             .into_par_iter()
-            .map(|(name, meta)| self.entry(dir, rel, name, meta, &before))
+            .map(|(name, meta)| self.entry(rel, name, meta, &before))
             .collect::<Result<Vec<(Entry, Record)>>>()?;
         let (entries, records) = done.into_iter().unzip();
         Ok((Tree { entries, links: Vec::new() }, records))
     }
 
-    fn entry(
-        &self,
-        _dir: &Path,
-        rel: &[u8],
-        name: Vec<u8>,
-        meta: fs::Metadata,
-        before: &HashMap<Vec<u8>, Node>,
-    ) -> Result<(Entry, Record)> {
+    fn entry(&self, rel: &[u8], name: Vec<u8>, meta: fs::Metadata, before: &HashMap<Vec<u8>, Node>) -> Result<(Entry, Record)> {
         let path = self.source.path(&join(rel, &name))?;
         let ft = meta.file_type();
         let xattrs = fsx::xattrs(&path).with_context(|| format!("cannot read the attributes of {}", path.display()))?;
         let mode = meta.mode() & MODE_BITS;
         let child = join(rel, &name);
-        let mut record = Record::Time(ns_of(&meta));
+        // The times format requires one table per folder; zero pads a placeholder's absent time.
+        let time = self.source.entry_kind(&path, &meta)?.time(&meta).unwrap_or(0);
+        let mut record = Record::Time(time);
         let node = if ft.is_dir() {
             let previous = match before.get(&name) {
                 Some(Node::Dir { tree }) => Some(*tree),
                 _ => None,
             };
-            let (mut sub, below) = self.folder(&path, &child, previous)?;
-            record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
+            let (mut sub, below) = self.folder(&child, previous)?;
+            record = Record::Folder(self.store.put_times(&Times { own: time, records: below })?);
             sub.normalize();
             self.dirs.fetch_add(1, Ordering::Relaxed);
             Node::Dir { tree: self.store.put_tree(&sub)? }
@@ -467,5 +454,29 @@ impl Walk<'_> {
             bail!("{} is {kind}; a tree holds files, folders and symbolic links", path.display());
         };
         Ok((Entry { name, mode, node, xattrs }, record))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{testutil::scratch, Keying};
+
+    #[test]
+    fn a_directory_time_change_keeps_its_files_and_updates_times() {
+        let dir = scratch("directory-time");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("a/b/file"), "unchanged").unwrap();
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let options = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let first = write_tree(&store, &src, &options).unwrap();
+        let base = Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        crate::times::set(&src.join("a/b"), 1_234_567_890).unwrap();
+        let incremental = write_changed_with_dirty_from(&store, &Folder(&src), &base, &[], &[b"a/b".to_vec()], &options).unwrap();
+        let full = write_tree(&store, &src, &options).unwrap();
+        assert_eq!(incremental.tree, full.tree);
+        assert_eq!(incremental.times, full.times);
+        assert_eq!(incremental.files, 0, "time-only directories do not reread files");
     }
 }
