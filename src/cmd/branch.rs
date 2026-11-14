@@ -203,6 +203,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .flag("--discard")
         .flag("--show-current")
         .flag("--path")
+        .value("--id")
         .value("--owner")
         .value("--count")
         .value("--view")
@@ -243,6 +244,10 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     {
         return Err(exit(128, "usage: layr line new <prefix> [<rev>] --count <N>"));
     }
+    let exact_id = a.get("--id").map(layr_types::LineId::parse).transpose()?;
+    if exact_id.is_some() && (sub != "delete" || !a.pos.is_empty()) {
+        return Err(exit(2, "usage: layr line delete --id <line-id> [-D] [--discard] [--json]"));
+    }
     let h = here(ctx)?;
     let repo = &h.repo;
     let current = h.line.clone();
@@ -253,13 +258,35 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         return Ok(0);
     }
     if a.has("-d") || a.has("-D") {
-        if a.pos.is_empty() {
-            return Err(exit(128, "fatal: line name required"));
+        if a.pos.is_empty() && exact_id.is_none() {
+            return Err(exit(128, "fatal: line name or --id required"));
         }
         let discard = a.has("--discard") || a.has("-f");
-        for name in &a.pos {
-            let l = repo.line(name)?;
-            repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+        let selectors = if let Some(id) = exact_id { vec![id.to_string()] } else { a.pos.clone() };
+        for selector in &selectors {
+            let (l, target) = {
+                let _lock = repo.p.lock_maintenance()?;
+                let l = match exact_id {
+                    Some(id) => crate::lineops::live_line(repo, id)?,
+                    None => repo.line(selector)?,
+                };
+                repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+                let target = crate::lineops::DeleteTarget::capture(repo, &l)?;
+                (l, target)
+            };
+            // Test only: replace the resolved identity or folder before locked validation.
+            if let Some(dir) = std::env::var_os("LAYR_TEST_LINE_DELETE_BARRIER") {
+                let dir = std::path::PathBuf::from(dir);
+                std::fs::write(dir.join("ready"), b"")?;
+                let start = std::time::Instant::now();
+                while !dir.join("release").exists() {
+                    if start.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("line delete test barrier timed out");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            let name = &l.name;
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
@@ -305,8 +332,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
             if let Some(v) = view {
-                crate::cmd::view_ops::delete(ctx, repo, &l, &v)?;
-                outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+                crate::cmd::view_ops::delete(ctx, repo, &l, &v, &target)?;
+                if a.has("--json") {
+                    outln!(ctx, "{}", line_json(repo, &l));
+                } else {
+                    outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+                }
                 continue;
             }
             // The working state is prepared before the lock; under it the record and the renames only
@@ -316,15 +347,20 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // CI line) has no working state to keep: the record alone deletes it.
             #[cfg(target_os = "linux")]
             crate::views::ensure_no_pending_move(repo, &l)?;
-            let made = repo.working(&l).exists();
-            let (_lock, l, last) = if !made {
+            let made = target.has_folder();
+            let (_lock, last) = if !made {
                 let lock = repo.p.lock_maintenance()?;
-                let fresh = repo.line(&l.id)?;
-                (lock, fresh, None)
+                let fresh = target.validate(repo)?;
+                repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                (lock, None)
             } else {
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
+                    {
+                        let _lock = repo.p.lock_maintenance()?;
+                        target.validate(repo)?;
+                    }
                     let mut prepared = repo.prepare_final_state(&l)?;
                     // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
                     // test can write into the folder before the lock.
@@ -339,6 +375,8 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                         }
                     };
                     let checked = (|| -> Result<(crate::repo::FinalState, crate::model::Line)> {
+                        let fresh = target.validate(repo)?;
+                        repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
                         // Automatic states leave overlay files out: uncommitted changes of them would be lost.
                         if !discard && repo.is_stacked(&l)? && repo.working(&l).exists() {
                             let private = repo.private_paths(&l)?;
@@ -357,7 +395,6 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                                 ));
                             }
                         }
-                        let fresh = repo.line(&l.id)?;
                         let state = repo.record_final_state(&lock, ctx, &fresh, &mut prepared)?;
                         Ok((state, fresh))
                     })();
@@ -366,7 +403,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                             repo.discard_final_state(prepared.take());
                             return Err(e);
                         }
-                        Ok((crate::repo::FinalState::Recorded(last), fresh)) => break (lock, fresh, last),
+                        Ok((crate::repo::FinalState::Recorded(last), _)) => break (lock, last),
                         Ok((crate::repo::FinalState::Moved, _)) if attempt < 3 => drop(lock),
                         Ok((crate::repo::FinalState::Moved, fresh)) => {
                             return Err(exit(
@@ -390,8 +427,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     crate::free::keyframe_later(id);
                 }
             }
+            let l = target.validate(repo)?;
+            let deleted = line_json(repo, &l);
             delete_recorded(&_lock, ctx, repo, &l, last, made)?;
-            outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+            if a.has("--json") {
+                outln!(ctx, "{}", deleted);
+            } else {
+                outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+            }
         }
         return Ok(0);
     }

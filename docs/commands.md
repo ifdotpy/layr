@@ -155,6 +155,12 @@ deleted files, and new files that are not ignored. `-D` does not change this. An
 the changes in a named state (`layr add`, then `layr save -m`), park them (`layr park`), or add
 `--discard` to delete the line with them. `-f` is `-D` and `--discard` together. A discarded line
 stays in the `deleted` ring, so `layr undo` brings it back with its changes.
+For automation, resolve the `id` from `line new --json` or `line list --json`, then use
+`line delete --id <line-id>` to delete exactly that identity, even after a rename. It refuses a
+missing or deleted id and a working folder whose path, device or inode changed after resolution;
+it never falls back to a line name. The checks and deletion hold the project lock. `--id` accepts
+one full UUID and cannot be combined with a name. `line delete --json` returns the deleted line
+object, including its `id`. Name-based deletion uses the same folder guard after resolving once.
 With `--count N`, names run from `<name>-1` through `<name>-N`. The main project's line records
 commit together in one durable transaction: failure records none of the batch and removes its
 published folders. If a commit reports an error after it succeeded, all recorded lines and their

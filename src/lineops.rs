@@ -9,6 +9,80 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::path::PathBuf;
 
+/// A refused delete must not touch a replacement line or working folder.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum DeleteRefused {
+    LineMissing(layr_types::LineId),
+    FolderChanged(layr_types::LineId),
+}
+
+impl std::fmt::Display for DeleteRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LineMissing(id) => write!(f, "line id {id} no longer exists; refusing to delete"),
+            Self::FolderChanged(id) => write!(f, "working folder of line id {id} changed; refusing to delete"),
+        }
+    }
+}
+impl std::error::Error for DeleteRefused {}
+
+/// Exact lookup: deleted rows remain in the catalog and must never be resolved by name.
+pub(crate) fn live_line(repo: &Repo, id: layr_types::LineId) -> Result<Line> {
+    let key = id.to_string();
+    if repo.p.db.line_deleted(&key)? {
+        return Err(DeleteRefused::LineMissing(id).into());
+    }
+    let line = repo.p.db.line_by_id(&key)?;
+    repo.localize(line.ok_or(DeleteRefused::LineMissing(id))?)
+}
+
+/// Captured under the project lock together with name resolution. Keep metadata, not an open
+/// directory handle: another delete must be able to unmount this folder while preparation runs.
+pub(crate) struct DeleteTarget {
+    id: layr_types::LineId,
+    path: PathBuf,
+    folder: Option<std::fs::Metadata>,
+}
+
+impl DeleteTarget {
+    pub(crate) fn capture(repo: &Repo, line: &Line) -> Result<Self> {
+        let id = layr_types::LineId::parse(&line.id)?;
+        let path = repo.working(line);
+        let folder = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => Some(meta),
+            Ok(_) => return Err(DeleteRefused::FolderChanged(id).into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let target = Self { id, path, folder };
+        target.validate(repo)?;
+        Ok(target)
+    }
+
+    pub(crate) fn has_folder(&self) -> bool {
+        self.folder.is_some()
+    }
+
+    /// The caller holds the project lock through the subsequent record and folder removal.
+    pub(crate) fn validate(&self, repo: &Repo) -> Result<Line> {
+        use std::os::unix::fs::MetadataExt;
+        let line = live_line(repo, self.id)?;
+        if repo.working(&line) != self.path {
+            return Err(DeleteRefused::FolderChanged(self.id).into());
+        }
+        let same = match (&self.folder, std::fs::symlink_metadata(&self.path)) {
+            (Some(before), Ok(now)) => now.is_dir() && before.dev() == now.dev() && before.ino() == now.ino(),
+            (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => true,
+            (_, Err(e)) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => false,
+        };
+        if !same {
+            return Err(DeleteRefused::FolderChanged(self.id).into());
+        }
+        Ok(line)
+    }
+}
+
 fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
     if count == 0 {
         bail!("--count must be greater than zero");
@@ -471,6 +545,75 @@ mod batch_commit_tests {
             recs.push(rec);
         }
         Ok((repo, PreparedLines { start, lines, tmps, recs }))
+    }
+
+    #[test]
+    fn delete_guard_rejects_folder_replacement_and_symlinks() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let _lock = repo.p.lock_maintenance()?;
+        let lines = repo.commit_prepared_lines(&_lock, &ctx, prepared)?;
+        let line = &lines[0];
+        let target = DeleteTarget::capture(&repo, line)?;
+        assert_eq!(target.validate(&repo)?.id, line.id);
+        let path = repo.working(line);
+        let old = path.with_extension("old");
+        std::fs::rename(&path, &old)?;
+        std::fs::create_dir(&path)?;
+        let err = target.validate(&repo).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<DeleteRefused>(),
+            Some(&DeleteRefused::FolderChanged(layr_types::LineId::parse(&line.id)?))
+        );
+        std::fs::remove_dir(&path)?;
+        std::os::unix::fs::symlink(&old, &path)?;
+        assert!(matches!(
+            target.validate(&repo).unwrap_err().downcast_ref::<DeleteRefused>(),
+            Some(DeleteRefused::FolderChanged(_))
+        ));
+        std::fs::remove_file(&path)?;
+        assert!(target.validate(&repo).is_err());
+        std::fs::rename(&old, &path)?;
+        assert!(target.validate(&repo).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn delete_guard_rejects_deleted_identity_even_with_a_replacement_name() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let _lock = repo.p.lock_maintenance()?;
+        let lines = repo.commit_prepared_lines(&_lock, &ctx, prepared)?;
+        let line = &lines[0];
+        let target = DeleteTarget::capture(&repo, line)?;
+        repo.p.db.test_connection().execute("UPDATE lines SET deleted=1 WHERE id=?1", [&line.id])?;
+        repo.p.db.test_connection().execute("UPDATE lines SET name=?1 WHERE id=?2", [&line.id, &lines[1].id])?;
+        let err = target.validate(&repo).unwrap_err();
+        assert_eq!(err.downcast_ref::<DeleteRefused>(), Some(&DeleteRefused::LineMissing(layr_types::LineId::parse(&line.id)?)));
+        assert!(repo.working(line).is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn delete_guard_rejects_a_changed_path_or_new_folder() -> Result<()> {
+        let (_root, ctx) = context()?;
+        let (repo, prepared) = prepared(&ctx)?;
+        let _lock = repo.p.lock_maintenance()?;
+        let lines = repo.commit_prepared_lines(&_lock, &ctx, prepared)?;
+        let line = &lines[0];
+        let target = DeleteTarget::capture(&repo, line)?;
+        let path = repo.working(line);
+        let moved = path.with_extension("moved");
+        repo.p.set_moved_path(&line.id, Some(&moved))?;
+        assert!(target.validate(&repo).is_err());
+        repo.p.set_moved_path(&line.id, None)?;
+        std::fs::remove_dir_all(&path)?;
+        let absent = DeleteTarget::capture(&repo, line)?;
+        assert!(!absent.has_folder());
+        assert!(absent.validate(&repo).is_ok());
+        std::fs::create_dir(&path)?;
+        assert!(absent.validate(&repo).is_err());
+        Ok(())
     }
 
     #[test]

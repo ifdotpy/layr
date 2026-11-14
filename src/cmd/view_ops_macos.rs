@@ -54,23 +54,26 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
         outln!(ctx, "[{} {}] {}", line.name, ids::short(&st.id), message.lines().next().unwrap_or(""));
         let new_root = repo.state_src(&st.id)?;
         for c in changes::with_renames(&t.head, &new_root, list) {
-            let code = match (&c.old, &c.new, &c.old_path) {
+            let code = match (c.old(), c.new(), c.old_path()) {
                 (_, _, Some(o)) => format!("rename {o} =>"),
                 (None, _, _) => "create".into(),
                 (_, None, _) => "delete".into(),
                 _ => "modify".into(),
             };
-            outln!(ctx, " {code} {}", c.path);
+            outln!(ctx, " {code} {}", c.path());
         }
     }
     Ok(0)
 }
 
 /// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
-pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
+pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, target: &crate::lineops::DeleteTarget) -> Result<()> {
     let _lifecycle = lifecycle_lock(repo, l)?;
     let _line_lock = repo.line_lock(l)?;
-    let l = repo.line(&l.id)?;
+    let l = {
+        let _lock = repo.p.lock_maintenance()?;
+        target.validate(repo)?
+    };
     let at = repo.working(&l);
     let last = if v.mounted || upper(&repo.p, &l.id).exists() {
         let t = trees(repo, &l, v)?;
@@ -83,6 +86,19 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
     } else {
         None
     };
+    let _lock = _line_lock.lock(&repo.p)?;
+    let fresh = match target.validate(repo).and_then(|line| {
+        repo.authorize_line(ctx, &line, crate::repo::LineOp::Manage)?;
+        Ok(line)
+    }) {
+        Ok(line) => line,
+        Err(e) => {
+            if let Some(st) = &last {
+                repo.discard_states(std::slice::from_ref(st));
+            }
+            return Err(e);
+        }
+    };
     if is_mounted(&at) {
         if let Err(e) = unmount(&at) {
             if let Some(st) = &last {
@@ -91,8 +107,6 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
             return Err(e);
         }
     }
-    let _lock = _line_lock.lock(&repo.p)?;
-    let fresh = repo.line(&l.id)?;
     let last_id = match last {
         Some(st) => {
             let mut rec = Record::new("save");
