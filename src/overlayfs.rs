@@ -1179,20 +1179,20 @@ pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], 
     send_command(parent, child)
 }
 /// The paths whose entries can differ between the sealed trees `parent` and `child`, for an
-/// incremental send (see `changed_names`). `None` when they share no layer or have hard links
+/// incremental send (see `changed_entries`). `None` when they share no layer or have hard links
 /// (a stream names those by inode): the stream is then complete.
 pub fn changed_paths(parent: &Path, child: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
-    let sealed = |path: &Path| -> bool {
-        let Ok(path) = absolute(path) else {
-            return false;
-        };
-        lock(&path).is_ok_and(|s| s.registry.trees.get(&path).is_some_and(|e| e.info.readonly && !e.plain && !e.hard_links))
+    let (Ok(parent), Ok(child)) = (absolute(parent), absolute(child)) else {
+        return Ok(None);
     };
-    if !sealed(parent) || !sealed(child) {
+    let sealed = |path: &Path| -> bool {
+        lock(path).is_ok_and(|s| s.registry.trees.get(path).is_some_and(|e| e.info.readonly && !e.plain && !e.hard_links))
+    };
+    if !sealed(&parent) || !sealed(&child) {
         return Ok(None);
     }
-    match own_layers(parent, child)? {
-        Some(layers) => Ok(Some(changed_names(parent, child, &layers)?)),
+    match own_layers(&parent, &child)? {
+        Some(layers) => Ok(Some(changed_entries(&parent, &child, &layers)?.into_keys().collect())),
         None => Ok(None),
     }
 }
@@ -1218,14 +1218,14 @@ fn scan_entries(root: &Path) -> Result<BTreeMap<String, ScanEntry>> {
     Ok(out)
 }
 // The entry at `rel` as a tree walk lists it: nested trees and mounts are not listed.
-fn visible_entry(root: &Path, root_dev: u64, rel: &str) -> Result<Option<ScanEntry>> {
+fn visible_entry(root: &Path, root_dev: u64, nested: &HashSet<PathBuf>, rel: &str) -> Result<Option<ScanEntry>> {
     let full = root.join(rel);
     let m = match fs::symlink_metadata(&full) {
         Ok(m) => m,
         Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    if m.is_dir() && (m.dev() != root_dev || is_subvolume(&full)) {
+    if m.is_dir() && (m.dev() != root_dev || nested.contains(&full)) {
         return Ok(None);
     }
     Ok(Some(ScanEntry {
@@ -1235,9 +1235,13 @@ fn visible_entry(root: &Path, root_dev: u64, rel: &str) -> Result<Option<ScanEnt
 }
 // The layers above the ones both trees share, top first. `None` when either tree is not an
 // OverlayFS mount of this store or the two share no layer.
-fn own_layers(parent: &Path, child: &Path) -> Result<Option<Vec<PathBuf>>> {
-    let (parent, child) = (absolute(parent)?, absolute(child)?);
-    let Ok(state) = lock(&parent) else {
+struct CandidateLayers {
+    dirs: Vec<PathBuf>,
+    nested: HashSet<PathBuf>,
+}
+
+fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
+    let Ok(state) = lock(parent) else {
         return Ok(None);
     };
     let stack = |path: &Path| -> Option<Vec<(String, PathBuf)>> {
@@ -1251,7 +1255,7 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<Vec<PathBuf>>> {
         }
         Some(layers)
     };
-    let (Some(a), Some(b)) = (stack(&parent), stack(&child)) else {
+    let (Some(a), Some(b)) = (stack(parent), stack(child)) else {
         return Ok(None);
     };
     let (mut i, mut j) = (a.len(), b.len());
@@ -1262,7 +1266,10 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<Vec<PathBuf>>> {
     if i == a.len() {
         return Ok(None);
     }
-    Ok(Some(a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect()))
+    Ok(Some(CandidateLayers {
+        dirs: a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect(),
+        nested: state.registry.trees.keys().filter(|p| p.as_path() != parent && p.as_path() != child).cloned().collect(),
+    }))
 }
 // Every path a layer holds (files, folders, whiteouts), and whether the layer hides
 // the lower content of a folder (opaque or redirected).
@@ -1273,9 +1280,12 @@ fn layer_paths(dir: &Path, rel: &str, out: &mut BTreeMap<String, bool>) -> Resul
         let name = format!("{rel}{}", e.file_name().to_string_lossy());
         let mut hides = false;
         if e.file_type()?.is_dir() {
-            hides = sys::overlay_xattrs(&path)?
-                .iter()
-                .any(|(n, _)| n == b"trusted.overlay.opaque" || n == b"trusted.overlay.redirect");
+            hides = sys::overlay_xattrs(&path)?.iter().any(|(n, _)| {
+                n == b"trusted.overlay.opaque"
+                    || n == b"trusted.overlay.redirect"
+                    || n == b"user.overlay.opaque"
+                    || n == b"user.overlay.redirect"
+            });
             layer_paths(&path, &format!("{name}/"), out)?;
         }
         *out.entry(name).or_default() |= hides;
@@ -1284,78 +1294,100 @@ fn layer_paths(dir: &Path, rel: &str, out: &mut BTreeMap<String, bool>) -> Resul
 }
 // Paths whose content can differ. A path that no unshared layer holds is the same file in
 // both trees. A folder that one tree lacks or replaces is listed with everything below it.
-fn changed_names(parent: &Path, child: &Path, layers: &[PathBuf]) -> Result<std::collections::BTreeSet<String>> {
+fn changed_entries(
+    parent: &Path,
+    child: &Path,
+    layers: &CandidateLayers,
+) -> Result<BTreeMap<String, (Option<ScanEntry>, Option<ScanEntry>)>> {
     let mut held = BTreeMap::new();
-    for layer in layers {
+    for layer in &layers.dirs {
         layer_paths(layer, "", &mut held)?;
     }
-    let dev = |root: &Path| -> Result<u64> { Ok(fs::symlink_metadata(root)?.dev()) };
-    let (pdev, cdev) = (dev(parent)?, dev(child)?);
-    let mut names = std::collections::BTreeSet::new();
+    let (pdev, cdev) = (fs::symlink_metadata(parent)?.dev(), fs::symlink_metadata(child)?.dev());
+    let mut entries = BTreeMap::new();
     let mut inside: Option<String> = None;
     for (rel, hides) in &held {
         if inside.as_ref().is_some_and(|prefix| rel.starts_with(prefix.as_str())) {
             continue;
         }
-        let (old, new) = (visible_entry(parent, pdev, rel)?, visible_entry(child, cdev, rel)?);
+        let (old, new) = (visible_entry(parent, pdev, &layers.nested, rel)?, visible_entry(child, cdev, &layers.nested, rel)?);
         if old.is_none() && new.is_none() {
             inside = Some(format!("{rel}/"));
             continue;
         }
-        names.insert(rel.clone());
         let is_dir = |e: &Option<ScanEntry>| e.as_ref().is_some_and(|e| e.meta.is_dir());
-        let deep = match (&old, &new) {
-            (Some(_), Some(_)) if is_dir(&old) && is_dir(&new) => *hides,
-            (Some(_), Some(_)) => is_dir(&old) || is_dir(&new),
-            _ => is_dir(&old) || is_dir(&new),
-        };
+        let deep = (is_dir(&old) || is_dir(&new)) && !(is_dir(&old) && is_dir(&new) && !hides);
+        let directories = [is_dir(&old), is_dir(&new)];
+        entries.insert(rel.clone(), (old, new));
         if deep {
             inside = Some(format!("{rel}/"));
-            for root in [parent, child] {
-                crate::fsutil::walk(root, rel, &mut |below, _| {
-                    names.insert(below.to_string());
-                    Ok(true)
-                })?;
+            // Only a removed, replaced or opaque directory can change lower-only children.
+            // Enumerate those subtrees with the same registry snapshot, never one lock per directory.
+            for (index, ((root, dev), directory)) in [(parent, pdev), (child, cdev)].into_iter().zip(directories).enumerate() {
+                if !directory {
+                    continue;
+                }
+                let mut stack = vec![rel.clone()];
+                while let Some(dir) = stack.pop() {
+                    for e in fs::read_dir(root.join(&dir))? {
+                        let name = format!("{dir}/{}", e?.file_name().to_string_lossy());
+                        if let Some(entry) = visible_entry(root, dev, &layers.nested, &name)? {
+                            if entry.meta.is_dir() {
+                                stack.push(name.clone());
+                            }
+                            let pair = entries.entry(name).or_default();
+                            if index == 0 {
+                                pair.0 = Some(entry);
+                            } else {
+                                pair.1 = Some(entry);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    Ok(names)
+    Ok(entries)
 }
 /// Changes from `parent` to `child`. When both are OverlayFS trees of this store, only the
 /// paths that their unshared layers hold are read: a path in a shared lower layer is the
 /// same file in both. Other trees are walked in full.
 pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Change>> {
     let _t = crate::trace::span("OverlayFS candidates");
-    let (names, a, b, exact) = match own_layers(parent, child)? {
-        Some(layers) => {
-            let names = changed_names(parent, child, &layers)?;
-            let (pdev, cdev) = (fs::symlink_metadata(parent)?.dev(), fs::symlink_metadata(child)?.dev());
-            let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
-            for name in &names {
-                if let Some(e) = visible_entry(parent, pdev, name)? {
-                    a.insert(name.clone(), e);
-                }
-                if let Some(e) = visible_entry(child, cdev, name)? {
-                    b.insert(name.clone(), e);
-                }
-            }
-            (names, a, b, false)
-        }
+    candidates_in(parent, child, None)
+}
+
+fn candidates_in(parent: &Path, child: &Path, layers: Option<CandidateLayers>) -> Result<Vec<crate::changes::Change>> {
+    let (parent, child) = (absolute(parent)?, absolute(child)?);
+    let layers = match layers {
+        Some(layers) => Some(layers),
+        None => own_layers(&parent, &child)?,
+    };
+    let (entries, exact) = match layers {
+        Some(layers) => (changed_entries(&parent, &child, &layers)?, false),
         None => {
-            let (a, b) = (scan_entries(parent)?, scan_entries(child)?);
-            (a.keys().chain(b.keys()).filter(|s| !s.is_empty()).cloned().collect(), a, b, true)
+            let (mut a, mut b) = (scan_entries(&parent)?, scan_entries(&child)?);
+            let names: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).filter(|s| !s.is_empty()).cloned().collect();
+            let entries = names
+                .into_iter()
+                .map(|name| {
+                    let pair = (a.remove(&name), b.remove(&name));
+                    (name, pair)
+                })
+                .collect();
+            (entries, true)
         }
     };
-    let mut changes: BTreeMap<_, _> = names
-        .into_iter()
-        .map(|p| {
+    let mut changes: BTreeMap<_, _> = entries
+        .iter()
+        .map(|(path, (old, new))| {
             (
-                p.clone(),
+                path.clone(),
                 crate::changes::Change {
-                    path: p.clone(),
+                    path: path.clone(),
                     old_path: None,
-                    old: a.get(&p).map(|entry| entry.meta.clone()),
-                    new: b.get(&p).map(|entry| entry.meta.clone()),
+                    old: old.as_ref().map(|e| e.meta.clone()),
+                    new: new.as_ref().map(|e| e.meta.clone()),
                     ranges: None,
                 },
             )
@@ -1393,8 +1425,9 @@ pub fn candidates(parent: &Path, child: &Path) -> Result<Vec<crate::changes::Cha
             // Same size, mode, modification and change time (the check git calls racy): equal
             // without a read. Other files get their exact changed ranges, which a merge needs.
             let quick = !exact
-                && a.get(p)
-                    .zip(b.get(p))
+                && entries
+                    .get(p)
+                    .and_then(|(old, new)| old.as_ref().zip(new.as_ref()))
                     .is_some_and(|(x, y)| x.stamp.is_some() && x.stamp == y.stamp && x.meta.size == y.meta.size);
             c.ranges = Some(if quick { Vec::new() } else { changed_ranges(&parent.join(p), &child.join(p))? });
         }
@@ -1431,6 +1464,112 @@ fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn candidates_only_read_unshared_entries() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-candidates-{}", crate::ids::new_id()));
+        let (parent, child, upper) = (root.join("parent"), root.join("child"), root.join("upper"));
+        for path in [&parent, &child, &upper] {
+            fs::create_dir_all(path)?;
+        }
+        for tree in [&parent, &child] {
+            fs::create_dir(tree.join("lower"))?;
+            fs::write(tree.join("lower/untouched"), b"lower only")?;
+            // If candidate enumeration enters unchanged lower content, the test fails with EACCES.
+            fs::set_permissions(tree.join("lower"), fs::Permissions::from_mode(0o0))?;
+            fs::write(tree.join("edit"), if tree == &parent { b"before".as_slice() } else { b"after!!".as_slice() })?;
+        }
+        fs::write(upper.join("edit"), b"after!!")?;
+        let result = candidates_in(&parent, &child, Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }));
+        for tree in [&parent, &child] {
+            fs::set_permissions(tree.join("lower"), fs::Permissions::from_mode(0o700))?;
+        }
+        let changes = result?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "edit");
+        assert_eq!(changes[0].ranges, Some(vec![(0, 7)]));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn candidates_keep_whiteouts_opaque_replacements_and_nested_trees() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-candidates-{}", crate::ids::new_id()));
+        let (parent, child, upper) = (root.join("parent"), root.join("child"), root.join("upper"));
+        for path in [&parent, &child, &upper] {
+            fs::create_dir_all(path)?;
+        }
+        for tree in [&parent, &child] {
+            fs::create_dir(tree.join("opaque"))?;
+            fs::create_dir(tree.join("nested"))?;
+            fs::write(tree.join("nested/cache"), b"private")?;
+        }
+        fs::write(parent.join("opaque/hidden"), b"lower")?;
+        fs::create_dir(parent.join("gone"))?;
+        fs::write(parent.join("gone/file"), b"deleted")?;
+        fs::create_dir(parent.join("replace"))?;
+        fs::write(parent.join("replace/file"), b"replaced")?;
+        fs::write(child.join("replace"), b"now a file")?;
+        // A whiteout is held in the upper layer but absent from the visible child.
+        fs::write(upper.join("gone"), b"")?;
+        fs::write(upper.join("replace"), b"now a file")?;
+        fs::create_dir(upper.join("opaque"))?;
+        sys::overlay_attribute(&upper.join("opaque"), c"user.overlay.opaque", Some(b"y"))?;
+        fs::create_dir(upper.join("nested"))?;
+        fs::write(upper.join("nested/cache"), b"private")?;
+        let layers =
+            CandidateLayers { dirs: vec![upper], nested: [parent.join("nested"), child.join("nested")].into_iter().collect() };
+        let changes = candidates_in(&parent, &child, Some(layers))?;
+        let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["gone", "gone/file", "opaque", "opaque/hidden", "replace", "replace/file"]);
+        assert!(changes.iter().filter(|c| c.path.ends_with("/file") || c.path == "opaque/hidden").all(|c| c.new.is_none()));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn relative_candidates_exclude_absolute_managed_roots() -> Result<()> {
+        // Keep the relative fixture in this line's build folder; do not change the process cwd.
+        let root = PathBuf::from(format!("target/layr-candidates-{}", crate::ids::new_id()));
+        let (parent, child, upper) = (root.join("parent"), root.join("child"), root.join("upper"));
+        for tree in [&parent, &child, &upper] {
+            fs::create_dir_all(tree.join("nested"))?;
+            fs::write(tree.join("nested/cache"), b"private")?;
+        }
+        let layers = CandidateLayers {
+            dirs: vec![upper],
+            nested: [absolute(&parent)?.join("nested"), absolute(&child)?.join("nested")].into_iter().collect(),
+        };
+        assert!(candidates_in(&parent, &child, Some(layers))?.is_empty());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn candidates_keep_renames_and_ambiguous_hard_links() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-candidates-{}", crate::ids::new_id()));
+        let (parent, child, upper) = (root.join("parent"), root.join("child"), root.join("upper"));
+        for path in [&parent, &child, &upper] {
+            fs::create_dir_all(path)?;
+        }
+        fs::write(parent.join("old"), b"renamed")?;
+        fs::hard_link(parent.join("old"), child.join("new"))?;
+        fs::write(parent.join("link-a"), b"linked")?;
+        fs::hard_link(parent.join("link-a"), parent.join("link-b"))?;
+        fs::hard_link(parent.join("link-a"), child.join("link-c"))?;
+        fs::hard_link(parent.join("link-a"), child.join("link-d"))?;
+        for path in ["old", "new", "link-a", "link-b", "link-c", "link-d"] {
+            fs::write(upper.join(path), b"")?;
+        }
+        let changes = candidates_in(&parent, &child, Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }))?;
+        let renamed = changes.iter().find(|c| c.path == "new").unwrap();
+        assert_eq!(renamed.old_path.as_deref(), Some("old"));
+        assert!(!changes.iter().any(|c| c.path == "old"));
+        assert_eq!(changes.iter().filter(|c| c.path.starts_with("link-")).count(), 4);
+        assert!(changes.iter().filter(|c| c.path.starts_with("link-")).all(|c| c.old_path.is_none()));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires root and an isolated test filesystem"]
     fn shared_store_is_rejected_before_registry_changes() -> Result<()> {
