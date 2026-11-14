@@ -34,8 +34,9 @@ eq "fast-forward heads are equal" "$ff" "$(l rev-parse head)"
 out=$(l --project del --line unrelated line delete ff 2>&1); rc=$?
 eq "an explicit unrelated destination refuses deletion" 1 "$rc"
 has "the explicit destination is named" "not fully merged into 'unrelated'" "$out"
-cd "$P/ff"
-ok "project without --line uses main even inside the deleted line" l --project del line delete ff
+# Keep cwd outside the deleted line: OverlayFS cannot unmount a working directory.
+cd "$T"
+ok "project without --line uses main without a current line" l --project del line delete ff
 cd "$P/main"
 no "the fast-forward line is deleted" test -e "$P/ff"
 
