@@ -38,6 +38,20 @@
           "description": "The id of the exact state to merge. A later save in the source line does not change it.",
           "$ref": "#/$defs/id"
         },
+        "expected_head": {
+          "description": "The exact target head required at merge time. Absent for entries without --expect-head.",
+          "$ref": "#/$defs/id"
+        },
+        "failure": {
+          "description": "A typed target head mismatch. Present when an expected target head differs at merge time; reason also gives a human-readable diagnostic.",
+          "type": "object",
+          "required": ["expected", "found"],
+          "additionalProperties": true,
+          "properties": {
+            "expected": { "description": "The required target head.", "$ref": "#/$defs/id" },
+            "found": { "description": "The target head observed under its line lock.", "$ref": "#/$defs/id" }
+          }
+        },
         "change_id": {
           "description": "The id of the change of the state. Absent when the state has no change id.",
           "$ref": "#/$defs/id"

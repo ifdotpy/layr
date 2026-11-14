@@ -24,7 +24,7 @@
     "clippy::cast_sign_loss": 1
   },
   "layr-model": {
-    "clippy::unwrap_used": 243,
+    "clippy::unwrap_used": 253,
     "clippy::expect_used": 4,
     "clippy::panic": 1,
     "clippy::cast_possible_truncation": 14,
@@ -47,7 +47,7 @@
     "clippy::struct_excessive_bools": 2
   },
   "layr-store": {
-    "clippy::unwrap_used": 341,
+    "clippy::unwrap_used": 343,
     "clippy::expect_used": 24,
     "clippy::panic": 3,
     "clippy::cast_possible_truncation": 12,

@@ -155,7 +155,7 @@ mod transaction;
 #[cfg(test)]
 pub(crate) use transaction::FAIL_RECONCILE;
 pub use transaction::{CleanupEffect, CommitResolution, CommittedEffects, PublishError, PublishResult, WriteTxn};
-pub(crate) use transaction::{RebuildAction, RebuildTxn};
+pub(crate) use transaction::{publication_outcome, RebuildAction, RebuildTxn};
 
 impl Db {
     #[cfg(test)]
@@ -2493,6 +2493,8 @@ mod tests {
         let db = memory();
         let id = "01a12290-0000-7000-8000-000000000003";
         let entry = QueueEntry {
+            expected_head: None,
+            failure: None,
             id: id.into(),
             into: "main".into(),
             target_line: "01a12290-0000-7000-8000-000000000004".into(),

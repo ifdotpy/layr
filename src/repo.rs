@@ -186,7 +186,9 @@ pub fn discard_unrecorded(repo: &Repo, states: &[StateRec]) {
 }
 
 #[derive(Debug)]
-pub struct TargetMoved;
+pub struct TargetMoved {
+    pub found: String,
+}
 impl std::fmt::Display for TargetMoved {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("target head changed")
@@ -204,7 +206,7 @@ pub fn line_moved(name: &str, from: &str, to: &str) -> anyhow::Error {
             crate::ids::short(to)
         ),
     )
-    .context(TargetMoved)
+    .context(TargetMoved { found: to.to_owned() })
 }
 
 /// The error of a command whose line was deleted during the command.
@@ -2884,6 +2886,15 @@ impl<'a> Repo<'a> {
         let hook = |name: &str| std::env::var(name).ok().is_some_and(|v| v == line.name);
         if hook("LAYR_TEST_CRASH_BEFORE_COMMIT") {
             std::process::exit(86);
+        }
+        // Test barrier: simulate a fetch changing the head after preparation, before commit.
+        if let Some(dir) = std::env::var_os("LAYR_TEST_COMMIT_BARRIER") {
+            let dir = PathBuf::from(dir);
+            std::fs::write(dir.join("ready"), b"")?;
+            let start = std::time::Instant::now();
+            while !dir.join("release").exists() && start.elapsed() < std::time::Duration::from_secs(30) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         let _lock = leases.lock(&self.p)?;
         let now = match self.p.db.line_by_id(&line.id)? {

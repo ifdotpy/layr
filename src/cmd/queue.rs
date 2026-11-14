@@ -138,8 +138,11 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
     {
         bail!("--checked-candidate needs all checked queue arguments");
     }
-    if (a.get("--expect-head").is_some() || a.get("--expect-state").is_some()) && command != "candidate" {
-        bail!("--expect-head and --expect-state are only for queue candidate");
+    if a.get("--expect-head").is_some() && !matches!(command, "add" | "candidate") {
+        bail!("--expect-head is only for queue add or queue candidate");
+    }
+    if a.get("--expect-state").is_some() && command != "candidate" {
+        bail!("--expect-state is only for queue candidate");
     }
     if a.has("--existing") && command != "candidate" {
         bail!("--existing is only for queue candidate");
@@ -150,7 +153,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.get("--candidate-machine").is_some_and(|machine| !crate::model::is_uuid(machine)) {
         bail!("--candidate-machine needs a full machine UUID");
     }
-    let usage = "usage: layr queue (add <rev> [-m <conventional title>] [--no-run-queue]|list|remove <entry>|candidate <entry> --expect-head <state> --expect-state <state> [--existing [--candidate-machine <uuid>]]|run [--push <remote>] [--checked-entry <id> --checked-head <state> --checked-state <state> [--checked-candidate <state>]]) [--into <line>] [--json]";
+    let usage = "usage: layr queue (add <rev> [--expect-head <state>] [-m <conventional title>] [--no-run-queue]|list|remove <entry>|candidate <entry> --expect-head <state> --expect-state <state> [--existing [--candidate-machine <uuid>]]|run [--push <remote>] [--checked-entry <id> --checked-head <state> --checked-state <state> [--checked-candidate <state>]]) [--into <line>] [--json]";
     match command {
         "candidate" if a.pos.len() == 2 => {
             repo.require(ctx, if a.has("--existing") { "try" } else { "merge" })?;
@@ -255,7 +258,16 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !repo.working(&line).exists() {
                 bail!("queue target line '{into}' has no local work folder");
             }
+            let expected_head = a
+                .get("--expect-head")
+                .map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev))
+                .transpose()?
+                .map(crate::model::HeadExpectation::try_from)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
             let entry = QueueEntry {
+                expected_head,
+                failure: None,
                 id: ids::new_id(),
                 into: line.name,
                 target_line: line.id,
@@ -446,7 +458,8 @@ fn run_entries(
             bail!("checked queue entry state changed");
         }
         let line = target(repo, &entry)?;
-        if guard.as_ref().is_some_and(|guard| line.head != guard.head) {
+        // Pinned entries reach the locked expectation check even when the checked runner's head is stale.
+        if entry.expected_head.is_none() && guard.as_ref().is_some_and(|guard| line.head != guard.head) {
             bail!("checked queue target head changed");
         }
         // A caller who cannot update this line cannot fail other users' entries.
@@ -479,20 +492,27 @@ fn run_entries(
         let outcome = loop {
             attempts += 1;
             let line = target(&merge_repo, &entry)?;
-            if guard.as_ref().is_some_and(|guard| line.head != guard.head) {
+            if entry.expected_head.is_none() && guard.as_ref().is_some_and(|guard| line.head != guard.head) {
                 bail!("checked queue target head changed");
             }
-            let (result, probes) = super::mergecmd::merge_queued(
+            let (mut result, probes) = super::mergecmd::merge_queued(
                 &merge_ctx,
                 &merge_repo,
                 &line,
                 &entry,
-                &line.head,
+                guard.as_ref().map(|guard| guard.head).unwrap_or(&line.head),
                 attempts,
                 guard.is_some(),
                 false,
                 guard.as_ref().and_then(|guard| guard.candidate),
             );
+            if let Some(moved) = result.as_ref().err().and_then(|error| error.downcast_ref::<super::mergecmd::TargetMoved>()) {
+                if let Some(expected) = &entry.expected_head {
+                    if let Err(mismatch) = expected.check(&moved.found) {
+                        result = Err(mismatch.into());
+                    }
+                }
+            }
             if attempts == 1
                 && guard.is_none()
                 && result.as_ref().err().is_some_and(|error| error.downcast_ref::<super::mergecmd::TargetMoved>().is_some())
@@ -515,9 +535,9 @@ fn run_entries(
         match outcome {
             Ok(0) => {}
             result => {
-                let reason = match result {
-                    Err(error) => format!("{error:#}"),
-                    Ok(code) => format!("merge failed (exit {code})"),
+                let (reason, failure) = match result {
+                    Err(error) => (format!("{error:#}"), error.downcast_ref::<crate::model::HeadMismatch>().cloned()),
+                    Ok(code) => (format!("merge failed (exit {code})"), None),
                 };
                 let _lock = repo.p.lock_maintenance()?;
                 if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
@@ -526,6 +546,7 @@ fn run_entries(
                 let mut after = entry.clone();
                 after.status = "failed".into();
                 after.reason = Some(reason);
+                after.failure = failure;
                 after.attempts = attempts;
                 after.probes = probes;
                 let mut rec = Record::new("queue.result");

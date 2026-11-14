@@ -148,8 +148,61 @@ pub struct RefChange {
     pub after: Option<RefState>,
 }
 
+/// An exact target head, resolved when an operation is prepared.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub struct HeadExpectation(String);
+
+impl TryFrom<String> for HeadExpectation {
+    type Error = &'static str;
+
+    fn try_from(head: String) -> Result<Self, Self::Error> {
+        if !crate::validation::is_uuid(&head) {
+            return Err("expected head must be a full state UUID");
+        }
+        Ok(Self(head))
+    }
+}
+
+impl From<HeadExpectation> for String {
+    fn from(head: HeadExpectation) -> Self {
+        head.0
+    }
+}
+
+impl HeadExpectation {
+    pub fn check(&self, found: &str) -> Result<(), HeadMismatch> {
+        if self.0 == found {
+            Ok(())
+        } else {
+            Err(HeadMismatch { expected: self.0.clone(), found: found.to_string() })
+        }
+    }
+}
+
+/// A target head mismatch is permanent for the prepared operation, unlike a retryable head race.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeadMismatch {
+    pub expected: String,
+    pub found: String,
+}
+
+impl std::fmt::Display for HeadMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "target head mismatch: expected {}, found {}", self.expected, self.found)
+    }
+}
+
+impl std::error::Error for HeadMismatch {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueEntry {
+    /// The target must still have this head when the runner takes its line lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<HeadExpectation>,
+    /// A machine-readable failure, alongside the existing human-readable reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<HeadMismatch>,
     pub id: String,
     pub into: String,
     pub target_line: String,
@@ -291,4 +344,41 @@ pub struct Comment {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+}
+
+#[cfg(test)]
+mod head_expectation_tests {
+    use super::*;
+
+    const BEFORE: &str = "01a12290-0000-7000-8000-000000000001";
+    const AFTER: &str = "01a12290-0000-7000-8000-000000000002";
+
+    #[test]
+    fn exact_head_check_returns_typed_mismatch() {
+        let expected = HeadExpectation::try_from(BEFORE.to_string()).unwrap();
+        assert!(expected.check(BEFORE).is_ok());
+        let mismatch = expected.check(AFTER).unwrap_err();
+        assert_eq!(mismatch, HeadMismatch { expected: BEFORE.into(), found: AFTER.into() });
+        assert_eq!(mismatch.to_string(), format!("target head mismatch: expected {BEFORE}, found {AFTER}"));
+        assert_eq!(serde_json::to_value(&expected).unwrap(), BEFORE);
+        assert!(serde_json::from_str::<HeadExpectation>(r#""not-a-state""#).is_err());
+    }
+
+    #[test]
+    fn legacy_queue_entries_omit_expectation_and_failure() {
+        let value = serde_json::json!({
+            "id": BEFORE, "into": "main", "target_line": BEFORE, "state": AFTER,
+            "added_by": 1000, "time": 1, "status": "pending", "attempts": 0
+        });
+        let mut entry: QueueEntry = serde_json::from_value(value.clone()).unwrap();
+        assert!(entry.expected_head.is_none());
+        assert!(entry.failure.is_none());
+        assert_eq!(serde_json::to_value(&entry).unwrap(), value);
+        entry.expected_head = Some(HeadExpectation::try_from(BEFORE.to_string()).unwrap());
+        entry.failure = Some(entry.expected_head.as_ref().unwrap().check(AFTER).unwrap_err());
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["expected_head"], BEFORE);
+        assert_eq!(encoded["failure"], serde_json::json!({"expected": BEFORE, "found": AFTER}));
+        assert_eq!(serde_json::from_value::<QueueEntry>(encoded).unwrap(), entry);
+    }
 }

@@ -76,8 +76,9 @@ pub fn refs(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let matches = if expect == "none" {
                     before.is_none()
                 } else {
-                    let expected = crate::revs::resolve(repo, h.line.as_ref(), expect)?;
-                    before.as_ref().is_some_and(|r| r.target == expected)
+                    let expected = crate::model::HeadExpectation::try_from(crate::revs::resolve(repo, h.line.as_ref(), expect)?)
+                        .map_err(anyhow::Error::msg)?;
+                    before.as_ref().is_some_and(|r| expected.check(&r.target).is_ok())
                 };
                 if !matches {
                     bail!("ref '{name}' changed: --expect does not match its current position");

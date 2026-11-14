@@ -1211,9 +1211,18 @@ fn checks_unlocked(
     held: &mut Option<crate::store::LineLeaseSet>,
 ) -> Result<std::collections::BTreeSet<String>> {
     held.take();
-    run_line_checks(ctx, repo, line, head, candidate, settled, quiet, queue)?;
+    let checked = match run_line_checks(ctx, repo, line, head, candidate, settled, quiet, queue) {
+        Err(error) if queue.and_then(|q| q.entry.expected_head.as_ref()).is_none() || crate::db::publication_outcome(&error) => {
+            return Err(error);
+        }
+        result => result,
+    };
     *held = Some(repo.line_lock(line)?);
     let now = repo.line(&line.id)?;
+    if let Some(expected) = queue.and_then(|q| q.entry.expected_head.as_ref()) {
+        expected.check(&now.head)?;
+    }
+    checked?;
     if now.head != head {
         return Err(crate::repo::line_moved(&line.name, head, &now.head));
     }
@@ -1547,8 +1556,9 @@ fn passed_on(repo: &Repo, state: &str, argv: &[String], want: &str) -> Result<bo
 
 pub use crate::repo::TargetMoved;
 
-fn target_moved(name: &str) -> anyhow::Error {
-    exit(1, format!("error: line '{name}' moved while its merge ran; merge again")).context(TargetMoved)
+fn target_moved(name: &str, found: &str) -> anyhow::Error {
+    exit(1, format!("error: line '{name}' moved while its merge ran; merge again"))
+        .context(TargetMoved { found: found.to_owned() })
 }
 
 struct QueuedMerge<'a> {
@@ -1581,25 +1591,10 @@ pub fn merge_queued(
     candidate_only: bool,
     expected_candidate: Option<&str>,
 ) -> (Result<i32>, Option<serde_json::Value>) {
-    if checked_only && !candidate_only && expected_candidate.is_none() {
-        match repo.is_ancestor(expected_head, &entry.state) {
-            Ok(true) if entry.title.is_none() => {}
-            Ok(_) => {
-                return (
-                    Err(anyhow::Error::from(ChecksWaiting("checked queue run needs an untitled fast-forward entry".into()))),
-                    None,
-                )
-            }
-            Err(error) => return (Err(error), None),
-        }
-    }
     let run_probes = match crate::probes::queue_enabled(repo) {
         Ok(enabled) => enabled,
         Err(error) => return (Err(error), None),
     };
-    if checked_only && run_probes && !candidate_only {
-        return (Err(anyhow::Error::from(ChecksWaiting("checked queue run cannot execute probes".into()))), None);
-    }
     let queue = QueuedMerge {
         entry,
         expected_head,
@@ -1670,7 +1665,10 @@ fn merge_rev_inner(
     // Pin the expectation before waiting, but resolve the source only under the project lock.
     let want = a
         .get("--expect")
-        .map(|e| if queue.is_some() { Ok(e.to_string()) } else { revs::resolve(repo, Some(line), e) })
+        .map(|e| {
+            let state = if queue.is_some() { e.to_string() } else { revs::resolve(repo, Some(line), e)? };
+            crate::model::HeadExpectation::try_from(state).map_err(anyhow::Error::msg)
+        })
         .transpose()?;
     let expect = want.is_some();
     // The refusal of a protected line names the ready command; the state is read only.
@@ -1688,11 +1686,22 @@ fn merge_rev_inner(
         let _ = repo.prepare_status_report(line);
     }
     if let Some(q) = queue {
+        if let Some(expected) = &q.entry.expected_head {
+            expected.check(&line.head)?;
+        }
         if line.head != q.expected_head {
-            return Err(target_moved(&line.name));
+            return Err(target_moved(&line.name, &line.head));
         }
         if repo.p.db.queue_entry(&q.entry.id)?.as_ref() != Some(q.entry) {
             return Err(exit(1, "queue entry changed before the merge"));
+        }
+        if q.checked_only && !q.candidate_only {
+            if q.expected_candidate.is_none() && (q.entry.title.is_some() || !repo.is_ancestor(&line.head, &q.entry.state)?) {
+                return Err(anyhow::Error::from(ChecksWaiting("checked queue run needs an untitled fast-forward entry".into())));
+            }
+            if q.run_probes {
+                return Err(anyhow::Error::from(ChecksWaiting("checked queue run cannot execute probes".into())));
+            }
         }
     }
     let (theirs, theirs_line) = match queue {
@@ -1700,13 +1709,13 @@ fn merge_rev_inner(
         None => (revs::resolve(repo, Some(line), rev)?, repo.p.db.line_by_name(rev)?),
     };
     if let Some(want) = want {
-        if want != theirs {
+        if let Err(mismatch) = want.check(&theirs) {
             return Err(exit(
                 1,
                 format!(
                     "error: {rev} is at {} but --expect names {}: the line changed after the review; review the new state first",
                     ids::short(&theirs),
-                    ids::short(&want)
+                    ids::short(&mismatch.expected)
                 ),
             ));
         }

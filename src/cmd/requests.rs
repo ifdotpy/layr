@@ -393,6 +393,8 @@ fn effect(ctx: &Ctx, repo: &Repo, request: &Request) -> Result<Record> {
                 bail!("queue target line has no local work folder");
             }
             let entry = QueueEntry {
+                expected_head: None,
+                failure: None,
                 id: request.id.clone(),
                 into: target.name,
                 target_line: target.id,

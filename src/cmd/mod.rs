@@ -412,12 +412,19 @@ mod tests {
     fn domain_failures_keep_their_process_diagnostics_through_retry_context() {
         use crate::errors::{error, Kind};
         for (kind, code) in [(Kind::Failed, 1), (Kind::Unsupported, 2), (Kind::CannotRun, 127), (Kind::Invalid, 128)] {
-            let failure = error(kind, "unchanged diagnostic").context(crate::repo::TargetMoved);
+            let failure = error(kind, "unchanged diagnostic").context(crate::repo::TargetMoved { found: "after".into() });
             assert_eq!(super::diagnostic(&failure), Some((code, "unchanged diagnostic")));
             assert!(failure.downcast_ref::<crate::repo::TargetMoved>().is_some());
         }
         assert_eq!(super::diagnostic(&super::exit(3, "CLI diagnostic")), Some((3, "CLI diagnostic")));
         assert_eq!(super::diagnostic(&anyhow::anyhow!("ordinary failure")), None);
+    }
+
+    #[test]
+    fn moved_error_retains_the_head_observed_at_commit() {
+        let error = crate::repo::line_moved("main", "before", "during");
+        let moved = error.downcast_ref::<crate::repo::TargetMoved>();
+        assert!(moved.is_some_and(|moved| moved.found == "during"));
     }
 
     #[test]

@@ -98,6 +98,25 @@ impl From<PublishError> for anyhow::Error {
     }
 }
 
+/// Whether an error reports a committed or indeterminate publication.
+pub(crate) fn publication_outcome(error: &anyhow::Error) -> bool {
+    error.is::<CommitRecovery>() || error.is::<ReportedCommit>()
+}
+
+#[cfg(test)]
+mod publication_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn detects_committed_and_unknown_outcomes_through_context() {
+        let committed: anyhow::Error = PublishError::Committed(anyhow!("committed")).into();
+        let unknown: anyhow::Error = PublishError::Unknown(CommitRecovery { cause: anyhow!("unknown") }).into();
+        assert!(publication_outcome(&committed.context("check")));
+        assert!(publication_outcome(&unknown.context("check")));
+        assert!(!publication_outcome(&anyhow!("ordinary check failure")));
+    }
+}
+
 // Preserve a confirmed commit across general command helpers, just as CommitRecovery preserves Unknown.
 #[derive(Debug)]
 struct ReportedCommit(anyhow::Error);

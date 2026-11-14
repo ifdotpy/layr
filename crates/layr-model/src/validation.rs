@@ -276,6 +276,10 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
             uuid("queued state", &entry.state)?;
             uuid("queue target line", &entry.target_line)?;
+            if let Some(failure) = &entry.failure {
+                uuid("expected queue head", &failure.expected)?;
+                uuid("actual queue head", &failure.found)?;
+            }
             if let Some(id) = &entry.change_id {
                 uuid("queue change", id)?;
             }
