@@ -1903,6 +1903,120 @@ impl ExportContext {
     }
 }
 
+/// Fast-import owns pack encoding, compression and atomic pack publication. Keep the final
+/// commit in `ExportContext::commit`: fast-import must not reinterpret its identity or signing.
+/// The private branch is reset before `done`, so even a successful import publishes no ref.
+fn pack_tree(s: &Path, root: &Path, paths: &[String]) -> Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let _pack = crate::trace::span("git export pack stream");
+    let branch = format!("refs/layr/pack/{}", ids::new_id());
+    let mut child = base_cmd(s)
+        .args(["-c", "fastimport.unpackLimit=0", "fast-import", "--quiet", "--done"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stream = (|| -> Result<()> {
+        let mut input = std::io::BufWriter::new(child.stdin.take().context("Git import has no input")?);
+        writeln!(input, "commit {branch}\ncommitter Layr <layr@example.invalid> 0 +0000\ndata 0")?;
+        for path in paths {
+            let file = root.join(path);
+            let meta = std::fs::symlink_metadata(&file)?;
+            // update-index uses the owner execute bit, even when other execute bits differ.
+            let mode = if meta.file_type().is_symlink() {
+                0o120000
+            } else if meta.permissions().mode() & 0o100 != 0 {
+                0o100755
+            } else {
+                0o100644
+            };
+            // Git's C quoting is byte based (JSON's Unicode escapes are not accepted).
+            write!(input, "M {mode:o} inline \"")?;
+            for byte in path.bytes() {
+                match byte {
+                    b'"' | b'\\' => write!(input, "\\{}", char::from(byte))?,
+                    0x20..=0x7e => input.write_all(&[byte])?,
+                    _ => write!(input, "\\{byte:03o}")?,
+                }
+            }
+            writeln!(input, "\"")?;
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&file)?;
+                let data = target.as_os_str().as_bytes();
+                writeln!(input, "data {}", data.len())?;
+                input.write_all(data)?;
+            } else {
+                let fd = rustix::fs::open(
+                    &file,
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK,
+                    rustix::fs::Mode::empty(),
+                )?;
+                let mut file = std::fs::File::from(fd);
+                let meta = file.metadata()?;
+                if !meta.is_file() {
+                    bail!("{} is not a regular file", path);
+                }
+                let size = meta.len();
+                writeln!(input, "data {size}")?;
+                if std::io::copy(&mut Read::by_ref(&mut file).take(size), &mut input)? != size {
+                    bail!("{path} changed during Git export");
+                }
+            }
+            writeln!(input)?;
+        }
+        writeln!(input, "ls \"\"\n\nreset {branch}\n\ndone")?;
+        input.flush()?;
+        Ok(())
+    })();
+    if stream.is_err() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output()?;
+    stream?;
+    if !output.status.success() {
+        bail!("git fast-import failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let listing = std::str::from_utf8(&output.stdout)?;
+    let tree = listing
+        .strip_prefix("040000 tree ")
+        .and_then(|l| l.split_once('\t'))
+        .map(|(oid, _)| oid)
+        .context("Git import did not return its root tree")?;
+    Ok(tree.to_string())
+}
+
+/// Only initial exports use a pack. Later exports retain changed-path/index reuse. Git's
+/// index applies attributes and clean/EOL conversions; keep that path whenever they may apply.
+fn can_pack_tree(s: &Path, root: &Path, paths: &[u8]) -> Result<bool> {
+    if git_out(s, &["config", "--get", "core.autocrlf"]).is_ok_and(|v| v.trim() != "false") {
+        return Ok(false);
+    }
+    if git_out(s, &["config", "--bool", "core.filemode"]).is_ok_and(|v| v.trim() == "false")
+        || git_out(s, &["config", "--bool", "core.ignorecase"]).is_ok_and(|v| v.trim() == "true")
+    {
+        return Ok(false);
+    }
+    let mut child = base_cmd(s)
+        .env("GIT_WORK_TREE", root)
+        .args(["check-attr", "--all", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().context("Git attributes has no input")?;
+    // Attribute output may exceed a pipe: consume it while writing the path list.
+    let output = std::thread::scope(|scope| -> Result<_> {
+        let writer = scope.spawn(move || input.write_all(paths));
+        let output = child.wait_with_output()?;
+        writer.join().map_err(|_| anyhow!("Git attributes writer failed"))??;
+        Ok(output)
+    })?;
+    if !output.status.success() {
+        bail!("git check-attr failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(output.stdout.is_empty())
+}
+
 /// Write the commit of a state: the tree from the index of `base` (a state with its commit) plus
 /// the paths that changed since, the given parent commits, author and committer from the state.
 /// `refname` is set to the commit.
@@ -1977,27 +2091,39 @@ fn commit_tree(
         };
         // Changed paths are hashed again: see FORGET_CHANGED.
         let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
-        let index_command = crate::trace::span("git export index command");
-        for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
-            let mut c = base_cmd(s);
-            c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &checkout.root).args(args);
-            c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-            let mut ch = c.spawn()?;
-            ch.stdin.take().unwrap().write_all(&input)?;
-            let out = ch.wait_with_output()?;
+        let tree = if base.is_none() && can_pack_tree(s, &checkout.root, &input)? {
+            let tree = pack_tree(s, &checkout.root, &paths)?;
+            let _index = crate::trace::span("git export index command");
+            let out = base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", &tree]).output()?;
             if !out.status.success() {
-                bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+                bail!("git read-tree failed: {}", String::from_utf8_lossy(&out.stderr));
             }
-        }
-        drop(index_command);
-        let tree_write = crate::trace::span("git export tree write");
-        let tree = String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
-            .trim()
-            .to_string();
-        if tree.is_empty() {
-            bail!("git write-tree failed");
-        }
-        drop(tree_write);
+            tree
+        } else {
+            let index_command = crate::trace::span("git export index command");
+            for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
+                let mut c = base_cmd(s);
+                c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &checkout.root).args(args);
+                c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+                let mut ch = c.spawn()?;
+                ch.stdin.take().unwrap().write_all(&input)?;
+                let out = ch.wait_with_output()?;
+                if !out.status.success() {
+                    bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+                }
+            }
+            drop(index_command);
+            let tree_write = crate::trace::span("git export tree write");
+            let tree =
+                String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
+                    .trim()
+                    .to_string();
+            if tree.is_empty() {
+                bail!("git write-tree failed");
+            }
+            drop(tree_write);
+            tree
+        };
         let commit_write = crate::trace::span("git export commit and ref write");
         let commit = export.commit(state, &tree, parents, message)?;
         git_out(s, &["update-ref", refname, &commit])?;
@@ -2905,6 +3031,10 @@ pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
 mod history_tests;
 
 #[cfg(test)]
+#[path = "gitbridge_pack_tests.rs"]
+mod pack_tests;
+
+#[cfg(test)]
 mod export_tests {
     use super::*;
     use layr_hashers::{Digest, GitCompatible};
@@ -3071,6 +3201,11 @@ mod export_tests {
                 assert_eq!(made.last(), Some(&(id.clone(), commit.clone())));
                 assert!(!repo.p.state_path(&id).exists(), "export must not rebuild a second native state");
                 assert!(index_path(&repo, &id).exists());
+                if version == 0 {
+                    let counts = git_out(&super::store(&repo), &["count-objects", "-v"])?;
+                    assert!(counts.lines().any(|l| l == "packs: 1"), "initial export streams a pack");
+                    assert!(counts.lines().any(|l| l == "count: 1"), "only the final commit is loose: {counts}");
+                }
                 let git = repo.p.git_dir();
                 assert_eq!(git_out(&git, &["show", &format!("{commit}:text")])?, contents);
                 let listing = git_out(&git, &["ls-tree", &commit])?;
@@ -3087,6 +3222,25 @@ mod export_tests {
                 parents = vec![id];
                 commits.push(commit);
             }
+            // Corruption of a packed blob must still rebuild the complete derived cache.
+            forget_objects();
+            VERIFIED_OBJECTS.with(|v| v.borrow_mut().clear());
+            let packs = super::store(&repo).join("objects/pack");
+            let pack = std::fs::read_dir(&packs)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|e| e == "pack"))
+                .context("no export pack")?;
+            std::fs::set_permissions(&pack, std::fs::Permissions::from_mode(0o644))?;
+            std::fs::OpenOptions::new().write(true).open(&pack)?.set_len(12)?;
+            // As at the push boundary, tree lookup alone is insufficient: verify all blobs.
+            let repaired = cache_retry(&repo, || {
+                let commit = export_commit(&repo, &parents[0])?;
+                check_reachable(&repo, &commit)?;
+                Ok(commit)
+            })?;
+            assert_eq!(Some(&repaired), commits.last());
+            git_out(&super::store(&repo), &["fsck", "--full", "--no-reflogs", "--no-dangling"])?;
             Ok(())
         })();
         // Unprivileged btrfs cannot drop read-only scan subvolumes. Unseal test-owned
