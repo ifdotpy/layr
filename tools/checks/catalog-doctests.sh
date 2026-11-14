@@ -17,8 +17,10 @@ manifest = manifest.replace('path = "crates/', f'path = "{root}/crates/')
 (scratch / "Cargo.toml").write_text(manifest)
 shutil.copyfile(root / "Cargo.lock", scratch / "Cargo.lock")
 for name in ["src", "build.rs"]:
-    if not (scratch / name).exists():
-        (scratch / name).symlink_to(root / name)
+    link = scratch / name
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(root / name)
 command = ["cargo", "--offline"]
 options = [ "--manifest-path", str(scratch / "Cargo.toml"), "--target-dir", str(root / "target"), "--lib"]
 build = subprocess.run(command + ["rustc"] + options + ["--message-format=json", "--", "--cfg", "layr_doctest"],

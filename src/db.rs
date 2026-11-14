@@ -8,6 +8,7 @@ use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
+use std::{marker::PhantomData, rc::Rc};
 use std::sync::LazyLock;
 
 /// Cache only the schema query definition; every open still reads its database.
@@ -28,10 +29,26 @@ thread_local! {
 /// Enough room for the distinct database and ownership statements used in a replay.
 pub(crate) const STATEMENT_CACHE_CAPACITY: usize = 256;
 
-pub struct Db {
-    conn: Connection,
-    /// The derived tables are from an older schema: `rebuild` replaces them before use.
-    pub stale: bool,
+pub enum Current {}
+pub enum Stale {}
+
+/// Normal queries require a current catalog.
+/// ```compile_fail,E0599
+/// use layr::{Db, Stale};
+/// fn query(db: &Db<Stale>) { let _ = db.state("state"); }
+/// ```
+/// ```
+/// use layr::{Db, Current};
+/// fn query(db: &Db<Current>) { let _ = db.state("state"); }
+/// ```
+pub struct Db<S = Current> {
+    conn: Rc<Connection>,
+    schema: PhantomData<S>,
+}
+
+pub(crate) enum OpenedDb {
+    Current(Db<Current>),
+    Stale(Db<Stale>),
 }
 
 pub(crate) const SCHEMA: &str = r#"
@@ -138,6 +155,7 @@ mod transaction;
 #[cfg(test)]
 pub(crate) use transaction::FAIL_RECONCILE;
 pub use transaction::{CleanupEffect, CommitResolution, CommittedEffects, PublishError, PublishResult, WriteTxn};
+pub(crate) use transaction::{RebuildAction, RebuildTxn};
 
 impl Db {
     #[cfg(test)]
@@ -169,8 +187,15 @@ impl Db {
         conn.execute_batch("PRAGMA cache_size=-2048; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;")?;
         Ok(conn)
     }
-    /// Open the database. Returns it and whether the derived tables must be rebuilt.
-    pub fn open(path: &Path) -> Result<Db> {
+    /// Open a current catalog. A stale catalog must first be rebuilt through its project.
+    pub fn open(path: &Path) -> Result<Db<Current>> {
+        match Self::inspect(path)? {
+            OpenedDb::Current(db) => Ok(db),
+            OpenedDb::Stale(_) => anyhow::bail!("catalog schema needs rebuilding; open the project first"),
+        }
+    }
+
+    pub(crate) fn inspect(path: &Path) -> Result<OpenedDb> {
         let conn = Connection::open(path)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         // Before the pragmas: switching to WAL takes a lock too.
@@ -202,7 +227,11 @@ impl Db {
             }
             opened.map_err(|e| e.context(path.display().to_string()))?
         };
-        Ok(Db { conn, stale })
+        Ok(if stale {
+            OpenedDb::Stale(Db { conn: Rc::new(conn), schema: PhantomData })
+        } else {
+            OpenedDb::Current(Db { conn: Rc::new(conn), schema: PhantomData })
+        })
     }
 
     /// True when the version is current and every table and index of the schema exists.
@@ -257,14 +286,14 @@ impl Db {
     /// Rebuild the derived tables in one write transaction: drop them, create them, `replay` the
     /// records, write the schema version, COMMIT. Other processes read the old tables until the
     /// COMMIT, and a failure or a crash rolls the whole rebuild back. With `only_older`, nothing
-    /// is done when the database is current already (another process rebuilt it); returns false.
-    fn rebuild_rows(&self, only_older: bool, replay: impl FnOnce() -> Result<()>) -> Result<bool> {
+    /// is reset when another process already rebuilt it; replay receives AlreadyCurrent.
+    fn rebuild_rows<T>(&self, only_older: bool, replay: impl FnOnce(RebuildAction) -> Result<T>) -> Result<T> {
         let version: i64 = self.conn.prepare_cached("PRAGMA user_version")?.query_row([], |r| r.get(0))?;
         if only_older && version >= SCHEMA_VERSION {
             if version > SCHEMA_VERSION {
                 anyhow::bail!("written by a newer layr (schema {version})");
             }
-            return Ok(false);
+            return replay(RebuildAction::AlreadyCurrent);
         }
         // Pins and removal reservations belong to running processes, not signed records.
         // Preserve them in this transaction so a replay cannot expose a reader's tree to GC.
@@ -305,9 +334,10 @@ impl Db {
         "#)?;
         // The replay fills the owners and frees nothing (the upgrade rule, docs/ownership.md).
         // Keeps come from no record: their table outlives the rebuild, and their owners return after the replay.
-        crate::db::owners::fill_only(|| -> Result<()> {
-            replay()?;
-            self.restore_keeps(self)
+        let value = crate::db::owners::fill_only(|| -> Result<T> {
+            let value = replay(RebuildAction::Replay)?;
+            self.restore_keeps(self)?;
+            Ok(value)
         })?;
         // Test only (tests/t95-schema-rebuild-readers.sh): hold the transaction open.
         if let Some(ms) = std::env::var("LAYR_TEST_REBUILD_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
@@ -315,7 +345,7 @@ impl Db {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
         self.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(true)
+        Ok(value)
     }
 
     #[cfg(test)]
@@ -1635,7 +1665,7 @@ mod tests {
     fn rebuild_preserves_active_reader_and_removal_reservations() -> anyhow::Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(super::SCHEMA)?;
-        let db = super::Db { conn, stale: false };
+        let db = super::Db { conn: conn.into(), schema: std::marker::PhantomData };
         for (state, kind, holder) in [("read", "pin", "reader"), ("remove", "drop", "collector")] {
             db.conn.execute("INSERT INTO owners(state,kind,holder) VALUES(?1,?2,?3)", rusqlite::params![state, kind, holder])?;
         }
@@ -1662,7 +1692,7 @@ mod tests {
     fn request_outcome_copy_preserves_newest_and_json_duplicate_semantics() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         for (n, request, digest) in [(1, "wanted", Some("old")), (2, "wanted", Some("new")), (3, "missing", None)] {
             let mut record = Record::new("request.refused");
             record.id = format!("r{n}");
@@ -1696,7 +1726,7 @@ mod tests {
     fn line_name_keeps_the_name_of_a_deleted_line() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         let apply = |seq: u64, op: &str, id: &str, after: Option<&str>, data: serde_json::Value| -> Result<()> {
             let mut rec = Record::new(op);
             rec.id = format!("r{seq}");
@@ -1765,7 +1795,7 @@ mod tests {
     fn log_records_keep_the_observed_insertion_order_for_fully_tied_records() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         for (id, op) in [("z-first", "save"), ("a-second", "sync"), ("m-third", "save")] {
             let mut rec = Record::new(op);
             rec.id = id.into();
@@ -1796,12 +1826,12 @@ mod tests {
     fn log_records_match_full_history_output() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..1000 {
             let mut rec = Record::new(if i % 17 == 0 { "push" } else { "save" });
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
-            rec.seq = i as u64;
+            rec.seq = u64::try_from(i)?;
             rec.time = i / 3;
             if i % 5 == 0 {
                 rec.data = serde_json::json!({"line": "wanted"});
@@ -1851,7 +1881,7 @@ mod tests {
         // Main's schema 9 has no operation-log index. It must not be treated as current.
         conn.execute_batch("DROP TRIGGER records_index_lines; DROP TABLE record_lines; DROP INDEX records_time_seq")?;
         conn.pragma_update(None, "user_version", 9)?;
-        let old = Db { conn, stale: true };
+        let old = Db { conn: conn.into(), schema: PhantomData };
         let mut rec = Record::new("save");
         rec.id = "main-nine-record".into();
         rec.machine = "machine".into();
@@ -1860,9 +1890,9 @@ mod tests {
         rec.data = serde_json::json!({"line": "wanted"});
         old.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
         drop(old);
-        let db = Db::open(&path)?;
-        assert!(db.stale, "main schema 9 must trigger a rebuild instead of creating an empty index");
-        assert!(db.rebuild(true, |_| Ok(()))?);
+        let db = stale(&path);
+        let (db, rebuilt) = db.test_rebuild(|_| Ok(()))?;
+        assert!(rebuilt, "main schema 9 must rebuild instead of creating an empty index");
         assert_eq!(db.log_records(Some("wanted"), 1)?[0].id, rec.id);
         assert_eq!(db.conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?, 10);
         drop(db);
@@ -1877,12 +1907,12 @@ mod tests {
         let conn = Connection::open(dir.join("layr.sqlite"))?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", 9)?;
-        let db = Db { conn, stale: true };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..400 {
             let mut rec = Record::new(if i % 13 == 0 { "sync" } else { "save" });
             rec.id = format!("record-{i}");
             rec.machine = "machine".into();
-            rec.seq = i as u64;
+            rec.seq = u64::try_from(i)?;
             rec.time = i / 4;
             rec.data = serde_json::json!({"line": if i % 2 == 0 { "a" } else { "b" }});
             let raw = serde_json::json!({"r": rec, "s": ""}).to_string();
@@ -1917,7 +1947,7 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         let conn = Connection::open(dir.join("layr.sqlite"))?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         let ordered: Vec<String> = {
             let mut st = db.conn.prepare(
                 "SELECT value FROM json_each('{\"line\":\"first\",\"line\":\"last\"}') WHERE key='line' ORDER BY id DESC",
@@ -1957,7 +1987,7 @@ mod tests {
     fn log_records_decode_only_the_requested_records() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, stale: false };
+        let db = Db { conn: conn.into(), schema: PhantomData };
         for i in 0..41 {
             let mut rec = Record::new("save");
             rec.id = format!("record-{i}");
@@ -1992,7 +2022,7 @@ mod tests {
         creating.execute_batch(SCHEMA).unwrap();
         creating.execute("INSERT INTO states(id, display, kind) VALUES('s', 's', 'commit')", []).unwrap();
         let db = Db::open(&path).unwrap();
-        assert!(!db.stale);
+        assert!(Db::schema_is_current(&db.conn).unwrap());
         let kept: i64 = db.conn.query_row("SELECT COUNT(*) FROM states", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1);
         let version: i64 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
@@ -2011,14 +2041,21 @@ mod tests {
         old.execute("INSERT INTO records(id, raw) VALUES('r', '{}')", []).unwrap();
         old.execute("INSERT INTO states(id, display, kind) VALUES('s', 's', 'commit')", []).unwrap();
         drop(old);
-        let db = Db::open(&path).unwrap();
-        assert!(db.stale);
+        let db = stale(&path);
         let kept: i64 = db.conn.query_row("SELECT COUNT(*) FROM states", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1, "the old derived rows stay until the rebuild commits");
-        assert!(db.rebuild(true, |_| Ok(())).unwrap());
+        let (db, rebuilt) = db.test_rebuild(|_| Ok(())).unwrap();
+        assert!(rebuilt);
         let kept: i64 = db.conn.query_row("SELECT COUNT(*) FROM states", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 0, "derived rows are rebuilt from the records");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn stale(path: &std::path::Path) -> Db<Stale> {
+        match Db::inspect(path).unwrap() {
+            OpenedDb::Stale(db) => db,
+            OpenedDb::Current(_) => panic!("the fixture must require rebuilding"),
+        }
     }
 
     /// An old-schema database (version 6) with one record, one state and one line.
@@ -2043,28 +2080,30 @@ mod tests {
     #[test]
     fn a_failed_rebuild_keeps_the_old_tables_and_version() {
         let path = old_database("failed-rebuild");
-        let db = Db::open(&path).unwrap();
-        assert!(db.rebuild(true, |_| anyhow::bail!("replay failed")).is_err());
+        let db = stale(&path);
+        assert!(db.test_rebuild(|_| anyhow::bail!("replay failed")).is_err());
         let reader = Connection::open(&path).unwrap();
         assert_eq!((count_rows(&reader, "states"), count_rows(&reader, "lines")), (1, 1));
         let version: i64 = reader.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 6, "the next open retries the rebuild");
-        assert!(Db::open(&path).unwrap().stale);
+        assert!(matches!(Db::inspect(&path).unwrap(), OpenedDb::Stale(_)));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn readers_see_the_old_rows_while_the_rebuild_transaction_is_open() {
         let path = old_database("rebuild-readers");
-        let db = Db::open(&path).unwrap();
+        let db = stale(&path);
         let reader = Connection::open(&path).unwrap();
         let mut seen = None;
-        assert!(db
-            .rebuild(true, |_| {
+        assert!(
+            db.test_rebuild(|_| {
                 seen = Some((count_rows(&reader, "states"), count_rows(&reader, "lines")));
                 Ok(())
             })
-            .unwrap());
+            .unwrap()
+            .1
+        );
         assert_eq!(seen, Some((1, 1)), "the reader sees the complete old tables");
         assert_eq!(count_rows(&reader, "states"), 0, "the rebuilt tables are visible after the COMMIT");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -2073,7 +2112,7 @@ mod tests {
     #[test]
     fn a_rebuild_waits_for_another_writer_without_failing() {
         let path = old_database("rebuild-waits");
-        let db = Db::open(&path).unwrap();
+        let db = stale(&path);
         let (locked, held) = std::sync::mpsc::channel();
         let writer_path = path.clone();
         let writer = std::thread::spawn(move || {
@@ -2084,7 +2123,7 @@ mod tests {
             other.execute_batch("COMMIT").unwrap();
         });
         held.recv().unwrap();
-        assert!(db.rebuild(true, |_| Ok(())).unwrap(), "the rebuild runs after the other writer commits");
+        assert!(db.test_rebuild(|_| Ok(())).unwrap().1, "the rebuild runs after the other writer commits");
         writer.join().unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2104,8 +2143,7 @@ mod tests {
         old.execute("INSERT INTO lines(id, name) VALUES('l', 'main')", []).unwrap();
         old.pragma_update(None, "user_version", 6).unwrap();
         drop(old);
-        let db = Db::open(&path).unwrap();
-        assert!(db.stale);
+        let db = stale(&path);
         let reader = Connection::open(&path).unwrap();
         let count =
             |table: &str| -> i64 { reader.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap() };
@@ -2270,7 +2308,7 @@ mod tests {
     fn memory() -> Db {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        Db { conn, stale: false }
+        Db { conn: conn.into(), schema: PhantomData }
     }
 
     #[test]

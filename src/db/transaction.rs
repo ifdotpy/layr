@@ -1,6 +1,6 @@
 //! Catalog write boundaries and durable commit resolution.
 use super::owners::Row;
-use super::{retry_locked, Db};
+use super::{retry_locked, Current, Db, Stale};
 use crate::model::Record;
 use crate::store::LockedProject;
 #[cfg(test)]
@@ -119,6 +119,24 @@ pub enum CleanupEffect {
     LineDeleted(String),
 }
 
+fn append_effects(effects: &mut Vec<CleanupEffect>, record: &Record) {
+    for (id, change) in &record.lines {
+        if let Some(after) = &change.after {
+            effects.push(CleanupEffect::HeadMoved(after.head.clone()));
+        }
+        match (&change.before, &change.after) {
+            (Some(before), Some(after)) if before.head != after.head => {
+                effects.push(CleanupEffect::HeadLeft(before.head.clone()))
+            }
+            (Some(before), None) => {
+                effects.push(CleanupEffect::HeadLeft(before.head.clone()));
+                effects.push(CleanupEffect::LineDeleted(id.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Only a confirmed commit can construct effects that the application may release.
 #[derive(Debug)]
 #[must_use]
@@ -223,22 +241,7 @@ impl WriteTxn<'_> {
     }
     pub fn derive(&self, record: &Record, present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
         self.sql.db.derive_rows(record, present, local)?;
-        let mut effects = self.sql.effects.borrow_mut();
-        for (id, change) in &record.lines {
-            if let Some(after) = &change.after {
-                effects.push(CleanupEffect::HeadMoved(after.head.clone()));
-            }
-            match (&change.before, &change.after) {
-                (Some(before), Some(after)) if before.head != after.head => {
-                    effects.push(CleanupEffect::HeadLeft(before.head.clone()))
-                }
-                (Some(before), None) => {
-                    effects.push(CleanupEffect::HeadLeft(before.head.clone()));
-                    effects.push(CleanupEffect::LineDeleted(id.clone()));
-                }
-                _ => {}
-            }
-        }
+        append_effects(&mut self.sql.effects.borrow_mut(), record);
         Ok(())
     }
     #[cfg(target_os = "macos")]
@@ -277,18 +280,6 @@ impl WriteTxn<'_> {
     pub fn forget_base(&self, state: &str) -> Result<()> {
         self.sql.db.forget_base(state)
     }
-    pub fn rebuild(&self, only_older: bool, replay: impl FnOnce(&Self) -> Result<()>) -> Result<bool> {
-        self.sql.db.rebuild_rows(only_older, || replay(self))
-    }
-    pub fn all_lines(&self) -> Result<Vec<String>> {
-        self.sql.db.all_lines()
-    }
-    pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
-        self.sql.db.present_states()
-    }
-    pub fn fill_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
-        self.sql.db.fill_bases(bases)
-    }
     pub fn finish(self) -> CommitResolution<CommittedWrite> {
         self.sql.finish()
     }
@@ -313,10 +304,103 @@ impl Db {
 #[cfg(test)]
 pub(super) fn test_rebuild(db: &Db, only_older: bool, replay: impl FnOnce(&Db) -> Result<()>) -> Result<bool> {
     let txn = SqlTxn::begin(db)?;
-    let rebuilt = db.rebuild_rows(only_older, || replay(db))?;
+    let rebuilt = db.rebuild_rows(only_older, |action| {
+        if action == RebuildAction::Replay {
+            replay(db)?;
+        }
+        Ok(action == RebuildAction::Replay)
+    })?;
     let committed = txn.finish().into_result().map_err(anyhow::Error::from)?;
     if let Some(error) = committed.reported_error {
         return Err(error);
     }
     Ok(rebuilt)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RebuildAction {
+    Replay,
+    AlreadyCurrent,
+}
+
+#[must_use]
+pub(crate) struct RebuildTxn<'db> {
+    sql: SqlTxn<'db>,
+}
+impl LockedProject<'_> {
+    pub(crate) fn begin_rebuild(&self) -> Result<RebuildTxn<'_>> {
+        Ok(RebuildTxn { sql: SqlTxn::begin(self.catalog())? })
+    }
+}
+impl RebuildTxn<'_> {
+    pub fn rebuild(&self, replay: impl FnOnce(&Self) -> Result<()>) -> Result<()> {
+        self.sql.db.rebuild_rows(false, |_| replay(self))
+    }
+    pub fn all_lines(&self) -> Result<Vec<String>> {
+        self.sql.db.all_lines()
+    }
+    pub fn present_states(&self) -> Result<Vec<(String, bool)>> {
+        self.sql.db.present_states()
+    }
+    pub fn fill_bases(&self, bases: &BTreeMap<String, String>) -> Result<()> {
+        self.sql.db.fill_bases(bases)
+    }
+
+    pub fn derive(&self, record: &Record, present: &dyn Fn(&str) -> bool, local: &str) -> Result<()> {
+        self.sql.db.derive_rows(record, present, local)?;
+        append_effects(&mut self.sql.effects.borrow_mut(), record);
+        Ok(())
+    }
+    pub fn set_present(&self, state: &str, present: bool) -> Result<()> {
+        self.sql.db.set_present(state, present)
+    }
+    pub fn finish(self) -> CommitResolution<CommittedWrite> {
+        self.sql.finish()
+    }
+}
+
+impl Db<Stale> {
+    /// Consume the stale connection under the actual project lease. Current query tables are
+    /// exposed to replay only inside the transaction; no current project escapes before commit.
+    pub(crate) fn rebuild<T>(
+        self,
+        lease: &crate::store::Lock,
+        replay: impl FnOnce(Db<Current>, &RebuildTxn<'_>, RebuildAction) -> Result<T>,
+    ) -> PublishResult<(T, CommittedWrite)> {
+        lease.check_catalog(self.conn.path())?;
+        self.rebuild_inner(replay)
+    }
+
+    fn rebuild_inner<T>(
+        self,
+        replay: impl FnOnce(Db<Current>, &RebuildTxn<'_>, RebuildAction) -> Result<T>,
+    ) -> PublishResult<(T, CommittedWrite)> {
+        let db = Db { conn: self.conn, schema: Default::default() };
+        let txn = RebuildTxn { sql: SqlTxn::begin(&db)? };
+        // The replay's project owns its query handle. Both handles use this one SQLite
+        // connection and transaction; neither exposes writable SQL outside this module.
+        let project_db = Db { conn: std::rc::Rc::clone(&db.conn), schema: Default::default() };
+        let value = db.rebuild_rows(true, |action| replay(project_db, &txn, action))?;
+        let committed = txn.finish().into_result()?;
+        db.remove_upgrade_copies();
+        Ok((value, committed))
+    }
+}
+
+#[cfg(test)]
+impl Db<Stale> {
+    pub(super) fn test_rebuild(self, replay: impl FnOnce(&Db<Current>) -> Result<()>) -> Result<(Db<Current>, bool)> {
+        let ((db, rebuilt), committed) = self
+            .rebuild_inner(|db, _, action| {
+                if action == RebuildAction::Replay {
+                    replay(&db)?;
+                }
+                Ok((db, action == RebuildAction::Replay))
+            })
+            .map_err(anyhow::Error::from)?;
+        if let Some(error) = committed.reported_error {
+            return Err(error);
+        }
+        Ok((db, rebuilt))
+    }
 }

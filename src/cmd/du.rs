@@ -51,7 +51,7 @@ pub fn du(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !a.pos.is_empty() {
             bail!("usage: layr du --store [--json]");
         }
-        return store(ctx, &h.repo.p.store.root, a.has("--json"));
+        return store(ctx, a.has("--json"));
     }
     let repo = &h.repo;
     let mut lines = Vec::new();
@@ -129,6 +129,7 @@ fn child_dirs(p: &Path) -> Result<Vec<(String, PathBuf)>> {
 /// The parts of the projects of one volume: each line folder, each other folder of a project
 /// (states, deltas, git, meta). `label` names the volume in the rows (empty for `main`).
 fn project_parts(
+    store: &crate::store::Store,
     projects: &Path,
     moved: &[crate::linepaths::Entry],
     label: &str,
@@ -137,8 +138,8 @@ fn project_parts(
     for (project, ppath) in child_dirs(projects)? {
         // Lines moved out of the store (`layr line move`) are listed with the others.
         for e in moved.iter().filter(|e| e.project == project && e.path.is_dir()) {
-            let db = crate::db::Db::open(&crate::store::db_file(&ppath));
-            if let Some(l) = db.ok().and_then(|db| db.line_by_id(&e.line).ok().flatten()) {
+            let project_db = crate::store::Project::open_partial(store, &project);
+            if let Some(l) = project_db.ok().and_then(|p| p.db.line_by_id(&e.line).ok().flatten()) {
                 out.push((format!("{label}{project}/lines/{}", l.name), e.path.clone()));
             }
         }
@@ -164,7 +165,8 @@ fn vanished(e: &anyhow::Error) -> bool {
 
 /// The parts of a store: each line folder, each other folder of a project (states, deltas, git,
 /// meta), and each folder at the top (trash). The other volumes contribute their projects and trash.
-fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+fn parts(store: &crate::store::Store) -> Result<Vec<(String, PathBuf)>> {
+    let root = &store.root;
     let mut out = Vec::new();
     let moved = crate::linepaths::index(root);
     for (name, path) in child_dirs(root)? {
@@ -178,12 +180,12 @@ fn parts(root: &Path) -> Result<Vec<(String, PathBuf)>> {
             out.push((name, path));
             continue;
         }
-        project_parts(&path, &moved, "", &mut out)?;
+        project_parts(store, &path, &moved, "", &mut out)?;
     }
     let layout = crate::volumes::Layout::for_root(root)?;
     for (volume, projects) in layout.ready_projects_dirs().into_iter().filter(|(v, _)| v != crate::volumes::MAIN) {
         let label = format!("volume {volume}: ");
-        project_parts(&projects, &moved, &label, &mut out)?;
+        project_parts(store, &projects, &moved, &label, &mut out)?;
         if let Some(trash) = projects.parent().map(|v| v.join("trash")).filter(|t| t.is_dir()) {
             out.push((format!("{label}trash"), trash));
         }
@@ -319,9 +321,11 @@ fn filesystem_or_empty(path: &Path) -> std::io::Result<Option<FsId>> {
 /// `layr du --store`: the space of every part of the store, and what deleting each one frees.
 /// Data that clones share counts once, under its key (`fsutil::Held`): it belongs to a part
 /// when no other part references it.
-fn store(ctx: &Ctx, root: &Path, json: bool) -> Result<i32> {
+fn store(ctx: &Ctx, json: bool) -> Result<i32> {
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    let root = &ctx.store.root;
     const SHARED: usize = usize::MAX;
-    let parts = parts(root)?;
+    let parts = parts(&ctx.store)?;
     let filesystems: Vec<_> = parts.iter().map(|(_, path)| filesystem_or_empty(path)).collect::<std::io::Result<_>>()?;
     let keys: Mutex<HashMap<(FsId, ExtentKey), (usize, u64)>> = Mutex::new(HashMap::new());
     let results: Vec<Mutex<Result<PartSpace>>> = parts.iter().map(|_| Mutex::new(Ok(PartSpace::default()))).collect();

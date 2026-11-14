@@ -360,3 +360,6 @@ fn main() {
     };
     std::process::exit(code);
 }
+
+#[cfg(layr_doctest)]
+pub use db::{Current, Db, Stale};

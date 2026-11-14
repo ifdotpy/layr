@@ -216,7 +216,7 @@ pub fn enabled(p: &Project) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
     }
-    Ok(on(crate::db::Db::open(&path)?.config(ENABLED)?))
+    Ok(on(Project::open_partial(p.store, project)?.config_value(ENABLED)?))
 }
 
 /// Comparison of an immutable save snapshot. Its delta stays bound to that snapshot

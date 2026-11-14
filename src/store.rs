@@ -20,7 +20,7 @@
 //! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
 //! deletes it. Records leave the database as JSONL lines (replication, remote copies, export).
 
-use crate::db::{CommitResolution, Db, PublishResult};
+use crate::db::{CommitResolution, Db, OpenedDb, PublishResult, RebuildAction, RebuildTxn};
 use crate::ids;
 use crate::model::{Actor, Record};
 use crate::oplog;
@@ -306,7 +306,7 @@ pub struct Project<'a> {
     pub db: Db,
 }
 
-struct Lock {
+pub(crate) struct Lock {
     f: Option<fs::File>,
     /// When the lock was taken, how long the command waited for it, and the log of slow holds.
     since: std::time::Instant,
@@ -1236,9 +1236,8 @@ impl<'a> Project<'a> {
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        let db = Db::open(&db_file(&dir))?;
-        let mut p = Project { lease: Default::default(), store, name: name.to_string(), dir, id: String::new(), db };
-        p.finish_schema_upgrade()?;
+        let mut p = Self::open_catalog(store, name, dir, Wait::Block)?
+            .ok_or_else(|| anyhow!("blocking project open unexpectedly busy"))?;
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
@@ -1253,8 +1252,6 @@ impl<'a> Project<'a> {
     }
 
     fn open_wait(store: &'a Store, name: &str, wait: Wait) -> Result<Option<Project<'a>>> {
-        #[cfg(not(target_os = "macos"))]
-        let _ = wait;
         #[cfg(test)]
         PROJECT_OPEN_COUNT.with(|count| count.set(count.get() + 1));
         let _t = crate::trace::span(format!("open project {name}"));
@@ -1266,15 +1263,12 @@ impl<'a> Project<'a> {
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = {
+        let Some(mut p) = ({
             let _t = crate::trace::span("project database open");
-            Db::open(&db_file(&dir))?
+            Self::open_catalog(store, name, dir, wait)?
+        }) else {
+            return Ok(None);
         };
-        let mut p = Project { lease: Default::default(), store, name: name.to_string(), dir, id: String::new(), db };
-        {
-            let _t = crate::trace::span("project schema upgrade");
-            p.finish_schema_upgrade()?;
-        }
         {
             let _t = crate::trace::span("project rollback validation");
             crate::rootcheck::check_project(&p)?;
@@ -1427,56 +1421,7 @@ impl<'a> Project<'a> {
     }
 
     fn lock_wait(&self, wait: Wait, lines: Vec<std::rc::Rc<LineLock>>) -> Result<Option<Lock>> {
-        if matches!(wait, Wait::Block) && self.holds_lock() {
-            bail!("project '{}' is already locked in this process; borrow the held token", self.name);
-        }
-        // Resolved before the lock is taken: a failure here must not leave a count behind.
-        let trash = self.trash_dir()?;
-        let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
-        let asked = std::time::Instant::now();
-        if !wait.acquire(&f, Some(&self.meta_dir()))? {
-            return Ok(None);
-        }
-        write_lock_holder(&self.meta_dir());
-        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
-        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        // `project move` may have taken the folder away while this call waited for the lock. The
-        // lock then belongs to the old folder: refuse, the caller runs the command again.
-        {
-            use std::os::unix::fs::MetadataExt;
-            let here = fs::symlink_metadata(self.meta_dir().join("lock")).ok();
-            let locked = f.metadata().ok();
-            let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
-            if !same {
-                bail!("project '{}' moved or was deleted while this command waited; run the command again", self.name);
-            }
-        }
-        HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut held) = HELD_PROJECTS.lock() {
-            held.push(self.meta_dir());
-        }
-        if std::env::var_os("LAYR_TRACE").is_some() {
-            eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, self.name);
-        }
-        if let Ok(mut dirs) = LOCK_TRASH.lock() {
-            if !dirs.contains(&trash) {
-                dirs.push(trash);
-            }
-        }
-        let lock = Lock {
-            f: Some(f),
-            since: {
-                crate::trace::reset();
-                std::time::Instant::now()
-            },
-            waited: asked.elapsed(),
-            log: self.meta_dir().join("lock-slow.log"),
-            project: self.name.clone(),
-            meta: self.meta_dir(),
-            _lines: lines,
-        };
+        let Some(lock) = lock_catalog(self.store, &self.name, &self.meta_dir(), wait, lines)? else { return Ok(None) };
         #[cfg(target_os = "macos")]
         crate::apfs_commit::recover(self)?;
         Ok(Some(lock))
@@ -1486,14 +1431,48 @@ impl<'a> Project<'a> {
         move |id: &str| self.has_state(id)
     }
 
-    /// A schema upgrade left the derived tables old: they come back from the records. Another
-    /// process may have rebuilt them already.
-    fn finish_schema_upgrade(&mut self) -> Result<()> {
-        if self.db.stale {
-            self.lock_maintenance()?.rebuild_derived(true)?;
-            self.db.stale = false;
+    /// Rebuild a stale catalog before constructing a project that can answer normal queries.
+    fn open_catalog(store: &'a Store, name: &str, dir: PathBuf, wait: Wait) -> Result<Option<Project<'a>>> {
+        let make =
+            |db| Project { lease: Default::default(), store, name: name.to_string(), dir: dir.clone(), id: String::new(), db };
+        match Db::inspect(&db_file(&dir))? {
+            OpenedDb::Current(db) => Ok(Some(make(db))),
+            OpenedDb::Stale(stale) => {
+                // A parent may need its own migration. Resolve it before the overlay lease,
+                // using the same wait policy so maintenance yields without holding either writer.
+                let parent = if let Some((parent, _)) = name.split_once('%') {
+                    let parent_dir = store.project_dir(parent)?;
+                    if db_file(&parent_dir).is_file() {
+                        let Some(parent) = Self::open_catalog(store, parent, parent_dir, wait)? else { return Ok(None) };
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let Some(lease) = lock_catalog(store, name, &dir.join("meta"), wait, Vec::new())? else { return Ok(None) };
+                let lease = std::rc::Rc::new(lease);
+                let (project, committed) = stale.rebuild(&lease, |db, tx, action| {
+                    let p = make(db);
+                    *p.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lease);
+                    if action == RebuildAction::Replay {
+                        let terms = match &parent {
+                            Some(parent) => parent.trust_terms(&[])?,
+                            None if p.is_overlay() => Default::default(),
+                            None => p.trust_terms(&[])?,
+                        };
+                        p.lock_or_borrow()?.replay_derived(tx, &terms)?;
+                    }
+                    Ok(p)
+                })?;
+                crate::free::release_effects(committed.effects);
+                if let Some(error) = committed.reported_error {
+                    return Err(error);
+                }
+                Ok(Some(project))
+            }
         }
-        Ok(())
     }
 
     /// The differences between the `bases` table and the layers on disk, one line each. Empty
@@ -1547,8 +1526,8 @@ impl<'a> Project<'a> {
                 if !path.is_file() {
                     return Ok(Default::default());
                 }
-                parent = Db::open(&path)?;
-                &parent
+                parent = Project::open_partial(self.store, project)?;
+                &parent.db
             }
             None => &self.db,
         };
@@ -1752,6 +1731,120 @@ impl<'a> Project<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_overlay_maintenance_yields_before_waiting_for_its_stale_parent() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-stale-overlay-{}", ids::new_id()));
+        let root = base.join("store");
+        let store = Store::open(&root)?;
+        let actor = crate::model::Actor { uid: 1000, name: "test".into(), session: None };
+        for name in ["p", "p%layer"] {
+            let dir = store.project_dir(name)?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: name.into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: Db::open(&db_file(&dir))?,
+            };
+            let mut record = Record::new("project");
+            record.data = serde_json::json!({"id": p.id, "name": name, "config": {}});
+            p.lock_maintenance()?.append(record, &actor)?;
+        }
+        // Overlay publication reads the parent's object setting, so downgrade both catalogs
+        // only after all setup publications have finished.
+        for name in ["p", "p%layer"] {
+            rusqlite::Connection::open(db_file(&store.project_dir(name)?))?.pragma_update(None, "user_version", 9)?;
+        }
+        let parent_dir = store.project_dir("p")?;
+        let overlay_dir = store.project_dir("p%layer")?;
+        let held = fs::OpenOptions::new().write(true).open(parent_dir.join("meta/lock"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        let worker_overlay = overlay_dir.clone();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let store = Store::open(&worker_root)?;
+            let result = Project::open_catalog(&store, "p%layer", worker_overlay, Wait::Try).map(|p| p.is_none());
+            send.send(result)?;
+            Ok(())
+        });
+        // This bounds a deadlock regression, not filesystem performance. Always release the
+        // parent and join the worker before asserting, so a failure leaves no blocked thread.
+        let outcome = receive.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap()?;
+        assert!(outcome.context("maintenance waited for the parent's migration lease")??);
+        assert!(matches!(Db::inspect(&db_file(&parent_dir))?, OpenedDb::Stale(_)));
+        assert!(matches!(Db::inspect(&db_file(&overlay_dir))?, OpenedDb::Stale(_)));
+        assert!(!overlay_dir.join("meta").join(LOCK_HOLDER).exists());
+        let overlay = Project::open_partial(&store, "p%layer")?;
+        assert!(!overlay.id.is_empty());
+        assert!(Db::open(&db_file(&parent_dir)).is_ok(), "the normal open upgrades the parent before the overlay");
+        drop(overlay);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_catalog_migration_respects_leases_and_rechecks_the_schema() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-stale-catalog-{}", ids::new_id()));
+        let store = Store::open(&base.join("store"))?;
+        let dir = store.project_dir("p")?;
+        fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: Db::open(&db_file(&dir))?,
+        };
+        let actor = crate::model::Actor { uid: 1000, name: "test".into(), session: None };
+        let mut record = Record::new("project");
+        record.data = serde_json::json!({"id": p.id, "name": "p", "config": {"description": "replayed"}});
+        p.lock_maintenance()?.append(record, &actor)?;
+        p.db.test_connection().pragma_update(None, "user_version", 9)?;
+        assert!(Db::open(&db_file(&dir)).is_err(), "normal opens cannot return a stale query handle");
+        let OpenedDb::Stale(stale) = Db::inspect(&db_file(&dir))? else { anyhow::bail!("expected a stale catalog") };
+        let held = fs::OpenOptions::new().write(true).open(p.meta_dir().join("lock"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        assert!(
+            Project::open_catalog(&store, "p", dir.clone(), Wait::Try)?.is_none(),
+            "maintenance yields to the existing writer"
+        );
+        drop(held);
+        let upgraded = Project::open_partial(&store, "p")?;
+        assert_eq!(upgraded.id, p.id);
+        assert_eq!(upgraded.config_value("description")?, Some(serde_json::json!("replayed")));
+        assert!(!upgraded.holds_lock(), "opening releases the migration flock");
+        let lease = lock_catalog(&store, "p", &p.meta_dir(), Wait::Block, Vec::new())?.unwrap();
+        let (db, committed) = stale.rebuild(&lease, |db, _, action| {
+            assert!(action == RebuildAction::AlreadyCurrent, "the lock recheck observes the other opener's rebuild");
+            Ok(db)
+        })?;
+        assert!(committed.reported_error.is_none());
+        assert_eq!(db.project_id()?, Some(p.id.clone()));
+        drop(lease);
+        p.db.test_connection().pragma_update(None, "user_version", 9)?;
+        let OpenedDb::Stale(stale) = Db::inspect(&db_file(&dir))? else { anyhow::bail!("expected a stale catalog") };
+        let other_meta = store.project_dir("other")?.join("meta");
+        fs::create_dir_all(&other_meta)?;
+        let other_lease = lock_catalog(&store, "other", &other_meta, Wait::Block, Vec::new())?.unwrap();
+        let error = stale.rebuild::<()>(&other_lease, |_, _, _| anyhow::bail!("an unrelated lease must never reach replay"));
+        assert!(matches!(error, Err(CommitResolution::NotCommitted(_))));
+        assert!(matches!(Db::inspect(&db_file(&dir))?, OpenedDb::Stale(_)));
+        drop(other_lease);
+        drop(upgraded);
+        drop(p);
+        drop(db);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
 
     #[test]
     fn try_locks_keep_bookkeeping_and_line_order() -> Result<()> {
@@ -2188,6 +2281,73 @@ impl<'p> std::ops::Deref for LockedProject<'p> {
     }
 }
 
+fn lock_catalog(store: &Store, name: &str, meta: &Path, wait: Wait, lines: Vec<std::rc::Rc<LineLock>>) -> Result<Option<Lock>> {
+    if matches!(wait, Wait::Block) && HELD_PROJECTS.lock().map(|held| held.iter().any(|path| path == meta)).unwrap_or(false) {
+        bail!("project '{name}' is already locked in this process; borrow the held token");
+    }
+    // Resolved before the lock is taken: a failure here must not leave a count behind.
+    let layout = store.layout()?;
+    let trash = layout.trash_of(&layout.volume_of(name))?;
+    let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join("lock"))?;
+    let asked = std::time::Instant::now();
+    if !wait.acquire(&f, Some(meta))? {
+        return Ok(None);
+    }
+    write_lock_holder(meta);
+    // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
+    if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    // `project move` may have taken the folder away while this call waited for the lock. The
+    // lock then belongs to the old folder: refuse, the caller runs the command again.
+    {
+        use std::os::unix::fs::MetadataExt;
+        let here = fs::symlink_metadata(meta.join("lock")).ok();
+        let locked = f.metadata().ok();
+        let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
+        if !same {
+            bail!("project '{}' moved or was deleted while this command waited; run the command again", name);
+        }
+    }
+    HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut held) = HELD_PROJECTS.lock() {
+        held.push(meta.to_path_buf());
+    }
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, name);
+    }
+    if let Ok(mut dirs) = LOCK_TRASH.lock() {
+        if !dirs.contains(&trash) {
+            dirs.push(trash);
+        }
+    }
+    let lock = Lock {
+        f: Some(f),
+        since: {
+            crate::trace::reset();
+            std::time::Instant::now()
+        },
+        waited: asked.elapsed(),
+        log: meta.join("lock-slow.log"),
+        project: name.to_string(),
+        meta: meta.to_path_buf(),
+        _lines: lines,
+    };
+    Ok(Some(lock))
+}
+
+impl Lock {
+    pub(crate) fn check_catalog(&self, catalog: Option<&str>) -> Result<()> {
+        let catalog = catalog.ok_or_else(|| anyhow!("a migration requires a persistent catalog"))?;
+        let path = Path::new(catalog);
+        anyhow::ensure!(
+            path == self.meta.join("layr.sqlite") || path == self.meta.join("db/layr.sqlite"),
+            "catalog lease belongs to another project"
+        );
+        Ok(())
+    }
+}
+
 impl LockedProject<'_> {
     pub fn write<T>(&self, change: impl FnOnce(&crate::db::WriteTxn<'_>) -> Result<T>) -> PublishResult<T> {
         let tx = self.begin_write()?;
@@ -2207,38 +2367,33 @@ impl LockedProject<'_> {
 
     /// Rebuild the derived tables from the records.
     pub fn rebuild_index(&self) -> Result<()> {
-        self.rebuild_derived(false).map(|_| ())
+        let terms = self.trust_terms(&[])?;
+        let tx = self.begin_rebuild()?;
+        tx.rebuild(|tx| self.replay_derived(tx, &terms))?;
+        let committed = tx.finish().into_result()?;
+        crate::free::release_effects(committed.effects);
+        if let Some(error) = committed.reported_error {
+            return Err(error);
+        }
+        self.db.remove_upgrade_copies();
+        Ok(())
     }
 
-    /// One rebuild transaction (`Db::rebuild`): replay every record, then mark the states that
-    /// have no local folder as absent.
-    fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
+    fn replay_derived(&self, tx: &RebuildTxn<'_>, terms: &layr_store::trust::Rules) -> Result<()> {
         let present = self.state_present();
-        // The layer bases are not in the records: they come from disk, read before the rebuild.
         let bases = self.layer_bases_on_disk()?;
-        let terms = self.trust_terms(&[])?;
-        let tx = self.begin_write()?;
-        let rebuilt = tx.rebuild(only_older, |db| {
-            for line in db.all_lines()? {
-                let s = oplog::parse_line(&line, None)?;
-                if self.refusal_in_order(&terms, &s.record)?.is_some() {
-                    continue;
-                }
-                db.derive(&s.record, &present, &self.store.machine.id)?;
+        for raw in tx.all_lines()? {
+            let signed = oplog::parse_line(&raw, None)?;
+            if self.refusal_in_order(terms, &signed.record)?.is_none() {
+                tx.derive(&signed.record, &present, &self.store.machine.id)?;
             }
-            for (id, deleted) in db.present_states()? {
-                if deleted || !self.has_state(&id) {
-                    db.set_present(&id, false)?;
-                }
-            }
-            db.fill_bases(&bases)?;
-            Ok(())
-        })?;
-        Self::finish_write(tx)?;
-        if rebuilt {
-            self.db.remove_upgrade_copies();
         }
-        Ok(rebuilt)
+        for (id, deleted) in tx.present_states()? {
+            if deleted || !self.has_state(&id) {
+                tx.set_present(&id, false)?;
+            }
+        }
+        tx.fill_bases(&bases)
     }
 
     /// Write a record: sign it and store it with its derived rows in one transaction.

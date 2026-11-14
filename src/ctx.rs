@@ -148,9 +148,8 @@ impl Ctx {
 
     fn loc_moved(&self, path: &Path) -> Option<Loc> {
         let (e, sub) = crate::linepaths::find(&self.store, path)?;
-        let dir = self.store.project_dir(&e.project).ok()?;
-        let db = crate::db::Db::open(&crate::store::db_file(&dir)).ok()?;
-        let line = db.line_by_id(&e.line).ok()??;
+        let project = crate::store::Project::open_partial(&self.store, &e.project).ok()?;
+        let line = project.db.line_by_id(&e.line).ok()??;
         Some(Loc { project: e.project, line: Some(line.name), sub })
     }
 
@@ -171,7 +170,7 @@ impl Ctx {
                 // A folder that `line rename` kept belongs to the renamed line, not to its old name.
                 let dir = projects.join(&project);
                 let line = crate::linepaths::kept_folder_line_in(&dir.join("meta"), &comps[2])
-                    .and_then(|id| crate::db::Db::open(&crate::store::db_file(&dir)).ok()?.line_by_id(&id).ok()?)
+                    .and_then(|id| crate::store::Project::open_partial(&self.store, &project).ok()?.db.line_by_id(&id).ok()?)
                     .map_or_else(|| comps[2].clone(), |l| l.name);
                 return Some(Loc { project, line: Some(line), sub: comps[3..].join("/") });
             }
