@@ -674,33 +674,37 @@ fn write_meta(dst: &Path, meta: &Meta, blobs: &BTreeMap<String, (PathBuf, String
         }
         return Ok(());
     }
-    // A state of the store: the store writes it, as `Ops::apply` copies files into it.
-    let dir = dst.join(META_DIR);
-    if fsutil::lmeta(dst, META_DIR).is_some_and(|m| !m.is_dir()) {
-        t.remove(META_DIR)?;
+    // The state before this one can come from another machine, so any entry of the metadata folder can
+    // be a link. Every write goes through `Tree`, which never follows a link and replaces an entry that
+    // is in the way. Only `meta.json` and `bases` stay in the folder.
+    t.mkdirs(META_BASES, own)?;
+    for name in t.list(META_DIR)? {
+        if name != "meta.json" && name != "bases" {
+            t.remove(&format!("{META_DIR}/{name}"))?;
+        }
     }
-    std::fs::create_dir_all(dir.join("bases"))?;
-    let tmp = dir.join("meta.json.tmp");
-    std::fs::write(&tmp, meta.to_bytes())?;
-    std::fs::rename(&tmp, dir.join("meta.json"))?;
+    {
+        use std::io::Write;
+        let mut f = t.create(META_FILE, 0o644)?;
+        f.write_all(&meta.to_bytes())?;
+    }
     let wanted: BTreeSet<&String> = meta.bases.values().collect();
     for h in &wanted {
         let rel = format!("{META_BASES}/{h}");
-        if fsutil::lmeta(dst, &rel).is_some() {
+        if t.stat(&rel).is_some() {
             continue;
         }
         let (root, p) = blobs.get(*h).ok_or_else(|| anyhow!("the base {h} of an overlay patch is missing"))?;
         fsutil::copy_entry(root.as_path(), p, dst, &rel, own)?;
     }
-    for e in std::fs::read_dir(dir.join("bases"))? {
-        let name = e?.file_name().to_string_lossy().into_owned();
+    for name in t.list(META_BASES)? {
         if !wanted.contains(&name) {
             t.remove(&format!("{META_BASES}/{name}"))?;
         }
     }
     if let Some((uid, gid)) = own {
         for rel in [META_DIR, META_BASES, META_FILE] {
-            std::os::unix::fs::lchown(dst.join(rel), Some(uid), Some(gid))?;
+            t.chown(rel, uid, gid)?;
         }
     }
     Ok(())
@@ -3647,6 +3651,35 @@ mod tests {
         std::fs::remove_dir_all(dst.join(META_DIR)).unwrap();
         std::os::unix::fs::symlink(&src, dst.join(META_DIR)).unwrap();
         assert!(read_meta(dst.as_path()).unwrap().is_empty());
+        // Links inside the metadata folder of a state from another machine: a write never follows them.
+        std::fs::remove_file(dst.join(META_DIR)).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(outside.join("dir")).unwrap();
+        std::fs::write(outside.join("file"), "keep").unwrap();
+        std::fs::write(outside.join("dir/other"), "keep").unwrap();
+        std::fs::create_dir_all(dst.join(META_DIR)).unwrap();
+        // A link in place of `meta.json` is refused: layr cannot know what such a state hides.
+        std::os::unix::fs::symlink(outside.join("file"), dst.join(META_FILE)).unwrap();
+        assert!(read_meta(dst.as_path()).is_err());
+        std::fs::remove_file(dst.join(META_FILE)).unwrap();
+        std::fs::write(dst.join(META_FILE), r#"{"v":1,"removed":["old.c"]}"#).unwrap();
+        std::os::unix::fs::symlink(outside.join("file"), dst.join(META_DIR).join("meta.json.tmp")).unwrap();
+        std::os::unix::fs::symlink(outside.join("dir"), dst.join(META_BASES)).unwrap();
+        let ops = Ops {
+            marks: ["gone.c".to_string()].into(),
+            bases: [("lib.c".to_string(), h.clone())].into(),
+            blobs: [(h.clone(), (src.clone(), "lib.c".to_string()))].into(),
+            ..Default::default()
+        };
+        std::fs::write(dst.join("lib.c"), "patched").unwrap();
+        ops.apply(&dst, &src, None).unwrap();
+        assert_eq!(std::fs::read_to_string(outside.join("file")).unwrap(), "keep", "no write through a link");
+        assert_eq!(std::fs::read_dir(outside.join("dir")).unwrap().count(), 1, "nothing is added or removed outside");
+        assert!(std::fs::symlink_metadata(dst.join(META_FILE)).unwrap().is_file());
+        assert!(std::fs::symlink_metadata(dst.join(META_BASES)).unwrap().is_dir());
+        assert!(!dst.join(META_DIR).join("meta.json.tmp").exists());
+        let meta = read_meta(dst.as_path()).unwrap();
+        assert!(meta.removed.contains("gone.c") && meta.bases.get("lib.c") == Some(&h));
         let _ = std::fs::remove_dir_all(&root);
     }
 
