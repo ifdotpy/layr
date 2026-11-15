@@ -100,8 +100,6 @@ pub struct Props {
     /// working folder.
     pub quiet: bool,
     pub merge: MergeKind,
-    /// `gc lru:<size>`: the size limit in bytes of the overlay in each working folder.
-    pub gc_lru: Option<u64>,
     /// `prune=<name>|none`: the cache adapter that prunes the folder (issue #167). None: detect it.
     pub prune: Option<String>,
     /// `platform=<key>` (`<os>-<arch>`): the overlay is shown and fetched only on that platform
@@ -138,7 +136,7 @@ impl Trust {
 }
 
 /// The property names, in the order that `overlay list` shows them.
-pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune", "platform", "trust"];
+pub const PROPS: &[&str] = &["history", "quiet", "merge", "prune", "platform", "trust"];
 
 /// A platform key as `--platform` takes it: lowercase letters, digits, `-` and `_` (for example
 /// `macos-aarch64`, `linux-x86_64`).
@@ -170,27 +168,6 @@ pub fn parse_history(s: &str) -> Option<Option<u32>> {
     }
 }
 
-/// A size with an optional unit: `500M`, `20G`, `1T`, `4096` (bytes). Units are powers of 1024.
-pub fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (num, mult) = match s.char_indices().last()? {
-        (i, 'K' | 'k') => (&s[..i], 1u64 << 10),
-        (i, 'M' | 'm') => (&s[..i], 1 << 20),
-        (i, 'G' | 'g') => (&s[..i], 1 << 30),
-        (i, 'T' | 't') => (&s[..i], 1 << 40),
-        _ => (s, 1),
-    };
-    num.parse::<u64>().ok().filter(|n| *n > 0).and_then(|n| n.checked_mul(mult))
-}
-
-/// `none` or `lru:<size>`. The outer None is an invalid value.
-pub fn parse_gc(s: &str) -> Option<Option<u64>> {
-    match s {
-        "none" => Some(None),
-        _ => s.strip_prefix("lru:").and_then(parse_size).map(Some),
-    }
-}
-
 impl Props {
     /// The setting value of one property (`PROPS`); null for the default.
     pub fn value(&self, prop: &str) -> serde_json::Value {
@@ -211,7 +188,6 @@ impl Props {
                     json!(self.merge.name())
                 }
             }
-            "gc" => self.gc_lru.map(|n| json!(format!("lru:{n}"))).unwrap_or(json!(null)),
             "prune" => self.prune.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
             "platform" => self.platform.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
             "trust" => self.trust.map(|t| json!(t.name())).unwrap_or(json!(null)),
@@ -228,7 +204,6 @@ impl Props {
         }
         p.quiet = get("quiet").and_then(|v| v.as_bool()).unwrap_or(false);
         p.merge = get("merge").and_then(|v| v.as_str().and_then(MergeKind::parse)).unwrap_or_default();
-        p.gc_lru = get("gc").and_then(|v| v.as_str().and_then(parse_gc)).flatten();
         p.prune = get("prune").and_then(|v| v.as_str().and_then(prune_name));
         p.platform = get("platform").and_then(|v| v.as_str().and_then(platform_name));
         p.trust = get("trust").and_then(|v| v.as_str().and_then(Trust::parse));
@@ -249,9 +224,6 @@ impl Props {
         if self.merge != MergeKind::ThreeWay {
             out.push(format!("merge={}", self.merge.name()));
         }
-        if let Some(n) = self.gc_lru {
-            out.push(format!("gc=lru:{}", show_size(n)));
-        }
         if let Some(n) = &self.prune {
             out.push(format!("prune={n}"));
         }
@@ -269,7 +241,6 @@ impl Props {
             "history": self.history.map(|n| serde_json::json!(n)).unwrap_or(serde_json::json!("all")),
             "quiet": self.quiet,
             "merge": self.merge.name(),
-            "gc": self.gc_lru.map(|n| format!("lru:{n}")).unwrap_or_else(|| "none".into()),
             "prune": self.prune.clone().unwrap_or_else(|| "auto".into()),
         });
         // Only when set: older readers of `overlay list --json` see the keys they know.
@@ -281,16 +252,6 @@ impl Props {
         }
         v
     }
-}
-
-/// A byte count with the largest unit that divides it (`20G`, `512M`, `4096`).
-pub fn show_size(n: u64) -> String {
-    for (unit, shift) in [("T", 40), ("G", 30), ("M", 20), ("K", 10)] {
-        if n >= 1 << shift && n % (1 << shift) == 0 {
-            return format!("{}{unit}", n >> shift);
-        }
-    }
-    n.to_string()
 }
 
 /// The overlay pass of `gc --repair`, read without locks (`Repo::overlay_plan`).
@@ -3929,21 +3890,12 @@ mod tests {
         assert_eq!(parse_history("3"), Some(Some(3)));
         assert_eq!(parse_history("0"), None);
         assert_eq!(parse_history("x"), None);
-        assert_eq!(parse_size("20G"), Some(20 << 30));
-        assert_eq!(parse_size("512m"), Some(512 << 20));
-        assert_eq!(parse_size("4096"), Some(4096));
-        assert_eq!(parse_size("0"), None);
-        assert_eq!(parse_size("G"), None);
-        assert_eq!(parse_gc("none"), Some(None));
-        assert_eq!(parse_gc("lru:1G"), Some(Some(1 << 30)));
-        assert_eq!(parse_gc("lru"), None);
         assert_eq!(MergeKind::parse("union-theirs"), Some(MergeKind::UnionTheirs));
         assert_eq!(MergeKind::parse("ours"), None);
         let p = Props {
             history: Some(1),
             quiet: true,
             merge: MergeKind::UnionTheirs,
-            gc_lru: Some(20 << 30),
             prune: Some("pnpm".into()),
             platform: Some("linux-x86_64".into()),
             trust: Some(Trust::Protected),
@@ -3956,7 +3908,6 @@ mod tests {
                 "history=last",
                 "quiet",
                 "merge=union-theirs",
-                "gc=lru:20G",
                 "prune=pnpm",
                 "platform=linux-x86_64",
                 "trust=protected"
@@ -3966,8 +3917,6 @@ mod tests {
         assert!(PROPS.iter().all(|k| Props::default().value(k).is_null()));
         let odd = Props::from_settings(|k| Some(serde_json::json!(if k == "history" { "many" } else { "?" })));
         assert_eq!(odd, Props::default());
-        assert_eq!(show_size(1536), "1536");
-        assert_eq!(show_size(3 << 20), "3M");
     }
 
     #[test]

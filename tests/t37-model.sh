@@ -405,7 +405,7 @@ for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
     assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties', 'paths', 'kind'}
     assert show['kind'] == 'patches'
     assert set(show['paths']) == {'patches', 'own', 'hidden', 'waiting'}
-    assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
+    assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'prune': 'auto'}
     assert show['access_mode'] == 'private'
     assert show['name'] == name and show['hidden'] == (label == 'hidden-reader')
     access = next(r['data']['config']['access'] for r in reversed(records) if 'access' in r.get('data', {}).get('config', {}))

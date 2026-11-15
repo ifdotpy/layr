@@ -31,8 +31,7 @@ const USAGE: &str =
        layr overlay log <name> --ops [--json]
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
        layr overlay migrate-parts [-n|--dry-run] [-q]
-properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none
-            --platform <key>|any  --trust protected|readers";
+cache settings: --history all|last|<N>  --prune <adapter>|none|auto  --key-files <files>|none  --platform <key>|any";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -319,8 +318,9 @@ pub(crate) fn kind_name(cache: bool) -> &'static str {
 }
 
 /// Kinds instead of properties (docs/overlays.md section 1): the options of the old properties that a kind
-/// fixes fail with exit status 2; the options of a cache (`--history`, `--gc`, `--prune`, `--key-files`)
-/// fail on a patches overlay. `--platform` stays for now (docs/overlays.md, "Kinds as built").
+/// fixes fail with exit status 2; the options of a cache (`--history`, `--prune`, `--key-files`)
+/// fail on a patches overlay. `--platform` stays for now (docs/overlays.md, "Kinds as built"). `--gc`
+/// (a size limit of a cache) was removed: a cache takes the space that it needs (owner decision 2026-11-15).
 fn refuse_kind_options(a: &crate::args::Parsed, cmd: &str, cache: bool) -> Result<()> {
     const RULE: &str = "an overlay has a kind: a patches overlay has a parent and readers; a cache (--folder) has a folder and history, and is always quiet, union-theirs, of one platform and trust=protected";
     for flag in ["--mode", "--quiet", "--no-quiet", "--merge", "--trust"] {
@@ -328,8 +328,14 @@ fn refuse_kind_options(a: &crate::args::Parsed, cmd: &str, cache: bool) -> Resul
             return Err(exit(2, format!("layr overlay {cmd} {flag} was removed: {RULE}")));
         }
     }
+    if a.get("--gc").is_some() {
+        return Err(exit(
+            2,
+            format!("layr overlay {cmd} --gc was removed: a cache has no size limit; history=last and the prune adapter (--prune) remove what it does not need"),
+        ));
+    }
     if !cache {
-        for flag in ["--history", "--gc", "--prune", "--key-files"] {
+        for flag in ["--history", "--prune", "--key-files"] {
             if a.get(flag).is_some() {
                 return Err(exit(2, format!("layr overlay {cmd} {flag} is a setting of a cache: {RULE}")));
             }
@@ -412,10 +418,6 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
     }
     if a.has("--patches") || a.has("--no-patches") {
         return Err(exit(2, "--patches was removed: every overlay holds patches of the overlays below it (docs/overlays.md section 1)"));
-    }
-    if let Some(v) = a.get("--gc") {
-        p.gc_lru = crate::overlay::parse_gc(v)
-            .ok_or_else(|| exit(128, format!("fatal: invalid --gc '{v}' (none or lru:<size>, for example lru:20G)")))?;
     }
     Ok(p)
 }

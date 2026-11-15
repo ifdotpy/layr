@@ -307,10 +307,6 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                     }
                     // Retention when caches are made, not only in gc: no daemon has to run.
                     trash_excess_caches(&repo.p)?;
-                    // The size limit of a folder overlay (`gc=lru:<size>`), now that a build may have grown it.
-                    if let Err(e) = repo.cache_lru_line(&l, &caches) {
-                        eprintln!("warning: cache size limits not applied: {e:#}");
-                    }
                 }
                 s.id
             }
@@ -1797,10 +1793,6 @@ fn repair_project(
         // The working content of automatic states that are gone, kept in the stores of overlays.
         if let Err(e) = repo.drop_dead_auto_states(ctx) {
             eprintln!("warning: overlays: the working content of dropped automatic states stays until the next gc: {e:#}");
-        }
-        // Folder overlays with an LRU limit.
-        if let Err(e) = repo.cache_gc_lru() {
-            eprintln!("warning: cache size limits not applied: {e:#}");
         }
         #[cfg(target_os = "macos")]
         {

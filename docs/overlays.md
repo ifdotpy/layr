@@ -258,21 +258,23 @@ Built so far (the rest of this file describes the code until a row says "built")
   `overlay list` shows `kind=<kind>` first, and `overlay list --json` and `overlay show --json` have
   `kind`.
 - `overlay create|set` options `--mode`, `--quiet`, `--no-quiet`, `--merge` and `--trust` fail with
-  exit status 2 and name the kind rule. `--history`, `--gc`, `--prune` and `--key-files` are settings
-  of a cache: on a patches overlay they fail with exit status 2. `--parent` is a setting of a patches
+  exit status 2 and name the kind rule. `--history`, `--prune` and `--key-files` are settings
+  of a cache: on a patches overlay they fail with exit status 2. `--gc` (the size limit of a cache)
+  fails with exit status 2 on every overlay: a cache takes the space that it needs, and the prune
+  adapter removes what a build no longer needs (owner decision 2026-11-15). The code of the limit is
+  gone, `properties` in JSON has no `gc`, and a stored `gc` value is not read. `--parent` is a setting of a patches
   overlay. `--hidden` stays.
 - `overlay create --folder` gives a cache its fixed behaviour: quiet, `merge=union-theirs`,
   `trust=protected` and `history=last` (`--history` changes it). The caches that a save makes have
   the platform of this machine, as before.
 - Old data. Each existing overlay maps to a kind by its `folder` setting. Every setting that an older
-  layr stored keeps acting as before: on a patches overlay `quiet`, `merge`, `history`, `gc`,
+  layr stored keeps acting as before: on a patches overlay `quiet`, `merge`, `history`,
   `prune`, `platform` and `trust` are still read, and on a cache a stored `trust=readers` or
   `quiet=false` too. No command changes them any more (`layr config` can take one away). So an old
   store opens and behaves as before; only the options to set them are gone.
 - Left (not built): `--platform` stays on `overlay create|set`, because the tests of overlays of
-  another platform (t235, t61) make such an overlay with it, and no other command makes one. `--gc`
-  and `--prune` stay on caches: they are the only way to set the size limit and the prune adapter
-  (t59, t117, t122). The internal properties (`Props`) are read as before, not derived from the kind.
+  another platform (t235, t61) make such an overlay with it, and no other command makes one. `--prune`
+  stays on caches: it is the only way to turn the prune adapter off or to name one (t117, t122). The internal properties (`Props`) are read as before, not derived from the kind.
 
 **Older peers (risk, 2026-11-15).** The store format 2 stops an older layr from opening a store
 that this layr opened. Nothing stops an older layr on another machine that takes the records of such
