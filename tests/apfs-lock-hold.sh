@@ -111,6 +111,41 @@ has "merge prepares before the lock" "prepare merge" "$trace"
 has "merge takes the lock" "store lock taken" "$trace"
 eq "merge copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
 eq "the merge brings the file" "side" "$(cat side.txt)"
+# Both already-up-to-date paths must prepare a dirty automatic-save layer before the lock.
+head=$(l rev-parse head)
+printf 'dirty up-to-date\n' > tracked.txt
+trace=$(LAYR_TRACE=1 l merge -q side 2>&1)
+has "an up-to-date merge takes its prepared save" "take prepared save" "$trace"
+eq "an up-to-date merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
+eq "an up-to-date merge keeps dirty content" "dirty up-to-date" "$(cat tracked.txt)"
+eq "an up-to-date merge keeps the head" "$head" "$(l rev-parse head)"
+eq "no prepared copies stay after an up-to-date merge" "" "$(ls -A "$LAYR_ROOT/projects/hold/meta/work" 2>/dev/null)"
+
+# The source selects an empty follow overlay; it changes no target layer, but goes through
+# the overlays-only up-to-date branch. Keep the target without overlays so its save is thin.
+# Use a separate project: new lines show every readable project overlay, even when their
+# source shows none. Leaving this overlay in hold would change the replay, clean and park tests.
+l init hold-layered --from "$T/src" -q >/dev/null || exit 1
+Q=$LAYR_ROOT/projects/hold-layered
+cd "$Q/lines/main" || exit 1
+printf 'tracked\n' > tracked.txt
+l add tracked.txt && l save -qm tracked || exit 1
+head=$(l rev-parse head)
+l line new -q already-layered || exit 1
+cd "$Q/lines/already-layered" || exit 1
+l overlay create lock-empty --mode follow -q || exit 1
+l overlay use --add lock-empty >/dev/null || exit 1
+eq "the layered source is already up to date" "$head" "$(l rev-parse head)"
+cd "$Q/lines/main" || exit 1
+l overlay use --none >/dev/null || exit 1
+printf 'dirty layered up-to-date\n' > tracked.txt
+trace=$(LAYR_TRACE=1 l merge -q already-layered 2>&1)
+has "an up-to-date overlay merge takes its prepared save" "take prepared save" "$trace"
+eq "an up-to-date overlay merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
+eq "an up-to-date overlay merge keeps dirty content" "dirty layered up-to-date" "$(cat tracked.txt)"
+eq "an up-to-date overlay merge keeps the head" "$head" "$(l rev-parse head)"
+eq "no prepared copies stay after an up-to-date overlay merge" "" "$(ls -A "$Q/meta/work" 2>/dev/null)"
+cd "$P/topic" || exit 1
 trace=$(LAYR_TRACE=1 l reset -q --hard side 2>&1)
 has "reset takes the lock" "store lock taken" "$trace"
 eq "reset --hard copies no tree under the lock" "" "$(locked "$trace" | grep -E "$copies")"
@@ -135,6 +170,7 @@ printf 'two\n' > rp2.txt && l add rp2.txt && l save -qm rp2
 cd "$P/rp-base" || exit 1
 printf 'base\n' > rpb.txt && l add rpb.txt && l save -qm rpb
 cd "$P/rp-work" || exit 1
+eq "the replay fixture shows no overlays" "line rp-work shows no overlays" "$(l overlay use)"
 trace=$(LAYR_TRACE=1 l replay rp-base 2>&1)
 has "replay merges before the lock" "prepare replay" "$trace"
 has "replay takes the lock" "store lock taken" "$trace"

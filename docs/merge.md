@@ -19,8 +19,11 @@ rename/rename and delete/modify. Files changed on both sides use the driver from
 
 ### Conflicts and conflict markers
 
-A merge never stops on a conflict. The new state holds the conflict markers and lists the conflicted paths.
-`layr merge` prints each path and exits with 1. `layr status` shows each open path as `UU`.
+A merge into an unprotected line keeps conflicts in the new state: it holds the conflict markers and lists the conflicted paths.
+A protected line refuses conflicted merge inputs and results, including overlays, even without configured checks. Recomputing a merge with `--no-ff`, `--squash` or a divergent target cannot hide an input state's unresolved conflicts.
+The refusal leaves records, the head, the working folder and staging unchanged. Merge the target into the source line, resolve and save there, then merge the source again with `--expect <state>`.
+This guarantee applies to merge commits: `CleanMerge` certifies their results. It does not change the explicit root and `protect --direct` exceptions for direct operations such as `pick` and `replay`. A failed queued merge may still record its `queue.result` failure bookkeeping; it does not record a merge state, move the target head or change its working folder or staging.
+For an unprotected merge, `layr merge` prints each conflicted path and exits with 1. `layr status` shows each open path as `UU`.
 A merge, `pick` or `invert` is refused while the head has open conflicts. Resolve the files and run `layr save -m <message>` first.
 A new merge would keep the old markers as file content and would list no conflict.
 
