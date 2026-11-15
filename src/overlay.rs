@@ -1024,33 +1024,61 @@ pub fn split(
             }
         }
     };
+    // `layr overlay move` of `p` to overlay `i` (docs/overlays.md section 1, move): `i` holds the version that
+    // the view shows, the overlays above it drop their entry, and the layers below keep theirs; `i` records
+    // a patch (with its base) when a layer below shows the path. A file that only `main` holds (no overlay
+    // has it) moves out of `main`: `main` deletes it.
+    let move_into = |s: &mut Split, i: usize, p: &str| -> Result<()> {
+        let owner = Owner::Overlay(i);
+        check_name(owner, p)?;
+        for j in (i + 1)..roots.len() {
+            if holds(Owner::Overlay(j), p) {
+                s.overlays[j].dels.insert(p.to_string());
+            }
+        }
+        let only_main = !(0..roots.len()).any(|j| holds(Owner::Overlay(j), p));
+        if only_main && has_file(shared, p) {
+            s.shared.dels.insert(p.to_string());
+        }
+        let under = if only_main { None } else { below(i, p) };
+        if under.as_ref().is_some_and(|r| same_entry(r, new, p).unwrap_or(false)) {
+            // The version below is the version that the view shows: `i` keeps no entry.
+            if holds(owner, p) {
+                s.overlays[i].dels.insert(p.to_string());
+            }
+            unmark(s, owner, p);
+            return Ok(());
+        }
+        match under {
+            Some(r) => {
+                if let Some(h) = version_hash(r.as_path(), p)? {
+                    s.overlays[i].blobs.insert(h.clone(), (r.clone(), p.to_string()));
+                    s.overlays[i].bases.insert(p.to_string(), h);
+                }
+            }
+            None => {
+                s.overlays[i].unbases.insert(p.to_string());
+            }
+        }
+        s.overlays[i].puts.insert(p.to_string());
+        unmark(s, owner, p);
+        Ok(())
+    };
     let mut handled: BTreeSet<String> = BTreeSet::new();
     for c in &list {
         handled.insert(c.path.clone());
         let p = c.path.clone();
         if let Some(i) = pending.get(&p).or_else(|| sticky.get(&p)).copied() {
-            // `layr overlay move`: the file goes to its overlay and leaves every other layer. A file of a
-            // quiet overlay (`sticky`) stays in it whatever the target is: `save --to main` never takes it.
-            let owner = Owner::Overlay(i);
+            // `layr overlay move`: the file goes to its overlay (`move_into`). A file of a quiet overlay
+            // (`sticky`) stays in it whatever the target is: `save --to main` never takes it.
             if let Some(old) = &c.old_path {
                 handled.insert(old.clone());
-                for o in all(old) {
-                    ops(&mut s, o).dels.insert(old.clone());
-                }
+                take_out(&mut s, Owner::Overlay(i), old, None);
             }
             if c.new.is_some() {
-                check_name(owner, &p)?;
-                for o in all(&p) {
-                    if o != owner {
-                        ops(&mut s, o).dels.insert(p.clone());
-                    }
-                }
-                ops(&mut s, owner).puts.insert(p.clone());
-                unmark(&mut s, owner, &p);
+                move_into(&mut s, i, &p)?;
             } else {
-                for o in all(&p) {
-                    ops(&mut s, o).dels.insert(p.clone());
-                }
+                take_out(&mut s, Owner::Overlay(i), &p, None);
             }
             continue;
         }
@@ -1105,18 +1133,12 @@ pub fn split(
             }
         }
     }
-    // Moves of unchanged files: out of their layer, into the overlay.
+    // Moves of unchanged files into their overlay.
     for (p, i) in pending {
         if handled.contains(p) || !has_file(new, p) {
             continue;
         }
-        let owner = Owner::Overlay(*i);
-        ops(&mut s, owner).puts.insert(p.clone());
-        for o in all(p) {
-            if o != owner {
-                ops(&mut s, o).dels.insert(p.clone());
-            }
-        }
+        move_into(&mut s, *i, p)?;
     }
     s.list = list;
     Ok(s)
@@ -3365,11 +3387,19 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
             };
             match merged {
                 Some((data, clean)) => {
+                    // The snapshot of a state that may come from another machine: written through `Tree`, never
+                    // by path, so a link in it is replaced, not followed.
                     let t = Tree::open(&work.path)?;
+                    let mode = fsutil::lmeta(roots[i].as_path(), p).map(|m| if m.executable() { 0o755 } else { 0o644 }).unwrap_or(0o644);
                     if t.stat(p).is_some() {
                         t.remove(p)?;
                     }
-                    std::fs::write(work.path.join(p), &data)?;
+                    t.mkdirs_for(p, own)?;
+                    {
+                        use std::io::Write;
+                        let mut f = t.create(p, mode)?;
+                        f.write_all(&data)?;
+                    }
                     ops.puts.insert(p.clone());
                     ops.bases.insert(p.clone(), now.clone());
                     ops.blobs.insert(now.clone(), (r.clone(), p.clone()));
@@ -3754,6 +3784,11 @@ mod tests {
         let moves = BTreeMap::from([("core.c".to_string(), 0usize)]);
         let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no).unwrap();
         assert!(s.overlays[0].puts.contains("core.c") && s.shared.dels.contains("core.c"));
+        // A patch moved to an overlay: the layers below keep their version, and the overlay records its base.
+        let moves = BTreeMap::from([(".env".to_string(), 0usize)]);
+        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no).unwrap();
+        assert!(s.overlays[0].puts.contains(".env") && !s.shared.dels.contains(".env"), "main keeps its .env");
+        assert!(s.overlays[0].bases.contains_key(".env"), "the moved patch has the version of main as its base");
         // A file of a quiet overlay stays in it, also with `--to main`.
         let quiet = BTreeMap::from([(".env".to_string(), 0usize)]);
         let s = split(&base, &new, &shared, &roots, &none, &quiet, Owner::Shared, &no).unwrap();
