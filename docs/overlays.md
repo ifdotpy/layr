@@ -271,8 +271,17 @@ a project from a store remote or by peer sync into its own store of format 1. Fr
 No transfer check exists that a binary of 0.47 honours and that this layr can use for only such
 projects: a store remote checks the versions of its tree headers, indexes and chunk indexes, and a
 change of one of them refuses the whole project for every older reader, also projects without
-overlays; Layr Cloud reads the same files. That is an owner decision, so it is not built. Until then:
-upgrade every machine of a project before it uses overlays with parents.
+overlays; Layr Cloud reads the same files. Owner decision of 2026-11-15: the versions of the remote
+format stay as they are, and they change together with the next change of that format. The rules
+until then:
+
+- Upgrade every machine of a project before the project uses an overlay with a parent.
+- Layr Cloud: set `minimumClient` in the gateway config to the first release with the overlay tree when
+  that release is deployed. An older layr sends `Layr-Client: <version>`, gets `426` and stops with
+  "update layr" (docs/remotes.md; layr 0.47 honours it). The value is one for the whole server, which
+  fits its rule that clients and the server update together.
+- A store remote in a bucket or a folder and peer sync have no such check: only the first rule
+  protects them.
 
 **Caches per view as built (2026-11-15).**
 
