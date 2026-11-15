@@ -13,7 +13,7 @@ pub(crate) fn native_fingerprint(path: &Path, observed: &std::fs::Metadata) -> F
             _ => return FileFingerprint::Unverifiable,
         }
     }
-    FileFingerprint::Verified { stat, backend: None }
+    FileFingerprint::Verified { stat, evidence: None }
 }
 
 pub(crate) fn scan(
@@ -34,7 +34,9 @@ pub(crate) fn scan(
             Err(e) => return Err(e.into()),
         };
         if !rel.is_empty()
-            && (crate::repo::skip_path(&rel) || m.dev() != root_meta.dev() || m.is_dir() && crate::storage::is_subvolume(&path))
+            && (crate::repo::skip_path(&rel)
+                || m.dev() != root_meta.dev()
+                || m.is_dir() && crate::fs::host().namespace.managed(&path))
         {
             continue;
         }

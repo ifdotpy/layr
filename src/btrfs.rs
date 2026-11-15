@@ -2,6 +2,7 @@
 //! `btrfs` command for send streams.
 
 use crate::sys;
+mod accounting;
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::fs::File;
@@ -12,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(crate) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+pub(crate) mod entries;
+
 const FIRST_FREE_OBJECTID: u64 = 256;
 
 /// A nested subvolume leaves inode 2 at its boundary in a parent snapshot. Unlike a real
@@ -50,16 +53,8 @@ fn fmt_uuid(b: &[u8; 16]) -> Option<String> {
     Some(uuid::Uuid::from_bytes(*b).hyphenated().to_string())
 }
 
-fn split_parent(path: &Path) -> Result<(File, String)> {
-    let parent = path.parent().ok_or_else(|| anyhow!("no parent: {}", path.display()))?;
-    let name = path.file_name().ok_or_else(|| anyhow!("no name: {}", path.display()))?;
-    let dir = File::open(if parent.as_os_str().is_empty() { Path::new(".") } else { parent })
-        .with_context(|| format!("open {}", parent.display()))?;
-    Ok((dir, name.to_string_lossy().into_owned()))
-}
-
 /// True when `path` lives on a btrfs file system.
-pub fn is_supported(path: &Path) -> bool {
+pub(super) fn supports_volume(path: &Path) -> bool {
     match rustix::fs::statfs(path) {
         Ok(st) => st.f_type as i64 == BTRFS_SUPER_MAGIC,
         Err(_) => false,
@@ -67,81 +62,41 @@ pub fn is_supported(path: &Path) -> bool {
 }
 
 /// True when `path` is the root of a subvolume.
-pub fn is_subvolume(path: &Path) -> bool {
+pub(super) fn managed_root(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
-        Ok(m) => m.is_dir() && m.ino() == FIRST_FREE_OBJECTID && is_supported(path),
+        Ok(m) => m.is_dir() && m.ino() == FIRST_FREE_OBJECTID && supports_volume(path),
         Err(_) => false,
     }
 }
 
-pub fn create_subvolume(path: &Path) -> Result<()> {
-    let (dir, name) = split_parent(path)?;
-    sys::subvol_create(dir.as_fd(), &name).with_context(|| format!("create subvolume {}", path.display()))
-}
-
 /// Snapshot `src` (a subvolume) to `dst`. The destination must not exist.
 /// A read-only snapshot for comparing content.
-pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
-    snapshot(src, dst, true)
-}
-
 /// A writable copy of a cache folder: a subvolume snapshot, which is O(1) and keeps every link.
 /// Returns false: a snapshot keeps each entry's owner, so every entry needs a check.
-pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
-    snapshot(src, dst, false)?;
-    Ok(false)
-}
-
-pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
-    use layr_fs_core::Filesystem;
-    let _t = crate::trace::span(format!("snapshot {}", dst.display()));
-    let driver = crate::btrfs_driver::BtrfsFs::for_snapshot(src, dst)?;
-    let result = (|| -> layr_fs_core::Result<()> {
-        let source = driver.working(src)?;
-        let destination = driver.location(dst)?;
-        // The legacy adapter transfers persistence back to the existing path owner.
-        let filesystem: &dyn Filesystem = driver.as_ref();
-        if readonly { drop(filesystem.freeze(&source, destination)?); }
-        else { drop(driver.native_snapshot(&source, destination)?); }
-        Ok(())
-    })();
-    result.map_err(|error| driver.legacy_error(error))
-}
-
 pub(crate) fn remember_snapshot(path: &Path) {
     NEW_SNAPSHOTS.with(|paths| paths.borrow_mut().insert(path.to_path_buf()));
 }
 
 /// Delete the subvolume at `path`. Nested subvolumes must be deleted first.
-pub fn delete_subvolume(path: &Path) -> Result<()> {
-    let (dir, name) = split_parent(path)?;
-    sys::subvol_destroy(dir.as_fd(), &name).with_context(|| format!("delete subvolume {}", path.display()))
-}
-
 /// Make a subvolume read-only (a writable snapshot becomes a state after its changes).
 /// Give a restored or received subvolume the received UUID and transaction of its signed state,
 /// the identity that `recv` checks for a later send.
-pub fn mark_received(path: &Path, uuid: &str, transid: u64) -> Result<()> {
-    let file = File::open(path)?;
-    sys::subvol_set_received(file.as_fd(), *uuid::Uuid::parse_str(uuid)?.as_bytes(), transid)?;
-    Ok(())
-}
 
-pub fn set_readonly(path: &Path) -> Result<()> {
+pub(super) fn seal_tree(path: &Path) -> Result<()> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let flags = sys::subvol_flags(f.as_fd())?;
     sys::subvol_set_flags(f.as_fd(), flags | sys::SUBVOL_RDONLY).with_context(|| format!("make {} read-only", path.display()))
 }
 
 /// Make a read-only subvolume writable again (btrfs does not rename a read-only subvolume).
-pub fn set_writable(path: &Path) -> Result<()> {
+pub(super) fn unseal_tree(path: &Path) -> Result<()> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let flags = sys::subvol_flags(f.as_fd())?;
     sys::subvol_set_flags(f.as_fd(), flags & !sys::SUBVOL_RDONLY).with_context(|| format!("make {} writable", path.display()))
 }
 
-pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
+pub(super) fn native_info(path: &Path) -> Result<SubvolInfo> {
     let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let raw = sys::subvol_info(f.as_fd()).with_context(|| format!("subvolume info {}", path.display()))?;
     let flags = sys::subvol_flags(f.as_fd())?;
@@ -155,84 +110,18 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
 
 /// Delete a subvolume and every subvolume nested inside it, or a plain folder tree. The tree is
 /// walked through descriptors (no link is followed), because a line belongs to its owner.
-pub fn delete_tree(path: &Path) -> Result<()> {
-    use layr_fs_core::Filesystem;
-    // Keep the legacy missing/inaccessible-path behavior at this compatibility boundary.
-    if std::fs::symlink_metadata(path).is_err() { return Ok(()); }
-    // Plain directory/file cleanup still belongs to the descriptor-walking legacy facade.
-    if !is_subvolume(path) { return delete_tree_native(path); }
-    let driver = crate::btrfs_driver::BtrfsFs::for_path(path)?;
-    let ownership = driver.owned(path)?;
-    driver.remove(ownership).map_err(|failure| driver.legacy_removal_error(failure))
-}
-
-pub(crate) fn delete_tree_native(path: &Path) -> Result<()> {
-    let _t = crate::trace::span(format!("delete {}", path.display()));
-    if std::fs::symlink_metadata(path).is_err() {
-        return Ok(());
-    }
-    if is_subvolume(path) {
-        if destroy_known(path, &[])? {
-            return Ok(());
-        }
-        let _t = crate::trace::span("delete: full search for nested subvolumes");
-        crate::tree::Tree::open(path)?.destroy_nested()?;
-        return delete_subvolume(path);
-    }
-    let parent = path.parent().ok_or_else(|| anyhow!("no parent: {}", path.display()))?;
-    let name = path.file_name().ok_or_else(|| anyhow!("no name: {}", path.display()))?.to_string_lossy().into_owned();
-    crate::tree::Tree::open(parent)?.remove(&name)
-}
-
 /// Destroy the subvolume `path` without a search: O(1) in the usual case. A subvolume with
 /// nested subvolumes (a working folder with its .git folder or caches) answers ENOTEMPTY; then
 /// the `.git` folder and the `nested` paths (known cache roots) go first, through descriptors.
 /// False when nested subvolumes remain: the caller searches for them (`delete_tree`) or defers.
-pub fn destroy_known(path: &Path, nested: &[String]) -> Result<bool> {
-    let (dir, name) = split_parent(path)?;
-    match sys::subvol_destroy(dir.as_fd(), &name) {
-        Ok(()) => Ok(true),
-        Err(e) if is_not_empty(&e) => {
-            let _t = crate::trace::span("delete: known nested subvolumes");
-            let t = crate::tree::Tree::open(path)?;
-            for rel in std::iter::once(".git").chain(nested.iter().map(|n| n.as_str())) {
-                if t.stat(rel).map(|m| m.is_dir() && m.ino == FIRST_FREE_OBJECTID).unwrap_or(false) {
-                    t.remove(rel)?;
-                }
-            }
-            Ok(sys::subvol_destroy(dir.as_fd(), &name).is_ok())
-        }
-        Err(e) => Err(e.context(format!("delete subvolume {}", path.display()))),
-    }
-}
-
 /// Move a tree to `to` on the same file system (the store trash).
 pub fn move_tree(src: &Path, to: &Path) -> Result<()> {
     std::fs::rename(src, to).with_context(|| format!("move {} to {}", src.display(), to.display()))
 }
 
-pub fn is_not_empty(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().map(|x| x.raw_os_error() == Some(39)).unwrap_or(false))
-}
-
 /// Reflink the whole content of `src` into `dst`.
-pub fn clone_file(src: &File, dst: &File) -> std::io::Result<()> {
-    rustix::fs::ioctl_ficlone(dst, src).map_err(std::io::Error::from)
-}
-
 /// Reflink a byte range. Offsets and length must be aligned to the block size, except a range
 /// that ends at the end of the source file.
-pub fn clone_range(src: &File, src_off: u64, len: u64, dst: &File, dst_off: u64) -> std::io::Result<()> {
-    use layr_fs_core::{Attempt, ByteRange, ReflinkRange};
-    let Ok(range) = ByteRange::new(src_off, len) else { return sys::clone_range(src, src_off, len, dst, dst_off); };
-    match crate::btrfs_driver::RangeClone.clone_range(src, range, dst, dst_off) {
-        Ok(Attempt::Applied(())) => Ok(()),
-        Ok(Attempt::Unavailable(error)) => Err(error),
-        Err(layr_fs_core::FsError::Io(error)) => Err(error),
-        Err(error) => Err(std::io::Error::other(error)),
-    }
-}
-
 /// Copies what it reads into a buffer that stays at most `limit` bytes; past that it drops the
 /// copy (`kept` then gives nothing).
 struct Tee<R> {
@@ -300,7 +189,7 @@ pub(crate) fn send_no_data_pinned(parent: &Path, child: &Path, p: &File, c: &Fil
 }
 
 /// Extra sources and compressed extents require an explicit agreement with the receiver.
-pub fn send_optimized(parent: Option<&Path>, child: &Path, clones: &[PathBuf], compressed: bool) -> Result<Command> {
+pub(super) fn native_send(parent: Option<&Path>, child: &Path, clones: &[PathBuf], compressed: bool) -> Result<Command> {
     let mut c = Command::new("btrfs");
     c.arg("send").arg("-q");
     if compressed && supports_compressed_send() {
@@ -330,17 +219,17 @@ fn tools_version() -> Option<(u32, u32)> {
     })
 }
 
-pub fn supports_compressed_receive() -> bool {
+pub(super) fn compressed_input() -> bool {
     tools_version().is_some_and(|v| v >= (6, 0))
 }
 
 // Before 6.11, receive searches clone sources only by received UUID, not local UUID.
-pub fn supports_local_clone_receive() -> bool {
+pub(super) fn local_clone_input() -> bool {
     tools_version().is_some_and(|v| v >= (6, 11))
 }
 
 fn supports_compressed_send() -> bool {
-    supports_compressed_receive()
+    compressed_input()
         && std::fs::read_to_string("/sys/fs/btrfs/features/send_stream_version")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
@@ -348,7 +237,7 @@ fn supports_compressed_send() -> bool {
 }
 
 /// An immutable source identity accepted by the receiver. Local UUIDs do not need a remote transaction ID.
-pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
+pub(super) fn native_clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
     let f = File::open(path)?;
     if sys::subvol_flags(f.as_fd())? & sys::SUBVOL_RDONLY == 0 {
         bail!("clone source is not read-only");
@@ -363,31 +252,25 @@ pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
 }
 
 /// The kernel writes its local ctransid even when the UUID comes from a received snapshot.
-pub fn send_clone_identity(path: &Path) -> Result<(String, u64)> {
-    let (uuid, _) = clone_identity(path)?;
+pub(super) fn native_send_identity(path: &Path) -> Result<(String, u64)> {
+    let (uuid, _) = native_clone_identity(path)?;
     let f = File::open(path)?;
     Ok((uuid, sys::subvol_info(f.as_fd())?.ctransid))
 }
 
 /// Identity retained by btrfs snapshots, used to stage file moves.
-pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn native_file_identity(path: &Path) -> Result<Vec<u8>> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::symlink_metadata(path)?.ino().to_le_bytes().to_vec())
 }
 
-/// Disk space of a folder (`layr du`): extents that a snapshot or a reflink shares are flagged.
-pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
+/// Disk measure_space of a folder (`layr du`): extents that a snapshot or a reflink shares are flagged.
+pub(super) fn measure_space(path: &Path) -> Result<crate::fsutil::Space> {
     crate::fsutil::fiemap_space(path)
 }
 
-/// Visit the files of a folder for disk-usage tests.
-#[cfg(test)]
-pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
-    crate::fsutil::fiemap_visit(path, f)
-}
-
 /// Bytes that a copy of `path` occupies on another btrfs file system: each distinct extent once.
-pub(crate) fn copy_need(path: &Path) -> Result<u64> {
+pub(super) fn copy_allocation(path: &Path) -> Result<u64> {
     let mut keys: std::collections::HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
         for &(key, size) in h.shared {
@@ -400,7 +283,7 @@ pub(crate) fn copy_need(path: &Path) -> Result<u64> {
 }
 
 /// Allocated bytes of `path` with shared data counted per file (the size of a flattened copy).
-pub(crate) fn copy_total(path: &Path) -> Result<u64> {
+pub(super) fn copy_flat_allocation(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     crate::fsutil::fiemap_visit(path, &mut |h| total += h.alloc)?;
     Ok(total)
@@ -425,19 +308,19 @@ impl Copier {
         // Snapshots left by an interrupted copy of this project.
         let tmp = src_root.join("meta").join(crate::project_copy::TMP);
         if tmp.exists() {
-            delete_tree(&tmp)?;
+            crate::fs::remove(&tmp)?;
         }
         Ok(Copier { root: src_root.to_path_buf(), seen: Default::default(), links: Default::default(), serial: 0 })
     }
 
     pub(crate) fn native_subvolume(&self, path: &Path) -> bool {
-        is_subvolume(path)
+        managed_root(path)
     }
 
     /// Create the folder `dst` for `src`: a subvolume for a subvolume, else a folder.
     pub(crate) fn shell_dir(&mut self, src: &Path, dst: &Path) -> Result<()> {
-        if is_subvolume(src) {
-            create_subvolume(dst)
+        if managed_root(src) {
+            crate::fs::create(dst)
         } else {
             fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))
         }
@@ -483,7 +366,7 @@ impl Copier {
     /// Send one subvolume and receive it at `dst`, then the subvolumes nested inside it. A
     /// writable subvolume is sent from a temporary read-only snapshot in the source.
     pub(crate) fn subvolume(&mut self, src: &Path, dst: &Path) -> Result<()> {
-        let info = subvol_info(src)?;
+        let info = native_info(src)?;
         self.serial += 1;
         let serial = self.serial;
         let name = src.file_name().context("subvolume without a name")?.to_owned();
@@ -493,7 +376,7 @@ impl Copier {
             let dir = self.root.join("meta").join(crate::project_copy::TMP).join(serial.to_string());
             fs::create_dir_all(&dir)?;
             let snap = dir.join(&name);
-            snapshot(src, &snap, true)?;
+            crate::fs::snapshot(src, &snap, true)?;
             (snap, Some(dir))
         };
         let inbox = dst.parent().context("subvolume target has no parent")?.join(format!(".layr-copy-in-{serial}"));
@@ -521,7 +404,7 @@ impl Copier {
         }
         // btrfs does not rename a read-only subvolume. The copy is writable while it is placed
         // and while nested subvolumes come in; a read-only original is made read-only again.
-        set_writable(&inbox.join(&name))?;
+        unseal_tree(&inbox.join(&name))?;
         fs::rename(inbox.join(&name), dst).with_context(|| format!("place {}", dst.display()))?;
         fs::remove_dir(&inbox)?;
         self.share_files(src, dst)?;
@@ -529,16 +412,16 @@ impl Copier {
         for rel in nested_subvolumes(src)? {
             let target = dst.join(&rel);
             // The send leaves an empty folder where a nested subvolume is.
-            if fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir() && !is_subvolume(&target)) {
+            if fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir() && !managed_root(&target)) {
                 fs::remove_dir(&target).with_context(|| format!("clear {}", target.display()))?;
             }
             self.subvolume(&src.join(&rel), &target)?;
         }
         if info.readonly {
-            set_readonly(dst)?;
+            seal_tree(dst)?;
         }
         if let Some(dir) = temp {
-            delete_tree(&send)?;
+            crate::fs::remove(&send)?;
             fs::remove_dir(&dir)?;
         }
         Ok(())
@@ -556,7 +439,7 @@ impl Copier {
                     continue;
                 }
                 let child = rel.join(e.file_name());
-                if is_subvolume(&src.join(&child)) {
+                if managed_root(&src.join(&child)) {
                     continue;
                 }
                 let (s_path, d_path) = (src.join(&child), dst.join(&child));
@@ -583,7 +466,7 @@ impl Copier {
                 let m = e.metadata()?;
                 let child = rel.join(e.file_name());
                 if m.is_dir() {
-                    if !is_subvolume(&src.join(&child)) {
+                    if !managed_root(&src.join(&child)) {
                         stack.push(child);
                     }
                 } else if m.is_file() {
@@ -607,7 +490,7 @@ impl Copier {
         match self.seen.get(&key) {
             Some(first) => {
                 let (from, to) = (File::open(first)?, fs::OpenOptions::new().write(true).open(dst)?);
-                clone_file(&from, &to).with_context(|| format!("share {}", dst.display()))?;
+                layr_fs_unix::copy_contents(&from, &to).with_context(|| format!("share {}", dst.display()))?;
             }
             None => {
                 self.seen.insert(key, dst.to_path_buf());
@@ -620,7 +503,7 @@ impl Copier {
     pub(crate) fn finish(self) -> Result<()> {
         let tmp = self.root.join("meta").join(crate::project_copy::TMP);
         if tmp.exists() {
-            delete_tree(&tmp)?;
+            crate::fs::remove(&tmp)?;
         }
         Ok(())
     }
@@ -635,7 +518,7 @@ fn nested_subvolumes(root: &Path) -> Result<Vec<PathBuf>> {
             let e = e?;
             if e.metadata()?.is_dir() {
                 let child = rel.join(e.file_name());
-                if is_subvolume(&root.join(&child)) {
+                if managed_root(&root.join(&child)) {
                     out.push(child);
                 } else {
                     stack.push(child);
@@ -648,11 +531,7 @@ fn nested_subvolumes(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// btrfs has no layer registry: nothing to verify beyond the tree.
-pub(crate) fn verify_registry(_src: &Path, _dst: &Path) -> Result<()> {
-    Ok(())
-}
-
-pub(crate) use crate::linux_status::status_stage_identity;
+use crate::linux_status::status_stage_identity as index_identity;
 
 fn status_evidence(
     root: &Path,
@@ -661,20 +540,20 @@ fn status_evidence(
 ) {
     if let Ok(ids) = crate::btrfs_scan::status_identities(root, inodes) {
         for entry in scan.values_mut() {
-            if let crate::status_cache::FileFingerprint::Verified { stat, backend } = entry {
-                *backend = ids.get(&stat.ino).cloned().map(crate::status_cache::BackendIdentity::Btrfs);
+            if let crate::status_cache::FileFingerprint::Verified { stat, evidence } = entry {
+                *evidence = ids.get(&stat.ino).map(|id| crate::status_cache::ObservationEvidence::Counter([id[0], id[1], 0]));
             }
         }
     }
 }
 
-pub(crate) fn status_scan(root: &Path) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
+pub(super) fn observe_tree(root: &Path) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
     let mut scan = crate::linux_status::scan(root, None, &mut |p, m| crate::linux_status::native_fingerprint(&root.join(p), m))?;
     status_evidence(root, &mut scan, None);
     Ok(scan)
 }
 
-pub(crate) fn status_scan_paths(
+pub(super) fn observe_paths(
     root: &Path,
     paths: &std::collections::BTreeSet<String>,
 ) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
@@ -702,24 +581,24 @@ mod placeholder_tests {
     #[test]
     fn fallback_keeps_independent_changes_with_colliding_subvolume_inodes() -> Result<()> {
         let tmp = std::env::temp_dir();
-        if !is_supported(&tmp) {
+        if !supports_volume(&tmp) {
             return Ok(());
         }
         struct Fixture(PathBuf);
         impl Drop for Fixture {
             fn drop(&mut self) {
-                let _ = delete_tree(&self.0);
+                let _ = crate::fs::remove(&self.0);
             }
         }
         let fixture = Fixture(tmp.join(format!("layr-unrelated-hints-{}", crate::ids::new_id())));
         fs::create_dir(&fixture.0)?;
         let (base, tree) = (fixture.0.join("base"), fixture.0.join("tree"));
-        create_subvolume(&base)?;
-        create_subvolume(&tree)?;
+        crate::fs::create(&base)?;
+        crate::fs::create(&tree)?;
         fs::write(base.join("old"), b"deleted file")?;
         fs::write(tree.join("new"), b"independent addition")?;
         assert_eq!(fs::symlink_metadata(base.join("old"))?.ino(), fs::symlink_metadata(tree.join("new"))?.ino());
-        assert_ne!(subvol_info(&base)?.uuid, subvol_info(&tree)?.uuid);
+        assert_ne!(native_info(&base)?.uuid, native_info(&tree)?.uuid);
         // Writable unrelated roots force Partial without invoking privileged send.
         let changes = crate::changes::candidates(&base, &tree)?;
         assert_eq!(changes.len(), 2);
@@ -731,25 +610,26 @@ mod placeholder_tests {
     #[test]
     fn snapshot_placeholder_is_classified_at_the_driver_boundary() -> Result<()> {
         let tmp = std::env::temp_dir();
-        if !is_supported(&tmp) {
+        if !supports_volume(&tmp) {
             return Ok(());
         }
         struct Fixture(PathBuf);
         impl Drop for Fixture {
             fn drop(&mut self) {
-                let _ = set_writable(&self.0.join("snapshot"));
-                let _ = delete_tree(&self.0);
+                let _ = unseal_tree(&self.0.join("snapshot"));
+                let _ = crate::fs::remove(&self.0);
             }
         }
         let fixture = Fixture(tmp.join(format!("layr-placeholder-{}", crate::ids::new_id())));
-        fs::create_dir(&fixture.0)?;
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&fixture.0)?;
         let source = fixture.0.join("source");
         let saved = fixture.0.join("snapshot");
-        create_subvolume(&source)?;
-        create_subvolume(&source.join(".git"))?;
+        crate::fs::create(&source)?;
+        crate::fs::create(&source.join(".git"))?;
         fs::write(source.join(".git/marker"), "not in the parent snapshot")?;
         fs::write(source.join("file"), "saved content")?;
-        snapshot(&source, &saved, true)?;
+        crate::fs::snapshot(&source, &saved, true)?;
         assert_eq!(entry_kind(&source.join(".git"), &fs::symlink_metadata(source.join(".git"))?)?, EntryKind::Ordinary);
         let stub = saved.join(".git");
         assert_eq!(entry_kind(&stub, &fs::symlink_metadata(&stub)?)?, EntryKind::SubvolumePlaceholder);
@@ -770,20 +650,141 @@ mod placeholder_tests {
         layr_objects::times::set(&copy.join(".git"), 123_456_789)?;
         assert!(layr_objects::compare::compare_with_kinds(&saved, &copy, true, entry_kind)?.differences.is_empty());
         assert!(layr_objects::compare::compare_with_kinds(&copy, &saved, true, entry_kind)?.differences.is_empty());
-        set_writable(&saved)?;
-        delete_tree(&fixture.0)?;
+        unseal_tree(&saved)?;
+        crate::fs::remove(&fixture.0)?;
         Ok(())
     }
 }
 
 /// Native send is evidence only for sealed snapshots; failures select the shared full scan.
-pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeHints> {
-    Some(&SendHints)
+use crate::fs::{Accounting, Namespace, Observations, ProjectCopier, Transfer};
+pub(crate) struct HostServices;
+impl Namespace for HostServices {
+    fn entry_kind(&self, path: &Path, metadata: &fs::Metadata) -> Result<layr_objects::fsx::EntryKind> {
+        entry_kind(path, metadata)
+    }
+    fn supported(&self, path: &Path) -> bool {
+        supports_volume(path)
+    }
+    fn managed(&self, path: &Path) -> bool {
+        managed_root(path)
+    }
+    fn info(&self, path: &Path) -> Result<crate::fs::TreeInfo> {
+        let info = native_info(path)?;
+        Ok(crate::fs::TreeInfo {
+            uuid: info.uuid,
+            received_uuid: info.received_uuid,
+            parent_uuid: info.parent_uuid,
+            readonly: info.readonly,
+        })
+    }
+    #[cfg(test)]
+    fn protect(&self, path: crate::fs::ManagedPath, protection: crate::fs::Protection) -> Result<()> {
+        match protection {
+            crate::fs::Protection::Frozen => seal_tree(path.path()),
+            crate::fs::Protection::Writable => unseal_tree(path.path()),
+        }
+    }
+    fn relocate(&self, path: crate::fs::ManagedPath, to: &Path) -> Result<()> {
+        move_tree(path.path(), to)
+    }
+    fn file_identity(&self, path: &Path) -> Result<Vec<u8>> {
+        native_file_identity(path)
+    }
 }
-
-struct SendHints;
-impl crate::change_hints::ChangeHints for SendHints {
-    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
-        crate::btrfs_driver::BtrfsFs::for_path(base)?.legacy_hints(base, tree)
+impl Transfer for HostServices {
+    fn send(&self, parent: Option<&Path>, child: &Path, clones: &[PathBuf], compressed: bool) -> Result<Command> {
+        native_send(parent, child, clones, compressed)
+    }
+    fn offer(&self) -> crate::fs::StreamOffer {
+        crate::fs::StreamOffer {
+            compressed: compressed_input(),
+            clone_lookup: if local_clone_input() {
+                crate::fs::CloneLookup::LocalOrReceived
+            } else {
+                crate::fs::CloneLookup::ReceivedOnly
+            },
+        }
+    }
+    fn receive(
+        &self,
+        source: &mut dyn std::io::Read,
+        destination: &Path,
+        expected: &crate::receive_stream::Expect,
+    ) -> Result<()> {
+        crate::fs::receive_native::receive(source, destination, expected)
+    }
+    fn clone_identity(&self, path: &Path) -> Result<(String, Option<u64>)> {
+        native_clone_identity(path)
+    }
+    fn send_identity(&self, path: &Path) -> Result<(String, u64)> {
+        native_send_identity(path)
+    }
+}
+impl Accounting for HostServices {
+    fn line_spaces(&self, paths: &[PathBuf]) -> Result<Vec<Result<crate::fsutil::Space>>> {
+        accounting::line_spaces(paths)
+    }
+    fn allocations(
+        &self,
+        root: &Path,
+        parts: &[crate::fs::accounting::AllocationPart],
+    ) -> Result<crate::fs::accounting::AllocationReport> {
+        accounting::allocations(root, parts)
+    }
+    fn space(&self, path: &Path) -> Result<crate::fsutil::Space> {
+        measure_space(path)
+    }
+    fn copy_need(&self, path: &Path) -> Result<u64> {
+        copy_allocation(path)
+    }
+    fn copy_total(&self, path: &Path) -> Result<u64> {
+        copy_flat_allocation(path)
+    }
+}
+impl Observations for HostServices {
+    fn read_policy(&self) -> crate::fs::observations::ReadPolicy {
+        crate::fs::observations::ReadPolicy::Capture
+    }
+    fn scan(
+        &self,
+        path: &Path,
+        paths: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
+        match paths {
+            Some(paths) => observe_paths(path, paths),
+            None => observe_tree(path),
+        }
+    }
+    fn stage_identity(&self, path: &Path) -> Result<Vec<u8>> {
+        index_identity(path)
+    }
+}
+impl HostServices {
+    pub(crate) fn copier(src: &Path, dst: &Path) -> Result<Box<dyn ProjectCopier>> {
+        Ok(Box::new(Copier::new(src, dst)?))
+    }
+}
+impl ProjectCopier for Copier {
+    fn native_subvolume(&self, path: &Path) -> bool {
+        Copier::native_subvolume(self, path)
+    }
+    fn shell_dir(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        Copier::shell_dir(self, src, dst)
+    }
+    fn dir_close(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::dir_close(self, src, dst, metadata)
+    }
+    fn file(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::file(self, src, dst, metadata)
+    }
+    fn symlink(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::symlink(self, src, dst, metadata)
+    }
+    fn subvolume(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        Copier::subvolume(self, src, dst)
+    }
+    fn finish(self: Box<Self>) -> Result<()> {
+        Copier::finish(*self)
     }
 }

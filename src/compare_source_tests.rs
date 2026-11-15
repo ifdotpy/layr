@@ -33,10 +33,7 @@ impl Src for FakeSource<'_> {
     fn objects(&self) -> Option<&ObjectTree> {
         self.source.objects()
     }
-    #[cfg(target_os = "macos")]
-    fn layered(&self) -> Option<&crate::thin::Layered> {
-        self.source.layered()
-    }
+
     fn comparison_io(&self, path: &str, io: ComparisonIo) {
         let mut counts = self.counts.lock().unwrap();
         match io {
@@ -80,7 +77,7 @@ impl Drop for Fixture {
 fn object_source(tree: Arc<ObjectTree>) -> crate::repo::Snap {
     #[cfg(target_os = "macos")]
     {
-        crate::thin::Layered::objects(tree)
+        crate::source::Source::Objects(tree)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -219,14 +216,14 @@ struct FakeHints<'a> {
     changed: &'a [String],
     mode: HintMode,
 }
-impl crate::change_hints::ChangeHints for FakeHints<'_> {
-    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
+impl FakeHints<'_> {
+    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<layr_fs_core::hints::HintSet, layr_fs_core::FsError> {
         assert_eq!(self.base.folder(), Some(base));
         assert_eq!(self.tree.folder(), Some(tree));
         match self.mode {
-            HintMode::Partial => Ok(crate::change_hints::HintSet::Partial),
+            HintMode::Partial => Ok(layr_fs_core::hints::HintSet::Partial),
             HintMode::Failed => Err(layr_fs_core::FsError::Invalid("candidate enumeration failed")),
-            HintMode::Complete => Ok(crate::change_hints::HintSet::Complete(
+            HintMode::Complete => Ok(layr_fs_core::hints::HintSet::Complete(
                 self.changed
                     .iter()
                     .filter_map(|path| {
@@ -262,7 +259,7 @@ fn hint_budget(files: usize) -> Result<()> {
             *base.counts.lock().unwrap() = Counts::default();
             *tree.counts.lock().unwrap() = Counts::default();
             let hints = FakeHints { base: &base, tree: &tree, changed: &paths, mode };
-            let candidates = candidates_with_hints(&base, &tree, Some(&hints))?;
+            let candidates = candidates_with_hints(&base, &tree, Default::default(), None, |a, b| hints.between(a, b))?;
             let compared = base.counts.lock().unwrap().metadata.values().sum::<usize>()
                 + tree.counts.lock().unwrap().metadata.values().sum::<usize>();
             let expected = match mode {
@@ -314,7 +311,7 @@ fn fallback_preserves_ranges_renames_and_rejects_incomplete_observations() -> Re
     let (base, tree) = (FakeSource::new(&base), FakeSource::new(&tree));
     for mode in [HintMode::Partial, HintMode::Failed] {
         let hints = FakeHints { base: &base, tree: &tree, changed: &[], mode };
-        let list = candidates_with_hints(&base, &tree, Some(&hints))?;
+        let list = candidates_with_hints(&base, &tree, Default::default(), None, |a, b| hints.between(a, b))?;
         assert!(list.iter().any(|change| matches!(change, EntryChange::Add { path, .. } if path == "new")));
         assert!(list.iter().any(|change| matches!(change, EntryChange::Remove { path, .. } if path == "old")));
         let inferred = with_renames(&base, &tree, list.clone());
@@ -327,7 +324,7 @@ fn fallback_preserves_ranges_renames_and_rejects_incomplete_observations() -> Re
             for root in unreadable {
                 std::fs::set_permissions(root.join("private"), std::fs::Permissions::from_mode(0o0))?;
             }
-            let result = candidates_with_hints(&base, &tree, Some(&hints));
+            let result = candidates_with_hints(&base, &tree, Default::default(), None, |a, b| hints.between(a, b));
             for root in unreadable {
                 std::fs::set_permissions(root.join("private"), std::fs::Permissions::from_mode(0o755))?;
             }

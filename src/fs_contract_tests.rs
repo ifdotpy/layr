@@ -64,7 +64,7 @@ fn capture(
     name: &str,
 ) -> Result<Capture> {
     let CreatedTree { tree, ownership } = fs.materialise(source, location(&format!("{name}-work"))?)?;
-    let capture = fs.freeze(&tree, location(name)?)?;
+    let capture = fs.freeze(layr_fs_core::FreezeSource::Working(&tree), location(name)?)?;
     drop(tree);
     fs.remove(ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     Ok(capture)
@@ -117,7 +117,7 @@ fn scenarios(
     seed.put(&path("sym"), EntryData::Symlink(b"text"), &attributes(0o777))?;
     let base = capture(fs, location, &seed, "base")?;
     let caps = fs.capabilities(&base.tree.scope());
-    let Capabilities { change_hints, clone_new, reflink_range } = caps;
+    let Capabilities { change_hints, clone_new, reflink_range, capture_copy: _, exchange: _ } = caps;
     match expected_capabilities {
         ExpectedCapabilities::Empty => assert!(change_hints.is_none() && clone_new.is_none() && reflink_range.is_none()),
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
@@ -125,22 +125,22 @@ fn scenarios(
         #[cfg(target_os = "macos")]
         ExpectedCapabilities::Apfs => assert!(change_hints.is_some() && clone_new.is_some() && reflink_range.is_none()),
     }
-    assert!(fs.changes(&base.tree, &base.tree)?.iter().all(|c| c.old().is_some() && c.new().is_some()));
+    assert!(fs.changes(&base.tree, &base.tree, Default::default())?.iter().all(|c| c.old().is_some() && c.new().is_some()));
     let CreatedTree { tree: ours_work, ownership: ours_owner } = fs.materialise(base.tree.reader(), location("ours-work")?)?;
     write(ours_work.writer(), "text", b"one\nOURS\nthree\n")?;
     ours_work.writer().remove_entry(&path("old"))?;
-    let ours = fs.freeze(&ours_work, location("ours")?)?;
+    let ours = fs.freeze(layr_fs_core::FreezeSource::Working(&ours_work), location("ours")?)?;
     drop(ours_work);
     // Source remains independent of subsequent versions; mtime-preserving edits are visible.
     let CreatedTree { tree: theirs_work, ownership: theirs_owner } =
         fs.materialise(base.tree.reader(), location("theirs-work")?)?;
     write(theirs_work.writer(), "text", b"one\nTHEIRS\nthree\n")?;
     write(theirs_work.writer(), "added", b"new\n")?;
-    let theirs = fs.freeze(&theirs_work, location("theirs")?)?;
+    let theirs = fs.freeze(layr_fs_core::FreezeSource::Working(&theirs_work), location("theirs")?)?;
     drop(theirs_work);
     let (b, o, t) = (ReaderOnly(base.tree.reader()), ReaderOnly(ours.tree.reader()), ReaderOnly(theirs.tree.reader()));
-    assert!(crate::changes::file_changes_of(&b, &b, fs.changes(&base.tree, &base.tree)?)?.is_empty());
-    let changed = crate::changes::file_changes_of(&b, &o, fs.changes(&base.tree, &ours.tree)?)?;
+    assert!(crate::changes::file_changes_of(&b, &b, fs.changes(&base.tree, &base.tree, Default::default())?)?.is_empty());
+    let changed = crate::changes::file_changes_of(&b, &o, fs.changes(&base.tree, &ours.tree, Default::default())?)?;
     assert_eq!(changed.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(), ["old", "text"]);
     let diffs = crate::diff::file_diffs(&b, &o, &changed)?;
     let patch = diffs.iter().map(|diff| crate::diff::patch(diff, 3)).collect::<String>();
@@ -171,7 +171,7 @@ fn scenarios(
         output.tree.writer().set_metadata(&RelDir::Path(path(file)), &attributes(0o644))?;
     }
     output.tree.writer().set_metadata(&RelDir::Root, &root_attributes)?;
-    let merged = fs.freeze(&output.tree, location("merged")?)?;
+    let merged = fs.freeze(layr_fs_core::FreezeSource::Working(&output.tree), location("merged")?)?;
     drop(output.tree);
     fs.remove(output.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     let merged_ids = save(&store, merged.tree.reader())?;
@@ -222,39 +222,71 @@ enum Disabled {
     Hints,
     Clone,
     Range,
+    Capture,
     All,
     Unavailable,
 }
 struct Decorator<'a> {
     fs: &'a dyn Filesystem,
     disabled: Disabled,
-    calls: [AtomicUsize; 3],
+    calls: [AtomicUsize; 4],
 }
 impl Filesystem for Decorator<'_> {
+    fn create_empty(&self, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
+        self.fs.create_empty(dst)
+    }
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
         self.fs.materialise(source, dst)
     }
-    fn freeze(&self, source: &WorkingTree, dst: NewTreeLocation) -> layr_fs_core::Result<Capture> {
+    fn freeze(&self, source: FreezeSource<'_>, dst: NewTreeLocation) -> layr_fs_core::Result<Capture> {
         self.fs.freeze(source, dst)
     }
-    fn changes(&self, before: &FrozenTree, after: &FrozenTree) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
-        layr_fs_common::changes(self, before, after)
+    fn changes(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
+        layr_fs_common::changes(self, before, after, request)
     }
     fn remove(&self, owner: OwnedTree) -> std::result::Result<(), RemovalFailure> {
         self.fs.remove(owner)
     }
-    fn capabilities(&self, _: &TreeScope) -> Capabilities<'_> {
+    fn capabilities(&self, scope: &TreeScope) -> Capabilities<'_> {
         // Exhaustive construction registers conformance for every declared capability: adding
         // a capability requires extending this fixture and its independent disable cases.
         Capabilities {
+            exchange: None,
+            capture_copy: self
+                .fs
+                .capabilities(scope)
+                .capture_copy
+                .filter(|_| !matches!(self.disabled, Disabled::Capture | Disabled::All))
+                .map(|_| self as &dyn CaptureCopy),
             change_hints: (!matches!(self.disabled, Disabled::Hints | Disabled::All)).then_some(self as &dyn hints::ChangeHints),
             clone_new: (!matches!(self.disabled, Disabled::Clone | Disabled::All)).then_some(self as &dyn CloneToNew),
             reflink_range: (!matches!(self.disabled, Disabled::Range | Disabled::All)).then_some(self as &dyn ReflinkRange),
         }
     }
 }
+impl CaptureCopy for Decorator<'_> {
+    fn copy_capture(&self, source: &WorkingTree, dst: NewTreeLocation) -> layr_fs_core::Result<WritableCapture> {
+        self.calls[3].fetch_add(1, Ordering::Relaxed);
+        self.fs
+            .capabilities(&source.scope())
+            .capture_copy
+            .ok_or(FsError::Invalid("capture capability absent"))?
+            .copy_capture(source, dst)
+    }
+}
 impl hints::ChangeHints for Decorator<'_> {
-    fn between(&self, before: &FrozenTree, after: &FrozenTree) -> layr_fs_core::Result<hints::HintSet> {
+    fn between(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> layr_fs_core::Result<hints::HintSet> {
+        let _ = request;
         self.calls[0].fetch_add(1, Ordering::Relaxed);
         if matches!(self.disabled, Disabled::Unavailable) {
             return Ok(hints::HintSet::Partial);
@@ -265,7 +297,7 @@ impl hints::ChangeHints for Decorator<'_> {
 impl CloneToNew for Decorator<'_> {
     fn clone_new(
         &self,
-        source: &FrozenTree,
+        source: CloneSource<'_>,
         path: &RelPath,
         dst: &WorkingTree,
         target: &RelPath,
@@ -324,8 +356,9 @@ fn capabilities_disabled_independently_match_full_fallback() -> Result<()> {
         let target = fs.materialise(base.tree.reader(), memory.location(path(&format!("work-{index}")))?)?;
         layr_fs_common::copy_file(&fs, &base.tree, &path("file"), &target.tree, &path("clone"))?;
         target.tree.writer().set_metadata(&RelDir::Root, &attributes(0o755))?;
-        let after = fs.freeze(&target.tree, memory.location(path(&format!("after-{index}")))?)?;
-        let changes = fs.changes(&base.tree, &after.tree)?;
+        let after =
+            fs.freeze(layr_fs_core::FreezeSource::Working(&target.tree), memory.location(path(&format!("after-{index}")))?)?;
+        let changes = fs.changes(&base.tree, &after.tree, Default::default())?;
         let a = ReaderOnly(base.tree.reader());
         let b = ReaderOnly(after.tree.reader());
         let changes = crate::changes::file_changes_of(&a, &b, changes)?;
@@ -358,14 +391,279 @@ fn memory_publication_fault_keeps_source_and_destination_reusable() -> Result<()
     write(&source, "file", b"old")?;
     let work = memory.materialise(&source, memory.location(path("work"))?)?;
     memory.fail_next_publication();
-    assert!(memory.freeze(&work.tree, memory.location(path("saved"))?).is_err());
-    let saved = memory.freeze(&work.tree, memory.location(path("saved"))?)?;
+    assert!(memory.freeze(layr_fs_core::FreezeSource::Working(&work.tree), memory.location(path("saved"))?).is_err());
+    let saved = memory.freeze(layr_fs_core::FreezeSource::Working(&work.tree), memory.location(path("saved"))?)?;
     write(work.tree.writer(), "file", b"new")?;
     let mut bytes = Vec::new();
     saved.tree.reader().open_file(&path("file"))?.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"old");
     assert_eq!(saved.consistency, CaptureConsistency::AtomicPoint);
     assert!(!saved.consistency.running());
+    Ok(())
+}
+
+#[test]
+fn captured_publication_preserves_content_links_state_ids_and_consistency() -> Result<()> {
+    let scratch = Scratch::new()?;
+    let memory = MemoryFs::default();
+    let plain = PlainFs::open(&scratch.directory("plain")?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"captured")?;
+    seed.put(&path("alias"), EntryData::HardLink(&path("file")), &attributes(0o644))?;
+    let store = layr_objects::Store::open(&scratch.directory("objects")?, layr_objects::Keying::Plain)?;
+    let memory_location = |name: &str| memory.location(path(name));
+    let plain_location = |name: &str| plain.location(path(name));
+    let drivers: [(&dyn Filesystem, &dyn Fn(&str) -> layr_fs_core::Result<NewTreeLocation>); 2] =
+        [(&memory, &memory_location), (&plain, &plain_location)];
+    for (fs, location) in drivers {
+        let captured = capture(fs, location, &seed, "prepared")?;
+        let consistency = captured.consistency;
+        let ids = save(&store, captured.tree.reader())?;
+        let published = fs.freeze(FreezeSource::Captured(captured), location("published")?)?;
+        assert_eq!(published.consistency, consistency);
+        assert_eq!(save(&store, published.tree.reader())?, ids);
+        drop(published.tree);
+        fs.remove(published.ownership).map_err(|failure| failure.error)?;
+        // Successful publication retired the original destination.
+        let replacement = fs.create_empty(location("prepared")?)?;
+        drop(replacement.tree);
+        fs.remove(replacement.ownership).map_err(|failure| failure.error)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn captured_publication_failure_retains_cleanup_at_anyhow_boundary() -> Result<()> {
+    let memory = std::sync::Arc::new(MemoryFs::default());
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"captured")?;
+    let captured = capture(memory.as_ref(), &|name| memory.location(path(name)), &seed, "prepared")?;
+    let pinned = captured.tree.clone();
+    let error = memory
+        .freeze(FreezeSource::Captured(captured), memory.location(path("published"))?)
+        .err()
+        .context("pinned source cleanup must fail")?;
+    let error = crate::fs::operation_error(memory.clone(), error);
+    let cleanup = error.downcast::<crate::fs::Cleanup>()?;
+    drop(pinned);
+    cleanup.retry()?;
+    // Both the original and the incomplete destination have been removed.
+    for name in ["prepared", "published"] {
+        let created = memory.create_empty(memory.location(path(name))?)?;
+        drop(created.tree);
+        memory.remove(created.ownership).map_err(|failure| failure.error)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_copies_preserve_empty_directories_links_and_state_with_optional_cloning() -> Result<()> {
+    let scratch = Scratch::new()?;
+    let store = layr_objects::Store::open(&scratch.directory("objects")?, layr_objects::Keying::Plain)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    seed.put(&path("dir"), EntryData::Directory, &attributes(0o500))?;
+    seed.put(&path("empty"), EntryData::Directory, &attributes(0o500))?;
+    write(&seed, "dir/a", b"linked")?;
+    seed.put(&path("dir/b"), EntryData::HardLink(&path("dir/a")), &attributes(0o644))?;
+    seed.put(&path("sym"), EntryData::Symlink(b"dir/a"), &attributes(0o777))?;
+    write(&seed, "excluded", b"not selected")?;
+    let mut states = Vec::new();
+    for disabled in [Disabled::None, Disabled::Clone, Disabled::Unavailable] {
+        let memory = MemoryFs::default();
+        let fs = Decorator { fs: &memory, disabled, calls: std::array::from_fn(|_| AtomicUsize::new(0)) };
+        let source = fs.materialise(&seed, memory.location(path("source"))?)?;
+        let target = fs.create_empty(memory.location(path("target"))?)?;
+        target.tree.writer().set_metadata(&RelDir::Root, &attributes(0o755))?;
+        let clone = fs.capabilities(&target.tree.scope()).clone_new;
+        let mut clone =
+            clone.map(|clone| |path: &RelPath| clone.clone_new(CloneSource::Working(&source.tree), path, &target.tree, path));
+        layr_fs_common::copy_selected(
+            source.tree.reader(),
+            target.tree.writer(),
+            &[path("empty"), path("dir/a"), path("dir/b"), path("sym")],
+            clone.as_mut().map(|clone| clone as &mut dyn FnMut(&RelPath) -> layr_fs_core::Result<Attempt<()>>),
+        )?;
+        states.push(save(&store, target.tree.reader())?);
+        assert!(target.tree.reader().metadata(&RelDir::Path(path("excluded")))?.is_none());
+        assert_eq!(
+            target.tree.reader().metadata(&RelDir::Path(path("empty")))?.context("empty directory absent")?.attributes.mode,
+            0o500
+        );
+        assert_eq!(fs.calls[1].load(Ordering::Relaxed), usize::from(!matches!(disabled, Disabled::Clone)));
+    }
+    assert!(states.iter().all(|state| state == &states[0]));
+    Ok(())
+}
+
+#[test]
+fn reference_exchanges_require_exclusive_affine_authority_and_follow_tree_identity() -> Result<()> {
+    let scratch = Scratch::new()?;
+    let memory = MemoryFs::default();
+    let plain = PlainFs::open(&scratch.directory("plain")?)?;
+    let memory_location = |name: &str| memory.location(path(name));
+    let plain_location = |name: &str| plain.location(path(name));
+    let drivers: [(&dyn Filesystem, &dyn Fn(&str) -> layr_fs_core::Result<NewTreeLocation>); 2] =
+        [(&memory, &memory_location), (&plain, &plain_location)];
+    for (fs, location) in drivers {
+        let first = fs.create_empty(location("first")?)?;
+        let second = fs.create_empty(location("second")?)?;
+        write(first.tree.writer(), "file", b"first")?;
+        write(second.tree.writer(), "file", b"second")?;
+        let scope = first.ownership.scope();
+        let exchange = fs.capabilities(&scope).exchange.context("exchange absent")?;
+        let failure =
+            exchange.exchange(first.ownership, second.ownership).err().context("exchange should reject the supplied handles")?;
+        assert!(matches!(failure.error, FsError::Busy));
+        assert_eq!(failure.progress, ExchangeProgress::Unchanged);
+        drop(first.tree);
+        drop(second.tree);
+        let failure = exchange.exchange(failure.first, failure.second).err().context("scope must pin its trees")?;
+        assert!(matches!(failure.error, FsError::Busy));
+        drop(scope);
+        let (first, second) = exchange.exchange(failure.first, failure.second).unwrap();
+        fs.remove(first).unwrap();
+        let replacement = fs.create_empty(location("second")?)?;
+        assert!(fs.create_empty(location("first")?).is_err());
+        drop(replacement.tree);
+        fs.remove(replacement.ownership).unwrap();
+        fs.remove(second).unwrap();
+        let foreign = MemoryFs::default();
+        let first = fs.create_empty(location("owned")?)?;
+        let second = foreign.create_empty(foreign.location(path("foreign"))?)?;
+        drop(first.tree);
+        drop(second.tree);
+        let failure =
+            exchange.exchange(first.ownership, second.ownership).err().context("exchange should reject the supplied handles")?;
+        assert!(matches!(failure.error, FsError::WrongInstance));
+        fs.remove(failure.first).unwrap();
+        foreign.remove(failure.second).unwrap();
+    }
+    Ok(())
+}
+
+#[test]
+fn index_exchange_recovers_after_anyhow_conversion_without_repeating_the_swap() -> Result<()> {
+    use std::path::Path;
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+    struct Driver {
+        inner: PlainFs,
+        stage: PathBuf,
+        owner: Mutex<Option<OwnedTree>>,
+        before: bool,
+        pending: AtomicBool,
+        after: AtomicBool,
+        remove_fault: AtomicBool,
+        swaps: AtomicUsize,
+    }
+    impl Filesystem for Driver {
+        fn create_empty(&self, d: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
+            self.inner.create_empty(d)
+        }
+        fn materialise(&self, s: &dyn TreeRead, d: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
+            self.inner.materialise(s, d)
+        }
+        fn freeze(&self, s: FreezeSource<'_>, d: NewTreeLocation) -> layr_fs_core::Result<Capture> {
+            self.inner.freeze(s, d)
+        }
+        fn changes(&self, a: &FrozenTree, b: &FrozenTree, r: ChangeRequest) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
+            self.inner.changes(a, b, r)
+        }
+        fn remove(&self, ownership: OwnedTree) -> std::result::Result<(), RemovalFailure> {
+            if self.remove_fault.swap(false, Ordering::Relaxed) {
+                return Err(RemovalFailure { ownership, error: FsError::Invalid("obsolete cleanup fault") });
+            }
+            self.inner.remove(ownership)
+        }
+        fn capabilities(&self, s: &TreeScope) -> Capabilities<'_> {
+            Capabilities { exchange: Some(self), ..self.inner.capabilities(s) }
+        }
+    }
+    impl crate::fs::PathAdmission for Driver {
+        fn received_identity(&self, _: &OwnedTree, _: &str, _: u64) -> layr_fs_core::Result<()> {
+            Err(FsError::Invalid("unexpected transport bookkeeping in exchange recovery fixture"))
+        }
+        fn release_unused(&self) {}
+        fn working(&self, _: &Path) -> layr_fs_core::Result<WorkingTree> {
+            Err(FsError::Invalid("unexpected admission in recovery fixture"))
+        }
+        fn frozen(&self, _: &Path) -> layr_fs_core::Result<FrozenTree> {
+            Err(FsError::Invalid("unexpected admission in recovery fixture"))
+        }
+        fn location(&self, p: &Path) -> layr_fs_core::Result<NewTreeLocation> {
+            self.inner.location(RelPath::new(
+                p.file_name().context("fixture location has no name").map_err(FsError::backend)?.as_encoded_bytes(),
+            )?)
+        }
+        fn claim(&self, p: crate::fs::ManagedPath) -> layr_fs_core::Result<OwnedTree> {
+            if p.path() != self.stage {
+                return Err(FsError::Invalid("fixture only owns its stage"));
+            }
+            self.owner.lock().unwrap().take().ok_or(FsError::Invalid("stage authority already transferred"))
+        }
+    }
+    impl ExchangeTrees for Driver {
+        fn exchange(&self, first: OwnedTree, second: OwnedTree) -> std::result::Result<(OwnedTree, OwnedTree), ExchangeFailure> {
+            if self.before {
+                return Err(ExchangeFailure {
+                    error: FsError::Invalid("before exchange"),
+                    progress: ExchangeProgress::Unchanged,
+                    first,
+                    second,
+                });
+            }
+            if self.pending.swap(false, Ordering::Relaxed) {
+                return Ok((first, second));
+            }
+            let (first, second) = self.inner.exchange(first, second)?;
+            self.swaps.fetch_add(1, Ordering::Relaxed);
+            if self.after.swap(false, Ordering::Relaxed) {
+                self.pending.store(true, Ordering::Relaxed);
+                return Err(ExchangeFailure {
+                    error: FsError::Invalid("after exchange"),
+                    progress: ExchangeProgress::Swapped,
+                    first,
+                    second,
+                });
+            }
+            Ok((first, second))
+        }
+    }
+    for before in [true, false] {
+        let scratch = Scratch::new()?;
+        let root = scratch.directory("plain")?;
+        let inner = PlainFs::open(&root)?;
+        let stage = inner.create_empty(inner.location(path("stage"))?)?;
+        write(stage.tree.writer(), "file", b"old")?;
+        drop(stage.tree);
+        let driver = Arc::new(Driver {
+            inner,
+            stage: root.join("stage"),
+            owner: Mutex::new(Some(stage.ownership)),
+            before,
+            pending: AtomicBool::new(false),
+            after: AtomicBool::new(true),
+            remove_fault: AtomicBool::new(false),
+            swaps: AtomicUsize::new(0),
+        });
+        let new = driver.create_empty(driver.inner.location(path("replacement"))?)?;
+        write(new.tree.writer(), "file", b"new")?;
+        let owned = crate::fs::OwnedWorking::new(driver.clone(), new);
+        let error = owned.exchange_existing(crate::fs::ManagedPath::claim(&driver.stage)).unwrap_err();
+        if before {
+            assert_eq!(std::fs::read(driver.stage.join("file"))?, b"old");
+            assert!(!root.join("replacement").exists());
+        } else {
+            let recovery = error.downcast::<crate::fs::owned_capture::ExchangeRecovery>()?;
+            assert_eq!(std::fs::read(driver.stage.join("file"))?, b"new");
+            driver.remove_fault.store(true, Ordering::Relaxed);
+            let recovery =
+                anyhow::Error::new(recovery.retry().unwrap_err()).downcast::<crate::fs::owned_capture::ExchangeRecovery>()?;
+            recovery.retry()?;
+            assert_eq!(driver.swaps.load(Ordering::Relaxed), 1);
+            assert!(!root.join("replacement").exists());
+            assert_eq!(std::fs::read(driver.stage.join("file"))?, b"new");
+        }
+    }
     Ok(())
 }
 
@@ -453,7 +751,7 @@ fn plain_copy_preserves_byte_names_attributes_sparse_data_and_safe_paths() -> Re
     assert!(reader.metadata(&RelDir::Path(path("escape/source"))).is_err());
     let plain = PlainFs::open(&scratch.directory("plain")?)?;
     let work = plain.materialise(&reader, plain.location(path("work"))?)?;
-    let copy = plain.freeze(&work.tree, plain.location(path("copy"))?)?;
+    let copy = plain.freeze(layr_fs_core::FreezeSource::Working(&work.tree), plain.location(path("copy"))?)?;
     assert_eq!(copy.consistency, CaptureConsistency::UnsettledCopy);
     assert!(copy.consistency.running());
     let memory = MemoryFs::default();
@@ -465,7 +763,7 @@ fn plain_copy_preserves_byte_names_attributes_sparse_data_and_safe_paths() -> Re
         [(b"user.layr-test".to_vec(), b"attribute".to_vec())]
     );
     // Legacy string-only comparison rejects bytes explicitly; object writing stays byte preserving.
-    assert!(plain.changes(&copy.tree, &copy.tree).is_err());
+    assert!(plain.changes(&copy.tree, &copy.tree, Default::default()).is_err());
     drop(copy.tree);
     plain.remove(copy.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     drop(work.tree);
@@ -1084,7 +1382,7 @@ fn overwrite_availability_never_masks_errors_after_mutation() -> Result<()> {
 #[test]
 fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()> {
     let scratch = Scratch::new()?;
-    if !crate::storage::is_supported(&scratch.0) {
+    if !crate::fs::host().namespace.supported(&scratch.0) {
         eprintln!("btrfs conformance unavailable: TMPDIR is not btrfs");
         return Ok(());
     }
@@ -1099,7 +1397,7 @@ fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()
         &scratch,
         "btrfs",
         ExpectedCapabilities::Accelerated,
-        &|name| crate::storage::set_writable(&root.join(name)),
+        &|name| crate::fs::set_writable(&root.join(name)),
     )?;
     assert_eq!(actual, expected);
 
@@ -1122,7 +1420,7 @@ fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()
     );
     assert!(matches!(
         source_caps.clone_new.context("clone capability absent")?.clone_new(
-            &base.tree,
+            CloneSource::Frozen(&base.tree),
             &path("file"),
             &work.tree,
             &path("direct")
@@ -1144,7 +1442,7 @@ fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()
     assert!(matches!(failed.error, FsError::Busy), "scope retains its tree pin");
     drop(scope);
     // Normal-user deletion requires a writable subvolume; prepare only this owned fixture.
-    crate::storage::set_writable(&root.join("clone-base"))?;
+    crate::fs::set_writable(&root.join("clone-base"))?;
     native.remove(failed.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     let source_path = scratch.0.join("range-source");
     let target_path = scratch.0.join("range-target");
@@ -1166,7 +1464,7 @@ fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()
 #[test]
 fn btrfs_destinations_keep_parent_identity_after_namespace_replacement() -> Result<()> {
     let scratch = Scratch::new()?;
-    if !crate::storage::is_supported(&scratch.0) {
+    if !crate::fs::host().namespace.supported(&scratch.0) {
         return Ok(());
     }
     let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
@@ -1178,20 +1476,20 @@ fn btrfs_destinations_keep_parent_identity_after_namespace_replacement() -> Resu
     let moved = scratch.0.join("moved-parent");
     std::fs::rename(&parent, &moved)?;
     std::fs::create_dir(&parent)?;
-    crate::storage::create_subvolume(&parent.join("saved"))?;
+    crate::fs::create(&parent.join("saved"))?;
     std::fs::write(parent.join("saved/file"), b"replacement")?;
-    let saved = driver.freeze(&work.tree, destination)?;
+    let saved = driver.freeze(layr_fs_core::FreezeSource::Working(&work.tree), destination)?;
     let mut bytes = Vec::new();
     saved.tree.reader().open_file(&path("file"))?.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"captured");
     // Removal addresses the original subvolume ID through the retained parent, even though
     // the display pathname now names an unrelated subvolume.
-    crate::storage::set_writable(&moved.join("saved"))?;
+    crate::fs::set_writable(&moved.join("saved"))?;
     drop(saved.tree);
     driver.remove(saved.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     assert!(!moved.join("saved").exists());
     assert_eq!(std::fs::read(parent.join("saved/file"))?, b"replacement");
-    crate::storage::delete_tree(&parent.join("saved"))?;
+    crate::fs::remove(&parent.join("saved"))?;
     drop(work.tree);
     driver.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     Ok(())
@@ -1201,7 +1499,7 @@ fn btrfs_destinations_keep_parent_identity_after_namespace_replacement() -> Resu
 #[test]
 fn btrfs_nested_boundaries_keep_state_ids_through_reference_copies() -> Result<()> {
     let scratch = Scratch::new()?;
-    if !crate::storage::is_supported(&scratch.0) {
+    if !crate::fs::host().namespace.supported(&scratch.0) {
         return Ok(());
     }
     let native = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
@@ -1209,10 +1507,10 @@ fn btrfs_nested_boundaries_keep_state_ids_through_reference_copies() -> Result<(
     write(&seed, "file", b"kept")?;
     let work_path = scratch.0.join("work");
     let work = native.materialise(&seed, native.location(&work_path)?)?;
-    crate::storage::create_subvolume(&work_path.join("nested"))?;
+    crate::fs::create(&work_path.join("nested"))?;
     std::fs::write(work_path.join("nested/excluded"), b"nested subvolume content")?;
     let snapshot_path = scratch.0.join("snapshot");
-    let snapshot = native.freeze(&work.tree, native.location(&snapshot_path)?)?;
+    let snapshot = native.freeze(layr_fs_core::FreezeSource::Working(&work.tree), native.location(&snapshot_path)?)?;
     let metadata = snapshot.tree.reader().metadata(&RelDir::Path(path("nested")))?.context("boundary absent")?;
     assert!(metadata.attributes.stored_time.is_none());
     let store = layr_objects::Store::open(&scratch.directory("objects")?, layr_objects::Keying::Plain)?;
@@ -1224,7 +1522,7 @@ fn btrfs_nested_boundaries_keep_state_ids_through_reference_copies() -> Result<(
     let plain_copy = capture(&plain, &|name| plain.location(path(name)), snapshot.tree.reader(), "copy")?;
     assert_eq!(save(&store, plain_copy.tree.reader())?, expected);
     drop(snapshot.tree);
-    crate::storage::set_writable(&snapshot_path)?;
+    crate::fs::set_writable(&snapshot_path)?;
     native.remove(snapshot.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     drop(work.tree);
     native.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
@@ -1236,23 +1534,23 @@ fn btrfs_nested_boundaries_keep_state_ids_through_reference_copies() -> Result<(
 fn btrfs_pinned_hints_and_removal_survive_root_replacement() -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let scratch = Scratch::new()?;
-    if !crate::storage::is_supported(&scratch.0) {
+    if !crate::fs::host().namespace.supported(&scratch.0) {
         return Ok(());
     }
     let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
     let seed = MemoryTree::new(attributes(0o755));
     write(&seed, "file", b"old")?;
     let work = driver.materialise(&seed, driver.location(&scratch.0.join("work"))?)?;
-    let before = driver.freeze(&work.tree, driver.location(&scratch.0.join("before"))?)?;
+    let before = driver.freeze(layr_fs_core::FreezeSource::Working(&work.tree), driver.location(&scratch.0.join("before"))?)?;
     write(work.tree.writer(), "file", b"new contents")?;
-    let after = driver.freeze(&work.tree, driver.location(&scratch.0.join("after"))?)?;
+    let after = driver.freeze(layr_fs_core::FreezeSource::Working(&work.tree), driver.location(&scratch.0.join("after"))?)?;
     let hints = driver.hints_with(&before.tree, &after.tree, |base, tree, p, c| {
         // This callback runs after registry lookup and descriptor selection, immediately
         // where the real kernel send runs. Replace both namespace entries at that point.
         for (name, file) in [(base, p), (tree, c)] {
             let moved = name.with_extension("moved");
             std::fs::rename(name, &moved)?;
-            crate::storage::create_subvolume(name)?;
+            crate::fs::create(name)?;
             std::fs::write(name.join("file"), b"unrelated replacement")?;
             assert_eq!(file.metadata()?.dev(), std::fs::metadata(&moved)?.dev());
             assert_ne!(file.metadata()?.dev(), std::fs::metadata(name)?.dev());
@@ -1266,13 +1564,13 @@ fn btrfs_pinned_hints_and_removal_survive_root_replacement() -> Result<()> {
     assert_eq!(candidates[0].old().unwrap().size, 3);
     assert_eq!(candidates[0].new().unwrap().size, 12);
     for (name, saved) in [("before", before), ("after", after)] {
-        crate::storage::set_writable(&scratch.0.join(name).with_extension("moved"))?;
+        crate::fs::set_writable(&scratch.0.join(name).with_extension("moved"))?;
         drop(saved.tree);
         let failure = driver.remove(saved.ownership).unwrap_err();
         assert!(matches!(failure.error, FsError::LocationChanged));
         assert!(scratch.0.join(name).with_extension("moved").exists());
         assert_eq!(std::fs::read(scratch.0.join(name).join("file"))?, b"unrelated replacement");
-        crate::storage::delete_tree(&scratch.0.join(name))?;
+        crate::fs::remove(&scratch.0.join(name))?;
         std::fs::rename(scratch.0.join(name).with_extension("moved"), scratch.0.join(name))?;
         driver.remove(failure.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     }
@@ -1286,7 +1584,7 @@ fn btrfs_pinned_hints_and_removal_survive_root_replacement() -> Result<()> {
 fn btrfs_deletion_rejects_nonroots_and_ignores_unreadable_files() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let scratch = Scratch::new()?;
-    if !crate::storage::is_supported(&scratch.0) {
+    if !crate::fs::host().namespace.supported(&scratch.0) {
         return Ok(());
     }
     let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
@@ -1300,7 +1598,7 @@ fn btrfs_deletion_rejects_nonroots_and_ignores_unreadable_files() -> Result<()> 
     std::fs::set_permissions(root.join("a"), std::fs::Permissions::from_mode(0))?;
     std::fs::create_dir(root.join("b"))?;
     std::fs::set_permissions(root.join("b"), std::fs::Permissions::from_mode(0))?;
-    crate::storage::create_subvolume(&root.join("z"))?;
+    crate::fs::create(&root.join("z"))?;
     std::fs::write(root.join("z/kept"), b"nested")?;
     drop(work.tree);
     driver.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
@@ -1470,15 +1768,15 @@ fn acl_metadata_is_preserved_in_memory_and_rejected_by_portable_object_encoding(
 #[test]
 #[ignore = "requires an APFS test volume; compile checked on Linux"]
 fn apfs_core_operations_and_capabilities_match_reference_results() -> Result<()> {
-    use crate::storage::driver::{ApfsFs, Links, PreparedCopy};
+    use crate::apfs::driver::{ApfsFs, Links};
     use std::os::unix::fs::PermissionsExt;
     let scratch = Scratch::new()?;
-    anyhow::ensure!(crate::storage::is_supported(&scratch.0), "TMPDIR must be APFS");
+    anyhow::ensure!(crate::fs::host().namespace.supported(&scratch.0), "TMPDIR must be APFS");
     let memory = MemoryFs::default();
     let expected =
         scenarios(&memory, &|name| memory.location(path(name)), &scratch, "reference", ExpectedCapabilities::Empty, &|_| Ok(()))?;
     let root = scratch.directory("apfs")?;
-    let native = ApfsFs::for_destination(&root.join("base"), Links::Keep, PreparedCopy::Use)?;
+    let native = ApfsFs::for_destination(&root.join("base"), Links::Keep)?;
     let actual = scenarios(
         native.as_ref(),
         &|name| native.location(&root.join(name)),
@@ -1502,7 +1800,9 @@ fn apfs_core_operations_and_capabilities_match_reference_results() -> Result<()>
     );
     assert_eq!(on.calls[1].load(Ordering::Relaxed), 1);
     let before = ReaderOnly(base.tree.reader());
-    assert!(crate::changes::file_changes_of(&before, &before, off.changes(&base.tree, &base.tree)?)?.is_empty());
+    assert!(
+        crate::changes::file_changes_of(&before, &before, off.changes(&base.tree, &base.tree, Default::default())?)?.is_empty()
+    );
     // A sealed descendant must be unsealed before chmod; data-read permission is unnecessary.
     let protected = output.tree.writer();
     protected.put(&path("sealed"), EntryData::Directory, &attributes(0o700))?;
@@ -1552,7 +1852,7 @@ fn sparse_native_layers_read_and_encode_lower_entries_below_missing_upper_ancest
     std::fs::write(lower.join("dir/deep/file"), b"lower")?;
     #[cfg(target_os = "macos")]
     let readers: [Arc<dyn TreeRead>; 2] =
-        [Arc::new(crate::storage::ApfsTree::open(&upper)?), Arc::new(crate::storage::ApfsTree::open(&lower)?)];
+        [Arc::new(crate::apfs::ApfsTree::open(&upper)?), Arc::new(crate::apfs::ApfsTree::open(&lower)?)];
     #[cfg(not(target_os = "macos"))]
     let readers: [Arc<dyn TreeRead>; 2] =
         [Arc::new(layr_fs_unix::DirectoryTree::open(&upper)?), Arc::new(layr_fs_unix::DirectoryTree::open(&lower)?)];
@@ -1574,5 +1874,46 @@ fn sparse_native_layers_read_and_encode_lower_entries_below_missing_upper_ancest
     let (tree, times) = save(&store, &layered)?;
     let output = crate::object_tree::ObjectTree::new(store, layr_objects::StateRef { tree, times }, &scratch.0)?;
     assert_eq!(output.read("dir/deep/file")?, b"lower");
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn writable_capture_shortcut_and_disabled_fallback_preserve_nested_snapshot_semantics() -> Result<()> {
+    let scratch = Scratch::new()?;
+    let fs = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"content")?;
+    seed.put(&path("alias"), EntryData::HardLink(&path("file")), &attributes(0o644))?;
+    let source = fs.materialise(&seed, fs.location(&scratch.0.join("source"))?)?;
+    let nested = fs.create_empty(fs.location(&scratch.0.join("source/nested"))?)?;
+    write(nested.tree.writer(), "live", b"must not turn a capture into a full logical copy")?;
+    let objects = layr_objects::Store::open(&scratch.directory("objects")?, layr_objects::Keying::Plain)?;
+    let mut outputs = Vec::new();
+    for (index, disabled) in [Disabled::None, Disabled::Capture].into_iter().enumerate() {
+        let decorated = Decorator { fs: &fs, disabled, calls: std::array::from_fn(|_| AtomicUsize::new(0)) };
+        let mut scratch_calls = 0;
+        let copied = layr_fs_common::copy_capture(
+            &decorated,
+            &source.tree,
+            fs.location(&scratch.0.join(format!("copy{index}")))?,
+            &mut || {
+                scratch_calls += 1;
+                fs.location(&scratch.0.join(format!("capture{index}")))
+            },
+        )?;
+        assert_eq!(scratch_calls, index);
+        assert_eq!(decorated.calls[3].load(Ordering::Relaxed), 1 - index);
+        assert_eq!(copied.consistency, CaptureConsistency::AtomicPoint);
+        assert!(copied.created.tree.reader().kind(&RelDir::Path(path("nested/live")))?.is_none());
+        outputs.push(save(&objects, copied.created.tree.reader())?);
+        drop(copied.created.tree);
+        fs.remove(copied.created.ownership).map_err(|failure| failure.error)?;
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    drop(nested.tree);
+    fs.remove(nested.ownership).map_err(|failure| failure.error)?;
+    drop(source.tree);
+    fs.remove(source.ownership).map_err(|failure| failure.error)?;
     Ok(())
 }

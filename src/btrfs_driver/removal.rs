@@ -16,11 +16,6 @@ pub(super) enum Placement {
     Private(Stage),
     Removed,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Acquisition {
-    Owned,
-    Descendant,
-}
 
 pub(super) struct Pinned {
     pub tree: NativeTree,
@@ -47,11 +42,15 @@ fn matches(file: &File, parent: &File, name: &RelPath) -> Result<bool> {
 fn prepare_owned(file: &File) -> Result<()> {
     let flags = crate::sys::subvol_flags(file.as_fd())?;
     if flags & crate::sys::SUBVOL_RDONLY != 0 {
-        crate::sys::subvol_set_flags(file.as_fd(), flags & !crate::sys::SUBVOL_RDONLY)?;
+        backend(
+            crate::sys::subvol_set_flags(file.as_fd(), flags & !crate::sys::SUBVOL_RDONLY)
+                .map_err(|error| anyhow::anyhow!("unseal owned root: {error:#}")),
+        )?;
     }
     let mode = file.metadata()?.mode() & 0o7777;
     if mode & 0o700 != 0o700 {
-        io(rustix::fs::fchmod(file, Mode::from_raw_mode(mode | 0o700)))?;
+        rustix::fs::fchmod(file, Mode::from_raw_mode(mode | 0o700))
+            .map_err(|error| FsError::backend(anyhow::anyhow!("open owned root permissions: {error}")))?;
     }
     Ok(())
 }
@@ -64,11 +63,12 @@ impl Pinned {
         };
         self.cleanup.reserve(1);
         let record = operation.clone();
-        io(rustix::fs::mkdirat(
+        rustix::fs::mkdirat(
             driver.anchor.as_ref(),
             OsStr::from_bytes(operation.name.as_bytes()),
             Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        ))?;
+        )
+        .map_err(|error| FsError::backend(anyhow::anyhow!("create removal custody: {error}")))?;
         self.cleanup.push(record);
         driver.step("quarantine-directory")?;
         let directory = Arc::new(File::from(io(rustix::fs::openat(
@@ -79,7 +79,7 @@ impl Pinned {
         ))?));
         Ok(Stage { operation, directory })
     }
-    fn acquire(&mut self, driver: &BtrfsFs, acquisition: Acquisition) -> Result<()> {
+    fn acquire(&mut self, driver: &BtrfsFs) -> Result<()> {
         if let Placement::Public(location) = &self.placement {
             if !matches(self.tree.reader.directory.root_file(), &location.parent, &location.name)? {
                 return Err(FsError::LocationChanged);
@@ -90,18 +90,22 @@ impl Pinned {
             let Placement::Public(location) = &self.placement else {
                 return Err(FsError::Invalid("public locator absent"));
             };
-            if acquisition == Acquisition::Owned {
-                prepare_owned(self.tree.reader.directory.root_file())?;
+            // A nested root inherits authority only while it still occupies its observed
+            // parent slot. Normal users must unseal readonly roots before renaming them.
+            if !matches(self.tree.reader.directory.root_file(), &location.parent, &location.name)? {
+                return Err(FsError::LocationChanged);
             }
+            prepare_owned(self.tree.reader.directory.root_file())?;
             driver.step("quarantine-rename")?;
             let captured = Placement::Custody { stage: stage.clone(), restore: location.clone() };
-            io(rustix::fs::renameat_with(
+            rustix::fs::renameat_with(
                 location.parent.as_ref(),
                 OsStr::from_bytes(location.name.as_bytes()),
                 stage.directory.as_ref(),
                 "tree",
                 rustix::fs::RenameFlags::NOREPLACE,
-            ))?;
+            )
+            .map_err(|error| FsError::backend(anyhow::anyhow!("acquire owned removal custody: {error}")))?;
             self.placement = captured;
             driver.step("quarantined")?;
         }
@@ -132,7 +136,7 @@ impl Pinned {
         }
         Ok(())
     }
-    pub fn remove(&mut self, driver: &BtrfsFs, acquisition: Acquisition) -> Result<()> {
+    pub fn remove(&mut self, driver: &BtrfsFs) -> Result<()> {
         // Extracted children remain owned even when an earlier attempt was interrupted.
         self.finish_children(driver)?;
         if matches!(self.placement, Placement::Removed) {
@@ -142,7 +146,7 @@ impl Pinned {
             self.placement = Placement::Removed;
             return Ok(());
         }
-        self.acquire(driver, acquisition)?;
+        self.acquire(driver)?;
         let Placement::Private(stage) = &self.placement else {
             return Err(FsError::Invalid("deletion has no verified private slot"));
         };
@@ -154,7 +158,7 @@ impl Pinned {
                 self.placement = Placement::Removed;
                 return Ok(());
             }
-            Err(error) if native::is_not_empty(&error) => {}
+            Err(error) if crate::fs::is_not_empty(&error) => {}
             Err(error) => return Err(FsError::backend(error)),
         }
         let root = self.tree.reader.directory.root_file().try_clone()?;
@@ -165,7 +169,7 @@ impl Pinned {
     }
     fn finish_children(&mut self, driver: &BtrfsFs) -> Result<()> {
         while let Some(child) = self.children.last_mut() {
-            match child.remove(driver, Acquisition::Descendant) {
+            match child.remove(driver) {
                 Ok(()) => {}
                 Err(FsError::LocationChanged) if matches!(child.placement, Placement::Public(_)) => {
                     // A nested root that left its observed parent before acquisition is no
@@ -217,21 +221,8 @@ impl Pinned {
             let metadata = child.metadata()?;
             if metadata.ino() == 256 && metadata.dev() != parent_metadata.dev() {
                 driver.step("nested-opened")?;
-                // This parent remains inside the acquired subvolume: ordinary directories
-                // cannot cross subvolume boundaries. Named deletion never follows a moved-out
-                // child by ID. Only roots requiring descent are acquired into private custody.
-                match crate::sys::subvol_destroy_bytes(parent.as_fd(), name.as_bytes()) {
-                    Ok(()) => continue,
-                    Err(error)
-                        if error.chain().any(|cause| {
-                            cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                        }) =>
-                    {
-                        continue
-                    }
-                    Err(error) if native::is_not_empty(&error) => {}
-                    Err(error) => return Err(FsError::backend(error)),
-                }
+                // Every nested root enters verified custody before unsealing or deletion.
+                // A descriptor that moved outside before acquisition never grants authority.
                 let reader = Arc::new(Reader { directory: DirectoryTree::from_file(child)? });
                 self.children.push(Pinned {
                     tree: NativeTree {

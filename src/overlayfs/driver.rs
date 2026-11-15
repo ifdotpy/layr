@@ -41,6 +41,7 @@ impl Publication {
 }
 
 enum Resource {
+    Entry(crate::fs::custody::Entry),
     Published { destination: Destination, publication: Publication },
     Borrowed(Registered),
     Owned { tree: Registered, home: PathBuf, parent: Arc<File> },
@@ -79,7 +80,7 @@ impl OverlayFs {
         Ok(Registered { path, directory })
     }
     fn working(&self, path: &Path) -> layr_fs_core::Result<WorkingTree> {
-        backend(subvol_info(path))?;
+        backend(native_info(path))?;
         let registered = self.register(path)?;
         let tree = self.issuer.import_working(registered.directory.clone());
         self.trees()?.insert(self.issuer.working_key(&tree)?, Resource::Borrowed(registered));
@@ -187,131 +188,18 @@ impl OverlayFs {
         let src = self.path(self.issuer.working_key(source)?)?;
         self.create_with(dst, |dst, publication| snapshot_native(&src, dst, readonly, publication))
     }
-    pub(super) fn snapshot_path(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureConsistency> {
-        let driver = Arc::new(Self::default());
-        let result = (|| -> layr_fs_core::Result<CaptureConsistency> {
-            let source = driver.working(src)?;
-            let destination = driver.location(dst)?;
-            let filesystem: &dyn Filesystem = driver.as_ref();
-            if readonly {
-                Ok(filesystem.freeze(&source, destination)?.consistency)
-            } else {
-                let (_, consistency) = driver.copy_native(&source, destination, false)?;
-                Ok(consistency)
-            }
-        })();
-        result.map_err(|error| driver.error(error))
-    }
-    pub(super) fn create_path(dst: &Path) -> Result<()> {
-        let driver = Arc::new(Self::default());
-        let result = driver.location(dst).and_then(|dst| {
-            driver.create_with(dst, |dst, publication| {
-                create_subvolume_native(dst, publication)?;
-                Ok(CaptureConsistency::UnsettledCopy)
-            })
-        });
-        result.map(|_| ()).map_err(|error| driver.error(error))
-    }
-    pub(super) fn remove_path(path: &Path) -> Result<()> {
-        Self::remove_path_with(path, home_of, Removal::run)
-    }
-    fn remove_path_with(
-        path: &Path,
-        home: impl FnOnce(&Path) -> Result<PathBuf>,
-        remove: impl FnOnce(&mut Removal) -> Result<()>,
-    ) -> Result<()> {
-        let path = absolute(path)?;
-        let home = home(&path)?;
-        let identity = match fs::symlink_metadata(&path) {
-            Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
-            Err(error) => return Err(error.into()),
-        };
-        let resource = match File::open(path.parent().context("tree has no parent")?) {
-            Ok(parent) => Resource::Removing(Removal::new(path, home, Arc::new(parent), identity)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && identity == RootIdentity::Absent => {
-                Resource::Missing { path, home }
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let driver = Arc::new(Self::default());
-        let ownership = driver.issuer.own();
-        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, resource);
-        driver.remove_with(ownership, remove).map_err(|failure| {
-            driver.error(FsError::Cleanup {
-                cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
-                failure: Box::new(failure),
-            })
-        })
-    }
-    pub(super) fn path_hints(base: &Path, tree: &Path) -> layr_fs_core::Result<hints::HintSet> {
-        Self::path_hints_with(base, tree, own_layers)
-    }
-    fn path_hints_with(
-        base: &Path,
-        tree: &Path,
-        load: impl FnOnce(&Path, &Path) -> Result<Option<CandidateLayers>>,
-    ) -> layr_fs_core::Result<hints::HintSet> {
-        let (base, tree) = (backend(absolute(base))?, backend(absolute(tree))?);
-        let Some(layers) = backend(load(&base, &tree))? else { return Ok(hints::HintSet::Partial) };
-        // One operation-local registry snapshot supplies both registrations and the capability.
-        let driver = Self { hint_pair: Some(HintPair { base: base.clone(), tree: tree.clone(), layers }), ..Self::default() };
-        let (base, tree) = (driver.frozen(&base)?, driver.frozen(&tree)?);
-        match driver.capabilities(&base.scope()).change_hints {
-            Some(hints) => hints.between(&base, &tree),
-            None => Ok(hints::HintSet::Partial),
-        }
-    }
-    fn error(self: Arc<Self>, error: FsError) -> anyhow::Error {
-        // Retain the driver together with cleanup authority across the path-based boundary.
-        match error {
-            FsError::Cleanup { cause, failure } => anyhow::Error::new(Cleanup { driver: self, cause: *cause, failure: *failure }),
-            error => anyhow::Error::new(error),
-        }
-    }
-}
-pub(crate) struct Cleanup {
-    pub(crate) driver: Arc<OverlayFs>,
-    cause: FsError,
-    pub(crate) failure: RemovalFailure,
-}
-impl std::fmt::Debug for Cleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.fmt_error(f)
-    }
-}
-impl Cleanup {
-    fn fmt_error(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; cleanup requires retry: {}", self.cause, self.failure.error)?;
-        if let (Ok(key), Ok(trees)) = (self.driver.issuer.owned_key(&self.failure.ownership), self.driver.trees()) {
-            let path = match trees.get(&key) {
-                Some(Resource::Published { destination, .. }) => Some(&destination.path),
-                Some(Resource::Owned { tree, .. } | Resource::Borrowed(tree)) => Some(&tree.path),
-                Some(Resource::Removing(removal)) => Some(&removal.path),
-                Some(Resource::Missing { path, .. }) => Some(path),
-                None => None,
-            };
-            if let Some(path) = path {
-                write!(f, "; pending tree {}", path.display())?;
-            }
-        }
-        Ok(())
-    }
-}
-impl std::fmt::Display for Cleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.fmt_error(f)
-    }
-}
-impl std::error::Error for Cleanup {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
-    }
 }
 impl Filesystem for OverlayFs {
+    fn create_empty(&self, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
+        self.create_with(dst, |dst, publication| {
+            create_subvolume_native(dst, publication, InitialContent::Empty)?;
+            Ok(CaptureConsistency::UnsettledCopy)
+        })
+        .map(|(created, _)| created)
+    }
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
         let (created, _) = self.create_with(dst, |dst, publication| {
-            create_subvolume_native(dst, publication)?;
+            create_subvolume_native(dst, publication, InitialContent::Empty)?;
             Ok(CaptureConsistency::UnsettledCopy)
         })?;
         if let Err(cause) = layr_fs_common::copy_tree(source, created.tree.writer()) {
@@ -320,14 +208,31 @@ impl Filesystem for OverlayFs {
         }
         Ok(created)
     }
-    fn freeze(&self, source: &WorkingTree, dst: NewTreeLocation) -> layr_fs_core::Result<Capture> {
-        let (created, consistency) = self.copy_native(source, dst, true)?;
-        self.issuer.seal(created, consistency)
+    fn freeze(&self, source: layr_fs_core::FreezeSource<'_>, dst: NewTreeLocation) -> layr_fs_core::Result<Capture> {
+        match source {
+            layr_fs_core::FreezeSource::Captured(capture) => layr_fs_common::republish(self, &self.issuer, capture, dst),
+            layr_fs_core::FreezeSource::Working(source) => {
+                let (created, consistency) = self.copy_native(source, dst, true)?;
+                self.issuer.seal(created, consistency)
+            }
+            layr_fs_core::FreezeSource::Reader(source) => {
+                let (created, consistency) = self.create_with(dst, |path, publication| {
+                    create_subvolume_native(path, publication, InitialContent::Frozen(source))?;
+                    Ok(CaptureConsistency::UnsettledCopy)
+                })?;
+                self.issuer.seal(created, consistency)
+            }
+        }
     }
-    fn changes(&self, before: &FrozenTree, after: &FrozenTree) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
+    fn changes(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
         self.issuer.frozen_key(before)?;
         self.issuer.frozen_key(after)?;
-        layr_fs_common::changes(self, before, after)
+        layr_fs_common::changes(self, before, after, request)
     }
     fn remove(&self, ownership: OwnedTree) -> std::result::Result<(), RemovalFailure> {
         self.remove_with(ownership, Removal::run)
@@ -337,11 +242,22 @@ impl Filesystem for OverlayFs {
         {
             return Capabilities::default();
         }
-        Capabilities { change_hints: Some(self), clone_new: None, reflink_range: Some(&RangeClone) }
+        Capabilities {
+            exchange: None,
+            capture_copy: Some(self),
+            change_hints: Some(self),
+            clone_new: None,
+            reflink_range: Some(&RangeClone),
+        }
     }
 }
 impl hints::ChangeHints for OverlayFs {
-    fn between(&self, base: &FrozenTree, tree: &FrozenTree) -> layr_fs_core::Result<hints::HintSet> {
+    fn between(
+        &self,
+        base: &FrozenTree,
+        tree: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> layr_fs_core::Result<hints::HintSet> {
         let _t = crate::trace::span("OverlayFS candidates");
         let (base, tree) = (self.path(self.issuer.frozen_key(base)?)?, self.path(self.issuer.frozen_key(tree)?)?);
         let loaded;
@@ -355,7 +271,7 @@ impl hints::ChangeHints for OverlayFs {
             let Some(layers) = &loaded else { return Ok(hints::HintSet::Partial) };
             layers
         };
-        Ok(hints::HintSet::Complete(backend(candidates_in(&base, &tree, layers))?))
+        Ok(hints::HintSet::Complete(backend(candidates_in(&base, &tree, layers, request))?))
     }
 }
 impl OverlayFs {
@@ -368,6 +284,14 @@ impl OverlayFs {
             let mut trees = self.trees()?;
             let resource = trees.get_mut(key).ok_or(FsError::Invalid("tree absent"))?;
             match resource {
+                Resource::Entry(entry) => {
+                    entry.remove(|directory, name, _file| {
+                        rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty())
+                            .map_err(|error| FsError::Io(error.into()))
+                    })?;
+                    trees.remove(key);
+                    return Ok(());
+                }
                 Resource::Owned { tree, home, parent } => {
                     tree.validate()?;
                     let held = tree.directory.root_file().metadata()?;
@@ -427,7 +351,7 @@ impl OverlayFs {
     }
 }
 
-pub(super) struct RangeClone;
+pub(crate) struct RangeClone;
 impl ReflinkRange for RangeClone {
     fn clone_range(&self, source: &File, range: ByteRange, dst: &File, offset: u64) -> layr_fs_core::Result<Attempt<()>> {
         match sys::clone_range(source, range.offset(), range.length(), dst, offset) {
@@ -442,6 +366,30 @@ impl ReflinkRange for RangeClone {
 
 #[cfg(test)]
 mod tests {
+    fn path_hints_with(
+        base: &Path,
+        tree: &Path,
+        load: impl FnOnce(&Path, &Path) -> Result<Option<CandidateLayers>>,
+    ) -> layr_fs_core::Result<hints::HintSet> {
+        let Some(driver) = OverlayFs::comparison_with(base, tree, load)? else { return Ok(hints::HintSet::Partial) };
+        let (base, tree) = (crate::fs::PathAdmission::frozen(&driver, base)?, crate::fs::PathAdmission::frozen(&driver, tree)?);
+        hints::ChangeHints::between(&driver, &base, &tree, Default::default())
+    }
+    fn remove_path_with(
+        path: &Path,
+        home: impl FnOnce(&Path) -> Result<PathBuf>,
+        remove: impl FnOnce(&mut Removal) -> Result<()>,
+    ) -> Result<()> {
+        let driver = Arc::new(OverlayFs::default());
+        let owner = driver.claim_with(path, home)?;
+        driver.remove_with(owner, remove).map_err(|failure| {
+            crate::fs::operation_error(
+                driver,
+                FsError::Cleanup { cause: Box::new(FsError::Invalid("removal requires recovery")), failure: Box::new(failure) },
+            )
+        })
+    }
+
     use super::*;
     struct Fixture {
         root: PathBuf,
@@ -483,36 +431,44 @@ mod tests {
         fs::write(upper.join("gone"), b"")?;
         fs::write(upper.join("edit"), b"tree")?;
         let loads = std::cell::Cell::new(0);
-        let hints = OverlayFs::path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |base, tree| {
+        let hints = path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |base, tree| {
             loads.set(loads.get() + 1);
             assert!(base.is_absolute() && tree.is_absolute());
-            Ok(Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }))
+            Ok(Some(CandidateLayers { frozen: true, dirs: vec![upper], nested: HashSet::new() }))
         })?;
         assert_eq!(loads.get(), 1);
         let hints::HintSet::Complete(changes) = hints else { panic!("shared layers must supply complete hints") };
         assert_eq!(changes.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(), ["edit", "gone"]);
         assert!(changes.iter().find(|c| c.path() == "gone").unwrap().new().is_none());
-        let fallback = layr_fs_common::changes(&NoHints(&fixture.driver), &base, &tree)?;
+        let fallback = layr_fs_common::changes(&NoHints(&fixture.driver), &base, &tree, Default::default())?;
         assert_eq!(
             changes.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(),
             fallback.iter().map(|c| c.path().as_str()).collect::<Vec<_>>()
         );
         assert!(matches!(
-            OverlayFs::path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |_, _| Ok(None))?,
+            path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |_, _| Ok(None))?,
             hints::HintSet::Partial
         ));
         Ok(())
     }
     struct NoHints<'a>(&'a OverlayFs);
     impl Filesystem for NoHints<'_> {
+        fn create_empty(&self, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
+            self.0.create_empty(dst)
+        }
         fn materialise(&self, s: &dyn TreeRead, d: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
             self.0.materialise(s, d)
         }
-        fn freeze(&self, s: &WorkingTree, d: NewTreeLocation) -> layr_fs_core::Result<Capture> {
+        fn freeze(&self, s: layr_fs_core::FreezeSource<'_>, d: NewTreeLocation) -> layr_fs_core::Result<Capture> {
             self.0.freeze(s, d)
         }
-        fn changes(&self, a: &FrozenTree, b: &FrozenTree) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
-            layr_fs_common::changes(self, a, b)
+        fn changes(
+            &self,
+            a: &FrozenTree,
+            b: &FrozenTree,
+            request: layr_fs_core::ChangeRequest,
+        ) -> layr_fs_core::Result<Vec<evidence::EntryChange>> {
+            layr_fs_common::changes(self, a, b, request)
         }
         fn remove(&self, t: OwnedTree) -> std::result::Result<(), RemovalFailure> {
             self.0.remove(t)
@@ -527,10 +483,10 @@ mod tests {
         let (base, tree) = (fixture.tree("base")?, fixture.tree("tree")?);
         let other = OverlayFs::default();
         assert!(other.capabilities(&base.scope()).change_hints.is_none());
-        assert!(matches!(other.changes(&base, &tree), Err(FsError::WrongInstance)));
+        assert!(matches!(other.changes(&base, &tree, Default::default()), Err(FsError::WrongInstance)));
         fs::rename(fixture.root.join("base"), fixture.root.join("held"))?;
         fs::create_dir(fixture.root.join("base"))?;
-        let result = hints::ChangeHints::between(fixture.driver.as_ref(), &base, &tree);
+        let result = hints::ChangeHints::between(fixture.driver.as_ref(), &base, &tree, Default::default());
         assert!(matches!(result, Err(FsError::LocationChanged)));
         Ok(())
     }
@@ -662,8 +618,8 @@ mod tests {
             })
             .err()
             .unwrap();
-        let error = fixture.driver.clone().error(core_error);
-        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        let error = crate::fs::operation_error(fixture.driver.clone(), core_error);
+        let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
         fs::remove_dir(fixture.root.join("lock"))?;
         fs::create_dir(fixture.root.join("objects"))?;
         let failure = driver.remove(failure.ownership).unwrap_err();
@@ -855,7 +811,7 @@ mod tests {
         if let Some(root) = std::env::var_os(CHILD) {
             fs::create_dir("tree")?;
             fs::create_dir("objects")?;
-            OverlayFs::remove_path_with(Path::new("tree"), |_| Ok(PathBuf::from(root)), Removal::run)?;
+            remove_path_with(Path::new("tree"), |_| Ok(PathBuf::from(root)), Removal::run)?;
             assert!(!Path::new("tree").exists());
             return Ok(());
         }
@@ -864,7 +820,7 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "storage::driver::tests::bare_relative_tree_uses_its_normalized_parent_locator",
+                "overlayfs::driver::tests::bare_relative_tree_uses_its_normalized_parent_locator",
                 "--test-threads=1",
             ])
             .env(CHILD, &fixture.root)
@@ -879,7 +835,7 @@ mod tests {
         let destination = fixture.root.join("tree");
         fs::create_dir(&destination)?;
         let covered = PinnedMountpoint::new(File::open(&destination)?)?;
-        let error = OverlayFs::remove_path_with(
+        let error = remove_path_with(
             &destination,
             |_| Ok(fixture.root.clone()),
             |removal| {
@@ -890,8 +846,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
-        let failure = driver.remove_with(failure.ownership, Removal::validate).unwrap_err();
+        let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        let failure = driver.remove(failure.ownership).unwrap_err();
         assert!(failure.error.to_string().contains("owned tree location changed"));
         assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
         Ok(())
@@ -903,7 +860,7 @@ mod tests {
         fs::create_dir(&destination)?;
         fs::write(destination.join("one"), b"one")?;
         fs::write(destination.join("two"), b"two")?;
-        let error = OverlayFs::remove_path_with(
+        let error = remove_path_with(
             &destination,
             |_| Ok(fixture.root.clone()),
             |removal| {
@@ -919,7 +876,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
         assert!(!destination.exists());
         fs::remove_dir(fixture.root.join("lock"))?;
         fs::create_dir(fixture.root.join("objects"))?;
@@ -934,7 +891,7 @@ mod tests {
         fs::create_dir(&destination)?;
         let original = fixture.root.join("original");
         let mut substituted = false;
-        let error = OverlayFs::remove_path_with(
+        let error = remove_path_with(
             &destination,
             |_| Ok(fixture.root.clone()),
             |removal| {
@@ -954,7 +911,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
         assert_eq!(fs::read(destination.join("blocker"))?, b"keep too");
         fs::remove_dir_all(&destination)?;
         fs::remove_dir(fixture.root.join("lock"))?;
@@ -976,13 +933,13 @@ mod tests {
         fs::create_dir(&home)?;
         fs::create_dir(home.join("objects"))?;
         let before = fs::metadata(&parent)?;
-        OverlayFs::remove_path_with(&parent.join("absent"), |_| Ok(home.clone()), Removal::run)?;
+        remove_path_with(&parent.join("absent"), |_| Ok(home.clone()), Removal::run)?;
         let after = fs::metadata(&parent)?;
         assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
         fs::remove_dir(home.join("objects"))?;
         let missing = parent.join("absent/child");
-        let error = OverlayFs::remove_path_with(&missing, |_| Ok(home.clone()), Removal::run).unwrap_err();
-        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        let error = remove_path_with(&missing, |_| Ok(home.clone()), Removal::run).unwrap_err();
+        let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
         fs::create_dir(home.join("objects"))?;
         driver.remove(failure.ownership).unwrap();
         assert!(!parent.join("absent").exists());
@@ -994,11 +951,11 @@ mod tests {
         fs::create_dir_all(root.join("base"))?;
         fs::create_dir(root.join("tree"))?;
         let loads = std::cell::Cell::new(0);
-        let result = OverlayFs::path_hints_with(&root.join("base"), &root.join("tree"), |base, tree| {
+        let result = path_hints_with(&root.join("base"), &root.join("tree"), |base, tree| {
             loads.set(loads.get() + 1);
             assert_eq!(base, absolute(&root.join("base"))?);
             assert_eq!(tree, absolute(&root.join("tree"))?);
-            Ok(Some(CandidateLayers { dirs: Vec::new(), nested: HashSet::new() }))
+            Ok(Some(CandidateLayers { frozen: true, dirs: Vec::new(), nested: HashSet::new() }))
         });
         fs::remove_dir_all(root)?;
         assert_eq!(loads.get(), 1);
@@ -1028,5 +985,98 @@ mod tests {
         assert_eq!(fs::read(&target)?, [vec![b'a'; 4096], vec![b'b'; 4096]].concat());
         assert_eq!(before, dst.metadata()?.ino());
         Ok(())
+    }
+}
+
+impl layr_fs_core::CaptureCopy for OverlayFs {
+    fn prefers_capture_for_changes(&self) -> bool {
+        true
+    }
+    fn copy_capture(&self, source: &WorkingTree, dst: NewTreeLocation) -> layr_fs_core::Result<layr_fs_core::WritableCapture> {
+        let (created, consistency) = self.copy_native(source, dst, false)?;
+        Ok(layr_fs_core::WritableCapture { created, consistency, owners: layr_fs_core::OwnerLayout::PerEntry })
+    }
+}
+impl crate::fs::PathAdmission for OverlayFs {
+    fn received_identity(&self, ownership: &OwnedTree, uuid: &str, _transid: u64) -> layr_fs_core::Result<()> {
+        backend(uuid::Uuid::parse_str(uuid).map_err(Into::into))?;
+        self.issuer.with_exclusive(ownership, |key| {
+            let trees = self.trees()?;
+            let Some(Resource::Owned { tree, .. }) = trees.get(key) else {
+                return Err(FsError::Invalid("received root is not owned"));
+            };
+            let mut state = backend(lock(&tree.path))?;
+            tree.validate()?;
+            state
+                .registry
+                .trees
+                .get_mut(&tree.path)
+                .ok_or(FsError::Invalid("received tree is unregistered"))?
+                .info
+                .received_uuid = Some(uuid.to_owned());
+            backend(state.save())
+        })
+    }
+    fn release_unused(&self) {
+        // Releasing unreferenced borrowed readers cannot mutate or discard an owned resource.
+        self.trees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, resource| !matches!(resource, Resource::Borrowed(_)) || self.issuer.has_handles(key));
+    }
+    fn working(&self, path: &Path) -> layr_fs_core::Result<WorkingTree> {
+        OverlayFs::working(self, path)
+    }
+    fn frozen(&self, path: &Path) -> layr_fs_core::Result<FrozenTree> {
+        let path = backend(absolute(path))?;
+        let selected = self.hint_pair.as_ref().is_some_and(|pair| pair.base == path || pair.tree == path);
+        if !selected && !backend(native_info(&path))?.readonly {
+            return Err(FsError::Invalid("OverlayFS tree is not readonly"));
+        }
+        OverlayFs::frozen(self, &path)
+    }
+    fn location(&self, path: &Path) -> layr_fs_core::Result<NewTreeLocation> {
+        OverlayFs::location(self, path)
+    }
+    fn claim(&self, path: crate::fs::ManagedPath) -> layr_fs_core::Result<OwnedTree> {
+        self.claim_with(path.path(), home_of)
+    }
+}
+
+impl OverlayFs {
+    fn claim_with(&self, path: &Path, home: impl FnOnce(&Path) -> Result<PathBuf>) -> layr_fs_core::Result<OwnedTree> {
+        let path = backend(absolute(path))?;
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_dir()) {
+            let entry = crate::fs::custody::Entry::claim(&path)?;
+            let owner = self.issuer.own();
+            self.trees()?.insert(self.issuer.owned_key(&owner)?, Resource::Entry(entry));
+            return Ok(owner);
+        }
+        let home = backend(home(&path))?;
+        let identity = match fs::symlink_metadata(&path) {
+            Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
+            Err(e) => return Err(e.into()),
+        };
+        let resource = match File::open(path.parent().ok_or(FsError::Invalid("tree has no parent"))?) {
+            Ok(parent) => Resource::Removing(Removal::new(path, home, Arc::new(parent), identity)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && identity == RootIdentity::Absent => Resource::Missing { path, home },
+            Err(e) => return Err(e.into()),
+        };
+        let owner = self.issuer.own();
+        self.trees()?.insert(self.issuer.owned_key(&owner)?, resource);
+        Ok(owner)
+    }
+    pub(crate) fn comparison(base: &Path, tree: &Path) -> layr_fs_core::Result<Option<Self>> {
+        Self::comparison_with(base, tree, own_layers)
+    }
+    fn comparison_with(
+        base: &Path,
+        tree: &Path,
+        load: impl FnOnce(&Path, &Path) -> Result<Option<CandidateLayers>>,
+    ) -> layr_fs_core::Result<Option<Self>> {
+        let (base, tree) = (backend(absolute(base))?, backend(absolute(tree))?);
+        let Some(layers) = backend(load(&base, &tree))?.filter(|layers| layers.frozen) else { return Ok(None) };
+        Ok(Some(Self { hint_pair: Some(HintPair { base, tree, layers }), ..Self::default() }))
     }
 }

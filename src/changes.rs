@@ -12,59 +12,100 @@ use layr_hashers::{FastMap, FastSet};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-/// Candidate observations from a backend capability, or the portable full comparison.
+pub(crate) use layr_fs_core::{ChangeDetail, ChangeRequest, ChangeScope};
+/// Candidate observations and content detail follow the caller's explicit semantic scope.
 pub fn candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    candidates_with_hints(parent, child, crate::storage::change_hints())
+    candidates_request(parent, child, ChangeRequest { scope: ChangeScope::Content, detail: ChangeDetail::Ranges })
 }
-
+pub(crate) fn candidates_request(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    request: ChangeRequest,
+) -> Result<Vec<EntryChange>> {
+    candidates_with_hints(parent, child, request, None, |a, b| crate::fs::candidate_hints(a, b, request))
+}
+pub(crate) fn candidates_selected(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<Vec<EntryChange>> {
+    candidates_with_hints(
+        parent,
+        child,
+        ChangeRequest { scope: ChangeScope::Stored, detail: ChangeDetail::Equality },
+        Some(paths),
+        |_, _| Ok(layr_fs_core::hints::HintSet::Partial),
+    )
+}
 fn candidates_with_hints(
     parent: &(impl Src + ?Sized),
     child: &(impl Src + ?Sized),
-    hints: Option<&dyn crate::change_hints::ChangeHints>,
+    request: ChangeRequest,
+    selection: Option<&std::collections::BTreeSet<String>>,
+    hints: impl FnOnce(&Path, &Path) -> layr_fs_core::Result<layr_fs_core::hints::HintSet>,
 ) -> Result<Vec<EntryChange>> {
-    if parent.core_reader().is_some() || child.core_reader().is_some() {
-        return object_change_candidates(parent, child);
-    }
-    // Object identities are not native snapshot identities. Never apply native hints to them.
-    if parent.objects().is_none() && child.objects().is_none() {
-        if let (Some(hints), Some(base), Some(tree)) = (hints, parent.folder(), child.folder()) {
-            match hints.between(base, tree) {
-                Ok(crate::change_hints::HintSet::Complete(entries)) => return Ok(entries),
-                Ok(crate::change_hints::HintSet::Partial) | Err(_) => {}
+    use layr_fs_core::hints::HintSet;
+    // Object and logical-layer identities never acquire native tree authority.
+    if selection.is_none() && parent.objects().is_none() && child.objects().is_none() {
+        if let (Some(a), Some(b)) = (parent.folder(), child.folder()) {
+            match hints(a, b) {
+                Ok(HintSet::Complete(entries)) => return Ok(entries),
+                Ok(HintSet::Partial) | Err(_) => {}
             }
         }
-        #[cfg(target_os = "macos")]
-        return crate::storage::candidates(parent, child);
-        #[cfg(not(target_os = "macos"))]
-        return native_candidates(parent, child);
     }
-    object_change_candidates(parent, child)
-}
-
-/// Full native observations include block ranges; renames require separate evidence.
-#[cfg(not(target_os = "macos"))]
-fn native_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
+    enum Reader<'a> {
+        Borrowed(&'a dyn layr_fs_core::TreeRead),
+        Native(std::sync::Arc<dyn layr_fs_core::TreeRead>),
+    }
+    impl Reader<'_> {
+        fn read(&self) -> &dyn layr_fs_core::TreeRead {
+            match self {
+                Self::Borrowed(reader) => *reader,
+                Self::Native(reader) => reader.as_ref(),
+            }
+        }
+    }
+    fn reader(source: &(impl Src + ?Sized)) -> Result<Reader<'_>> {
+        if let Some(reader) = source.core_reader() {
+            return Ok(Reader::Borrowed(reader));
+        }
+        if let Some(objects) = source.objects() {
+            return Ok(Reader::Borrowed(objects));
+        }
+        Ok(Reader::Native(crate::fs::reader(&source.at("")?)?))
+    }
+    let (before, after) = (reader(parent)?, reader(child)?);
+    let checked = selection
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| layr_fs_core::RelPath::new(path.as_bytes()))
+                .collect::<layr_fs_core::Result<std::collections::BTreeSet<_>>>()
+        })
+        .transpose()?;
+    match before.read().candidate_evidence(after.read(), request, checked.as_ref())? {
+        HintSet::Complete(entries) => return Ok(entries),
+        HintSet::Partial => {}
+    }
     let mut entries = object_change_candidates(parent, child)?;
-    for change in &mut entries {
-        if let (Some(old), Some(new)) = (change.old(), change.new()) {
-            if old.is_file() && new.is_file() {
-                let ranges = changed_ranges(&parent.at(change.src())?, &child.at(change.path())?)?;
-                change.set_data(DataEvidence::from_native(&ranges, old.size, new.size).map_err(anyhow::Error::msg)?);
+    if let Some(selected) = selection {
+        entries
+            .retain(|change| selected.iter().any(|path| change.path() == path || change.path().starts_with(&format!("{path}/"))));
+    }
+    if request.detail == ChangeDetail::Ranges && parent.objects().is_none() && child.objects().is_none() {
+        for change in &mut entries {
+            if let (Some(old), Some(new)) = (change.old(), change.new()) {
+                if old.is_file() && new.is_file() {
+                    let mut a = fsutil::open_source(parent, change.src(), old)?;
+                    let mut b = fsutil::open_source(child, change.path(), new)?;
+                    let ranges = layr_fs_common::changed_ranges(&mut a, old.size, &mut b, new.size)?;
+                    change.set_data(DataEvidence::from_native(&ranges, old.size, new.size).map_err(anyhow::Error::msg)?);
+                }
             }
         }
     }
-    // Native inode numbers have no shared identity domain without backend proof.
-    // Keep Add/Remove here; merge may apply its ordinary content rename detection.
     Ok(entries)
-}
-
-// Compare fixed blocks when the backend cannot report changed extents.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
-    let _t = crate::trace::span("content compare");
-    let (mut a, mut b) = (crate::fsutil::open_regular(a)?, crate::fsutil::open_regular(b)?);
-    let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
-    Ok(layr_fs_common::changed_ranges(&mut a, alen, &mut b, blen)?)
 }
 
 /// True when the entry changed in a way git would see: type, content, link target or the
@@ -97,44 +138,8 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
 
 /// True when two entries hold the same stored attributes (and ACL on APFS).
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    if parent.objects().is_none() && child.objects().is_none() && parent.core_reader().is_none() && child.core_reader().is_none()
-    {
-        return match (parent.at(path), child.at(path)) {
-            (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
-            _ => false,
-        };
-    }
-    fn attrs(src: &(impl Src + ?Sized), path: &str) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>)> {
-        if let Some(reader) = src.core_reader() {
-            let metadata = reader
-                .metadata(&layr_fs_core::RelDir::from_bytes(path.as_bytes())?)?
-                .ok_or_else(|| anyhow::anyhow!("reader entry absent"))?;
-            return Ok((
-                metadata.attributes.xattrs.into_iter().filter(|(name, _)| layr_objects::fsx::keep_xattr(name)).collect(),
-                metadata.attributes.acl,
-            ));
-        }
-        if let Some(tree) = src.objects() {
-            return Ok((tree.entry(path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?.entry.xattrs, None));
-        }
-        let path = src.at(path)?;
-        #[cfg(target_os = "macos")]
-        {
-            // Object entries have no native ACL (the writer rejects them). Preserve the
-            // native attribute/ACL comparison without materializing the object side.
-            anyhow::ensure!(crate::sys::apfs_acl_text(&path)?.is_none(), "native ACL differs from object entry");
-            let keep = |name: &[u8]| name != b"com.apple.provenance";
-            let mut attrs = crate::sys::apfs_xattrs_where(&path, keep)?;
-            attrs.retain(|(name, _)| keep(name));
-            attrs.sort();
-            Ok((attrs, None))
-        }
-        #[cfg(not(target_os = "macos"))]
-        Ok((layr_objects::fsx::xattrs(&path)?, None))
-    }
-    match (attrs(parent, path), attrs(child, path)) {
-        (Ok(a), Ok(b)) => a == b,
+    match (crate::fs::attributes(parent, path), crate::fs::attributes(child, path)) {
+        (Ok(a), Ok(b)) => a.xattrs == b.xattrs && a.acl == b.acl,
         _ => false,
     }
 }
@@ -385,34 +390,34 @@ fn split(d: &[u8]) -> Vec<&[u8]> {
 /// Paths needed for an object import, including time-only changes. A directory whose
 /// only change is its time is dirty, but does not need a full subtree import.
 pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
-    #[cfg(target_os = "macos")]
-    let (normal, timed) = {
-        let normal = candidates(parent, child)?;
-        let timed = crate::storage::with_stored_compare(|| crate::storage::candidates_with_times(parent, child))?;
-        (normal, timed)
-    };
-    #[cfg(not(target_os = "macos"))]
-    let (normal, timed) = {
-        let normal = candidates(parent, child)?;
-        let timed = normal.clone();
-        (normal, timed)
-    };
-    let known: HashSet<&str> =
-        normal.iter().flat_map(|c| std::iter::once(c.path().as_str()).chain(c.old_path().map(String::as_str))).collect();
+    let candidates = candidates_request(parent, child, ChangeRequest::default())?;
     let (mut changed, mut dirty) = (Vec::new(), Vec::new());
-    for c in &timed {
-        if !known.contains(c.path().as_str())
-            && c.old_path().is_none()
-            && c.old().is_some_and(|m| m.is_dir())
-            && c.new().is_some_and(|m| m.is_dir())
-        {
-            dirty.push(c.path().as_bytes().to_vec());
-        } else {
-            changed.push(c.path().as_bytes().to_vec());
-            if let Some(old) = c.old_path() {
+    for change in candidates {
+        if change.old_path().is_some() || change.old().is_none() || change.new().is_none() {
+            changed.push(change.path().as_bytes().to_vec());
+            if let Some(old) = change.old_path() {
                 changed.push(old.as_bytes().to_vec());
             }
+            continue;
         }
+        let a = crate::fs::metadata(parent, change.src())?;
+        let b = crate::fs::metadata(child, change.path())?;
+        let same_attributes = a.attributes.mode == b.attributes.mode
+            && a.attributes.xattrs == b.attributes.xattrs
+            && a.attributes.acl == b.attributes.acl;
+        let same_time = a.attributes.stored_time.is_none() && b.attributes.stored_time.is_none()
+            || a.attributes.modified_ns == b.attributes.modified_ns;
+        if a.kind == fsutil::FType::Dir && b.kind == fsutil::FType::Dir && same_attributes {
+            if !same_time {
+                dirty.push(change.path().as_bytes().to_vec());
+            }
+            continue;
+        }
+        let linked = a.link.is_some_and(|link| link.count > 1) || b.link.is_some_and(|link| link.count > 1);
+        if !linked && a.kind == b.kind && same_attributes && same_time && !really_changed(parent, child, &change)? {
+            continue;
+        }
+        changed.push(change.path().as_bytes().to_vec());
     }
     changed.sort();
     changed.dedup();
@@ -421,19 +426,31 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
     Ok((changed, dirty))
 }
 
-/// Candidates for a caller that only asks whether content differs: APFS then skips the exact
-/// ranges of changed files. Other backends have the ranges from their stream at no cost.
-#[cfg(target_os = "macos")]
-fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    if parent.objects().is_some() || child.objects().is_some() {
-        return object_change_candidates(parent, child);
+/// Confirm complete persisted-state differences, including nanosecond timestamps and stored
+/// attributes. This is shared by sparse representation writers and portable transfer plans.
+pub(crate) fn state_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
+    let candidates = without_moves(candidates_request(
+        parent,
+        child,
+        ChangeRequest { scope: ChangeScope::FullState, detail: ChangeDetail::Equality },
+    )?);
+    let mut changes = Vec::new();
+    for candidate in candidates {
+        let (Some(_), Some(_)) = (candidate.old(), candidate.new()) else {
+            changes.push(candidate);
+            continue;
+        };
+        let before = crate::fs::metadata(parent, candidate.path())?;
+        let after = crate::fs::metadata(child, candidate.path())?;
+        if before.kind != after.kind || before.attributes != after.attributes || really_changed(parent, child, &candidate)? {
+            changes.push(candidate);
+        }
     }
-    crate::storage::candidates_equal(parent, child)
+    Ok(changes)
 }
 
-#[cfg(not(target_os = "macos"))]
 fn candidates_equal(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
-    candidates(parent, child)
+    candidates_request(parent, child, ChangeRequest { scope: ChangeScope::Stored, detail: ChangeDetail::Equality })
 }
 
 #[cfg(test)]

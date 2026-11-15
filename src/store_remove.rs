@@ -3,7 +3,7 @@
 //! Layr seals store entries (on macOS the immutable flag and a deny entry in the ACL; on btrfs read-only
 //! subvolumes), so `rm -rf` of a store fails. This command checks that the folder is a layr store that no
 //! layr process uses, unmounts what is mounted below it, and deletes it with the delete of the store backend
-//! (`storage::delete_tree`), which opens each sealed entry first. It runs in the caller's process and never
+//! (`crate::fs::remove`), which opens each sealed entry first. It runs in the caller's process and never
 //! opens the store: an open would write to it.
 
 use crate::args::{parse, Spec};
@@ -66,7 +66,7 @@ fn remove(given: &Path, force: bool) -> Result<PathBuf> {
     let _trash = exclusive(&root.join("trash.lock"), "a layr process empties the trash of the store")?;
     unmount_below(&root)?;
     let outside = outside_data(&root);
-    crate::storage::delete_tree(&root).with_context(|| format!("remove {}", root.display()))?;
+    crate::fs::remove(&root).with_context(|| format!("remove {}", root.display()))?;
     if fs::symlink_metadata(&root).is_ok() {
         bail!("{} is still there after the delete", root.display());
     }

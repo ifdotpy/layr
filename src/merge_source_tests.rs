@@ -36,7 +36,7 @@ impl Fixture {
         )?;
         std::fs::remove_dir_all(native)?;
         #[cfg(target_os = "macos")]
-        return Ok(crate::thin::Layered::objects(tree));
+        return Ok(crate::source::Source::Objects(tree));
         #[cfg(not(target_os = "macos"))]
         Ok(crate::source::Source::Objects(tree))
     }

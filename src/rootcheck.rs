@@ -57,7 +57,7 @@ mod imp {
         let Some(folder) = path.ancestors().find(|p| p.exists()) else {
             return Ok(None);
         };
-        if !crate::storage::is_supported(folder) {
+        if !crate::fs::host().namespace.supported(folder) {
             return Ok(None);
         }
         let file = File::open(folder).with_context(|| format!("open {}", folder.display()))?;
@@ -161,8 +161,8 @@ mod imp {
             return false;
         };
         meta.is_dir()
-            && crate::storage::is_supported(path)
-            && !crate::storage::is_subvolume(path)
+            && crate::fs::host().namespace.supported(path)
+            && !crate::fs::host().namespace.managed(path)
             && std::fs::read_dir(path).map(|mut entries| entries.next().is_none()).unwrap_or(false)
     }
 

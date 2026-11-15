@@ -241,16 +241,20 @@ pub(super) fn fetch_states(store: &Store, repo: &Repo, states: Vec<StateRec>, re
         let local = StateRef { tree: r.tree, times };
         objects.set_state(&state.id, &local)?;
         let stage = repo.p.work_dir().join(crate::store::temp_name());
-        crate::storage::create_subvolume(&stage)?;
+        let temporary = crate::repo::Temp::empty(stage.clone())?;
         let result = (|| -> Result<u64> {
             let made = layr_objects::checkout_with(&objects, &local.tree, Some(&local.times), &stage)?;
             reader::publish_restored(repo, &state, &stage, 0)?;
             Ok(made.files)
         })();
-        if stage.exists() {
-            let _ = crate::storage::delete_tree(&stage);
-        }
-        report.files += result.with_context(|| format!("state {}", crate::ids::short(&state.id)))? as usize;
+        let made = match result {
+            Ok(made) => {
+                temporary.discard()?;
+                made
+            }
+            Err(error) => return Err(temporary.abort(error)),
+        };
+        report.files += Ok::<_, anyhow::Error>(made).with_context(|| format!("state {}", crate::ids::short(&state.id)))? as usize;
         report.states += 1;
         report.state_ids.push(state.id.clone());
     }

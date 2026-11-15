@@ -18,7 +18,6 @@ use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::StateKind;
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use crate::store::{Project, Trust};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -206,8 +205,10 @@ fn recv_records<R: Read, W: Write>(w: &mut Wire<R, W>) -> Result<Vec<String>> {
 fn clone_identities(p: &Project) -> Result<BTreeMap<String, (String, Option<u64>)>> {
     let mut out = BTreeMap::new();
     for id in present(p)?.iter().rev().take(MAX_CLONE_SOURCES * 4) {
-        if let Ok(identity) = btrfs::clone_identity(&p.state_path(id)) {
-            if identity.1.is_none() && !btrfs::supports_local_clone_receive() {
+        if let Ok(identity) = crate::fs::host().transfer.clone_identity(&p.state_path(id)) {
+            if identity.1.is_none()
+                && matches!(crate::fs::host().transfer.offer().clone_lookup, crate::fs::CloneLookup::ReceivedOnly)
+            {
                 continue;
             }
             if p.db.state(id)?.is_some_and(|s| s.subvol == identity.0) {
@@ -358,10 +359,12 @@ fn send_states<R: Read, W: Write>(
                 .take(MAX_CLONE_SOURCES * 4)
                 .filter(|source| {
                     repo.p.db.state(source).ok().flatten().is_some_and(|state| {
-                        btrfs::send_clone_identity(&repo.p.state_path(source)).ok().is_some_and(|(uuid, transid)| {
-                            uuid == state.subvol
-                                && identities.get(*source).is_some_and(|(u, t)| *u == uuid && t.is_none_or(|t| t == transid))
-                        })
+                        crate::fs::host().transfer.send_identity(&repo.p.state_path(source)).ok().is_some_and(
+                            |(uuid, transid)| {
+                                uuid == state.subvol
+                                    && identities.get(*source).is_some_and(|(u, t)| *u == uuid && t.is_none_or(|t| t == transid))
+                            },
+                        )
                     })
                 })
                 .take(MAX_CLONE_SOURCES)
@@ -376,10 +379,12 @@ fn send_states<R: Read, W: Write>(
         // A thin parent gets a view (`state_root`), as the child does.
         let pp = parent.as_ref().and_then(|p| repo.state_root(p).ok()).filter(|path| {
             let subvol = parent.as_ref().and_then(|p| repo.p.db.state(p).ok().flatten()).map(|s| s.subvol);
-            btrfs::send_clone_identity(path).ok().is_some_and(|(uuid, _)| Some(uuid) == subvol)
+            crate::fs::host().transfer.send_identity(path).ok().is_some_and(|(uuid, _)| Some(uuid) == subvol)
         });
         let sources: Vec<_> = clones.iter().map(|id| repo.p.state_path(id)).collect();
-        let child = btrfs::send_optimized(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
+        let child = crate::fs::host()
+            .transfer
+            .send(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -391,7 +396,7 @@ fn send_states<R: Read, W: Write>(
         w.transfer.states_sent += 1;
         w.transfer.state_ids_sent.push(id.clone());
         have.insert(id.clone());
-        if let Ok((uuid, transid)) = btrfs::send_clone_identity(&repo.p.state_path(id)) {
+        if let Ok((uuid, transid)) = crate::fs::host().transfer.send_identity(&repo.p.state_path(id)) {
             identities.insert(id.clone(), (uuid, Some(transid)));
         }
     }
@@ -459,7 +464,7 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
                 let mut clones = Vec::new();
                 for source in ids {
                     let state = p.db.state(&source)?.ok_or_else(|| anyhow!("unknown clone source"))?;
-                    let identity = btrfs::clone_identity(&p.state_path(&source))?;
+                    let identity = crate::fs::host().transfer.clone_identity(&p.state_path(&source))?;
                     if identity.0 != state.subvol {
                         bail!("clone source does not match its signed state");
                     }
@@ -524,7 +529,7 @@ pub fn exchange(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": crate::fs::host().transfer.offer().compressed, "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine}))?;
         let hello = w.recv_json()?;
         if direction != "sync" && hello["direction_v1"] != true {
             bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
@@ -688,7 +693,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p, ctx: Some(ctx) };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": crate::fs::host().transfer.offer().compressed, "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     if direction == "fetch" && !lines.is_empty() {
         bail!("the client sent records during fetch");
@@ -892,7 +897,7 @@ fn exchange_overlays<R: Read, W: Write>(
                 }
                 w.json(&json!({"op":"overlay.hello","seqs":seqs(&project)?,"present":present(&project)?,
                     "clone_identities_v1":clone_identities(&project)?,
-                    "compressed_send_v2":btrfs::supports_compressed_receive(),"clone_sources_v1":true}))?;
+                    "compressed_send_v2":crate::fs::host().transfer.offer().compressed,"clone_sources_v1":true}))?;
                 let parent_transfer = std::mem::take(&mut w.transfer);
                 let lines = recv_records(w)?;
                 let trusted = crate::store_remote::overlays::trusted_keys(repo)?;
@@ -944,14 +949,14 @@ mod tests {
     #[ignore = "requires a root Btrfs fixture and a built peer binary"]
     fn auxiliary_states_cross_the_peer_protocol() {
         use crate::ctx::Caller;
-        
+
         // Only a root Btrfs fixture sets this folder.
         let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else {
             return;
         };
         let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
         let source = base.join("source");
-        btrfs::create_subvolume(&source).unwrap();
+        crate::fs::create(&source).unwrap();
         std::fs::write(source.join("payload"), "auxiliary payload").unwrap();
         let ctx = Ctx {
             store: crate::store::Store::open(&base.join("a")).unwrap(),
@@ -959,6 +964,7 @@ mod tests {
             cwd: base.clone(),
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
         };
         let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap(), ctx: None };
@@ -996,7 +1002,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(peer_state(&ids[0]).join("payload")).unwrap(), "auxiliary payload");
         // Fetch must use the same policy, and the server must traverse auxiliary states.
         for id in &ids {
-            btrfs::delete_tree(&ctx.store.project_dir("p").unwrap().join("states").join(id)).unwrap();
+            crate::fs::remove(&ctx.store.project_dir("p").unwrap().join("states").join(id)).unwrap();
         }
         exchange(&ctx, &command, "fetch", false, false, true, false).unwrap();
         assert!(!ctx.store.project_dir("p").unwrap().join("states").join(&ids[0]).exists());
@@ -1007,7 +1013,7 @@ mod tests {
 
     #[test]
     fn live_refs_include_auto_ancestry_and_gate_only_cache_states() {
-        use crate::model::{Author};
+        use crate::model::Author;
         let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
         let store = crate::store::Store::open(&dir).unwrap();
         let project_dir = store.project_dir("p").unwrap();
@@ -1067,7 +1073,11 @@ mod tests {
         let mut rec = crate::model::Record::untrusted_preview("line.delete");
         rec.lines.insert(
             "line".into(),
-            crate::model::LineChange { transition: crate::model::LineTransition::Delete { before: None }, working_before: Some("working".into()), working_after: None },
+            crate::model::LineChange {
+                transition: crate::model::LineTransition::Delete { before: None },
+                working_before: Some("working".into()),
+                working_after: None,
+            },
         );
         rec.data = json!({"final_state": "working"});
         assert_eq!(deletion_states(&rec), BTreeSet::from(["working".into()]));

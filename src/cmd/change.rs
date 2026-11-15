@@ -1,12 +1,12 @@
 //! Logical changes and the immutable states of each version.
 
 use super::{here, history};
-pub use crate::revs::change::{find, version};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::diff;
 use crate::model::StateRec;
 use crate::repo::{skip_path, Repo};
+pub use crate::revs::change::{find, version};
 use anyhow::{bail, Result};
 
 /// On the numbering machine of the project: give a number to each change that has none, oldest first
@@ -452,7 +452,7 @@ fn patch(repo: &Repo, state: &StateRec) -> Result<Vec<diff::FileDiff>> {
     let empty = if state.parents.is_empty() {
         let path = std::env::temp_dir().join(format!("layr-change-{}", crate::ids::new_id()));
         std::fs::create_dir(&path)?;
-        Some(crate::repo::Temp { path })
+        Some(crate::repo::Temp::existing(path)?)
     } else {
         None
     };

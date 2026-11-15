@@ -248,7 +248,7 @@ fn drop_derived(store: &Store, name: &str, left: &BTreeSet<String>, deleted: &BT
         if let Ok(rd) = std::fs::read_dir(p.base_dir()) {
             for e in rd.flatten() {
                 if e.file_name().to_string_lossy().split('@').next() == Some(id.as_str()) {
-                    let _ = crate::storage::delete_tree(&e.path());
+                    let _ = crate::fs::remove(&e.path());
                 }
             }
         }

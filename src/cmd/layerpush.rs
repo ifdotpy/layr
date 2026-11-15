@@ -11,7 +11,7 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::gitbridge;
 use crate::ids;
-use crate::model::{Line};
+use crate::model::Line;
 use crate::repo::Repo;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -378,6 +378,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 cwd: ctx.cwd.clone(),
                 env: ctx.env.clone(),
                 author: Default::default(),
+                captures: Default::default(),
                 out: std::cell::RefCell::new(if json {
                     Box::new(capture.clone())
                 } else if quiet {
@@ -409,6 +410,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     cwd: ctx.cwd.clone(),
                     env: ctx.env.clone(),
                     author: Default::default(),
+                    captures: Default::default(),
                     out: std::cell::RefCell::new(Box::new(std::io::sink())),
                 };
                 match super::remote::git::push(&sub, &[name.clone(), l.clone(), "-q".to_string()]) {

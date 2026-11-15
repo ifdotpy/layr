@@ -673,9 +673,7 @@ fn scan(
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
         memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
         // RLIMIT_NPROC counts threads on Linux: Chromium, Node and vite of a web check run more than 256.
-        processes: setting(&policy, "checks.processes", json!(4096))?
-            .as_u64()
-            .context("invalid checks.processes")?,
+        processes: setting(&policy, "checks.processes", json!(4096))?.as_u64().context("invalid checks.processes")?,
         log_bytes: setting(&policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
     };
     let local = local_settings(repo)?;
@@ -758,8 +756,7 @@ fn scan(
                 bail!("automatic checks require Linux");
             };
             let work = repo.p.work_dir().join(crate::store::temp_name());
-            crate::storage::create_subvolume(&work)?;
-            let cleanup = crate::repo::Temp { path: work.clone() };
+            let cleanup = crate::repo::Temp::empty(work.clone())?;
             std::fs::write(work.join("check.log"), &log)?;
             let _lock = repo.p.lock_maintenance()?;
             let mut output =
@@ -788,7 +785,10 @@ fn scan(
     Ok(Scan { checks: results, pending, pending_privileged })
 }
 
-fn creator_policy(project: &str, records: Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>) -> Result<(layr_model::Project, BTreeSet<String>)> {
+fn creator_policy(
+    project: &str,
+    records: Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>,
+) -> Result<(layr_model::Project, BTreeSet<String>)> {
     let creator = layr_model::project_perspective(project, records.iter().map(|r| r.record()))
         .context("automatic checks refuse to run without an unambiguous verified project creator")?;
     let model = layr_model::Project::from_authorized_records(project, records.clone(), &creator)?;
@@ -856,7 +856,7 @@ fn execute(
         // Filesystem suites start service clients under test users. They must
         // traverse this credential-free source copy to reach their own fixtures.
         std::fs::DirBuilder::new().mode(0o711).create(&path)?;
-        Some(crate::repo::Temp { path })
+        Some(crate::repo::Temp::existing(path)?)
     } else {
         None
     };
@@ -1028,10 +1028,10 @@ pub(crate) fn save_back_caches(
         if !path.is_dir() {
             continue;
         }
-        if !crate::storage::is_subvolume(&path) {
+        if !crate::fs::host().namespace.managed(&path) {
             crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
         }
-        if crate::storage::is_subvolume(&path) {
+        if crate::fs::host().namespace.managed(&path) {
             folders.push(folder);
         }
     }
@@ -1136,8 +1136,7 @@ fn execute(
     // work folder, so a warm cache folder is cloned and not copied.
     let tmp = std::path::Path::new("/private/var/tmp");
     let base = if std::fs::metadata(dir)?.dev() == std::fs::metadata(tmp)?.dev() { tmp.to_path_buf() } else { repo.p.work_dir() };
-    let private = crate::repo::Temp { path: base.join(format!("layr-check-{}", crate::ids::new_id())) };
-    std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
+    let private = crate::repo::Temp::directory(base.join(format!("layr-check-{}", crate::ids::new_id())), 0o700)?;
     let same_volume = std::fs::metadata(dir)?.dev() == std::fs::metadata(&private.path)?.dev();
     let status = std::process::Command::new("/bin/cp")
         .args([if same_volume { "-cR" } else { "-R" }, "--"])
@@ -1246,7 +1245,7 @@ mod macos_tests {
         use std::os::unix::net::UnixListener;
         let root = std::path::Path::new("/private/var/tmp").join(format!("lsc-{:016x}", rand::random::<u64>()));
         std::fs::create_dir(&root)?;
-        let cleanup = crate::repo::Temp { path: root.clone() };
+        let cleanup = crate::repo::Temp::existing(root.clone())?;
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let profile = macos_profile(&work, &work)?;
@@ -1294,7 +1293,7 @@ mod macos_tests {
         let name = crate::ids::display(&crate::ids::new_id());
         let root = std::env::temp_dir().join(format!("ls-{}", &name[..16]));
         std::fs::create_dir(&root)?;
-        let cleanup = crate::repo::Temp { path: root.clone() };
+        let cleanup = crate::repo::Temp::existing(root.clone())?;
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let work = std::fs::canonicalize(work)?;
@@ -1427,11 +1426,21 @@ mod policy_tests {
 
     const PROJECT: &str = "01a12290-0000-7000-8000-000000000001";
 
-    fn record(machine: &str, op: &str, mut data: Value) -> layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope> {
-        let n = match machine { "owner" => 1, "runner" => 2, _ => 3 };
+    fn record(
+        machine: &str,
+        op: &str,
+        mut data: Value,
+    ) -> layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope> {
+        let n = match machine {
+            "owner" => 1,
+            "runner" => 2,
+            _ => 3,
+        };
         let machine = format!("01a12290-0000-7000-8001-{n:012}");
         let key = ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
-        if op == "project" { data["id"] = json!(PROJECT); }
+        if op == "project" {
+            data["id"] = json!(PROJECT);
+        }
         let mut record = crate::model::Record::untrusted_preview(op);
         record.id = crate::ids::new_id();
         record.project = PROJECT.into();
@@ -1441,10 +1450,20 @@ mod policy_tests {
         let lines = vec![crate::oplog::sign_line(&record, &key).unwrap()];
         let keys = BTreeMap::from([(machine.clone(), key.verifying_key())]);
         let rules = Default::default();
-        layr_model::record::authorize_local_lines(PROJECT, &lines, &keys,
+        layr_model::record::authorize_local_lines(
+            PROJECT,
+            &lines,
+            &keys,
             layr_model::record::LocalAuthority {
-                machine: layr_types::MachineId::parse(&machine).unwrap(), trust_writers: &keys, limits: &rules, overlay: None,
-            }, 0).unwrap().remove(0)
+                machine: layr_types::MachineId::parse(&machine).unwrap(),
+                trust_writers: &keys,
+                limits: &rules,
+                overlay: None,
+            },
+            0,
+        )
+        .unwrap()
+        .remove(0)
     }
 
     #[test]

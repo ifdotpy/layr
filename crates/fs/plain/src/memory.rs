@@ -269,6 +269,21 @@ impl MemoryFs {
     }
 }
 impl Filesystem for MemoryFs {
+    fn create_empty(&self, dst: NewTreeLocation) -> Result<CreatedTree> {
+        self.issuer.location_key(&dst)?;
+        let tree = Arc::new(MemoryTree::new(EntryAttributes {
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            modified_ns: 0,
+            stored_time: Some(0),
+            xattrs: Vec::new(),
+            acl: None,
+        }));
+        let created = self.issuer.create(tree.clone());
+        self.publish(dst.name().as_bytes(), self.issuer.working_key(&created.tree)?, tree)?;
+        Ok(created)
+    }
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> Result<CreatedTree> {
         self.issuer.location_key(&dst)?;
         let tree = Arc::new(MemoryTree::new(layr_fs_common::required(source, &RelDir::Root)?.attributes));
@@ -277,7 +292,15 @@ impl Filesystem for MemoryFs {
         self.publish(dst.name().as_bytes(), self.issuer.working_key(&created.tree)?, tree)?;
         Ok(created)
     }
-    fn freeze(&self, source: &WorkingTree, dst: NewTreeLocation) -> Result<Capture> {
+    fn freeze(&self, source: FreezeSource<'_>, dst: NewTreeLocation) -> Result<Capture> {
+        let source = match source {
+            FreezeSource::Captured(capture) => return layr_fs_common::republish(self, &self.issuer, capture, dst),
+            FreezeSource::Working(source) => source,
+            FreezeSource::Reader(reader) => {
+                let created = self.materialise(reader, dst)?;
+                return self.issuer.seal(created, CaptureConsistency::UnsettledCopy);
+            }
+        };
         self.issuer.location_key(&dst)?;
         let key = self.issuer.working_key(source)?;
         let snapshot = self.trees()?.get(&key).ok_or(FsError::Invalid("tree absent"))?.tree.snapshot()?;
@@ -286,10 +309,15 @@ impl Filesystem for MemoryFs {
         self.publish(dst.name().as_bytes(), self.issuer.frozen_key(&capture.tree)?, snapshot)?;
         Ok(capture)
     }
-    fn changes(&self, before: &FrozenTree, after: &FrozenTree) -> Result<Vec<evidence::EntryChange>> {
+    fn changes(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> Result<Vec<evidence::EntryChange>> {
         self.issuer.frozen_key(before)?;
         self.issuer.frozen_key(after)?;
-        layr_fs_common::changes(self, before, after)
+        layr_fs_common::changes(self, before, after, request)
     }
     fn remove(&self, tree: OwnedTree) -> std::result::Result<(), RemovalFailure> {
         self.issuer.remove(tree, |key| {
@@ -297,7 +325,29 @@ impl Filesystem for MemoryFs {
             Ok(())
         })
     }
-    fn capabilities(&self, _scope: &TreeScope) -> Capabilities<'_> {
-        Capabilities::default()
+    fn capabilities(&self, scope: &TreeScope) -> Capabilities<'_> {
+        Capabilities {
+            exchange: self
+                .issuer
+                .scope_key(scope)
+                .ok()
+                .filter(|key| self.trees().is_ok_and(|trees| trees.contains_key(key)))
+                .map(|_| self as &dyn ExchangeTrees),
+            ..Capabilities::default()
+        }
+    }
+}
+
+impl ExchangeTrees for MemoryFs {
+    fn exchange(&self, first: OwnedTree, second: OwnedTree) -> std::result::Result<(OwnedTree, OwnedTree), ExchangeFailure> {
+        self.issuer.exchange(first, second, |a, b| {
+            let mut trees = self.trees()?;
+            // TreeIssuer checked that the two keys are distinct before invoking this closure.
+            let [Some(a), Some(b)] = trees.get_disjoint_mut([a, b]) else {
+                return Err(FsError::Invalid("exchange tree absent").into());
+            };
+            std::mem::swap(&mut a.name, &mut b.name);
+            Ok(())
+        })
     }
 }

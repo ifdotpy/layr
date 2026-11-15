@@ -16,10 +16,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-
-
-
-
 pub const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 pub const LAYER: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -601,7 +597,7 @@ fn register_layer(
     source: &str,
     layer: &Descriptor,
 ) -> Result<()> {
-        locked.check(&repo.p)?;
+    locked.check(&repo.p)?;
     use crate::model::{RefChange, RefState, StateKind};
     let key = digest_hex(&layer.digest)?;
     let name = format!("derived/oci-layer-v1/{key}");
@@ -621,8 +617,7 @@ fn register_layer(
     } else {
         let src = cache.blob_path(&layer.digest)?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
-        crate::storage::create_subvolume(&work)?;
-        let cleanup = crate::repo::Temp { path: work.clone() };
+        let cleanup = crate::repo::Temp::empty(work.clone())?;
         fsutil::copy_entry(
             src.parent().context("layer path has no parent")?,
             src.file_name().and_then(|s| s.to_str()).context("invalid layer filename")?,

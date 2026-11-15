@@ -96,7 +96,11 @@ fn move_old_entries(ctx: &Ctx, repo: &Repo) -> Result<()> {
         rec.data = serde_json::json!({"state": state, "line": line.id, "parked_line": parked.name});
         rec.lines.insert(
             parked.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state) }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state) },
+                working_before: None,
+                working_after: None,
+            },
         );
         repo.commit_record(&_lock, ctx, rec)?;
         eprintln!("park entry {} is now the line {}", ids::short(&state), parked.name);
@@ -254,28 +258,24 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
     repo.require(ctx, "line.create")?;
     let untracked = a.has("-u") || a.has("-a");
     let ignored = a.has("-a");
-    // APFS: the status, the park tree and its snapshot copy go before the store lock (copies of
+    // The status, the park tree and its snapshot copy go before the store lock (copies of
     // the working folder and of the head took minutes under it). Under the lock they hold when the
     // head and the index did not change.
-    #[cfg(target_os = "macos")]
     let pre = (|| -> Result<_> {
         let token = repo.index_token(line)?;
         let (st, scan, _, _) = repo.status(line)?;
         let (work, paths) = park_tree(repo, line, &st, &scan.path, untracked, ignored)?;
-        crate::storage::prepare_snapshot(&work.path, &repo.p.work_dir(), true)?;
+        repo.prepare_capture(&work.path)?;
         Ok((token, st, scan, work, paths))
     })()
     .ok();
     let r = (|| -> Result<i32> {
         let (_lock, w) = begin_change(ctx, repo, line)?;
         let line = repo.line(&line.id)?;
-        #[cfg(target_os = "macos")]
         let pre = match pre {
             Some((token, st, scan, work, paths)) if token == repo.index_token(&line)? => Some((st, scan, work, paths)),
             _ => None,
         };
-        #[cfg(not(target_os = "macos"))]
-        let pre: Option<(Status, Temp, Temp, BTreeSet<String>)> = None;
         let (st, scan, prepared) = match pre {
             Some((st, scan, work, paths)) => (st, scan, Some((work, paths))),
             None => {
@@ -332,11 +332,22 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
         let working_after = repo.after_state(ctx, &line, "park", &mut rec)?;
         rec.lines.insert(
             line.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&line, &line.head), after: repo.line_state(&line, &line.head) }, working_before: w, working_after: working_after },
+            LineChange {
+                transition: crate::model::LineTransition::Move {
+                    before: repo.line_state(&line, &line.head),
+                    after: repo.line_state(&line, &line.head),
+                },
+                working_before: w,
+                working_after: working_after,
+            },
         );
         rec.lines.insert(
             parked.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state.id) }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create { after: repo.line_state(&parked, &state.id) },
+                working_before: None,
+                working_after: None,
+            },
         );
         repo.commit_record(&_lock, ctx, rec)?;
         if !a.has("-q") {
@@ -358,8 +369,11 @@ fn park_tree(
     untracked: bool,
     ignored: bool,
 ) -> Result<(Temp, BTreeSet<String>)> {
-    let work = Temp { path: repo.p.work_dir().join(crate::store::temp_name()) };
-    repo.snapshot_state(&line.head, &work.path, false)?;
+    let work = Temp::source(
+        &repo.state_src(&line.head)?,
+        repo.p.work_dir().join(crate::store::temp_name()),
+        crate::fs::Protection::Writable,
+    )?;
     let own = repo.own(line);
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for c in st.staged.iter().chain(st.unstaged.iter()) {

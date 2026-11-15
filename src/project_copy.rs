@@ -1,7 +1,7 @@
 //! Copy a whole project folder to another file system and keep the sharing between its states.
 //!
 //! This module walks the project and refuses unsafe targets. The backend does the copy
-//! (`storage::Copier`): btrfs sends each subvolume, APFS clones the files that share data inside
+//! (the native copier): btrfs sends each subvolume, APFS clones the files that share data inside
 //! the copy, and OverlayFS has no copier yet. The database is written with `VACUUM INTO`, so the
 //! copy is consistent and the source is only read.
 //!
@@ -9,7 +9,6 @@
 //! A later call removes a marked target and copies again (no partial reuse). The source is not
 //! changed; a backend may use temporary snapshots inside it and removes them.
 
-use crate::storage;
 use anyhow::{bail, ensure, Context, Result};
 use layr_hashers::FastCryptographic;
 use rusqlite::types::Value;
@@ -123,7 +122,7 @@ pub fn copy_project(src: &Path, dst: &Path, mut progress: impl FnMut(Step)) -> R
         "the source and the target are on the same file system; rename the project instead"
     );
     prepare_target(&dst)?;
-    let need = storage::copy_need(&src)?;
+    let need = crate::fs::host().accounting.copy_need(&src)?;
     // After prepare_target: a removed partial copy no longer exists.
     let ancestor = existing_ancestor(&dst)?;
     let free = free_bytes(&ancestor)?;
@@ -133,9 +132,9 @@ pub fn copy_project(src: &Path, dst: &Path, mut progress: impl FnMut(Step)) -> R
         fs::create_dir(&dst).with_context(|| format!("create {}", dst.display()))?;
     }
     File::create(dst.join(MARKER)).context("mark the copy as unfinished")?.sync_all()?;
-    let mut copier = storage::Copier::new(&src, &dst)?;
+    let mut copier = (crate::fs::host().copier)(&src, &dst)?;
     let mut sink = Sink { progress: &mut progress, counts: Counts::default() };
-    walk(&mut copier, &src, &dst, &mut Vec::new(), &mut sink)?;
+    walk(copier.as_mut(), &src, &dst, &mut Vec::new(), &mut sink)?;
     copier.finish()?;
     let copy_ms = started.elapsed().as_millis();
     // A failed verification leaves the target marked: the next call removes and copies again.
@@ -176,7 +175,7 @@ fn prepare_target(dst: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
         Ok(m) if !m.is_dir() => bail!("the target exists and is not a folder: {}", dst.display()),
-        Ok(_) if dst.join(MARKER).exists() => storage::delete_tree(dst),
+        Ok(_) if dst.join(MARKER).exists() => crate::fs::remove(dst),
         Ok(_) => {
             ensure!(fs::read_dir(dst)?.next().is_none(), "the target is not empty: {}", dst.display());
             Ok(())
@@ -184,22 +183,8 @@ fn prepare_target(dst: &Path) -> Result<()> {
     }
 }
 
-/// The plain extents of a file as (logical offset, physical address, length), for comparing its
-/// content. None when the file has none (empty, inline or encoded data) or the file system does
-/// not report extents.
-#[cfg(target_os = "linux")]
-pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
-    const LAST: u32 = 0x1;
-    const SHARED: u32 = 0x2000;
-    let extents = crate::sys::fiemap_full(file).ok()?;
-    if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
-        return None;
-    }
-    Some(extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect())
-}
-
 /// Copy the folder `src` (a project or a part of one) into `dst`, entry by entry.
-fn walk(c: &mut storage::Copier, src: &Path, dst: &Path, rel: &mut Vec<String>, out: &mut Sink) -> Result<()> {
+fn walk(c: &mut dyn crate::fs::ProjectCopier, src: &Path, dst: &Path, rel: &mut Vec<String>, out: &mut Sink) -> Result<()> {
     let mut entries =
         fs::read_dir(src).with_context(|| format!("read {}", src.display()))?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -218,7 +203,14 @@ fn walk(c: &mut storage::Copier, src: &Path, dst: &Path, rel: &mut Vec<String>, 
     Ok(())
 }
 
-fn entry(c: &mut storage::Copier, s: &Path, d: &Path, m: &fs::Metadata, rel: &mut Vec<String>, out: &mut Sink) -> Result<()> {
+fn entry(
+    c: &mut dyn crate::fs::ProjectCopier,
+    s: &Path,
+    d: &Path,
+    m: &fs::Metadata,
+    rel: &mut Vec<String>,
+    out: &mut Sink,
+) -> Result<()> {
     if let Some(kind) = unit(rel) {
         out.step(kind, rel);
     }
@@ -281,7 +273,9 @@ fn compare_copy(src: &Path, dst: &Path) -> Result<()> {
     compare_dir(src, dst, &mut rel, &mut stats).with_context(|| format!("verify {}", dst.display()))?;
     ensure!(stats.databases > 0, "the source has no database");
     compare_contents(&stats.files).with_context(|| format!("verify {}", dst.display()))?;
-    storage::verify_registry(src, dst).with_context(|| format!("verify the registry of {}", dst.display()))?;
+    if let Some(registry) = &crate::fs::host().registry {
+        (registry.verify)(src, dst).with_context(|| format!("verify the registry of {}", dst.display()))?;
+    }
     Ok(())
 }
 
@@ -500,8 +494,8 @@ pub fn hidden(argv: &[String]) -> Option<i32> {
             Ok(())
         }
         ("__project-space", 2) => {
-            let need = storage::copy_need(Path::new(&argv[1]))?;
-            let total = storage::copy_total(Path::new(&argv[1]))?;
+            let need = crate::fs::host().accounting.copy_need(Path::new(&argv[1]))?;
+            let total = crate::fs::host().accounting.copy_total(Path::new(&argv[1]))?;
             println!("{}", serde_json::json!({ "need": need, "total": total }));
             Ok(())
         }

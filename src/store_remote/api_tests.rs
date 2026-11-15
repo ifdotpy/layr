@@ -522,6 +522,7 @@ fn context(root: &Path) -> Ctx {
         cwd: root.to_path_buf(),
         env: HashMap::new(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
     }
 }
@@ -627,7 +628,11 @@ fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name:
     let mut record = crate::model::DraftRecord::new(if before.is_some() { "save" } else { "line.create" });
     record.lines.insert(
         line.into(),
-        LineChange { transition: crate::model::LineTransition::from_endpoints(before.map(state), Some(state(head))), working_before: None, working_after: None },
+        LineChange {
+            transition: crate::model::LineTransition::from_endpoints(before.map(state), Some(state(head))),
+            working_before: None,
+            working_after: None,
+        },
     );
     record.data = serde_json::json!({"name":name});
     project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
@@ -819,39 +824,15 @@ fn a_first_api_cache_fetch_selects_after_importing_metadata() {
         let store = api_store(&root, &ctx, &fake);
         let (repo, parent_states, _) = project(&ctx);
         let opts = if exact_state {
-            Options {
-                caches_of_state: Some(parent_states[2].clone()),
-                heads: true,
-                ..Default::default()
-            }
+            Options { caches_of_state: Some(parent_states[2].clone()), heads: true, ..Default::default() }
         } else if form == 2 {
             // `fetch --line main`: the same caches as `--caches-of main`.
-            Options {
-                lines: vec!["main".into()],
-                heads: true,
-                ..Default::default()
-            }
+            Options { lines: vec!["main".into()], heads: true, ..Default::default() }
         } else {
-            Options {
-                caches_of: vec!["main".into()],
-                heads: true,
-                ..Default::default()
-            }
+            Options { caches_of: vec!["main".into()], heads: true, ..Default::default() }
         };
-        check_first_cache_fetch(
-            &root,
-            &ctx,
-            &repo,
-            &store,
-            "cache.target",
-            &opts,
-            selected.then_some(parent_states[2].as_str()),
-        );
-        assert_eq!(
-            fake.count("GET /api/v1/projects/p/objects/") > 0,
-            selected,
-            "only a selected cache downloads an object pack"
-        );
+        check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, selected.then_some(parent_states[2].as_str()));
+        assert_eq!(fake.count("GET /api/v1/projects/p/objects/") > 0, selected, "only a selected cache downloads an object pack");
         crate::free::finish(&ctx);
         drop(repo);
         delete_cache_fixture(&root);
@@ -946,46 +927,25 @@ fn check_first_cache_fetch(
         assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
         return;
     }
-    assert!(
-        report
-            .omitted
-            .iter()
-            .all(|item| item.contains("not for --line")),
-        "cache fetch errors: {:?}",
-        report.omitted
-    );
+    assert!(report.omitted.iter().all(|item| item.contains("not for --line")), "cache fetch errors: {:?}", report.omitted);
     let copied = repo.overlay_repo(name).unwrap();
-    assert!(
-        copied.p.db.state(&state).unwrap().is_some(),
-        "the metadata is imported"
-    );
-    assert_eq!(
-        report.states,
-        usize::from(selected),
-        "only selected cache bodies arrive: {:?}",
-        report.omitted
-    );
+    assert!(copied.p.db.state(&state).unwrap().is_some(), "the metadata is imported");
+    assert_eq!(report.states, usize::from(selected), "only selected cache bodies arrive: {:?}", report.omitted);
     assert_eq!(copied.p.has_state(&state), selected);
     if selected {
         assert_eq!(
             std::fs::read(copied.p.state_path(&state).join("unrelated")).unwrap(),
-            std::fs::read(
-                root.join(format!("original-{name}/states"))
-                    .join(&state)
-                    .join("unrelated")
-            )
-            .unwrap()
+            std::fs::read(root.join(format!("original-{name}/states")).join(&state).join("unrelated")).unwrap()
         );
     }
 }
-
 
 fn delete_cache_fixture(root: &Path) {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     fn open_subvolumes(path: &Path) {
         // The fixture owns these snapshots. Ordinary Btrfs deletion needs them writable.
-        if crate::storage::is_subvolume(path) {
-            crate::storage::set_writable(path).unwrap();
+        if crate::fs::host().namespace.managed(path) {
+            crate::fs::set_writable(path).unwrap();
         }
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
@@ -1000,7 +960,7 @@ fn delete_cache_fixture(root: &Path) {
     #[cfg(all(target_os = "linux", feature = "overlayfs"))]
     let _ = std::fs::remove_dir_all(root);
     #[cfg(not(all(target_os = "linux", feature = "overlayfs")))]
-    crate::storage::delete_tree(root).unwrap();
+    crate::fs::remove(root).unwrap();
 }
 
 #[test]
@@ -1290,12 +1250,19 @@ fn real_gateway_object_round_trip() {
     // First cache copies select after importing metadata on the actual Gateway too.
     for (n, (exact_state, selected)) in [(false, false), (true, false), (false, true), (true, true)].into_iter().enumerate() {
         let opts = if exact_state {
-            Options {caches_of_state:Some(states[2].clone()),heads:true,..Default::default()}
+            Options { caches_of_state: Some(states[2].clone()), heads: true, ..Default::default() }
         } else {
-            Options {caches_of:vec!["main".into()],heads:true,..Default::default()}
+            Options { caches_of: vec!["main".into()], heads: true, ..Default::default() }
         };
-        check_first_cache_fetch(&root, &ctx, &repo, &store, &format!("cache.selection{n}"), &opts,
-            selected.then_some(states[2].as_str()));
+        check_first_cache_fetch(
+            &root,
+            &ctx,
+            &repo,
+            &store,
+            &format!("cache.selection{n}"),
+            &opts,
+            selected.then_some(states[2].as_str()),
+        );
     }
     crate::free::finish(&ctx);
     crate::free::finish(&receiver_ctx);
@@ -1439,17 +1406,15 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
     };
     run_focused(&["clone", &focused_remote, "p", "--heads", "--only-line", "main"]);
     if let Some(script) = std::env::var_os("LAYR_INTEROP_CI_SCRIPT") {
-        let output = std::process::Command::new(
-            std::env::var_os("LAYR_INTEROP_CI_PYTHON").unwrap_or_else(|| "python3".into()),
-        )
-        .arg(script)
-        .env("LAYR_CI_INTEROP_ROOT", focused_root.join("local"))
-        .env("LAYR_CI_INTEROP_URL", &focused_remote)
-        .env("LAYR_CI_INTEROP_TOKEN_FILE", &focused_token_file)
-        .env("LAYR_CI_INTEROP_CA_FILE", &ca_file)
-        .env("LAYR_CI_INTEROP_BIN", &binary)
-        .output()
-        .unwrap();
+        let output = std::process::Command::new(std::env::var_os("LAYR_INTEROP_CI_PYTHON").unwrap_or_else(|| "python3".into()))
+            .arg(script)
+            .env("LAYR_CI_INTEROP_ROOT", focused_root.join("local"))
+            .env("LAYR_CI_INTEROP_URL", &focused_remote)
+            .env("LAYR_CI_INTEROP_TOKEN_FILE", &focused_token_file)
+            .env("LAYR_CI_INTEROP_CA_FILE", &ca_file)
+            .env("LAYR_CI_INTEROP_BIN", &binary)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "CI store interoperability failed: {}{}",
@@ -1811,8 +1776,11 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
         (main.id, main.head)
     };
     let focused_api = Api::for_test(origin, "cli-queue", Some(token));
-    assert!(focused_api.refs("", "lines/").unwrap().iter().any(|r|
-        r.name == format!("lines/{main_id}") && r.target.as_deref() == Some(&main_head)));
+    assert!(focused_api
+        .refs("", "lines/")
+        .unwrap()
+        .iter()
+        .any(|r| r.name == format!("lines/{main_id}") && r.target.as_deref() == Some(&main_head)));
     // The creator names the merge machine and gives it the merge role (docs/ci-trust.md), not full trust.
     run(&["--project", "p", "config", "queue.merge-machine", &focused_ctx.store.machine.id]);
     {

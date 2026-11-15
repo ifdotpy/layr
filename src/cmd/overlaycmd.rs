@@ -1,8 +1,8 @@
 //! `layr overlay`: file trees with an owner, readers and their own history, shown in lines above
 //! the shared set (docs/overlays.md; the model is in src/overlay.rs).
 
-pub(crate) use crate::overlay::create::make_overlay;
 pub(crate) use crate::overlay::create::access_map;
+pub(crate) use crate::overlay::create::make_overlay;
 
 use super::{exit, here};
 use crate::access::{parse_principal, show_principal, Policy, Role};
@@ -13,7 +13,6 @@ use crate::ids;
 use crate::model::{Record, StateKind};
 use crate::overlay::{Layer, MergeKind, Mode, Props, PROPS};
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use crate::store::{check_name, Project};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -333,7 +332,7 @@ fn folder_in_line(
     op: Option<&Project>,
 ) -> InLine {
     let cp = repo.working(l).join(folder);
-    let is_layer = btrfs::is_subvolume(&cp);
+    let is_layer = crate::fs::host().namespace.managed(&cp);
     let state = match (kind, is_layer) {
         (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
         (FolderIn::Versioned, false) => crate::cmd::admin::VERSIONED.to_string(),
@@ -1443,6 +1442,7 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
         cwd: ctx.cwd.clone(),
         env,
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::BufWriter::new(std::io::stdout()))),
     };
     let mut argv = vec![cmd.to_string()];
@@ -1538,6 +1538,7 @@ mod tests {
                 cwd,
                 env: std::collections::HashMap::new(),
                 author: Default::default(),
+                captures: Default::default(),
                 out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
             };
             // Run twice: handles belong to a listing, never to a later command.

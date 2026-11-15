@@ -32,10 +32,9 @@ use crate::fsutil;
 use crate::ids;
 use crate::model::{Line, LineChange, LineState, StateKind, StateRec};
 use crate::repo::{skip_path, Repo, Temp};
-use crate::storage as btrfs;
 use crate::store::Project;
 use crate::tree::Tree;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -338,10 +337,7 @@ impl ListedOverlay<'_> {
     pub(crate) fn visible_to(&self, ctx: &Ctx) -> bool {
         !self.info.hidden
             || ctx.caller.is_root()
-            || self
-                .project
-                .as_ref()
-                .is_ok_and(|p| Policy::load(p).check(&Who::caller(&ctx.caller), "read").is_ok())
+            || self.project.as_ref().is_ok_and(|p| Policy::load(p).check(&Who::caller(&ctx.caller), "read").is_ok())
     }
 }
 
@@ -453,7 +449,10 @@ pub fn folder_path(s: &str) -> Result<String> {
         || t == ".git"
         || t.starts_with(".git/");
     if bad {
-        return Err(crate::errors::error(crate::errors::Kind::Invalid, format!("fatal: invalid folder '{s}': use a relative path inside the line")));
+        return Err(crate::errors::error(
+            crate::errors::Kind::Invalid,
+            format!("fatal: invalid folder '{s}': use a relative path inside the line"),
+        ));
     }
     Ok(t.to_string())
 }
@@ -769,8 +768,7 @@ impl<'a> Repo<'a> {
                 let orepo = self.overlay_repo(&layer.overlay)?;
                 let _lock = orepo.p.lock_maintenance()?;
                 if orepo.p.export_jsonl()?.lines().any(|line| {
-                    crate::oplog::parse_line(line)
-                        .is_ok_and(|s| s.record.op == "view.hidden" && s.record.data["view_id"] == id)
+                    crate::oplog::parse_line(line).is_ok_and(|s| s.record.op == "view.hidden" && s.record.data["view_id"] == id)
                 }) {
                     continue;
                 }
@@ -979,8 +977,9 @@ impl<'a> Repo<'a> {
     }
 
     pub fn need_overlay(&self, name: &str) -> Result<Info> {
-        self.overlay_info(name)?
-            .ok_or_else(|| crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name)))
+        self.overlay_info(name)?.ok_or_else(|| {
+            crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name))
+        })
     }
 
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
@@ -993,7 +992,9 @@ impl<'a> Repo<'a> {
     /// Keep the project that supplied hidden metadata while reading its settings.
     fn hidden_settings_project(&self, name: &str) -> Result<Option<Project<'a>>> {
         let (info, project) = self.open_overlay_info(name)?;
-        let info = info.ok_or_else(|| crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name)))?;
+        let info = info.ok_or_else(|| {
+            crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name))
+        })?;
         if info.hidden {
             return project.map(Ok).unwrap_or_else(|| self.overlay_project(name)).map(Some);
         }
@@ -1310,10 +1311,13 @@ impl<'a> Repo<'a> {
             }
             let state = match find_overlay_line(&op.db, info, line)? {
                 Some(ol) => ol.head,
-                None => match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned)) {
-                    Some(part) => part,
-                    None => continue,
-                },
+                None => {
+                    match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned))
+                    {
+                        Some(part) => part,
+                        None => continue,
+                    }
+                }
             };
             let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
             hidden.push((position, Layer { overlay: name.to_string(), state }));
@@ -1564,7 +1568,8 @@ impl<'a> Repo<'a> {
     pub fn check_stack(&self, line: &Line, layers: &[Layer]) -> Result<()> {
         for l in layers {
             if self.overlay_info(&l.overlay)?.is_none() || self.layer_root(l).is_none() {
-                return Err(crate::errors::error(crate::errors::Kind::Failed,
+                return Err(crate::errors::error(
+                    crate::errors::Kind::Failed,
                     format!(
                         "error: line '{}' shows overlay '{}', which is not on this machine; run 'layr overlay use --remove {}'",
                         line.name, l.overlay, l.overlay
@@ -1572,7 +1577,8 @@ impl<'a> Repo<'a> {
                 ));
             }
             if !self.owner_reads(&l.overlay, line.owner)? {
-                return Err(crate::errors::error(crate::errors::Kind::Failed,
+                return Err(crate::errors::error(
+                    crate::errors::Kind::Failed,
                     format!(
                         "error: line '{}' shows overlay '{}', which its owner no longer reads; run 'layr overlay use' without it",
                         line.name, l.overlay
@@ -1597,7 +1603,8 @@ impl<'a> Repo<'a> {
         }
         for l in self.layers(line)? {
             if !self.need_overlay(&l.overlay)?.hidden && !self.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? {
-                return Err(crate::errors::error(crate::errors::Kind::Failed,
+                return Err(crate::errors::error(
+                    crate::errors::Kind::Failed,
                     format!("permission denied: line '{}' shows overlays that you do not read", line.name),
                 ));
             }
@@ -1718,16 +1725,40 @@ impl<'a> Repo<'a> {
             return self.state_root(&line.head);
         }
         let path = self.base_path(line, &line.head, &layers);
-        if path.exists() {
-            // A base that another request just placed may still be writable for a moment.
-            if !btrfs::subvol_info(&path).map(|i| i.readonly).unwrap_or(true) {
-                btrfs::set_readonly(&path)?;
-            }
+        let _publication = self.lock_base(&path)?;
+        if self.base_ready(&path)? {
             return Ok(path);
         }
         let view = self.assemble(line, &line.head, &layers)?;
         self.place_base(&view, &path)?;
         Ok(path)
+    }
+
+    fn lock_base(&self, path: &Path) -> Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = self.p.meta_dir().join("base-locks");
+        std::fs::create_dir_all(&dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(dir.join(path.file_name().context("base has no name")?))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(lock)
+    }
+    fn base_ready(&self, path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        if crate::fs::host().namespace.info(path)?.readonly {
+            return Ok(true);
+        }
+        // An interrupted older publication may have left a writable derived cache.
+        // Rebuild it under its publication lock instead of mutating a leased tree.
+        crate::fs::remove(path)?;
+        Ok(false)
     }
 
     fn place_base(&self, view: &Temp, path: &Path) -> Result<()> {
@@ -1737,14 +1768,18 @@ impl<'a> Repo<'a> {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        // btrfs renames only a writable subvolume: the view is complete, so it is writable only
-        // for the rename.
-        btrfs::set_writable(&view.path)?;
-        match crate::fsutil::rename_tree(&view.path, path) {
-            Ok(()) => btrfs::set_readonly(path),
-            // Another request made the same base at the same time.
-            Err(_) if path.exists() => Ok(()),
-            Err(e) => Err(e.into()),
+        // Bases are derived immutable trees. Freeze through the operation contract rather
+        // than changing a mounted tree while its readable lease is still alive.
+        match crate::fs::snapshot(&view.path, path, true) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.chain().any(|cause| {
+                    cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists)
+                }) && crate::fs::host().namespace.info(path).is_ok_and(|info| info.readonly) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1753,11 +1788,22 @@ impl<'a> Repo<'a> {
     /// wins), read-only.
     pub fn assemble(&self, line: &Line, head: &str, layers: &[Layer]) -> Result<Temp> {
         let _t = crate::trace::span("assemble");
-        let t = Temp { path: self.p.work_dir().join(crate::store::temp_name()) };
-        self.snapshot_state(head, &t.path, false)?;
-        self.put_layers(&t.path, layers, self.own(line))?;
-        btrfs::set_readonly(&t.path)?;
-        Ok(t)
+        let t = Temp::source(
+            &self.state_src(head)?,
+            self.p.work_dir().join(crate::store::temp_name()),
+            crate::fs::Protection::Writable,
+        )?;
+        if let Err(error) = self.put_layers(&t.path, layers, self.own(line)) {
+            return Err(t.abort(error));
+        }
+        let captured = match self.temp_snapshot(&t.path, true) {
+            Ok(captured) => captured,
+            Err(error) => return Err(t.abort(error)),
+        };
+        if let Err(error) = t.discard() {
+            return Err(captured.abort(error));
+        }
+        Ok(captured)
     }
 
     /// The folder of the state a layer shows, if the overlay and the state are on this machine
@@ -1787,8 +1833,11 @@ impl<'a> Repo<'a> {
         let path = self.base_path(line, head, layers);
         if layers.is_empty() {
             drop(view);
-        } else if !path.exists() {
-            self.place_base(&view, &path)?;
+        } else {
+            let _publication = self.lock_base(&path)?;
+            if !self.base_ready(&path)? {
+                self.place_base(&view, &path)?;
+            }
         }
         self.prune_bases(line, Some(&path), 60)
     }
@@ -1810,7 +1859,7 @@ impl<'a> Repo<'a> {
             let name = e.file_name().to_string_lossy().into_owned();
             let id = name.split('@').next().unwrap_or("").to_string();
             if !live.contains(&id) {
-                let _ = btrfs::delete_tree(&e.path());
+                let _ = crate::fs::remove(&e.path());
             }
         }
         Ok(())
@@ -1829,7 +1878,7 @@ impl<'a> Repo<'a> {
             }
             let ctime = e.metadata().map(|m| m.ctime()).unwrap_or(0);
             if now - ctime >= age as i64 {
-                let _ = btrfs::delete_tree(&e.path());
+                let _ = crate::fs::remove(&e.path());
             }
         }
         Ok(())
@@ -1859,7 +1908,11 @@ impl<'a> Repo<'a> {
         let mut rec = crate::model::DraftRecord::new("line.create");
         rec.lines.insert(
             line.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Create { after: self.line_state(&line, start) }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create { after: self.line_state(&line, start) },
+                working_before: None,
+                working_after: None,
+            },
         );
         rec.data = serde_json::json!({"name": name, "start": start});
         locked.append(rec, &ctx.actor())?;
@@ -1946,7 +1999,11 @@ impl<'a> Repo<'a> {
         let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Move { before: self.line_state(&l, &l.head), after: after }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Move { before: self.line_state(&l, &l.head), after: after },
+                working_before: None,
+                working_after: None,
+            },
         );
         rec.data = serde_json::json!({"from": l.name, "to": name});
         locked.append(rec, &ctx.actor())?;
@@ -2230,15 +2287,17 @@ pub fn next_state(
     let _t = crate::trace::span("layer state");
     let id = ids::new_id();
     let dst = repo.p.state_path(&id);
-    repo.snapshot_state(prev, &dst, false)?;
-    let made = ops.apply(&dst, src, own).and_then(|_| btrfs::set_readonly(&dst)).and_then(|_| btrfs::subvol_info(&dst));
-    let info = match made {
-        Ok(i) => i,
-        Err(e) => {
-            let _ = btrfs::delete_tree(&dst);
-            return Err(e);
-        }
+    let working =
+        Temp::source(&repo.state_src(prev)?, repo.p.work_dir().join(crate::store::temp_name()), crate::fs::Protection::Writable)?;
+    if let Err(error) = ops.apply(&working.path, src, own) {
+        return Err(working.abort(error));
+    }
+    let captured = crate::fs::freeze_path_owned(&working.path, &dst, crate::fs::CapturePurpose::State)?;
+    let info = match crate::fs::host().namespace.info(&dst) {
+        Ok(info) => info,
+        Err(error) => return Err(captured.abort(error)),
     };
+    captured.release();
     Ok(StateRec {
         id,
         kind: StateKind::Commit,
@@ -2340,7 +2399,11 @@ pub fn move_overlay_line(
     let st = |h: &str| LineState { name: ol.name.clone(), head: h.to_string(), owner: ol.owner, machine: ol.machine.clone() };
     rec.lines.insert(
         ol.id.clone(),
-        LineChange { transition: crate::model::LineTransition::Move { before: st(&ol.head), after: st(head) }, working_before: None, working_after: None },
+        LineChange {
+            transition: crate::model::LineTransition::Move { before: st(&ol.head), after: st(head) },
+            working_before: None,
+            working_after: None,
+        },
     );
     rec.data = serde_json::json!({"line": ol.id});
     orepo.commit_record(locked, ctx, rec)?;
@@ -2371,7 +2434,7 @@ pub fn commit_layers(
     author: Option<(String, String)>,
     summary: bool,
 ) -> Result<Option<Committed>> {
-        locked.check(&repo.p)?;
+    locked.check(&repo.p)?;
     let base = repo.head_tree(line)?;
     let shared_root = repo.state_root(&line.head)?;
     let mut orepos = Vec::new();
@@ -2832,6 +2895,7 @@ mod read_open_tests {
                     cwd,
                     env: Default::default(),
                     author: Default::default(),
+                    captures: Default::default(),
                     out: std::cell::RefCell::new(Box::new(std::io::sink())),
                 },
                 head,

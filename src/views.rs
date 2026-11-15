@@ -251,7 +251,11 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         rec.data = serde_json::json!({"name": name, "start": start});
         rec.lines.insert(
             line.id.clone(),
-            LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, start) }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create { after: repo.line_state(&line, start) },
+                working_before: None,
+                working_after: None,
+            },
         );
         _lock.append(rec, &ctx.actor())?;
         write_view(
@@ -292,7 +296,7 @@ pub struct Trees {
 pub(crate) fn trees(repo: &Repo, line: &Line, v: &View) -> Result<Trees> {
     let up = upper(&repo.p, &line.id);
     let merged = Layered::over(&up, Layered::complete(&v.lower))?;
-    Ok(Trees { upper: up, merged, head: repo.state_src(&line.head)? })
+    Ok(Trees { upper: up, merged, head: repo.state_src(&line.head)?.into_layered() })
 }
 
 fn system_path(p: &str) -> bool {
@@ -342,7 +346,7 @@ fn candidates(t: &Trees, v: &View, rules: &crate::ignore_rules::Rules) -> Result
 
 /// The confirmed file changes of the merged view against the head, without ignored new files.
 pub(crate) fn file_changes(t: &Trees, v: &View) -> Result<Vec<EntryChange>> {
-    let rules = crate::ignore_rules::Rules::of(&t.merged);
+    let rules = crate::ignore_rules::Rules::of(&crate::source::Source::from(t.merged.clone()));
     let list = match candidates(t, v, &rules)? {
         Some(set) => {
             strip_quarantine(&t.upper, &set);
@@ -426,10 +430,10 @@ pub fn diff_input(
     line: &Line,
     v: &View,
     _keep: &mut Vec<crate::repo::Temp>,
-) -> Result<(Layered, Layered, Vec<EntryChange>)> {
+) -> Result<(crate::repo::Snap, crate::repo::Snap, Vec<EntryChange>)> {
     let t = trees(repo, line, v)?;
     let list = file_changes(&t, v)?;
-    Ok((t.head, t.merged, list))
+    Ok((t.head.into(), t.merged.into(), list))
 }
 
 fn topmost(paths: BTreeSet<String>) -> BTreeSet<String> {
@@ -490,7 +494,7 @@ fn write_state_as(
             gone.insert(r);
         }
     }
-    let rules = crate::ignore_rules::Rules::of(&t.merged);
+    let rules = crate::ignore_rules::Rules::of(&crate::source::Source::from(t.merged.clone()));
     fsutil::walk(t.upper.as_path(), "", &mut |rel, m| {
         if !m.is_dir() || skip_path(rel) || system_path(rel) || rules.ignored(rel, true) {
             return Ok(false);
@@ -533,11 +537,11 @@ fn write_state_as(
                 Ok(true)
             })?;
             for rel in excluded {
-                crate::storage::delete_tree(&path.join(rel))?;
+                crate::fs::remove(&path.join(rel))?;
             }
-            crate::storage::write_info(
+            crate::apfs::write_info(
                 &path,
-                &crate::storage::SubvolInfo {
+                &crate::apfs::SubvolInfo {
                     uuid: ids::new_id(),
                     received_uuid: None,
                     parent_uuid: None,
@@ -545,7 +549,7 @@ fn write_state_as(
                     base: None,
                 },
             )?;
-            crate::storage::seal(&path, true, false)
+            crate::apfs::seal(&path, true, false)
         })();
         if let Err(error) = made {
             let _ = repo.p.delete_state(&id);
@@ -583,7 +587,7 @@ pub fn save_working(
     }
     let t = trees(repo, line, v)?;
     let list = file_changes(&t, v)?;
-    crate::secrets::check_changes(ctx, repo, &t.head, &t.merged, &line.head, &list)?;
+    crate::secrets::check_changes(ctx, repo, &t.head.clone().into(), &t.merged.clone().into(), &line.head, &list)?;
     let st = write_state(ctx, repo, line, &t, &list, StateKind::Auto, message)?;
     let mut rec = crate::model::DraftRecord::new("save");
     rec.data = serde_json::json!({"line": line.id, "head": line.head,

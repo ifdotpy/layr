@@ -11,7 +11,7 @@ impl Fixture {
     fn new() -> anyhow::Result<Option<Self>> {
         let path = std::env::temp_dir().join(format!("layr-btrfs-create-{}", crate::ids::new_id()));
         std::fs::DirBuilder::new().mode(0o700).create(&path)?;
-        if !native::is_supported(&path) {
+        if !native::supports_volume(&path) {
             std::fs::remove_dir(path)?;
             return Ok(None);
         }
@@ -45,7 +45,7 @@ impl Drop for Fixture {
         }
         if let Ok(entries) = std::fs::read_dir(&self.path) {
             for entry in entries.flatten() {
-                let _ = native::delete_tree_native(&entry.path());
+                let _ = crate::fs::remove(&entry.path());
             }
         }
         let _ = std::fs::remove_dir(&self.path);
@@ -78,13 +78,13 @@ fn creation_pins_private_root_before_public_destination_can_be_replaced() -> any
     let replaced = destination.clone();
     f.driver.set_fault(move |point| {
         if point == "created" {
-            backend(native::create_subvolume(&replaced))?;
+            backend(crate::fs::create(&replaced))?;
             std::fs::write(replaced.join("sentinel"), b"unrelated")?;
         }
         Ok(())
     })?;
     assert!(
-        matches!(f.driver.freeze(&source.tree, f.driver.location(&destination)?), Err(FsError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists)
+        matches!(f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&destination)?), Err(FsError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists)
     );
     assert_eq!(std::fs::read(destination.join("sentinel"))?, b"unrelated");
     assert_eq!(bytes(source.tree.reader())?, b"source");
@@ -104,21 +104,21 @@ fn published_replacement_does_not_change_sealing_or_removal_identity() -> anyhow
     f.driver.set_fault(move |point| {
         if point == "published" {
             std::fs::rename(&to_replace, &old)?;
-            backend(native::create_subvolume(&to_replace))?;
+            backend(crate::fs::create(&to_replace))?;
             std::fs::write(to_replace.join("sentinel"), b"unrelated")?;
         }
         Ok(())
     })?;
-    let captured = f.driver.freeze(&source.tree, f.driver.location(&destination)?)?;
+    let captured = f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&destination)?)?;
     assert_eq!(bytes(captured.tree.reader())?, b"source");
-    assert!(!native::subvol_info(&destination)?.readonly);
-    assert!(native::subvol_info(&moved)?.readonly);
+    assert!(!native::native_info(&destination)?.readonly);
+    assert!(native::native_info(&moved)?.readonly);
     drop(captured.tree);
     let failure = f.driver.remove(captured.ownership).unwrap_err();
     assert!(matches!(failure.error, FsError::LocationChanged));
     assert!(moved.exists());
     assert_eq!(std::fs::read(destination.join("sentinel"))?, b"unrelated");
-    native::delete_tree(&destination)?;
+    crate::fs::remove(&destination)?;
     std::fs::rename(&moved, &destination)?;
     f.driver.remove(failure.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     assert!(!destination.exists());
@@ -143,7 +143,7 @@ fn root_open_and_preparation_failures_roll_back_both_creation_paths() -> anyhow:
             })?;
             let destination = f.path.join("failed");
             let result = if snapshot {
-                f.driver.freeze(&source.tree, f.driver.location(&destination)?).map(|_| ())
+                f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&destination)?).map(|_| ())
             } else {
                 f.driver.materialise(&MemoryTree::new(attributes(0)), f.driver.location(&destination)?).map(|_| ())
             };
@@ -175,11 +175,14 @@ fn legacy_cleanup_error_retains_driver_and_retry_authority() -> anyhow::Result<(
         }
         Ok(())
     })?;
-    let error = driver.freeze(&source, driver.location(&f.path.join("failed"))?).err().expect("injected root open must fail");
+    let error = driver
+        .freeze(layr_fs_core::FreezeSource::Working(&source), driver.location(&f.path.join("failed"))?)
+        .err()
+        .expect("injected root open must fail");
     drop(source);
-    let error = driver.legacy_error(error);
+    let error = crate::fs::operation_error(driver, error);
     assert!(weak.upgrade().is_some());
-    let NativeCleanup { driver, failure, .. } = error.downcast::<NativeCleanup>()?;
+    let crate::fs::Cleanup { driver, failure, .. } = error.downcast::<crate::fs::Cleanup>()?;
     driver.remove(failure.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     drop(driver);
     assert!(weak.upgrade().is_none());
@@ -210,7 +213,8 @@ fn mode_zero_snapshot_preserves_root_acl_and_does_not_chmod_source() -> anyhow::
     }
     rustix::fs::fsetxattr(root, "system.posix_acl_access", &acl, rustix::fs::XattrFlags::empty())?;
     assert_eq!(root.metadata()?.mode() & 0o7777, 0);
-    let captured = f.driver.freeze(&source.tree, f.driver.location(&f.path.join("snapshot"))?)?;
+    let captured =
+        f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&f.path.join("snapshot"))?)?;
     let captured_reader =
         f.driver.trees()?.get(&f.driver.issuer.frozen_key(&captured.tree)?).and_then(Resource::pinned).unwrap().reader.clone();
     for file in [root, captured_reader.directory.root_file()] {
@@ -233,7 +237,10 @@ fn frozen_publication_rejects_a_nonprivate_parent_before_creation() -> anyhow::R
     let public = f.path.join("public");
     std::fs::create_dir(&public)?;
     std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755))?;
-    assert!(matches!(f.driver.freeze(&source.tree, f.driver.location(&public.join("snapshot"))?), Err(FsError::Invalid(_))));
+    assert!(matches!(
+        f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&public.join("snapshot"))?),
+        Err(FsError::Invalid(_))
+    ));
     assert!(!public.join("snapshot").exists());
     f.no_stages()?;
     Ok(())
@@ -287,7 +294,7 @@ fn descriptor_exhaustion_rolls_back_without_opening_more_files() -> anyhow::Resu
         Ok(())
     })?;
     let destination = f.path.join("failed");
-    let result = f.driver.freeze(&source.tree, f.driver.location(&destination)?);
+    let result = f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&destination)?);
     held.lock().unwrap().clear();
     drop(restore);
     assert!(matches!(result, Err(FsError::Io(error)) if error.raw_os_error() == Some(rustix::io::Errno::MFILE.raw_os_error())));
@@ -305,7 +312,10 @@ fn private_creation_publishes_byte_names_and_rejects_untrusted_anchors() -> anyh
     let source = f.source()?;
     let working =
         f.driver.materialise(source.tree.reader(), f.driver.location(&f.path.join(OsStr::from_bytes(b"working-\xff")))?)?;
-    let snapshot = f.driver.freeze(&working.tree, f.driver.location(&f.path.join(OsStr::from_bytes(b"snapshot-\xfe")))?)?;
+    let snapshot = f.driver.freeze(
+        layr_fs_core::FreezeSource::Working(&working.tree),
+        f.driver.location(&f.path.join(OsStr::from_bytes(b"snapshot-\xfe")))?,
+    )?;
     assert_eq!(bytes(snapshot.tree.reader())?, b"source");
     let public = f.path.join("untrusted-anchor");
     std::fs::create_dir(&public)?;
@@ -355,7 +365,7 @@ fn live_reader_materialisation_preserves_nested_contents_and_snapshot_compatibil
     };
     let source = f.source()?;
     let nested = f.path.join("source/nested");
-    native::create_subvolume(&nested)?;
+    crate::fs::create(&nested)?;
     std::fs::write(nested.join("data"), b"nested contents")?;
     std::fs::hard_link(nested.join("data"), nested.join("alias"))?;
     std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o711))?;
@@ -394,7 +404,7 @@ fn live_reader_materialisation_preserves_nested_contents_and_snapshot_compatibil
     let imported_copy = f.driver.materialise(imported.reader(), f.driver.location(&f.path.join("imported"))?)?;
     assert_eq!(save(&store, imported_copy.tree.reader())?, expected);
     assert_eq!(snapshots.load(Ordering::SeqCst), 1);
-    let known = f.driver.freeze(&source.tree, f.driver.location(&f.path.join("known"))?)?;
+    let known = f.driver.freeze(layr_fs_core::FreezeSource::Working(&source.tree), f.driver.location(&f.path.join("known"))?)?;
     let _accelerated = f.driver.materialise(known.tree.reader(), f.driver.location(&f.path.join("accelerated"))?)?;
     assert_eq!(snapshots.load(Ordering::SeqCst), 3);
     Ok(())

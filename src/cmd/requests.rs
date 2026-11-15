@@ -489,6 +489,7 @@ mod tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let dir = ctx.store.project_dir("p").unwrap();

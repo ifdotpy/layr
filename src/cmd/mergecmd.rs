@@ -27,7 +27,7 @@ pub fn merge_states(
     parents: Vec<String>,
     message: &str,
 ) -> Result<(StateRec, merge::Outcome)> {
-    merge_states_with_commands(ctx, repo, line, base, ours, theirs, theirs_label, parents, message, true)
+    merge_states_with_commands(ctx, repo, line, base, ours, theirs, theirs_label, parents, message, true, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -42,15 +42,12 @@ fn merge_states_with_commands(
     parents: Vec<String>,
     message: &str,
     allow_commands: bool,
+    prepared: Option<PreparedMerge>,
 ) -> Result<(StateRec, merge::Outcome)> {
-    #[cfg(target_os = "macos")]
-    let prepared = PREPARED_MERGE.with(|p| p.borrow_mut().take()).filter(|p| {
+    let prepared = prepared.filter(|p| {
         allow_commands && p.line == line.id && p.base == base && p.ours == ours && p.theirs == theirs && p.label == theirs_label
     });
-    #[cfg(target_os = "macos")]
     let prepared = prepared.map(|p| (p.work, p.out));
-    #[cfg(not(target_os = "macos"))]
-    let prepared = None;
     let (work, out) = match prepared {
         Some(p) => p,
         None => merge_trees(ctx, repo, line, base, ours, theirs, theirs_label, allow_commands)?,
@@ -131,11 +128,10 @@ fn merge_trees_at(
     Ok((work, out))
 }
 
-/// A merge computed before the store lock (APFS): the states are immutable, so their merge
+/// A merge computed before the store lock: the states are immutable, so their merge
 /// needs no lock. Copying and merging the trees took minutes under the lock in a large project,
 /// and every other command of the project waited. Under the lock `merge_states` takes this
 /// result when the line, its head and the source did not move; else it merges again.
-#[cfg(target_os = "macos")]
 struct PreparedMerge {
     line: String,
     base: String,
@@ -145,38 +141,29 @@ struct PreparedMerge {
     work: crate::repo::Temp,
     out: merge::Outcome,
 }
-#[cfg(target_os = "macos")]
-thread_local! {
-    static PREPARED_MERGE: std::cell::RefCell<Option<PreparedMerge>> = const { std::cell::RefCell::new(None) };
-}
 
-/// The reads of `merge <rev>` before the store lock (APFS): the automatic state of the working
+/// The reads of `merge <rev>` before the store lock: the automatic state of the working
 /// folder, the status, the trees of the states, and the merge result. Errors only lose the
 /// preparation; the merge under the lock reads everything again.
-#[cfg(target_os = "macos")]
-fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<()> {
+fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<Option<PreparedMerge>> {
     let _t = crate::trace::span("prepare merge");
     let theirs = revs::resolve_state(repo, Some(line), rev)?;
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
-        return Ok(());
+        return Ok(None);
     }
     if repo.is_ancestor(head, &theirs)? {
         // A fast-forward reads the layers of the new head (`finish`): it needs no complete tree.
-        return Ok(());
+        return Ok(None);
     }
-    let Some(base) = repo.merge_base(&repo.source_id(head)?, &repo.source_id(&theirs)?)? else { return Ok(()) };
+    let Some(base) = repo.merge_base(&repo.source_id(head)?, &repo.source_id(&theirs)?)? else { return Ok(None) };
     let label = repo.p.db.line_by_name(rev)?.map(|l| l.name).unwrap_or_else(|| rev.to_string());
     let (work, out) = merge_trees(ctx, repo, line, &base, head, &theirs, &label, true)?;
-    crate::storage::prepare_snapshot(&work.path, &repo.p.work_dir(), true)?;
-    PREPARED_MERGE.with(|p| {
-        *p.borrow_mut() = Some(PreparedMerge { line: line.id.clone(), base, ours: head.to_string(), theirs, label, work, out })
-    });
-    Ok(())
+    repo.prepare_capture(&work.path)?;
+    Ok(Some(PreparedMerge { line: line.id.clone(), base, ours: head.to_owned(), theirs, label, work, out }))
 }
 
-/// One merge of a chain (`replay`, `pick`) made before the store lock (APFS).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// One merge of a chain (`replay`, `pick`) made before the store lock.
 struct PreparedStep {
     base: String,
     theirs: String,
@@ -191,8 +178,7 @@ type Steps = std::iter::Peekable<std::vec::IntoIter<PreparedStep>>;
 
 /// Give `merge_states` the prepared merge of (`base`, `theirs`) over `ours` when it is the next
 /// one of `steps`. Its conflicts get the real state of `ours`.
-#[cfg(target_os = "macos")]
-fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &str, label: &str) -> Result<()> {
+fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &str, label: &str) -> Result<Option<PreparedMerge>> {
     match steps.next_if(|s| s.base == base && s.theirs == theirs && s.label == label) {
         Some(step) => {
             let mut out = step.out;
@@ -205,29 +191,26 @@ fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &st
                     };
                 }
             }
-            PREPARED_MERGE.with(|m| {
-                *m.borrow_mut() = Some(PreparedMerge {
-                    line: line.id.clone(),
-                    base: base.to_string(),
-                    ours: ours.to_string(),
-                    theirs: theirs.to_string(),
-                    label: label.to_string(),
-                    work: step.work,
-                    out,
-                })
-            });
+            return Ok(Some(PreparedMerge {
+                line: line.id.clone(),
+                base: base.to_string(),
+                ours: ours.to_string(),
+                theirs: theirs.to_string(),
+                label: label.to_string(),
+                work: step.work,
+                out,
+            }));
         }
         // A later prepared merge was made over this one: none of them holds any more.
         None => *steps = Vec::new().into_iter().peekable(),
     }
-    Ok(())
+    Ok(None)
 }
 
-/// The merges of a chain before the store lock (APFS): each (base, theirs, label) merges onto
+/// The merges of a chain before the store lock: each (base, theirs, label) merges onto
 /// the result of the one before it, the first onto `onto`, in temporary folders, with a
 /// prepared snapshot copy of each result. Copying and merging the trees of every state took
 /// minutes under the lock.
-#[cfg(target_os = "macos")]
 fn prepare_steps(
     ctx: &Ctx,
     repo: &Repo,
@@ -242,14 +225,13 @@ fn prepare_steps(
             None => repo.state_root(onto)?,
         };
         let (work, out) = merge_trees_at(ctx, repo, line, &base, "", &ours_root, &theirs, &label, true)?;
-        crate::storage::prepare_snapshot(&work.path, &repo.p.work_dir(), true)?;
+        repo.prepare_capture(&work.path)?;
         steps.push(PreparedStep { base, theirs, label, work, out });
     }
     Ok(steps)
 }
 
-/// The merges of `replay` before the store lock (APFS), for the line at its head onto `onto`.
-#[cfg(target_os = "macos")]
+/// The merges of `replay` before the store lock, for the line at its head onto `onto`.
 fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &str) -> Result<Vec<PreparedStep>> {
     let _t = crate::trace::span("prepare replay");
     if repo.merge_base(&repo.source_id(&line.head)?, &repo.source_id(upstream)?)?.is_none() {
@@ -265,13 +247,6 @@ fn prepare_replay(ctx: &Ctx, repo: &Repo, line: &Line, upstream: &str, onto: &st
         }
     }
     prepare_steps(ctx, repo, line, onto, list)
-}
-
-/// Delete what the preparation left (after the lock).
-fn discard_prepared(repo: &Repo) {
-    #[cfg(target_os = "macos")]
-    PREPARED_MERGE.with(|p| p.borrow_mut().take());
-    repo.discard_prepared();
 }
 
 /// The merge of the follow overlays of two lines (docs/overlays.md, section 1): it goes with the
@@ -405,7 +380,8 @@ fn plan_overlays(
                 m.moves.push((tl.overlay.clone(), ol, st.id.clone(), Some(st)));
                 continue;
             }
-            let base = o.merge_base(&o.source_id(&ours_s)?, &o.source_id(&tl.state)?)?
+            let base = o
+                .merge_base(&o.source_id(&ours_s)?, &o.source_id(&tl.state)?)?
                 .ok_or_else(|| exit(128, format!("fatal: overlay '{}': refusing to merge unrelated histories", tl.overlay)))?;
             if !o.p.has_state(&base) {
                 return Err(exit(
@@ -1239,8 +1215,7 @@ fn checks_unlocked(
 /// A new state would drop the open conflicts of the head and keep their markers as content.
 /// Only files with markers matter: other kinds stay listed until the next commit.
 fn refuse_open_conflicts(st: &crate::repo::Status) -> Result<()> {
-    let paths: Vec<&str> =
-        st.conflicts.iter().filter(|c| c.uses_markers()).map(|c| c.path.as_str()).collect();
+    let paths: Vec<&str> = st.conflicts.iter().filter(|c| c.uses_markers()).map(|c| c.path.as_str()).collect();
     if paths.is_empty() {
         return Ok(());
     }
@@ -1307,7 +1282,7 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let before = line.head.clone();
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
-    discard_prepared(&h.repo);
+    h.repo.discard_prepared();
     let code = code?;
     // The caches of a merged line go with it, taken and saved as the follow pass does (docs/cache-overlays.md,
     // section 5). They are regenerable: a failure is reported and never undoes the merge.
@@ -1677,17 +1652,16 @@ fn merge_rev_inner(
     let expect = want.is_some();
     // The refusal of a protected line names the ready command; the state is read only.
     let hint = match queue {
-        None if !expect => Some(format!("layr merge {rev} --expect {}", ids::display(&revs::resolve_state(repo, Some(line), rev)?))),
+        None if !expect => {
+            Some(format!("layr merge {rev} --expect {}", ids::display(&revs::resolve_state(repo, Some(line), rev)?)))
+        }
         _ => None,
     };
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     if queue.is_none() {
         repo.hold(repo.pin(&[&revs::resolve_state(repo, Some(line), rev)?])?);
     }
-    if queue.is_none() {
-        #[cfg(target_os = "macos")]
-        let _ = prepare_merge(ctx, repo, line, rev);
-    }
+    let prepared_merge = if queue.is_none() { prepare_merge(ctx, repo, line, rev).ok().flatten() } else { None };
     if let Some(q) = queue {
         if let Some(expected) = &q.entry.expected_head {
             expected.check(&line.head)?;
@@ -1990,6 +1964,7 @@ fn merge_rev_inner(
         parents,
         &message,
         !queue.is_some_and(|q| q.candidate_only),
+        prepared_merge,
     )?;
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
@@ -2139,40 +2114,17 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             .ok_or_else(|| exit(128, format!("fatal: {} has no parent", ids::short(p))))?;
         Ok(if revert { (p.to_string(), parent) } else { (parent, p.to_string()) })
     };
-    // APFS: a pick that needs no merge is a thin layer and a write of its paths (`thin_pick`).
-    // The picks it does not take go on to the merge below.
-    #[cfg(target_os = "macos")]
-    if !revert {
-        let mut done = 0;
-        for p in &picks {
-            let cur = repo.line(&line.id)?;
-            let Some(sid) = thin_pick(ctx, repo, &cur, p, a.has("-x"))? else { break };
-            done += 1;
-            if !a.has("-q") {
-                let subject = repo.state(&sid)?.message.lines().next().unwrap_or("").to_string();
-                outln!(ctx, "[{} {}] {}", cur.name, ids::short(&sid), subject);
-            }
-        }
-        picks.drain(..done);
-        if picks.is_empty() {
-            return Ok(0);
-        }
-    }
     let comparison = if repo.uses_native_hints(&line)? { None } else { repo.prepare_status_report(&line).ok() };
-    #[cfg(target_os = "macos")]
     let prepared = (|| -> Result<Vec<PreparedStep>> {
         let _t = crate::trace::span("prepare pick");
         let chain = picks.iter().map(|p| pair(p).map(|(b, t)| (b, t, ids::short(p)))).collect::<Result<Vec<_>>>()?;
         prepare_steps(ctx, repo, &line, &line.head, chain)
     })()
     .unwrap_or_default();
-    #[cfg(not(target_os = "macos"))]
-    let prepared: Vec<PreparedStep> = Vec::new();
     let head_before = line.head.clone();
     let r = (|| -> Result<i32> {
         let (_line_lock, w) = work::begin_line(ctx, repo, &line, crate::repo::LineOp::Direct)?;
         let mut line = repo.line(&line.id)?;
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
         let mut steps: Steps = if line.head == head_before { prepared } else { Vec::new() }.into_iter().peekable();
         let locked = _line_lock.lock(&repo.p)?;
         let st = repo.locked_status_report(&locked, &line, comparison)?;
@@ -2196,13 +2148,24 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
                 c.message.clone()
             };
             let label = ids::short(&p);
-            #[cfg(target_os = "macos")]
-            hand_over(&mut steps, &line, &base, &line.head, &theirs, &label)?;
-            let (mut state, out) =
-                merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
+            let prepared = hand_over(&mut steps, &line, &base, &line.head, &theirs, &label)?;
+            let (mut state, out) = merge_states_with_commands(
+                ctx,
+                repo,
+                &line,
+                &base,
+                &line.head,
+                &theirs,
+                &label,
+                vec![line.head.clone()],
+                &message,
+                true,
+                prepared,
+            )?;
             if !revert {
                 state.author = c.author.clone();
                 state.change_id = c.change_id.clone();
+                state.parts = c.parts.clone();
             }
             let sid = state.id.clone();
             let n = out.conflicts.len();
@@ -2229,6 +2192,14 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
                 None,
             )?;
             line = repo.line(&line.id)?;
+            if !revert && n == 0 {
+                let taken =
+                    repo.pull_caches(ctx, &line, &crate::cache_overlay::Source::State(&p), &std::collections::BTreeSet::new())?;
+                let folders = taken.iter().map(|(folder, _)| folder.clone()).collect::<Vec<_>>();
+                if let Err(error) = crate::source_times::apply(&repo.working(&line), &folders) {
+                    eprintln!("warning: source file times of the caches not set: {error:#}");
+                }
+            }
             for m in &out.messages {
                 outln!(ctx, "{m}");
             }
@@ -2250,195 +2221,8 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
         }
         Ok(code)
     })();
-    discard_prepared(repo);
+    repo.discard_prepared();
     r
-}
-
-/// Leaves a pick to the merge; the trace names the reason.
-#[cfg(target_os = "macos")]
-fn declined(reason: &str) -> Result<Option<String>> {
-    let _t = crate::trace::span(format!("thin pick declined: {reason}"));
-    Ok(None)
-}
-
-/// The APFS pick without a merge (the common case): the change of the picked state over its
-/// parent is a thin layer over the head, and only the changed paths are written to the working
-/// folder. No tree is copied. Returns false, with nothing changed, when the merge is needed: the
-/// head changed the same paths, a folder or an attributes file changed, the working folder has
-/// local changes, or the state is not a thin layer over its parent.
-#[cfg(target_os = "macos")]
-fn thin_pick(ctx: &Ctx, repo: &Repo, line: &Line, pick: &str, picked_from: bool) -> Result<Option<String>> {
-    let _t = crate::trace::span("thin pick");
-    let c = repo.state(pick)?;
-    let [base] = c.parents.as_slice() else {
-        return declined("parents");
-    };
-    let base = base.clone();
-    // A thin picked state holds its change in its own layer (when that layer sits on `base`); a
-    // complete one (saved with caches) is read through its change set.
-    let own_layer = repo.p.delta_path(pick);
-    let complete = repo.p.state_path(pick);
-    let thin = !complete.is_dir()
-        && own_layer.is_dir()
-        && crate::storage::subvol_info(&own_layer)?.base.as_deref() == Some(base.as_str());
-    if !thin && !complete.is_dir() {
-        return declined("own layer");
-    }
-    repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
-    let _line_lock = repo.line_lock(line)?;
-    let line = repo.line(&line.id)?;
-    if repo.current_stage(&line)?.is_some() {
-        return declined("stage");
-    }
-    let w = repo.working(&line);
-    let head_src = repo.head_src(&line)?;
-    // Local changes go through the merge. Overlay folders are not part of the head: the walk for
-    // them (`cache_paths`) runs only when the working folder has a change.
-    let local = changes::file_changes(&head_src, &w)?;
-    if !local.is_empty() {
-        let regen = repo.cache_paths(&w)?;
-        let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
-        if local.iter().any(|x| keep(x.path()) || x.old_path().map(String::as_str).is_some_and(keep)) {
-            return declined("local change");
-        }
-    }
-    let base_src = repo.state_src(&base)?;
-    let pick_src = repo.state_src(pick)?;
-    let cands = changes::candidates(&base_src, &pick_src)?;
-    if cands.iter().any(|x| x.old().is_some_and(|m| m.is_dir()) || x.new().is_some_and(|m| m.is_dir())) {
-        return declined("directory change");
-    }
-    let theirs: Vec<changes::EntryChange> = changes::without_moves(changes::file_changes_of(&base_src, &pick_src, cands)?)
-        .into_iter()
-        .filter(|x| !skip_path(x.path()))
-        .collect();
-    let attributes = |p: &str| p.ends_with(".layrattributes") || p.ends_with(".gitattributes");
-    // Only a derive rule changes the merge of other paths; the merge reads the root attributes.
-    let mut derive = false;
-    for s in [&head_src as &dyn crate::fsutil::Src, &pick_src] {
-        for n in [".layrattributes", ".gitattributes"] {
-            if let Ok(text) = s.at(n).and_then(|p| Ok(std::fs::read_to_string(p).unwrap_or_default())) {
-                derive |= text.contains("derive");
-            }
-        }
-    }
-    if derive || theirs.iter().any(|x| attributes(x.path()) || x.old_path().map(String::as_str).is_some_and(attributes)) {
-        return declined("attributes");
-    }
-    let mut ours: Vec<String> = Vec::new();
-    if line.head != base {
-        for x in changes::without_moves(changes::file_changes(&base_src, &head_src)?) {
-            ours.push(x.path().clone());
-        }
-    }
-    let overlaps = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"));
-    for x in &theirs {
-        if ours.iter().any(|o| overlaps(x.path(), o)) {
-            return declined("overlap");
-        }
-    }
-    let _t = crate::trace::span(format!("pick visits {} paths", theirs.len()));
-    // The layer of the picked state already holds exactly its change over `base`: it becomes the
-    // layer of the new state over the head.
-    let (src, diff) = if thin {
-        let mut write = std::collections::BTreeSet::new();
-        crate::fsutil::walk(&own_layer, "", &mut |p, _| {
-            if !p.is_empty() {
-                write.insert(p.to_string());
-            }
-            Ok(true)
-        })?;
-        (own_layer.clone(), crate::thin::Diff { write, removed: crate::thin::removed_of(&own_layer)?, whole: Default::default() })
-    } else {
-        // The change set of the picked state over `base`, read from its complete tree.
-        let mut write = std::collections::BTreeSet::new();
-        let mut removed = std::collections::BTreeSet::new();
-        for x in &theirs {
-            if x.new().is_some() {
-                write.insert(x.path().clone());
-            } else {
-                removed.insert(x.path().clone());
-            }
-            if let Some(o) = x.old_path() {
-                removed.insert(o.clone());
-            }
-        }
-        (complete.clone(), crate::thin::Diff { write, removed, whole: Default::default() })
-    };
-    let id = ids::new_id();
-    let dst = repo.p.delta_path(&id);
-    crate::thin::write_layer(&src, &dst, &diff, &line.head, false, None)?;
-    let message =
-        if picked_from { format!("{}\n\n(picked from state {})", c.message, ids::display(pick)) } else { c.message.clone() };
-    let mut st = repo.describe_state(ctx, id.clone(), StateKind::Commit, vec![line.head.clone()], &message, Some(&line))?;
-    st.author = c.author.clone();
-    st.change_id = c.change_id.clone();
-    let states = std::slice::from_ref(&st);
-    let fail = |e: anyhow::Error| {
-        repo.discard_states(states);
-        e
-    };
-    if let Err(e) = repo.check_move(ctx, &line, &id) {
-        return Err(fail(e));
-    }
-    // The working folder takes the paths of the change (removals first, as a folder can replace
-    // a file). Each path is read from the layer that holds it in the new tree. A failure after
-    // this point writes each path back from the head.
-    let view = crate::thin::Layered::of_state(&repo.p, &id)?;
-    let own = repo.own(&line);
-    let undo_work = || -> Result<()> {
-        for x in &theirs {
-            for p in x.old_path().into_iter().chain(std::iter::once(x.path())) {
-                if crate::fsutil::lmeta(&head_src, p).is_some() {
-                    crate::fsutil::copy_work_entry(&head_src, p, &w, p, own)?;
-                } else {
-                    crate::fsutil::remove_entry(&w, p)?;
-                }
-            }
-        }
-        Ok(())
-    };
-    let work = (|| -> Result<()> {
-        for x in &theirs {
-            for gone in x.old_path().into_iter().chain(x.new().is_none().then_some(x.path())) {
-                if view.find(gone)?.is_none() {
-                    crate::fsutil::remove_entry(&w, gone)?;
-                }
-            }
-        }
-        for x in theirs.iter().filter(|x| x.new().is_some()) {
-            crate::fsutil::copy_work_entry(&view, x.path(), &w, x.path(), own)?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = work {
-        let _ = undo_work();
-        return Err(fail(e));
-    }
-    let data = serde_json::json!({"source": pick, "version": crate::model::VersionOperation {
-        state: id.clone(), kind: "pick".into(), source: pick.into(),
-        target_line: Some(line.id.clone()), target_head: line.head.clone(),
-    }});
-    // The working folder was clean, so its content before the pick is the head: undo reverts the
-    // working content of the pick with it (deleted files come back).
-    let head = line.head.clone();
-    let rec = match repo.head_record(ctx, "cherry-pick", &line, &id, vec![st], Some(line.head.clone()), data) {
-        Ok(rec) => rec,
-        Err(e) => {
-            let _ = undo_work();
-            return Err(e);
-        }
-    };
-    let all_states = rec.states.clone();
-    if let Err(e) = repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())) {
-        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
-            let _ = undo_work();
-            crate::repo::discard_unrecorded(repo, &all_states);
-        }
-        return Err(e.into());
-    }
-    repo.after_head_moved(&line, &id);
-    Ok(Some(id))
 }
 
 /// The uncommitted paths that a pick kept: the names of the first 20, then the count of the rest.
@@ -2483,12 +2267,9 @@ pub fn rebase(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     repo.hold(repo.pin(&[&line.head, &upstream, &onto])?);
     let comparison = if repo.uses_native_hints(&line)? { None } else { repo.prepare_status_report(&line).ok() };
-    #[cfg(target_os = "macos")]
     let prepared = (line.head.clone(), prepare_replay(ctx, repo, &line, &upstream, &onto).unwrap_or_default());
-    #[cfg(not(target_os = "macos"))]
-    let prepared = (String::new(), Vec::new());
     let r = replay_locked(ctx, repo, &line, &a, up, &upstream, &onto, prepared, comparison);
-    discard_prepared(repo);
+    repo.discard_prepared();
     r
 }
 
@@ -2509,7 +2290,6 @@ fn replay_locked(
     let line = repo.line(&line.id)?;
     let head0 = line.head.clone();
     // The merges prepared before the lock hold when the line did not move.
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
     let mut steps: Steps = if prepared.0 == line.head { prepared.1 } else { Vec::new() }.into_iter().peekable();
     let locked = _line_lock.lock(&repo.p)?;
     let st = repo.locked_status_report(&locked, &line, comparison)?;
@@ -2517,7 +2297,8 @@ fn replay_locked(
     if !st.clean() {
         return Err(exit(1, "error: cannot replay: you have unstaged or staged changes.\nPlease save or park them."));
     }
-    repo.merge_base(&repo.source_id(&line.head)?, &repo.source_id(&upstream)?)?.ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
+    repo.merge_base(&repo.source_id(&line.head)?, &repo.source_id(&upstream)?)?
+        .ok_or_else(|| exit(128, "fatal: no common ancestor"))?;
     if repo.is_ancestor(&upstream, &line.head)? && onto == upstream {
         outln!(ctx, "Current line {} is up to date.", line.name);
         return Ok(0);
@@ -2535,9 +2316,20 @@ fn replay_locked(
             [] => return Err(exit(128, format!("fatal: cannot replay {}: it has no parent", ids::short(p)))),
             _ => continue,
         };
-        #[cfg(target_os = "macos")]
-        hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p))?;
-        let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
+        let prepared = hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p))?;
+        let (mut s, out) = merge_states_with_commands(
+            ctx,
+            repo,
+            &line,
+            &parent,
+            &cur,
+            p,
+            &ids::short(p),
+            vec![cur.clone()],
+            &c.message,
+            true,
+            prepared,
+        )?;
         s.author = c.author.clone();
         s.change_id = c.change_id.clone();
         // A replayed state moves the base change onto the new upstream; its parts on the overlays stay those of the
@@ -2653,6 +2445,7 @@ mod approval_tests {
             cwd: dir.clone(),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let project_dir = ctx.store.project_dir("p").unwrap();
@@ -2726,6 +2519,7 @@ mod approval_tests {
             cwd: dir.clone(),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         assert!(check_approvals(&root_ctx, &repo, &line, Some(&rule), &base.id, &ordinary.id, false).is_ok());

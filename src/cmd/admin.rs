@@ -15,7 +15,6 @@ use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::{skip_path, Repo};
 pub(crate) use crate::retention::{drop_trees, overlay_named_states};
 use crate::revs;
-use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -389,11 +388,10 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
     // The copy of each cache folder that the overlay save takes under the lock is made here, before it.
-    #[cfg(target_os = "macos")]
     for p in &ready {
         let cp = fsutil::safe_join(&w, p)?;
-        if btrfs::is_subvolume(&cp) {
-            btrfs::prepare_snapshot(&cp, &repo.p.work_dir(), true)?;
+        if crate::fs::host().namespace.managed(&cp) {
+            repo.prepare_capture(&cp)?;
         }
     }
     Ok(refused)
@@ -674,7 +672,11 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let now = repo.line_state(&line, &line.head);
     rec.lines.insert(
         lid.clone(),
-        LineChange { transition: crate::model::LineTransition::Move { before: now.clone(), after: now }, working_before: wb.clone(), working_after: Some(before) },
+        LineChange {
+            transition: crate::model::LineTransition::Move { before: now.clone(), after: now },
+            working_before: wb.clone(),
+            working_after: Some(before),
+        },
     );
     let head0 = line.head.clone();
     let done = match repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec)) {
@@ -824,8 +826,11 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         };
         for l in &made {
             let o = repo.overlay_repo(&l.overlay)?;
-            let parent =
-                o.parents(&o.source_id(&l.state)?)?.first().cloned().ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
+            let parent = o
+                .parents(&o.source_id(&l.state)?)?
+                .first()
+                .cloned()
+                .ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
             let info = repo.need_overlay(&l.overlay)?;
             let Some(ol) = crate::overlay::find_overlay_line(&o.p.db, &info, &line)? else { continue };
             if ol.head != l.state && !force {
@@ -882,9 +887,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let mut needed: Vec<String> = Vec::new();
     for ch in r.lines.values() {
         needed.extend(
-            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
-                .into_iter()
-                .flatten(),
+            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten(),
         );
     }
     needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
@@ -981,7 +984,11 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         rec.lines.insert(
             lid.clone(),
-            LineChange { transition: crate::model::LineTransition::from_endpoints(cur_state, ch.before().cloned()), working_before: wb, working_after: ch.working_before.clone() },
+            LineChange {
+                transition: crate::model::LineTransition::from_endpoints(cur_state, ch.before().cloned()),
+                working_before: wb,
+                working_after: ch.working_before.clone(),
+            },
         );
     }
     for (name, ol, parent) in &overlay_back {
@@ -1335,7 +1342,7 @@ pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
         .iter()
         .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
         .filter(|p| p.exists())
-        .filter_map(|p| crate::storage::space(&p).ok().map(|s| s.unique))
+        .filter_map(|p| crate::fs::host().accounting.space(&p).ok().map(|s| s.unique))
         .sum()
 }
 
@@ -1682,8 +1689,9 @@ fn repair_project(
             eprintln!("warning: unnamed OCI blobs stay until the next gc: {e:#}");
         }
     }
-    #[cfg(target_os = "macos")]
-    crate::storage::prune_saved_scans(&repo.p.dir)?;
+    if let Some(prune) = crate::fs::host().prune_observations {
+        prune(&repo.p.dir)?;
+    }
     if !quiet {
         outln!(ctx, "freed {freed} state(s), {} leaked", leaks.len());
         if evicted.states + evicted.caches > 0 {
@@ -2092,7 +2100,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             None => {
                 problems += 1;
                 if a.has("--repair") {
-                    btrfs::delete_tree(&e.path())?;
+                    crate::fs::remove(&e.path())?;
                     outln!(ctx, "deleted snapshot without record: {name}");
                 } else {
                     outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
@@ -2159,7 +2167,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
             if o.p.db.state(&id)?.is_none() && !crate::free::preparing_state(&o.p, &id)? {
                 problems += 1;
                 if repair {
-                    btrfs::delete_tree(&e.path())?;
+                    crate::fs::remove(&e.path())?;
                     outln!(ctx, "overlay {name}: deleted snapshot without record: {id}");
                 } else {
                     outln!(ctx, "overlay {name}: snapshot without record: {id} (use --repair)");
@@ -2167,7 +2175,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
             }
         }
         for l in o.lines()? {
-            if !o.p.has_state(&l.head) {
+            if !o.p.has_state(&l.head) && crate::objstore::verified(&o.p, &l.head)?.is_none() {
                 // Remote sync imports cache records for every platform, but only the local
                 // platform's trees. An intentional absence is not damage; a present/deleted
                 // marker or a local-platform head still requires the normal error below.
@@ -2432,8 +2440,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             crate::objstore::enable(&_lock, ctx, &repo)?;
         }
         let work = repo.p.work_dir().join(crate::store::temp_name());
-        btrfs::create_subvolume(&work)?;
-        let cleanup = crate::repo::Temp { path: work.clone() };
+        let mut cleanup = crate::repo::Temp::empty(work.clone())?;
         let mut parents = Vec::new();
         let mut msg = a.get("-m").unwrap_or("initial state").to_string();
         if let Some(url) = a.get("--git") {
@@ -2486,18 +2493,16 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     // Copy as the caller, then freeze the bytes used by both the HEAD import
                     // and the folder content. A source edit cannot race the blob comparison.
                     let tmp = repo.p.work_dir().join(crate::store::temp_name());
-                    btrfs::create_subvolume(&tmp)?;
-                    let _t2 = crate::repo::Temp { path: tmp.clone() };
+                    let _t2 = crate::repo::Temp::empty(tmp.clone())?;
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
                     let snap = repo.temp_snapshot(&tmp, true)?;
-                    let (st, _) =
-                        crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"))?;
+                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"))?;
                     // The line starts at the HEAD commit: its tree is built now, from the folder copy.
                     crate::gitbridge::build_tree(&repo, &st, Some(&snap.path), Some(owner_ids))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
-                    btrfs::delete_tree(&work)?;
-                    repo.snapshot_state(&st, &work, false)?;
+                    drop(cleanup);
+                    cleanup = crate::repo::Temp::source(&repo.state_src(&st)?, work.clone(), crate::fs::Protection::Writable)?;
                     let imported = repo.state_root(&st)?;
                     let diffs = changes::file_changes(&imported, &snap.path);
                     // Different file systems give no common lineage: compare by walking instead.
@@ -2569,7 +2574,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // Close the database first: an open file keeps its overlay mount busy (OverlayFS).
             drop(repo);
             // Remove the folder this call made, with its subvolumes. The error of the step is kept.
-            if let Err(c) = btrfs::delete_tree(&dir) {
+            if let Err(c) = crate::fs::remove(&dir) {
                 return Err(e.context(format!("cannot remove {}: {c:#}", dir.display())));
             }
             return Err(e);
@@ -3594,6 +3599,7 @@ mod op_log_tests {
             cwd: project_dir.join("lines/main"),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
         };
         for all in [false, true] {
@@ -3651,6 +3657,7 @@ mod caller_import_tests {
                 cwd: src.clone(),
                 env: Default::default(),
                 author: Default::default(),
+                captures: Default::default(),
                 out: std::cell::RefCell::new(Box::new(std::io::sink())),
             };
             assert_eq!(copy_folder(&ctx, &src, &dst, true, None)?, 133);

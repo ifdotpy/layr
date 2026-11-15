@@ -32,7 +32,7 @@ const COMPARE_DIR: &str = "overlap-compares";
 /// The folder under `meta/` that holds the saved compares of a line's head with its live folder.
 const LIVE_DIR: &str = "overlap-live";
 /// Format of the saved live compares. Bump it when `compare` changes its results.
-const LIVE_FORMAT: u32 = 1;
+const LIVE_FORMAT: u32 = 2;
 /// Threads that compare saved states at once.
 
 #[derive(Debug, Serialize)]
@@ -80,16 +80,17 @@ fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
     crate::fsutil::cache_write(file, &serde_json::to_vec(saved)?, 0o600)
 }
 
-/// A digest of every entry of a scan: the path, the metadata, the data identity and the birth.
-#[cfg(target_os = "macos")]
-fn scan_digest(live: &Path) -> Result<String> {
+/// Equality of verifiable observation evidence can reuse a previous comparison. Missing
+/// evidence, including mapped files, always requires another content read.
+fn scan_digest(live: &Path) -> Result<Option<String>> {
     use layr_hashers::{Digest, GitCompatible};
-    let scan = crate::storage::scan_shared(live, true)?;
-    let mut h = GitCompatible::new();
-    for (path, e) in scan.iter() {
-        h.update(format!("{path}|{:?}|{:?}|{:?}|{:?}\n", e.fingerprint, e.meta, e.data, e.birth).as_bytes());
+    let scan = crate::fs::observe_tree(live)?;
+    if scan.values().any(|entry| !entry.verifiable()) {
+        return Ok(None);
     }
-    Ok(hex::encode(h.finalize()))
+    let mut hash = GitCompatible::new();
+    hash.update(&serde_json::to_vec(&scan)?);
+    Ok(Some(hex::encode(hash.finalize())))
 }
 
 /// The real changes between two trees. Paths that `skip_path` or `rules` ignore are left out
@@ -439,14 +440,13 @@ impl Repo<'_> {
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
     /// a copy would clone every file, cache folders included.
     fn radar_tree(&self, line: &Line) -> Result<(Option<crate::repo::Temp>, PathBuf)> {
-        #[cfg(target_os = "macos")]
-        return Ok((None, self.working(line)));
-        #[cfg(not(target_os = "macos"))]
-        {
-            let t = self.scan(line)?;
-            let path = t.path.clone();
-            Ok((Some(t), path))
+        let working = self.working(line);
+        if !crate::fs::prefers_captured_comparison(&working) {
+            return Ok((None, working));
         }
+        let captured = self.scan(line)?;
+        let path = captured.path.clone();
+        Ok((Some(captured), path))
     }
 
     /// Our head -> live folder compare: one per call, shared by all merge bases.
@@ -468,13 +468,7 @@ impl Repo<'_> {
     /// when the head and the scan of the folder (every path, its metadata and data identity) are
     /// the same. The compare reads only those, so the result is the same. Other platforms compare.
     fn live_compare(&self, line: &Line, head: &Snap, live: &Path, rules: &Rules) -> Result<Vec<Found>> {
-        #[cfg(target_os = "macos")]
-        let digest = {
-            let _t = crate::trace::span("overlap live digest");
-            Some(scan_digest(live)?)
-        };
-        #[cfg(not(target_os = "macos"))]
-        let digest: Option<String> = None;
+        let digest = scan_digest(live)?;
         let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
         if let Some(digest) = &digest {
             let saved = std::fs::read(&file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
@@ -487,7 +481,7 @@ impl Repo<'_> {
             let _t = crate::trace::span("overlap live compare");
             compare(head, live, rules)?
         };
-        if let Some(digest) = digest {
+        if let Some(digest) = digest.filter(|digest| scan_digest(live).ok().flatten().as_ref() == Some(digest)) {
             // A file that cannot be written only costs the next status a compare.
             let saved = SavedLive { format: LIVE_FORMAT, head: line.head.clone(), digest, found: found.clone() };
             let _ = write_live(&file, &saved);

@@ -5,8 +5,6 @@ use crate::ids;
 use crate::model::{Line, LineChange};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
-#[cfg(not(target_os = "macos"))]
-use std::path::Path;
 use std::path::PathBuf;
 
 /// A refused delete must not touch a replacement line or working folder.
@@ -97,55 +95,13 @@ fn batch_names(prefix: &str, count: usize) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Submit standard snapshots concurrently so the kernel can share transaction commits.
-#[cfg(not(target_os = "macos"))]
-fn snapshots(src: &Path, destinations: &[PathBuf]) -> Result<()> {
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    {
-        let workers = destinations.len().min(8);
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|worker| {
-                    scope.spawn(move || -> Result<()> {
-                        for dst in destinations.iter().skip(worker).step_by(workers) {
-                            crate::storage::snapshot(src, dst, false)?;
-                        }
-                        Ok(())
-                    })
-                })
-                .collect();
-            // Join every worker before any rollback can remove its destination.
-            let mut error = None;
-            for handle in handles {
-                match handle.join() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => error = Some(e),
-                    Err(_) => error = Some(anyhow::anyhow!("snapshot worker failed")),
-                }
-            }
-            match error {
-                Some(e) => Err(e),
-                None => Ok(()),
-            }
-        })
-    }
-    #[cfg(feature = "overlayfs")]
-    {
-        for dst in destinations {
-            crate::storage::snapshot(src, dst, false)?;
-        }
-        Ok(())
-    }
-}
-
 /// Line folders made without the project lock, waiting for `commit_prepared_lines`.
 pub(crate) struct PreparedLines {
     start: String,
     pub(crate) lines: Vec<Line>,
     tmps: Vec<PathBuf>,
     recs: Vec<crate::model::DraftRecord>,
-    /// The line that the lines start from: an OverlayFS commit takes its caches (`commit_prepared_lines`).
-    #[cfg(feature = "overlayfs")]
+    /// Cache selection follows publication, so nested mounts never move with a parent.
     source: Option<Line>,
 }
 
@@ -207,8 +163,8 @@ impl Repo<'_> {
     }
 
     /// The heavy part of line creation, without the project lock: the tree clone, the overlay
-    /// layers, the .git folder and the caches of every line, in the service's work folder. The
-    /// lines appear only in `commit_prepared_lines`, which checks again under the lock.
+    /// layers and .git folders in private work directories. `commit_prepared_lines` checks
+    /// again under the lock, publishes the folders, then installs their caches.
     pub(crate) fn prepare_named_lines(
         &self,
         ctx: &Ctx,
@@ -241,7 +197,7 @@ impl Repo<'_> {
                 // with its times (hot blobs are clones), no snapshot is built first.
                 Some((store, refs)) => {
                     for tmp in &tmps {
-                        crate::storage::create_subvolume(tmp)?;
+                        crate::fs::create(tmp)?;
                         // This private work directory is inaccessible to the caller. Decode
                         // here with the service identity; prepare_at assigns the line owner
                         // before publication, including every file below the root.
@@ -249,12 +205,10 @@ impl Repo<'_> {
                     }
                 }
                 None => {
-                    #[cfg(target_os = "macos")]
+                    let source = self.state_src(start)?;
                     for tmp in &tmps {
-                        self.snapshot_state(start, tmp, false)?;
+                        crate::source::storage::create_stage(&source, tmp, None)?.release();
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    snapshots(&self.state_root(start)?, &tmps)?;
                 }
             }
             let mut recs = Vec::new();
@@ -270,14 +224,7 @@ impl Repo<'_> {
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
-                // On OverlayFS the caches are taken after the folder move (`commit_prepared_lines`): a
-                // mount under a moved folder is lost by MS_MOVE. Elsewhere a take is a snapshot taken
-                // before the store lock, and it runs first so `prepare_at` does not copy the folder again.
-                #[cfg(not(feature = "overlayfs"))]
-                let cached = self.take_caches(ctx, line, start, source, tmp)?;
-                #[cfg(feature = "overlayfs")]
-                let cached: Vec<String> = Vec::new();
-                self.prepare_at(line, start, tmp, &cached)?;
+                self.prepare_at(line, start, tmp, &[])?;
                 let mut rec = crate::model::DraftRecord::new("line.create");
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {
@@ -289,20 +236,17 @@ impl Repo<'_> {
                 }
                 rec.lines.insert(
                     line.id.clone(),
-                    LineChange { transition: crate::model::LineTransition::Create { after: self.line_state(line, start) }, working_before: None, working_after: None },
+                    LineChange {
+                        transition: crate::model::LineTransition::Create { after: self.line_state(line, start) },
+                        working_before: None,
+                        working_after: None,
+                    },
                 );
                 recs.push(rec);
             }
             Ok(recs)
         })();
-        let prepared = PreparedLines {
-            start: start.to_string(),
-            lines,
-            tmps,
-            recs: Vec::new(),
-            #[cfg(feature = "overlayfs")]
-            source: source.cloned(),
-        };
+        let prepared = PreparedLines { start: start.to_string(), lines, tmps, recs: Vec::new(), source: source.cloned() };
         match result {
             Ok(recs) => Ok(PreparedLines { recs, ..prepared }),
             Err(e) => {
@@ -315,7 +259,7 @@ impl Repo<'_> {
     /// Delete the prepared folders and the bases of lines that were never recorded.
     pub(crate) fn discard_prepared_lines(&self, prepared: PreparedLines) {
         for (line, tmp) in prepared.lines.iter().zip(&prepared.tmps) {
-            let _ = crate::storage::delete_tree(tmp);
+            let _ = crate::fs::remove(tmp);
             if self.p.db.line_by_id(&line.id).ok().flatten().is_none() {
                 let _ = self.prune_bases(line, None, 0);
             }
@@ -332,7 +276,6 @@ impl Repo<'_> {
     ) -> Result<Vec<Line>> {
         locked.check(&self.p)?;
         let _t = crate::trace::span("record lines");
-        #[cfg(feature = "overlayfs")]
         let source = prepared.source.clone();
         let PreparedLines { start, lines, tmps, mut recs, .. } = prepared;
         let result = (|| -> crate::db::PublishResult<()> {
@@ -341,7 +284,6 @@ impl Repo<'_> {
             self.source_state(&start)?;
             for (line, tmp) in lines.iter().zip(&tmps) {
                 crate::fsutil::rename_tree(tmp, self.working(line))?;
-                #[cfg(feature = "overlayfs")]
                 self.take_caches(ctx, line, &start, source.as_ref(), &self.working(line))?;
             }
             locked.append_batch(&mut recs, &ctx.actor())?;
@@ -362,10 +304,10 @@ impl Repo<'_> {
             for (line, tmp) in lines.iter().zip(&tmps) {
                 // A moved tmp is ours at the line path; a folder there while tmp exists is not ours.
                 let moved = !tmp.exists();
-                let _ = crate::storage::delete_tree(tmp);
+                let _ = crate::fs::remove(tmp);
                 if self.p.db.line_by_id(&line.id)?.is_none() {
                     if moved && self.p.db.line_by_name(&line.name)?.is_none() {
-                        let _ = crate::storage::delete_tree(&self.working(line));
+                        let _ = crate::fs::remove(&self.working(line));
                     }
                     let _ = self.prune_bases(line, None, 0);
                 }
@@ -374,76 +316,6 @@ impl Repo<'_> {
         }
         // The store access was synced in `prepare_named_lines`, without the lock.
         Ok(lines)
-    }
-
-    /// Snapshot replacement is unsafe with local-only files, caches, overlays or active users.
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    pub fn reset_snapshot(&self, ctx: &Ctx, line: &Line, target: &str) -> Result<bool> {
-        let working = self.working(line);
-        let git = working.join(".git");
-        if git.symlink_metadata().is_ok() && !crate::storage::is_subvolume(&git) {
-            return Ok(false);
-        }
-        if ctx.cwd.starts_with(&working)
-            || self.is_stacked(line)?
-            || !self.pending_moves(line).is_empty()
-            || !self.cache_paths(&working)?.is_empty()
-            || !self.cache_paths(&self.state_root(target)?)?.is_empty()
-            || crate::busy::user_of(&working)?.is_some()
-        {
-            return Ok(false);
-        }
-        let (status, _, _, _) = self.status(line)?;
-        if !status.untracked.is_empty() || !status.untracked_dirs.is_empty() || !status.ignored.is_empty() {
-            return Ok(false);
-        }
-        // Only .git may be nested. Other subvolumes must keep their identity.
-        let target_root = self.state_root(target)?;
-        let mut nested = false;
-        crate::fsutil::walk(&working, "", &mut |p, m| {
-            if p == ".git" {
-                return Ok(false);
-            }
-            if m.is_dir() && (crate::storage::is_subvolume(&working.join(p)) || crate::fsutil::lmeta(&target_root, p).is_none()) {
-                nested = true;
-                return Ok(false);
-            }
-            Ok(true)
-        })?;
-        if nested {
-            return Ok(false);
-        }
-        let replacement = self.temp_work(&self.state_root(target)?)?;
-        self.prepare_at(line, target, &replacement.path, &[])?;
-        // Preserve the existing Git folder, including local settings and object links.
-        crate::storage::delete_tree(&replacement.path.join(".git"))?;
-        let has_git = git.symlink_metadata().is_ok();
-        if has_git {
-            // Moving a folder to another parent needs write permission on it.
-            crate::fsutil::git_writable(&working, true);
-            std::fs::rename(&git, replacement.path.join(".git"))?;
-        }
-        let swap = rustix::fs::renameat_with(
-            rustix::fs::CWD,
-            &replacement.path,
-            rustix::fs::CWD,
-            &working,
-            rustix::fs::RenameFlags::EXCHANGE,
-        );
-        if let Err(e) = swap {
-            if has_git {
-                std::fs::rename(replacement.path.join(".git"), &git)?;
-                crate::fsutil::git_writable(&working, false);
-            }
-            return Err(e.into());
-        }
-        crate::fsutil::git_writable(&working, false);
-        Ok(true)
-    }
-
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-    pub fn reset_snapshot(&self, _ctx: &Ctx, _line: &Line, _target: &str) -> Result<bool> {
-        Ok(false)
     }
 }
 
@@ -481,6 +353,7 @@ mod batch_commit_tests {
             env: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
             author: Default::default(),
+            captures: Default::default(),
         };
         Ok((root, ctx))
     }
@@ -528,13 +401,17 @@ mod batch_commit_tests {
             rec.data = serde_json::json!({"name": line.name, "start": start});
             rec.lines.insert(
                 line.id.clone(),
-                LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &start) }, working_before: None, working_after: None },
+                LineChange {
+                    transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &start) },
+                    working_before: None,
+                    working_after: None,
+                },
             );
             lines.push(line);
             tmps.push(tmp);
             recs.push(rec);
         }
-        Ok((repo, PreparedLines { start, lines, tmps, recs }))
+        Ok((repo, PreparedLines { start, lines, tmps, recs, source: None }))
     }
 
     #[test]

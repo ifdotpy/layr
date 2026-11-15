@@ -16,6 +16,7 @@ pub(crate) fn sys<T>(result: rustix::io::Result<T>) -> Result<T> {
 pub struct DirectoryTree {
     root: File,
     serial: AtomicU64,
+    root_enumeration: std::sync::Mutex<()>,
 }
 impl DirectoryTree {
     pub fn open(path: &Path) -> Result<Self> {
@@ -29,7 +30,7 @@ impl DirectoryTree {
         if !root.metadata()?.is_dir() {
             return Err(FsError::Invalid("tree root is not a directory"));
         }
-        Ok(Self { root, serial: AtomicU64::new(0) })
+        Ok(Self { root, serial: AtomicU64::new(0), root_enumeration: std::sync::Mutex::new(()) })
     }
     pub fn root_file(&self) -> &File {
         &self.root
@@ -394,9 +395,20 @@ impl TreeRead for DirectoryTree {
         }))
     }
     fn entries(&self, dir: &RelDir, visit: &mut dyn FnMut(&RelPath) -> Result<()>) -> Result<()> {
+        // Consume the newly opened child FD: read_from reopens "." and unnecessarily
+        // requires search permission on a directory whose names are already readable.
+        let _root_guard = if matches!(dir, RelDir::Root) {
+            Some(self.root_enumeration.lock().map_err(|_| FsError::Invalid("root enumeration lock poisoned"))?)
+        } else {
+            None
+        };
         let directory = self.directory(dir.as_bytes())?;
+        let mut stream = sys(fs::Dir::new(directory))?;
+        if matches!(dir, RelDir::Root) {
+            stream.rewind();
+        }
         let mut names = Vec::new();
-        for entry in sys(fs::Dir::read_from(&directory))? {
+        for entry in stream {
             let entry = sys(entry)?;
             let name = entry.file_name().to_bytes();
             if name != b"." && name != b".." {

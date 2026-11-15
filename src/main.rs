@@ -18,81 +18,78 @@ mod stream_fs;
 compile_error!("the overlayfs feature requires Linux");
 mod args;
 mod attestation;
-mod byte_size;
-mod cache_overlay;
-mod change_hints;
-mod changes;
-#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
-mod fs_candidates;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_driver;
-mod compare;
+mod byte_size;
+mod cache_overlay;
+mod changes;
 mod cmd;
+mod compare;
 mod db;
 mod dedup;
 mod diff;
 mod disk;
 mod errors;
 mod free;
-mod fsutil;
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
+mod fs_candidates;
 #[cfg(test)]
 mod fs_contract_tests;
+mod fsutil;
 mod gitbridge;
 mod ids;
 use layr_store::http;
+#[cfg(target_os = "macos")]
+mod apfs;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_scan;
+mod fs;
 mod ignore_rules;
 mod layrfs;
 mod lineops;
 mod linepaths;
+#[cfg(target_os = "linux")]
+mod linux_status;
 mod machine_trust;
 mod merge;
-mod write_source;
 mod model;
-mod objstore;
 mod object_tree;
-#[cfg(not(target_os = "macos"))]
-mod source;
+mod objstore;
 mod oci;
 mod oplog;
 mod overlay;
 mod overlay_managers;
-mod person;
+#[cfg(feature = "overlayfs")]
+mod overlayfs;
 mod pathspec;
+mod person;
 mod privs;
 mod probes;
+mod project_config;
 mod project_copy;
 mod project_move;
-mod project_config;
 mod radar;
 mod receive_stream;
 mod recv;
+mod remote_config;
 mod repo;
 mod retention;
-mod remote_config;
 mod revs;
 mod rootcheck;
 mod runner;
 mod schemas;
 mod secrets;
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod send_cache;
 mod service;
+mod source;
 mod source_times;
 mod status_cache;
-#[cfg(target_os = "linux")]
-mod linux_status;
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-#[path = "btrfs.rs"]
-mod storage;
-#[cfg(feature = "overlayfs")]
-#[path = "overlayfs.rs"]
-mod storage;
-#[cfg(target_os = "macos")]
-#[path = "apfs.rs"]
-mod storage;
 mod store;
+mod write_source;
 // The binary examples are checked against its real types without another permanent Cargo target.
 #[cfg(layr_doctest)]
 pub use store::Project;

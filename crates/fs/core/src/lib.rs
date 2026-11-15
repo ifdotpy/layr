@@ -55,6 +55,29 @@ impl From<std::io::Error> for FsError {
 }
 pub type Result<T> = std::result::Result<T, FsError>;
 
+/// The metadata needed by a caller and how much content detail it will consume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeScope {
+    Content,
+    Stored,
+    FullState,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeDetail {
+    Equality,
+    Ranges,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct ChangeRequest {
+    pub scope: ChangeScope,
+    pub detail: ChangeDetail,
+}
+impl Default for ChangeRequest {
+    fn default() -> Self {
+        Self { scope: ChangeScope::FullState, detail: ChangeDetail::Ranges }
+    }
+}
+
 /// Link identities are meaningful only within one reader's namespace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryMetadata {
@@ -104,6 +127,19 @@ impl<T: Read + Seek + Send> ReadSeek for T {}
 
 /// All lookups are relative, no parent symlinks may be traversed, and absence differs from IO failure.
 pub trait TreeRead: Send + Sync {
+    /// Driver-local evidence adapters may recognise each other. Shared algorithms never
+    /// downcast readers and always retain the complete-enumeration fallback.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+    fn candidate_evidence(
+        &self,
+        _after: &dyn TreeRead,
+        _request: ChangeRequest,
+        _selection: Option<&std::collections::BTreeSet<RelPath>>,
+    ) -> Result<hints::HintSet> {
+        Ok(hints::HintSet::Partial)
+    }
     /// None confines link identities to this reader. Adapters may share an explicit domain.
     fn link_domain(&self) -> Option<&LinkDomain> {
         None
@@ -161,19 +197,62 @@ pub struct Capture {
 }
 
 /// Core changes are a complete candidate superset; hints alone may be partial.
+/// Capture a backend-affine working tree, or materialise and seal a logical reader.
+/// The distinction preserves wrong-instance rejection without exporting logical sources.
+pub enum FreezeSource<'a> {
+    Working(&'a WorkingTree),
+    Reader(&'a dyn TreeRead),
+    Captured(Capture),
+}
 pub trait Filesystem: Send + Sync {
+    /// Create an empty working tree with the driver's normal creation defaults.
+    fn create_empty(&self, dst: NewTreeLocation) -> Result<CreatedTree>;
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> Result<CreatedTree>;
-    fn freeze(&self, source: &WorkingTree, dst: NewTreeLocation) -> Result<Capture>;
-    fn changes(&self, before: &FrozenTree, after: &FrozenTree) -> Result<Vec<evidence::EntryChange>>;
+    fn freeze(&self, source: FreezeSource<'_>, dst: NewTreeLocation) -> Result<Capture>;
+    fn changes(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: crate::ChangeRequest,
+    ) -> Result<Vec<evidence::EntryChange>>;
     fn remove(&self, tree: OwnedTree) -> std::result::Result<(), RemovalFailure>;
     fn capabilities(&self, scope: &TreeScope) -> Capabilities<'_>;
 }
 
 #[derive(Default)]
 pub struct Capabilities<'a> {
+    pub exchange: Option<&'a dyn ExchangeTrees>,
+    pub capture_copy: Option<&'a dyn CaptureCopy>,
     pub change_hints: Option<&'a dyn hints::ChangeHints>,
     pub clone_new: Option<&'a dyn CloneToNew>,
     pub reflink_range: Option<&'a dyn ReflinkRange>,
+}
+
+/// Ownership guarantees of a writable capture. Used when handing a cache to another user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerLayout {
+    PerEntry,
+    Uniform,
+}
+#[must_use]
+pub struct WritableCapture {
+    pub created: CreatedTree,
+    pub consistency: CaptureConsistency,
+    pub owners: OwnerLayout,
+}
+/// A shortcut for freezing a working tree then materialising that captured namespace.
+/// It preserves capture semantics (including nested-tree boundaries), rather than promising
+/// native snapshot support or changing full logical materialisation of live readers.
+pub trait CaptureCopy: Send + Sync {
+    /// Capture-based candidate evidence is cheaper than enumerating the live namespace.
+    fn prefers_capture_for_changes(&self) -> bool {
+        false
+    }
+    /// Preparing a capture before taking an application lock avoids expensive work under it.
+    fn prepare_before_lock(&self) -> bool {
+        false
+    }
+    fn copy_capture(&self, source: &WorkingTree, dst: NewTreeLocation) -> Result<WritableCapture>;
 }
 
 /// Unavailable guarantees that the destination was not changed, so full copying is safe.
@@ -183,9 +262,24 @@ pub enum Attempt<T> {
     Unavailable(std::io::Error),
 }
 
+/// A file clone can read a captured tree, or a live tree whose surrounding operation
+/// validates its observations. A live entry clone makes no whole-tree consistency claim.
+#[derive(Clone, Copy)]
+pub enum CloneSource<'a> {
+    Frozen(&'a FrozenTree),
+    Working(&'a WorkingTree),
+}
+impl CloneSource<'_> {
+    pub fn reader(&self) -> &dyn TreeRead {
+        match self {
+            Self::Frozen(tree) => tree.reader(),
+            Self::Working(tree) => tree.reader(),
+        }
+    }
+}
 /// Clone into an exclusively prepared destination, preserving the requested entry's metadata.
 pub trait CloneToNew: Send + Sync {
-    fn clone_new(&self, source: &FrozenTree, path: &RelPath, dst: &WorkingTree, target: &RelPath) -> Result<Attempt<()>>;
+    fn clone_new(&self, source: CloneSource<'_>, path: &RelPath, dst: &WorkingTree, target: &RelPath) -> Result<Attempt<()>>;
 }
 pub trait ReflinkRange: Send + Sync {
     fn clone_range(&self, source: &std::fs::File, range: ByteRange, dst: &std::fs::File, offset: u64) -> Result<Attempt<()>>;
@@ -207,4 +301,41 @@ impl ByteRange {
     pub fn length(self) -> u64 {
         self.length.get()
     }
+}
+
+/// Atomic replacement of two owned tree locations, without accepting a readable path as
+/// authority. A failed post-exchange validation retains progress and both receipts for retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExchangeProgress {
+    Unchanged,
+    Swapped,
+}
+pub struct ExchangeError {
+    pub error: FsError,
+    pub progress: ExchangeProgress,
+}
+impl From<std::io::Error> for ExchangeError {
+    fn from(error: std::io::Error) -> Self {
+        FsError::Io(error).into()
+    }
+}
+impl From<FsError> for ExchangeError {
+    fn from(error: FsError) -> Self {
+        Self { error, progress: ExchangeProgress::Unchanged }
+    }
+}
+#[must_use]
+pub struct ExchangeFailure {
+    pub error: FsError,
+    pub progress: ExchangeProgress,
+    pub first: OwnedTree,
+    pub second: OwnedTree,
+}
+impl std::fmt::Debug for ExchangeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+pub trait ExchangeTrees: Send + Sync {
+    fn exchange(&self, first: OwnedTree, second: OwnedTree) -> std::result::Result<(OwnedTree, OwnedTree), ExchangeFailure>;
 }

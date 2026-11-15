@@ -110,14 +110,22 @@ pub fn candidates(before: &dyn TreeRead, after: &dyn TreeRead) -> Result<Vec<Ent
 }
 
 /// One capability decision for every backend. Errors remain distinct from unavailable evidence.
-pub fn changes(fs: &dyn Filesystem, before: &FrozenTree, after: &FrozenTree) -> Result<Vec<EntryChange>> {
+pub fn changes(
+    fs: &dyn Filesystem,
+    before: &FrozenTree,
+    after: &FrozenTree,
+    request: layr_fs_core::ChangeRequest,
+) -> Result<Vec<EntryChange>> {
     if let Some(hints) = fs.capabilities(&before.scope()).change_hints {
-        match hints.between(before, after)? {
+        match hints.between(before, after, request)? {
             hints::HintSet::Complete(entries) => return Ok(entries),
             hints::HintSet::Partial => {}
         }
     }
     let mut entries = candidates(before.reader(), after.reader())?;
+    if request.detail == ChangeDetail::Equality {
+        return Ok(entries);
+    }
     for entry in &mut entries {
         if let (Some(old), Some(new)) = (entry.old(), entry.new()) {
             if old.is_file() && new.is_file() {
@@ -141,7 +149,7 @@ pub fn copy_file(
 ) -> Result<()> {
     if source.scope().same_instance(&target.scope()) {
         if let Some(clone) = fs.capabilities(&target.scope()).clone_new {
-            if let Attempt::Applied(()) = clone.clone_new(source, path, target, destination)? {
+            if let Attempt::Applied(()) = clone.clone_new(CloneSource::Frozen(source), path, target, destination)? {
                 return Ok(());
             }
         }
@@ -204,4 +212,132 @@ pub fn changed_ranges(a: &mut dyn std::io::Read, alen: u64, b: &mut dyn std::io:
         pos += len;
     }
     Ok(ranges)
+}
+
+/// Export selected leaves for an external process. Namespace and metadata reads stay on the
+/// logical reader; directories are opened for writing until their children are complete.
+pub fn copy_selected(
+    source: &dyn TreeRead,
+    target: &dyn TreeWrite,
+    selected: &[RelPath],
+    mut clone: Option<&mut dyn FnMut(&RelPath) -> Result<Attempt<()>>>,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    let mut directories = BTreeSet::new();
+    let mut files = Vec::new();
+    for path in selected {
+        let Some(metadata) = source.metadata(&RelDir::Path(path.clone()))? else { continue };
+        for (end, byte) in path.as_bytes().iter().enumerate() {
+            if *byte == b'/' {
+                directories.insert(RelPath::new(&path.as_bytes()[..end])?);
+            }
+        }
+        if metadata.kind == FType::Dir {
+            directories.insert(path.clone());
+        } else {
+            files.push((path.clone(), metadata));
+        }
+    }
+    for path in &directories {
+        let mut attributes = required(source, &RelDir::Path(path.clone()))?.attributes;
+        attributes.mode |= 0o700;
+        attributes.acl = None;
+        target.put(path, EntryData::Directory, &attributes)?;
+    }
+    let mut links = HashMap::new();
+    for (path, metadata) in files {
+        match metadata.kind {
+            FType::File => {
+                let link = metadata.link.filter(|link| link.count > 1).map(|link| (link.device, link.inode));
+                if let Some(first) = link.and_then(|key| links.get(&key)) {
+                    target.put(&path, EntryData::HardLink(first), &metadata.attributes)?;
+                } else {
+                    let cloned = match clone.as_deref_mut() {
+                        Some(clone) => matches!(clone(&path)?, Attempt::Applied(())),
+                        None => false,
+                    };
+                    if !cloned {
+                        target.put(&path, EntryData::File(&mut source.open_file(&path)?), &metadata.attributes)?;
+                    }
+                    if let Some(key) = link {
+                        links.insert(key, path);
+                    }
+                }
+            }
+            FType::Symlink => target.put(&path, EntryData::Symlink(&source.read_link(&path)?), &metadata.attributes)?,
+            _ => return Err(FsError::Invalid("cannot export a special entry")),
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        let at = RelDir::Path(directory);
+        target.set_metadata(&at, &required(source, &at)?.attributes)?;
+    }
+    Ok(())
+}
+
+/// Publish an already frozen capture through a reader copy when a driver cannot move it.
+/// Consistency belongs to the original capture, and failed cleanup retains both receipts.
+pub fn republish(fs: &dyn Filesystem, issuer: &TreeIssuer, capture: Capture, dst: NewTreeLocation) -> Result<Capture> {
+    let checked = (|| -> Result<()> {
+        issuer.location_key(&dst)?;
+        if issuer.frozen_key(&capture.tree)? != issuer.owned_key(&capture.ownership)? {
+            return Err(FsError::Invalid("capture ownership mismatch"));
+        }
+        Ok(())
+    })();
+    let result = checked.and_then(|()| fs.freeze(FreezeSource::Reader(capture.tree.reader()), dst));
+    let Capture { tree, ownership, consistency } = capture;
+    drop(tree);
+    if let Err(failure) = fs.remove(ownership) {
+        let cause = match result {
+            Err(cause) => cause,
+            Ok(published) => {
+                drop(published.tree);
+                match fs.remove(published.ownership) {
+                    Ok(()) => FsError::Invalid("captured source cleanup failed"),
+                    Err(next) => FsError::Cleanup {
+                        cause: Box::new(FsError::Invalid("published capture cleanup failed")),
+                        failure: Box::new(next),
+                    },
+                }
+            }
+        };
+        return Err(FsError::Cleanup { cause: Box::new(cause), failure: Box::new(failure) });
+    }
+    result.map(|mut published| {
+        published.consistency = consistency;
+        published
+    })
+}
+
+/// A writable copy of a capture is distinct from materialising a live reader. Drivers may
+/// accelerate this exact operation; the fallback freezes first and preserves its consistency.
+pub fn copy_capture(
+    fs: &dyn Filesystem,
+    source: &WorkingTree,
+    destination: NewTreeLocation,
+    scratch: &mut dyn FnMut() -> Result<NewTreeLocation>,
+) -> Result<WritableCapture> {
+    if let Some(copy) = fs.capabilities(&source.scope()).capture_copy {
+        return copy.copy_capture(source, destination);
+    }
+    let captured = fs.freeze(FreezeSource::Working(source), scratch()?)?;
+    let consistency = captured.consistency;
+    let materialised = fs.materialise(captured.tree.reader(), destination);
+    drop(captured.tree);
+    if let Err(failure) = fs.remove(captured.ownership) {
+        let cause = match materialised {
+            Err(cause) => cause,
+            Ok(created) => {
+                drop(created.tree);
+                let cause = FsError::Invalid("capture cleanup failed");
+                match fs.remove(created.ownership) {
+                    Ok(()) => cause,
+                    Err(failure) => FsError::Cleanup { cause: Box::new(cause), failure: Box::new(failure) },
+                }
+            }
+        };
+        return Err(FsError::Cleanup { cause: Box::new(cause), failure: Box::new(failure) });
+    }
+    Ok(WritableCapture { created: materialised?, consistency, owners: OwnerLayout::PerEntry })
 }

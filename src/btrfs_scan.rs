@@ -620,10 +620,7 @@ mod tests {
 
 /// Optional per-inode evidence. TREE_SEARCH requires privileges on some kernels;
 /// callers then retain ordinary stat/lease validation without this acceleration.
-pub(crate) fn status_identities(
-    root: &Path,
-    inodes: Option<&BTreeSet<u64>>,
-) -> io::Result<BTreeMap<u64, crate::status_cache::BtrfsIdentity>> {
+pub(crate) fn status_identities(root: &Path, inodes: Option<&BTreeSet<u64>>) -> io::Result<BTreeMap<u64, [u64; 2]>> {
     let file = File::open(root)?;
     let mut scanner = TreeSearch::new(SEARCH_BUFFER);
     let mut out = BTreeMap::new();
@@ -631,10 +628,7 @@ pub(crate) fn status_identities(
         search(&file, &mut scanner, key, |key, bytes| {
             if key.kind == INODE_ITEM {
                 let inode: &InodeItem = parse(bytes)?;
-                out.insert(
-                    key.ino,
-                    crate::status_cache::BtrfsIdentity { generation: inode.generation.get(), transid: inode.transid.get() },
-                );
+                out.insert(key.ino, [inode.generation.get(), inode.transid.get()]);
             }
             Ok(())
         })

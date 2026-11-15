@@ -12,8 +12,8 @@
 //!
 //! `states/<id>` of a thin state is a view: a complete tree made when a command needs one.
 //! `layr gc` removes views that were not used recently.
+use crate::apfs::{self, ScanEntry, SubvolInfo};
 use crate::fsutil::FType;
-use crate::storage::{self as apfs, ScanEntry, SubvolInfo};
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,7 +66,7 @@ impl Layered {
                 let mut layers = Vec::new();
                 for layer in &self.layers {
                     layers.push(layr_fs_common::ReadLayer {
-                        reader: std::sync::Arc::new(crate::storage::ApfsTree::open(&layer.root)?),
+                        reader: std::sync::Arc::new(crate::apfs::ApfsTree::open(&layer.root)?),
                         removed: layer
                             .removed
                             .iter()
@@ -88,6 +88,37 @@ impl Layered {
     }
 }
 impl layr_fs_core::TreeRead for Layered {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+    fn candidate_evidence(
+        &self,
+        after: &dyn layr_fs_core::TreeRead,
+        request: layr_fs_core::ChangeRequest,
+        selection: Option<&std::collections::BTreeSet<layr_fs_core::RelPath>>,
+    ) -> layr_fs_core::Result<layr_fs_core::hints::HintSet> {
+        if self.object_base.is_some() {
+            return Ok(layr_fs_core::hints::HintSet::Partial);
+        }
+        let Some(after) = after.as_any() else { return Ok(layr_fs_core::hints::HintSet::Partial) };
+        if after.downcast_ref::<Layered>().is_some_and(|after| after.object_base.is_some()) {
+            return Ok(layr_fs_core::hints::HintSet::Partial);
+        }
+        let result = if let Some(after) = after.downcast_ref::<Layered>() {
+            apfs::candidate_observations(self, after, request, selection)
+        } else if let Some(after) = after.downcast_ref::<apfs::ApfsTree>() {
+            apfs::candidate_observations(self, after.path.as_path(), request, selection)
+        } else {
+            return Ok(layr_fs_core::hints::HintSet::Partial);
+        };
+        Ok(layr_fs_core::hints::HintSet::Complete(result.map_err(layr_fs_core::FsError::backend)?))
+    }
+    fn link_domain(&self) -> Option<&layr_fs_core::LinkDomain> {
+        self.core().ok().and_then(|reader| reader.link_domain())
+    }
+    fn kind(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<crate::fsutil::FType>> {
+        self.core()?.kind(path)
+    }
     fn metadata(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
         self.core()?.metadata(path)
     }
@@ -230,7 +261,7 @@ impl Layered {
                 }
                 bail!("state {} is not on this machine (run layr sync)", crate::ids::short(&id));
             }
-            let base = apfs::subvol_info(&d)?.base.with_context(|| format!("thin state {id} has no base"))?;
+            let base = apfs::native_info(&d)?.base.with_context(|| format!("thin state {id} has no base"))?;
             layers.push(Layer { removed: removed_of(&d)?, root: d });
             id = base;
         }
@@ -274,7 +305,7 @@ impl Layered {
     pub fn entry(&self, rel: &str) -> Result<Option<ScanEntry>> {
         if self.layers.is_empty() {
             if let Some(o) = &self.object_base {
-                return o.scan_entry(rel);
+                return crate::apfs::object_scan::entry(o, rel);
             }
         }
         self.find(rel)?.map(|p| apfs::entry_of_path(&p)).transpose()
@@ -330,7 +361,7 @@ impl Layered {
     /// All entries of the merged tree, as `apfs::scan_with_data` gives them for a folder.
     pub fn scan(&self, data: bool) -> Result<BTreeMap<String, ScanEntry>> {
         let mut map = match &self.object_base {
-            Some(o) => o.scan()?,
+            Some(o) => crate::apfs::object_scan::scan(o)?,
             None => apfs::scan_with_data(self.bottom(), data)?,
         };
         for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
@@ -345,9 +376,10 @@ impl Layered {
     /// The entry at `rel` and its content in the merged tree, as `scan` gives them.
     pub fn scan_at(&self, rel: &str) -> Result<BTreeMap<String, ScanEntry>> {
         let mut map = match &self.object_base {
-            Some(o) => {
-                o.scan()?.into_iter().filter(|(p, _)| rel.is_empty() || p == rel || p.starts_with(&format!("{rel}/"))).collect()
-            }
+            Some(o) => crate::apfs::object_scan::scan(o)?
+                .into_iter()
+                .filter(|(p, _)| rel.is_empty() || p == rel || p.starts_with(&format!("{rel}/")))
+                .collect(),
             None => apfs::scan_at(self.bottom(), rel)?,
         };
         for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
@@ -362,13 +394,6 @@ impl Layered {
             map.extend(apfs::scan_at(&l.root, rel)?);
         }
         Ok(map)
-    }
-
-    /// Entries in walk order (a folder before its content), as `fsutil::walk` gives them.
-    pub fn entries(&self, rel: &str) -> Result<Vec<(String, crate::fsutil::Meta)>> {
-        let map = if rel.is_empty() { self.scan(false)? } else { self.scan_at(rel)? };
-        let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
-        Ok(map.into_iter().filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix)).map(|(k, v)| (k, v.meta)).collect())
     }
 
     /// Make a complete tree at `dst`, which must not exist. A read-only tree keeps the
@@ -429,7 +454,7 @@ impl Layered {
             Ok(())
         })();
         if result.is_err() {
-            let _ = apfs::delete_tree(dst);
+            let _ = crate::fs::remove(dst);
         }
         result
     }
@@ -513,7 +538,7 @@ fn apply(layer: &Layer, dst: &Path, cloned: &mut Vec<PathBuf>) -> Result<()> {
         let p = dst.join(r);
         if crate::fsutil::exact_metadata(&p, r).is_some() {
             open_parent(dst, r)?;
-            apfs::delete_tree(&p)?;
+            crate::fs::remove(&p)?;
         }
     }
     fn visit(layer: &Path, dst: &Path, rel: &str, dirs: &mut Vec<String>, cloned: &mut Vec<PathBuf>) -> Result<()> {
@@ -533,7 +558,7 @@ fn apply(layer: &Layer, dst: &Path, cloned: &mut Vec<PathBuf>) -> Result<()> {
                 existing => {
                     open_parent(dst, &child)?;
                     if existing.is_ok() {
-                        apfs::delete_tree(&target)?;
+                        crate::fs::remove(&target)?;
                     }
                     clone_entry(&layer.join(&child), &target, &lm)?;
                     cloned.push(target);
@@ -569,32 +594,6 @@ impl Diff {
     }
 }
 
-/// True when two entries have the same type, metadata, and data. Unknown data differs.
-fn same(a: &ScanEntry, b: &ScanEntry, link: impl Fn() -> Result<bool>) -> Result<bool> {
-    let (fa, fb) = (&a.fingerprint, &b.fingerprint);
-    if a.meta.ftype != b.meta.ftype
-        || a.meta.mode != b.meta.mode
-        || a.meta.uid != b.meta.uid
-        || a.meta.gid != b.meta.gid
-        // A folder size counts the entries of one layer only.
-        || (fa.3 != fb.3 && a.meta.ftype != FType::Dir)
-        || (fa.4, fa.5) != (fb.4, fb.5)
-    {
-        return Ok(false);
-    }
-    match a.meta.ftype {
-        FType::Dir => Ok(true),
-        // An empty file has no extents and so no data identity; equal metadata (size and times
-        // included) make two empty files the same.
-        FType::File if fa.3 == 0 => Ok(true),
-        FType::File => Ok(a.data.zip(b.data).is_some_and(|(x, y)| {
-            x.generation.is_some() && y.generation.is_some() && x.clone_id.is_some() && x.clone_id == y.clone_id
-        })),
-        FType::Symlink => link(),
-        FType::Special => Ok(false),
-    }
-}
-
 /// True when two entries of equal type carry the same extended attributes and ACL. Extended
 /// attributes and ACLs are not part of the scan: `same` runs first and this runs on entries
 /// that look equal. A change of them keeps the modification time.
@@ -615,71 +614,26 @@ pub(crate) fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
     xb.sort();
     Ok(xa == xb && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
 }
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn stored_metadata_same(_: &Path, _: &Path) -> Result<bool> {
-    Ok(true)
-}
 
-/// Compare a scan of `new` with a scan of `old`. Both scans need data identities.
-/// `since` is the time (seconds) at which `old` was a copy of `new` in extended attributes and
-/// ACLs, or 0 when unknown. Changing either updates the change time of an entry, so an entry
-/// that was last changed before `since` needs no read of them.
+/// Produce the native sparse-write plan from shared logical comparison evidence. Scans are
+/// retained only for physical clone eligibility and copy settling, never for object exports.
 pub fn diff(
     old: &BTreeMap<String, ScanEntry>,
-    old_path: &(dyn Fn(&str) -> Result<PathBuf> + Sync),
+    base: &Layered,
     new: &BTreeMap<String, ScanEntry>,
     new_root: &Path,
-    since: i64,
 ) -> Result<Diff> {
     let mut d = Diff::default();
-    let mut equal = Vec::new();
-    for (k, e) in new {
-        if k.is_empty() {
-            continue;
+    let before: crate::source::Source = base.clone().into();
+    let after = crate::source::Source::native(new_root);
+    for change in crate::changes::state_changes(&before, &after)? {
+        if change.new().is_some() {
+            d.write.insert(change.path().clone());
         }
-        match old.get(k) {
-            None => {
-                d.write.insert(k.clone());
-            }
-            Some(o) if o.meta.ftype != e.meta.ftype => {
-                d.removed.insert(k.clone());
-                d.write.insert(k.clone());
-            }
-            Some(o) => {
-                let link = || {
-                    let old_link = fs::read_link(old_path(k)?).with_context(|| format!("read the link {k} of the base"))?;
-                    let new_link = fs::read_link(new_root.join(k)).with_context(|| format!("read the link {k} of the source"))?;
-                    Ok(old_link == new_link)
-                };
-                if !same(o, e, link).with_context(|| format!("compare {k} with the base"))? {
-                    d.write.insert(k.clone());
-                } else {
-                    if e.fingerprint.6 >= since - 1 {
-                        equal.push(k.as_str());
-                    }
-                }
-            }
-        }
-    }
-    // Extended attributes and ACLs are not in the scan: read them for the entries that look equal.
-    // An unreadable entry differs. Threads share the work, as the scan does.
-    let _t = crate::trace::span(format!("thin stored metadata of {} entries", equal.len()));
-    let differ: Vec<&str> = if let Some(width) = std::num::NonZeroUsize::new(equal.len()) {
-        crate::pools::run(crate::pools::Priority::Foreground, crate::pools::Width::Items(width), || {
-            use rayon::prelude::*;
-            equal
-                .par_iter()
-                .copied()
-                .filter(|k| !old_path(k).and_then(|a| stored_metadata_same(&a, &new_root.join(k))).unwrap_or(false))
-                .collect()
-        })?
-    } else {
-        Vec::new()
-    };
-    d.write.extend(differ.into_iter().map(String::from));
-    for k in old.keys() {
-        if !k.is_empty() && !new.contains_key(k) && !ancestors(k).any(|a| d.removed.contains(a)) {
-            d.removed.insert(k.clone());
+        if change.old().is_some()
+            && (change.new().is_none() || change.old().zip(change.new()).is_some_and(|(a, b)| a.ftype != b.ftype))
+        {
+            d.removed.insert(change.path().clone());
         }
     }
     // A replaced folder hides its old content; drop paths below it.
@@ -714,34 +668,96 @@ pub fn write_layer(
     writable: bool,
     gone: Option<&mut BTreeSet<String>>,
 ) -> Result<()> {
+    let layer = write_layer_owned(src, dst, d, base, gone)?;
+    if writable {
+        layer.working()?.release();
+    } else {
+        layer.freeze()?.release();
+    }
+    Ok(())
+}
+
+pub(crate) struct LayerWrite {
+    driver: std::sync::Arc<apfs::driver::ApfsFs>,
+    created: Option<layr_fs_core::CreatedTree>,
+    consistency: layr_fs_core::CaptureConsistency,
+}
+impl LayerWrite {
+    fn take(&mut self) -> Result<layr_fs_core::CreatedTree> {
+        self.created.take().context("layer ownership already consumed")
+    }
+    fn abort(mut self, cause: anyhow::Error) -> anyhow::Error {
+        let Some(created) = self.created.take() else { return cause };
+        use layr_fs_core::Filesystem;
+        drop(created.tree);
+        match self.driver.remove(created.ownership) {
+            Ok(()) => cause,
+            Err(failure) => crate::fs::operation_error(
+                self.driver.clone(),
+                layr_fs_core::FsError::Cleanup {
+                    cause: Box::new(layr_fs_core::FsError::backend(cause)),
+                    failure: Box::new(failure),
+                },
+            ),
+        }
+    }
+    fn working(mut self) -> Result<crate::fs::OwnedWorking> {
+        let created = self.take()?;
+        Ok(crate::fs::OwnedWorking::new(self.driver.clone(), created))
+    }
+    pub(crate) fn freeze(mut self) -> Result<crate::fs::OwnedCapture> {
+        let created = self.take()?;
+        let capture = self
+            .driver
+            .seal_owned(created, self.consistency)
+            .map_err(|error| crate::fs::operation_error(self.driver.clone(), error))?;
+        Ok(crate::fs::OwnedCapture::new(self.driver.clone(), capture))
+    }
+}
+impl Drop for LayerWrite {
+    fn drop(&mut self) {
+        if let Some(created) = self.created.take() {
+            if let Err(error) = crate::fs::OwnedWorking::new(self.driver.clone(), created).discard() {
+                eprintln!("warning: {error:#}");
+            }
+        }
+    }
+}
+pub(crate) fn write_layer_owned(
+    src: &Path,
+    dst: &Path,
+    d: &Diff,
+    base: &str,
+    gone: Option<&mut BTreeSet<String>>,
+) -> Result<LayerWrite> {
     let _t = crate::trace::span(format!("thin write {} entries", d.write.len()));
     let _c = (!d.whole.is_empty()).then(|| crate::trace::span(format!("thin clone {} new folders", d.whole.len())));
     ensure_parent(dst)?;
-    fs::create_dir(dst)?;
+    let driver = apfs::driver::ApfsFs::for_destination(dst, apfs::driver::Links::Keep)?;
+    let root = crate::fs::attributes(&src.to_path_buf(), "")?;
+    let created = driver.working_layer(root, layr_types::StateId::parse(base)?, driver.location(dst)?)?;
+    let layer = LayerWrite { driver, created: Some(created), consistency: layr_fs_core::CaptureConsistency::UnsettledCopy };
     let result = (|| -> Result<()> {
-        apfs::write_info(
-            dst,
-            &SubvolInfo {
-                uuid: crate::ids::new_id(),
-                received_uuid: None,
-                parent_uuid: None,
-                readonly: false,
-                base: Some(base.to_string()),
-            },
-        )?;
+        let mut temporary = crate::fs::attributes(&src.to_path_buf(), "")?;
+        temporary.mode |= 0o700;
+        temporary.acl = None;
+        layer
+            .created
+            .as_ref()
+            .context("layer ownership absent")?
+            .tree
+            .writer()
+            .set_metadata(&layr_fs_core::RelDir::Root, &temporary)?;
         set_removed(dst, &d.removed).with_context(|| format!("write the removed paths of {}", dst.display()))?;
         add_entries(src, dst, d.write.iter().map(|s| s.as_str()), d.removed.iter().map(|s| s.as_str()), &d.whole, gone)
             .with_context(|| format!("copy {} entries of {} to {}", d.write.len(), src.display(), dst.display()))?;
         copy_dir_meta(src, dst, true).with_context(|| format!("copy the metadata of {}", src.display()))?;
-        if !writable {
-            apfs::seal(dst, true, false)?;
-        }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = apfs::delete_tree(dst);
+    match result {
+        Ok(()) => Ok(layer),
+        Err(cause) => Err(layer.abort(cause)),
     }
-    result
 }
 
 /// True when the new folder `k` of `src` is a nested layer or holds one. A clone of such a folder
@@ -749,7 +765,8 @@ pub fn write_layer(
 /// layer stays an empty folder in a state: its files are a cache, not state content.
 fn holds_layer(src: &Path, k: &str, write: &[&str]) -> bool {
     let below = format!("{k}/");
-    apfs::is_subvolume(&src.join(k)) || write.iter().any(|w| w.starts_with(&below) && apfs::is_subvolume(&src.join(w)))
+    crate::fs::host().namespace.managed(&src.join(k))
+        || write.iter().any(|w| w.starts_with(&below) && crate::fs::host().namespace.managed(&src.join(w)))
 }
 
 /// Copy entries of `src` into a writable layer. Each folder of the layer gets the metadata of
@@ -805,7 +822,7 @@ pub fn add_entries<'a>(
             let m = read_source(fs::symlink_metadata(&from), &from).with_context(|| format!("stat {k} in the source"))?;
             if crate::fsutil::exact_metadata(&to, k).is_some() {
                 open_parent(dst, k).with_context(|| format!("open the folder of {k} in the layer"))?;
-                apfs::delete_tree(&to).with_context(|| format!("remove the old {k} from the layer"))?;
+                crate::fs::remove(&to).with_context(|| format!("remove the old {k} from the layer"))?;
             }
             if m.is_dir() && whole.contains(k) && !holds_layer(src, k, &write) {
                 // A new folder: one clone copies its content (layer rule 5 holds, as the
@@ -818,7 +835,7 @@ pub fn add_entries<'a>(
                 if complete {
                     cloned.insert(k.to_string());
                 } else {
-                    apfs::delete_tree(&to)?;
+                    crate::fs::remove(&to)?;
                     fs::create_dir(&to)?;
                 }
                 dirs.insert(k.to_string());
@@ -841,7 +858,7 @@ pub fn add_entries<'a>(
         if let Err(e) = copied {
             match gone.as_deref_mut() {
                 Some(g) if vanished(&e) => {
-                    let _ = apfs::delete_tree(&to);
+                    let _ = crate::fs::remove(&to);
                     g.insert(k.to_string());
                 }
                 _ => return Err(e),
@@ -866,7 +883,7 @@ pub fn add_entries<'a>(
         match gone.as_deref_mut() {
             // The folder went away during the last copy: so did all of its content.
             Some(g) if left => {
-                let _ = apfs::delete_tree(&dst.join(d));
+                let _ = crate::fs::remove(&dst.join(d));
                 g.insert(d.clone());
             }
             _ => copied?,
@@ -919,10 +936,11 @@ pub fn any_linked(root: &Path, paths: &BTreeSet<String>) -> bool {
 
 /// True when the tree at `path` is a thin layer over a base.
 pub fn is_thin(path: &Path) -> bool {
-    apfs::subvol_info(path).ok().and_then(|i| i.base).is_some()
+    apfs::native_info(path).ok().and_then(|i| i.base).is_some()
 }
 
 /// Write an empty writable layer over `base`. Its root gets the metadata of `root`.
+#[cfg(test)]
 pub fn empty_layer(dst: &Path, base: &str, root: &Path) -> Result<()> {
     write_layer(root, dst, &Diff::default(), base, true, None)
 }
@@ -1030,7 +1048,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
         };
         if crate::fsutil::exact_metadata(&at, p).is_some() {
             open_parent(&stage, p)?;
-            apfs::delete_tree(&at)?;
+            crate::fs::remove(&at)?;
         }
         let old = below.find(p).ok().flatten().map(fs::symlink_metadata).transpose()?;
         let (Some(m), Some(from)) = (new, from) else {
@@ -1084,7 +1102,7 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
             let d = crate::fsutil::safe_join(&stage, a)?;
             if crate::fsutil::exact_metadata(&d, a).is_some() {
                 open_parent(&stage, a)?;
-                apfs::delete_tree(&d)?;
+                crate::fs::remove(&d)?;
             }
             if below.find(a)?.is_some() {
                 removed.insert(a.to_string());
@@ -1108,50 +1126,26 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
     Ok(())
 }
 
-/// Copy the entries of `paths` that `src` holds into a new private folder `dst`, for a tool
-/// that reads a few files of a state from a folder (git). Absent paths stay absent.
-pub fn extract<'a>(src: &Layered, paths: impl Iterator<Item = &'a str>, dst: &Path) -> Result<()> {
-    fs::create_dir(dst)?;
-    fs::set_permissions(dst, fs::Permissions::from_mode(0o700))?;
-    let result = (|| -> Result<()> {
-        for p in paths {
-            let Some(from) = src.find(p)? else {
-                continue;
-            };
-            let m = fs::symlink_metadata(&from)?;
-            if m.is_dir() {
-                continue;
-            }
-            let to = dst.join(p);
-            if crate::fsutil::exact_metadata(&to, p).is_some() {
-                continue;
-            }
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if clone_entry(&from, &to, &m)? {
-                crate::sys::apfs_immutable(&to, false)?;
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = apfs::delete_tree(dst);
-    }
-    result
-}
-
 /// Write a thin layer of `src` over `base`, or `None` when nothing differs. A concurrent
 /// change of `src` returns an error.
+#[cfg(test)]
 pub fn snapshot_over(base: &Layered, base_id: &str, src: &Path, dst: &Path, writable: bool) -> Result<Option<Diff>> {
+    let Some((layer, diff)) = snapshot_layer(base, base_id, src, dst)? else { return Ok(None) };
+    if writable {
+        layer.working()?.release();
+    } else {
+        layer.freeze()?.release();
+    }
+    Ok(Some(diff))
+}
+pub(crate) fn snapshot_layer(base: &Layered, base_id: &str, src: &Path, dst: &Path) -> Result<Option<(LayerWrite, Diff)>> {
     let old = base.scan(true)?;
     let before = apfs::scan_with_data(src, true)?;
-    let d = diff(&old, &|k| base.path(k), &before, src, 0)?;
+    let d = diff(&old, base, &before, src)?;
     if d.is_empty() {
         return Ok(None);
     }
-    write_checked(src, base, &old, &before, &d, dst, base_id, writable)?;
-    Ok(Some(d))
+    Ok(Some((write_checked(src, base, &old, &before, &d, dst, base_id)?, d)))
 }
 
 /// Paths whose entries differ between two scans of one tree.
@@ -1204,7 +1198,7 @@ pub(crate) fn resync(src: &Path, dst: &Path, paths: &BTreeSet<String>) -> Result
         open_parent(dst, p).with_context(|| format!("open the folder of {p} in the copy"))?;
         dirs.insert(parent_of(p).to_string());
         if old.is_some() {
-            apfs::delete_tree(&at).with_context(|| format!("remove the old {p} from the copy"))?;
+            crate::fs::remove(&at).with_context(|| format!("remove the old {p} from the copy"))?;
         }
         if let Some((f, m)) = from {
             if m.is_dir() {
@@ -1244,7 +1238,7 @@ pub(crate) fn settle(round: usize) {
 /// layer stays: each entry is a consistent copy from some moment of the copy, as with `git add`.
 /// A changed file with more than one name returns `HardLinks`.
 #[allow(clippy::too_many_arguments)]
-pub fn write_checked(
+fn write_checked(
     src: &Path,
     base: &Layered,
     old: &BTreeMap<String, ScanEntry>,
@@ -1252,8 +1246,7 @@ pub fn write_checked(
     d: &Diff,
     dst: &Path,
     base_id: &str,
-    writable: bool,
-) -> Result<()> {
+) -> Result<LayerWrite> {
     let mut before = before.clone();
     let mut d = Diff { write: d.write.clone(), removed: d.removed.clone(), whole: d.whole.clone() };
     let mut round = 0;
@@ -1264,43 +1257,45 @@ pub fn write_checked(
         if round + 1 >= COPY_ROUNDS {
             // The last round keeps what it copies. Entries that left during the copy are gone.
             let mut gone = BTreeSet::new();
-            write_layer(src, dst, &d, base_id, true, Some(&mut gone))?;
+            let layer = write_layer_owned(src, dst, &d, base_id, Some(&mut gone))?;
             if !gone.is_empty() {
                 let mut removed = d.removed.clone();
                 removed.extend(gone.into_iter().filter(|g| old.contains_key(g)));
                 set_removed(dst, &removed)?;
             }
             crate::fsutil::mark_unsettled(src);
-            if !writable {
-                apfs::seal(dst, true, false)?;
-            }
-            return Ok(());
+            return Ok(layer);
         }
-        let wrote = write_layer(src, dst, &d, base_id, true, None);
+        let wrote = write_layer_owned(src, dst, &d, base_id, None);
         let after = apfs::scan_with_data(src, true).with_context(|| format!("scan {} after the copy", src.display()))?;
-        if let Err(e) = wrote {
-            // An entry that went away during the copy is a change: the next round copies again.
-            // Another error fails the copy when the source did not change.
-            if after == before && !vanished(&e) {
-                return Err(e);
+        let mut layer = match wrote {
+            Ok(layer) => layer,
+            Err(e) => {
+                // An entry that went away during the copy is a change: the next round copies again.
+                // Another error fails the copy when the source did not change.
+                if after == before && !vanished(&e) {
+                    return Err(e);
+                }
+                settle(round);
+                round += 1;
+                d = diff(old, base, &after, src)?;
+                before = after;
+                continue;
             }
-            settle(round);
-            round += 1;
-            d = diff(old, &|k| base.path(k), &after, src, 0)?;
-            before = after;
-            continue;
-        }
+        };
         if after == before {
-            if !writable {
-                apfs::seal(dst, true, false)?;
+            if after.values().all(|entry| !entry.meta.is_file() || entry.data.is_some_and(|data| data.generation.is_some())) {
+                layer.consistency = layr_fs_core::CaptureConsistency::ValidatedCopy;
+            } else {
+                crate::fsutil::mark_unsettled(src);
             }
-            return Ok(());
+            return Ok(layer);
         }
         // Writers changed the source during the copy: make the difference again.
-        apfs::delete_tree(dst)?;
+        layer.working()?.discard()?;
         settle(round);
         round += 1;
-        d = diff(old, &|k| base.path(k), &after, src, 0)?;
+        d = diff(old, base, &after, src)?;
         before = after;
     }
 }
@@ -1328,7 +1323,7 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
         return Ok(full);
     }
     let layered = Layered::of_state(p, id)?;
-    let info = apfs::subvol_info(&delta)?;
+    let info = apfs::native_info(&delta)?;
     let tmp = p.work_dir().join(crate::store::temp_name());
     layered.materialize(&tmp, true)?;
     let made = (|| -> Result<()> {
@@ -1341,13 +1336,13 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
                 apfs::seal(&full, true, false)?;
             }
             // Another command made the same view.
-            Err(_) if full.is_dir() => apfs::delete_tree(&tmp)?,
+            Err(_) if full.is_dir() => crate::fs::remove(&tmp)?,
             Err(e) => return Err(e.into()),
         }
         Ok(())
     })();
     if made.is_err() {
-        let _ = apfs::delete_tree(&tmp);
+        let _ = crate::fs::remove(&tmp);
     }
     made?;
     touch_view(p, id);
@@ -1399,7 +1394,7 @@ pub fn layer_base(p: &Project, id: &str) -> Result<Option<String>> {
     if !p.delta_path(id).is_dir() {
         return Ok(None);
     }
-    Ok(apfs::subvol_info(&p.delta_path(id))?.base)
+    Ok(apfs::native_info(&p.delta_path(id))?.base)
 }
 
 /// The base of each thin layer on this machine.
@@ -1417,7 +1412,7 @@ pub fn bases(p: &Project) -> Result<BTreeMap<String, String>> {
         if !crate::model::is_uuid(&name) {
             continue;
         }
-        if let Some(b) = apfs::subvol_info(&p.delta_path(&name)).ok().and_then(|i| i.base) {
+        if let Some(b) = apfs::native_info(&p.delta_path(&name)).ok().and_then(|i| i.base) {
             out.insert(name, b);
         }
     }
@@ -1544,11 +1539,6 @@ pub struct Upkeep {
 
 /// Upkeep for `layr gc`, with the project lock held: delete states that a record deleted while
 /// another thin state still used them and layers that never got a record, remove unused views,
-/// and give a head with a long chain a complete tree. `heads` are the states that lines read now.
-pub fn upkeep(p: &Project, heads: &BTreeSet<String>) -> Result<Upkeep> {
-    upkeep_with(p, heads, None)
-}
-
 /// `upkeep` with the layer bases that the command read already (`bases_read`), if any: a command
 /// that reads the layers once passes them here. A base read before an earlier step of the same
 /// command can be stale; that only keeps a base one more command.
@@ -1633,7 +1623,7 @@ pub fn chain_len(p: &Project, id: &str) -> usize {
         if p.state_path(&id).is_dir() {
             return n + 1;
         }
-        match apfs::subvol_info(&p.delta_path(&id)).ok().and_then(|i| i.base) {
+        match apfs::native_info(&p.delta_path(&id)).ok().and_then(|i| i.base) {
             Some(b) if n < 10_000 => {
                 n += 1;
                 id = b;
@@ -1658,7 +1648,7 @@ mod tests {
     }
     impl Drop for Sandbox {
         fn drop(&mut self) {
-            let _ = apfs::delete_tree(&self.0);
+            let _ = crate::fs::remove(&self.0);
         }
     }
 
@@ -1708,7 +1698,7 @@ mod tests {
     }
 
     fn tree(root: &Path) {
-        apfs::create_subvolume(root).unwrap();
+        crate::fs::create(root).unwrap();
         for d in ["a", "a/deep", "b", "gone", "gone/inner", "swap-dir", "linkdir", "quiet"] {
             fs::create_dir(root.join(d)).unwrap();
         }
@@ -1762,9 +1752,9 @@ mod tests {
         let p = Project::create(&store, "p", &actor, serde_json::json!({}))?;
         let (a, b) = (crate::ids::new_id(), crate::ids::new_id());
         tree(&p.state_path(&a));
-        apfs::set_readonly(&p.state_path(&a))?;
+        crate::fs::set_readonly(&p.state_path(&a))?;
         let work = s.0.join("work");
-        apfs::snapshot(&p.state_path(&a), &work, false)?;
+        crate::fs::snapshot(&p.state_path(&a), &work, false)?;
         change(&work);
         snapshot_over(&Layered::complete(&p.state_path(&a)), &a, &work, &p.delta_path(&b), false)?.expect("changes");
         assert_eq!(bases(&p)?.get(&b), Some(&a));
@@ -1790,13 +1780,13 @@ mod tests {
         let p = Project::create(&store, "p", &actor, serde_json::json!({}))?;
         let base = crate::ids::new_id();
         tree(&p.state_path(&base));
-        apfs::set_readonly(&p.state_path(&base))?;
+        crate::fs::set_readonly(&p.state_path(&base))?;
         let (old, young) = (crate::ids::new_id(), crate::ids::new_id());
         for id in [&old, &young] {
             empty_layer(&p.delta_path(id), &base, &p.state_path(&base))?;
         }
         crate::sys::apfs_set_birthtime(&p.delta_path(&old), 1_600_000_000, 1)?;
-        let done = upkeep(&p, &BTreeSet::new())?;
+        let done = upkeep_with(&p, &BTreeSet::new(), None)?;
         assert_eq!(done.deleted, 1);
         assert!(!p.delta_path(&old).exists() && p.delta_path(&young).is_dir());
         // The base without a layer of its own is not touched.
@@ -1830,20 +1820,20 @@ mod tests {
     fn copies_succeed_while_files_change() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("work");
-        apfs::create_subvolume(&src)?;
+        crate::fs::create(&src)?;
         for i in 0..2000 {
             fs::create_dir_all(src.join(format!("d{}", i % 10)))?;
             fs::write(src.join(format!("d{}/f{i}", i % 10)), b"first")?;
         }
         fs::hard_link(src.join("d5/f1005"), src.join("linked"))?;
         let base = s.0.join("base");
-        apfs::snapshot(&src, &base, true)?;
+        crate::fs::snapshot(&src, &base, true)?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let w = writer(src.clone(), stop.clone());
         let results = (|| -> Result<()> {
             for n in 0..2 {
-                apfs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0).with_context(|| format!("full copy {n}"))?;
-                snapshot_over(&Layered::complete(&base), "base", &src, &s.0.join(format!("thin{n}")), false)
+                crate::fs::snapshot(&src, &s.0.join(format!("full{n}")), n % 2 == 0).with_context(|| format!("full copy {n}"))?;
+                snapshot_over(&Layered::complete(&base), &crate::ids::new_id(), &src, &s.0.join(format!("thin{n}")), false)
                     .with_context(|| format!("thin copy {n}"))?;
             }
             Ok(())
@@ -1915,28 +1905,37 @@ mod tests {
         let s = Sandbox::new();
         let base = s.0.join("base");
         tree(&base);
-        apfs::set_readonly(&base)?;
+        crate::fs::set_readonly(&base)?;
         let work = s.0.join("work");
-        apfs::snapshot(&base, &work, false)?;
+        crate::fs::snapshot(&base, &work, false)?;
         change(&work);
         let layer = s.0.join("layer");
-        let d = snapshot_over(&Layered::complete(&base), "base-id", &work, &layer, false)?.expect("changes");
+        let base_id = crate::ids::new_id();
+        let d = snapshot_over(&Layered::complete(&base), &base_id, &work, &layer, false)?.expect("changes");
         assert!(!d.write.contains("a/same"), "unchanged clones are not copied: {d:?}");
         assert!(d.removed.contains("gone") && !d.removed.contains("gone/inner"));
         assert!(d.removed.contains("swap-file") && d.removed.contains("swap-dir"));
-        assert_eq!(apfs::subvol_info(&layer)?.base.as_deref(), Some("base-id"));
+        assert_eq!(apfs::native_info(&layer)?.base.as_deref(), Some(base_id.as_str()));
         let layered = Layered::over(&layer, Layered::complete(&base))?;
         check_same(&layered, &work);
         // The layers answer `holds_files` as the complete tree does.
         let paths = ["", "a", "a/deep", "a/edit/below", "b", "gone", "gone/inner", "quiet", "fresh", "swap-file", "swap-dir"];
         for p in paths.into_iter().chain(["swap-dir/below", "link", "linkdir", "linkdir/inner", "missing", "missing/below"]) {
-            assert_eq!(crate::repo::holds_files_in(&layered, p), crate::repo::holds_files(&work, p), "holds_files of '{p}'");
+            assert_eq!(
+                crate::repo::holds_files_in(&crate::source::Source::from(layered.clone()), p),
+                crate::repo::holds_files(&work, p),
+                "holds_files of '{p}'"
+            );
         }
         assert!(layered.find("gone/inner/file")?.is_none());
         assert!(layered.find("linkdir/inner")?.is_none(), "a path below a new link is absent");
         assert!(layer.join("quiet").is_dir() && d.removed.contains("quiet/one"));
         let some = s.0.join("some");
-        extract(&layered, ["linkdir", "linkdir/inner", "a/edit", "gone/inner/file"].into_iter(), &some)?;
+        let _export = crate::repo::Temp::selected(
+            &layered.clone().into(),
+            &["linkdir", "linkdir/inner", "a/edit", "gone/inner/file"].map(str::to_owned),
+            some.clone(),
+        )?;
         assert!(fs::symlink_metadata(some.join("linkdir"))?.file_type().is_symlink());
         assert_eq!(fs::read(some.join("a/edit"))?, b"new bytes");
         assert!(!some.join("gone").exists());
@@ -1964,7 +1963,8 @@ mod tests {
         let work3 = s.0.join("work3");
         layered.materialize(&work3, false)?;
         fs::write(work3.join("b/linked"), b"both names")?;
-        let e = snapshot_over(&layered, "layer-id", &work3, &s.0.join("refused"), false).unwrap_err();
+        let layer_id = crate::ids::new_id();
+        let e = snapshot_over(&layered, &layer_id, &work3, &s.0.join("refused"), false).unwrap_err();
         assert!(needs_complete(&e) && !s.0.join("refused").exists());
         // A second layer over the first one.
         let work2 = s.0.join("work2");
@@ -1972,7 +1972,7 @@ mod tests {
         fs::remove_file(work2.join("a/new"))?;
         fs::write(work2.join("gone"), b"back as a file")?;
         let layer2 = s.0.join("layer2");
-        snapshot_over(&layered, "layer-id", &work2, &layer2, false)?.expect("changes");
+        snapshot_over(&layered, &layer_id, &work2, &layer2, false)?.expect("changes");
         let two = Layered::over(&layer2, layered.clone())?;
         check_same(&two, &work2);
         let out2 = s.0.join("out2");
@@ -1982,5 +1982,24 @@ mod tests {
         assert!(snapshot_over(&two, "x", &work2, &s.0.join("none"), false)?.is_none());
         assert!(!s.0.join("none").exists());
         Ok(())
+    }
+}
+
+impl crate::fsutil::Src for Layered {
+    fn core_reader(&self) -> Option<&dyn layr_fs_core::TreeRead> {
+        Some(self)
+    }
+    fn at(&self, rel: &str) -> Result<PathBuf> {
+        self.path(rel)
+    }
+    fn folder(&self) -> Option<&Path> {
+        self.is_complete().then(|| self.bottom())
+    }
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
+        if self.layers().is_empty() {
+            self.object_base().map(|base| base.as_ref())
+        } else {
+            None
+        }
     }
 }

@@ -106,11 +106,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
         }
     };
     repo.source_state(&view.shared)?;
-    let subject = if view.layers.is_empty() {
-        Subject::state(&view.shared)?
-    } else {
-        Subject::view(&view.id()?)?
-    };
+    let subject = if view.layers.is_empty() { Subject::state(&view.shared)? } else { Subject::view(&view.id()?)? };
     Ok(Input { subject, state: view.shared, layers: view.layers })
 }
 fn readers_cover(project: &crate::access::Policy, overlay: &crate::access::Policy) -> bool {
@@ -349,14 +345,16 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             if source_status(repo, input) != "available" {
                 bail!("{}", source_status(repo, input));
             }
-            let env =
-                if matches!(&input.subject, crate::model::Subject::View(_)) { vec![("LAYR_TRY_VIEW".into(), input.subject.id().to_owned())] } else { vec![] };
+            let env = if matches!(&input.subject, crate::model::Subject::View(_)) {
+                vec![("LAYR_TRY_VIEW".into(), input.subject.id().to_owned())]
+            } else {
+                vec![]
+            };
             let code = crate::try_run::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
             // Freeze outputs before root reads them; the command may have left a child process.
             let snapshot = repo.temp_snapshot(dir, true)?;
             let work = repo.p.work_dir().join(crate::store::temp_name());
-            crate::storage::create_subvolume(&work)?;
-            let cleanup = Temp { path: work.clone() };
+            let cleanup = Temp::empty(work.clone())?;
             collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;
             validate_outputs(&work, &probe)?;
             let _lock = repo.p.lock_maintenance()?;
@@ -863,7 +861,9 @@ pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Be
         _ => bail!("the line upstream must be a line name"),
     };
     let target = repo.line(target)?;
-    let base = repo.merge_base(&repo.source_id(&target.head)?, &repo.source_id(&state.id)?)?.context("change and target have no common ancestor")?;
+    let base = repo
+        .merge_base(&repo.source_id(&target.head)?, &repo.source_id(&state.id)?)?
+        .context("change and target have no common ancestor")?;
     let base = resolve(repo, None, &base)?;
     let head = resolve(repo, None, &state.id)?;
     let mut behavior = diff(repo, &base, &head)?;

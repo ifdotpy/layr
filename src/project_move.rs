@@ -16,7 +16,7 @@
 use crate::project_copy::{self, CopyReport};
 use crate::store::{db_file, kick_trash, Project, Store};
 use crate::volumes::{self, Layout};
-use crate::{fsutil, ids, linepaths, storage};
+use crate::{fsutil, ids, linepaths};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -108,10 +108,7 @@ fn moved_folders(project_dir: &Path) -> Vec<PathBuf> {
 /// Move a folder to another place on its file system. Each backend moves a tree its own way:
 /// sealed trees on APFS, managed mounts on OverlayFS.
 fn move_folder(from: &Path, to: &Path) -> Result<()> {
-    #[cfg(feature = "overlayfs")]
-    return storage::rename_tree(from, to);
-    #[cfg(not(feature = "overlayfs"))]
-    storage::move_tree(from, to)
+    crate::fs::move_tree(from, to)
 }
 
 /// Remove a folder of a volume through that volume's trash (a rename on the same file system).
@@ -330,7 +327,7 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
     drop(_lock);
     drop(handle);
     #[cfg(feature = "overlayfs")]
-    storage::delete_tree(&gone)?;
+    crate::fs::remove(&gone)?;
     #[cfg(not(feature = "overlayfs"))]
     let _ = gone;
     Ok(())

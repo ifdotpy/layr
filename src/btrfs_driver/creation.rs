@@ -34,6 +34,7 @@ pub(super) struct Stage {
     pub(super) directory: Arc<File>,
 }
 pub(super) enum Resource {
+    Ordinary(crate::fs::custody::Entry),
     Vacant,
     Directories(Vec<OperationDirectory>),
     Staged { stage: Stage, cleanup: Vec<OperationDirectory> },
@@ -50,6 +51,11 @@ impl Resource {
     }
     pub fn remove(&mut self, driver: &BtrfsFs) -> Result<()> {
         match self {
+            Self::Ordinary(entry) => entry.remove(|directory, name, _held| {
+                driver.step("ordinary-cleanup")?;
+                let name = name.to_str().ok_or(FsError::Invalid("invalid custody name"))?;
+                backend(crate::tree::remove_at(&directory.try_clone()?.into(), name))
+            }),
             Self::Vacant => Ok(()),
             Self::Borrowed(_) => Err(FsError::Invalid("borrowed tree has no deletion authority")),
             Self::Directories(directories) => removal::cleanup_directories(driver, directories),
@@ -77,7 +83,7 @@ impl Resource {
                 self.remove(driver)
             }
             Self::Pinned(pinned) => {
-                pinned.remove(driver, removal::Acquisition::Owned)?;
+                pinned.remove(driver)?;
                 *self = Self::Directories(std::mem::take(&mut pinned.cleanup));
                 driver.step("destroyed")?;
                 self.remove(driver)
@@ -86,6 +92,7 @@ impl Resource {
     }
 }
 pub(super) enum Source<'a> {
+    Empty,
     Snapshot(&'a File),
     Copy(&'a dyn TreeRead),
 }
@@ -221,7 +228,7 @@ impl BtrfsFs {
                     backend(crate::sys::subvol_snapshot(file.as_fd(), stage.directory.as_fd(), "tree", false))?;
                     self.step("snapshot-created")?;
                 }
-                Source::Copy(_) => {
+                Source::Copy(_) | Source::Empty => {
                     backend(crate::sys::subvol_create(stage.directory.as_fd(), "tree"))?;
                     self.step("copy-created")?;
                 }
@@ -255,7 +262,7 @@ impl BtrfsFs {
                         access,
                         provenance: match source {
                             Source::Snapshot(_) => Provenance::Snapshot,
-                            Source::Copy(_) => Provenance::Other,
+                            Source::Copy(_) | Source::Empty => Provenance::Other,
                         },
                     },
                     placement: Placement::Private(stage.clone()),
@@ -268,7 +275,7 @@ impl BtrfsFs {
                     layr_fs_common::copy_tree(tree, reader.as_ref())?;
                     reader.directory.root_file().metadata()?.mode() & 0o7777
                 }
-                Source::Snapshot(_) => original_mode,
+                Source::Snapshot(_) | Source::Empty => original_mode,
             };
             self.step("prepared")?;
             let root = reader.directory.root_file();
@@ -310,59 +317,6 @@ impl BtrfsFs {
             Ok(reader) => Ok((reader, ownership)),
             Err(cause) => Err(self.rollback(ownership, cause)),
         }
-    }
-}
-
-/// Keep the operation-local registry alive when the legacy facade returns a retry token.
-/// Callers can downcast the error and retry through the retained driver and authority.
-pub(crate) struct NativeCleanup {
-    pub driver: Arc<BtrfsFs>,
-    pub failure: RemovalFailure,
-    pub(super) cause: FsError,
-}
-impl std::fmt::Debug for NativeCleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeCleanup").field("cause", &self.cause).field("failure", &self.failure).finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for NativeCleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; cleanup requires retry: {} (staging anchor {:?})", self.cause, self.failure.error, self.driver.anchor)?;
-        if let (Ok(key), Ok(trees)) = (self.driver.issuer.owned_key(&self.failure.ownership), self.driver.trees()) {
-            match trees.get(&key) {
-                Some(Resource::Directories(directories)) => {
-                    for directory in directories {
-                        write!(f, "; pending directory {:?}", OsStr::from_bytes(directory.name.as_bytes()))?;
-                    }
-                }
-                Some(Resource::Staged { stage, .. }) => {
-                    write!(f, "; private slot {:?}/tree", OsStr::from_bytes(stage.operation.name.as_bytes()))?
-                }
-                Some(Resource::Pinned(pinned)) => match &pinned.placement {
-                    Placement::Public(location) => {
-                        write!(f, "; original slot {:?}/{:?}", location.parent, OsStr::from_bytes(location.name.as_bytes()))?
-                    }
-                    Placement::Custody { stage, restore } => write!(
-                        f,
-                        "; custody {:?}/tree; restore to {:?}/{:?}",
-                        OsStr::from_bytes(stage.operation.name.as_bytes()),
-                        restore.parent,
-                        OsStr::from_bytes(restore.name.as_bytes())
-                    )?,
-                    Placement::Private(stage) => {
-                        write!(f, "; private slot {:?}/tree", OsStr::from_bytes(stage.operation.name.as_bytes()))?
-                    }
-                    Placement::Removed => {}
-                },
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-}
-impl std::error::Error for NativeCleanup {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
     }
 }
 

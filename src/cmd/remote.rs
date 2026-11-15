@@ -10,7 +10,7 @@ pub mod git {
     use crate::ctx::Ctx;
     use crate::gitbridge;
     use crate::ids;
-    
+
     use crate::repo::Repo;
     use crate::revs;
     use anyhow::Result;
@@ -1028,7 +1028,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
     }
-    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store) {
+    if (a.get("--line").is_some() || a.get("--overlay").is_some())
+        && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store)
+    {
         bail!("--line and --overlay require layr fetch or layr push with a store remote");
     }
     if let Some(line) = a.get("--only-line") {
@@ -1230,7 +1232,9 @@ fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
         None
     };
     match replacement {
-        Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}"))),
+        Some((flag, instead)) => {
+            Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}")))
+        }
         None => Ok(()),
     }
 }
@@ -1391,7 +1395,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if result.is_err() {
         let dir = repo.p.dir.clone();
         drop(repo);
-        let _ = crate::storage::delete_tree(&dir);
+        let _ = crate::fs::remove(&dir);
     }
     result
 }

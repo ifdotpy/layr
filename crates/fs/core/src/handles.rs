@@ -1,5 +1,5 @@
 use crate::{FsError, RelPath, Result, TreeRead, TreeWrite};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// The trusted driver's issuer. One issuer per instance; no process-global registry or IDs.
 #[derive(Default)]
@@ -9,7 +9,7 @@ pub struct TreeIssuer {
 
 /// Opaque, non-reused identity retained by the driver's resource registry.
 #[derive(Clone)]
-pub struct TreeKey(Arc<()>);
+pub struct TreeKey(Arc<Weak<Lease>>);
 impl PartialEq for TreeKey {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -90,14 +90,27 @@ impl WorkingTree {
         TreeScope { lease: self.lease.clone() }
     }
 }
+impl OwnedTree {
+    pub fn scope(&self) -> TreeScope {
+        TreeScope { lease: self.lease.clone() }
+    }
+}
 impl NewTreeLocation {
+    pub fn scope(&self) -> TreeScope {
+        TreeScope { lease: Arc::new(Lease { instance: self.instance.clone(), key: self.key.clone() }) }
+    }
     pub fn name(&self) -> &RelPath {
         &self.name
     }
 }
 impl TreeIssuer {
     fn lease(&self) -> Arc<Lease> {
-        Arc::new(Lease { instance: self.instance.clone(), key: TreeKey(Arc::new(())) })
+        Arc::new_cyclic(|lease| Lease { instance: self.instance.clone(), key: TreeKey(Arc::new(lease.clone())) })
+    }
+    /// Borrowed registrations may release native descriptors after the last handle or scope
+    /// disappears. Owned resources remain governed by their distinct deletion authority.
+    pub fn has_handles(&self, key: &TreeKey) -> bool {
+        key.0.upgrade().is_some_and(|lease| Arc::ptr_eq(&lease.instance, &self.instance))
     }
     pub fn create(&self, writer: Arc<dyn TreeWrite>) -> CreatedTree {
         let lease = self.lease();
@@ -136,7 +149,7 @@ impl TreeIssuer {
         if !name.is_name() {
             return Err(FsError::Invalid("destination must be one child name"));
         }
-        Ok(NewTreeLocation { instance: self.instance.clone(), key: TreeKey(Arc::new(())), name, _parent: parent })
+        Ok(NewTreeLocation { instance: self.instance.clone(), key: TreeKey(Arc::new(Weak::new())), name, _parent: parent })
     }
     pub fn location_key(&self, dst: &NewTreeLocation) -> Result<TreeKey> {
         self.check(&dst.instance)?;
@@ -145,6 +158,12 @@ impl TreeIssuer {
     pub fn working_key(&self, tree: &WorkingTree) -> Result<TreeKey> {
         self.check(&tree.lease.instance)?;
         Ok(tree.lease.key.clone())
+    }
+    pub fn clone_source_key(&self, source: crate::CloneSource<'_>) -> Result<TreeKey> {
+        match source {
+            crate::CloneSource::Frozen(tree) => self.frozen_key(tree),
+            crate::CloneSource::Working(tree) => self.working_key(tree),
+        }
     }
     pub fn frozen_key(&self, tree: &FrozenTree) -> Result<TreeKey> {
         self.check(&tree.lease.instance)?;
@@ -170,18 +189,45 @@ impl TreeIssuer {
         self.check(&ownership.lease.instance)?;
         Ok(FrozenTree { lease: ownership.lease.clone(), reader })
     }
+    /// An exchange retains both authorities on failure, including failures after the native
+    /// namespace change. Read handles and retained scopes must release their pins first.
+    pub fn exchange(
+        &self,
+        first: OwnedTree,
+        second: OwnedTree,
+        operation: impl FnOnce(&TreeKey, &TreeKey) -> std::result::Result<(), crate::ExchangeError>,
+    ) -> std::result::Result<(OwnedTree, OwnedTree), crate::ExchangeFailure> {
+        let checked = (|| -> Result<()> {
+            self.check(&first.lease.instance)?;
+            self.check(&second.lease.instance)?;
+            if first.lease.key == second.lease.key {
+                return Err(FsError::Invalid("exchange requires distinct trees"));
+            }
+            if Arc::strong_count(&first.lease) != 1 || Arc::strong_count(&second.lease) != 1 {
+                return Err(FsError::Busy);
+            }
+            Ok(())
+        })();
+        match checked.map_err(crate::ExchangeError::from).and_then(|()| operation(&first.lease.key, &second.lease.key)) {
+            Ok(()) => Ok((first, second)),
+            Err(crate::ExchangeError { error, progress }) => Err(crate::ExchangeFailure { error, progress, first, second }),
+        }
+    }
+    /// Native owned mutations use the same affinity and lease exclusion as deletion.
+    pub fn with_exclusive<T>(&self, ownership: &OwnedTree, operation: impl FnOnce(&TreeKey) -> Result<T>) -> Result<T> {
+        self.check(&ownership.lease.instance)?;
+        if Arc::strong_count(&ownership.lease) != 1 {
+            return Err(FsError::Busy);
+        }
+        operation(&ownership.lease.key)
+    }
     /// The operation runs only after all readers have released their pin. Errors retain authority.
     pub fn remove(
         &self,
         ownership: OwnedTree,
         operation: impl FnOnce(&TreeKey) -> Result<()>,
     ) -> std::result::Result<(), RemovalFailure> {
-        let result = self.check(&ownership.lease.instance).and_then(|()| {
-            if Arc::strong_count(&ownership.lease) != 1 {
-                return Err(FsError::Busy);
-            }
-            operation(&ownership.lease.key)
-        });
+        let result = self.with_exclusive(&ownership, operation);
         result.map_err(|error| RemovalFailure { error, ownership })
     }
 }
@@ -228,6 +274,27 @@ mod tests {
             Ok(())
         }
     }
+    #[test]
+    fn registration_liveness_tracks_readers_scopes_and_authority_without_pinning_them() {
+        let issuer = TreeIssuer::default();
+        let other = TreeIssuer::default();
+        let created = issuer.create(Arc::new(Empty));
+        let key = issuer.working_key(&created.tree).unwrap();
+        let scope = created.tree.scope();
+        assert!(issuer.has_handles(&key));
+        assert!(!other.has_handles(&key));
+        drop(created.tree);
+        drop(created.ownership);
+        assert!(issuer.has_handles(&key));
+        drop(scope);
+        assert!(!issuer.has_handles(&key));
+        let borrowed = issuer.import(Arc::new(Empty));
+        let key = issuer.frozen_key(&borrowed).unwrap();
+        assert!(issuer.has_handles(&key));
+        drop(borrowed);
+        assert!(!issuer.has_handles(&key));
+    }
+
     #[test]
     fn authority_survives_busy_wrong_instance_and_io_failure() {
         let issuer = TreeIssuer::default();

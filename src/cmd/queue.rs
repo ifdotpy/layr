@@ -441,6 +441,7 @@ fn run_entries(
         cwd: ctx.cwd.clone(),
         env: ctx.env.clone(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     };
     let merge_repo = Repo::open(&merge_ctx, &repo.p.name)?;
@@ -601,6 +602,7 @@ fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remotes: &str) ->
             cwd: repo.working(&line),
             env: ctx.env.clone(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let code = if names.len() == 2 {
@@ -631,6 +633,7 @@ pub fn run_configured(ctx: &Ctx, repo: &Repo, only: Option<&str>) -> Result<()> 
             cwd: repo.working(&line),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let run_repo = Repo::open(&run_ctx, &repo.p.name)?;

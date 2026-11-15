@@ -198,6 +198,7 @@ mod tests {
             env: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
             author: Default::default(),
+            captures: Default::default(),
         };
         IDENTITY_LOOKUPS.with(|lookups| lookups.set(0));
         let nested = ctx.caller.clone();
@@ -230,8 +231,10 @@ mod tests {
         let caller = crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw());
         let fs = CallerFs(caller.fs_identity()?);
         for kind in [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Interrupted] {
-            let error = fs.run(&mut || Err(std::io::Error::new(kind, "step failed")))
-                .err().ok_or_else(|| anyhow::anyhow!("filesystem step unexpectedly succeeded"))?;
+            let error = fs
+                .run(&mut || Err(std::io::Error::new(kind, "step failed")))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("filesystem step unexpectedly succeeded"))?;
             assert_eq!(error.kind(), kind);
             assert_eq!(error.to_string(), "step failed");
         }

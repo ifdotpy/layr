@@ -5,7 +5,6 @@ use crate::ids;
 use crate::model::{StateKind, StateRec};
 use crate::overlay::{Mode, Props, PROPS};
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -26,7 +25,7 @@ pub(crate) fn make_overlay(
     folder: Option<&str>,
     key_files: Option<&serde_json::Value>,
 ) -> Result<()> {
-        locked.check(&repo.p)?;
+    locked.check(&repo.p)?;
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
@@ -34,7 +33,7 @@ pub(crate) fn make_overlay(
     // overlay replaces that folder (its states are not kept by any line).
     let removed = repo.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some();
     if removed && dir.exists() {
-        btrfs::delete_tree(&dir)?;
+        crate::fs::remove(&dir)?;
     }
     // Only a folder this call made is removed below, so the creation stays outside the cleanup.
     let config = serde_json::json!({
@@ -48,9 +47,12 @@ pub(crate) fn make_overlay(
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();
         let dst = orepo.p.state_path(&id);
-        btrfs::create_subvolume(&dst)?;
-        btrfs::set_readonly(&dst)?;
-        let info = btrfs::subvol_info(&dst)?;
+        let empty = crate::repo::Temp::empty(orepo.p.work_dir().join(crate::store::temp_name()))?;
+        let captured = crate::fs::freeze_path_owned(&empty.path, &dst, crate::fs::CapturePurpose::State)?;
+        let info = match crate::fs::host().namespace.info(&dst) {
+            Ok(info) => info,
+            Err(error) => return Err(captured.abort(error).into()),
+        };
         let st = StateRec {
             id: id.clone(),
             kind: StateKind::Commit,
@@ -77,7 +79,14 @@ pub(crate) fn make_overlay(
         };
         let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st);
-        orepo.commit_record(&overlay_lock, ctx, rec)?;
+        match orepo.commit_record(&overlay_lock, ctx, rec) {
+            Ok(_) => captured.release(),
+            Err(crate::db::CommitResolution::NotCommitted(error)) => return Err(captured.abort(error).into()),
+            Err(error) => {
+                captured.release();
+                return Err(error);
+            }
+        }
         let mut rec = crate::model::DraftRecord::new("overlay.create");
         let mut cfg = serde_json::Map::new();
         cfg.insert(
@@ -111,7 +120,7 @@ pub(crate) fn make_overlay(
     if let Err(e) = made {
         // No record of the project names the overlay: its folder goes.
         if matches!(e, crate::db::CommitResolution::NotCommitted(_)) && repo.overlay_info(name)?.is_none() {
-            let _ = btrfs::delete_tree(&dir);
+            let _ = crate::fs::remove(&dir);
         }
         return Err(e.into());
     }

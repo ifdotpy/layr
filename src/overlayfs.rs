@@ -6,7 +6,6 @@ use layr_fs_core::CaptureConsistency;
 #[path = "overlayfs/driver.rs"]
 pub(crate) mod driver;
 use anyhow::{bail, Context, Result};
-pub(crate) use driver::OverlayFs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -101,7 +100,8 @@ fn lock_at(home: PathBuf) -> Result<Locked> {
 /// Line folders outside the store (`layr line move`) and the registry that manages them.
 static EXTERNAL: std::sync::Mutex<(PathBuf, Vec<PathBuf>)> = std::sync::Mutex::new((PathBuf::new(), Vec::new()));
 /// Set the folders outside the store root that `home_root`'s registry manages.
-pub fn set_external(home_root: &Path, folders: Vec<PathBuf>) {
+pub fn set_external(home_root: &Path, mut folders: Vec<PathBuf>) {
+    folders.extend(crate::views::pending_paths(home_root));
     *EXTERNAL.lock().unwrap() = (home_root.join(".layr-overlayfs"), folders);
 }
 /// The registry of a folder outside the store: the registry of its volume when the volume has
@@ -298,6 +298,13 @@ fn shared_parent(path: &Path, mounts: &str) -> bool {
         .max_by_key(|(depth, _)| *depth)
         .is_some_and(|(_, shared)| shared)
 }
+pub(super) fn recover_existing(root: &Path) -> Result<()> {
+    if root.join(".layr-overlayfs").is_dir() {
+        recover(root)
+    } else {
+        Ok(())
+    }
+}
 pub fn recover(root: &Path) -> Result<()> {
     if !rustix::process::geteuid().is_root() {
         bail!("OverlayFS requires the root service or a root command");
@@ -443,21 +450,22 @@ fn finish_cache_restore(state: &mut Locked, path: &Path, entry: &Entry) -> Resul
     state.save()?;
     state.collect()
 }
-pub fn is_supported(path: &Path) -> bool {
+pub(super) fn supports_volume(path: &Path) -> bool {
     rustix::process::geteuid().is_root() && lock(path).is_ok()
 }
-pub fn is_subvolume(path: &Path) -> bool {
-    path.is_dir() && subvol_info(path).is_ok()
+pub(super) fn managed_root(path: &Path) -> bool {
+    path.is_dir() && native_info(path).is_ok()
 }
-pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
+pub(super) fn native_info(path: &Path) -> Result<SubvolInfo> {
     let path = absolute(path)?;
     let state = lock(&path)?;
     Ok(state.registry.trees.get(&path).context("not an OverlayFS tree")?.info.clone())
 }
-pub fn create_subvolume(path: &Path) -> Result<()> {
-    OverlayFs::create_path(path)
+enum InitialContent<'a> {
+    Empty,
+    Frozen(&'a dyn layr_fs_core::TreeRead),
 }
-fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -> Result<()> {
+fn create_subvolume_native(path: &Path, publication: &mut driver::Publication, content: InitialContent<'_>) -> Result<()> {
     let path = absolute(path)?;
     valid_path(&path)?;
     let mut state = lock(&path)?;
@@ -466,15 +474,22 @@ fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -
     }
     *publication = driver::Publication::Objects(state.home.clone());
     let id = state.new_object()?;
-    fs::create_dir(state.object(&id).join("data"))?;
+    let data = state.object(&id).join("data");
+    fs::create_dir(&data)?;
+    let readonly = matches!(content, InitialContent::Frozen(_));
+    if let InitialContent::Frozen(source) = content {
+        let target = layr_fs_unix::DirectoryTree::open(&data)?;
+        layr_fs_common::copy_tree(source, &target)?;
+        sync_tree(&data)?;
+    }
     let entry = Entry {
-        info: SubvolInfo { uuid: id.clone(), received_uuid: None, parent_uuid: None, readonly: false },
+        info: SubvolInfo { uuid: id.clone(), received_uuid: None, parent_uuid: None, readonly },
         lower: id,
-        hard_links: false,
+        hard_links: if readonly { tree_has_links(&data)? } else { false },
         bases: Vec::new(),
         restore_cache: false,
         taken: false,
-        plain: state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
+        plain: !readonly && state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
     };
     fs::create_dir(&path)?;
     publication.directory(&state.home, None);
@@ -550,9 +565,7 @@ fn copy_tree_at(
                 bail!("source file changed during snapshot");
             }
             let d = fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
-            if clone_file(&s, &d).is_err() {
-                io::copy(&mut &s, &mut &d)?;
-            }
+            layr_fs_unix::copy_contents(&s, &d)?;
             links.insert((m.dev(), m.ino()), dst.to_path_buf());
         }
     } else {
@@ -574,7 +587,7 @@ fn copy_tree_at(
         }
         sys::overlay_attribute(dst, &std::ffi::CString::new(name)?, Some(&value))?;
     }
-    sys::overlay_attribute(dst, c"trusted.layr.origin", Some(&file_identity(src)?))?;
+    sys::overlay_attribute(dst, c"trusted.layr.origin", Some(&native_file_identity(src)?))?;
     sys::overlay_mtime(dst, m.mtime(), m.mtime_nsec())?;
     Ok(())
 }
@@ -822,22 +835,8 @@ fn copy_delta(
 }
 
 /// A read-only snapshot for comparing content.
-pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
-    snapshot(src, dst, true)
-}
-
 /// A writable copy of a cache folder (see the APFS and btrfs versions).
 /// Returns false: every entry needs a check of its owner (see the btrfs version).
-pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
-    snapshot(src, dst, false)?;
-    Ok(false)
-}
-
-pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
-    let consistency = OverlayFs::snapshot_path(src, dst, readonly)?;
-    report_consistency(src, consistency);
-    Ok(())
-}
 fn report_consistency(src: &Path, consistency: CaptureConsistency) {
     if consistency.running() {
         crate::fsutil::mark_unsettled(src);
@@ -985,7 +984,8 @@ fn lock_home(path: &Path) -> Result<PathBuf> {
     }
     bail!("path is outside the store")
 }
-pub fn set_readonly(path: &Path) -> Result<()> {
+#[cfg(test)]
+pub(super) fn seal_tree(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let mut state = lock(&path)?;
     let mut e = state.registry.trees.get(&path).context("unmanaged tree")?.clone();
@@ -1025,7 +1025,8 @@ pub fn set_readonly(path: &Path) -> Result<()> {
     File::open(state.object(&e.info.uuid))?.sync_all()?;
     state.collect()
 }
-pub fn set_writable(path: &Path) -> Result<()> {
+#[cfg(test)]
+pub(super) fn unseal_tree(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let mut state = lock(&path)?;
     let mut e = state.registry.trees.get(&path).context("unmanaged tree")?.clone();
@@ -1048,7 +1049,7 @@ pub fn set_writable(path: &Path) -> Result<()> {
 pub fn rename_tree(from: &Path, to: &Path) -> Result<()> {
     rename_tree_using(from, to, true, || Ok(fs::rename(from, to)?))
 }
-pub fn rename_plain_tree(from: &Path, to: &Path, rename: impl FnOnce() -> Result<()>) -> Result<()> {
+pub(super) fn rename_plain_tree(from: &Path, to: &Path, rename: &mut dyn FnMut() -> Result<()>) -> Result<()> {
     rename_tree_using(from, to, false, rename)
 }
 fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnOnce() -> Result<()>) -> Result<()> {
@@ -1099,9 +1100,6 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
         fs::remove_dir(from)?;
     }
     Ok(())
-}
-pub fn delete_tree(path: &Path) -> Result<()> {
-    OverlayFs::remove_path(path)
 }
 struct PrivateLocation {
     parent: std::sync::Arc<File>,
@@ -1360,66 +1358,7 @@ fn remove_missing(path: &Path, home: &Path) -> Result<()> {
     }
     state.collect()
 }
-pub fn delete_subvolume(path: &Path) -> Result<()> {
-    delete_tree(path)
-}
-pub fn is_not_empty(e: &anyhow::Error) -> bool {
-    e.chain().any(|e| e.downcast_ref::<io::Error>().is_some_and(|e| e.raw_os_error() == Some(libc::ENOTEMPTY)))
-}
-pub fn clone_file(src: &File, dst: &File) -> io::Result<()> {
-    match rustix::fs::ioctl_ficlone(dst, src) {
-        Ok(()) => return Ok(()),
-        Err(e)
-            if matches!(
-                e,
-                rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::XDEV | rustix::io::Errno::INVAL | rustix::io::Errno::NOTTY
-            ) => {}
-        Err(e) => return Err(e.into()),
-    }
-    // ext4 has no reflinks. Preserve holes instead of allocating their zero bytes.
-    use rustix::fs::{seek, SeekFrom};
-    use std::io::Read;
-    let source = src.metadata()?;
-    let dest = dst.metadata()?;
-    if (source.dev(), source.ino()) == (dest.dev(), dest.ino()) {
-        return Err(io::Error::other("source and destination are the same file"));
-    }
-    let size = source.len();
-    dst.set_len(0)?;
-    dst.set_len(size)?;
-    let mut at = 0;
-    while at < size {
-        let data = match seek(src, SeekFrom::Data(at)) {
-            Ok(n) => n,
-            Err(rustix::io::Errno::NXIO) => break,
-            Err(e) => return Err(e.into()),
-        };
-        if data >= size {
-            break;
-        }
-        let end = seek(src, SeekFrom::Hole(data))?.min(size);
-        if end <= data {
-            return Err(io::Error::other("invalid sparse extent"));
-        }
-        seek(src, SeekFrom::Start(data))?;
-        seek(dst, SeekFrom::Start(data))?;
-        if io::copy(&mut src.take(end - data), &mut &*dst)? != end - data {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "source changed during copy"));
-        }
-        at = end;
-    }
-    Ok(())
-}
-pub fn clone_range(src: &File, off: u64, len: u64, dst: &File, dst_off: u64) -> io::Result<()> {
-    use layr_fs_core::{Attempt, ByteRange, ReflinkRange};
-    let Ok(range) = ByteRange::new(off, len) else { return sys::clone_range(src, off, len, dst, dst_off) };
-    match driver::RangeClone.clone_range(src, range, dst, dst_off) {
-        Ok(Attempt::Applied(())) => Ok(()),
-        Ok(Attempt::Unavailable(error)) | Err(layr_fs_core::FsError::Io(error)) => Err(error),
-        Err(error) => Err(io::Error::other(error)),
-    }
-}
-pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn native_file_identity(path: &Path) -> Result<Vec<u8>> {
     match sys::overlay_attribute(path, c"trusted.layr.origin", None) {
         Ok(v) => Ok(v),
         Err(e) if e.raw_os_error() == Some(libc::ENODATA) => {
@@ -1429,59 +1368,26 @@ pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
         Err(e) => Err(e.into()),
     }
 }
-pub fn mark_received(path: &Path, uuid: &str, _transid: u64) -> Result<()> {
-    uuid::Uuid::parse_str(uuid)?;
-    let path = absolute(path)?;
-    let mut s = lock(&path)?;
-    s.registry.trees.get_mut(&path).context("unmanaged receive")?.info.received_uuid = Some(uuid.into());
-    s.save()
-}
-pub fn clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
-    let i = subvol_info(path)?;
+
+pub(super) fn native_clone_identity(path: &Path) -> Result<(String, Option<u64>)> {
+    let i = native_info(path)?;
     if !i.readonly {
         bail!("clone source is writable");
     }
     Ok((i.received_uuid.unwrap_or(i.uuid), None))
 }
-pub fn send_clone_identity(path: &Path) -> Result<(String, u64)> {
-    Ok((clone_identity(path)?.0, 1))
+pub(super) fn native_send_identity(path: &Path) -> Result<(String, u64)> {
+    Ok((native_clone_identity(path)?.0, 1))
 }
 pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
     let mut c = Command::new(std::env::current_exe()?);
     c.arg("__apfs-send").arg(child);
     // With a parent the stream holds only the differences (`apfs_stream::send`). A parent that
     // is no sealed tree gives a complete stream.
-    if let Some((p, id)) = parent.and_then(|p| clone_identity(p).ok().map(|(id, _)| (p, id))) {
+    if let Some((p, id)) = parent.and_then(|p| native_clone_identity(p).ok().map(|(id, _)| (p, id))) {
         c.arg(p).arg(id);
     }
     Ok(c)
-}
-pub fn send_optimized(parent: Option<&Path>, child: &Path, _clones: &[PathBuf], _compressed: bool) -> Result<Command> {
-    send_command(parent, child)
-}
-/// The paths whose entries can differ between the sealed trees `parent` and `child`, for an
-/// incremental send (see `changed_entries`). `None` when they share no layer or have hard links
-/// (a stream names those by inode): the stream is then complete.
-pub fn changed_paths(parent: &Path, child: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
-    let (Ok(parent), Ok(child)) = (absolute(parent), absolute(child)) else {
-        return Ok(None);
-    };
-    let sealed = |path: &Path| -> bool {
-        lock(path).is_ok_and(|s| s.registry.trees.get(path).is_some_and(|e| e.info.readonly && !e.plain && !e.hard_links))
-    };
-    if !sealed(&parent) || !sealed(&child) {
-        return Ok(None);
-    }
-    match own_layers(&parent, &child)? {
-        Some(layers) => Ok(Some(changed_entries(&parent, &child, &layers)?.into_keys().collect())),
-        None => Ok(None),
-    }
-}
-pub fn supports_compressed_receive() -> bool {
-    false
-}
-pub fn supports_local_clone_receive() -> bool {
-    true
 }
 
 struct ScanEntry {
@@ -1509,6 +1415,7 @@ fn visible_entry(root: &Path, root_dev: u64, nested: &HashSet<PathBuf>, rel: &st
 // The layers above the ones both trees share, top first. `None` when either tree is not an
 // OverlayFS mount of this store or the two share no layer.
 struct CandidateLayers {
+    frozen: bool,
     dirs: Vec<PathBuf>,
     nested: HashSet<PathBuf>,
 }
@@ -1538,6 +1445,7 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
         return Ok(None);
     }
     Ok(Some(CandidateLayers {
+        frozen: [parent, child].iter().all(|path| state.registry.trees.get(*path).is_some_and(|entry| entry.info.readonly)),
         dirs: a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect(),
         nested: state.registry.trees.keys().filter(|p| p.as_path() != parent && p.as_path() != child).cloned().collect(),
     }))
@@ -1622,18 +1530,12 @@ fn changed_entries(
     }
     Ok(entries)
 }
-pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeHints> {
-    Some(&UpperHints)
-}
-
-struct UpperHints;
-impl crate::change_hints::ChangeHints for UpperHints {
-    fn between(&self, base: &Path, tree: &Path) -> layr_fs_core::Result<crate::change_hints::HintSet> {
-        OverlayFs::path_hints(base, tree)
-    }
-}
-
-fn candidates_in(parent: &Path, child: &Path, layers: &CandidateLayers) -> Result<Vec<crate::compare::EntryChange>> {
+fn candidates_in(
+    parent: &Path,
+    child: &Path,
+    layers: &CandidateLayers,
+    request: layr_fs_core::ChangeRequest,
+) -> Result<Vec<crate::compare::EntryChange>> {
     let (parent, child) = (absolute(parent)?, absolute(child)?);
     let entries = changed_entries(&parent, &child, layers)?;
     let mut changes: BTreeMap<_, _> = entries
@@ -1653,10 +1555,10 @@ fn candidates_in(parent: &Path, child: &Path, layers: &CandidateLayers) -> Resul
     let mut added: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
     for (path, change) in changes.iter() {
         if change.new().is_none() {
-            removed.entry(file_identity(&parent.join(path))?).or_default().push(path.clone());
+            removed.entry(native_file_identity(&parent.join(path))?).or_default().push(path.clone());
         }
         if change.old().is_none() {
-            added.entry(file_identity(&child.join(path))?).or_default().push(path.clone());
+            added.entry(native_file_identity(&child.join(path))?).or_default().push(path.clone());
         }
     }
     for (identity, sources) in removed {
@@ -1678,7 +1580,18 @@ fn candidates_in(parent: &Path, child: &Path, layers: &CandidateLayers) -> Resul
                 .get(p)
                 .and_then(|(old, new)| old.as_ref().zip(new.as_ref()))
                 .is_some_and(|(x, y)| x.stamp == y.stamp && x.meta.size == y.meta.size);
-            let ranges = if quick { Vec::new() } else { crate::changes::changed_ranges(&parent.join(p), &child.join(p))? };
+            if !quick && request.detail == layr_fs_core::ChangeDetail::Equality {
+                continue;
+            }
+            let ranges = if quick {
+                Vec::new()
+            } else {
+                {
+                    let (mut a, mut b) =
+                        (crate::fsutil::open_regular(&parent.join(p))?, crate::fsutil::open_regular(&child.join(p))?);
+                    layr_fs_common::changed_ranges(&mut a, old_size, &mut b, new_size)?
+                }
+            };
             c.set_data(crate::compare::DataEvidence::from_native(&ranges, old_size, new_size).map_err(anyhow::Error::msg)?);
         }
     }
@@ -1709,8 +1622,11 @@ mod tests {
                 fs::write(base.join("opaque").join(bad), b"hidden lower")?;
                 sys::overlay_attribute(&upper.join("opaque"), c"user.overlay.opaque", Some(b"y"))?;
             }
-            let layers = CandidateLayers { dirs: vec![upper], nested: HashSet::new() };
-            assert!(candidates_in(&base, &tree, &layers).is_err(), "{source}: incomplete enumeration cannot authorize Complete");
+            let layers = CandidateLayers { frozen: true, dirs: vec![upper], nested: HashSet::new() };
+            assert!(
+                candidates_in(&base, &tree, &layers, Default::default()).is_err(),
+                "{source}: incomplete enumeration cannot authorize Complete"
+            );
             assert!(
                 crate::changes::candidates(&base, &tree).is_err(),
                 "{source}: full fallback also rejects the invalid visible path"
@@ -1735,7 +1651,12 @@ mod tests {
             fs::write(tree.join("edit"), if tree == &parent { b"before".as_slice() } else { b"after!!".as_slice() })?;
         }
         fs::write(upper.join("edit"), b"after!!")?;
-        let result = candidates_in(&parent, &child, &CandidateLayers { dirs: vec![upper], nested: HashSet::new() });
+        let result = candidates_in(
+            &parent,
+            &child,
+            &CandidateLayers { frozen: true, dirs: vec![upper], nested: HashSet::new() },
+            Default::default(),
+        );
         for tree in [&parent, &child] {
             fs::set_permissions(tree.join("lower"), fs::Permissions::from_mode(0o700))?;
         }
@@ -1772,9 +1693,12 @@ mod tests {
         sys::overlay_attribute(&upper.join("opaque"), c"user.overlay.opaque", Some(b"y"))?;
         fs::create_dir(upper.join("nested"))?;
         fs::write(upper.join("nested/cache"), b"private")?;
-        let layers =
-            CandidateLayers { dirs: vec![upper], nested: [parent.join("nested"), child.join("nested")].into_iter().collect() };
-        let changes = candidates_in(&parent, &child, &layers)?;
+        let layers = CandidateLayers {
+            frozen: true,
+            dirs: vec![upper],
+            nested: [parent.join("nested"), child.join("nested")].into_iter().collect(),
+        };
+        let changes = candidates_in(&parent, &child, &layers, Default::default())?;
         let paths: Vec<_> = changes.iter().map(|c| c.path().as_str()).collect();
         assert_eq!(paths, ["gone", "gone/file", "opaque", "opaque/hidden", "replace", "replace/file"]);
         assert!(changes.iter().filter(|c| c.path().ends_with("/file") || c.path() == "opaque/hidden").all(|c| c.new().is_none()));
@@ -1792,10 +1716,11 @@ mod tests {
             fs::write(tree.join("nested/cache"), b"private")?;
         }
         let layers = CandidateLayers {
+            frozen: true,
             dirs: vec![upper],
             nested: [absolute(&parent)?.join("nested"), absolute(&child)?.join("nested")].into_iter().collect(),
         };
-        assert!(candidates_in(&parent, &child, &layers)?.is_empty());
+        assert!(candidates_in(&parent, &child, &layers, Default::default())?.is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1816,7 +1741,12 @@ mod tests {
         for path in ["old", "new", "link-a", "link-b", "link-c", "link-d"] {
             fs::write(upper.join(path), b"")?;
         }
-        let changes = candidates_in(&parent, &child, &CandidateLayers { dirs: vec![upper], nested: HashSet::new() })?;
+        let changes = candidates_in(
+            &parent,
+            &child,
+            &CandidateLayers { frozen: true, dirs: vec![upper], nested: HashSet::new() },
+            Default::default(),
+        )?;
         let renamed = changes.iter().find(|c| c.path() == "new").unwrap();
         assert_eq!(renamed.old_path().map(String::as_str), Some("old"));
         assert!(!changes.iter().any(|c| c.path() == "old"));
@@ -1910,17 +1840,17 @@ mod tests {
         let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("delta-{}", crate::ids::new_id()));
         recover(&root)?;
         let initial = root.join("initial");
-        create_subvolume(&initial)?;
+        crate::fs::create(&initial)?;
         fs::create_dir(initial.join("dir"))?;
         fs::write(initial.join("dir/remove"), b"remove")?;
         fs::write(initial.join("dir/keep"), b"keep")?;
         fs::write(initial.join("unchanged"), vec![7; 1024 * 1024])?;
         fs::write(initial.join("edit"), b"before")?;
-        set_readonly(&initial)?;
+        seal_tree(&initial)?;
         let work = root.join("work");
-        snapshot(&initial, &work, false)?;
+        crate::fs::snapshot(&initial, &work, false)?;
         let cache = work.join("cache");
-        create_subvolume(&cache)?;
+        crate::fs::create(&cache)?;
         fs::write(cache.join("output"), b"private")?;
         fs::remove_dir_all(&cache)?;
         fs::create_dir(&cache)?;
@@ -1932,7 +1862,7 @@ mod tests {
         fs::write(outside.join("secret"), b"private")?;
         fs::remove_dir_all(&cache)?;
         std::os::unix::fs::symlink(&outside, &cache)?;
-        assert!(snapshot(&cache, &root.join("escape"), true).is_err());
+        assert!(crate::fs::snapshot(&cache, &root.join("escape"), true).is_err());
         assert!(!root.join("escape").exists());
         fs::remove_file(&cache)?;
         fs::create_dir(&cache)?;
@@ -1942,7 +1872,7 @@ mod tests {
         fs::remove_file(work.join("dir/remove"))?;
         fs::rename(work.join("dir"), work.join("moved"))?;
         let saved = root.join("saved");
-        snapshot(&work, &saved, true)?;
+        crate::fs::snapshot(&work, &saved, true)?;
         assert_eq!(fs::read(saved.join("edit"))?, b"saved");
         assert!(!saved.join("dir").exists());
         assert!(!saved.join("moved/remove").exists());
@@ -1962,21 +1892,21 @@ mod tests {
         let mut previous = saved;
         for n in 0..20 {
             let branch = root.join(format!("branch-{n}"));
-            snapshot(&previous, &branch, false)?;
+            crate::fs::snapshot(&previous, &branch, false)?;
             fs::write(branch.join("edit"), format!("version {n}"))?;
             let next = root.join(format!("state-{n}"));
-            snapshot(&branch, &next, true)?;
-            delete_tree(&branch)?;
-            delete_tree(&previous)?;
+            crate::fs::snapshot(&branch, &next, true)?;
+            crate::fs::remove(&branch)?;
+            crate::fs::remove(&previous)?;
             assert_eq!(fs::read(next.join("edit"))?, format!("version {n}").as_bytes());
             assert_eq!(fs::read(next.join("unchanged"))?.len(), 1024 * 1024);
             assert!(!next.join("dir/remove").exists());
             assert!(lock(&next)?.registry.trees[&next].bases.len() < 16);
             previous = next;
         }
-        delete_tree(&work)?;
-        delete_tree(&initial)?;
-        delete_tree(&previous)?;
+        crate::fs::remove(&work)?;
+        crate::fs::remove(&initial)?;
+        crate::fs::remove(&previous)?;
         Ok(())
     }
     #[test]
@@ -1985,9 +1915,9 @@ mod tests {
         let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("migration-{}", crate::ids::new_id()));
         recover(&root)?;
         let work = root.join("work");
-        create_subvolume(&work)?;
+        crate::fs::create(&work)?;
         let cache = work.join("cache");
-        create_subvolume(&cache)?;
+        crate::fs::create(&cache)?;
         // Reproduce the previous registry format and mounted cache.
         {
             let mut state = lock(&cache)?;
@@ -2012,10 +1942,10 @@ mod tests {
         fs::create_dir(&cache)?;
         fs::write(cache.join("rebuilt"), b"rebuilt")?;
         let saved = root.join("saved");
-        snapshot(&work, &saved, true)?;
+        crate::fs::snapshot(&work, &saved, true)?;
         assert!(!saved.join("cache/rebuilt").exists());
-        delete_tree(&saved)?;
-        delete_tree(&work)?;
+        crate::fs::remove(&saved)?;
+        crate::fs::remove(&work)?;
         Ok(())
     }
     #[test]
@@ -2024,7 +1954,7 @@ mod tests {
         let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("unit-{}", crate::ids::new_id()));
         recover(&root)?;
         let source = root.join("source");
-        create_subvolume(&source)?;
+        crate::fs::create(&source)?;
         fs::write(source.join("file"), b"base")?;
         fs::hard_link(source.join("file"), source.join("hard"))?;
         let sparse = File::create(source.join("sparse"))?;
@@ -2032,11 +1962,11 @@ mod tests {
         std::os::unix::fs::FileExt::write_all_at(&sparse, b"tail", 2 * 1024 * 1024 * 1024 - 4)?;
         drop(sparse);
         let cache = source.join("cache");
-        create_subvolume(&cache)?;
+        crate::fs::create(&cache)?;
         fs::write(cache.join("generated"), b"cache data")?;
         assert!(crate::fsutil::is_layer(&source, "cache", &crate::fsutil::meta_of(&fs::metadata(&cache)?)));
         let state = root.join("state");
-        snapshot(&source, &state, true)?;
+        crate::fs::snapshot(&source, &state, true)?;
         assert!(state.join("cache").is_dir());
         assert!(!state.join("cache/generated").exists());
         let sparse = File::open(state.join("sparse"))?;
@@ -2050,32 +1980,32 @@ mod tests {
         assert_eq!(fs::metadata(state.join("file"))?.ino(), fs::metadata(state.join("hard"))?.ino());
         assert!(fs::write(state.join("file"), b"bad").is_err());
         let branch = root.join("branch");
-        snapshot(&state, &branch, false)?;
+        crate::fs::snapshot(&state, &branch, false)?;
         fs::write(branch.join("file"), b"changed")?;
         assert_eq!(fs::read(branch.join("hard"))?, b"changed");
         assert_eq!(fs::read(state.join("file"))?, b"base");
-        delete_tree(&state)?;
+        crate::fs::remove(&state)?;
         assert_eq!(fs::read(branch.join("hard"))?, b"changed");
-        set_readonly(&branch)?;
+        seal_tree(&branch)?;
         assert_eq!(fs::read(branch.join("hard"))?, b"changed");
         {
             let store = lock(&branch)?;
             let entry = &store.registry.trees[&branch];
             assert!(!store.object(&entry.info.uuid).join("upper").exists());
         }
-        delete_tree(&branch)?;
+        crate::fs::remove(&branch)?;
         assert!(crate::repo::uncache(&source, "cache", 0, 0)?);
-        assert!(!is_subvolume(&cache));
+        assert!(!managed_root(&cache));
         assert_eq!(fs::read(cache.join("generated"))?, b"cache data");
         assert!(crate::repo::convert_cache(&source, "cache", 0, 0)?);
-        assert!(is_subvolume(&cache));
+        assert!(managed_root(&cache));
         assert_eq!(fs::read(cache.join("generated"))?, b"cache data");
         fs::create_dir(source.join("group"))?;
         rename_tree(&cache, &source.join("group/cache"))?;
         rename_tree(&source.join("group"), &source.join("moved"))?;
-        assert!(is_subvolume(&source.join("moved/cache")));
+        assert!(managed_root(&source.join("moved/cache")));
         assert_eq!(fs::read(source.join("moved/cache/generated"))?, b"cache data");
-        delete_tree(&source)?;
+        crate::fs::remove(&source)?;
         Ok(())
     }
 }
@@ -2102,15 +2032,42 @@ pub fn contains_managed_tree(path: &Path) -> bool {
 }
 
 /// The backing registry of a managed overlay mount, for physical extent keys.
-pub fn du_backing(path: &Path) -> Option<PathBuf> {
-    let path = absolute(path).ok()?;
-    let state = lock(&path).ok()?;
-    state.registry.trees.get(&path).filter(|entry| !entry.plain).map(|_| state.home.clone())
+fn allocation_domain(path: &Path) -> io::Result<crate::fs::accounting::AllocationDomain> {
+    use crate::fs::accounting::AllocationDomain;
+    use std::os::fd::AsFd;
+    let backing = absolute(path).ok().and_then(|path| {
+        let state = lock(&path).ok()?;
+        state.registry.trees.get(&path).filter(|entry| !entry.plain).map(|_| state.home.clone())
+    });
+    let path = backing.as_deref().unwrap_or(path);
+    if let Ok(file) = File::open(path) {
+        return Ok(crate::sys::filesystem_uuid(file.as_fd())
+            .map(AllocationDomain::native)
+            .unwrap_or(AllocationDomain::device(file.metadata()?.dev())));
+    }
+    Ok(AllocationDomain::device(path.metadata()?.dev()))
+}
+pub(crate) fn accounting_part(path: &Path) -> Option<String> {
+    (path.file_name() == Some(std::ffi::OsStr::new(".layr-overlayfs"))).then(|| "overlayfs layers".to_owned())
+}
+fn allocation_units(path: &Path) -> Result<Vec<PathBuf>> {
+    if accounting_part(path).is_some() {
+        let mut units = Vec::new();
+        for entry in fs::read_dir(path.join("objects"))? {
+            let data = entry?.path().join("data");
+            if data.is_dir() {
+                units.push(data);
+            }
+        }
+        Ok(units)
+    } else {
+        crate::fs::accounting::directory_units(path)
+    }
 }
 
-/// Disk space of a folder (`layr du`). A mounted tree reads its files from shared lower layers
+/// Disk measure_space of a folder (`layr du`). A mounted tree reads its files from shared lower layers
 /// and its own upper layer: only the upper layer is its own. A plain folder is its own files.
-pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
+pub(super) fn measure_space(path: &Path) -> Result<crate::fsutil::Space> {
     let abs = absolute(path)?;
     let upper = {
         let state = lock(&abs)?;
@@ -2125,15 +2082,15 @@ pub fn space(path: &Path) -> Result<crate::fsutil::Space> {
     }
 }
 
-/// Visit the files of a folder for `layr du --store` (see `fsutil::Held`).
-pub fn visit_space(path: &Path, f: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
-    crate::fsutil::fiemap_visit(path, f)
+/// Visit physical entries for allocation attribution.
+fn visit_allocation(path: &Path, visit: &mut dyn FnMut(&crate::fsutil::Held)) -> Result<()> {
+    crate::fsutil::fiemap_visit(path, visit)
 }
 
 /// Bytes that a copy of `path` occupies on another file system: each distinct extent once. The
 /// layer folders of the project's trees count too: a mounted view shows them, but a file that
 /// an upper layer hides is only in its layer.
-pub(crate) fn copy_need(path: &Path) -> Result<u64> {
+pub(super) fn copy_allocation(path: &Path) -> Result<u64> {
     let src = absolute(path)?;
     let mut keys: HashMap<crate::fsutil::ExtentKey, u64> = Default::default();
     crate::fsutil::fiemap_visit(path, &mut |h| {
@@ -2162,7 +2119,7 @@ pub(crate) fn copy_need(path: &Path) -> Result<u64> {
 }
 
 /// Allocated bytes of `path` with shared data counted per file.
-pub(crate) fn copy_total(path: &Path) -> Result<u64> {
+pub(super) fn copy_flat_allocation(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     crate::fsutil::fiemap_visit(path, &mut |h| total += h.alloc)?;
     Ok(total)
@@ -2270,13 +2227,15 @@ impl Files {
             }
         }
         let from = File::open(src).with_context(|| format!("open {}", src.display()))?;
-        let key = crate::project_copy::plain_extents(&from);
+        let key = plain_extents(&from);
         let shared = key.as_ref().and_then(|k| self.seen.get(k).cloned());
         let to =
             fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
         match &shared {
-            Some(first) => clone_file(&File::open(first)?, &to).with_context(|| format!("share {}", dst.display()))?,
-            None => clone_file(&from, &to).with_context(|| format!("copy {}", src.display()))?,
+            Some(first) => {
+                layr_fs_unix::copy_contents(&File::open(first)?, &to).with_context(|| format!("share {}", dst.display()))?
+            }
+            None => layr_fs_unix::copy_contents(&from, &to).with_context(|| format!("copy {}", src.display()))?,
         }
         if let (None, Some(k)) = (shared, key) {
             self.seen.insert(k, dst.to_path_buf());
@@ -2510,7 +2469,7 @@ pub(crate) fn verify_registry(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) use crate::linux_status::status_stage_identity;
+use crate::linux_status::status_stage_identity as index_identity;
 
 /// Resolve only ordinary, unredirected layers. An ambiguous backing file cannot
 /// validate an overlay mapping, so it keeps the snapshot fallback.
@@ -2533,7 +2492,7 @@ fn status_scan_with(
     root: &Path,
     paths: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
-    use crate::status_cache::{BackendIdentity, FileFingerprint, FileStat};
+    use crate::status_cache::{FileFingerprint, FileStat, ObservationEvidence};
     let layers = status_layers(root)?;
     let mut safe_dirs = HashMap::<PathBuf, bool>::new();
     crate::linux_status::scan(root, paths, &mut |rel, observed| {
@@ -2580,7 +2539,7 @@ fn status_scan_with(
                 FileFingerprint::Verified { stat, .. }
                     if fs::symlink_metadata(root.join(rel)).is_ok_and(|m| FileStat::of(&m) == merged) =>
                 {
-                    return FileFingerprint::Verified { stat: merged, backend: Some(BackendIdentity::Overlay(stat)) };
+                    return FileFingerprint::Verified { stat: merged, evidence: Some(ObservationEvidence::Backing(stat)) };
                 }
                 _ => return FileFingerprint::Unverifiable,
             }
@@ -2589,11 +2548,11 @@ fn status_scan_with(
     })
 }
 
-pub(crate) fn status_scan(root: &Path) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
+pub(super) fn observe_tree(root: &Path) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
     status_scan_with(root, None)
 }
 
-pub(crate) fn status_scan_paths(
+pub(super) fn observe_paths(
     root: &Path,
     paths: &std::collections::BTreeSet<String>,
 ) -> Result<BTreeMap<String, crate::status_cache::FileFingerprint>> {
@@ -2601,4 +2560,139 @@ pub(crate) fn status_scan_paths(
         return Ok(Default::default());
     }
     status_scan_with(root, Some(paths))
+}
+
+use crate::fs::{Accounting, Namespace, Observations, ProjectCopier, Transfer};
+pub(crate) struct HostServices;
+impl Namespace for HostServices {
+    fn managed_or_present(&self, _path: &Path) -> Result<bool> {
+        Ok(true)
+    }
+    fn supported(&self, path: &Path) -> bool {
+        supports_volume(path)
+    }
+    fn managed(&self, path: &Path) -> bool {
+        managed_root(path)
+    }
+    fn info(&self, path: &Path) -> Result<crate::fs::TreeInfo> {
+        let info = native_info(path)?;
+        Ok(crate::fs::TreeInfo {
+            uuid: info.uuid,
+            received_uuid: info.received_uuid,
+            parent_uuid: info.parent_uuid,
+            readonly: info.readonly,
+        })
+    }
+    #[cfg(test)]
+    fn protect(&self, path: crate::fs::ManagedPath, protection: crate::fs::Protection) -> Result<()> {
+        match protection {
+            crate::fs::Protection::Frozen => seal_tree(path.path()),
+            crate::fs::Protection::Writable => unseal_tree(path.path()),
+        }
+    }
+    fn relocate(&self, path: crate::fs::ManagedPath, to: &Path) -> Result<()> {
+        rename_tree(path.path(), to)
+    }
+    fn file_identity(&self, path: &Path) -> Result<Vec<u8>> {
+        native_file_identity(path)
+    }
+}
+impl Transfer for HostServices {
+    fn send(&self, parent: Option<&Path>, child: &Path, _clones: &[PathBuf], _compressed: bool) -> Result<Command> {
+        send_command(parent, child)
+    }
+    fn offer(&self) -> crate::fs::StreamOffer {
+        crate::fs::StreamOffer { compressed: false, clone_lookup: crate::fs::CloneLookup::LocalOrReceived }
+    }
+    fn receive(
+        &self,
+        source: &mut dyn std::io::Read,
+        destination: &Path,
+        expected: &crate::receive_stream::Expect,
+    ) -> Result<()> {
+        crate::apfs_stream::receive(source, destination, expected)
+    }
+    fn clone_identity(&self, path: &Path) -> Result<(String, Option<u64>)> {
+        native_clone_identity(path)
+    }
+    fn send_identity(&self, path: &Path) -> Result<(String, u64)> {
+        native_send_identity(path)
+    }
+}
+impl Accounting for HostServices {
+    fn line_spaces(&self, paths: &[PathBuf]) -> Result<Vec<Result<crate::fsutil::Space>>> {
+        crate::fs::accounting::parallel_spaces(paths, measure_space)
+    }
+    fn allocations(
+        &self,
+        _root: &Path,
+        parts: &[crate::fs::accounting::AllocationPart],
+    ) -> Result<crate::fs::accounting::AllocationReport> {
+        crate::fs::accounting::directory_allocations(parts, allocation_domain, allocation_units, visit_allocation)
+    }
+    fn space(&self, path: &Path) -> Result<crate::fsutil::Space> {
+        measure_space(path)
+    }
+    fn copy_need(&self, path: &Path) -> Result<u64> {
+        copy_allocation(path)
+    }
+    fn copy_total(&self, path: &Path) -> Result<u64> {
+        copy_flat_allocation(path)
+    }
+}
+impl Observations for HostServices {
+    fn read_policy(&self) -> crate::fs::observations::ReadPolicy {
+        crate::fs::observations::ReadPolicy::Capture
+    }
+    fn scan(
+        &self,
+        path: &Path,
+        paths: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
+        match paths {
+            Some(paths) => observe_paths(path, paths),
+            None => observe_tree(path),
+        }
+    }
+    fn stage_identity(&self, path: &Path) -> Result<Vec<u8>> {
+        index_identity(path)
+    }
+}
+impl HostServices {
+    pub(crate) fn copier(src: &Path, dst: &Path) -> Result<Box<dyn ProjectCopier>> {
+        Ok(Box::new(Copier::new(src, dst)?))
+    }
+}
+impl ProjectCopier for Copier {
+    fn native_subvolume(&self, path: &Path) -> bool {
+        Copier::native_subvolume(self, path)
+    }
+    fn shell_dir(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        Copier::shell_dir(self, src, dst)
+    }
+    fn dir_close(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::dir_close(self, src, dst, metadata)
+    }
+    fn file(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::file(self, src, dst, metadata)
+    }
+    fn symlink(&mut self, src: &Path, dst: &Path, metadata: &fs::Metadata) -> Result<()> {
+        Copier::symlink(self, src, dst, metadata)
+    }
+    fn subvolume(&mut self, src: &Path, dst: &Path) -> Result<()> {
+        Copier::subvolume(self, src, dst)
+    }
+    fn finish(self: Box<Self>) -> Result<()> {
+        Copier::finish(*self)
+    }
+}
+
+pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
+    const LAST: u32 = 0x1;
+    const SHARED: u32 = 0x2000;
+    let extents = crate::sys::fiemap_full(file).ok()?;
+    if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
+        return None;
+    }
+    Some(extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect())
 }

@@ -5,7 +5,7 @@ use crate::cmd::{exit, here, Here};
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, Record, StateKind};
+use crate::model::{Line, StateKind};
 use crate::repo::Repo;
 use crate::views::*;
 use anyhow::{bail, Result};
@@ -30,7 +30,17 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
     }
     let head = repo.state(&line.head)?;
     let mut st = write_state(ctx, repo, &line, &t, &list, StateKind::Commit, message)?;
-    let checked = crate::cmd::work::named_checks(ctx, repo, &head, &mut st, &t.head, &t.merged, &line, &list, Default::default());
+    let checked = crate::cmd::work::named_checks(
+        ctx,
+        repo,
+        &head,
+        &mut st,
+        &t.head.clone().into(),
+        &t.merged.clone().into(),
+        &line,
+        &list,
+        Default::default(),
+    );
     if let Err(error) = checked {
         repo.discard_states(std::slice::from_ref(&st));
         return Err(error);
@@ -197,18 +207,18 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
         for name in SYSTEM_ROOT_NAMES {
             let p = tmp.join(name);
             if p.symlink_metadata().is_ok() {
-                crate::storage::delete_tree(&p)?;
+                crate::fs::remove(&p)?;
             }
         }
         repo.prepare_at(&l, &l.head, &tmp, &[])
     })();
     if let Err(e) = made {
-        let _ = crate::storage::delete_tree(&tmp);
+        let _ = crate::fs::remove(&tmp);
         return Err(e);
     }
     if is_mounted(&at) {
         if let Err(e) = unmount(&at) {
-            let _ = crate::storage::delete_tree(&tmp);
+            let _ = crate::fs::remove(&tmp);
             return Err(e);
         }
     }

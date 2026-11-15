@@ -209,7 +209,7 @@ impl WriteSrc<'_> {
         for &(offset, length) in ranges {
             if let (Some(source), Target::Native(target)) = (native_source, &output) {
                 // Preserve the legacy policy: reflink errors select byte copying.
-                if crate::storage::clone_range(source, offset, length, target, offset).is_ok() {
+                if crate::fs::copy_range(source, offset, length, target, offset).is_ok() {
                     continue;
                 }
             }

@@ -49,6 +49,8 @@ pub struct Ctx {
     pub out: std::cell::RefCell<Box<dyn Write>>,
     /// Resolved on first use and kept for every state this command creates.
     pub author: std::cell::OnceCell<Author>,
+    /// Captures prepared by this command retain their original driver and cleanup authority.
+    pub captures: crate::fs::CaptureSession,
 }
 
 /// Where the command runs: a project, a line and the folder below the line root.
@@ -250,6 +252,7 @@ mod author_tests {
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
             author: Default::default(),
+            captures: Default::default(),
         };
         Ok((root, ctx))
     }

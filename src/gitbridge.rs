@@ -828,13 +828,7 @@ fn import_with_repair(
     }
 }
 
-fn import_planned(
-    ctx: &Ctx,
-    repo: &Repo,
-    commit: &str,
-    refname: &str,
-    guard: Option<Option<String>>,
-) -> Result<(String, bool)> {
+fn import_planned(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, guard: Option<Option<String>>) -> Result<(String, bool)> {
     let plan = plan_import(ctx, repo, commit, refname)?;
     test_sleep("LAYR_TEST_PLAN_SLEEP_MS");
     commit_import(ctx, repo, plan, guard)
@@ -924,12 +918,7 @@ pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Resul
 /// writes only. With a guard, the remote ref must still hold the expected state before each chunk,
 /// and it ends at the tip. A commit that another command imported meanwhile is `Moved`, so the
 /// records never repeat it. Returns the tip state and whether this plan imported the tip.
-pub fn commit_import(
-    ctx: &Ctx,
-    repo: &Repo,
-    plan: ImportPlan,
-    guard: Option<Option<String>>,
-) -> Result<(String, bool)> {
+pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Option<String>>) -> Result<(String, bool)> {
     let fresh = plan.records.iter().any(|(oid, _)| *oid == plan.commit);
     let ImportPlan { records, commit, tip, refname } = plan;
     let mut expected: Option<String> = guard.clone().flatten();
@@ -1102,36 +1091,48 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>, own: Option<(
     let base = nearest_built_import(repo, state)?;
     let (_, changes) = import_changes(&raw, base.as_ref().map(|(_, c)| c.as_str()), &mut cat)?;
     let work = repo.p.work_dir().join(crate::store::temp_name());
-    let made = (|| -> Result<()> {
-        match &base {
-            Some((b, _)) => {
-                // Owner normalization needs a complete private copy, never a write into
-                // an inherited immutable base. Ordinary rebuilds still use thin imports.
-                if own.is_none() && thin_build(repo, &mut cat, &changes, &work, b, source, state)? {
-                    return Ok(());
+    let prepared = match &base {
+        Some((base, _)) if own.is_none() => thin_build(repo, &mut cat, &changes, &work, base, source, state)?,
+        _ => None,
+    };
+    let captured = match prepared {
+        Some(captured) => captured,
+        None => {
+            let temporary = match &base {
+                Some((base, _)) => {
+                    crate::repo::Temp::source(&repo.state_src(base)?, work.clone(), crate::fs::Protection::Writable)?
                 }
-                repo.snapshot_state(b, &work, false)?;
-                let paths: Vec<String> =
-                    changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect();
-                materialize(&s, &commit, &work, Some(&paths), None, source)?;
-            }
-            None => {
-                crate::storage::create_subvolume(&work)?;
-                materialize(&s, &commit, &work, None, None, source)?;
+                None => crate::repo::Temp::empty(work.clone())?,
+            };
+            let prepared = (|| -> Result<_> {
+                let paths = base.as_ref().map(|_| {
+                    changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect::<Vec<_>>()
+                });
+                materialize(&s, &commit, &work, paths.as_deref(), None, source)?;
+                if let Some((uid, gid)) = own {
+                    crate::repo::give_tree(&work, uid, gid)?;
+                }
+                crate::fs::freeze_path_owned(&work, &repo.p.state_path(state), crate::fs::CapturePurpose::State)
+            })();
+            match prepared {
+                Ok(captured) => {
+                    if let Err(error) = temporary.discard() {
+                        return Err(captured.abort(error));
+                    }
+                    captured
+                }
+                Err(error) => return Err(temporary.abort(error)),
             }
         }
-        if let Some((uid, gid)) = own {
-            crate::repo::give_tree(&work, uid, gid)?;
+    };
+    match repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true)) {
+        Ok(()) => captured.release(),
+        Err(crate::db::CommitResolution::NotCommitted(error)) => return Err(captured.abort(error)),
+        Err(error) => {
+            captured.release();
+            return Err(error.into());
         }
-        crate::storage::snapshot(&work, &repo.p.state_path(state), true)
-    })();
-    let _ = crate::storage::delete_tree(&work);
-    if let Err(e) = made {
-        let _ = crate::storage::delete_tree(&repo.p.state_path(state));
-        let _ = crate::storage::delete_tree(&repo.p.delta_path(state));
-        return Err(e);
     }
-    repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true))?;
     if let Err(e) = keep_newest_built(&repo.p, state) {
         eprintln!("warning: older built Git trees stay: {e:#}");
     }
@@ -1193,7 +1194,6 @@ fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
 /// A thin layer of the changes over the state `base`, written from the changed files only, as the
 /// tree of `state`. False when the chain of `base` is long enough for a complete tree
 /// (`thin.chain`), so reads stay short, and for a project that keeps complete trees.
-#[cfg(target_os = "macos")]
 fn thin_build(
     repo: &Repo,
     cat: &mut CatFile,
@@ -1202,37 +1202,39 @@ fn thin_build(
     base: &str,
     source: Option<&Path>,
     state: &str,
-) -> Result<bool> {
-    let max = repo.p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
-    let len = crate::thin::chain_len(&repo.p, base);
-    if repo.p.is_overlay() || len == 0 || len >= max {
-        return Ok(false);
-    }
-    std::fs::create_dir(work)?;
-    std::fs::set_permissions(work, std::fs::Permissions::from_mode(0o755))?;
-    let source = source.map(crate::tree::Tree::open).transpose()?;
-    for (path, mode, oid) in &changes.write {
-        if mode == "160000" {
-            fsutil::make_parents(work, &format!("{path}/x"), None)?;
-            continue;
-        }
-        let data = cat.object(oid, "blob")?;
-        place_blob(work, mode, path, &data, None, source.as_ref())?;
-    }
-    let d = crate::thin::Diff {
-        write: changes.write.iter().map(|w| w.0.clone()).collect(),
-        removed: changes.removed.clone(),
-        whole: Default::default(),
+) -> Result<Option<crate::fs::OwnedCapture>> {
+    let Some(storage) = repo.state_src(base)?.layered_storage().and_then(|storage| storage.for_import(&repo.p, base)) else {
+        return Ok(None);
     };
-    crate::thin::write_layer(work, &repo.p.delta_path(state), &d, base, false, None)?;
-    repo.p.lock_or_borrow()?.write(|tx| tx.record_base(state, base))?;
-    Ok(true)
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::too_many_arguments)]
-fn thin_build(_: &Repo, _: &mut CatFile, _: &Changes, _: &Path, _: &str, _: Option<&Path>, _: &str) -> Result<bool> {
-    Ok(false)
+    let temporary = crate::repo::Temp::directory(work.to_path_buf(), 0o755)?;
+    let prepared = (|| -> Result<_> {
+        let source = source.map(crate::tree::Tree::open).transpose()?;
+        for (path, mode, oid) in &changes.write {
+            if mode == "160000" {
+                fsutil::make_parents(work, &format!("{path}/x"), None)?;
+                continue;
+            }
+            let data = cat.object(oid, "blob")?;
+            place_blob(work, mode, path, &data, None, source.as_ref())?;
+        }
+        storage.write_import(
+            &repo.p,
+            work,
+            base,
+            state,
+            changes.write.iter().map(|w| w.0.clone()).collect(),
+            changes.removed.clone(),
+        )
+    })();
+    match prepared {
+        Ok(captured) => {
+            if let Err(error) = temporary.discard() {
+                return Err(captured.abort(error));
+            }
+            Ok(Some(captured))
+        }
+        Err(error) => Err(temporary.abort(error)),
+    }
 }
 
 /// Removes the given paths from an index before they are added again. A copied index keeps the
@@ -1243,25 +1245,18 @@ const FORGET_CHANGED: [&str; 4] = ["update-index", "--force-remove", "-z", "--st
 
 /// The folder that git reads `paths` of a state from: its complete tree, or on APFS a private
 /// copy of only those paths when the state is a thin layer.
-fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        if src.is_complete() {
-            return Ok(src.bottom().to_path_buf());
-        }
-        let t = crate::repo::Temp { path: repo.p.scan_dir().join(crate::store::temp_name()) };
-        #[cfg(test)]
-        crate::repo::MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
-        crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
-        let p = t.path.clone();
-        keep.push(t);
-        Ok(p)
+fn work_tree(repo: &Repo, source: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
+    use crate::fsutil::Src;
+    if let Some(root) = source.folder() {
+        return Ok(root.to_path_buf());
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = paths;
-        repo.complete(src.clone(), keep)
-    }
+    let path = repo.p.scan_dir().join(crate::store::temp_name());
+    #[cfg(test)]
+    crate::repo::MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    let temporary = crate::repo::Temp::selected(source, paths, path)?;
+    let path = temporary.path.clone();
+    keep.push(temporary);
+    Ok(path)
 }
 
 /// A checkout borrowed from one immutable source, owning any temporary trees until Git has
@@ -1284,13 +1279,8 @@ impl<'source> ExportCheckout<'source> {
     }
 
     fn is_thin(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        return !self.source.is_complete();
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = self.source;
-            false
-        }
+        use crate::fsutil::Src;
+        self.source.folder().is_none()
     }
 }
 
@@ -1750,7 +1740,11 @@ pub fn export_commit(repo: &Repo, state: &str) -> Result<String> {
     cache_retry(repo, || export_history_once(repo, &source, false)).map(|(c, _)| c)
 }
 
-fn export_history_once(repo: &Repo, state: &crate::repo::SourceStateId, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
+fn export_history_once(
+    repo: &Repo,
+    state: &crate::repo::SourceStateId,
+    name_history: bool,
+) -> Result<(String, Vec<(String, String)>)> {
     let _export = crate::trace::span("git export history");
     let dag = crate::trace::span("git export DAG ordering");
     let mut known: BTreeMap<String, String> = BTreeMap::new();
@@ -1811,7 +1805,9 @@ fn export_history_once(repo: &Repo, state: &crate::repo::SourceStateId, name_his
             // no empty commit, the state maps to its parent's commit (docs/overlays.md section 1a).
             let c = match (rec.parents.as_slice(), base.as_ref()) {
                 ([parent], Some((_, parent_commit)))
-                    if !rec.parts.is_empty() && repo.state(parent)?.parts != rec.parts && same_tree(&export.store, &c, parent_commit) =>
+                    if !rec.parts.is_empty()
+                        && repo.state(parent)?.parts != rec.parts
+                        && same_tree(&export.store, &c, parent_commit) =>
                 {
                     // The history ref of the state names the parent's commit too, so a later export
                     // (`history_commit`) gives the same commit as this one.
@@ -2308,13 +2304,13 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     }
     let g = w.join(".git");
     if let Ok(m) = std::fs::symlink_metadata(&g) {
-        if m.is_dir() && !crate::storage::is_subvolume(&g) && std::fs::read_dir(&g)?.next().is_none() {
+        if m.is_dir() && !crate::fs::host().namespace.managed(&g) && std::fs::read_dir(&g)?.next().is_none() {
             std::fs::remove_dir(&g)?;
         } else {
             return Ok(());
         }
     }
-    crate::storage::create_subvolume(&g)?;
+    crate::fs::create(&g)?;
     let s = store(repo);
     for d in ["objects/info", "refs/heads", "refs/tags", "info"] {
         std::fs::create_dir_all(g.join(d))?;
@@ -2346,9 +2342,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         if idx.exists() {
             let src = std::fs::File::open(&idx)?;
             let dst = std::fs::File::create(g.join("index"))?;
-            if crate::storage::clone_file(&src, &dst).is_err() {
-                std::fs::copy(&idx, g.join("index"))?;
-            }
+            layr_fs_unix::copy_contents(&src, &dst)?;
         }
     }
     if let Some((_, c)) = &anc {
@@ -2493,9 +2487,7 @@ fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> R
             "index",
             &mut |f| {
                 let src = std::fs::File::open(&idx)?;
-                if crate::storage::clone_file(&src, f).is_err() {
-                    std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
-                }
+                layr_fs_unix::copy_contents(&src, f)?;
                 Ok(())
             },
             own,
@@ -2630,7 +2622,7 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
     let data: BTreeMap<String, Vec<u8>> = ids.iter().cloned().zip(blobs(repo, &ids)?).collect();
     let mut keep = Vec::new();
     for _ in 0..2 {
-        keep.push(crate::repo::Temp { path: scratch_folder(repo)? });
+        keep.push(crate::repo::Temp::empty(repo.p.scan_dir().join(crate::store::temp_name()))?);
     }
     for (path, o, n) in &changes {
         for (side, dst) in [(o, &keep[0].path), (n, &keep[1].path)] {
@@ -2645,23 +2637,7 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
             place_blob(dst, &side.mode, path, bytes, None, None)?;
         }
     }
-    // `btrfs send` sends read-only subvolumes only.
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    for k in &keep {
-        crate::storage::set_readonly(&k.path)?;
-    }
     Ok(Pair { old: crate::repo::snap(&keep[0].path), new: crate::repo::snap(&keep[1].path), keep })
-}
-
-/// An empty folder for one side of a sparse pair. On btrfs it is a subvolume: a comparison of two
-/// trees sends them (`btrfs send`), and that needs subvolumes.
-fn scratch_folder(repo: &Repo) -> Result<PathBuf> {
-    let path = repo.p.scan_dir().join(crate::store::temp_name());
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    crate::storage::create_subvolume(&path)?;
-    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
 }
 
 /// One side of a raw diff record: the mode and the object id that git prints for it.
@@ -3255,8 +3231,8 @@ mod export_tests {
         let scans = root.join("store/projects/export/meta/scan");
         for entry in std::fs::read_dir(scans)? {
             let path = entry?.path();
-            crate::storage::set_writable(&path)?;
-            crate::storage::delete_tree(&path)?;
+            crate::fs::set_writable(&path)?;
+            crate::fs::remove(&path)?;
         }
         std::fs::remove_dir_all(root)?;
         result

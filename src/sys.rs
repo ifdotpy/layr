@@ -15,6 +15,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use zerocopy::FromZeros;
 
 const CHECK_OPEN_FILES_COUNT: u64 = 1024;
@@ -366,11 +367,17 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
 
 // ----- btrfs ioctls -----
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SNAP_CREATE_V2: libc::c_ulong = 0x5000_9417;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_CREATE_V2: libc::c_ulong = 0x5000_9418;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_SETFLAGS: libc::c_ulong = 0x4008_941a;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 #[cfg(target_os = "linux")]
 const BTRFS_FS_INFO: libc::c_ulong = 0x8400_941f;
@@ -423,7 +430,9 @@ const _: () = {
     assert!(std::mem::size_of::<SendArgs>() == 72);
     assert!(std::mem::offset_of!(SendArgs, version) == 40);
 };
+#[cfg(target_os = "linux")]
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
 
 /// The UAPI `btrfs_ioctl_search_key`, in native byte order.
@@ -515,6 +524,7 @@ impl TreeSearch {
 }
 
 #[repr(C)]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 struct VolArgsV2 {
     fd: i64,
     transid: u64,
@@ -525,6 +535,7 @@ struct VolArgsV2 {
 
 #[repr(C)]
 #[derive(Clone, Copy, FromZeros)]
+#[cfg(target_os = "linux")]
 struct Timespec {
     sec: u64,
     nsec: u32,
@@ -532,6 +543,7 @@ struct Timespec {
 
 #[repr(C)]
 #[derive(FromZeros)]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 struct SubvolInfoArgs {
     treeid: u64,
     name: [u8; 256],
@@ -554,6 +566,7 @@ struct SubvolInfoArgs {
 }
 
 #[repr(C)]
+#[cfg(target_os = "linux")]
 struct CloneRange {
     src_fd: i64,
     src_offset: u64,
@@ -561,10 +574,12 @@ struct CloneRange {
     dest_offset: u64,
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn vol_args(fd: i64, flags: u64, name: &str) -> Result<Box<VolArgsV2>> {
     vol_args_bytes(fd, flags, name.as_bytes())
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn vol_args_bytes(fd: i64, flags: u64, name: &[u8]) -> Result<Box<VolArgsV2>> {
     if name.is_empty() || name.len() >= 4040 || name.contains(&0) || name.contains(&b'/') {
         return Err(anyhow!("bad subvolume name {name:?}"));
@@ -601,30 +616,27 @@ pub fn casefold(path: &std::path::Path) -> bool {
 }
 
 /// Create the subvolume `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_create(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
     ioctl_ptr(dir, SUBVOL_CREATE_V2, &mut *a).with_context(|| format!("create subvolume {name}"))
 }
 
 /// Snapshot the subvolume `src` as `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_snapshot(src: BorrowedFd, dir: BorrowedFd, name: &str, readonly: bool) -> Result<()> {
     let mut a = vol_args(src.as_raw_fd() as i64, if readonly { SUBVOL_RDONLY } else { 0 }, name)?;
     ioctl_ptr(dir, SNAP_CREATE_V2, &mut *a).with_context(|| format!("snapshot to {name}"))
 }
 
 /// Destroy the subvolume `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_destroy(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
     ioctl_ptr(dir, SNAP_DESTROY_V2, &mut *a).with_context(|| format!("delete subvolume {name}"))
 }
 
-/// std/rustix do not expose btrfs subvolume destruction; kernel names are arbitrary bytes.
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-pub fn subvol_destroy_bytes(dir: BorrowedFd, name: &[u8]) -> Result<()> {
-    let mut args = vol_args_bytes(0, 0, name)?;
-    ioctl_ptr(dir, SNAP_DESTROY_V2, &mut *args).context("delete nested subvolume")
-}
-
 pub fn subvol_flags(fd: BorrowedFd) -> io::Result<u64> {
     let mut flags: u64 = 0;
     ioctl_ptr(fd, SUBVOL_GETFLAGS, &mut flags)?;
@@ -640,6 +652,7 @@ pub fn filesystem_uuid(fd: BorrowedFd) -> io::Result<[u8; 16]> {
 
 #[cfg(target_os = "linux")]
 /// Set the flags of a subvolume (`SUBVOL_RDONLY` makes it read-only).
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
     let mut f: u64 = flags;
     ioctl_ptr(fd, SUBVOL_SETFLAGS, &mut f)
@@ -647,6 +660,7 @@ pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
 
 /// Set the identity of a verified file restore, as btrfs receive does before sealing it.
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::Result<()> {
     let zero_time = Timespec { sec: 0, nsec: 0 };
     let mut args = ReceivedSubvolArgs {
@@ -682,6 +696,7 @@ pub fn subvol_id(fd: BorrowedFd) -> io::Result<u64> {
     Ok(a.treeid)
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub struct RawSubvolInfo {
     pub tree_id: u64,
     pub generation: u64,
@@ -692,6 +707,7 @@ pub struct RawSubvolInfo {
     pub stransid: u64,
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
     let mut a = Box::new(SubvolInfoArgs::new_zeroed());
     ioctl_ptr(fd, GET_SUBVOL_INFO, &mut *a)?;
@@ -708,6 +724,7 @@ pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
 
 /// Produce a version 1 metadata stream through an open pipe.
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::Result<()> {
     const BTRFS_SEND_NO_FILE_DATA: u64 = 1;
     // Version zero selects the original protocol.
@@ -724,6 +741,7 @@ pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::R
 }
 
 /// Reflink a byte range from `src` into `dst`.
+#[cfg(target_os = "linux")]
 pub fn clone_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst_off: u64) -> io::Result<()> {
     let mut a = CloneRange { src_fd: src.as_fd().as_raw_fd() as i64, src_offset: src_off, src_length: len, dest_offset: dst_off };
     ioctl_ptr(dst.as_fd(), FICLONERANGE, &mut a)
@@ -1844,12 +1862,16 @@ impl Acl {
 
     fn user_text(mut self) -> io::Result<Option<Vec<u8>>> {
         self.remove_seal()?;
-        if self.is_empty() { return Ok(None) }
+        if self.is_empty() {
+            return Ok(None);
+        }
         let mut len: libc::ssize_t = 0;
         // SAFETY: this ACL is live, text is copied before libc frees its allocation.
         unsafe {
             let text = acl_to_text(self.0, &mut len);
-            if text.is_null() { return Err(io::Error::last_os_error()) }
+            if text.is_null() {
+                return Err(io::Error::last_os_error());
+            }
             let output = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
             acl_free(text.cast());
             Ok(Some(output))
@@ -2036,12 +2058,6 @@ pub fn apfs_publish(src: &std::path::Path, dst: &std::path::Path) -> io::Result<
     Ok(rustix::fs::renameat_with(rustix::fs::CWD, src, rustix::fs::CWD, dst, rustix::fs::RenameFlags::NOREPLACE)?)
 }
 
-/// Exchange two entries in one step.
-#[cfg(target_os = "macos")]
-pub fn apfs_swap(a: &std::path::Path, b: &std::path::Path) -> io::Result<()> {
-    Ok(rustix::fs::renameat_with(rustix::fs::CWD, a, rustix::fs::CWD, b, rustix::fs::RenameFlags::EXCHANGE)?)
-}
-
 #[cfg(target_os = "macos")]
 pub fn apfs_copy_metadata(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
     let (src, dst) = (cpath(src)?, cpath(dst)?);
@@ -2077,7 +2093,11 @@ pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::Borr
 }
 
 #[cfg(target_os = "macos")]
-pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: impl rustix::path::Arg) -> io::Result<()> {
+pub fn apfs_clone_at(
+    src: std::os::fd::BorrowedFd<'_>,
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: impl rustix::path::Arg,
+) -> io::Result<()> {
     Ok(rustix::fs::fclonefileat(
         src,
         dir,
@@ -2096,7 +2116,9 @@ pub fn apfs_immutable_fd(fd: std::os::fd::BorrowedFd<'_>, readonly: bool) -> io:
     let st = rustix::fs::fstat(fd)?;
     let flags = if readonly { st.st_flags | libc::UF_IMMUTABLE } else { st.st_flags & !libc::UF_IMMUTABLE };
     // SAFETY: fd remains open and fchflags takes only integer flags.
-    if flags != st.st_flags && unsafe { libc::fchflags(fd.as_raw_fd(), flags) } != 0 { return Err(io::Error::last_os_error()) }
+    if flags != st.st_flags && unsafe { libc::fchflags(fd.as_raw_fd(), flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -2245,7 +2267,9 @@ pub fn apfs_set_acl_text_fd(fd: std::os::fd::BorrowedFd<'_>, text: Option<&[u8]>
             // std/rustix have no macOS ACL parser. SAFETY: text is a live C string;
             // the returned ACL is owned and freed by Acl, including on errors.
             let pointer = unsafe { acl_from_text(text.as_ptr()) };
-            if pointer.is_null() { return Err(io::Error::last_os_error()) }
+            if pointer.is_null() {
+                return Err(io::Error::last_os_error());
+            }
             Acl(pointer)
         }
     };

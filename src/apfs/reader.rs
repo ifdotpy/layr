@@ -5,7 +5,7 @@ use layr_fs_unix::DirectoryTree;
 use std::os::fd::AsFd;
 
 pub(crate) struct ApfsTree {
-    pub(super) path: PathBuf,
+    pub(crate) path: PathBuf,
     pub(super) directory: DirectoryTree,
 }
 impl ApfsTree {
@@ -28,7 +28,7 @@ impl ApfsTree {
             Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        match subvol_info(path) {
+        match native_info(path) {
             Ok(_) => Ok(true),
             Err(error)
                 if error.chain().any(|cause| {
@@ -64,6 +64,36 @@ impl ApfsTree {
     }
 }
 impl TreeRead for ApfsTree {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+    fn candidate_evidence(
+        &self,
+        after: &dyn TreeRead,
+        request: layr_fs_core::ChangeRequest,
+        selection: Option<&std::collections::BTreeSet<layr_fs_core::RelPath>>,
+    ) -> layr_fs_core::Result<layr_fs_core::hints::HintSet> {
+        self.validate()?;
+        let evidence = if let Some(after) = after.as_any().and_then(|value| value.downcast_ref::<ApfsTree>()) {
+            after.validate()?;
+            let result = candidate_observations(self.path.as_path(), after.path.as_path(), request, selection)
+                .map_err(FsError::backend)?;
+            after.validate()?;
+            layr_fs_core::hints::HintSet::Complete(result)
+        } else if let Some(after) = after
+            .as_any()
+            .and_then(|value| value.downcast_ref::<crate::thin::Layered>())
+            .filter(|after| after.object_base().is_none())
+        {
+            layr_fs_core::hints::HintSet::Complete(
+                candidate_observations(self.path.as_path(), after, request, selection).map_err(FsError::backend)?,
+            )
+        } else {
+            layr_fs_core::hints::HintSet::Partial
+        };
+        self.validate()?;
+        Ok(evidence)
+    }
     fn link_domain(&self) -> Option<&layr_fs_core::LinkDomain> {
         self.directory.link_domain()
     }
@@ -74,6 +104,10 @@ impl TreeRead for ApfsTree {
         self.directory.kind(path)
     }
     fn metadata(&self, path: &RelDir) -> layr_fs_core::Result<Option<EntryMetadata>> {
+        note_read(
+            &self.path,
+            [std::str::from_utf8(path.as_bytes()).map_err(|_| FsError::Invalid("APFS legacy namespace requires UTF-8"))?],
+        );
         if !self.visible(path)? {
             return Ok(None);
         }
@@ -99,12 +133,14 @@ impl TreeRead for ApfsTree {
         self.directory.entries(dir, visit)
     }
     fn open_file(&self, path: &RelPath) -> layr_fs_core::Result<Box<dyn ReadSeek + '_>> {
+        note_read(&self.path, [path.utf8()?]);
         if !self.visible(&RelDir::Path(path.clone()))? {
             return Err(FsError::Invalid("APFS file absent"));
         }
         self.directory.open_file(path)
     }
     fn read_link(&self, path: &RelPath) -> layr_fs_core::Result<Vec<u8>> {
+        note_read(&self.path, [path.utf8()?]);
         if !self.visible(&RelDir::Path(path.clone()))? {
             return Err(FsError::Invalid("APFS link absent"));
         }

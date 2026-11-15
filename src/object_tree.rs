@@ -174,15 +174,6 @@ impl ObjectTree {
         }
         Ok(())
     }
-    #[cfg(any(target_os = "linux", test))]
-    pub fn entries(&self, rel: &str) -> Result<BTreeMap<String, Meta>> {
-        let mut out = BTreeMap::new();
-        self.walk(rel, &mut |p, m| {
-            out.insert(p.to_owned(), m.clone());
-            Ok(true)
-        })?;
-        Ok(out)
-    }
     /// Decode one entry for a filesystem-only consumer. Never expand its children.
     pub fn path(&self, rel: &str) -> Result<PathBuf> {
         crate::fsutil::check_rel(rel)?;
@@ -289,41 +280,6 @@ impl Drop for ObjectTree {
 }
 use std::os::unix::fs::DirBuilderExt;
 
-#[cfg(target_os = "macos")]
-impl ObjectTree {
-    pub fn scan_entry(&self, rel: &str) -> Result<Option<crate::storage::ScanEntry>> {
-        Ok(self.entry(rel)?.map(|e| {
-            let meta = e.meta();
-            crate::storage::ScanEntry {
-                fingerprint: (
-                    u64::MAX,
-                    self.links.get(rel).map(|(_, inode, _)| *inode).unwrap_or(0),
-                    meta.mode,
-                    meta.size,
-                    meta.mtime,
-                    e.ns.rem_euclid(1_000_000_000),
-                    0,
-                    0,
-                ),
-                meta,
-                data: None,
-                nlink: self.links.get(rel).map(|(_, _, count)| *count).unwrap_or(1),
-                birth: (0, 0),
-                flags: 0,
-            }
-        }))
-    }
-    pub fn scan(&self) -> Result<BTreeMap<String, crate::storage::ScanEntry>> {
-        let mut map = BTreeMap::new();
-        map.insert(String::new(), self.scan_entry("")?.context("missing root")?);
-        self.walk("", &mut |p, _| {
-            map.insert(p.to_owned(), self.scan_entry(p)?.context("missing object entry")?);
-            Ok(true)
-        })?;
-        Ok(map)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,7 +352,12 @@ mod tests {
         assert!(Arc::ptr_eq(&tree.times(&tree.refs.times)?, &tree.times(&tree.refs.times)?));
         assert_eq!(tree.trees.lock().unwrap().len(), 2);
         assert_eq!(tree.times.lock().unwrap().len(), 2);
-        assert_eq!(tree.entries("")?.len(), expected.len());
+        let mut count = 0;
+        tree.walk("", &mut |_, _| {
+            count += 1;
+            Ok(true)
+        })?;
+        assert_eq!(count, expected.len());
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
         Ok(())

@@ -220,11 +220,13 @@ pub(crate) fn compare_checkout(
     let started = Instant::now();
     let work = h.repo.p.work_dir();
     std::fs::create_dir_all(&work)?;
-    let tmp = crate::repo::Temp { path: work.join(crate::store::temp_name()) };
+    let tmp = crate::repo::Temp::directory(work.join(crate::store::temp_name()), 0o700)?;
     let made = layr_objects::checkout_with(store, &r.tree, Some(&r.times), &tmp.path)?;
     let checkout_seconds = started.elapsed().as_secs_f64();
     let pin = h.repo.pin(&[state])?;
-    let cmp = layr_objects::compare::compare_with_kinds(&h.repo.state_root(state)?, &tmp.path, true, crate::objstore::ENTRY_KIND);
+    let cmp = layr_objects::compare::compare_with_kinds(&h.repo.state_root(state)?, &tmp.path, true, |path, metadata| {
+        crate::fs::host().namespace.entry_kind(path, metadata)
+    });
     drop(pin);
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
     // Read-only folders of the copy must open again before the copy goes.

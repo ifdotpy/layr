@@ -2,7 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn restore_original(f: &Fixture, public: &Path, moved: &Path, ownership: OwnedTree) -> anyhow::Result<()> {
-    native::delete_tree(public)?;
+    crate::fs::remove(public)?;
     std::fs::rename(moved, public)?;
     f.driver.remove(ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     f.no_stages()?;
@@ -23,7 +23,7 @@ fn replacement_between_precheck_and_capture_is_restored_without_deletion() -> an
         if point == "quarantine-rename" && !replaced {
             replaced = true;
             std::fs::rename(&a, &b)?;
-            backend(native::create_subvolume(&a))?;
+            backend(crate::fs::create(&a))?;
             std::fs::write(a.join("sentinel"), b"foreign")?;
         }
         Ok(())
@@ -51,12 +51,12 @@ fn failed_restoration_retains_foreign_custody_and_original_authority() -> anyhow
         if point == "quarantine-rename" && !replaced {
             replaced = true;
             std::fs::rename(&a, &b)?;
-            backend(native::create_subvolume(&a))?;
+            backend(crate::fs::create(&a))?;
             std::fs::write(a.join("sentinel"), b"first")?;
         }
         if point == "restore-custody" && !blocked {
             blocked = true;
-            backend(native::create_subvolume(&a))?;
+            backend(crate::fs::create(&a))?;
             std::fs::write(a.join("sentinel"), b"second")?;
         }
         Ok(())
@@ -78,7 +78,7 @@ fn failed_restoration_retains_foreign_custody_and_original_authority() -> anyhow
     assert_eq!(std::fs::read(moved.join("kept"))?, b"source");
     let failure = f.driver.remove(failure.ownership).unwrap_err();
     assert_eq!(std::fs::read(&held)?, b"first");
-    native::delete_tree(&public)?;
+    crate::fs::remove(&public)?;
     let failure = f.driver.remove(failure.ownership).unwrap_err();
     assert!(matches!(failure.error, FsError::LocationChanged));
     assert_eq!(std::fs::read(public.join("sentinel"))?, b"first");
@@ -122,8 +122,8 @@ fn nested_root_moved_out_after_open_is_not_followed() -> anyhow::Result<()> {
     };
     let source = f.source()?;
     let original = f.path.join("source");
-    native::create_subvolume(&original.join("nested"))?;
-    native::create_subvolume(&original.join("nested/deeper"))?;
+    crate::fs::create(&original.join("nested"))?;
+    crate::fs::create(&original.join("nested/deeper"))?;
     std::fs::write(original.join("nested/deeper/secret"), b"outside survives")?;
     let outside = f.path.join("outside");
     std::fs::create_dir(&outside)?;

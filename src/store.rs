@@ -152,8 +152,9 @@ impl Store {
             bail!("this store requires a layr build with the overlayfs feature");
         }
         crate::linepaths::register(root);
-        #[cfg(feature = "overlayfs")]
-        crate::storage::recover(root)?;
+        if let Some(registry) = &crate::fs::host().registry {
+            (registry.recover)(root)?;
+        }
         let machine_lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -188,10 +189,9 @@ impl Store {
         // Every volume folder must hold the identity file of this store (checked when used).
         let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
         // A volume with its own OverlayFS registry (a project moved there) is recovered too.
-        #[cfg(feature = "overlayfs")]
-        for volume in store.layout()?.ready_volume_paths() {
-            if volume.join(".layr-overlayfs").is_dir() {
-                crate::storage::recover(&volume)?;
+        if let Some(registry) = &crate::fs::host().registry {
+            for volume in store.layout()?.ready_volume_paths() {
+                (registry.recover_existing)(&volume)?;
             }
         }
         // A `project move` that stopped midway is finished or rolled back before the command runs.
@@ -658,32 +658,6 @@ impl Drop for LineLock {
 /// empties them.
 static LOCK_TRASH: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-/// Delete a temporary tree. Under a store lock on APFS it only moves to the trash, which the
-/// last lock empties: a copy of a working folder took seconds to delete, and every other
-/// command of the project waited for it.
-pub fn discard_tree(path: &Path) {
-    #[cfg(target_os = "macos")]
-    if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-        // The trash of the volume that holds `path`: the one whose volume folder is its longest prefix.
-        let dir = LOCK_TRASH.lock().ok().and_then(|dirs| {
-            dirs.iter()
-                .filter(|d| d.parent().is_some_and(|volume| path.starts_with(volume)))
-                .max_by_key(|d| d.components().count())
-                .cloned()
-        });
-        if let (Some(dir), Some(name)) = (dir, path.file_name()) {
-            if fs::symlink_metadata(path).is_err() {
-                return;
-            }
-            let to = dir.join(format!("{}.{}", name.to_string_lossy(), crate::ids::new_id()));
-            if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
-                return;
-            }
-        }
-    }
-    let _ = crate::storage::delete_tree(path);
-}
-
 /// The time one command spends on emptying the trash after its last lock.
 const TRASH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 /// `LAYR_TRASH_BUDGET_MS` replaces it (tests).
@@ -789,7 +763,7 @@ pub fn empty_trash_process(dir: &Path) -> anyhow::Result<()> {
 pub fn empty_all(dir: &Path) -> Result<Vec<String>, crate::pools::PoolError> {
     loop {
         let (deleted, failed) = empty_trash(dir, None)?;
-        if deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
+        if !failed.is_empty() || deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
             if let Some(store) = dir.parent() {
                 let _ = fs::write(store.join("trash.errors"), failed.iter().map(|line| format!("{line}\n")).collect::<String>());
             }
@@ -809,7 +783,7 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(u
     let (mut deleted, mut failed) = (0, Vec::new());
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
-            if late() || !empty_tree(&e.path(), &late, &mut deleted, &mut failed)? {
+            if late() || !empty_tree(&e.path(), &mut deleted, &mut failed)? {
                 break;
             }
         }
@@ -819,36 +793,18 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(u
 
 /// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
 /// false when the budget ended before `path` was gone.
-fn empty_tree(
-    path: &Path,
-    late: &(dyn Fn() -> bool + Sync),
-    deleted: &mut usize,
-    failed: &mut Vec<String>,
-) -> Result<bool, crate::pools::PoolError> {
-    #[cfg(not(target_os = "macos"))]
-    let _ = late;
-    #[cfg(target_os = "macos")]
-    if let Ok(m) = fs::symlink_metadata(path) {
-        if m.is_dir() {
-            // Open the folder (it can be sealed), delete its entries, then the folder.
-            use std::os::unix::fs::PermissionsExt;
-            let _ = crate::sys::apfs_immutable(path, false);
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode((m.permissions().mode() & 0o7777) | 0o700));
-            if let Ok(rd) = fs::read_dir(path) {
-                let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-                if !empty_entries(&entries, late, deleted, failed)? {
-                    return Ok(false);
-                }
-            }
-        }
-    }
+fn empty_tree(path: &Path, deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
     if fs::symlink_metadata(path).is_err() {
         return Ok(true);
     }
-    match crate::storage::delete_tree(path) {
+    match crate::fs::remove(path) {
         Ok(()) => *deleted += 1,
         // Another emptier deleted it, or an entry of it, at the same time: that is no failure. A path that is still
         // here goes in the next pass.
+        Err(error) if error.downcast_ref::<crate::fs::Cleanup>().is_some() => {
+            failed.push(format!("{}: {error:#}", path.display()));
+            return Ok(false);
+        }
         Err(_) if fs::symlink_metadata(path).is_err() => *deleted += 1,
         Err(e)
             if e.chain()
@@ -856,53 +812,6 @@ fn empty_tree(
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     Ok(true)
-}
-
-/// A folder with at least this many entries is emptied in parallel.
-#[cfg(target_os = "macos")]
-const TRASH_PARALLEL_FROM: usize = 64;
-// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
-// half the time of one (40,363 files: 4.7 s to 2.4 s).
-
-/// `empty_tree` of each of `entries`. False when the budget ended first.
-#[cfg(target_os = "macos")]
-fn empty_entries(
-    entries: &[PathBuf],
-    late: &(dyn Fn() -> bool + Sync),
-    deleted: &mut usize,
-    failed: &mut Vec<String>,
-) -> Result<bool, crate::pools::PoolError> {
-    if entries.len() < TRASH_PARALLEL_FROM {
-        for e in entries {
-            if late() || !empty_tree(e, late, deleted, failed)? {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
-    }
-    let results = crate::pools::run(
-        crate::pools::Priority::Background,
-        crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()),
-        || {
-            use rayon::prelude::*;
-            entries
-                .par_iter()
-                .map(|e| {
-                    let (mut deleted, mut failed) = (0, Vec::new());
-                    let done = if late() { false } else { empty_tree(e, late, &mut deleted, &mut failed)? };
-                    Ok((deleted, failed, done))
-                })
-                .collect::<Vec<Result<_, crate::pools::PoolError>>>()
-        },
-    )?;
-    let mut done = true;
-    for result in results {
-        let (count, errors, complete) = result?;
-        *deleted += count;
-        failed.extend(errors);
-        done &= complete;
-    }
-    Ok(done)
 }
 
 impl<'a> Project<'a> {
@@ -955,67 +864,22 @@ impl<'a> Project<'a> {
     /// the last lock. A tree that cannot move, and any tree on the other file systems (whose
     /// snapshots delete at once), is deleted in place.
     pub fn trash(&self, path: &Path) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let _t = crate::trace::span(format!("trash {}", path.display()));
-            if fs::symlink_metadata(path).is_err() {
-                return Ok(());
-            }
+        let _t = crate::trace::span(format!("trash {}", path.display()));
+        if !crate::fs::host().namespace.managed_or_present(path)? {
+            return Ok(());
+        }
+        if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             let dir = self.trash_dir()?;
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
             let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-            match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| crate::storage::move_tree(path, &to)) {
-                Ok(()) => {
-                    // A long command holds the lock for hours (a migration): the trash would wait for its end and
-                    // fill the disk. Start the emptier now and then; it takes the trash lock, not the project lock.
-                    if trash_kick_due(&LAST_TRASH_KICK_MS, crate::ids::now_ms().max(0) as u64) {
-                        spawn_trash_emptier(&dir);
-                    }
-                    return Ok(());
+            if fs::create_dir_all(&dir).is_ok() && crate::fs::move_tree(path, &to).is_ok() {
+                if trash_kick_due(&LAST_TRASH_KICK_MS, crate::ids::now_ms().max(0) as u64) {
+                    spawn_trash_emptier(&dir);
                 }
-                Err(e) => {
-                    let _t = crate::trace::span(format!("delete in place ({e:#}) {}", path.display()));
-                }
-            }
-        }
-        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        {
-            let _t = crate::trace::span(format!("trash {}", path.display()));
-            if fs::symlink_metadata(path).is_err() {
                 return Ok(());
             }
-            // A subvolume with known nested subvolumes is destroyed at once, with no search.
-            if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints())? {
-                return Ok(());
-            }
-            // What needs a search or a file by file delete waits for the end of the last lock.
-            if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                let dir = self.trash_dir()?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-                if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
-                    return Ok(());
-                }
-            }
         }
-        crate::storage::delete_tree(path)
-    }
-    /// The paths of nested subvolumes (caches) that a working folder of a line can hold: the
-    /// machine setting and the folders of the cache overlays.
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    fn nested_hints(&self) -> Vec<String> {
-        let mut hints = self.config_strings("regenerable");
-        // The folders of the cache overlays (`overlay.<name>.folder`).
-        let mut names: Vec<String> = Vec::new();
-        for entry in fs::read_dir(self.dir.join("meta/overlays")).into_iter().flatten().flatten() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        for name in names {
-            if let Ok(Some(v)) = self.db.overlay_config(&format!("overlay.{name}.folder")) {
-                hints.extend(v.as_str().map(str::to_owned));
-            }
-        }
-        hints
+        crate::fs::remove(path)
     }
     /// Delete the trees of a state. On APFS a state that another thin state uses as its base
     /// stays until that state goes (`thin::delete_state`); this returns false then.
@@ -1024,7 +888,7 @@ impl<'a> Project<'a> {
         return crate::thin::delete_state(self, id);
         #[cfg(not(target_os = "macos"))]
         {
-            crate::storage::delete_tree(&self.state_path(id))?;
+            crate::fs::remove(&self.state_path(id))?;
             Ok(true)
         }
     }
@@ -1131,7 +995,7 @@ impl<'a> Project<'a> {
     fn create_folder(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         let volume_root = store.volume_root(name)?;
-        if !crate::storage::is_supported(&volume_root) {
+        if !crate::fs::host().namespace.supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
@@ -1159,7 +1023,7 @@ impl<'a> Project<'a> {
             for d in ["stage", "scan", "work"] {
                 mkdir_mode(&dir.join("meta").join(d), 0o700)?;
             }
-            crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
+            crate::fs::create(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
             let id = ids::new_id();
             let db = Db::open(&db_file(&dir))?;
@@ -1173,7 +1037,7 @@ impl<'a> Project<'a> {
             Ok(p) => Ok(p),
             Err(e) => {
                 if matches!(e, CommitResolution::NotCommitted(_)) {
-                    let _ = crate::storage::delete_tree(&dir);
+                    let _ = crate::fs::remove(&dir);
                 }
                 Err(e.into())
             }
@@ -1209,7 +1073,7 @@ impl<'a> Project<'a> {
             bail!("project '{name}' already exists");
         }
         let volume_root = store.volume_root(name)?;
-        if !crate::storage::is_supported(&volume_root) {
+        if !crate::fs::host().namespace.supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
@@ -1226,7 +1090,7 @@ impl<'a> Project<'a> {
             mkdir_mode(&dir.join("meta").join(d), 0o700)?;
         }
         if !dir.join("meta").join("db").exists() {
-            crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
+            crate::fs::create(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
         }
         let db = Db::open(&db_file(&dir))?;
@@ -1475,14 +1339,8 @@ impl<'a> Project<'a> {
         }
     }
 
-    /// The differences between the `bases` table and the layers on disk, one line each. Empty
-    /// when they agree. `gc --repair` makes the table match the disk.
-    pub fn layer_bases_differences(&self) -> Result<Vec<String>> {
-        Ok(self.layer_bases_check()?.1)
-    }
-
-    /// The layers on disk and the differences from the table (see `layer_bases_differences`). The
-    /// layers are read once: `gc` repairs the table with the same map.
+    /// The layers on disk and differences from their base rows. Read once so `gc` repairs
+    /// the table using the same map.
     pub fn layer_bases_check(&self) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>)> {
         let disk = self.layer_bases_on_disk()?;
         let rows = self.db.bases_rows()?;
@@ -1657,7 +1515,9 @@ impl<'a> Project<'a> {
                 if record.op == "machine" {
                     let key = oplog::machine_key(&record)?;
                     if let Some(known) = keys.insert(machine, key) {
-                        if known != key { bail!("catalog machine key differs from trusted key"); }
+                        if known != key {
+                            bail!("catalog machine key differs from trusted key");
+                        }
                     }
                 }
             }
@@ -1665,11 +1525,16 @@ impl<'a> Project<'a> {
         keys.insert(self.store.machine.id.clone(), self.store.machine.key.verifying_key());
         let terms = self.trust_terms(&[])?;
         layr_model::record::authorize_local_lines(
-            &self.id, &self.db.all_lines()?, &keys,
+            &self.id,
+            &self.db.all_lines()?,
+            &keys,
             layr_model::record::LocalAuthority {
-                machine: layr_types::MachineId::parse(&self.store.machine.id)?, trust_writers: &trust_writers, limits: &terms,
+                machine: layr_types::MachineId::parse(&self.store.machine.id)?,
+                trust_writers: &trust_writers,
+                limits: &terms,
                 overlay: self.name.split_once('%').map(|(_, overlay)| overlay),
-            }, ids::now_ms(),
+            },
+            ids::now_ms(),
         )
     }
 
@@ -2454,7 +2319,8 @@ impl LockedProject<'_> {
                 machine: layr_types::MachineId::parse(&m.id)?,
                 project: layr_types::ProjectId::parse(&project)?,
                 seq: std::num::NonZeroU64::new(seq).context("record sequence must be positive")?,
-                time, actor: actor.clone(),
+                time,
+                actor: actor.clone(),
             })
         };
         let tx = self.begin_write()?;
@@ -2572,8 +2438,7 @@ impl LockedProject<'_> {
                 if s.record.seq != last + 1 {
                     bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
                 }
-                oplog::verify_line(&s.line, &key)
-                    .with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
+                oplog::verify_line(&s.line, &key).with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
                 for st in &s.record.states {
                     if self.db.state(&st.id)?.is_some() || fresh.iter().any(|f| f.record.states.iter().any(|x| x.id == st.id)) {
                         bail!("record {} of machine {machine} reuses state id {}", s.record.seq, st.id);

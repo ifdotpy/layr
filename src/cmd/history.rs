@@ -52,7 +52,7 @@ fn diff_spec() -> Spec {
 fn empty_root() -> Result<Temp> {
     let p = std::env::temp_dir().join(format!("layr-empty-{}", ids::new_id()));
     std::fs::create_dir(&p)?;
-    Ok(Temp { path: p })
+    Temp::existing(p)
 }
 
 /// All files of a root as additions.
@@ -213,10 +213,12 @@ fn is_path_arg(cwd: &std::path::Path, p: &str) -> bool {
 
 fn is_rev(repo: &Repo, line: Option<&Line>, s: &str) -> bool {
     if let Some((a, b)) = s.split_once("...") {
-        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
+        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok())
+            && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
     }
     if let Some((a, b)) = s.split_once("..") {
-        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok()) && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
+        return (a.is_empty() || revs::resolve_state(repo, line, a).is_ok())
+            && (b.is_empty() || revs::resolve_state(repo, line, b).is_ok());
     }
     revs::resolve_state(repo, line, s).is_ok()
 }
@@ -335,7 +337,9 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if let Some((x, y)) = r.split_once("...") {
                 let xi = revs::resolve_state(repo, line.as_ref(), if x.is_empty() { "head" } else { x })?;
                 let yi = revs::resolve_state(repo, line.as_ref(), if y.is_empty() { "head" } else { y })?;
-                let b = repo.merge_base(&repo.source_id(&xi)?, &repo.source_id(&yi)?)?.ok_or_else(|| anyhow::anyhow!("no merge base"))?;
+                let b = repo
+                    .merge_base(&repo.source_id(&xi)?, &repo.source_id(&yi)?)?
+                    .ok_or_else(|| anyhow::anyhow!("no merge base"))?;
                 let (o, n, k) = pair_of(repo, &b, &yi)?;
                 keep.extend(k);
                 (o, n, false)
@@ -445,10 +449,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // The live working folder, validated by kernel change counters as `status` does; a
         // read-only snapshot when validation fails.
         let l = h.line()?;
-        #[cfg(target_os = "macos")]
-        let fast = crate::storage::stable_read(&[repo.working(l).as_path()], || compute(&old, &new))?;
-        #[cfg(not(target_os = "macos"))]
-        let fast: Option<Vec<FileDiff>> = None;
+        let fast = crate::fs::observations::validated_read(&[repo.working(l).as_path()], None, || compute(&old, &new))?;
         match fast {
             Some(v) => v,
             None => {
@@ -998,7 +999,10 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
             continue;
         }
         let (old, new, list) = state_changes(repo, &s, &specs)?;
-        let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old))).collect();
+        let list: Vec<EntryChange> = list
+            .into_iter()
+            .filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old)))
+            .collect();
         if list.is_empty() {
             continue;
         }
@@ -1225,7 +1229,10 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
         first = false;
         if want_diff && crate::gitbridge::readable(repo, &s.id)? {
             let (old, new, list) = state_changes(repo, s, &specs)?;
-            let list: Vec<EntryChange> = list.into_iter().filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old))).collect();
+            let list: Vec<EntryChange> = list
+                .into_iter()
+                .filter(|c| matches(&specs, c.path()) || c.old_path().is_some_and(|old| matches(&specs, old)))
+                .collect();
             if !list.is_empty() {
                 if blank {
                     outln!(ctx);
@@ -1576,7 +1583,7 @@ fn search_root(repo: &Repo, line: Option<&Line>, rev: Option<&str>) -> Result<(P
 fn ignore_folder(repo: &Repo, commit: &str) -> Result<Temp> {
     let dir = repo.p.scan_dir().join(crate::store::temp_name());
     std::fs::create_dir_all(&dir)?;
-    let guard = Temp { path: dir.clone() };
+    let guard = Temp::existing(dir.clone())?;
     let ignores: Vec<(String, String)> = crate::gitbridge::regular_files(repo, commit)?
         .into_iter()
         .filter(|(p, _)| p.ends_with(".gitignore") || p.ends_with(".layrignore"))
@@ -2017,6 +2024,7 @@ mod renderer_regression {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: RefCell::new(Box::new(Capture(capture.clone()))),
         };
         let files = diff::regression::generated_files();

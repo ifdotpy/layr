@@ -9,7 +9,6 @@ use crate::ids;
 use crate::privs::as_caller_fs;
 use crate::repo::skip_path;
 use crate::revs;
-use crate::storage as btrfs;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -37,10 +36,10 @@ fn put_entry(ctx: &Ctx, src_root: &Path, rel: &str, dst_root: &Path) -> Result<(
     if m.is_dir() {
         return as_caller_fs(ctx, || fsutil::make_parents(dst_root, &format!("{rel}/x"), None));
     }
-    let mut s = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&src)?;
+    let s = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&src)?;
     use std::os::unix::fs::MetadataExt;
     let mode = m.mode() & 0o777;
-    let mut d = as_caller_fs(ctx, || {
+    let d = as_caller_fs(ctx, || {
         fsutil::make_parents(dst_root, rel, None)?;
         let d = fsutil::safe_join(dst_root, rel)?;
         if d.symlink_metadata().is_ok() {
@@ -48,9 +47,7 @@ fn put_entry(ctx: &Ctx, src_root: &Path, rel: &str, dst_root: &Path) -> Result<(
         }
         Ok(OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&d)?)
     })?;
-    if btrfs::clone_file(&s, &d).is_err() {
-        std::io::copy(&mut s, &mut d)?;
-    }
+    layr_fs_unix::copy_contents(&s, &d)?;
     d.set_permissions(std::fs::Permissions::from_mode(mode))?;
     fsutil::set_mtime(&d, m.mtime(), m.mtime_nsec())?;
     Ok(())

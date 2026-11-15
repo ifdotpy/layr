@@ -5,7 +5,6 @@ use crate::errors::{error, Kind as ErrorKind};
 use crate::ids;
 use crate::model::Line;
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use anyhow::Result;
 use std::path::Path;
 
@@ -39,7 +38,7 @@ pub fn with_try_copy<T>(
         // the records of a cache overlay, so the cache comes now from the store remote.
         crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
         if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
-            let _ = btrfs::delete_tree(&dir);
+            let _ = crate::fs::remove(&dir);
             return Err(e);
         }
     }
@@ -47,7 +46,7 @@ pub fn with_try_copy<T>(
     if keep {
         eprintln!("layr try: kept {}", dir.display());
     } else {
-        let _ = btrfs::delete_tree(&dir);
+        let _ = crate::fs::remove(&dir);
     }
     result
 }

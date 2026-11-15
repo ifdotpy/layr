@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Enforce workspace edges and transitive leaf dependencies over all manifest targets/features."""
 import json
+import re
+from pathlib import Path
 import subprocess
 import sys
 
@@ -41,6 +43,16 @@ for p in workspace:
         if packages[node]["name"] in heavy - set(policy[p["name"]].get("allow-heavy", [])):
             errors.append(f'{p["name"]}: forbidden transitive dependency {packages[node]["name"]}')
         todo.extend(dep["pkg"] for dep in nodes[node]["deps"] if any(k["kind"] != "dev" for k in dep["dep_kinds"]))
+# Filesystem implementations are composed once. Shared algorithms must not import a
+# concrete driver or restore the old cfg-selected module alias.
+root = Path(m["workspace_root"])
+main = (root / "src/main.rs").read_text()
+if re.search(r"\bmod\s+storage\b|#\[path\s*=\s*\"(?:apfs|btrfs|overlayfs)\.rs\"", main):
+    errors.append("src/main.rs: filesystem facade alias is forbidden")
+for name in ["repo.rs", "lineops.rs", "overlay.rs", "cache_overlay.rs", "changes.rs", "objstore.rs", "tree.rs", "fsutil.rs", "merge.rs", "write_source.rs", "recv.rs", "project_copy.rs", "project_move.rs", "gitbridge.rs", "cmd/admin.rs", "cmd/du.rs", "cmd/work.rs", "cmd/mergecmd.rs", "cmd/park.rs"]:
+    source = (root / "src" / name).read_text()
+    if re.search(r"crate::(?:apfs|btrfs|btrfs_driver|overlayfs|storage)::|(?<![:\w])storage::", source):
+        errors.append(f"src/{name}: shared algorithms must use filesystem contracts")
 if errors:
     print('\n'.join(errors), file=sys.stderr)
     sys.exit(1)

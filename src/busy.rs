@@ -25,8 +25,8 @@ impl std::fmt::Display for User {
 
 /// The first process that uses `path` or a path below it: its working directory, its root, an
 /// open file or a memory map. Linux reads `/proc` (every process that `/proc` lets this user
-/// read; as root, all). Only Linux has a caller (the snapshot reset of a line).
-#[cfg(target_os = "linux")]
+/// read; as root, all). Used to test the broader process-observation rule.
+#[cfg(all(test, target_os = "linux"))]
 pub fn user_of(path: &Path) -> Result<Option<User>> {
     find(path, false)
 }

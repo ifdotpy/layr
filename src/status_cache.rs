@@ -11,23 +11,12 @@ pub(crate) struct Timestamp {
     pub nanos: i64,
 }
 
+/// Native observation stamps are compared for equality; shared logic never interprets a
+/// filesystem's counter layout. A backing stat binds a merged entry to its physical source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BtrfsIdentity {
-    pub generation: u64,
-    pub transid: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ApfsIdentity {
-    pub change_counter: u32,
-    pub clone_id: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum BackendIdentity {
-    Btrfs(BtrfsIdentity),
-    Apfs(ApfsIdentity),
-    Overlay(FileStat),
+pub(crate) enum ObservationEvidence {
+    Counter([u64; 3]),
+    Backing(FileStat),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +51,7 @@ impl FileStat {
 /// Missing optional acceleration is distinct from evidence that cannot verify this entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FileFingerprint {
-    Verified { stat: FileStat, backend: Option<BackendIdentity> },
+    Verified { stat: FileStat, evidence: Option<ObservationEvidence> },
     Unverifiable,
 }
 
@@ -97,7 +86,7 @@ pub(crate) struct StatusCache {
 
 impl StatusCache {
     pub fn new(key: String, written: u64, entries: BTreeMap<String, FileFingerprint>, status: Status) -> Self {
-        Self { format: 4, version: env!("CARGO_PKG_VERSION").to_string(), key, written, entries, status }
+        Self { format: 5, version: env!("CARGO_PKG_VERSION").to_string(), key, written, entries, status }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -106,7 +95,7 @@ impl StatusCache {
 
     pub fn decode(raw: &[u8], key: &str) -> Option<Self> {
         let cache: Self = serde_json::from_slice(raw).ok()?;
-        (cache.format == 4 && cache.version == env!("CARGO_PKG_VERSION") && cache.key == key).then_some(cache)
+        (cache.format == 5 && cache.version == env!("CARGO_PKG_VERSION") && cache.key == key).then_some(cache)
     }
 
     pub fn changed(&self, now: &BTreeMap<String, FileFingerprint>) -> BTreeSet<String> {
@@ -143,7 +132,7 @@ mod tests {
                 mtime: Timestamp { seconds: 100, nanos: 123 },
                 ctime: Timestamp { seconds: 100, nanos: 456 },
             },
-            backend: None,
+            evidence: None,
         }
     }
 

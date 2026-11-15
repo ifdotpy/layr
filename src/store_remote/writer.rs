@@ -785,7 +785,7 @@ pub fn format_gap(root: &Path) -> Result<Option<&'static str>> {
             entries += 1;
             let meta = std::fs::symlink_metadata(&path)?;
             if meta.is_dir() {
-                if crate::storage::is_subvolume(&path) {
+                if crate::fs::host().namespace.managed(&path) {
                     return Ok(Some("a nested subvolume"));
                 }
                 pending.push(path.clone());
@@ -841,7 +841,7 @@ fn walk_state(root: &Path, visit: &mut dyn FnMut(&str, &fsutil::Meta) -> Result<
             let relative = path.strip_prefix(root)?.to_str().context("state path is not UTF-8")?;
             let metadata = std::fs::symlink_metadata(&path)?;
             let meta = fsutil::meta_of(&metadata);
-            if meta.is_dir() && crate::storage::is_subvolume(&path) {
+            if meta.is_dir() && crate::fs::host().namespace.managed(&path) {
                 continue;
             }
             if visit(relative, &meta)? && meta.is_dir() {
@@ -875,7 +875,8 @@ fn upload_state_journal(
     } else {
         attempt
     };
-    let delta_root = base_root.filter(|base| crate::storage::is_subvolume(base) && crate::storage::is_subvolume(root));
+    let delta_root =
+        base_root.filter(|base| crate::fs::host().namespace.managed(base) && crate::fs::host().namespace.managed(root));
     let mut files =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
     let mut times =
@@ -1127,11 +1128,11 @@ fn seed_chunks(chunk_hashes: &mut BTreeMap<String, Vec<String>>, tree: &Tree) {
 fn btrfs_identity(root: &Path, signed_uuid: &str) -> Option<format::BtrfsIdentity> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
-        let (uuid, received_transid) = crate::storage::clone_identity(root).ok()?;
+        let (uuid, received_transid) = crate::fs::host().transfer.clone_identity(root).ok()?;
         if uuid != signed_uuid {
             return None;
         }
-        let transid = received_transid.or_else(|| crate::storage::send_clone_identity(root).ok().map(|(_, t)| t))?;
+        let transid = received_transid.or_else(|| crate::fs::host().transfer.send_identity(root).ok().map(|(_, t)| t))?;
         return Some(format::BtrfsIdentity { uuid, transid });
     }
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
@@ -1214,6 +1215,7 @@ mod tests {
             cwd: root.to_path_buf(),
             env: HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         }
     }
@@ -1269,7 +1271,7 @@ mod tests {
     }
     #[test]
     fn live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option() {
-        use crate::model::{StateRec};
+        use crate::model::StateRec;
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
@@ -1341,7 +1343,7 @@ mod tests {
     }
 
     fn branch_fixture<'a>(ctx: &'a Ctx, store: &Store) -> Repo<'a> {
-        use crate::model::{StateRec};
+        use crate::model::StateRec;
         let dir = ctx.store.project_dir("p").unwrap();
         let existing = dir.join("meta/db/layr.sqlite").exists();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
@@ -2179,12 +2181,18 @@ mod tests {
         commit.states.push(state);
         commit.lines.insert(
             line_id,
-            LineChange { transition: crate::model::LineTransition::Create { after: LineState {
-                    name: "main".into(),
-                    head: state_id.clone(),
-                    owner: ctx.caller.uid,
-                    machine: store.machine.clone(),
-                } }, working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create {
+                    after: LineState {
+                        name: "main".into(),
+                        head: state_id.clone(),
+                        owner: ctx.caller.uid,
+                        machine: store.machine.clone(),
+                    },
+                },
+                working_before: None,
+                working_after: None,
+            },
         );
         let mut lines = Vec::new();
         for (index, mut record) in [first, project, commit].into_iter().enumerate() {

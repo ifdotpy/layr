@@ -49,6 +49,7 @@ impl Fixture {
             env: [("LAYR_PROJECT".into(), "history".into()), ("LAYR_ROOT".into(), root.join("store").display().to_string())]
                 .into(),
             author: Default::default(),
+            captures: Default::default(),
             out: RefCell::new(Box::new(output.clone())),
         };
         let p = Project {

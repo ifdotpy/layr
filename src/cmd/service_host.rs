@@ -199,7 +199,15 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     };
     let started = std::time::Instant::now();
     let out: Box<dyn Write> = Box::new(std::io::BufWriter::new(std::io::stdout()));
-    let ctx = Ctx { store, caller, cwd, env, author: Default::default(), out: std::cell::RefCell::new(out) };
+    let ctx = Ctx {
+        store,
+        caller,
+        cwd,
+        env,
+        author: Default::default(),
+        captures: Default::default(),
+        out: std::cell::RefCell::new(out),
+    };
     let r = crate::cmd::run(&ctx, &argv);
     let _ = ctx.out.borrow_mut().flush();
     let code = match r {
@@ -290,6 +298,7 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
             cwd: PathBuf::from("/"),
             env: HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };
@@ -450,6 +459,7 @@ fn garbage_report(root: &Path, caller: Caller) {
             cwd: PathBuf::from("/"),
             env: HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };

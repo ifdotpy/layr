@@ -8,8 +8,8 @@ use crate::model::{Attestation, Line, QueueChange, QueueEntry, Record, RefChange
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::{marker::PhantomData, rc::Rc};
 use std::sync::LazyLock;
+use std::{marker::PhantomData, rc::Rc};
 
 /// Cache only the schema query definition; every open still reads its database.
 static SCHEMA_CHECK: LazyLock<(Vec<&'static str>, String)> = LazyLock::new(|| {
@@ -155,8 +155,8 @@ mod queries;
 mod transaction;
 #[cfg(test)]
 pub(crate) use transaction::FAIL_RECONCILE;
-pub use transaction::{CleanupEffect, CommitResolution, CommittedEffects, PublishError, PublishResult, WriteTxn};
 pub(crate) use transaction::{publication_outcome, RebuildAction, RebuildTxn};
+pub use transaction::{CleanupEffect, CommitResolution, CommittedEffects, PublishError, PublishResult, WriteTxn};
 
 impl Db {
     #[cfg(test)]
@@ -814,6 +814,7 @@ impl Db {
     }
 
     /// The subvolume UUID of a cache snapshot, from the signed save.caches record.
+    #[cfg(test)]
     pub fn cache_uuid(&self, state: &str, name: &str) -> Result<Option<String>> {
         let raw: Option<String> =
             self.conn.prepare_cached("SELECT rec FROM states WHERE id=?1")?.query_row(params![state], |r| r.get(0)).optional()?;
@@ -960,9 +961,9 @@ impl Db {
     /// The states that are here only as objects (`layr migrate` retired their native copy): not present, not deleted,
     /// and their record names a tree.
     pub fn object_only_states(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT id FROM states WHERE present=0 AND deleted=0 AND json_extract(rec, '$.tree') IS NOT NULL",
-        )?;
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT id FROM states WHERE present=0 AND deleted=0 AND json_extract(rec, '$.tree') IS NOT NULL")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
@@ -1019,7 +1020,10 @@ impl Db {
 
     /// True when a deleted line of the project had the name `name` and no live line has it.
     pub fn lines_deleted_named(&self, name: &str) -> Result<bool> {
-        let n: i64 = self.conn.prepare_cached("SELECT COUNT(*) FROM lines WHERE name=?1 AND deleted=1")?.query_row(params![name], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM lines WHERE name=?1 AND deleted=1")?
+            .query_row(params![name], |r| r.get(0))?;
         Ok(n > 0)
     }
 
@@ -1200,21 +1204,6 @@ impl Db {
         let mut st = self.conn.prepare("SELECT state, base FROM bases")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?)
-    }
-
-    /// The base of a thin layer, from its `bases` row.
-    pub fn base_of_layer(&self, state: &str) -> Result<Option<String>> {
-        let mut st = self.conn.prepare("SELECT base FROM bases WHERE state=?1")?;
-        let mut rows = st.query_map(rusqlite::params![state], |r| r.get::<_, String>(0))?;
-        Ok(match rows.next() {
-            Some(b) => Some(b?),
-            None => None,
-        })
-    }
-
-    /// True when a thin layer is made over `base`.
-    pub fn has_layer_child(&self, base: &str) -> Result<bool> {
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM bases WHERE base=?1)", rusqlite::params![base], |r| r.get(0))?)
     }
 
     /// Put a dead state in the free queue (its last layer child went).
@@ -1736,8 +1725,14 @@ mod tests {
             rec.time = seq as i64;
             let after =
                 after.map(|name| crate::model::LineState { name: name.into(), head: "h".into(), owner: 1, machine: "m".into() });
-            rec.lines
-                .insert(id.into(), crate::model::LineChange { transition: crate::model::LineTransition::from_endpoints(None, after), working_before: None, working_after: None });
+            rec.lines.insert(
+                id.into(),
+                crate::model::LineChange {
+                    transition: crate::model::LineTransition::from_endpoints(None, after),
+                    working_before: None,
+                    working_after: None,
+                },
+            );
             rec.data = data;
             db.insert_record(&rec, &serde_json::json!({"r": rec, "s": ""}).to_string())?;
             db.derive_rows(&rec, &|_| true, "m")
@@ -1839,7 +1834,11 @@ mod tests {
             } else if i % 7 == 0 {
                 rec.lines.insert(
                     "wanted".into(),
-                    crate::model::LineChange { transition: crate::model::LineTransition::Delete { before: None }, working_before: None, working_after: None },
+                    crate::model::LineChange {
+                        transition: crate::model::LineTransition::Delete { before: None },
+                        working_before: None,
+                        working_after: None,
+                    },
                 );
             } else {
                 rec.data = serde_json::json!({"line": "other", "note": "wanted"});

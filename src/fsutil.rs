@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,17 +86,11 @@ pub trait Src: Sync {
     fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
         None
     }
-    /// The layers, when the tree is not one folder.
-    #[cfg(target_os = "macos")]
-    fn layered(&self) -> Option<&crate::thin::Layered> {
-        None
-    }
 }
 impl Src for Path {
     fn at(&self, rel: &str) -> Result<PathBuf> {
         // Every read of a live folder passes here: a validated read checks these paths again.
-        #[cfg(target_os = "macos")]
-        crate::storage::note_read(self, [rel]);
+        crate::fs::observations::note_read(self, [rel]);
         safe_join(self, rel)
     }
     fn folder(&self) -> Option<&Path> {
@@ -105,31 +99,11 @@ impl Src for Path {
 }
 impl Src for PathBuf {
     fn at(&self, rel: &str) -> Result<PathBuf> {
-        #[cfg(target_os = "macos")]
-        crate::storage::note_read(self, [rel]);
+        crate::fs::observations::note_read(self, [rel]);
         safe_join(self, rel)
     }
     fn folder(&self) -> Option<&Path> {
         Some(self)
-    }
-}
-#[cfg(target_os = "macos")]
-impl Src for crate::thin::Layered {
-    fn at(&self, rel: &str) -> Result<PathBuf> {
-        self.path(rel)
-    }
-    fn folder(&self) -> Option<&Path> {
-        self.is_complete().then(|| self.bottom())
-    }
-    fn layered(&self) -> Option<&crate::thin::Layered> {
-        Some(self)
-    }
-    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
-        if self.layers().is_empty() {
-            self.object_base().map(|base| base.as_ref())
-        } else {
-            None
-        }
     }
 }
 
@@ -607,20 +581,12 @@ pub fn copy_open_file(src: &File, dst_root: &Path, dst_rel: &str) -> Result<()> 
     refuse_case_clash(dst_root, dst_rel)?;
     let t = crate::tree::Tree::open(dst_root)?;
     t.mkdirs_for(dst_rel, None)?;
-    #[cfg(target_os = "macos")]
     let cloned = t.clone_new_file(src, dst_rel)?;
-    #[cfg(not(target_os = "macos"))]
-    let cloned: Option<File> = None;
     let d = match cloned {
         Some(d) => d,
         None => {
             let d = t.create(dst_rel, m.mode() & 0o7777)?;
-            if crate::storage::clone_file(src, &d).is_err() {
-                d.set_len(0)?;
-                let (mut from, mut to) = (src.try_clone()?, d.try_clone()?);
-                from.seek(SeekFrom::Start(0))?;
-                std::io::copy(&mut from, &mut to)?;
-            }
+            layr_fs_unix::copy_contents(src, &d)?;
             d
         }
     };
@@ -1053,19 +1019,13 @@ fn copy_entry_impl(
         }
         fchown(d, own)
     };
-    #[cfg(target_os = "macos")]
     if _replace_index && t.replace_index_file(&s, dst_rel, finish)? {
         return Ok(());
     }
     // Keep the inode of a file that is there: btrfs then reports an in-place change with byte
     // ranges, and running tools keep their file handles.
     let fill = |d: &File| -> Result<()> {
-        if crate::storage::clone_file(&s, d).is_err() {
-            let mut s2 = open_ro(&src)?;
-            let mut d2 = d.try_clone()?;
-            d2.set_len(0)?;
-            std::io::copy(&mut s2, &mut d2)?;
-        }
+        layr_fs_unix::copy_contents(&s, d)?;
         // Linux clones and copies carry no attributes: keep the user ones, as an APFS clone does.
         #[cfg(target_os = "linux")]
         sync_user_xattrs(&s, d)?;
@@ -1077,8 +1037,15 @@ fn copy_entry_impl(
         if let Some(old) = t.open_write(dst_rel)? {
             // btrfs: a reflink swaps the whole content of a single-link file in one step. The
             // inode stays, and moves are found by inode. Elsewhere the new file gets a new inode.
-            #[cfg(target_os = "linux")]
-            if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
+            let replaced = if old.metadata()?.nlink() == 1 {
+                match crate::fs::host().file_copies.replace_content {
+                    Some(clone) => matches!(clone(&s, &old)?, layr_fs_core::Attempt::Applied(())),
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if replaced {
                 #[cfg(target_os = "linux")]
                 sync_user_xattrs(&s, &old)?;
                 return finish(&old);
@@ -1111,10 +1078,7 @@ fn copy_entry_impl(
             (d, false)
         }
         None => {
-            #[cfg(target_os = "macos")]
             let cloned = t.clone_new_file(&s, dst_rel)?;
-            #[cfg(target_os = "linux")]
-            let cloned: Option<File> = None;
             match cloned {
                 Some(d) => (d, true),
                 None => (t.create(dst_rel, m.mode() & 0o7777)?, false),
@@ -1306,24 +1270,7 @@ pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta
     }
     match root.folder() {
         Some(dir) => walk_folder(dir, rel, f),
-        #[cfg(target_os = "macos")]
-        None => {
-            let layered = root.layered().expect("a tree that is not a folder has layers");
-            // Entries come sorted by path, so the content of a folder follows it.
-            let mut skip: Option<String> = None;
-            for (path, m) in layered.entries(rel)? {
-                if skip.as_ref().is_some_and(|s| path.starts_with(s.as_str())) {
-                    continue;
-                }
-                skip = None;
-                if !f(&path, &m)? && m.is_dir() {
-                    skip = Some(format!("{path}/"));
-                }
-            }
-            Ok(())
-        }
-        #[cfg(not(target_os = "macos"))]
-        None => unreachable!("only APFS has layered trees"),
+        None => bail!("source has neither a reader nor a native folder"),
     }
 }
 
@@ -1345,7 +1292,7 @@ fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<
             if meta.is_dir()
                 && (m.dev() != dev
                     || ((cfg!(target_os = "macos") || cfg!(feature = "overlayfs"))
-                        && crate::storage::is_subvolume(&root.join(&child))))
+                        && crate::fs::host().namespace.managed(&root.join(&child))))
             {
                 continue;
             }
@@ -1450,16 +1397,20 @@ pub fn open_dir_nofollow(path: &Path) -> Result<File> {
         .with_context(|| format!("open folder {}", path.display()))
 }
 
-/// Open a regular file `name` of an open folder for reading: never a link, a device or a pipe.
+/// Open a regular cached stream through its retained parent, without following a leaf link.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn open_file_at(dir: &File, name: &str) -> Result<File> {
     use rustix::fs::{Mode, OFlags};
-    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty())
-        .with_context(|| format!("open {name}"))?;
-    let f = File::from(fd);
-    if !f.metadata()?.is_file() {
+    let file = File::from(rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?);
+    if !file.metadata()?.is_file() {
         bail!("{name} is not a regular file");
     }
-    Ok(f)
+    Ok(file)
 }
 
 /// Read a regular file `name` of an open folder; `None` if absent, a link or not a file.
@@ -1537,23 +1488,12 @@ pub fn git_writable(w: &Path, writable: bool) {
 
 /// Whether a known directory is a nested storage root.
 pub fn is_layer(root: &Path, rel: &str, m: &Meta) -> bool {
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    {
-        let _ = (root, rel);
-        m.is_dir() && m.ino == 256
-    }
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-    {
-        m.is_dir() && crate::storage::is_subvolume(&root.join(rel))
-    }
+    (crate::fs::host().nested_entry)(root, rel, m)
 }
 
 /// Move a managed tree, including its mount when the backend requires it.
 pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
-    #[cfg(feature = "overlayfs")]
-    return crate::storage::rename_tree(from.as_ref(), to.as_ref());
-    #[cfg(not(feature = "overlayfs"))]
-    Ok(fs::rename(from, to)?)
+    crate::fs::move_tree(from.as_ref(), to.as_ref())
 }
 
 /// Disk space of a folder for `layr du`: the allocated bytes of its files, and the bytes that

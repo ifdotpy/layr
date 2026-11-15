@@ -14,15 +14,14 @@
 //!   older layr made, and the old cache fields of state records (`cache_by`, `cache_shared`).
 //! - Prune and size limits of the folder, and the cleanup of lines that are gone.
 
-use crate::errors::{error, Kind as ErrorKind};
 use crate::ctx::Ctx;
+use crate::errors::{error, Kind as ErrorKind};
 use crate::fsutil;
 use crate::ids;
 use crate::ignore_rules::Rules;
 use crate::model::{Line, LineChange, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -251,7 +250,11 @@ impl<'a> Repo<'a> {
             let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
-                LineChange { transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(&ol, &ol.head)) }, working_before: None, working_after: None },
+                LineChange {
+                    transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(&ol, &ol.head)) },
+                    working_before: None,
+                    working_after: None,
+                },
             );
             rec.data = serde_json::json!({"name": ol.name});
             orepo.commit_record(&_lock, ctx, rec)?;
@@ -339,7 +342,11 @@ impl<'a> Repo<'a> {
             let mut rec = crate::model::DraftRecord::new("line.delete");
             rec.lines.insert(
                 ol.id.clone(),
-                LineChange { transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(ol, &ol.head)) }, working_before: None, working_after: None },
+                LineChange {
+                    transition: crate::model::LineTransition::Delete { before: Some(orepo.line_state(ol, &ol.head)) },
+                    working_before: None,
+                    working_after: None,
+                },
             );
             rec.data = serde_json::json!({"name": ol.name});
             orepo.commit_record(locked, ctx, rec)?;
@@ -473,7 +480,7 @@ impl<'a> Repo<'a> {
         let mut out = Vec::new();
         for p in paths {
             let cp = fsutil::safe_join(w, p)?;
-            if !btrfs::is_subvolume(&cp) {
+            if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
             let name = self.ensure_cache_overlay(locked, ctx, p)?;
@@ -485,14 +492,8 @@ impl<'a> Repo<'a> {
                 let _lock = orepo.p.lock_maintenance()?;
                 let ol = self.ensure_build_line(&_lock, ctx, &orepo, &name, &info, line, &info.root)?;
                 let dst = orepo.p.state_path(&id);
-                let made = btrfs::snapshot(&cp, &dst, true).and_then(|_| btrfs::subvol_info(&dst));
-                let sub = match made {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = btrfs::delete_tree(&dst);
-                        return Err(e);
-                    }
-                };
+                let captured = ctx.captures.snapshot(&cp, &dst)?;
+                let sub = crate::fs::host().namespace.info(&dst)?;
                 let st = StateRec {
                     id: id.clone(),
                     kind: StateKind::Commit,
@@ -518,11 +519,12 @@ impl<'a> Repo<'a> {
                     times: None,
                 };
                 if let Err(e) = crate::overlay::move_overlay_line(&_lock, &orepo, ctx, "commit", &ol, &id, vec![st]) {
-                    if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
-                        let _ = btrfs::delete_tree(&dst);
+                    if !matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                        captured.release();
                     }
                     return Err(e.into());
                 }
+                captured.release();
             }
             self.after_overlay_move(ctx, &name);
             out.push((p.clone(), name, id));
@@ -591,7 +593,7 @@ impl<'a> Repo<'a> {
                 Some(l) => crate::overlay::find_overlay_line(&orepo.p.db, &info, &l)?.map(|ol| ol.id),
                 None => None,
             };
-            for (id, of) in orepo.p.db.cache_states()? {
+            for (id, of) in orepo.p.db.cache_states_known()? {
                 if expected.is_some_and(|value| value != id.as_str()) {
                     continue;
                 }
@@ -646,7 +648,7 @@ impl<'a> Repo<'a> {
         let mut saved_with: std::collections::HashMap<String, String> = Default::default();
         // The project states that each usable cache state counts for.
         let mut counts_for: std::collections::HashMap<String, Vec<String>> = Default::default();
-        for (id, of) in orepo.p.db.cache_states()? {
+        for (id, of) in orepo.p.db.cache_states_known()? {
             if !self.usable_cache(&orepo, &info.root, &id, uid, key, protected)? {
                 continue;
             }
@@ -719,7 +721,8 @@ impl<'a> Repo<'a> {
         let unbuilt = self.unbuilt_file(line).exists();
         let mut out = Vec::new();
         for (name, folder) in self.folder_overlays()? {
-            if damaged.contains(&folder) || !fsutil::safe_join(&w, &folder).is_ok_and(|p| btrfs::is_subvolume(&p)) {
+            if damaged.contains(&folder) || !fsutil::safe_join(&w, &folder).is_ok_and(|p| crate::fs::host().namespace.managed(&p))
+            {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
@@ -804,13 +807,17 @@ impl<'a> Repo<'a> {
         if self.p.is_overlay() {
             return Ok(taken);
         }
+        let overlays = self.folder_overlays()?;
+        if overlays.is_empty() {
+            return Ok(taken);
+        }
         // The start state (its caches are read) and the source head stay for the command.
         let mut held = vec![start];
         held.extend(source.map(|s| s.head.as_str()));
         self.hold(self.pin(&held)?);
         let ignored = Rules::new(w);
         let (uid, gid) = self.owner_ids(line);
-        for (name, folder) in self.folder_overlays()? {
+        for (name, folder) in overlays {
             // Versioned files win: a folder that the start state holds files in comes from the
             // state. Otherwise the cache below replaces what the folder holds now: an old cache
             // of the state (`states/<id>@<folder>`, applied before), else the line would start
@@ -846,9 +853,9 @@ impl<'a> Repo<'a> {
                 fsutil::remove_entry(w, &folder)?;
             }
             fsutil::make_parents(w, &folder, Some((uid, gid)))?;
-            let uniform = btrfs::cache_snapshot(&orepo.state_root(&sid)?, &cp)?;
+            let uniform = crate::fs::cache(&orepo.state_root(&sid)?, &cp)?;
             let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
-            crate::repo::give_cache_tree(&cp, uniform, source_owner, uid, gid)?;
+            crate::repo::give_cache_tree(&cp, uniform == layr_fs_core::OwnerLayout::Uniform, source_owner, uid, gid)?;
             taken.push((name, folder, sid));
         }
         Ok(taken)
@@ -903,7 +910,7 @@ impl<'a> Repo<'a> {
                     let src = orepo.state_root(&sid)?;
                     if cp.symlink_metadata().is_err() {
                         fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
-                        btrfs::snapshot(&src, &cp, false)?;
+                        crate::fs::snapshot(&src, &cp, false)?;
                         crate::repo::give_tree(&cp, uid, gid)?;
                     } else {
                         let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
@@ -927,7 +934,8 @@ impl<'a> Repo<'a> {
                     };
                     // The working folder first: a failure leaves the overlay line where it was.
                     let src = orepo.state_root(&sid)?;
-                    let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
+                    let empty =
+                        cp.symlink_metadata().is_err() || (crate::fs::host().namespace.managed(&cp) && files_of(&cp)?.is_empty());
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")))
                     } else if empty {
@@ -936,7 +944,7 @@ impl<'a> Repo<'a> {
                                 fsutil::remove_entry(&w, &folder)?;
                             }
                             fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
-                            btrfs::snapshot(&src, &cp, false)?;
+                            crate::fs::snapshot(&src, &cp, false)?;
                             crate::repo::give_tree(&cp, uid, gid)
                         })()
                     } else {
@@ -1192,7 +1200,7 @@ impl<'a> Repo<'a> {
         for (name, folder) in self.folder_overlays()?.into_iter().filter(|(_, f)| folders.contains(f)) {
             let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
             let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-            if btrfs::is_subvolume(&cp) {
+            if crate::fs::host().namespace.managed(&cp) {
                 freed += lru_trim(&cp, limit)?;
             }
         }
@@ -1209,7 +1217,7 @@ impl<'a> Repo<'a> {
                     continue;
                 }
                 let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-                if !btrfs::is_subvolume(&cp) {
+                if !crate::fs::host().namespace.managed(&cp) {
                     continue;
                 }
                 freed += lru_trim(&cp, limit)?;
@@ -1229,7 +1237,8 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
     fsutil::walk(root, "", &mut |rel, m| {
         if !m.is_dir() {
             let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            let unit = units.entry(crate::cache_hook::unit_of(rel).unwrap_or_else(|| rel.to_string())).or_insert((0, 0, Vec::new()));
+            let unit =
+                units.entry(crate::cache_hook::unit_of(rel).unwrap_or_else(|| rel.to_string())).or_insert((0, 0, Vec::new()));
             unit.0 = unit.0.max(used);
             unit.1 += m.size;
             unit.2.push(rel.to_string());

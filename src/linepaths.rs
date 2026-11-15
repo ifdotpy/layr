@@ -217,22 +217,17 @@ pub fn register(root: &Path) {
     register_with(root, None);
 }
 
-#[cfg_attr(not(feature = "overlayfs"), allow(unused_variables))]
 pub fn register_with(root: &Path, extra: Option<&Path>) {
-    #[cfg(feature = "overlayfs")]
-    {
+    if let Some(registry) = &crate::fs::host().registry {
         // The project files are the authority: a store whose index lacks an entry still opens.
         let mut folders = moved_folders(root);
-        // A view move can stop after the kernel moved its mount but before the
-        // path index changed. Accept both journal paths during registry recovery.
-        folders.extend(crate::views::pending_paths(root));
         // The volumes that hold projects are outside the store folder too. All of them, usable
         // or not: an unusable volume (unmounted, wrong identity) must not break the registry.
         if let Ok(layout) = crate::volumes::Layout::for_root(root) {
             folders.extend(layout.volume_paths());
         }
         folders.extend(extra.map(Path::to_path_buf));
-        crate::storage::set_external(root, folders);
+        (registry.external)(root, folders);
     }
 }
 

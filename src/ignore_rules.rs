@@ -42,10 +42,7 @@ pub struct Rules {
     local: std::cell::OnceCell<Option<PathBuf>>,
     /// The folders (relative to root, "" is the root) whose rule files are read. None: every folder.
     dirs: Option<std::collections::HashSet<String>>,
-    /// The layers of a thin state: rule files are read from the layer that holds them.
-    #[cfg(target_os = "macos")]
-    layers: Option<crate::thin::Layered>,
-    #[cfg(not(target_os = "macos"))]
+    /// Read rules from the logical source without exporting object or layer entries.
     source: Option<crate::source::Source>,
 }
 
@@ -59,9 +56,6 @@ impl Rules {
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
             dirs: None,
-            #[cfg(target_os = "macos")]
-            layers: None,
-            #[cfg(not(target_os = "macos"))]
             source: None,
         }
     }
@@ -78,54 +72,27 @@ impl Rules {
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
             dirs: Some(dirs),
-            #[cfg(target_os = "macos")]
-            layers: None,
-            #[cfg(not(target_os = "macos"))]
             source: None,
         }
     }
 
-    /// The rules of a tree that hot paths read (`repo::Snap`).
-    #[cfg(target_os = "macos")]
-    pub fn of(tree: &crate::thin::Layered) -> Rules {
-        let mut r = Rules::new(tree.top());
-        if !tree.is_complete() {
-            r.layers = Some(tree.clone());
-        }
-        r
-    }
-    #[cfg(not(target_os = "macos"))]
-    pub fn of(tree: &crate::source::Source) -> Rules {
-        use crate::fsutil::Src;
-        let mut rules = Rules::new(tree.folder().unwrap_or_else(|| tree.objects().unwrap().root()));
-        rules.source = Some(tree.clone());
+    pub fn of(source: &crate::source::Source) -> Rules {
+        let mut rules = Rules::new(source.root_hint());
+        rules.source = Some(source.clone());
         rules
     }
-
-    fn file(&self, rel: &str) -> PathBuf {
-        #[cfg(not(target_os = "macos"))]
-        if let Some(source) = &self.source {
-            return source.path(rel).unwrap_or_else(|_| self.root.join(rel));
+    fn is_file(&self, relative: &str) -> bool {
+        match &self.source {
+            Some(source) => crate::fsutil::lmeta(source, relative),
+            None => crate::fsutil::lmeta(&self.root, relative),
         }
-        #[cfg(target_os = "macos")]
-        if let Some(l) = &self.layers {
-            return l.path(rel).unwrap_or_else(|_| self.root.join(rel));
-        }
-        #[cfg(target_os = "macos")]
-        crate::storage::note_read(&self.root, [rel]);
-        self.root.join(rel)
+        .is_some_and(|metadata| metadata.is_file())
     }
-
-    fn is_file(&self, rel: &str) -> bool {
-        #[cfg(not(target_os = "macos"))]
-        if let Some(source) = &self.source {
-            return crate::fsutil::lmeta(source, rel).map(|m| m.is_file()).unwrap_or(false);
+    fn read_rule(&self, relative: &str) -> Vec<u8> {
+        match &self.source {
+            Some(source) => crate::fsutil::read_file(source, relative).unwrap_or_default(),
+            None => std::fs::read(self.root.join(relative)).unwrap_or_default(),
         }
-        #[cfg(target_os = "macos")]
-        if let Some(l) = &self.layers {
-            return crate::fsutil::lmeta(l, rel).map(|m| m.is_file()).unwrap_or(false);
-        }
-        crate::fsutil::lmeta(&self.root, rel).map(|m| m.is_file()).unwrap_or(false)
     }
 
     /// The paths that `.layrattributes` files give the attribute `name`: `ignored` is true for them.
@@ -138,9 +105,6 @@ impl Rules {
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
             dirs: None,
-            #[cfg(target_os = "macos")]
-            layers: None,
-            #[cfg(not(target_os = "macos"))]
             source: None,
         }
     }
@@ -241,11 +205,13 @@ impl Rules {
                 if self.is_file(&rel) {
                     match self.attribute {
                         None => {
-                            b.add(self.file(&rel));
+                            for line in String::from_utf8_lossy(&self.read_rule(&rel)).lines() {
+                                let _ = b.add_line(None, line);
+                            }
                         }
                         Some(attribute) => {
                             let unset = format!("-{attribute}");
-                            for line in std::fs::read_to_string(self.file(&rel)).unwrap_or_default().lines() {
+                            for line in String::from_utf8_lossy(&self.read_rule(&rel)).lines() {
                                 let mut words = line.split_whitespace();
                                 let pattern = match words.next() {
                                     Some(p) if !p.starts_with('#') => p,

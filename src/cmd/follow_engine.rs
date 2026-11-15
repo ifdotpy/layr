@@ -652,6 +652,7 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
         cwd,
         env: HashMap::new(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     };
     let repo = Repo::open(&ctx, name)?;
@@ -670,10 +671,11 @@ mod tests {
         use crate::ctx::{Caller, Ctx};
         use crate::model::{Line, LineChange};
         use crate::store::{db_file, Project, Store};
-        let root =
-            crate::repo::Temp { path: std::env::temp_dir().join(format!("layr-local-cache-leases-{}", crate::ids::new_id())) };
-        std::fs::create_dir_all(&root.path)?;
-        if !crate::storage::is_supported(&root.path) {
+        let root = crate::repo::Temp::directory(
+            std::env::temp_dir().join(format!("layr-local-cache-leases-{}", crate::ids::new_id())),
+            0o700,
+        )?;
+        if !crate::fs::host().namespace.supported(&root.path) {
             return Ok(());
         }
         let store = Store::open(&root.path.join("store"))?;
@@ -683,7 +685,7 @@ mod tests {
         crate::store::mkdir_mode(&dir.join("states"), 0o700)?;
         crate::store::mkdir_mode(&dir.join("lines"), 0o711)?;
         let working = dir.join("lines/main");
-        crate::storage::create_subvolume(&working)?;
+        crate::fs::create(&working)?;
         let ctx = Ctx {
             store,
             caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
@@ -691,6 +693,7 @@ mod tests {
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into()), ("LAYR_LINE".into(), "main".into())]),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
             author: Default::default(),
+            captures: Default::default(),
         };
         let p = Project {
             lease: Default::default(),
@@ -726,7 +729,11 @@ mod tests {
             let mut creation = crate::model::DraftRecord::new("line.create");
             creation.lines.insert(
                 line.id.clone(),
-                LineChange { transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &line.head) }, working_before: None, working_after: None },
+                LineChange {
+                    transition: crate::model::LineTransition::Create { after: repo.line_state(&line, &line.head) },
+                    working_before: None,
+                    working_after: None,
+                },
             );
             locked.append(creation, &ctx.actor())?;
         }

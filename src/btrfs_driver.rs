@@ -1,15 +1,7 @@
-//! Operation-local btrfs adapter. The native facade retains legacy callers while core callers
-//! receive backend-affine handles and explicit capture consistency.
-//!
-//! The facade still owns empty-subvolume preparation, received UUID/readonly flags,
-//! move/destroy-known primitives, whole-file FD clones, send/receive and tool negotiation,
-//! stream caching, native extent scanning, sharing/deduplication and space accounting.
-//! APFS clone/seal/settling and thin readers, and OverlayFS upper/lower registry operations,
-//! still use their legacy facades and path-hint adapters. They migrate in later lines.
+//! Operation-local btrfs filesystem with backend-affine handles and retained cleanup authority.
 mod creation;
 mod removal;
-use crate::storage as native;
-pub(crate) use creation::NativeCleanup;
+use crate::btrfs as native;
 use creation::{NativeTree, Resource};
 use layr_fs_core::{evidence::FType, *};
 use layr_fs_unix::DirectoryTree;
@@ -27,8 +19,13 @@ fn backend<T>(result: anyhow::Result<T>) -> Result<T> {
 fn io<T>(result: rustix::io::Result<T>) -> Result<T> {
     result.map_err(|e| FsError::Io(e.into()))
 }
-struct Reader {
+pub(crate) struct Reader {
     directory: DirectoryTree,
+}
+impl Reader {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        Ok(Self { directory: DirectoryTree::open(path)? })
+    }
 }
 impl TreeRead for Reader {
     fn metadata(&self, path: &RelDir) -> Result<Option<EntryMetadata>> {
@@ -209,21 +206,15 @@ impl BtrfsFs {
             Err(cause) => Err(self.rollback(ownership, cause)),
         }
     }
-    pub(crate) fn legacy_hints(&self, before: &Path, after: &Path) -> Result<hints::HintSet> {
-        // Preserve the legacy hint boundary: unsupported/unsettled pairs choose the caller's
-        // full fallback, and errors remain available for that caller's existing error policy.
-        if !backend(native::subvol_info(before))?.readonly || !backend(native::subvol_info(after))?.readonly {
-            return Ok(hints::HintSet::Partial);
-        }
-        let before = self.frozen(before)?;
-        let after = self.frozen(after)?;
-        match self.capabilities(&before.scope()).change_hints {
-            Some(hints) => hints.between(&before, &after),
-            None => Ok(hints::HintSet::Partial),
-        }
-    }
 }
 impl Filesystem for BtrfsFs {
+    fn create_empty(&self, dst: NewTreeLocation) -> Result<CreatedTree> {
+        let (reader, ownership) = self.create(creation::Source::Empty, dst, Access::Working)?;
+        match self.issuer.attach_working(&ownership, reader) {
+            Ok(tree) => Ok(CreatedTree { tree, ownership }),
+            Err(error) => Err(self.rollback(ownership, error)),
+        }
+    }
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> Result<CreatedTree> {
         let native_source = {
             let trees = self.trees()?;
@@ -250,7 +241,18 @@ impl Filesystem for BtrfsFs {
             Err(cause) => Err(self.rollback(ownership, cause)),
         }
     }
-    fn freeze(&self, source: &WorkingTree, dst: NewTreeLocation) -> Result<Capture> {
+    fn freeze(&self, source: FreezeSource<'_>, dst: NewTreeLocation) -> Result<Capture> {
+        let source = match source {
+            FreezeSource::Captured(capture) => return layr_fs_common::republish(self, &self.issuer, capture, dst),
+            FreezeSource::Working(source) => source,
+            FreezeSource::Reader(reader) => {
+                let (reader, ownership) = self.create(creation::Source::Copy(reader), dst, Access::Frozen)?;
+                return match self.issuer.attach_frozen(&ownership, reader) {
+                    Ok(tree) => Ok(Capture { tree, ownership, consistency: CaptureConsistency::UnsettledCopy }),
+                    Err(error) => Err(self.rollback(ownership, error)),
+                };
+            }
+        };
         let key = self.issuer.working_key(source)?;
         let reader = self
             .trees()?
@@ -265,10 +267,15 @@ impl Filesystem for BtrfsFs {
             Err(cause) => Err(self.rollback(ownership, cause)),
         }
     }
-    fn changes(&self, before: &FrozenTree, after: &FrozenTree) -> Result<Vec<evidence::EntryChange>> {
+    fn changes(
+        &self,
+        before: &FrozenTree,
+        after: &FrozenTree,
+        request: layr_fs_core::ChangeRequest,
+    ) -> Result<Vec<evidence::EntryChange>> {
         self.issuer.frozen_key(before)?;
         self.issuer.frozen_key(after)?;
-        layr_fs_common::changes(self, before, after)
+        layr_fs_common::changes(self, before, after, request)
     }
     fn remove(&self, ownership: OwnedTree) -> std::result::Result<(), RemovalFailure> {
         self.issuer.remove(ownership, |key| {
@@ -290,6 +297,8 @@ impl Filesystem for BtrfsFs {
             return Capabilities::default();
         }
         Capabilities {
+            exchange: None,
+            capture_copy: Some(self),
             change_hints: (tree.access == Access::Frozen
                 && rustix::thread::capabilities(None)
                     .is_ok_and(|caps| caps.effective.contains(rustix::thread::CapabilitySet::SYS_ADMIN)))
@@ -300,8 +309,11 @@ impl Filesystem for BtrfsFs {
     }
 }
 impl hints::ChangeHints for BtrfsFs {
-    fn between(&self, before: &FrozenTree, after: &FrozenTree) -> Result<hints::HintSet> {
-        self.hints_with(before, after, native::send_no_data_pinned)
+    fn between(&self, before: &FrozenTree, after: &FrozenTree, request: layr_fs_core::ChangeRequest) -> Result<hints::HintSet> {
+        {
+            let _ = request;
+            self.hints_with(before, after, native::send_no_data_pinned)
+        }
     }
 }
 impl BtrfsFs {
@@ -349,8 +361,14 @@ fn unavailable(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(code) if code == rustix::io::Errno::OPNOTSUPP.raw_os_error() || code == rustix::io::Errno::XDEV.raw_os_error() || code == rustix::io::Errno::INVAL.raw_os_error() || code == rustix::io::Errno::NOTTY.raw_os_error())
 }
 impl CloneToNew for BtrfsFs {
-    fn clone_new(&self, source: &FrozenTree, path: &RelPath, target: &WorkingTree, destination: &RelPath) -> Result<Attempt<()>> {
-        let (source_key, target_key) = (self.issuer.frozen_key(source)?, self.issuer.working_key(target)?);
+    fn clone_new(
+        &self,
+        source: CloneSource<'_>,
+        path: &RelPath,
+        target: &WorkingTree,
+        destination: &RelPath,
+    ) -> Result<Attempt<()>> {
+        let (source_key, target_key) = (self.issuer.clone_source_key(source)?, self.issuer.working_key(target)?);
         let (source, target) = {
             let trees = self.trees()?;
             let lookup = |key| -> Result<Arc<Reader>> {
@@ -394,23 +412,58 @@ impl CloneToNew for BtrfsFs {
     }
 }
 
-impl BtrfsFs {
-    pub(crate) fn legacy_error(self: Arc<Self>, error: FsError) -> anyhow::Error {
-        match error {
-            FsError::Cleanup { cause, failure } => {
-                anyhow::Error::new(NativeCleanup { driver: self, cause: *cause, failure: *failure })
-            }
-            error => anyhow::Error::new(error),
-        }
+impl CaptureCopy for BtrfsFs {
+    fn prefers_capture_for_changes(&self) -> bool {
+        rustix::thread::capabilities(None).is_ok_and(|caps| caps.effective.contains(rustix::thread::CapabilitySet::SYS_ADMIN))
+    }
+    fn copy_capture(&self, source: &WorkingTree, dst: NewTreeLocation) -> Result<WritableCapture> {
+        Ok(WritableCapture {
+            created: self.native_snapshot(source, dst)?,
+            consistency: CaptureConsistency::AtomicPoint,
+            owners: OwnerLayout::PerEntry,
+        })
     }
 }
-
-impl BtrfsFs {
-    pub(crate) fn legacy_removal_error(self: Arc<Self>, failure: RemovalFailure) -> anyhow::Error {
-        anyhow::Error::new(NativeCleanup {
-            driver: self,
-            cause: FsError::Invalid("native tree removal requires recovery"),
-            failure,
+impl crate::fs::PathAdmission for BtrfsFs {
+    fn received_identity(&self, ownership: &OwnedTree, uuid: &str, transid: u64) -> Result<()> {
+        let uuid = backend(uuid::Uuid::parse_str(uuid).map_err(Into::into))?;
+        self.issuer.with_exclusive(ownership, |key| {
+            let trees = self.trees()?;
+            let Some(Resource::Pinned(pinned)) = trees.get(key) else {
+                return Err(FsError::Invalid("received root is not owned"));
+            };
+            let root = pinned.tree.reader.directory.root_file();
+            let flags = crate::sys::subvol_flags(root.as_fd())?;
+            crate::sys::subvol_set_flags(root.as_fd(), flags & !crate::sys::SUBVOL_RDONLY)?;
+            let result = crate::sys::subvol_set_received(root.as_fd(), *uuid.as_bytes(), transid);
+            let restore = crate::sys::subvol_set_flags(root.as_fd(), flags);
+            restore?;
+            result.map_err(Into::into)
         })
+    }
+    fn release_unused(&self) {
+        // Releasing unreferenced borrowed readers cannot mutate or discard an owned resource.
+        self.trees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, resource| !matches!(resource, Resource::Borrowed(_)) || self.issuer.has_handles(key));
+    }
+    fn working(&self, path: &Path) -> Result<WorkingTree> {
+        BtrfsFs::working(self, path)
+    }
+    fn frozen(&self, path: &Path) -> Result<FrozenTree> {
+        BtrfsFs::frozen(self, path)
+    }
+    fn location(&self, path: &Path) -> Result<NewTreeLocation> {
+        BtrfsFs::location(self, path)
+    }
+    fn claim(&self, path: crate::fs::ManagedPath) -> Result<OwnedTree> {
+        if native::managed_root(path.path()) {
+            return self.owned(path.path());
+        }
+        let entry = crate::fs::custody::Entry::claim(path.path())?;
+        let owner = self.issuer.own();
+        self.trees()?.insert(self.issuer.owned_key(&owner)?, Resource::Ordinary(entry));
+        Ok(owner)
     }
 }

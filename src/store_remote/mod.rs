@@ -307,7 +307,8 @@ pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Ve
         if data["result"] != "success" || !matches!(crate::remote_config::kind(url), Ok(crate::remote_config::Kind::Store)) {
             continue;
         }
-        if crate::remote_config::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file()
+        if crate::remote_config::remote_url(repo, name).ok().as_deref() != Some(url)
+            || !store_dir(repo, url).join("read").is_file()
         {
             continue;
         }
@@ -445,13 +446,7 @@ fn write_on_demand_marks(repo: &Repo, url: &str, marks: &mut OnDemandMarks) -> R
     crate::fsutil::atomic_write(&path, &serde_json::to_vec(marks)?, 0o600)
 }
 
-fn fetch_caches_inner(
-    ctx: &Ctx,
-    repo: &Repo,
-    start: &str,
-    source: Option<&crate::model::Line>,
-    quiet: bool,
-) -> Result<()> {
+fn fetch_caches_inner(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>, quiet: bool) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
     }
@@ -1280,8 +1275,13 @@ impl Store {
             // The segments that an earlier fetch or push read and checked are not read again (`seen-records`): a
             // runner that pushes after each check reads only the new segments, not the whole log each time.
             let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-            let records =
-                reader::records_with_local(&self.backend, &identity, &descriptor.project, &local, Some(&reader::seen_file(&self.dir)))?;
+            let records = reader::records_with_local(
+                &self.backend,
+                &identity,
+                &descriptor.project,
+                &local,
+                Some(&reader::seen_file(&self.dir)),
+            )?;
             manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
         } else if self.force_public {
             self.require_private_access()?;
@@ -1363,7 +1363,8 @@ impl Store {
         }
         let lines = report.clone_lines.take().unwrap_or(repo.p.db.lines()?);
         let only = if let Some(name) = &opts.only_line {
-            let line = lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+            let line =
+                lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
             Some(std::collections::BTreeSet::from([line.id.clone()]))
         } else {
             None
@@ -1418,7 +1419,14 @@ impl Store {
                 let mut record = crate::model::DraftRecord::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
-                    crate::model::LineChange { transition: crate::model::LineTransition::from_endpoints(repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)), Some(repo.line_state(&local, &local.head))), working_before: None, working_after: None },
+                    crate::model::LineChange {
+                        transition: crate::model::LineTransition::from_endpoints(
+                            repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
+                            Some(repo.line_state(&local, &local.head)),
+                        ),
+                        working_before: None,
+                        working_after: None,
+                    },
                 );
                 let shown = repo.readable_layers(&local)?;
                 record.data = serde_json::json!({
@@ -1531,8 +1539,6 @@ impl Store {
     }
 }
 
-
-
 /// The daemon's pass (docs/cache-overlays.md): for each project of the store at `root` and each of its
 /// store remotes, delete the dead cache states, so a remote that nobody pushes to loses them too. A
 /// remote that cannot be reached now is tried at the next pass.
@@ -1548,6 +1554,7 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             cwd: std::path::PathBuf::from("/"),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let Ok(repo) = Repo::open(&ctx, &project) else { continue };
@@ -1602,7 +1609,6 @@ pub(crate) fn validate_gateway_url(url: &str) -> Result<()> {
 mod pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    
 
     #[test]
     fn changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption() {
@@ -1614,6 +1620,7 @@ mod pin_tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();
@@ -1699,7 +1706,6 @@ mod pin_tests {
 mod mode_pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    
 
     #[test]
     fn a_pinned_secret_store_rewritten_as_plain_stops_fetch_and_push() {
@@ -1711,6 +1717,7 @@ mod mode_pin_tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();
@@ -1991,7 +1998,13 @@ mod clone_head_tests {
         let old = crate::ids::new_id();
         let new = crate::ids::new_id();
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
-        let change = |head: &str, machine: &str| LineChange { transition: crate::model::LineTransition::Create { after: LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() } }, working_before: None, working_after: None };
+        let change = |head: &str, machine: &str| LineChange {
+            transition: crate::model::LineTransition::Create {
+                after: LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() },
+            },
+            working_before: None,
+            working_after: None,
+        };
         let mut creation = crate::model::Record::untrusted_preview("project");
         creation.project = project.clone();
         creation.machine = creator.clone();
@@ -2044,7 +2057,11 @@ mod clone_head_tests {
         own.seq = 1;
         own.time = 4;
         let mut own_change = change(&local_head, &store.machine.id);
-        (match &mut own_change.transition { crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).owner = caller.uid;
+        (match &mut own_change.transition {
+            crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after,
+            _ => panic!("fixture needs after"),
+        })
+        .owner = caller.uid;
         own.lines.insert(line.clone(), own_change);
         repo.p.db.test_insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
         repo.p.db.test_derive(&own, &|_| false, &store.machine.id)?;
@@ -2053,8 +2070,12 @@ mod clone_head_tests {
         std::fs::create_dir_all(&working)?;
         std::fs::write(working.join("keep"), "local work")?;
         let ctx = crate::ctx::Ctx {
-            store: crate::store::Store::open(&root.join("local"))?, caller,
-            cwd: root.clone(), env: Default::default(), author: Default::default(),
+            store: crate::store::Store::open(&root.join("local"))?,
+            caller,
+            cwd: root.clone(),
+            env: Default::default(),
+            author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected))?.is_empty());
@@ -2192,5 +2213,4 @@ mod clone_head_tests {
         }
         Ok(())
     }
-
 }
