@@ -219,10 +219,11 @@ Built so far (the rest of this file describes the code until a row says "built")
   the working content from there (`Repo::working_source`), and the check "did the folder change since
   the last automatic state" compares those states. The thin layers of APFS and the save layer made
   before the lock are not used in such a view: they would hold the content in the project's store.
-  Left: `line delete` of such a line with changes still needs `--discard`; `gc` does not yet drop
-  the state in X's store when the automatic state of the project goes. An overlay with a limited
-  `history` drops such states with its old states; `undo` then restores the head of `main` for the
-  view's changes (nothing leaks, but the change is not back).
+  The state in X's store lives as long as the automatic state of the project that names it: a limited
+  `history` of X never drops it while that state is live, and `gc` drops it (and its setting) when
+  that state goes, for example with a deleted line that left the ring of undoable deletes
+  (`undo.deleted`). When it is gone anyway, `undo` says so and the folder gets the head of `main` for
+  those changes. Left: `line delete` of such a line with changes still needs `--discard`.
 
 **Kinds as built (2026-11-15).**
 

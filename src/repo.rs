@@ -783,6 +783,11 @@ impl<'a> Repo<'a> {
                     if let Ok(root) = orepo.state_root(&id) {
                         return Ok((root, true));
                     }
+                    eprintln!(
+                        "warning: the working changes that automatic state {} kept in overlay {} are gone; the folder gets the head of main for them",
+                        ids::short(state),
+                        l.overlay
+                    );
                 }
             }
         }

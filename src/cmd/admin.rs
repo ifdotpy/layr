@@ -1794,6 +1794,10 @@ fn repair_project(
             Ok(plan) => repo.commit_overlay_plan(ctx, plan),
             Err(e) => eprintln!("warning: overlays: old states stay until the next gc: {e:#}"),
         }
+        // The working content of automatic states that are gone, kept in the stores of overlays.
+        if let Err(e) = repo.drop_dead_auto_states(ctx) {
+            eprintln!("warning: overlays: the working content of dropped automatic states stays until the next gc: {e:#}");
+        }
         // Folder overlays with an LRU limit.
         if let Err(e) = repo.cache_gc_lru() {
             eprintln!("warning: cache size limits not applied: {e:#}");

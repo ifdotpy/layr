@@ -147,4 +147,32 @@ no "and has no conflict" bash -c "l status --porcelain | grep -q '^UU'"
 no "the folder has neither" test -e a.c -o -e b.c
 ok "fsck is clean" l fsck
 
+# 7. The automatic states that keep the working content of a view in the overlay's store (docs/overlays.md
+# section 1): a limited history keeps the ones that a live automatic state names, and gc drops them when the
+# automatic state of the project goes (here with its line).
+O=$LAYR_ROOT/projects/p/meta/overlays
+kept() { for id in $(sqlite3 "$O/$1/meta/db/layr.sqlite" "select json_extract(value, '\$') from config where key like 'auto.%'"); do [ -e "$O/$1/states/$id" ] && echo "$id"; done | wc -l | tr -d ' '; }
+ok "an overlay hist" l overlay create hist -q
+l config overlay.hist.history 1 >/dev/null
+ok "a line hl" l line new hl main -q
+cd $LAYR_ROOT/projects/p/lines/hl
+ok "hl shows hist" l overlay use hist -q
+echo h1 > h.c
+l add h.c
+ok "a save to hist" l save -qm h1
+echo work >> h.c
+ok "an automatic state of the work" l save -q --force
+echo h2 > h2.c
+l add h2.c
+ok "a named save moves hist (history 1)" l save -qm h2
+cd $M
+n=$(kept hist)
+no "the history limit keeps the working content that a live automatic state names" test "$n" = 0
+# A deleted line keeps its states while it is in the ring of undoable deletes (undo.deleted); with no ring
+# its automatic states go at gc, and the working content in hist with them.
+l config undo.deleted 0 >/dev/null
+ok "delete the line" l line delete -D --discard hl
+ok "gc" l gc -q
+eq "gc drops the working content of the deleted line" 0 "$(kept hist)"
+
 finish
