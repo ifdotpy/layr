@@ -13,6 +13,8 @@ sample "$T/src"
 l init x --from "$T/src" -q >/dev/null
 A=$LAYR_ROOT/projects/x
 cd "$A/lines/main"
+# Pull keeps conflicts in this ordinary target; protection refusal is a separate contract.
+l protect main --remove >/dev/null
 new_fs "$T/peer" 4G
 BR=$T/peer/store
 B() { env LAYR_ROOT="$BR" "$LAYR" --project x --line main "$@"; }

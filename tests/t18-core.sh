@@ -24,7 +24,10 @@ for removed in "merge --no-commit head" "pick --no-commit head" "invert --no-com
     has "$removed names no replacement" "unknown option" "$(l $removed 2>&1)"
 done
 eq 'the removed options changed nothing' "$S1" "$(l rev-parse head)"
-for cmd in merge pick invert replay; do
+has "merge --continue explains ordinary conflict recording and resolution" \
+    "merges into unprotected lines keep conflicts: fix the files and run 'layr save -m <message>'." \
+    "$(l merge --continue 2>&1)"
+for cmd in pick invert replay; do
     has "$cmd --continue says to fix the files and save" "on a conflict: fix the files" "$(l $cmd --continue 2>&1)"
 done
 removed_cli '--all-lines' save --all

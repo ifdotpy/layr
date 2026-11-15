@@ -12,6 +12,8 @@ git add -A; git commit -qm "upstream 1"; git tag v0.1; git push -q origin main -
 
 l git clone $R gp -q >/dev/null
 cd $LAYR_ROOT/projects/gp/lines/main || exit 1
+# This bridge fixture records conflicts so a later push can refuse them.
+l protect main --remove >/dev/null || exit 1
 eq "clone: history from git" "upstream 1" "$(l log --format=%s)"
 eq "clone: clean status" "" "$(l status -s)"
 eq "git folder: clean for git" "" "$(git status --short)"
