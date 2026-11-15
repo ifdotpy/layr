@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos
 # `fetch` and `push` with `--line <name> --overlay <layer>` (docs/overlays.md section 1a): a fetch takes the history of the chosen lines,
-# only on the chosen layers. The states of other lines stay on the remote and come on first read. Without `base` in
+# only on the chosen layers. The states of other lines stay on the remote and come on first read. Without `main` in
 # `--overlay`, no state of the base comes.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -31,9 +31,13 @@ side_head=$(l log --json 2>/dev/null | python3 -c 'import json,sys; print([json.
 l push cloud -q >/dev/null 2>&1
 
 cd "$T/y/store/projects/p/lines/main" || exit 1
-out=$(yl fetch origin --overlay base --line nope 2>&1); code=$?
+out=$(yl fetch origin --overlay main --line nope 2>&1); code=$?
 no "a line that is not in the store fails the fetch" test "$code" = 0
 has "and names it" "line 'nope' is not in the store" "$out"
+
+out=$(yl fetch origin --overlay base 2>&1); code=$?
+eq "the old name base of the bottom overlay fails with status 2" 2 "$code"
+has "and names main" "--overlay main" "$out"
 
 out=$(yl fetch origin --overlay nothere 2>&1); code=$?
 no "an overlay that the project does not have fails the fetch" test "$code" = 0

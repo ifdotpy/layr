@@ -619,29 +619,34 @@ fn project_access_mode_and_epoch_metadata_follow_signed_order_without_keys() {
 }
 
 #[test]
-fn write_targets_fold_from_view_records_and_hidden_overlays_name_themselves() {
+fn a_view_is_the_path_of_the_tree_to_its_top() {
+    // The project: a line at a state that names a part on each overlay; a on main, b on a, c on main.
     let mut parent = record(1, "project");
     parent.lines.insert("line".into(), line("shared", "a"));
-    parent.data = json!({"config":{}});
-    let mut target = record(2, "overlay.use");
-    target.data = json!({"config":{"target.line":"shared"}});
-    let mut own = record(1, "project");
-    own.project = "overlay-project".into();
-    own.data = json!({"config":{"overlay":{"project":"project","name":"hidden","hidden":true,"mode":"follow"}}});
-    let mut hidden = record(2, "overlay.use");
-    hidden.project = "overlay-project".into();
-    hidden.data = json!({"config":{"hidden.target.line":true}});
-    let public = Model::from_records([parent.clone(), target.clone()], "a").unwrap();
-    let line = public.projects["project"].line_list().remove(0);
-    assert_eq!(public.write_target("project", &line).unwrap().as_deref(), Some("shared"));
-    let mut cleared = record(3, "overlay.use");
-    cleared.data = json!({"config":{"target.line":null}});
-    let none = Model::from_records([parent.clone(), target.clone(), cleared], "a").unwrap();
-    assert_eq!(none.write_target("project", &line).unwrap(), None);
-    let reader = Model::from_records([parent.clone(), own, hidden], "a").unwrap();
-    assert_eq!(reader.write_target("project", &line).unwrap().as_deref(), Some("hidden"));
-    // A reader of the parent project only sees no target and no name.
-    let other = Model::from_records([parent], "a").unwrap();
-    assert_eq!(other.write_target("project", &line).unwrap(), None);
-    assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
+    let mut shared = state("shared", StateKind::Commit, &[]);
+    shared.parts = [("a", "sa"), ("b", "sb"), ("c", "sc")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    parent.states.push(shared);
+    parent.data = json!({"config":{"overlay.a.parent":"main","overlay.b.parent":"a","overlay.c.parent":"main"}});
+    let mut records = vec![parent];
+    for name in ["a", "b", "c"] {
+        let mut own = record(1, "project");
+        own.project = format!("overlay-{name}");
+        own.data = json!({"config":{"overlay":{"project":"project","name":name,"hidden":false,"mode":"follow"}}});
+        records.push(own);
+    }
+    let view = |records: &[Record], names: &[&str]| -> Vec<String> {
+        let mut v = record(9, "overlay.use");
+        v.data = json!({"config":{"view.line":names}});
+        let mut all = records.to_vec();
+        all.push(v);
+        let m = Model::from_records(all, "a").unwrap();
+        let line = m.projects["project"].line_list().remove(0);
+        m.layers("project", &line).unwrap().into_iter().map(|l| l.overlay).collect()
+    };
+    assert_eq!(view(&records, &["b"]), ["a", "b"], "the view of b holds its parent a");
+    assert_eq!(view(&records, &["a", "b"]), ["a", "b"]);
+    assert_eq!(view(&records, &["a", "c"]), ["c"], "two siblings: the view of the top one");
+    // Overlays of older layr without a recorded parent: in a view each stands on the one below it.
+    records[0].data = json!({"config":{}});
+    assert_eq!(view(&records, &["c", "a"]), ["c", "a"], "an old view keeps its content");
 }

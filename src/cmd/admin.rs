@@ -107,9 +107,14 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
         .flag("--json")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
-    // The write target of a named save (docs/overlays.md, section 9.3); an automatic state has none.
+    // A save takes the index, never paths: a path here would be ignored, and a private change could go
+    // where the user did not mean it.
+    if !a.pos.is_empty() || !a.paths.is_empty() {
+        return Err(exit(128, "fatal: layr save takes no paths: stage them with 'layr add <paths>', then 'layr save -m <message>'"));
+    }
+    // The layer of a named save (docs/overlays.md section 1, write rule); an automatic state has none.
     if a.has("--to") && !(a.has("-m") || a.has("-F")) {
-        return Err(exit(2, "--to names the target of a named save: use it with -m <message>"));
+        return Err(exit(2, "--to names the layer of a named save: use it with -m <message>"));
     }
     if let Some(name) = a.get("--keep") {
         valid_keep_name(name)?;

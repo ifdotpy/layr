@@ -12,7 +12,7 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let show = a.pos.first().map(String::as_str) == Some("show");
     let rest = if save || show { &a.pos[1..] } else { &a.pos[..] };
     if rest.len() > 1 || a.dashdash {
-        bail!("usage: layr view [save [<line>]|show <id>|<rev or line>] [--overlay <overlay>,...] [--folder <dir>] [--json]");
+        bail!("usage: layr view [save [<line>]|show <id>|<rev or line>] [--overlay <overlay>] [--folder <dir>] [--json]");
     }
     if show && (a.get("--overlay").is_some() || a.get("--folder").is_some()) {
         bail!("view show takes no --overlay or --folder");
@@ -43,29 +43,38 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         view
     };
-    // Another view of the same line or state: the overlays that --overlay names, in that order
-    // (docs/overlays.md, section 1a, slice 5). `base` names the base, which is always below.
-    if let Some(list) = a.get("--overlay") {
+    // Another view of the same line or state, seen from one overlay (docs/overlays.md section 1, owner
+    // decision 2026-11-15): the path of the tree from `main` to it. `main` is the view of `main` alone.
+    if let Some(top) = a.get("--overlay") {
+        let top = top.trim();
+        if top == "base" {
+            return Err(super::exit(2, "layr view --overlay base was removed: the bottom overlay is main. Use --overlay main"));
+        }
+        if top.contains(',') {
+            return Err(super::exit(2, "layr view --overlay takes one overlay: the view shows it and the overlays below it"));
+        }
         let line = match rest.first().map(String::as_str) {
             None | Some("" | "head" | "@") => current.clone(),
             Some(name) => h.repo.p.db.line_by_name(name)?.map(|l| h.repo.localize(l)).transpose()?,
         };
         let mut layers = Vec::new();
-        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != "base") {
-            if layers.iter().any(|l: &crate::overlay::Layer| l.overlay == name) {
-                continue;
+        if top != crate::overlay::MAIN {
+            if !h.repo.reads_overlay(top, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) || !h.repo.patches_overlay(top)? {
+                bail!("unknown overlay '{top}'");
             }
-            if !h.repo.reads_overlay(name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
-                bail!("unknown overlay '{name}'");
+            for name in h.repo.overlay_path(top)? {
+                if !h.repo.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+                    bail!("permission denied: you do not read overlay '{name}', which is below '{top}'");
+                }
+                let layer = match view.layers.iter().find(|l| l.overlay == name) {
+                    Some(l) => l.clone(),
+                    None => h
+                        .repo
+                        .overlay_layer(line.as_ref(), &view.shared, &name)?
+                        .ok_or_else(|| anyhow::anyhow!("unknown overlay '{name}'"))?,
+                };
+                layers.push(layer);
             }
-            let layer = match view.layers.iter().find(|l| l.overlay == name) {
-                Some(l) => l.clone(),
-                None => h
-                    .repo
-                    .overlay_layer(line.as_ref(), &view.shared, name)?
-                    .ok_or_else(|| anyhow::anyhow!("unknown overlay '{name}'"))?,
-            };
-            layers.push(layer);
         }
         view.layers = layers;
         view.validate()?;

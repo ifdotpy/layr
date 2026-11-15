@@ -769,10 +769,10 @@ impl<'a> Repo<'a> {
         let w = self.working(line);
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
-        // A line whose next named save sends changes into an overlay (`private_target`): its automatic
+        // A line whose next named save sends changes into an overlay (`private_view`): its automatic
         // states hold the shared head, so no state that other readers of the project read holds a change
         // that may be proprietary (docs/overlays.md, section 9.4). Its changes have no automatic state.
-        if self.private_target(line)? {
+        if self.private_view(line)? {
             let head = self.state_root(&line.head)?;
             return self.new_state(ctx, &head, StateKind::Auto, parents, message, Some(line));
         }

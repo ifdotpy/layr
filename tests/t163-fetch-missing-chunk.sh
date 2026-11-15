@@ -30,16 +30,16 @@ ok "push a newer cache" l push archive -q
 # The packs of the cache go, as a broken sweep or a stopped push would leave them; the tree still names the chunks.
 find "$T/archive" -path '*/chunks/*' -name '*.age' -exec rm -f {} +
 cd "$Q" || exit 1
-out=$(LAYR_TRACE=1 B fetch origin --overlay "base,$TG" 2>&1)
+out=$(LAYR_TRACE=1 B fetch origin --overlay "main,$TG" 2>&1)
 has "the fetch omits the cache state with the missing chunk" "is not in the store" "$out"
 eq "no file of it was read" "" "$(echo "$out" | grep 'store restore files' | grep -v ' 0\.[0-9] ms')"
-out=$(B fetch origin --overlay "base,$TG" 2>&1)
+out=$(B fetch origin --overlay "main,$TG" 2>&1)
 has "the next fetch does not try it again" "it failed before, and the remote did not change" "$out"
 cd "$P/main" || exit 1
 echo again > target/debug/again
 l save --overlays -q
 l push archive -q
 cd "$Q" || exit 1
-out=$(B fetch origin --overlay "base,$TG" 2>&1)
+out=$(B fetch origin --overlay "main,$TG" 2>&1)
 no "after a push changed the packs it is tried again" grep -q "it failed before" <<<"$out"
 finish

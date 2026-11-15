@@ -104,30 +104,13 @@ impl Model {
             .cloned()
     }
 
-    /// The write target of a line (docs/overlays.md section 9.3, `layr line target`): `shared` or an
-    /// overlay name, as layr reads it (`Repo::line_target`). A hidden overlay names itself in its own
-    /// records (`hidden.target.<line id>`); else the setting `target.<line id>` of the parent project.
-    pub fn write_target(&self, parent: &str, line: &Line) -> Result<Option<String>> {
-        let project = self.projects.get(parent).context("unknown parent project")?;
-        for overlay in self.overlay_projects(parent) {
-            let Some(info) = overlay.overlay_setting("overlay") else { continue };
-            if info["hidden"] == true
-                && overlay.overlay_setting(&format!("hidden.target.{}", line.id)) == Some(&Value::Bool(true))
-            {
-                return Ok(info["name"].as_str().map(String::from));
-            }
-        }
-        let key = format!("target.{}", line.id);
-        let value = project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(&key));
-        Ok(value.and_then(|v| v.as_str()).map(String::from))
-    }
-
     /// The layers of a line (docs/overlays.md section 1): the overlays of its view (setting
     /// `view.<line id>`, else the overlay names of its old stack), each at the head of the line on
     /// that overlay, else at the part that the head names, else at the state of the old stack. Hidden
     /// overlays keep their place in their own records (`hidden.view.<line id>`), so the parent project
     /// names no hidden overlay.
     pub fn layers(&self, parent: &str, line: &Line) -> Result<Vec<validation::Layer>> {
+        let parent_id = parent;
         let project = self.projects.get(parent).context("unknown parent project")?;
         let at = |key: &str| project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(key));
         let old: Vec<validation::Layer> =
@@ -151,7 +134,7 @@ impl Model {
             }
         }
         let mut hidden = Vec::new();
-        for overlay in overlays {
+        for overlay in overlays.iter().copied() {
             let Some(info) = overlay.overlay_setting("overlay") else {
                 continue;
             };
@@ -176,10 +159,109 @@ impl Model {
             }
         }
         hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
+        let mut hidden_states = BTreeMap::new();
         for (position, layer) in hidden {
+            hidden_states.insert(layer.overlay.clone(), layer.state.clone());
             layers.insert((position as usize).min(layers.len()), layer);
         }
-        Ok(layers)
+        // A view is seen from one overlay (docs/overlays.md section 1, owner decision 2026-11-15): the path
+        // of the tree to its top, as layr reads it (`Repo::view_path`).
+        let setting = |name: &str, suffix: &str| -> Option<Value> {
+            let key = format!("overlay.{name}.{suffix}");
+            match overlays.iter().find(|o| o.overlay_setting("overlay").is_some_and(|v| v["name"] == name && v["hidden"] == true)) {
+                Some(o) => o.overlay_setting(&key).cloned(),
+                None => project.setting(&key).cloned(),
+            }
+        };
+        let is_node = |name: &str| setting(name, "folder").is_none_or(|v| v.is_null());
+        let nodes: Vec<String> = layers.iter().map(|l| l.overlay.clone()).filter(|n| is_node(n)).collect();
+        let parent = |n: &str| -> Option<String> {
+            if let Some(v) = setting(n, "parent") {
+                return v.as_str().filter(|p| *p != "main").map(String::from);
+            }
+            match nodes.iter().position(|x| x == n) {
+                Some(0) => None,
+                Some(i) => Some(nodes[i - 1].clone()),
+                None => self.derived_parent(parent_id, n),
+            }
+        };
+        let path_of = |top: &str| -> Result<Vec<String>> {
+            let mut out = vec![top.to_string()];
+            let mut cur = top.to_string();
+            while let Some(p) = parent(&cur) {
+                if out.contains(&p) || out.len() > 64 {
+                    anyhow::bail!("the parents of overlay '{top}' form a loop");
+                }
+                out.push(p.clone());
+                cur = p;
+            }
+            out.reverse();
+            Ok(out)
+        };
+        let mut path = None;
+        for cand in nodes.iter().rev() {
+            let p = path_of(cand)?;
+            let all = nodes.iter().all(|n| p.contains(n));
+            if path.is_none() || all {
+                path = Some(p);
+            }
+            if all {
+                break;
+            }
+        }
+        let Some(path) = path else { return Ok(layers) };
+        let mut out = Vec::new();
+        for name in path {
+            if let Some(l) = layers.iter().find(|l| l.overlay == name) {
+                out.push(l.clone());
+                continue;
+            }
+            let state = hidden_states.get(&name).cloned().or_else(|| {
+                by_name(&name)
+                    .and_then(|o| Self::overlay_line(o, line))
+                    .map(|ol| ol.head)
+                    .or_else(|| head.and_then(|h| h.parts.get(&name).cloned()))
+            });
+            if let Some(state) = state {
+                out.push(validation::Layer { overlay: name, state });
+            }
+        }
+        for l in layers {
+            if !out.iter().any(|o| o.overlay == l.overlay) && !is_node(&l.overlay) {
+                out.push(l);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The parent of an overlay without a recorded parent outside a view (`Repo::derived_parent`): the
+    /// patches overlay below it in the old project order (the names of `overlays.order`, then the time of
+    /// each overlay's empty first state, then the name). A public overlay never takes a hidden one.
+    fn derived_parent(&self, parent: &str, name: &str) -> Option<String> {
+        let project = self.projects.get(parent)?;
+        let overlays = self.overlay_projects(parent);
+        let info = |n: &str| -> Option<(bool, i64, bool)> {
+            let o = overlays.iter().find(|o| o.overlay_setting("overlay").is_some_and(|v| v["name"] == n))?;
+            let meta = o.overlay_setting("overlay")?;
+            let hidden = meta["hidden"] == true;
+            let desc = if hidden { o.overlay_setting(&format!("overlay.{n}")) } else { project.setting(&format!("overlay.{n}")) };
+            let root = desc.and_then(|d| d["root"].as_str()).unwrap_or("");
+            let time = o.state(root).map(|s| s.time).unwrap_or(i64::MAX);
+            let folder = if hidden { o.overlay_setting(&format!("overlay.{n}.folder")) } else { project.setting(&format!("overlay.{n}.folder")) };
+            Some((hidden, time, folder.is_some_and(|v| !v.is_null())))
+        };
+        let names: Vec<String> =
+            overlays.iter().filter_map(|o| o.overlay_setting("overlay").and_then(|v| v["name"].as_str().map(String::from))).collect();
+        let set: Vec<String> =
+            project.setting("overlays.order").and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()).unwrap_or_default();
+        let mut order: Vec<String> = set.into_iter().filter(|n| names.contains(n)).collect();
+        let mut rest: Vec<(i64, String)> =
+            names.iter().filter(|n| !order.contains(n)).map(|n| (info(n).map(|i| i.1).unwrap_or(i64::MAX), n.clone())).collect();
+        rest.sort();
+        order.extend(rest.into_iter().map(|(_, n)| n));
+        let pos = order.iter().position(|n| n == name)?;
+        let hidden = info(name).is_some_and(|i| i.0);
+        order[..pos].iter().rev().find(|c| info(c).is_some_and(|(h, _, folder)| !folder && (hidden || !h))).cloned()
     }
 
     /// Fold verified records, including any readable overlay projects.

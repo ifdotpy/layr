@@ -10,7 +10,8 @@ cd "$LAYR_ROOT/projects/p/lines/main"
 l protect main --remove >/dev/null 2>&1 || true
 l overlay create public --mode follow --quiet --history last -q || exit 1
 l overlay create private --mode follow --hidden --history 3 -q || exit 1
-l overlay use --add public private >/dev/null || exit 1
+l overlay set private --parent public >/dev/null || exit 1
+l overlay use private >/dev/null || exit 1
 mkdir -p target
 printf cache > target/result
 l save --overlays -q || exit 1

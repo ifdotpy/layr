@@ -116,11 +116,16 @@ eq "its status is clean" "" "$(in_line layr-o1 o1t status --porcelain)"
 sh_in layr-o1 o1t "echo w >> notes.txt"
 eq "diff HEAD shows the changed file only, not the overlay files" "notes.txt" "$(in_line layr-o1 o1t diff --name-only head)"
 sh_in layr-o1 o1t "$L restore notes.txt"
-# A moved private file stays private; a new file goes to the shared set.
-sh_in layr-o1 o1t "mv .codex-keychain.envrc .kc-renamed && echo pub > public.txt && $L add -A && $L save -qm 'rename and add'"
+# A save in the view of an overlay writes every change to it (docs/overlays.md section 1): a moved
+# private file stays private, and a new file goes to the overlay too; `--to main` publishes one.
+sh_in layr-o1 o1t "mv .codex-keychain.envrc .kc-renamed && echo priv > private-new.txt && $L add -A && $L save -qm 'rename and add'"
 no "the renamed file is not in the shared set" in_line layr-o1 o1t show head:.kc-renamed
-ok "the new file is" in_line layr-o1 o1t show head:public.txt
+no "nor the new file" in_line layr-o1 o1t show head:private-new.txt
 ok "the overlay has the new name" in_line layr-o1 o1t overlay show keychain head:.kc-renamed
+ok "and the new file" in_line layr-o1 o1t overlay show keychain head:private-new.txt
+sh_in layr-o1 o1t "echo pub > public.txt && $L add public.txt && $L save -qm 'public file' --to main"
+ok "a new file saved with --to main is in the shared set" in_line layr-o1 o1t show head:public.txt
+no "and not in the overlay" in_line layr-o1 o1t overlay show keychain head:public.txt
 sh_in layr-o1 o1t "echo w >> notes.txt"
 eq "diff against another state leaves the overlay files out" "notes.txt|public.txt" "$(in_line layr-o1 o1t diff --name-only main | paste -sd'|')"
 sh_in layr-o1 o1t "$L restore notes.txt"
@@ -146,9 +151,14 @@ eq "fsck is clean" "0 problem(s)" "$(l --project sap fsck | tail -1)"
 sh_in layr-o1 main "echo 'ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY' > .zulip.env"
 eq "the key is ignored in main" "!! .zulip.env" "$(in_line layr-o1 main status --porcelain --ignored | grep zulip)"
 ok "the owner makes an overlay for a group" in_line layr-o1 main overlay create zulip --readers @layr-sap -q
+# Overlays form a tree (docs/overlays.md section 1): the private loader goes above the group key.
+ok "main shows main alone for a moment" in_line layr-o1 main overlay use main -q
+ok "and o1t too" in_line layr-o1 o1t overlay use main -q
+ok "the loader overlay goes above the key" in_line layr-o1 main overlay set keychain --parent zulip
+ok "main shows the loader and the key below it" in_line layr-o1 main overlay use keychain -q
 ok "and moves the ignored key into it" in_line layr-o1 main overlay move -q zulip .zulip.env
 ok "commit" in_line layr-o1 main save -qm "zulip key"
-eq "main shows both overlays" "keychain zulip" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
+eq "main shows both overlays" "zulip keychain" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
 ok "a group member makes a line from main" in_line layr-o2 main line new -q g2 main
 eq "the member's line has the key" "ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY" "$(sh_in layr-o2 g2 cat .zulip.env)"
 no "but not the owner's private loader" test -e $P/g2/.kc-renamed
@@ -175,7 +185,7 @@ eq "the new line gets the owner's key" "ZULIP_APEIRO_SHOWROOM_API_KEY=$KEY" "$(s
 ok "a line can stop showing it" in_line layr-o3 g4 overlay use --none
 no "the file leaves the folder" test -e $P/g4/.zulip.env
 sh_in layr-o3 g4 "echo MY_OWN_KEY=1 > .zulip.env"
-has "use does not overwrite a local ignored file" "would be overwritten" "$(in_line layr-o3 g4 overlay use --add zulip 2>&1)"
+has "use does not overwrite a local ignored file" "would be overwritten" "$(in_line layr-o3 g4 overlay use zulip 2>&1)"
 eq "the user's file stays" "MY_OWN_KEY=1" "$(sh_in layr-o3 g4 cat .zulip.env)"
 sh_in layr-o3 g4 "rm .zulip.env"
 
@@ -248,6 +258,7 @@ ok "with -f it deletes" in_line layr-o1 f1 line delete -D -f f3
 
 # 10. A file of the shared set moves into an overlay: the next commit takes it out of the shared
 # set (earlier states keep it). Automatic states that held it can go with --purge.
+ok "o1t shows the loader again" in_line layr-o1 o1t overlay use keychain -q
 in_line layr-o1 o1t save -q --force
 ok "the automatic state holds the shared file" in_line layr-o1 o1t show head@{0}:notes.txt
 out=$(in_line layr-o1 o1t overlay move --purge keychain notes.txt)
@@ -292,5 +303,5 @@ eq "main still shows its overlays after gc" "" "$(in_line layr-o1 main status --
 eq "fsck is clean at the end" "0 problem(s)" "$(l --project sap fsck | tail -1)"
 ok "reindex" l --project sap reindex
 eq "fsck after reindex" "0 problem(s)" "$(l --project sap fsck | tail -1)"
-eq "the views survive the reindex" "keychain zulip" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
+eq "the views survive the reindex" "zulip keychain" "$(in_line layr-o1 main overlay use | cut -f1 | paste -sd' ')"
 finish

@@ -776,25 +776,20 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
 pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--cached").flag("-r").flag("-f|--force").flag("-q|--quiet").flag("-n|--dry-run").value("--to");
     let a = parse(&spec, args)?;
+    if a.get("--to").is_some() {
+        return Err(exit(
+            2,
+            "layr rm --to was removed: a delete goes to the layer of the next named save. Use layr save -m <message> --to <ancestor>",
+        ));
+    }
     let h = here(ctx)?;
     let line = h.line()?.clone();
     let specs = h.specs(&a.rest())?;
     if specs.is_empty() {
-        return Err(exit(128, "usage: layr rm [--cached] [-r] [-f] [--to <overlay>|shared] <path>..."));
+        return Err(exit(128, "usage: layr rm [--cached] [-r] [-f] <path>..."));
     }
     let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
-    // `--to`: the layer that the next named save gives the delete (docs/overlays.md, section 9.3). The
-    // index does not know layers, so the target waits next to it (`pending_targets`).
-    let to = a.get("--to").map(str::to_owned);
-    if let Some(t) = to.as_deref().filter(|t| *t != crate::overlay::SHARED_TARGET) {
-        if !h.repo.layers(&line)?.iter().any(|l| l.overlay == t) {
-            return Err(exit(
-                1,
-                format!("error: --to {t}: line '{}' shows no overlay '{t}' (see 'layr overlay use')", line.name),
-            ));
-        }
-    }
     let w = h.repo.working(&line);
     // A thin index takes the removals as one change of its top layer; no complete index.
     #[cfg(target_os = "macos")]
@@ -892,15 +887,6 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             removed.extend(files);
-        }
-        if let Some(t) = &to {
-            if h.repo.is_stacked(&line)? {
-                let mut targets = h.repo.pending_targets(&line);
-                for r in &removed {
-                    targets.insert(r.clone(), t.clone());
-                }
-                h.repo.set_pending_targets(&line, &targets)?;
-            }
         }
     }
     if !a.has("-q") {
@@ -1346,6 +1332,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // A virtual line saves every change of its view (docs/views.md).
     #[cfg(target_os = "macos")]
     if let Some(v) = crate::views::of(&h.repo, &line) {
+        // The save of a virtual line knows no layers: in the view of an overlay it would write `main`.
+        if stacked {
+            return Err(exit(1, "error: a virtual line cannot save the view of an overlay; run 'layr overlay use main' or use a folder line"));
+        }
         if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
             return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
         }
@@ -1356,6 +1346,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         crate::views::ensure_no_pending_move(&h.repo, &line)?;
         crate::views::of(&h.repo, &line).is_some()
     };
+    #[cfg(target_os = "linux")]
+    if virtual_save && stacked {
+        return Err(exit(1, "error: a virtual line cannot save the view of an overlay; run 'layr overlay use main' or use a folder line"));
+    }
     #[cfg(not(target_os = "linux"))]
     let virtual_save = false;
     if virtual_save && ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
@@ -1687,7 +1681,6 @@ fn commit_stacked(
     };
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
-    repo.set_pending_targets(line, &BTreeMap::new())?;
     if out == Output::Json {
         let overlays: Vec<_> = done
             .overlays
@@ -1726,21 +1719,20 @@ fn commit_stacked(
     Ok(0)
 }
 
-/// `save --to <overlay>` and a line target that names an overlay, in a line that shows no overlays:
-/// the change would go to the shared set. The text is the one of `commit_layers` for a name that the
-/// line does not show, so it does not tell whether a hidden overlay of that name exists.
-fn refuse_overlay_target(repo: &crate::repo::Repo, line: &Line, to: Option<&str>) -> Result<()> {
-    let (what, name) = match to {
-        Some(t) => ("--to", t.to_string()),
-        None => match repo.line_target(line)? {
-            Some(t) => ("the line target", t),
-            None => return Ok(()),
-        },
-    };
-    if name == crate::overlay::SHARED_TARGET {
-        return Ok(());
+/// `save --to <overlay>` in a line that shows no overlays: the change would go to `main`. Only `main`
+/// is on the path of that view. The text is the one of `save_target` for a name that is not on the
+/// path, so it does not tell whether a hidden overlay of that name exists.
+fn refuse_overlay_target(_repo: &crate::repo::Repo, line: &Line, to: Option<&str>) -> Result<()> {
+    match to {
+        None | Some(crate::overlay::MAIN) => Ok(()),
+        Some(name) => Err(exit(
+            1,
+            format!(
+                "error: --to {name}: overlay '{name}' is not on the path of the view of line '{}' (main); name main or an overlay of that path",
+                line.name
+            ),
+        )),
     }
-    Err(exit(1, format!("error: {what} {name}: line '{}' shows no overlay '{name}' (see 'layr overlay use')", line.name)))
 }
 
 /// What a named save prints.

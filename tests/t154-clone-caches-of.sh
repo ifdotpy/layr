@@ -54,7 +54,7 @@ ok "a new line of a plain clone fetches the cache of its line" test -e "$T/y/sto
 find "$T/archive/overlays" \( -name '*.data.age' -o -name '*.pack.age' -o -name '*.index.age' \) -delete
 zl() { env LAYR_ROOT="$T/z/store" "$LAYR" "$@"; }
 read zid zkey <<<"$(self z)"; (cd "$P/main" && l remote trust cloud "$zid" --public-key "$zkey" >/dev/null && l save --overlays -q && l push cloud -q >/dev/null 2>&1)
-out=$(zl clone "file://$T/archive" p --overlay "base,$TG" 2>&1); code=$?
+out=$(zl clone "file://$T/archive" p --overlay "main,$TG" 2>&1); code=$?
 eq "a clone whose caches went away on the remote works" 0 "$code"
 has "and says which cache it did not restore" "not restored" "$out"
 finish

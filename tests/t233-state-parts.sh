@@ -132,7 +132,7 @@ for n in sys.stdin.read().split():
 sys.exit(1)' "$1"
 }
 cd "$T/y/store/projects/p/lines/main" || exit 1
-ok "a fetch of main on the base and notes" yl fetch origin --line main --overlay base,notes -q
+ok "a fetch of main on the base and notes" yl fetch origin --line main --overlay main,notes -q
 ok "it takes the part of the new state of main" has_part "$main_part"
 no "it leaves the part of line a on the remote" has_part "$a_part"
 cd "$P/lines/main" || exit 1
