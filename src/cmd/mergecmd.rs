@@ -51,10 +51,22 @@ fn merge_states_with_commands(
     let prepared = prepared.map(|p| (p.work, p.out));
     #[cfg(not(target_os = "macos"))]
     let prepared = None;
-    let (work, out) = match prepared {
+    let (work, mut out) = match prepared {
         Some(p) => p,
         None => merge_trees(ctx, repo, line, base, ours, theirs, theirs_label, allow_commands)?,
     };
+    // The metadata of an overlay merges by structure, never as text (docs/overlays.md section 1).
+    if repo.p.is_overlay() {
+        let roots = [repo.state_root(ours)?, repo.state_root(theirs)?, repo.state_root(base)?];
+        let metas = [
+            crate::overlay::read_meta(roots[0].as_path())?,
+            crate::overlay::read_meta(roots[1].as_path())?,
+            crate::overlay::read_meta(roots[2].as_path())?,
+        ];
+        let merged = crate::overlay::merge_meta(&metas[2], &metas[0], &metas[1], &work.path);
+        crate::overlay::write_merged_meta(&work.path, &merged, &roots, repo.own(line))?;
+        out.conflicts.retain(|c| !crate::overlay::is_meta_path(&c.path));
+    }
     let mut st = repo.new_state(ctx, &work.path, StateKind::Commit, parents, message, Some(line))?;
     st.conflicts = out.conflicts.clone();
     Ok((st, out))
@@ -275,6 +287,9 @@ fn discard_prepared(repo: &Repo) {
 pub struct OverlayMerge {
     /// The stack of the line after the merge.
     layers: Vec<Layer>,
+    /// The merged parts on overlays that the view of the line does not show: the line keeps them (its line
+    /// on each overlay moves), and its folder does not show them (docs/overlays.md section 1).
+    extra: Vec<Layer>,
     /// Overlay, its line of the merged line (none for an overlay that keeps parts), the new head, the
     /// new state (none for a fast-forward).
     moves: Vec<(String, Option<Line>, String, Option<StateRec>)>,
@@ -347,6 +362,7 @@ fn plan_overlays(
     if their_layers.is_empty() {
         return Ok(m);
     }
+    let mut outside = std::collections::BTreeSet::new();
     let r = (|| -> Result<()> {
         for tl in their_layers {
             let info = match repo.overlay_info(&tl.overlay)? {
@@ -360,10 +376,9 @@ fn plan_overlays(
                 ));
             }
             // A line does not know overlays (owner decision 2026-11-11): an overlay that the incoming line shows and this
-            // line does not comes into this line's view, from its empty first state.
-            // An overlay that only the incoming line shows: this line's own state there (its line on the
-            // overlay, else the part of its head). The overlay comes into the view only when the merge
-            // brings something.
+            // line does not merges with this line's own state there (its line on the overlay, else the part of its
+            // head). The view of this line does not change (owner decision 2026-11-15): a merge of a line that shows
+            // a private overlay never moves the folder of a public line into it.
             let o = repo.overlay_repo(&tl.overlay)?;
             let i = match m.layers.iter().position(|l| l.overlay == tl.overlay) {
                 Some(i) => i,
@@ -376,6 +391,7 @@ fn plan_overlays(
                         continue;
                     }
                     m.layers.push(Layer { overlay: tl.overlay.clone(), state: own });
+                    outside.insert(tl.overlay.clone());
                     m.layers.len() - 1
                 }
             };
@@ -439,6 +455,8 @@ fn plan_overlays(
         m.discard(repo);
         return Err(e);
     }
+    m.extra = m.layers.iter().filter(|l| outside.contains(&l.overlay)).cloned().collect();
+    m.layers.retain(|l| !outside.contains(&l.overlay));
     Ok(m)
 }
 
@@ -590,8 +608,10 @@ fn finish(
         _ => repo.layers(line)?,
     };
     // A new state names its parts on the overlays (docs/overlays.md, section 1a).
-    if !layers.is_empty() {
+    let extra: Vec<Layer> = ovl.map(|o| o.extra.clone()).unwrap_or_default();
+    if !layers.is_empty() || !extra.is_empty() {
         let mut parts = repo.parts_of(&layers)?;
+        parts.extend(repo.parts_of(&extra)?);
         repo.carry_parts(&mut parts, &line.head, &layers)?;
         for st in pending.states.iter_mut().filter(|s| s.id == new_head) {
             st.parts = parts.clone();
@@ -1265,6 +1285,24 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
     discard_prepared(&h.repo);
     let code = code?;
+    // The patches of the view of the line merge with a parent that the merge changed (docs/overlays.md
+    // section 1). A failure leaves them waiting and never undoes the merge.
+    if code == 0 {
+        let r = (|| -> Result<Vec<String>> {
+            let _lock = h.repo.p.lock()?;
+            let now = h.repo.line(&line.id)?;
+            crate::overlay::rebase_patches(ctx, &h.repo, &now)
+        })();
+        match r {
+            Ok(msgs) if !a.has("-q") => {
+                for m in msgs {
+                    outln!(ctx, "{m}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: the patches of the view wait for a merge with the parent: {e:#}"),
+        }
+    }
     // The caches of a merged line go with it, taken and saved as the follow pass does (docs/cache-overlays.md,
     // section 5). They are regenerable: a failure is reported and never undoes the merge.
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {

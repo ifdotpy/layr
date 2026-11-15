@@ -282,6 +282,16 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(s) = super::followcmd::status_line(&h.repo, &line)? {
         outln!(ctx, "{s}");
     }
+    // The view of the folder and the state of the patches of each overlay of its path (docs/overlays.md section 1).
+    if let Some(top) = h.repo.line_view_top(&line)? {
+        outln!(ctx, "Named saves go to overlay {top} (layr save -m <message> --to main writes main)");
+        for r in h.repo.patch_report(&line)? {
+            for line in r.lines() {
+                outln!(ctx, "  {line}");
+            }
+        }
+        outln!(ctx);
+    }
     if !overlaps.is_empty() {
         outln!(ctx, "Overlaps with other live lines:");
         for overlap in &overlaps {
@@ -1715,6 +1725,15 @@ fn commit_stacked(
             }
         }
         print_fds(ctx, &done.fds);
+        // Which paths of the saved overlays are patches, hidden, or wait for a merge with the parent.
+        let line = repo.line(&line.id)?;
+        for r in repo.patch_report(&line)? {
+            if done.overlays.iter().any(|(n, _)| *n == r.overlay) {
+                for l in r.lines() {
+                    outln!(ctx, " {l}");
+                }
+            }
+        }
     }
     Ok(0)
 }
@@ -1823,7 +1842,8 @@ pub fn restore(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("-q|--quiet")
         .flag("--overlay")
         .flag("--no-overlay")
-        .flag("--clean");
+        .flag("--clean")
+        .flag("--parent");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
@@ -1831,11 +1851,21 @@ pub fn restore(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if specs.is_empty() {
         return Err(exit(128, "fatal: you must specify path(s) to restore"));
     }
+    // `--parent`: the version of the view of the parent of the overlay that the folder shows (docs/overlays.md
+    // section 1), in the working folder and the stage; the next save then drops the overlay's entry, as it
+    // equals the parent.
+    if a.has("--parent") {
+        if a.get("-s").is_some() || a.has("--ours") || a.has("--theirs") || a.has("-S") || a.has("--clean") {
+            return Err(exit(128, "fatal: --parent restores the working folder from the parent view: use it without --source, --ours, --theirs, --staged and --clean"));
+        }
+        // The stage takes the version too, so the next save (with or without -a) drops the overlay's entry.
+        return restore_impl(ctx, &h, &line, &specs, true, true, None, false, false, false, true);
+    }
     let worktree = a.has("-W") || !a.has("-S");
     if a.has("--clean") && !worktree {
         return Err(exit(128, "fatal: --clean restores the working folder: use it without --staged only, or with --worktree"));
     }
-    restore_impl(ctx, &h, &line, &specs, a.has("-S"), worktree, a.get("-s"), a.has("--ours"), a.has("--theirs"), a.has("--clean"))
+    restore_impl(ctx, &h, &line, &specs, a.has("-S"), worktree, a.get("-s"), a.has("--ours"), a.has("--theirs"), a.has("--clean"), false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1850,6 +1880,7 @@ pub fn restore_impl(
     ours: bool,
     theirs: bool,
     clean: bool,
+    parent: bool,
 ) -> Result<i32> {
     // Restore changes the working folder and the stage, never the head: a protected line allows it.
     let (_line_lock, w) = begin_line(ctx, &h.repo, line, crate::repo::LineOp::Working)?;
@@ -1897,7 +1928,22 @@ pub fn restore_impl(
         Some(id) if !layers.is_empty() => Some(repo.assemble(&line, id, &layers)?),
         _ => None,
     };
+    // The view of the parent: the path of the view without its top overlay.
+    let parent_view = if parent {
+        let mut top = None;
+        for (i, l) in layers.iter().enumerate() {
+            if repo.patches_overlay(&l.overlay)? {
+                top = Some(i);
+            }
+        }
+        let top = top.ok_or_else(|| exit(1, format!("error: line '{}' shows main, which has no parent", line.name)))?;
+        let below: Vec<_> = layers[..top].iter().filter(|l| repo.patches_overlay(&l.overlay).unwrap_or(false)).cloned().collect();
+        Some(repo.assemble(&line, &line.head, &below)?)
+    } else {
+        None
+    };
     let src_root = match &src_id {
+        _ if parent_view.is_some() => snap(&parent_view.as_ref().unwrap().path),
         Some(_) if src_view.is_some() => snap(&src_view.as_ref().unwrap().path),
         Some(id) => repo.state_src(id)?,
         None => {
@@ -2070,7 +2116,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !paths.is_empty() {
         let specs = h.specs(&paths)?;
         let src = pos.first().map(|s| s.as_str()).unwrap_or("head");
-        return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false, false);
+        return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false, false, false);
     }
     let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     // APFS: an equal tree with a clean working folder moves only the head (`reset_same_tree`).

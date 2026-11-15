@@ -989,6 +989,13 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "patterns":setting("patterns")?.unwrap_or_else(|| serde_json::json!([])),
         "peers":setting("peers")?,"state":state,"properties":h.repo.overlay_props(name)?.to_json(),
     });
+    // In the view of the current folder: which paths are patches, hidden, or wait for a merge with the parent.
+    let mut value = value;
+    if let Some(line) = h.line.as_ref() {
+        if let Some(r) = h.repo.patch_report(line)?.into_iter().find(|r| &r.overlay == name) {
+            value["paths"] = serde_json::json!({"patches": r.patches, "own": r.own, "hidden": r.hidden, "waiting": r.waiting});
+        }
+    }
     outln!(ctx, "{}", serde_json::to_string(&value)?);
     Ok(0)
 }
@@ -1451,7 +1458,12 @@ fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     change_stack(ctx, repo, &line, &layers, a.has("-f"))?;
+    // The patches of the new view merge with their parents (docs/overlays.md section 1).
+    let msgs = crate::overlay::rebase_patches(ctx, repo, &repo.line(&line.id)?)?;
     if !a.has("-q") {
+        for m in &msgs {
+            outln!(ctx, "{m}");
+        }
         match &top {
             None => outln!(ctx, "line {} shows main", line.name),
             Some(t) => outln!(ctx, "line {} shows {t} (main {})", line.name, names.join(" ")),
