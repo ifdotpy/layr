@@ -1726,6 +1726,7 @@ unsafe extern "C" {
     fn acl_set_qualifier(entry: *mut libc::c_void, qualifier: *const libc::c_void) -> libc::c_int;
     fn acl_get_permset_mask_np(entry: *mut libc::c_void, mask: *mut u64) -> libc::c_int;
     fn acl_set_permset_mask_np(entry: *mut libc::c_void, mask: u64) -> libc::c_int;
+    fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
     fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
     fn acl_get_flagset_np(obj: *mut libc::c_void, flagset: *mut *mut libc::c_void) -> libc::c_int;
     fn acl_set_flagset_np(obj: *mut libc::c_void, flagset: *mut libc::c_void) -> libc::c_int;
@@ -1841,6 +1842,19 @@ impl Acl {
         Ok(())
     }
 
+    fn user_text(mut self) -> io::Result<Option<Vec<u8>>> {
+        self.remove_seal()?;
+        if self.is_empty() { return Ok(None) }
+        let mut len: libc::ssize_t = 0;
+        // SAFETY: this ACL is live, text is copied before libc frees its allocation.
+        unsafe {
+            let text = acl_to_text(self.0, &mut len);
+            if text.is_null() { return Err(io::Error::last_os_error()) }
+            let output = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
+            acl_free(text.cast());
+            Ok(Some(output))
+        }
+    }
     fn new() -> io::Result<Acl> {
         // SAFETY: acl_init allocates an empty ACL that the wrapper frees.
         let acl = unsafe { acl_init(1) };
@@ -2063,7 +2077,7 @@ pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::Borr
 }
 
 #[cfg(target_os = "macos")]
-pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> io::Result<()> {
+pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: impl rustix::path::Arg) -> io::Result<()> {
     Ok(rustix::fs::fclonefileat(
         src,
         dir,
@@ -2073,13 +2087,17 @@ pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::Borrowe
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
-    let st = rustix::fs::fstat(fd)?;
-    // SAFETY: fd remains open and fchflags takes only integer flags.
-    if st.st_flags & libc::UF_IMMUTABLE != 0 && unsafe { libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
+    apfs_immutable_fd(fd, false)?;
     unseal_entry_fd(fd.as_raw_fd())
+}
+/// std/rustix expose no macOS file-flag setter. Keep the existing fchflags call behind an FD.
+#[cfg(target_os = "macos")]
+pub fn apfs_immutable_fd(fd: std::os::fd::BorrowedFd<'_>, readonly: bool) -> io::Result<()> {
+    let st = rustix::fs::fstat(fd)?;
+    let flags = if readonly { st.st_flags | libc::UF_IMMUTABLE } else { st.st_flags & !libc::UF_IMMUTABLE };
+    // SAFETY: fd remains open and fchflags takes only integer flags.
+    if flags != st.st_flags && unsafe { libc::fchflags(fd.as_raw_fd(), flags) } != 0 { return Err(io::Error::last_os_error()) }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2206,24 +2224,32 @@ pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
         // A volume without ACLs, or another error: the libc read below decides.
         _ => {}
     }
-    let Some(mut acl) = Acl::of_path(&path)? else {
-        return Ok(None);
-    };
-    acl.remove_seal()?;
-    if acl.is_empty() {
-        return Ok(None);
-    }
-    let mut len: libc::ssize_t = 0;
-    // SAFETY: the ACL is live; the text is owned by libc, copied, and freed once.
-    unsafe {
-        let text = acl_to_text(acl.0, &mut len);
-        if text.is_null() {
-            return Err(io::Error::last_os_error());
+    Acl::of_path(&path)?.map(Acl::user_text).transpose().map(Option::flatten)
+}
+
+/// Descriptor-based user ACL observations. std/rustix expose no macOS ACL API.
+#[cfg(target_os = "macos")]
+pub fn apfs_acl_text_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<Option<Vec<u8>>> {
+    use std::os::fd::AsRawFd;
+    Acl::of_fd(fd.as_raw_fd())?.map(Acl::user_text).transpose().map(Option::flatten)
+}
+
+/// Restore the ACL carried by a reader. Keep parsing and native ACL ownership in this module.
+#[cfg(target_os = "macos")]
+pub fn apfs_set_acl_text_fd(fd: std::os::fd::BorrowedFd<'_>, text: Option<&[u8]>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let acl = match text {
+        None => Acl::new()?,
+        Some(text) => {
+            let text = std::ffi::CString::new(text).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            // std/rustix have no macOS ACL parser. SAFETY: text is a live C string;
+            // the returned ACL is owned and freed by Acl, including on errors.
+            let pointer = unsafe { acl_from_text(text.as_ptr()) };
+            if pointer.is_null() { return Err(io::Error::last_os_error()) }
+            Acl(pointer)
         }
-        let out = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
-        acl_free(text.cast());
-        Ok(Some(out))
-    }
+    };
+    acl.set_fd(fd.as_raw_fd())
 }
 
 #[cfg(target_os = "macos")]

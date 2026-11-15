@@ -192,12 +192,18 @@ type Steps = std::iter::Peekable<std::vec::IntoIter<PreparedStep>>;
 /// Give `merge_states` the prepared merge of (`base`, `theirs`) over `ours` when it is the next
 /// one of `steps`. Its conflicts get the real state of `ours`.
 #[cfg(target_os = "macos")]
-fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &str, label: &str) {
+fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &str, label: &str) -> Result<()> {
     match steps.next_if(|s| s.base == base && s.theirs == theirs && s.label == label) {
         Some(step) => {
             let mut out = step.out;
             for conflict in &mut out.conflicts {
-                conflict.ours = Some(ours.to_string());
+                if let crate::model::ConflictDetails::Known { sides, .. } = &mut conflict.details {
+                    *sides = crate::model::ConflictSides::Recorded {
+                        base: layr_types::StateId::parse(base)?,
+                        ours: layr_types::StateId::parse(ours)?,
+                        theirs: layr_types::StateId::parse(theirs)?,
+                    };
+                }
             }
             PREPARED_MERGE.with(|m| {
                 *m.borrow_mut() = Some(PreparedMerge {
@@ -214,6 +220,7 @@ fn hand_over(steps: &mut Steps, line: &Line, base: &str, ours: &str, theirs: &st
         // A later prepared merge was made over this one: none of them holds any more.
         None => *steps = Vec::new().into_iter().peekable(),
     }
+    Ok(())
 }
 
 /// The merges of a chain before the store lock (APFS): each (base, theirs, label) merges onto
@@ -2190,7 +2197,7 @@ fn pick(ctx: &Ctx, args: &[String], revert: bool) -> Result<i32> {
             };
             let label = ids::short(&p);
             #[cfg(target_os = "macos")]
-            hand_over(&mut steps, &line, &base, &line.head, &theirs, &label);
+            hand_over(&mut steps, &line, &base, &line.head, &theirs, &label)?;
             let (mut state, out) =
                 merge_states(ctx, repo, &line, &base, &line.head, &theirs, &label, vec![line.head.clone()], &message)?;
             if !revert {
@@ -2529,7 +2536,7 @@ fn replay_locked(
             _ => continue,
         };
         #[cfg(target_os = "macos")]
-        hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p));
+        hand_over(&mut steps, &line, &parent, &cur, p, &ids::short(p))?;
         let (mut s, out) = merge_states(ctx, repo, &line, &parent, &cur, p, &ids::short(p), vec![cur.clone()], &c.message)?;
         s.author = c.author.clone();
         s.change_id = c.change_id.clone();

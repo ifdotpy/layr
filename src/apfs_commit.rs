@@ -514,7 +514,7 @@ fn recover_pending(p: &Project, dir: &Path, j: &PendingJournal) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Actor, Author, Record, StateKind, StateRec};
+    use crate::model::{Actor, Author, StateKind, StateRec};
     use crate::store::Store;
 
     struct Sandbox(PathBuf);
@@ -560,7 +560,7 @@ mod tests {
     }
     /// The record of a save, as `commit_state` writes it (the record of `move_head` is not needed).
     fn recorded(locked: &crate::store::LockedProject<'_>, pending: &PendingCommit, line: &str) -> Result<()> {
-        let mut r = Record::untrusted_preview("commit");
+        let mut r = crate::model::DraftRecord::new("commit");
         r.states.push(StateRec {
             id: pending.id.clone(),
             kind: StateKind::Commit,

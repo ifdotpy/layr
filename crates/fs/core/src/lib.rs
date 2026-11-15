@@ -73,6 +73,8 @@ pub struct EntryAttributes {
     /// None for entries whose time is not part of the stored state (subvolume placeholders).
     pub stored_time: Option<i64>,
     pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Native ACL text, without backend sealing entries. Portable formats may reject it.
+    pub acl: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -82,11 +84,34 @@ pub struct LinkIdentity {
     pub count: u64,
 }
 
+/// Equality of link identifiers is meaningful across readers only when they share this domain.
+#[derive(Clone, Default)]
+pub struct LinkDomain(std::sync::Arc<()>);
+impl PartialEq for LinkDomain {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for LinkDomain {}
+impl std::hash::Hash for LinkDomain {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::sync::Arc::as_ptr(&self.0), state)
+    }
+}
+
 pub trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
 
 /// All lookups are relative, no parent symlinks may be traversed, and absence differs from IO failure.
 pub trait TreeRead: Send + Sync {
+    /// None confines link identities to this reader. Adapters may share an explicit domain.
+    fn link_domain(&self) -> Option<&LinkDomain> {
+        None
+    }
+    /// Namespace lookup without loading user attributes. Default readers reuse metadata.
+    fn kind(&self, path: &RelDir) -> Result<Option<evidence::FType>> {
+        Ok(self.metadata(path)?.map(|metadata| metadata.kind))
+    }
     fn metadata(&self, path: &RelDir) -> Result<Option<EntryMetadata>>;
     /// Immediate child names in deterministic byte order. A name is one checked component.
     fn entries(&self, dir: &RelDir, visit: &mut dyn FnMut(&RelPath) -> Result<()>) -> Result<()>;

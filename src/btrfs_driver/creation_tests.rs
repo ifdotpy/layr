@@ -53,6 +53,7 @@ impl Drop for Fixture {
 }
 fn attributes(mode: u32) -> EntryAttributes {
     EntryAttributes {
+        acl: None,
         mode,
         uid: rustix::process::geteuid().as_raw(),
         gid: rustix::process::getegid().as_raw(),

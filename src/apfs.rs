@@ -1,7 +1,14 @@
 //! APFS local-user backend. Clones data extents, scans directories, and rejects source changes.
 //! Snapshots use verified directory clones; transport uses the compatible btrfs stream format.
 use crate::fsutil::Src;
+use layr_fs_core::CaptureConsistency;
+#[path = "apfs/driver.rs"]
+pub(crate) mod driver;
+pub(crate) use driver::ApfsFs;
+#[path = "apfs/reader.rs"]
+mod reader;
 use anyhow::{bail, Context, Result};
+pub(crate) use reader::ApfsTree;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -1194,13 +1201,17 @@ fn clone_around(
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
-    snapshot_with(src, dst, readonly, true)
+    let report = ApfsFs::snapshot_path(src, dst, readonly, driver::Links::Keep, driver::PreparedCopy::Use)?;
+    report_consistency(src, report.consistency);
+    Ok(())
 }
 
 /// A read-only snapshot for comparing content. Hard links become separate files, so a tree with
 /// hard links (for example pnpm's node_modules) is still cloned at once.
 pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
-    snapshot_with(src, dst, true, false)
+    let report = ApfsFs::snapshot_path(src, dst, true, driver::Links::Split, driver::PreparedCopy::Use)?;
+    report_consistency(src, report.consistency);
+    Ok(())
 }
 
 /// A writable copy of a cache folder, cloned at once. Hard links become separate files: build
@@ -1210,8 +1221,9 @@ pub fn scan_snapshot(src: &Path, dst: &Path) -> Result<()> {
 /// Returns true when the copy is one clone. A clone gives every entry the owner of the new folder
 /// (CLONE_NOOWNERCOPY), so the root tells the owner of the whole copy.
 pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
-    let scan = copy_snapshot(src, dst, false, false)?;
-    Ok(!needs_file_copies(src, &scan, false))
+    let report = ApfsFs::snapshot_path(src, dst, false, driver::Links::Split, driver::PreparedCopy::Fresh)?;
+    report_consistency(src, report.consistency);
+    Ok(matches!(report.owners, driver::Owners::Root))
 }
 
 /// A copy of a tree made before a store lock (`prepare_snapshot`).
@@ -1219,6 +1231,7 @@ struct Prepared {
     src: PathBuf,
     readonly: bool,
     path: PathBuf,
+    consistency: CaptureConsistency,
 }
 thread_local! {
     static PREPARED: std::cell::RefCell<Vec<Prepared>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1232,8 +1245,9 @@ thread_local! {
 pub fn prepare_snapshot(src: &Path, dir: &Path, readonly: bool) -> Result<()> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("prepared-{}", crate::store::temp_name()));
-    copy_snapshot(src, &path, readonly, true)?;
-    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path }));
+    let report = ApfsFs::snapshot_path(src, &path, readonly, driver::Links::Keep, driver::PreparedCopy::Fresh)?;
+    report_consistency(src, report.consistency);
+    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path, consistency: report.consistency }));
     Ok(())
 }
 
@@ -1270,27 +1284,53 @@ pub fn take_prepared() -> Vec<PathBuf> {
     PREPARED.with(|p| p.borrow_mut().drain(..).map(|x| x.path).collect())
 }
 
-fn snapshot_with(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Result<()> {
-    if keep_links {
+fn report_consistency(src: &Path, consistency: CaptureConsistency) {
+    if consistency.running() {
+        crate::fsutil::mark_unsettled(src);
+    }
+}
+fn snapshot_native(
+    src: &Path,
+    dst: &Path,
+    readonly: bool,
+    keep_links: bool,
+    prepared: driver::PreparedCopy,
+) -> Result<driver::CopyReport> {
+    if keep_links && matches!(prepared, driver::PreparedCopy::Use) {
         let taken = PREPARED.with(|p| {
             let mut p = p.borrow_mut();
             let i = p.iter().position(|x| x.src == src && x.readonly == readonly)?;
-            Some(p.remove(i).path)
+            Some(p.remove(i))
         });
-        if let Some(path) = taken {
+        if let Some(copy) = taken {
             let _t = crate::trace::span(format!("APFS take prepared copy {}", dst.display()));
             if fs::symlink_metadata(dst).is_ok() {
-                PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path }));
+                PREPARED.with(|p| p.borrow_mut().push(copy));
                 bail!("snapshot destination already exists");
             }
-            return move_tree(&path, dst).context("publish prepared snapshot");
+            let consistency = copy.consistency;
+            if let Err(error) = move_tree(&copy.path, dst).context("publish prepared snapshot") {
+                if copy.path.exists() {
+                    PREPARED.with(|p| p.borrow_mut().push(copy));
+                }
+                return Err(error);
+            }
+            return Ok(driver::CopyReport { consistency, owners: driver::Owners::EveryEntry });
         }
     }
-    copy_snapshot(src, dst, readonly, keep_links).map(|_| ())
+    let (scan, consistency) = copy_snapshot(src, dst, readonly, keep_links)?;
+    let owners =
+        if !keep_links && !needs_file_copies(src, &scan, false) { driver::Owners::Root } else { driver::Owners::EveryEntry };
+    Ok(driver::CopyReport { consistency, owners })
 }
 
 /// Copy `src` to `dst` as a snapshot. Returns the scan of `src` that the copy matches.
-fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Result<BTreeMap<String, ScanEntry>> {
+fn copy_snapshot(
+    src: &Path,
+    dst: &Path,
+    readonly: bool,
+    keep_links: bool,
+) -> Result<(BTreeMap<String, ScanEntry>, CaptureConsistency)> {
     let _t = crate::trace::span(format!("APFS clone {}", dst.display()));
     if fs::symlink_metadata(dst).is_ok() {
         bail!("snapshot destination already exists");
@@ -1302,7 +1342,8 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
     };
     let temp = dst.with_file_name(format!(".apfs-{}", crate::store::temp_name()));
     let mut published = false;
-    let result = (|| -> Result<BTreeMap<String, ScanEntry>> {
+    let result = (|| -> Result<(BTreeMap<String, ScanEntry>, CaptureConsistency)> {
+        let mut consistency = CaptureConsistency::ValidatedCopy;
         let mut before = before;
         for round in 0.. {
             let _t = crate::trace::span("APFS copy tree");
@@ -1331,7 +1372,7 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
                 break;
             }
             if round + 1 == crate::thin::COPY_ROUNDS {
-                crate::fsutil::mark_unsettled(src);
+                consistency = CaptureConsistency::UnsettledCopy;
                 break;
             }
             let paths = crate::thin::changed_paths(&before, &after);
@@ -1380,7 +1421,7 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
             let _t = crate::trace::span("APFS seal tree");
             seal(dst, true, false).context("seal snapshot")?;
         }
-        Ok(before)
+        Ok((before, consistency))
     })();
     if result.is_err() {
         let _ = delete_tree(&temp);
@@ -1391,6 +1432,9 @@ fn copy_snapshot(src: &Path, dst: &Path, readonly: bool, keep_links: bool) -> Re
     result
 }
 pub fn delete_tree(path: &Path) -> Result<()> {
+    ApfsFs::remove_path(path)
+}
+fn delete_tree_native(path: &Path) -> Result<()> {
     let m = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1904,6 +1948,7 @@ fn unshared(a: &File, b: &File, len: u64) -> Vec<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
 
     struct Sandbox(PathBuf);
@@ -1911,7 +1956,7 @@ mod tests {
         fn new() -> Self {
             let base = std::env::var_os("LAYR_APFS_TEST_ROOT").expect("set LAYR_APFS_TEST_ROOT to a case-sensitive APFS volume");
             let path = PathBuf::from(base).join(format!("backend-test-{}", crate::ids::new_id()));
-            fs::create_dir(&path).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
     }

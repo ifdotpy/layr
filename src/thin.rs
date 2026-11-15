@@ -41,10 +41,69 @@ pub struct Layer {
 }
 
 /// A tree made of layers: upper layers first, a complete tree last.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Layered {
-    pub layers: Vec<Layer>,
-    pub object_base: Option<std::sync::Arc<crate::object_tree::ObjectTree>>,
+    layers: Vec<Layer>,
+    object_base: Option<std::sync::Arc<crate::object_tree::ObjectTree>>,
+    core: std::sync::OnceLock<std::result::Result<layr_fs_common::LayeredTree, std::sync::Arc<layr_fs_core::FsError>>>,
+}
+
+impl std::fmt::Debug for Layered {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Layered").field("layers", &self.layers).field("object_base", &self.object_base).finish()
+    }
+}
+impl Layered {
+    pub(crate) fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+    pub(crate) fn object_base(&self) -> Option<&std::sync::Arc<crate::object_tree::ObjectTree>> {
+        self.object_base.as_ref()
+    }
+    fn core(&self) -> layr_fs_core::Result<&layr_fs_common::LayeredTree> {
+        let result = self.core.get_or_init(|| {
+            (|| -> layr_fs_core::Result<layr_fs_common::LayeredTree> {
+                let mut layers = Vec::new();
+                for layer in &self.layers {
+                    layers.push(layr_fs_common::ReadLayer {
+                        reader: std::sync::Arc::new(crate::storage::ApfsTree::open(&layer.root)?),
+                        removed: layer
+                            .removed
+                            .iter()
+                            .map(|path| layr_fs_core::RelPath::new(path.as_bytes()))
+                            .collect::<layr_fs_core::Result<_>>()?,
+                    });
+                }
+                if let Some(objects) = &self.object_base {
+                    layers.push(layr_fs_common::ReadLayer { reader: objects.clone(), removed: BTreeSet::new() });
+                }
+                layr_fs_common::LayeredTree::new(layers)
+            })()
+            .map_err(std::sync::Arc::new)
+        });
+        match result {
+            Ok(reader) => Ok(reader),
+            Err(error) => Err(layr_fs_core::FsError::backend(error.clone())),
+        }
+    }
+}
+impl layr_fs_core::TreeRead for Layered {
+    fn metadata(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
+        self.core()?.metadata(path)
+    }
+    fn entries(
+        &self,
+        dir: &layr_fs_core::RelDir,
+        visit: &mut dyn FnMut(&layr_fs_core::RelPath) -> layr_fs_core::Result<()>,
+    ) -> layr_fs_core::Result<()> {
+        self.core()?.entries(dir, visit)
+    }
+    fn open_file(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Box<dyn layr_fs_core::ReadSeek + '_>> {
+        self.core()?.open_file(path)
+    }
+    fn read_link(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Vec<u8>> {
+        self.core()?.read_link(path)
+    }
 }
 
 pub fn removed_of(root: &Path) -> Result<BTreeSet<String>> {
@@ -142,7 +201,11 @@ fn remove_subtree<V>(map: &mut BTreeMap<String, V>, rel: &str) {
 
 impl Layered {
     pub fn complete(root: &Path) -> Self {
-        Layered { layers: vec![Layer { root: root.to_path_buf(), removed: BTreeSet::new() }], object_base: None }
+        Layered {
+            layers: vec![Layer { root: root.to_path_buf(), removed: BTreeSet::new() }],
+            object_base: None,
+            core: Default::default(),
+        }
     }
 
     /// The layers of a state: its own layer and those of its bases, down to a complete tree.
@@ -157,13 +220,13 @@ impl Layered {
             let full = p.state_path(&id);
             if full.is_dir() {
                 layers.push(Layer { root: full, removed: BTreeSet::new() });
-                return Ok(Layered { layers, object_base: None });
+                return Ok(Layered { layers, object_base: None, core: Default::default() });
             }
             let d = p.delta_path(&id);
             if !d.is_dir() {
                 if let Some((store, refs)) = crate::objstore::verified(p, &id)? {
                     let base = crate::object_tree::ObjectTree::new(store, refs, &p.meta_dir().join("object-reads"))?;
-                    return Ok(Layered { layers, object_base: Some(base) });
+                    return Ok(Layered { layers, object_base: Some(base), core: Default::default() });
                 }
                 bail!("state {} is not on this machine (run layr sync)", crate::ids::short(&id));
             }
@@ -177,11 +240,11 @@ impl Layered {
     pub fn over(root: &Path, base: Layered) -> Result<Self> {
         let mut layers = vec![Layer { root: root.to_path_buf(), removed: removed_of(root)? }];
         layers.extend(base.layers);
-        Ok(Layered { layers, object_base: base.object_base })
+        Ok(Layered { layers, object_base: base.object_base, core: Default::default() })
     }
 
     pub fn objects(tree: std::sync::Arc<crate::object_tree::ObjectTree>) -> Self {
-        Self { layers: Vec::new(), object_base: Some(tree) }
+        Self { layers: Vec::new(), object_base: Some(tree), core: Default::default() }
     }
 
     pub fn is_complete(&self) -> bool {
@@ -210,7 +273,9 @@ impl Layered {
     /// The entry at `rel` alone (no content below it) in the merged tree, as `scan` gives it.
     pub fn entry(&self, rel: &str) -> Result<Option<ScanEntry>> {
         if self.layers.is_empty() {
-            if let Some(o) = &self.object_base { return o.scan_entry(rel); }
+            if let Some(o) = &self.object_base {
+                return o.scan_entry(rel);
+            }
         }
         self.find(rel)?.map(|p| apfs::entry_of_path(&p)).transpose()
     }
@@ -243,9 +308,13 @@ impl Layered {
                 Err(e) => return Err(e.into()),
             }
         }
-        if self.layers.last().is_some_and(|l| hides(l, rel)) { return Ok(None); }
+        if self.layers.last().is_some_and(|l| hides(l, rel)) {
+            return Ok(None);
+        }
         if let Some(o) = &self.object_base {
-            if o.entry(rel)?.is_some() { return Ok(Some(o.path(rel)?)); }
+            if o.entry(rel)?.is_some() {
+                return Ok(Some(o.path(rel)?));
+            }
         }
         Ok(None)
     }
@@ -276,7 +345,9 @@ impl Layered {
     /// The entry at `rel` and its content in the merged tree, as `scan` gives them.
     pub fn scan_at(&self, rel: &str) -> Result<BTreeMap<String, ScanEntry>> {
         let mut map = match &self.object_base {
-            Some(o) => o.scan()?.into_iter().filter(|(p, _)| rel.is_empty() || p == rel || p.starts_with(&format!("{rel}/"))).collect(),
+            Some(o) => {
+                o.scan()?.into_iter().filter(|(p, _)| rel.is_empty() || p == rel || p.starts_with(&format!("{rel}/"))).collect()
+            }
             None => apfs::scan_at(self.bottom(), rel)?,
         };
         for l in self.layers.iter().rev().skip(usize::from(self.object_base.is_none())) {
@@ -889,7 +960,11 @@ impl Layered {
 
     /// The tree without its top layer.
     pub fn below(&self) -> Option<Layered> {
-        (self.layers.len() > 1 || (self.layers.len() == 1 && self.object_base.is_some())).then(|| Layered { layers: self.layers[1..].to_vec(), object_base: self.object_base.clone() })
+        (self.layers.len() > 1 || (self.layers.len() == 1 && self.object_base.is_some())).then(|| Layered {
+            layers: self.layers[1..].to_vec(),
+            object_base: self.object_base.clone(),
+            core: Default::default(),
+        })
     }
 }
 

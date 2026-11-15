@@ -21,6 +21,7 @@ impl Src for ReaderOnly<'_> {
 
 fn attributes(mode: u32) -> EntryAttributes {
     EntryAttributes {
+        acl: None,
         mode,
         uid: rustix::process::geteuid().as_raw(),
         gid: rustix::process::getegid().as_raw(),
@@ -96,6 +97,8 @@ enum ExpectedCapabilities {
     Empty,
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     Accelerated,
+    #[cfg(target_os = "macos")]
+    Apfs,
 }
 fn scenarios(
     fs: &dyn Filesystem,
@@ -119,6 +122,8 @@ fn scenarios(
         ExpectedCapabilities::Empty => assert!(change_hints.is_none() && clone_new.is_none() && reflink_range.is_none()),
         #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
         ExpectedCapabilities::Accelerated => assert!(clone_new.is_some() && reflink_range.is_some()),
+        #[cfg(target_os = "macos")]
+        ExpectedCapabilities::Apfs => assert!(change_hints.is_some() && clone_new.is_some() && reflink_range.is_none()),
     }
     assert!(fs.changes(&base.tree, &base.tree)?.iter().all(|c| c.old().is_some() && c.new().is_some()));
     let CreatedTree { tree: ours_work, ownership: ours_owner } = fs.materialise(base.tree.reader(), location("ours-work")?)?;
@@ -1331,5 +1336,205 @@ fn stream_normalization_treats_non_directory_ancestors_as_absent() -> Result<()>
         assert_eq!(directory.old().unwrap().is_dir(), !created);
         assert_eq!(directory.new().unwrap().is_dir(), created);
     }
+    Ok(())
+}
+
+#[test]
+fn layered_reader_masks_removed_subtrees_replacements_and_non_directory_ancestors() -> Result<()> {
+    use layr_fs_common::{LayeredTree, ReadLayer};
+    use std::{collections::BTreeSet, io::Read, sync::Arc};
+    let base = Arc::new(MemoryTree::new(attributes(0o755)));
+    for name in ["merged", "opaque", "removed", "old-dir"] {
+        base.put(&path(name), EntryData::Directory, &attributes(0o755))?;
+    }
+    for name in ["merged/base", "opaque/hidden", "removed/hidden", "old-dir/hidden"] {
+        write(base.as_ref(), name, b"lower")?;
+    }
+    write(base.as_ref(), "replace", b"lower file")?;
+    let top = Arc::new(MemoryTree::new(attributes(0o755)));
+    for name in ["merged", "opaque", "replace"] {
+        top.put(&path(name), EntryData::Directory, &attributes(0o755))?;
+    }
+    write(top.as_ref(), "merged/top", b"upper")?;
+    write(top.as_ref(), "opaque/new", b"visible")?;
+    write(top.as_ref(), "old-dir", b"file replaces directory")?;
+    top.put(&path("link"), EntryData::Symlink(b"merged/base"), &attributes(0o777))?;
+    let layered = LayeredTree::new(vec![
+        ReadLayer { reader: top, removed: [path("opaque"), path("removed"), path("replace")].into_iter().collect() },
+        ReadLayer { reader: base, removed: BTreeSet::new() },
+    ])?;
+    for name in ["opaque/hidden", "removed", "removed/hidden", "old-dir/hidden", "replace/hidden"] {
+        assert!(layered.metadata(&RelDir::Path(path(name)))?.is_none(), "{name}");
+    }
+    let mut names = Vec::new();
+    layered.entries(&RelDir::Path(path("merged")), &mut |name| {
+        names.push(name.utf8()?.to_owned());
+        Ok(())
+    })?;
+    assert_eq!(names, ["base", "top"]);
+    let mut content = Vec::new();
+    layered.open_file(&path("merged/base"))?.read_to_end(&mut content)?;
+    assert_eq!(content, b"lower");
+    assert_eq!(layered.read_link(&path("link"))?, b"merged/base");
+    Ok(())
+}
+
+#[test]
+fn layered_reader_does_not_conflate_private_link_ids_and_retains_shared_native_groups() -> Result<()> {
+    use layr_fs_common::{LayeredTree, ReadLayer};
+    use std::{collections::BTreeSet, sync::Arc};
+    let a = Arc::new(MemoryTree::new(attributes(0o755)));
+    let b = Arc::new(MemoryTree::new(attributes(0o755)));
+    write(a.as_ref(), "a", b"one")?;
+    a.put(&path("a-link"), EntryData::HardLink(&path("a")), &attributes(0o644))?;
+    write(b.as_ref(), "b", b"two")?;
+    b.put(&path("b-link"), EntryData::HardLink(&path("b")), &attributes(0o644))?;
+    let layered = LayeredTree::new(vec![
+        ReadLayer { reader: a, removed: BTreeSet::new() },
+        ReadLayer { reader: b, removed: BTreeSet::new() },
+    ])?;
+    let output = MemoryTree::new(attributes(0o755));
+    layr_fs_common::copy_tree(&layered, &output)?;
+    let link = |name| -> Result<LinkIdentity> { Ok(output.metadata(&RelDir::Path(path(name)))?.unwrap().link.unwrap()) };
+    assert_eq!(link("a")?.inode, link("a-link")?.inode);
+    assert_eq!(link("b")?.inode, link("b-link")?.inode);
+    assert_ne!(link("a")?.inode, link("b")?.inode);
+    let scratch = Scratch::new()?;
+    let first = scratch.directory("first")?;
+    let second = scratch.directory("second")?;
+    std::fs::write(first.join("a"), b"native linked")?;
+    std::fs::hard_link(first.join("a"), second.join("b"))?;
+    let native = LayeredTree::new(vec![
+        ReadLayer { reader: Arc::new(layr_fs_unix::DirectoryTree::open(&first)?), removed: BTreeSet::new() },
+        ReadLayer { reader: Arc::new(layr_fs_unix::DirectoryTree::open(&second)?), removed: BTreeSet::new() },
+    ])?;
+    let a = native.metadata(&RelDir::Path(path("a")))?.unwrap().link.unwrap();
+    let b = native.metadata(&RelDir::Path(path("b")))?.unwrap().link.unwrap();
+    assert_eq!(a, b);
+    Ok(())
+}
+
+#[test]
+fn layered_single_base_names_do_not_load_sibling_attributes() -> Result<()> {
+    use layr_fs_common::{LayeredTree, ReadLayer};
+    use std::{collections::BTreeSet, sync::Arc};
+    struct NamesOnly(MemoryTree);
+    impl TreeRead for NamesOnly {
+        fn kind(&self, path: &RelDir) -> layr_fs_core::Result<Option<evidence::FType>> {
+            Ok(self.0.metadata(path)?.map(|metadata| metadata.kind))
+        }
+        fn metadata(&self, _: &RelDir) -> layr_fs_core::Result<Option<EntryMetadata>> {
+            panic!("name enumeration loaded attributes")
+        }
+        fn entries(&self, dir: &RelDir, visit: &mut dyn FnMut(&RelPath) -> layr_fs_core::Result<()>) -> layr_fs_core::Result<()> {
+            self.0.entries(dir, visit)
+        }
+        fn open_file(&self, _: &RelPath) -> layr_fs_core::Result<Box<dyn ReadSeek + '_>> {
+            panic!("name enumeration opened content")
+        }
+        fn read_link(&self, _: &RelPath) -> layr_fs_core::Result<Vec<u8>> {
+            panic!("name enumeration read a link")
+        }
+    }
+    let source = MemoryTree::new(attributes(0o755));
+    for i in 0..100 {
+        write(&source, &format!("file-{i:03}"), b"data")?;
+    }
+    let layered = LayeredTree::new(vec![ReadLayer { reader: Arc::new(NamesOnly(source)), removed: BTreeSet::new() }])?;
+    let mut names = Vec::new();
+    layered.entries(&RelDir::Root, &mut |name| {
+        names.push(name.clone());
+        Ok(())
+    })?;
+    assert_eq!(names.len(), 100);
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    Ok(())
+}
+
+#[test]
+fn acl_metadata_is_preserved_in_memory_and_rejected_by_portable_object_encoding() -> Result<()> {
+    let source = MemoryTree::new(attributes(0o755));
+    let mut acl = attributes(0o644);
+    acl.acl = Some(b"native ACL bytes".to_vec());
+    source.put(&path("file"), EntryData::File(&mut &b"content"[..]), &acl)?;
+    let target = MemoryTree::new(attributes(0o755));
+    layr_fs_common::copy_tree(&source, &target)?;
+    assert_eq!(target.metadata(&RelDir::Path(path("file")))?.unwrap().attributes, acl);
+    let scratch = Scratch::new()?;
+    let store = layr_objects::Store::open(&scratch.directory("objects-acl")?, layr_objects::Keying::Plain)?;
+    assert!(save(&store, &target).unwrap_err().to_string().contains("native ACL"));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires an APFS test volume; compile checked on Linux"]
+fn apfs_core_operations_and_capabilities_match_reference_results() -> Result<()> {
+    use crate::storage::driver::{ApfsFs, Links, PreparedCopy};
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new()?;
+    anyhow::ensure!(crate::storage::is_supported(&scratch.0), "TMPDIR must be APFS");
+    let memory = MemoryFs::default();
+    let expected =
+        scenarios(&memory, &|name| memory.location(path(name)), &scratch, "reference", ExpectedCapabilities::Empty, &|_| Ok(()))?;
+    let root = scratch.directory("apfs")?;
+    let native = ApfsFs::for_destination(&root.join("base"), Links::Keep, PreparedCopy::Use)?;
+    let actual = scenarios(
+        native.as_ref(),
+        &|name| native.location(&root.join(name)),
+        &scratch,
+        "apfs",
+        ExpectedCapabilities::Apfs,
+        &|_| Ok(()),
+    )?;
+    assert_eq!(actual, expected);
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"cloned")?;
+    let base = capture(native.as_ref(), &|name| native.location(&root.join(name)), &seed, "clone-base")?;
+    let output = native.materialise(base.tree.reader(), native.location(&root.join("clone-work"))?)?;
+    let on = Decorator { fs: native.as_ref(), disabled: Disabled::None, calls: Default::default() };
+    let off = Decorator { fs: native.as_ref(), disabled: Disabled::All, calls: Default::default() };
+    layr_fs_common::copy_file(&on, &base.tree, &path("file"), &output.tree, &path("native"))?;
+    layr_fs_common::copy_file(&off, &base.tree, &path("file"), &output.tree, &path("fallback"))?;
+    assert_eq!(
+        output.tree.reader().metadata(&RelDir::Path(path("native")))?.unwrap().attributes,
+        output.tree.reader().metadata(&RelDir::Path(path("fallback")))?.unwrap().attributes
+    );
+    assert_eq!(on.calls[1].load(Ordering::Relaxed), 1);
+    let before = ReaderOnly(base.tree.reader());
+    assert!(crate::changes::file_changes_of(&before, &before, off.changes(&base.tree, &base.tree)?)?.is_empty());
+    // A sealed descendant must be unsealed before chmod; data-read permission is unnecessary.
+    let protected = output.tree.writer();
+    protected.put(&path("sealed"), EntryData::Directory, &attributes(0o700))?;
+    write(protected, "sealed/zero", b"private")?;
+    let zero = root.join("clone-work/sealed/zero");
+    std::fs::set_permissions(&zero, std::fs::Permissions::from_mode(0))?;
+    crate::sys::apfs_immutable(&zero, true)?;
+    crate::sys::apfs_immutable(&root.join("clone-work/sealed"), true)?;
+    drop(output.tree);
+    native.remove(output.ownership).unwrap();
+    drop(base.tree);
+    native.remove(base.ownership).unwrap();
+    Ok(())
+}
+
+#[test]
+fn layered_enumeration_propagates_failed_upper_observations() -> Result<()> {
+    use layr_fs_common::{LayeredTree, ReadLayer};
+    use std::{collections::BTreeSet, os::unix::fs::PermissionsExt, sync::Arc};
+    let scratch = Scratch::new()?;
+    let root = scratch.directory("upper-permissions")?;
+    std::fs::write(root.join("file"), b"upper")?;
+    let upper = Arc::new(layr_fs_unix::DirectoryTree::open(&root)?);
+    let lower = Arc::new(MemoryTree::new(attributes(0o755)));
+    write(lower.as_ref(), "file", b"lower")?;
+    let layered = LayeredTree::new(vec![
+        ReadLayer { reader: upper, removed: BTreeSet::new() },
+        ReadLayer { reader: lower, removed: BTreeSet::new() },
+    ])?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o444))?;
+    let result = layered.entries(&RelDir::Root, &mut |_| Ok(()));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    assert!(matches!(result, Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied));
     Ok(())
 }

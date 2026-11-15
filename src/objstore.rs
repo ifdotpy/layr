@@ -155,55 +155,45 @@ impl layr_objects::write::Source for SnapshotSource<'_> {
         Ok(path)
     }
 
+    #[cfg(target_os = "macos")]
+    fn metadata(&self, relative: &[u8]) -> Result<layr_fs_core::EntryMetadata> {
+        layr_objects::write::ReaderSource(self.0).metadata(relative)
+    }
+    #[cfg(target_os = "macos")]
+    fn read_link(&self, relative: &[u8]) -> Result<Vec<u8>> {
+        layr_objects::write::ReaderSource(self.0).read_link(relative)
+    }
+    #[cfg(target_os = "macos")]
+    fn store_file(
+        &self,
+        store: &Store,
+        relative: &[u8],
+        temperature: layr_objects::Temperature,
+        bases: &[Id],
+        judge: bool,
+    ) -> Result<(Id, u64)> {
+        layr_objects::write::ReaderSource(self.0).store_file(store, relative, temperature, bases, judge)
+    }
+    #[cfg(target_os = "macos")]
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        layr_objects::write::ReaderSource(self.0).names(relative)
+    }
+    #[cfg(not(target_os = "macos"))]
     fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
         use crate::fsutil::Src;
         use std::os::unix::ffi::OsStrExt;
         if self.0.folder().is_some() {
-            // A complete immutable folder already defines the visible names. Resolving
-            // each sibling here would defeat the changed writer's metadata pruning.
-            return std::fs::read_dir(self.path(relative)?)?
-                .map(|entry| Ok(entry?.file_name().as_bytes().to_vec()))
-                .collect();
+            return std::fs::read_dir(self.path(relative)?)?.map(|entry| Ok(entry?.file_name().as_bytes().to_vec())).collect();
         }
         let rel = std::str::from_utf8(relative).context("a layr path is not UTF-8")?;
         let mut names = std::collections::BTreeSet::new();
-        #[cfg(target_os = "macos")]
-        let folders: Vec<PathBuf> = self.0.layers.iter().map(|l| l.root.join(rel)).collect();
-        #[cfg(not(target_os = "macos"))]
-        let folders = self.0.folder().map(|p| vec![p.join(rel)]).unwrap_or_default();
-        #[cfg(target_os = "macos")]
-        let objects = self.0.object_base.as_deref();
-        #[cfg(not(target_os = "macos"))]
-        let objects = crate::fsutil::Src::objects(self.0);
-        if let Some(objects) = objects {
+        if let Some(objects) = self.0.objects() {
             objects.walk(rel, &mut |path, _| {
-                let child = path.rsplit('/').next().unwrap();
-                #[cfg(target_os = "macos")]
-                let present = self.0.entry(path)?.is_some();
-                #[cfg(not(target_os = "macos"))]
-                let present = objects.entry(path)?.is_some();
-                if present { names.insert(child.as_bytes().to_vec()); }
+                if let Some(child) = path.rsplit('/').next() {
+                    names.insert(child.as_bytes().to_vec());
+                }
                 Ok(false)
             })?;
-        }
-        for folder in folders {
-            match std::fs::symlink_metadata(&folder) {
-                Ok(m) if m.is_dir() => {}
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => continue,
-                Err(e) => return Err(e.into()),
-            }
-            for entry in std::fs::read_dir(folder)? {
-                let name = entry?.file_name().as_bytes().to_vec();
-                let child = if relative.is_empty() { name.clone() } else { [relative, b"/", &name].concat() };
-                match std::fs::symlink_metadata(self.path(&child)?) {
-                    Ok(_) => {
-                        names.insert(name);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
         }
         Ok(names.into_iter().collect())
     }
@@ -425,7 +415,9 @@ fn changed_write_base(
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     let changes = match crate::changes::candidates(parent, source) {
         Err(error)
-            if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())) =>
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())) =>
         {
             return Ok(None);
         }
@@ -519,12 +511,18 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     for entry in std::fs::read_dir(&dir)? {
         let id = entry?.file_name().to_string_lossy().into_owned();
         let Some(state) = repo.p.db.state(&id)? else { continue };
-        if keep.contains(&id) || state.kind.auxiliary() { continue; }
-        if verified(&repo.p, &id)?.is_none() { continue; }
+        if keep.contains(&id) || state.kind.auxiliary() {
+            continue;
+        }
+        if verified(&repo.p, &id)?.is_none() {
+            continue;
+        }
         ids.push(id);
     }
     let gone = crate::retention::drop_trees(repo, &ids)?;
-    for id in gone { std::fs::remove_file(dir.join(id))?; }
+    for id in gone {
+        std::fs::remove_file(dir.join(id))?;
+    }
     Ok(())
 }
 

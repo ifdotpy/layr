@@ -12,7 +12,7 @@ use crate::ctx::Ctx;
 use crate::errors::{error, Kind as ErrorKind};
 use crate::fsutil::{self, Meta};
 use crate::ids;
-use crate::model::{Line, LineChange, Record, StateKind, StateRec};
+use crate::model::{Line, LineChange, StateKind, StateRec};
 use crate::repo::{skip_path, Repo, Status};
 use crate::store::Project;
 use crate::thin::{self, Layered};
@@ -324,7 +324,7 @@ fn candidates(t: &Trees, v: &View, rules: &crate::ignore_rules::Rules) -> Result
     })?;
     let lower = Layered::complete(&v.lower);
     let mut removed: BTreeSet<String> = thin::removed_of(&t.upper)?;
-    for l in &head.layers[..head.layers.len() - 1] {
+    for l in &head.layers()[..head.layers().len() - 1] {
         fsutil::walk(l.root.as_path(), "", &mut |rel, _| {
             set.insert(rel.to_string());
             Ok(true)
@@ -683,7 +683,7 @@ mod tests {
         crate::sys::apfs_attribute(&upper.join("added"), c"com.apple.quarantine", Some(b"0086;00000000;OtherAgent;"))?;
         let real_changes = file_changes(&trees, &view)?;
         assert_eq!(real_changes.len(), 1);
-        assert_eq!(real_changes[0].path, "added");
+        assert_eq!(real_changes[0].path(), "added");
         drop(trees);
         std::fs::remove_dir_all(tmp)?;
         Ok(())

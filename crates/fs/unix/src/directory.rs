@@ -34,6 +34,19 @@ impl DirectoryTree {
     pub fn root_file(&self) -> &File {
         &self.root
     }
+    /// Pin an entry for metadata APIs, including the symlink itself on macOS.
+    pub fn open_metadata(&self, path: &RelDir) -> Result<File> {
+        let RelDir::Path(path) = path else { return Ok(self.root.try_clone()?) };
+        let (parent, name) = self.parent(path)?;
+        Self::metadata_at(&parent, name)
+    }
+    fn metadata_at(parent: &File, name: &OsStr) -> Result<File> {
+        #[cfg(target_os = "macos")]
+        let flags = OFlags::RDONLY | OFlags::SYMLINK | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        #[cfg(not(target_os = "macos"))]
+        let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        Ok(File::from(sys(fs::openat(&parent, name, flags, Mode::empty()))?))
+    }
     pub fn open_directory(&self, dir: &RelDir) -> Result<File> {
         self.directory(dir.as_bytes())
     }
@@ -81,6 +94,9 @@ impl DirectoryTree {
             .map_err(|_| FsError::Invalid("invalid temporary name"))
     }
     fn apply_symlink(parent: &File, name: &OsStr, attributes: &EntryAttributes) -> Result<()> {
+        if attributes.acl.is_some() {
+            return Err(FsError::Invalid("native ACL needs a platform writer"));
+        }
         set_symlink_xattrs(parent, name, &attributes.xattrs)?;
         sys(fs::chownat(
             parent,
@@ -101,6 +117,9 @@ impl DirectoryTree {
         ))
     }
     fn apply(file: &File, attributes: &EntryAttributes) -> Result<()> {
+        if attributes.acl.is_some() {
+            return Err(FsError::Invalid("native ACL needs a platform writer"));
+        }
         let meta = file.metadata()?;
         if meta.uid() != attributes.uid || meta.gid() != attributes.gid {
             sys(fs::fchown(
@@ -260,6 +279,29 @@ fn set_symlink_xattrs(parent: &File, name: &OsStr, attrs: &[(Vec<u8>, Vec<u8>)])
 }
 
 impl TreeRead for DirectoryTree {
+    fn link_domain(&self) -> Option<&LinkDomain> {
+        static DOMAIN: std::sync::OnceLock<LinkDomain> = std::sync::OnceLock::new();
+        Some(DOMAIN.get_or_init(LinkDomain::default))
+    }
+    fn kind(&self, path: &RelDir) -> Result<Option<FType>> {
+        let stat = match path {
+            RelDir::Root => sys(fs::fstat(&self.root))?,
+            RelDir::Path(path) => {
+                let (parent, name) = self.parent(path)?;
+                match fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => stat,
+                    Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(None),
+                    Err(error) => return Err(FsError::Io(error.into())),
+                }
+            }
+        };
+        Ok(Some(match fs::FileType::from_raw_mode(stat.st_mode) {
+            fs::FileType::Directory => FType::Dir,
+            fs::FileType::RegularFile => FType::File,
+            fs::FileType::Symlink => FType::Symlink,
+            _ => FType::Special,
+        }))
+    }
     fn metadata(&self, path: &RelDir) -> Result<Option<EntryMetadata>> {
         let (stat, file) = match path {
             RelDir::Root => (sys(fs::fstat(&self.root))?, Some(self.root.try_clone()?)),
@@ -296,6 +338,7 @@ impl TreeRead for DirectoryTree {
             .ok_or(FsError::Invalid("timestamp out of range"))?;
         let size = u64::try_from(stat.st_size).map_err(|_| FsError::Invalid("negative entry size"))?;
         let attributes = EntryAttributes {
+            acl: None,
             mode: u32::from(stat.st_mode) & 0o7777,
             uid: stat.st_uid,
             gid: stat.st_gid,
@@ -348,13 +391,21 @@ impl TreeRead for DirectoryTree {
         Ok(sys(fs::readlinkat(&parent, name, Vec::new()))?.into_bytes())
     }
 }
-impl TreeWrite for DirectoryTree {
-    fn put(&self, path: &RelPath, data: EntryData<'_>, attributes: &EntryAttributes) -> Result<()> {
+impl DirectoryTree {
+    pub fn put_with_metadata(
+        &self,
+        path: &RelPath,
+        data: EntryData<'_>,
+        attributes: &EntryAttributes,
+        apply: &dyn Fn(&File) -> Result<()>,
+    ) -> Result<()> {
         let (parent, name) = self.parent(path)?;
         match data {
             EntryData::Directory => {
                 sys(fs::mkdirat(&parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR))?;
-                return Self::apply(&self.open_entry(path, OFlags::RDONLY)?, attributes);
+                let directory = self.open_entry(path, OFlags::RDONLY)?;
+                Self::apply(&directory, attributes)?;
+                return apply(&directory);
             }
             EntryData::Symlink(target) => {
                 let temporary = loop {
@@ -366,7 +417,9 @@ impl TreeWrite for DirectoryTree {
                     }
                 };
                 let result = (|| {
-                    Self::apply_symlink(&parent, OsStr::from_bytes(temporary.to_bytes()), attributes)?;
+                    let temporary_name = OsStr::from_bytes(temporary.to_bytes());
+                    Self::apply_symlink(&parent, temporary_name, attributes)?;
+                    apply(&Self::metadata_at(&parent, temporary_name)?)?;
                     sys(fs::renameat(&parent, temporary.as_c_str(), &parent, name))
                 })();
                 if result.is_err() {
@@ -401,6 +454,7 @@ impl TreeWrite for DirectoryTree {
                     let mut output = &temporary.1;
                     std::io::copy(reader, &mut output)?;
                     Self::apply(&temporary.1, attributes)?;
+                    apply(&temporary.1)?;
                     sys(fs::renameat(&parent, temporary.0.as_c_str(), &parent, name))
                 })();
                 if result.is_err() {
@@ -409,6 +463,36 @@ impl TreeWrite for DirectoryTree {
                 return result;
             }
         }
+    }
+    pub fn set_metadata_with(
+        &self,
+        path: &RelDir,
+        attributes: &EntryAttributes,
+        apply: &dyn Fn(&File) -> Result<()>,
+    ) -> Result<()> {
+        match path {
+            RelDir::Root => {
+                Self::apply(&self.root, attributes)?;
+                apply(&self.root)
+            }
+            RelDir::Path(path) => {
+                let metadata = self.metadata(&RelDir::Path(path.clone()))?.ok_or(FsError::Invalid("entry absent"))?;
+                if metadata.kind == FType::Symlink {
+                    let (parent, name) = self.parent(path)?;
+                    Self::apply_symlink(&parent, name, attributes)?;
+                    apply(&Self::metadata_at(&parent, name)?)
+                } else {
+                    let file = self.open_entry(path, OFlags::RDONLY)?;
+                    Self::apply(&file, attributes)?;
+                    apply(&file)
+                }
+            }
+        }
+    }
+}
+impl TreeWrite for DirectoryTree {
+    fn put(&self, path: &RelPath, data: EntryData<'_>, attributes: &EntryAttributes) -> Result<()> {
+        self.put_with_metadata(path, data, attributes, &|_| Ok(()))
     }
     fn rename_new(&self, source: &RelPath, destination: &RelPath) -> Result<()> {
         let (from, source) = self.parent(source)?;
@@ -455,18 +539,7 @@ impl TreeWrite for DirectoryTree {
         set_time(&file, modified_ns)
     }
     fn set_metadata(&self, path: &RelDir, attributes: &EntryAttributes) -> Result<()> {
-        match path {
-            RelDir::Root => Self::apply(&self.root, attributes),
-            RelDir::Path(path) => {
-                let metadata = self.metadata(&RelDir::Path(path.clone()))?.ok_or(FsError::Invalid("entry absent"))?;
-                if metadata.kind == FType::Symlink {
-                    let (parent, name) = self.parent(path)?;
-                    Self::apply_symlink(&parent, name, attributes)
-                } else {
-                    Self::apply(&self.open_entry(path, OFlags::RDONLY)?, attributes)
-                }
-            }
-        }
+        self.set_metadata_with(path, attributes, &|_| Ok(()))
     }
 }
 

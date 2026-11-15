@@ -735,7 +735,7 @@ fn mark_read(dir: &std::path::Path) -> Result<()> {
 pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
     #[cfg(target_os = "macos")]
     let roots: Vec<std::path::PathBuf> =
-        crate::thin::Layered::of_state(&repo.p, id)?.layers.into_iter().map(|layer| layer.root).collect();
+        crate::thin::Layered::of_state(&repo.p, id)?.layers().iter().map(|layer| layer.root.clone()).collect();
     #[cfg(not(target_os = "macos"))]
     let roots = vec![repo.p.state_path(id)];
     for root in roots {

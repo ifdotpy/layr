@@ -125,8 +125,8 @@ impl Src for crate::thin::Layered {
         Some(self)
     }
     fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
-        if self.layers.is_empty() {
-            self.object_base.as_deref()
+        if self.layers().is_empty() {
+            self.object_base().map(|base| base.as_ref())
         } else {
             None
         }
@@ -403,27 +403,35 @@ pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
 /// stores exactly that name. On a volume that ignores case, `readme` also finds `README`;
 /// for Layr these are two paths.
 pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
-    let m = fs::symlink_metadata(path).ok()?;
+    exact_metadata_checked(path, rel).ok().flatten()
+}
+/// Reader adapters must preserve IO failure rather than interpreting it as an absent name.
+pub(crate) fn exact_metadata_checked(path: &Path, rel: &str) -> std::io::Result<Option<fs::Metadata>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
     #[cfg(target_os = "macos")]
-    if !rel.is_empty() && !crate::sys::case_sensitive_dev(m.dev(), path) && !stored_exactly(path, rel, &m) {
-        return None;
+    if !rel.is_empty() && !crate::sys::case_sensitive_dev(metadata.dev(), path) && !stored_exactly(path, rel, &metadata)? {
+        return Ok(None);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = rel;
-    Some(m)
+    Ok(Some(metadata))
 }
 
 /// True when the listing of folder `dir` has exactly `name`. The last listing is kept per
 /// thread while the folder stays the same: status checks each hard-linked file of a folder.
 #[cfg(target_os = "macos")]
-fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> std::io::Result<bool> {
     use std::cell::RefCell;
     use std::collections::HashSet;
     type Listing = (PathBuf, (u64, u64, i64, i64), HashSet<std::ffi::OsString>);
     thread_local!(static LAST: RefCell<Option<Listing>> = const { RefCell::new(None) });
-    let Ok(m) = fs::symlink_metadata(dir) else {
-        return false;
-    };
+    let m = fs::symlink_metadata(dir)?;
     // A new, removed or renamed entry changes the ctime of the folder; tools can set its mtime
     // back, but not its ctime.
     let key = (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
@@ -431,47 +439,41 @@ fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
         if !last.as_ref().is_some_and(|(d, k, _)| d == dir && *k == key) {
             *last = None;
             // A listing with an error is not kept.
-            let names = fs::read_dir(dir).and_then(|rd| rd.map(|e| e.map(|e| e.file_name())).collect::<std::io::Result<_>>());
-            let Ok(names) = names else {
-                return false;
-            };
+            let names = fs::read_dir(dir)?.map(|entry| entry.map(|entry| entry.file_name())).collect::<std::io::Result<_>>()?;
             *last = Some((dir.to_path_buf(), key, names));
         }
-        last.as_ref().is_some_and(|(_, _, names)| names.contains(name))
+        Ok(last.as_ref().is_some_and(|(_, _, names)| names.contains(name)))
     })
 }
 
 /// True when the volume stores the last `rel` components of `path` with exactly these names.
 #[cfg(target_os = "macos")]
-fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
-    // The kernel names a file with several links by one of them, maybe another one: check the
-    // name in the listing of its folder, and the folder by its own stored path.
-    if !m.is_dir() && m.nlink() > 1 {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return false;
+fn stored_exactly(path: &Path, rel: &str, metadata: &fs::Metadata) -> std::io::Result<bool> {
+    // A hard link may be named by another alias in the kernel's full-path result.
+    if !metadata.is_dir() && metadata.nlink() > 1 {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return Ok(false) };
+        if !listed(parent, name)? {
+            return Ok(false);
+        }
+        return match rel.rsplit_once('/') {
+            Some((dir, _)) => stored_exactly(parent, dir, &fs::symlink_metadata(parent)?),
+            None => Ok(true),
         };
-        return listed(parent, name)
-            && rel.rsplit_once('/').is_none_or(|(dir, _)| {
-                stored_exactly(parent, dir, &fs::symlink_metadata(parent).ok().unwrap_or_else(|| m.clone()))
-            });
     }
-    match crate::sys::stored_path(path) {
-        Some(stored) => {
-            let stored = stored.to_string_lossy();
-            stored.ends_with(&format!("/{rel}")) || *stored == *rel
-        }
-        // Without the full path: compare each name.
-        None => {
-            let mut at = path.to_path_buf();
-            for part in rel.rsplit('/') {
-                if crate::sys::stored_name(&at).is_none_or(|n| n != part) {
-                    return false;
-                }
-                at.pop();
-            }
-            true
-        }
+    if let Some(stored) = crate::sys::stored_path(path) {
+        let stored = stored.to_string_lossy();
+        return Ok(stored.ends_with(&format!("/{rel}")) || *stored == *rel);
     }
+    // A failed full-path query is not absence. Fall back to fallible directory listings.
+    let mut at = path.to_path_buf();
+    for part in rel.rsplit('/') {
+        let Some(parent) = at.parent() else { return Ok(false) };
+        if !listed(parent, std::ffi::OsStr::new(part))? {
+            return Ok(false);
+        }
+        at.pop();
+    }
+    Ok(true)
 }
 
 pub fn read_link_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {

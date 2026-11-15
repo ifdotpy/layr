@@ -1,5 +1,7 @@
 //! Shared full-copy and full-enumeration fallbacks. No filesystem identity decisions.
 #![forbid(unsafe_code)]
+mod layered;
+pub use layered::{LayeredTree, ReadLayer};
 use layr_fs_core::{
     evidence::{DataEvidence, EntryChange, FType, Meta},
     *,
@@ -32,6 +34,7 @@ pub fn copy_tree(source: &dyn TreeRead, target: &dyn TreeWrite) -> Result<()> {
             match meta.kind {
                 FType::Dir => {
                     let mut temporary = meta.attributes.clone();
+                    temporary.acl = None;
                     temporary.mode |= 0o700;
                     target.put(&path, EntryData::Directory, &temporary)?;
                     folder(source, target, &at, links)?;

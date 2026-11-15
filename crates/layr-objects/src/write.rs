@@ -45,6 +45,7 @@ pub trait Source: Sync {
             size: meta.len(),
             link: meta.is_file().then_some(LinkIdentity { device: meta.dev(), inode: meta.ino(), count: meta.nlink() }),
             attributes: EntryAttributes {
+                acl: None,
                 mode: meta.mode() & MODE_BITS,
                 uid: meta.uid(),
                 gid: meta.gid(),
@@ -85,6 +86,9 @@ impl Source for ReaderSource<'_> {
     }
     fn metadata(&self, relative: &[u8]) -> Result<EntryMetadata> {
         let mut metadata = self.0.metadata(&RelDir::from_bytes(relative)?)?.context("reader entry disappeared")?;
+        if metadata.attributes.acl.is_some() {
+            bail!("object format cannot preserve native ACLs");
+        }
         for (name, _) in &metadata.attributes.xattrs {
             if matches!(name.as_slice(), b"system.posix_acl_access" | b"system.posix_acl_default" | b"security.capability") {
                 bail!("object format cannot preserve ACL or capability attributes");

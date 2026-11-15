@@ -100,6 +100,7 @@ impl WriteSrc<'_> {
                     size: old.size,
                     link: None,
                     attributes: EntryAttributes {
+                        acl: None,
                         mode: old.mode,
                         uid: metadata.uid(),
                         gid: metadata.gid(),
@@ -233,6 +234,7 @@ impl WriteSrc<'_> {
 
 fn fresh_attributes(mode: u32, modified_ns: i64) -> EntryAttributes {
     EntryAttributes {
+        acl: None,
         mode,
         modified_ns,
         stored_time: Some(modified_ns),

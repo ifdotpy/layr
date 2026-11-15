@@ -89,9 +89,9 @@ pub fn snap(p: &Path) -> Snap {
 /// True when both sources describe the same immutable tree and times.
 #[cfg(target_os = "macos")]
 pub fn same_tree(a: &Snap, b: &Snap) -> bool {
-    a.layers.len() == b.layers.len()
-        && a.layers.iter().zip(&b.layers).all(|(a, b)| a.root == b.root && a.removed == b.removed)
-        && match (&a.object_base, &b.object_base) {
+    a.layers().len() == b.layers().len()
+        && a.layers().iter().zip(b.layers()).all(|(a, b)| a.root == b.root && a.removed == b.removed)
+        && match (a.object_base(), b.object_base()) {
             (None, None) => true,
             (Some(a), Some(b)) => a.store.root() == b.store.root() && a.refs.tree == b.refs.tree && a.refs.times == b.refs.times,
             _ => false,
@@ -682,7 +682,7 @@ impl<'a> Repo<'a> {
             if src.is_complete() {
                 return btrfs::snapshot(src.bottom(), dst, readonly);
             }
-            let parent = if src.object_base.is_some() { None } else { Some(btrfs::subvol_info(src.top())?.uuid) };
+            let parent = if src.object_base().is_some() { None } else { Some(btrfs::subvol_info(src.top())?.uuid) };
             src.materialize(dst, readonly)?;
             let marked = (|| -> Result<()> {
                 let info =

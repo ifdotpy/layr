@@ -17,6 +17,7 @@ pub struct ObjectTree {
     trees: Mutex<HashMap<Id, Arc<layr_objects::tree::Tree>>>,
     times: Mutex<HashMap<Id, Arc<layr_objects::times::Times>>>,
     links: BTreeMap<String, (String, u64, u64)>,
+    link_domain: layr_fs_core::LinkDomain,
     #[cfg(test)]
     pub(crate) link_comparisons: std::sync::atomic::AtomicUsize,
 }
@@ -63,6 +64,7 @@ impl ObjectTree {
             refs,
             cache,
             links,
+            link_domain: layr_fs_core::LinkDomain::default(),
             #[cfg(test)]
             link_comparisons: Default::default(),
             materialized: Mutex::new(BTreeMap::new()),
@@ -172,6 +174,7 @@ impl ObjectTree {
         }
         Ok(())
     }
+    #[cfg(any(target_os = "linux", test))]
     pub fn entries(&self, rel: &str) -> Result<BTreeMap<String, Meta>> {
         let mut out = BTreeMap::new();
         self.walk(rel, &mut |p, m| {
@@ -492,6 +495,44 @@ mod tests {
     }
 
     #[test]
+    fn core_reader_encoding_keeps_state_ids_without_exporting_object_entries() -> Result<()> {
+        let (tmp, tree) = fixture()?;
+        let copied = Store::open(&tmp.join("copy-core"), layr_objects::Keying::Plain)?;
+        let report = layr_objects::write::write_tree_from(
+            &copied,
+            &layr_objects::write::ReaderSource(tree.as_ref()),
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        assert_eq!(report.tree, Some(tree.refs.tree));
+        assert_eq!(report.times, Some(tree.refs.times));
+        assert!(tree.materialized.lock().unwrap().is_empty());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+    #[test]
+    fn core_reader_verifies_hot_blob_identity_before_returning_content() -> Result<()> {
+        let (tmp, tree) = fixture()?;
+        let entry = tree.entry("file")?.unwrap();
+        let Node::File { blob, size } = entry.entry.node else { panic!("fixture file missing") };
+        let hot = tree.store.hot_path(&blob).unwrap();
+        std::fs::write(hot, vec![b'x'; size as usize])?;
+        let error = match layr_fs_core::TreeRead::open_file(tree.as_ref(), &layr_fs_core::RelPath::new(b"file")?) {
+            Ok(_) => anyhow::bail!("corrupt hot blob was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("does not match its id"));
+        assert!(tree.materialized.lock().unwrap().is_empty());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+    #[test]
     fn writing_an_object_source_keeps_tree_times_and_link_groups() -> Result<()> {
         let (tmp, tree) = fixture()?;
         #[cfg(target_os = "macos")]
@@ -511,6 +552,8 @@ mod tests {
         )?;
         assert_eq!(report.tree, Some(tree.refs.tree));
         assert_eq!(report.times, Some(tree.refs.times));
+        #[cfg(target_os = "macos")]
+        assert!(tree.materialized.lock().unwrap().is_empty());
         drop(source);
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
@@ -539,5 +582,58 @@ mod tests {
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
         Ok(())
+    }
+}
+
+impl layr_fs_core::TreeRead for ObjectTree {
+    fn link_domain(&self) -> Option<&layr_fs_core::LinkDomain> {
+        Some(&self.link_domain)
+    }
+    fn metadata(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
+        use layr_fs_core::*;
+        let rel = std::str::from_utf8(path.as_bytes()).map_err(|_| FsError::Invalid("object adapter requires UTF-8"))?;
+        let Some(entry) = self.entry(rel).map_err(FsError::backend)? else { return Ok(None) };
+        let meta = entry.meta();
+        Ok(Some(EntryMetadata {
+            kind: meta.ftype,
+            size: meta.size,
+            link: self.links.get(rel).map(|(_, inode, count)| LinkIdentity { device: u64::MAX, inode: *inode, count: *count }),
+            attributes: EntryAttributes {
+                mode: meta.mode,
+                uid: rustix::process::geteuid().as_raw(),
+                gid: rustix::process::getegid().as_raw(),
+                modified_ns: entry.ns,
+                stored_time: Some(entry.ns),
+                xattrs: entry.entry.xattrs,
+                acl: None,
+            },
+        }))
+    }
+    fn entries(
+        &self,
+        dir: &layr_fs_core::RelDir,
+        visit: &mut dyn FnMut(&layr_fs_core::RelPath) -> layr_fs_core::Result<()>,
+    ) -> layr_fs_core::Result<()> {
+        use layr_fs_core::*;
+        let rel = std::str::from_utf8(dir.as_bytes()).map_err(|_| FsError::Invalid("object adapter requires UTF-8"))?;
+        let entry = self.entry(rel).map_err(FsError::backend)?.ok_or(FsError::Invalid("object folder absent"))?;
+        let Node::Dir { tree } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a directory")) };
+        for entry in &self.tree(&tree).map_err(FsError::backend)?.entries {
+            visit(&RelPath::new(entry.name.clone())?)?;
+        }
+        Ok(())
+    }
+    fn open_file(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Box<dyn layr_fs_core::ReadSeek + '_>> {
+        use layr_fs_core::*;
+        let rel = path.utf8()?;
+        let entry = self.entry(rel).map_err(FsError::backend)?.ok_or(FsError::Invalid("object file absent"))?;
+        let Node::File { blob, size } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a file")) };
+        Ok(Box::new(std::io::Cursor::new(self.file_bytes(&blob, size).map_err(FsError::backend)?)))
+    }
+    fn read_link(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Vec<u8>> {
+        use layr_fs_core::*;
+        let entry = self.entry(path.utf8()?).map_err(FsError::backend)?.ok_or(FsError::Invalid("object link absent"))?;
+        let Node::Symlink { target } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a link")) };
+        Ok(target)
     }
 }
