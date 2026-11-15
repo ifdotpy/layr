@@ -209,8 +209,14 @@ struct Running<'s, 'i> {
     r: StateRef,
     i: super::objects::Imported,
     cold: bool,
-    pin: crate::free::Pin,
-    handle: std::thread::ScopedJoinHandle<'s, Verified>,
+    check: Check<'s>,
+}
+
+/// How a state is being verified: a full checkout and comparison on a scoped thread, or the Git tree walk
+/// (`gitbridge::GitVerifier`) that already showed it equal, with its seconds.
+enum Check<'s> {
+    Copy { pin: crate::free::Pin, handle: std::thread::ScopedJoinHandle<'s, Verified> },
+    Git { seconds: f64 },
 }
 
 /// How many verifications `layr migrate` runs at once: `LAYR_MIGRATE_VERIFY_JOBS`, else a quarter
@@ -479,13 +485,19 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut running = std::collections::VecDeque::new();
         // Journal the oldest running verification: the table, the counters, the progress line.
         let mut finish = |running: &mut std::collections::VecDeque<Running<'_, '_>>| -> Result<()> {
-            let Some(Running { n, id, r, i, cold, pin, handle }) = running.pop_front() else { return Ok(()) };
-            let verified = handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("verify state {}: the verification thread panicked", ids::short(id)))?;
-            drop(pin);
-            let (_, cmp, checkout_s, compare_s) = verified.with_context(|| format!("verify state {}", ids::short(id)))?;
-            let differences = counted_differences(repo, id, &cmp.differences);
+            let Some(Running { n, id, r, i, cold, check }) = running.pop_front() else { return Ok(()) };
+            let (differences, how) = match check {
+                Check::Copy { pin, handle } => {
+                    let verified = handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("verify state {}: the verification thread panicked", ids::short(id)))?;
+                    drop(pin);
+                    let (_, cmp, checkout_s, compare_s) = verified.with_context(|| format!("verify state {}", ids::short(id)))?;
+                    let differences: Vec<String> = counted_differences(repo, id, &cmp.differences).into_iter().cloned().collect();
+                    (differences, format!("checkout {checkout_s:.2} s, compare {compare_s:.2} s"))
+                }
+                Check::Git { seconds } => (Vec::new(), format!("equal to its Git commit in {seconds:.2} s")),
+            };
             if !differences.is_empty() {
                 outln!(ctx, "state {}: the checkout of tree {} differs from the snapshot:", ids::short(id), r.tree);
                 for d in differences.iter().take(20) {
@@ -507,15 +519,14 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             bytes += i.report.bytes;
             outln!(
                 ctx,
-                "{}/{} state {} {}: {} files, import {:.2} s, checkout {:.2} s, compare {:.2} s",
+                "{}/{} state {} {}: {} files, import {:.2} s, {}",
                 n + 1,
                 total,
                 ids::short(id),
                 if cold { "cold" } else { "hot" },
                 i.report.files,
                 i.seconds,
-                checkout_s,
-                compare_s
+                how
             );
             pending.push(id.clone());
             if stop_after == Some(n + 1) {
@@ -529,8 +540,18 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             Ok(())
         };
+        // A state that `build_tree` builds from Git has no snapshot of its own: its tree is compared with the Git
+        // commit it comes from (L10). `LAYR_MIGRATE_VERIFY_GIT=0` checks every state out instead.
+        let mut git = match ctx.env("LAYR_MIGRATE_VERIFY_GIT") {
+            Some("0") => None,
+            _ if repo.p.git_dir().join("objects").is_dir() => Some(crate::gitbridge::GitVerifier::new(repo)?),
+            _ => None,
+        };
         for (n, id) in p.todo.iter().enumerate() {
-            let parent = repo.state(id)?.parents.first().cloned();
+            let rec = repo.state(id)?;
+            let parent = rec.parents.first().cloned();
+            let from_git =
+                git.is_some() && rec.kind == StateKind::Import && !repo.p.has_state(id) && crate::gitbridge::buildable(repo, id);
             // An incremental import reads the paths that changed since the first parent; it needs
             // the parent's snapshot. Without it every path is read (the result is the same tree).
             let full = parent.as_ref().is_none_or(|p| !repo.p.has_state(p) || store.state_ref(p).ok().flatten().is_none());
@@ -541,11 +562,23 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             while running.len() >= jobs || (!running.is_empty() && low_disk(ctx, &work)) {
                 finish(&mut running)?;
             }
-            let (job, pin) =
-                super::objects::prepare_verify(&h, id, &r).with_context(|| format!("verify state {}", ids::short(id)))?;
-            let store = &store;
-            let handle = scope.spawn(move || super::objects::run_verify(store, &job));
-            running.push_back(Running { n, id, r, i, cold, pin, handle });
+            let walked = Instant::now();
+            let base = parent.as_ref().and_then(|p| store.state_ref(p).ok().flatten());
+            let equal = match git.as_mut() {
+                Some(g) if from_git => {
+                    g.verify(repo, &store, id, &r, base.as_ref()).with_context(|| format!("verify state {}", ids::short(id)))?
+                }
+                _ => false,
+            };
+            let check = if equal {
+                Check::Git { seconds: walked.elapsed().as_secs_f64() }
+            } else {
+                let (job, pin) =
+                    super::objects::prepare_verify(&h, id, &r).with_context(|| format!("verify state {}", ids::short(id)))?;
+                let store = &store;
+                Check::Copy { pin, handle: scope.spawn(move || super::objects::run_verify(store, &job)) }
+            };
+            running.push_back(Running { n, id, r, i, cold, check });
             // A state imported from Git is read as a tree that Git builds; each stays until something frees it. A
             // long run over Git history would fill the disk with these trees: free them as the run goes, once no
             // verification still reads one.

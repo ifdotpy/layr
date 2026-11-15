@@ -1001,6 +1001,131 @@ fn stored_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// The fast verification of `layr migrate` for a state that `build_tree` builds from Git (docs/objects.md,
+/// section 13). The "snapshot" of such a state is itself made from the Git commit, so the v2 tree can be
+/// compared with the commit's tree directly instead of checking both out: names, kinds and the modes that
+/// `materialize` writes (0644, 0755, 0755 folders, empty folders for submodules), file bytes by their Git
+/// blob id, and link targets. A subtree pair (v2 tree, Git tree) that matched once is not walked again.
+/// Times follow the rule of `build_tree`: an entry that is the same as in the v2 state of the first parent
+/// keeps its time there; a changed entry has a new time. `verify` answers false when it cannot show the
+/// state equal (an unusual mode, an attribute, a hard link, a time that moved, no first parent); the caller
+/// then runs the full comparison, which decides.
+pub(crate) struct GitVerifier {
+    cat: CatFile,
+    pairs: std::collections::HashSet<(layr_objects::Id, String)>,
+    blobs: std::collections::HashMap<layr_objects::Id, String>,
+}
+
+impl GitVerifier {
+    pub(crate) fn new(repo: &Repo) -> Result<Self> {
+        Ok(Self { cat: CatFile::new(&store(repo))?, pairs: Default::default(), blobs: Default::default() })
+    }
+
+    pub(crate) fn verify(
+        &mut self,
+        repo: &Repo,
+        objects: &layr_objects::Store,
+        state: &str,
+        r: &layr_objects::StateRef,
+        parent: Option<&layr_objects::StateRef>,
+    ) -> Result<bool> {
+        let Some(parent) = parent else { return Ok(false) };
+        let Some(commit) = stored_commit(repo, state)? else { return Ok(false) };
+        let raw = self.cat.object(&commit, "commit")?;
+        let root = tree_id(&raw)?.to_string();
+        Ok(self.same_tree(objects, &r.tree, &root)? && times_follow(objects, &r.tree, &r.times, &parent.tree, &parent.times)?)
+    }
+
+    fn same_tree(&mut self, objects: &layr_objects::Store, tree: &layr_objects::Id, git: &str) -> Result<bool> {
+        use layr_objects::tree::Node;
+        if self.pairs.contains(&(*tree, git.to_string())) {
+            return Ok(true);
+        }
+        let v2 = objects.get_tree(tree)?;
+        let entries = parse_tree(&self.cat.object(git, "tree")?)?;
+        if !v2.links.is_empty() || v2.entries.len() != entries.len() {
+            return Ok(false);
+        }
+        for e in &v2.entries {
+            let Ok(name) = std::str::from_utf8(&e.name) else { return Ok(false) };
+            let Some(g) = entries.get(name) else { return Ok(false) };
+            if !e.xattrs.is_empty() {
+                return Ok(false);
+            }
+            let same = match (g.mode.as_str(), &e.node) {
+                ("100644", Node::File { blob, .. }) => e.mode == 0o644 && self.blob_id(objects, blob)? == g.oid,
+                ("100755", Node::File { blob, .. }) => e.mode == 0o755 && self.blob_id(objects, blob)? == g.oid,
+                ("120000", Node::Symlink { target }) => *target == self.cat.object(&g.oid, "blob")?,
+                ("40000", Node::Dir { tree }) => e.mode == 0o755 && self.same_tree(objects, tree, &g.oid)?,
+                ("160000", Node::Dir { tree }) => {
+                    let sub = objects.get_tree(tree)?;
+                    e.mode == 0o755 && sub.entries.is_empty() && sub.links.is_empty()
+                }
+                _ => false,
+            };
+            if !same {
+                return Ok(false);
+            }
+        }
+        self.pairs.insert((*tree, git.to_string()));
+        Ok(true)
+    }
+
+    fn blob_id(&mut self, objects: &layr_objects::Store, blob: &layr_objects::Id) -> Result<String> {
+        if let Some(id) = self.blobs.get(blob) {
+            return Ok(id.clone());
+        }
+        let id = fsutil::git_blob_id(&objects.read_blob(blob)?);
+        self.blobs.insert(*blob, id.clone());
+        Ok(id)
+    }
+}
+
+/// The times rule of `build_tree` (see `GitVerifier`): every entry of `tree` that equals the entry of the
+/// same name in `base_tree` (same node and mode) has the same time record in `times` as in `base_times`; a
+/// folder that changed is checked the same way inside. Changed and new entries may have any time.
+fn times_follow(
+    objects: &layr_objects::Store,
+    tree: &layr_objects::Id,
+    times: &layr_objects::Id,
+    base_tree: &layr_objects::Id,
+    base_times: &layr_objects::Id,
+) -> Result<bool> {
+    use layr_objects::times::Record;
+    use layr_objects::tree::Node;
+    if tree == base_tree && times == base_times {
+        return Ok(true);
+    }
+    let (t, b) = (objects.get_tree(tree)?, objects.get_tree(base_tree)?);
+    let (m, bm) = (objects.get_times(times)?, objects.get_times(base_times)?);
+    if m.records.len() != t.entries.len() || bm.records.len() != b.entries.len() {
+        return Ok(false);
+    }
+    let base: BTreeMap<&[u8], (&layr_objects::tree::Entry, Record)> =
+        b.entries.iter().zip(bm.records.iter().copied()).map(|(e, r)| (e.name.as_slice(), (e, r))).collect();
+    for (e, record) in t.entries.iter().zip(m.records.iter().copied()) {
+        let Some((be, base_record)) = base.get(e.name.as_slice()) else { continue };
+        let unchanged = be.node == e.node && be.mode == e.mode && be.xattrs == e.xattrs;
+        match (&e.node, &be.node, record, *base_record) {
+            (Node::Dir { tree }, Node::Dir { tree: bt }, Record::Folder(x), Record::Folder(y)) => {
+                if unchanged && x != y {
+                    return Ok(false);
+                }
+                if !unchanged && !times_follow(objects, tree, &x, bt, &y)? {
+                    return Ok(false);
+                }
+            }
+            _ if unchanged => {
+                if record != *base_record {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
 /// The states of `states` that `build_tree` can build (`buildable`), checked with one `git cat-file`
 /// process for all of them: one process per state took minutes on a long imported history.
 pub fn buildable_set(repo: &Repo, states: &[String]) -> Result<BTreeSet<String>> {
@@ -1766,7 +1891,9 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             // no empty commit, the state maps to its parent's commit (docs/overlays.md section 1a).
             let c = match (rec.parents.as_slice(), base.as_ref()) {
                 ([parent], Some((_, parent_commit)))
-                    if !rec.parts.is_empty() && repo.state(parent)?.parts != rec.parts && same_tree(&export.store, &c, parent_commit) =>
+                    if !rec.parts.is_empty()
+                        && repo.state(parent)?.parts != rec.parts
+                        && same_tree(&export.store, &c, parent_commit) =>
                 {
                     // The history ref of the state names the parent's commit too, so a later export
                     // (`history_commit`) gives the same commit as this one.
