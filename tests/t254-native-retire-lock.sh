@@ -118,6 +118,12 @@ finally:
             raise
 
 assert reader.returncode == 0, (root / 'reader.err').read_text()
+if sys.platform != 'darwin':
+    # Off macOS the head of a line keeps its native copy for the next incremental object write.
+    run('gc', '-q', cwd=work)
+    assert marker.exists(), 'gc keeps the native copy of the line head'
+    (work / 'file.txt').write_text('newer head\n')
+    run('save', '-qam', 'newer head', cwd=work)
 gc_output = run('gc', '-q', cwd=work)
 assert not marker.exists(), ('a later gc retires the queued native copy',
                              (root / 'reader.err').read_text(), gc_output)

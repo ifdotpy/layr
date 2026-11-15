@@ -471,6 +471,9 @@ On Linux, `Source` selects a native folder or an object tree.
 Object writes finish before record publication. The `meta/object-native/<state>` marker queues removal of each new native source copy.
 Command cleanup checks the committed record, reserves the tree against readers, and removes the native copy.
 A crash leaves the marker for the next command. A pin or native layer dependency postpones removal.
+On Linux the head of each line with a working folder on this machine also keeps its native copy:
+the next save of the line writes its objects incrementally from it (a Btrfs send stream or an
+OverlayFS comparison with the new snapshot). The copy goes once a newer state replaces the head.
 Native trees reconstructed for older consumers use the same queue.
 
 The local object store must contain the root tree and times table before a reader selects objects.

@@ -220,6 +220,11 @@ pub fn record_states(p: &Project, records: &mut [crate::model::Record]) -> Resul
         #[cfg(not(target_os = "macos"))]
         // Publication holds the project lock, so retirement cannot remove the parent.
         let incremental = native_write_base(p, &store, state.parents.first().map(String::as_str), &source)?;
+        // LAYR_TRACE names the kind of write (tests/t257-btrfs-incremental-write.sh reads it).
+        let _t = crate::trace::named(|| {
+            let kind = if incremental.is_some() { "incremental" } else { "full" };
+            format!("objects: {kind} write of {}", crate::ids::short(&state.id))
+        });
         let source = SnapshotSource(&source);
         let written = match incremental {
             Some((refs, paths)) => layr_objects::write::write_changed_from(
@@ -406,6 +411,7 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     let mut keep = keep;
     #[cfg(target_os = "macos")]
     keep.extend(crate::views::protected_states(&repo.p));
+    keep.extend(native_bases(repo)?);
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let id = entry?.file_name().to_string_lossy().into_owned();
@@ -417,6 +423,25 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     let gone = crate::cmd::admin::drop_trees(repo, &ids)?;
     for id in gone { std::fs::remove_file(dir.join(id))?; }
     Ok(())
+}
+
+/// The native copies that the next save needs off macOS: the head of each line with a working folder here.
+/// `native_write_base` writes the next state of the line incrementally from it, and without it the write
+/// reads and hashes the whole tree. The marker stays, so a later pass retires the copy once a newer state
+/// replaced the head (or the line went). An overlay reads its parts through objects and keeps none. macOS
+/// writes incrementally from the thin layer (`incremental_base`) and keeps none either.
+fn native_bases(repo: &Repo) -> Result<Vec<String>> {
+    if cfg!(target_os = "macos") || repo.p.is_overlay() {
+        return Ok(Vec::new());
+    }
+    Ok(repo
+        .p
+        .db
+        .lines()?
+        .into_iter()
+        .filter(|line| repo.p.line_folder(&line.id, &line.name).exists())
+        .map(|line| line.head)
+        .collect())
 }
 
 /// Drop from the object store of `p` what its kept states do not reach (`Store::prune`), under the project lock, so no
