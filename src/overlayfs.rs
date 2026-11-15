@@ -433,6 +433,7 @@ fn finish_cache_restore(state: &mut Locked, path: &Path, entry: &Entry) -> Resul
             &parent,
             std::ffi::OsStr::new(&temp_name),
             Some(entry.lower.as_bytes()),
+            || {},
         )?;
         // Replaces only an empty mountpoint. Never replace existing user data.
         rustix::fs::renameat(&parent, &temp_name, &parent, name)?;
@@ -454,12 +455,16 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
     Ok(state.registry.trees.get(&path).context("not an OverlayFS tree")?.info.clone())
 }
 pub fn create_subvolume(path: &Path) -> Result<()> {
+    OverlayFs::create_path(path)
+}
+fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -> Result<()> {
     let path = absolute(path)?;
     valid_path(&path)?;
     let mut state = lock(&path)?;
     if path.exists() {
         bail!("destination already exists");
     }
+    *publication = driver::Publication::Objects(state.home.clone());
     let id = state.new_object()?;
     fs::create_dir(state.object(&id).join("data"))?;
     let entry = Entry {
@@ -472,6 +477,7 @@ pub fn create_subvolume(path: &Path) -> Result<()> {
         plain: state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
     };
     fs::create_dir(&path)?;
+    *publication = driver::Publication::Tree(state.home.clone());
     state.registry.trees.insert(path.clone(), entry.clone());
     state.save()?;
     if let Err(e) = state.mount(&path, &entry) {
@@ -585,14 +591,15 @@ fn pinned_directory(path: &Path) -> Result<File> {
     }
     Ok(File::from(dir))
 }
-fn copy_cache(src: &Path, dst: &Path) -> Result<()> {
+fn copy_cache(src: &Path, dst: &Path, created: impl FnOnce()) -> Result<()> {
     let parent = pinned_directory(dst.parent().context("cache parent")?)?;
-    copy_cache_at(src, &parent, dst.file_name().context("cache name")?, None)
+    copy_cache_at(src, &parent, dst.file_name().context("cache name")?, None, created)
 }
-fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Option<&[u8]>) -> Result<()> {
+fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Option<&[u8]>, created: impl FnOnce()) -> Result<()> {
     use rustix::fs::{mkdirat, openat, Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     mkdirat(parent, name, Mode::from_raw_mode(0o700))?;
+    created();
     let root = File::from(openat(parent, name, flags, Mode::empty())?);
     let m = root.metadata()?;
     if m.uid() != 0 || m.mode() & 0o777 != 0o700 {
@@ -829,7 +836,7 @@ fn report_consistency(src: &Path, consistency: CaptureConsistency) {
     }
 }
 
-fn snapshot_native(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureConsistency> {
+fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut driver::Publication) -> Result<CaptureConsistency> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;
     valid_path(&dst)?;
@@ -868,9 +875,10 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureCons
                 }
             )
         });
+        *publication = driver::Publication::Objects(state.home.clone());
         (state.home.clone(), parent, nested, plain, Building::begin(&state.home)?)
     };
-    let copied = copy_snapshot(&home, &nested, &src, &dst, readonly, plain, &parent, &build);
+    let copied = copy_snapshot(&home, &nested, &src, &dst, readonly, plain, &parent, &build, publication);
     let (lower, bases, hard_links, consistency) = match copied {
         Ok(value) => value,
         Err(error) => {
@@ -912,6 +920,7 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureCons
     File::open(state.object(&entry.lower))?.sync_all()?;
     if !plain {
         fs::create_dir(&dst)?;
+        *publication = driver::Publication::Tree(home.clone());
     }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
@@ -935,6 +944,7 @@ fn copy_snapshot(
     plain: bool,
     parent: &Entry,
     build: &Building,
+    publication: &mut driver::Publication,
 ) -> Result<(String, Vec<String>, bool, CaptureConsistency)> {
     let (lower, bases, hard_links, consistency) = if parent.info.readonly {
         (parent.lower.clone(), parent.bases.clone(), parent.hard_links, CaptureConsistency::ValidatedCopy)
@@ -946,9 +956,9 @@ fn copy_snapshot(
         // A cache is an ordinary directory. Its saved copy remains private.
         if parent.plain {
             let data = if lower.is_empty() { build.dir.join("data") } else { object_path(home, &lower).join("data") };
-            copy_cache(&data, dst)?;
+            copy_cache(&data, dst, || *publication = driver::Publication::Tree(home.to_path_buf()))?;
         } else {
-            copy_cache(src, dst)?;
+            copy_cache(src, dst, || *publication = driver::Publication::Tree(home.to_path_buf()))?;
         }
         sync_tree(dst)?;
     } else if !readonly && hard_links {
@@ -1087,26 +1097,92 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
 pub fn delete_tree(path: &Path) -> Result<()> {
     OverlayFs::remove_path(path)
 }
+#[derive(Default)]
+enum RemovalStage {
+    #[default]
+    Trees,
+    Directory,
+    Collect,
+}
+enum RootIdentity {
+    Observe,
+    Absent,
+    Expected(u64, u64),
+}
+struct Removal {
+    path: PathBuf,
+    home: PathBuf,
+    identity: RootIdentity,
+    stage: RemovalStage,
+}
+impl Removal {
+    fn new(path: PathBuf, home: PathBuf) -> Self {
+        Self { path, home, identity: RootIdentity::Observe, stage: RemovalStage::Trees }
+    }
+    fn validate(&mut self) -> Result<()> {
+        if matches!(self.stage, RemovalStage::Collect) {
+            return Ok(());
+        }
+        match fs::symlink_metadata(&self.path) {
+            Ok(actual) => {
+                anyhow::ensure!(!matches!(self.identity, RootIdentity::Absent), "owned tree location changed");
+                if let RootIdentity::Expected(device, inode) = self.identity {
+                    anyhow::ensure!((actual.dev(), actual.ino()) == (device, inode), "owned tree location changed");
+                }
+                self.identity = RootIdentity::Expected(actual.dev(), actual.ino());
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.identity = RootIdentity::Absent;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn after_unmount(&mut self) -> Result<()> {
+        // A normal unmount reveals a different directory. Validate that remaining resource
+        // on subsequent attempts, rather than requiring the old mounted-tree identity.
+        self.identity = RootIdentity::Observe;
+        self.validate()
+    }
+    fn directory_removed(&mut self) {
+        self.stage = RemovalStage::Collect;
+    }
+    fn run(&mut self) -> Result<()> {
+        let mut state = lock_at(self.home.clone())?;
+        valid_path(&self.path)?;
+        self.validate()?;
+        if matches!(self.stage, RemovalStage::Trees) {
+            let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(&self.path)).cloned().collect();
+            paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+            for path in paths {
+                if mounted(&path)? {
+                    sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
+                    if path == self.path {
+                        self.after_unmount()?;
+                    }
+                }
+                state.registry.trees.remove(&path);
+                state.save()?;
+            }
+            self.stage = RemovalStage::Directory;
+        }
+        if matches!(self.stage, RemovalStage::Directory) {
+            match fs::symlink_metadata(&self.path) {
+                Ok(m) if m.is_dir() => fs::remove_dir_all(&self.path)?,
+                Ok(_) => fs::remove_file(&self.path)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            self.directory_removed();
+        }
+        state.collect()
+    }
+}
 fn delete_tree_native(path: &Path) -> Result<()> {
     let path = absolute(path)?;
-    let mut state = lock(&path)?;
-    valid_path(&path)?;
-    let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(&path)).cloned().collect();
-    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for p in paths {
-        if mounted(&p)? {
-            sys::overlay_unmount(&p).with_context(|| format!("unmount before removal {}", p.display()))?;
-        }
-        state.registry.trees.remove(&p);
-        state.save()?;
-    }
-    match fs::symlink_metadata(&path) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(&path)?,
-        Ok(_) => fs::remove_file(&path)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    state.collect()
+    let home = home_of(&path)?;
+    Removal::new(path, home).run()
 }
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     delete_tree(path)
@@ -1263,9 +1339,6 @@ struct CandidateLayers {
 
 fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
     let Ok(state) = lock(parent) else { return Ok(None) };
-    Ok(own_layers_in(&state, parent, child))
-}
-fn own_layers_in(state: &Locked, parent: &Path, child: &Path) -> Option<CandidateLayers> {
     let stack = |path: &Path| -> Option<Vec<(String, PathBuf)>> {
         let e = state.registry.trees.get(path).filter(|e| !e.plain && !e.hard_links)?;
         let mut layers = Vec::new();
@@ -1278,7 +1351,7 @@ fn own_layers_in(state: &Locked, parent: &Path, child: &Path) -> Option<Candidat
         Some(layers)
     };
     let (Some(a), Some(b)) = (stack(parent), stack(child)) else {
-        return None;
+        return Ok(None);
     };
     let (mut i, mut j) = (a.len(), b.len());
     while i > 0 && j > 0 && a[i - 1].0 == b[j - 1].0 {
@@ -1286,12 +1359,12 @@ fn own_layers_in(state: &Locked, parent: &Path, child: &Path) -> Option<Candidat
         j -= 1;
     }
     if i == a.len() {
-        return None;
+        return Ok(None);
     }
-    Some(CandidateLayers {
+    Ok(Some(CandidateLayers {
         dirs: a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect(),
         nested: state.registry.trees.keys().filter(|p| p.as_path() != parent && p.as_path() != child).cloned().collect(),
-    })
+    }))
 }
 // Every path a layer holds (files, folders, whiteouts), and whether the layer hides
 // the lower content of a folder (opaque or redirected).
@@ -1630,10 +1703,10 @@ mod tests {
         let fd = pinned_directory(&parent)?;
         fs::rename(&parent, &moved)?;
         std::os::unix::fs::symlink(&outside, &parent)?;
-        copy_cache_at(&src, &fd, std::ffi::OsStr::new("cache"), None)?;
+        copy_cache_at(&src, &fd, std::ffi::OsStr::new("cache"), None, || {})?;
         assert_eq!(fs::read(moved.join("cache/file"))?, b"cache");
         assert_eq!(fs::metadata(moved.join("cache/file"))?.ino(), fs::metadata(moved.join("cache/hard"))?.ino());
-        assert!(copy_cache(&src, &parent.join("escape")).is_err());
+        assert!(copy_cache(&src, &parent.join("escape"), || {}).is_err());
         assert_eq!(fs::read_dir(&outside)?.count(), 0);
         drop(fd);
         fs::remove_dir_all(root)?;

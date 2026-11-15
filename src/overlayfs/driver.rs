@@ -25,10 +25,16 @@ impl Registered {
         Ok(())
     }
 }
+pub(super) enum Publication {
+    Untouched,
+    Objects(PathBuf),
+    Tree(PathBuf),
+}
 enum Resource {
-    Published(PathBuf),
-    Readable(Registered),
-    Detached { path: PathBuf, identity: (u64, u64) },
+    Published { path: PathBuf, publication: Publication },
+    Borrowed(Registered),
+    Owned { tree: Registered, home: PathBuf },
+    Removing(Removal),
 }
 struct HintPair {
     base: PathBuf,
@@ -65,13 +71,13 @@ impl OverlayFs {
         backend(subvol_info(path))?;
         let registered = self.register(path)?;
         let tree = self.issuer.import_working(registered.directory.clone());
-        self.trees()?.insert(self.issuer.working_key(&tree)?, Resource::Readable(registered));
+        self.trees()?.insert(self.issuer.working_key(&tree)?, Resource::Borrowed(registered));
         Ok(tree)
     }
     fn frozen(&self, path: &Path) -> layr_fs_core::Result<FrozenTree> {
         let registered = self.register(path)?;
         let tree = self.issuer.import(registered.directory.clone());
-        self.trees()?.insert(self.issuer.frozen_key(&tree)?, Resource::Readable(registered));
+        self.trees()?.insert(self.issuer.frozen_key(&tree)?, Resource::Borrowed(registered));
         Ok(tree)
     }
     fn location(&self, path: &Path) -> layr_fs_core::Result<NewTreeLocation> {
@@ -106,25 +112,40 @@ impl OverlayFs {
     }
     fn path(&self, key: TreeKey) -> layr_fs_core::Result<PathBuf> {
         let trees = self.trees()?;
-        let Some(Resource::Readable(tree)) = trees.get(&key) else { return Err(FsError::Invalid("tree is not readable")) };
+        let tree = match trees.get(&key) {
+            Some(Resource::Borrowed(tree) | Resource::Owned { tree, .. }) => tree,
+            _ => return Err(FsError::Invalid("tree is not readable")),
+        };
         tree.validate()?;
         Ok(tree.path.clone())
     }
     fn create_with(
         &self,
         dst: NewTreeLocation,
-        create: impl FnOnce(&Path) -> Result<CaptureConsistency>,
+        create: impl FnOnce(&Path, &mut Publication) -> Result<CaptureConsistency>,
     ) -> layr_fs_core::Result<(CreatedTree, CaptureConsistency)> {
         let dst = self.destination(dst)?;
         // Reserve authority and the registry slot before the native operation can publish.
         let ownership = self.issuer.own();
         let key = self.issuer.owned_key(&ownership)?;
         let mut trees = self.trees()?;
-        let consistency = backend(create(&dst))?;
-        trees.insert(key.clone(), Resource::Published(dst.clone()));
+        let mut publication = Publication::Untouched;
+        let result = backend(create(&dst, &mut publication));
+        trees.insert(key.clone(), Resource::Published { path: dst.clone(), publication });
+        let consistency = match result {
+            Ok(consistency) => consistency,
+            Err(cause) => {
+                drop(trees);
+                return Err(self.rollback(ownership, cause));
+            }
+        };
         let result = self.register(&dst).and_then(|registered| {
             let tree = self.issuer.attach_working(&ownership, registered.directory.clone())?;
-            trees.insert(key, Resource::Readable(registered));
+            let Some(Resource::Published { publication: Publication::Tree(home), .. }) = trees.get(&key) else {
+                return Err(FsError::Invalid("native creation did not publish its tree"));
+            };
+            let home = home.clone();
+            trees.insert(key, Resource::Owned { tree: registered, home });
             Ok(tree)
         });
         drop(trees);
@@ -146,7 +167,7 @@ impl OverlayFs {
         readonly: bool,
     ) -> layr_fs_core::Result<(CreatedTree, CaptureConsistency)> {
         let src = self.path(self.issuer.working_key(source)?)?;
-        self.create_with(dst, |dst| snapshot_native(&src, dst, readonly))
+        self.create_with(dst, |dst, publication| snapshot_native(&src, dst, readonly, publication))
     }
     pub(super) fn snapshot_path(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureConsistency> {
         let driver = Arc::new(Self::default());
@@ -163,6 +184,16 @@ impl OverlayFs {
         })();
         result.map_err(|error| driver.error(error))
     }
+    pub(super) fn create_path(dst: &Path) -> Result<()> {
+        let driver = Arc::new(Self::default());
+        let result = driver.location(dst).and_then(|dst| {
+            driver.create_with(dst, |dst, publication| {
+                create_subvolume_native(dst, publication)?;
+                Ok(CaptureConsistency::UnsettledCopy)
+            })
+        });
+        result.map(|_| ()).map_err(|error| driver.error(error))
+    }
     pub(super) fn remove_path(path: &Path) -> Result<()> {
         // Ordinary cleanup includes files and missing paths; those convey no managed-tree token.
         if !is_subvolume(path) {
@@ -171,7 +202,7 @@ impl OverlayFs {
         let driver = Arc::new(Self::default());
         let registered = driver.register(path)?;
         let ownership = driver.issuer.own();
-        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, Resource::Readable(registered));
+        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, Resource::Owned { tree: registered, home: home_of(path)? });
         driver.remove(ownership).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
@@ -230,16 +261,13 @@ impl std::fmt::Display for Cleanup {
 impl std::error::Error for Cleanup {}
 impl Filesystem for OverlayFs {
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
-        let (created, _) = self.create_with(dst, |dst| {
-            create_subvolume(dst)?;
+        let (created, _) = self.create_with(dst, |dst, publication| {
+            create_subvolume_native(dst, publication)?;
             Ok(CaptureConsistency::UnsettledCopy)
         })?;
         if let Err(cause) = layr_fs_common::copy_tree(source, created.tree.writer()) {
             drop(created.tree);
-            return match self.remove(created.ownership) {
-                Ok(()) => Err(cause),
-                Err(failure) => Err(FsError::Cleanup { cause: Box::new(cause), failure: Box::new(failure) }),
-            };
+            return Err(self.rollback(created.ownership, cause));
         }
         Ok(created)
     }
@@ -253,7 +281,7 @@ impl Filesystem for OverlayFs {
         layr_fs_common::changes(self, before, after)
     }
     fn remove(&self, ownership: OwnedTree) -> std::result::Result<(), RemovalFailure> {
-        self.remove_with(ownership, delete_tree_native)
+        self.remove_with(ownership, Removal::run)
     }
     fn capabilities(&self, scope: &TreeScope) -> Capabilities<'_> {
         if self.issuer.scope_key(scope).ok().and_then(|key| self.trees().ok().map(|trees| trees.contains_key(&key))) != Some(true)
@@ -284,35 +312,43 @@ impl OverlayFs {
     fn remove_with(
         &self,
         ownership: OwnedTree,
-        remove: impl FnOnce(&Path) -> Result<()>,
+        remove: impl FnOnce(&mut Removal) -> Result<()>,
     ) -> std::result::Result<(), RemovalFailure> {
         self.issuer.remove(ownership, |key| {
             let mut trees = self.trees()?;
             let resource = trees.get_mut(key).ok_or(FsError::Invalid("tree absent"))?;
-            if let Resource::Readable(tree) = resource {
-                tree.validate()?;
-                let held = tree.directory.root_file().metadata()?;
-                let detached = Resource::Detached { path: tree.path.clone(), identity: (held.dev(), held.ino()) };
-                // No reader lease remains. Drop the mount descriptor before normal unmount.
-                *resource = detached;
-            }
-            let path = match resource {
-                Resource::Published(path) => path,
-                Resource::Detached { path, identity } => {
-                    let actual = fs::symlink_metadata(&*path)?;
-                    if !actual.is_dir() || (actual.dev(), actual.ino()) != *identity {
-                        return Err(FsError::LocationChanged);
-                    }
-                    path
+            match resource {
+                Resource::Owned { tree, home } => {
+                    tree.validate()?;
+                    let held = tree.directory.root_file().metadata()?;
+                    let mut removal = Removal::new(tree.path.clone(), home.clone());
+                    removal.identity = RootIdentity::Expected(held.dev(), held.ino());
+                    // No reader lease remains. Drop the mount descriptor before normal unmount.
+                    *resource = Resource::Removing(removal);
                 }
-                Resource::Readable(_) => return Err(FsError::Invalid("tree still pinned")),
-            };
-            backend(remove(path))?;
+                Resource::Published { path, publication } => match publication {
+                    Publication::Untouched => {
+                        trees.remove(key);
+                        return Ok(());
+                    }
+                    Publication::Objects(home) => {
+                        let mut removal = Removal::new(path.clone(), home.clone());
+                        removal.stage = RemovalStage::Collect;
+                        *resource = Resource::Removing(removal);
+                    }
+                    Publication::Tree(home) => *resource = Resource::Removing(Removal::new(path.clone(), home.clone())),
+                },
+                Resource::Borrowed(_) => return Err(FsError::Invalid("borrowed tree has no deletion authority")),
+                Resource::Removing(_) => {}
+            }
+            let Resource::Removing(removal) = resource else { return Err(FsError::Invalid("tree still pinned")) };
+            backend(remove(removal))?;
             trees.remove(key);
             Ok(())
         })
     }
 }
+
 pub(super) struct RangeClone;
 impl ReflinkRange for RangeClone {
     fn clone_range(&self, source: &File, range: ByteRange, dst: &File, offset: u64) -> layr_fs_core::Result<Attempt<()>> {
@@ -337,6 +373,9 @@ mod tests {
         fn new() -> Result<Self> {
             let root = std::env::temp_dir().join(format!("overlay-driver-{}", crate::ids::new_id()));
             fs::create_dir(&root)?;
+            // Native rollback cannot open this fake registry lock, so tests exercise
+            // recovery through retained ownership without requiring a root-owned store.
+            fs::create_dir(root.join("lock"))?;
             Ok(Self { root, driver: OverlayFs::default() })
         }
         fn tree(&self, name: &str) -> Result<FrozenTree> {
@@ -344,7 +383,7 @@ mod tests {
             fs::create_dir(&path)?;
             let registered = self.driver.register(&path)?;
             let tree = self.driver.issuer.import(registered.directory.clone());
-            self.driver.trees()?.insert(self.driver.issuer.frozen_key(&tree)?, Resource::Readable(registered));
+            self.driver.trees()?.insert(self.driver.issuer.frozen_key(&tree)?, Resource::Borrowed(registered));
             Ok(tree)
         }
     }
@@ -440,8 +479,9 @@ mod tests {
         fixture.driver.fail_registration.store(true, Ordering::Relaxed);
         let error = fixture
             .driver
-            .create_with(location, |path| {
+            .create_with(location, |path, publication| {
                 fs::create_dir(path)?;
+                *publication = Publication::Tree(fixture.root.clone());
                 Ok(CaptureConsistency::ValidatedCopy)
             })
             .err()
@@ -452,9 +492,9 @@ mod tests {
         assert!(cause.to_string().contains("injected registration"));
         fixture
             .driver
-            .remove_with(failure.ownership, |path| {
-                assert_eq!(path, destination);
-                fs::remove_dir(path)?;
+            .remove_with(failure.ownership, |removal| {
+                assert_eq!(removal.path, destination);
+                fs::remove_dir(&removal.path)?;
                 Ok(())
             })
             .unwrap();
@@ -466,14 +506,15 @@ mod tests {
     fn removal_drops_the_mount_pin_before_unmount_and_retains_retry() -> Result<()> {
         let fixture = Fixture::new()?;
         let location = fixture.driver.location(&fixture.root.join("new"))?;
-        let (created, _) = fixture.driver.create_with(location, |path| {
+        let (created, _) = fixture.driver.create_with(location, |path, publication| {
             fs::create_dir(path)?;
+            *publication = Publication::Tree(fixture.root.clone());
             Ok(CaptureConsistency::ValidatedCopy)
         })?;
         let key = fixture.driver.issuer.owned_key(&created.ownership)?;
         let pin = {
             let trees = fixture.driver.trees()?;
-            let Resource::Readable(tree) = trees.get(&key).unwrap() else { panic!("tree must be pinned") };
+            let Resource::Owned { tree, .. } = trees.get(&key).unwrap() else { panic!("tree must be pinned") };
             Arc::downgrade(&tree.directory)
         };
         drop(created.tree);
@@ -486,11 +527,81 @@ mod tests {
             .unwrap_err();
         fixture
             .driver
-            .remove_with(failure.ownership, |path| {
-                fs::remove_dir(path)?;
+            .remove_with(failure.ownership, |removal| {
+                fs::remove_dir(&removal.path)?;
                 Ok(())
             })
             .unwrap();
+        Ok(())
+    }
+    #[test]
+    fn creation_error_after_publication_retains_the_destination() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let location = fixture.driver.location(&destination)?;
+        let error = fixture
+            .driver
+            .create_with(location, |path, publication| {
+                fs::create_dir(path)?;
+                *publication = Publication::Tree(fixture.root.clone());
+                anyhow::bail!("injected registry save failure")
+            })
+            .err()
+            .unwrap();
+        let FsError::Cleanup { cause, failure } = error else { panic!("creation lost its cleanup token") };
+        assert!(cause.to_string().contains("injected registry save"));
+        fixture
+            .driver
+            .remove_with(failure.ownership, |removal| {
+                fs::remove_dir(&removal.path)?;
+                removal.directory_removed();
+                Ok(())
+            })
+            .unwrap();
+        assert!(!destination.exists());
+        Ok(())
+    }
+    #[test]
+    fn removal_retries_after_unmount_and_after_directory_removal() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let location = fixture.driver.location(&destination)?;
+        let (created, _) = fixture.driver.create_with(location, |path, publication| {
+            fs::create_dir(path)?;
+            *publication = Publication::Tree(fixture.root.clone());
+            Ok(CaptureConsistency::ValidatedCopy)
+        })?;
+        drop(created.tree);
+        let failure = fixture
+            .driver
+            .remove_with(created.ownership, |removal| {
+                removal.validate()?;
+                // A normal unmount exposes the original mountpoint, with another inode/device.
+                fs::rename(&removal.path, fixture.root.join("old-mount"))?;
+                fs::create_dir(&removal.path)?;
+                removal.after_unmount()?;
+                anyhow::bail!("injected registry persistence failure after unmount")
+            })
+            .unwrap_err();
+        let failure = fixture
+            .driver
+            .remove_with(failure.ownership, |removal| {
+                removal.validate()?;
+                fs::remove_dir(&removal.path)?;
+                removal.directory_removed();
+                anyhow::bail!("injected collection failure after directory removal")
+            })
+            .unwrap_err();
+        fixture
+            .driver
+            .remove_with(failure.ownership, |removal| {
+                removal.validate()?;
+                assert!(matches!(removal.stage, RemovalStage::Collect));
+                assert!(!removal.path.exists());
+                Ok(())
+            })
+            .unwrap();
+        assert!(fixture.driver.trees()?.is_empty());
         Ok(())
     }
     #[test]
