@@ -45,6 +45,7 @@ operation that drops its last owner. No walk decides what lives; `gc` only check
 | `store` | store remote name | a state that a successful push to a store remote sent | push | never while eviction is off (the store keeps every state it receives) |
 | `pin` | `<pid>:<process start>` | a state that a command reads outside the store lock (a check or `try` copy) | pin start (only when the state has another owner) | pin end; a dead process is released by the next free step and by `gc --repair` |
 | `keep` | line id + `/` + name | the state of `layr save --keep <name>` on this machine | `save --keep` (a new state for the name replaces the old one) | `keep drop`, line delete |
+| `queue` | queue entry id | the state of a pending queue entry | `queue add` | the entry is done, failed or removed |
 
 Rules:
 
@@ -169,7 +170,7 @@ base it is the full tree of the commit. The built state is present; the normal r
 
 Owners and freeing:
 
-- Tree owners keep the tree: `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin`, `keep`, and
+- Tree owners keep the tree: `head`, `auto`, `undo`, `deleted`, `park`, `overlay`, `pin`, `keep`, `queue`, and
   `conflict` (a conflict needs the trees of its base, ours and theirs). The base of a present
   thin layer keeps its tree too.
 - Record owners keep only the record: `parent`, `derived`, `ref`, `tag`, `remote-ref` and
