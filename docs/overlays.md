@@ -76,12 +76,79 @@ Built so far (the rest of this file describes the code until a row says "built")
 
 | Part | State |
 | --- | --- |
-| Name `main`, kinds, tree, one-overlay views, readers rule | not built |
-| Write rule and `--to <ancestor>` | not built |
+| Name `main`, tree, one-overlay views, readers rule | built 2026-11-15 (below) |
+| Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
 | Metadata format, patch bases, merge with the parent, `restore --parent` | not built |
 | Move along the tree, checks per view, automatic states | not built |
 | Kinds instead of properties, caches per view | not built |
-| Store format step for older binaries | not built |
+| Store format step for older binaries | built 2026-11-15 (below) |
+
+**The tree as built (2026-11-15).**
+
+- Parent. `layr overlay create <name> [--parent <overlay>]` records the setting `overlay.<name>.parent`
+  (`main` by default; for a hidden overlay in its own records). `layr overlay set <name> --parent
+  <overlay>` changes it (the owner only). A parent is `main` or a patches overlay that the caller
+  sees; a loop, a folder overlay and a hidden parent of a public overlay are refused. A new parent is
+  refused while a line folder of this machine shows the overlay (`layr overlay use main` there
+  first), so no folder keeps files of the old path that a save would take. `overlay create main` is
+  refused. A folder overlay (a cache) has no parent and stays out of the tree.
+- View. A folder still records its overlays (`view.<line id>`, `hidden.view.<line id>`), and `layers`
+  shows the path of the tree to the top one (`Repo::view_path`, `Model::layers`). `layr overlay use
+  <overlay>` sets the path to that overlay; `overlay use main` and `--none` show `main` alone;
+  more names, `--add` and `--remove` fail with exit status 2. `layr view <line> --overlay <overlay>`
+  takes one overlay (`main` is `main` alone; a list and `base` fail with exit status 2).
+- New lines. `line new` gives the new folder the path of the folder where it ran (the working folder,
+  or `--project` with `--line`), cut below the first overlay that the owner of the new line does not
+  read. Run elsewhere, the new folder shows `main`. Before, it showed every overlay that the owner read.
+- Transfers. `fetch|push|clone --overlay main` names the bottom layer; `--overlay base` fails with
+  exit status 2 and names `main`.
+- `layr overlay order` fails with exit status 2 and names `--parent`.
+- Readers rule. Each reader of an overlay (and its owner) must read every overlay on its path:
+  `overlay create`, `overlay set --parent` and `overlay readers` refuse a change that breaks it, also
+  for the overlays above it. A principal reads an overlay when the overlay's policy gives it, or
+  everyone, the reader role and no deny rule takes `read` away; a user also through its groups.
+- Old data. An overlay of older layr has no recorded parent. In the view of a folder it stands on the
+  overlay below it in that view, so every existing folder keeps its content. Elsewhere (`overlay use`,
+  `view --overlay`, the readers rule) its parent is the patches overlay below it in the old project
+  order (`overlays.order`, then the order of creation); a public overlay never takes a hidden one.
+  `layr overlay migrate-parts` records those parents. After that, a folder whose old view skipped an
+  overlay of that order shows the skipped overlay too (`migrate-parts` prints each parent it sets).
+- Store format. `store-version.json` has format 2. The first open by this layr of a store of format 1
+  writes format 2 (only the marker changes; `store-version` reports `upgradable`). An older layr
+  (format 1) then refuses the store with exit status 128, so it cannot save into `main` by the old
+  rules ([local store version](local-store-version.md)).
+- Tests: tests/t234-views-hold-overlays.sh, tests/t260-overlay-tree-readers.sh (Linux, other users),
+  `a_view_is_the_path_of_the_tree_to_its_top` (layr-model), `a_reader_of_an_overlay_must_read_its_ancestor`,
+  `format_one_is_upgraded_and_then_refused_by_format_one`.
+
+**The write rule as built (2026-11-15).**
+
+- A named save in the view of overlay X writes every change to X (`split` and `save_target` in
+  `src/overlay.rs`): a new file, a change of a file of an ancestor (X gets its own copy, which wins in
+  the view), a delete (X gets a delete marker when a layer below still shows the path), and a rename
+  (a delete of the old path and a new file; inside X it stays a move). `main` does not change. The
+  view of `main` alone writes `main`, as before.
+- `layr save -m <message> --to <ancestor>`: the changes of this save go to `main` or to an overlay on
+  the path of the view; the layers above it drop the path, so the saved file shows. Another name (an
+  unknown overlay, one off the path, a hidden one that the owner does not read, the old name
+  `shared`) is refused with one text, and nothing is saved. `--to` needs `-m` or `-F`.
+- Mixed work is two saves: `layr add <public paths>`, `layr save -m <message> --to main` (a save
+  takes the index), then `layr save -am <message>` for the rest.
+- `layr save -m <message> <path>` fails with exit status 128 and names `layr add`: a save takes the
+  index, and before 2026-11-15 it ignored the path.
+- `layr overlay move <overlay> <paths>` keeps its meaning: the files go to that overlay and leave every
+  other layer, `main` too.
+- Removed (exit status 2): `layr line target`, `layr rm --to`, `overlay create|set --patches`. The
+  settings `target.<line id>`, `hidden.target.<line id>` and `overlay.<name>.patches` that the
+  slice of 2026-11-15 wrote are no longer read. The pending file `meta/stage/<line id>.targets` is
+  no longer read or written.
+- Automatic states. A line whose folder shows an overlay keeps no working change in its automatic
+  states: each one holds the head in `main` (`private_view`), as overlay files had none before. So
+  `undo` and the restore after a refused command do not bring such changes back; `line delete` of
+  such a line with changes needs `--discard`. (Owner decision D11 prefers automatic states in the
+  overlay's own store; not built.)
+- Test: tests/t258-overlay-patches.sh (one user), tests/t259-overlay-patches-readers.sh (another
+  reader of the project, Linux service mode), `a_save_writes_every_change_to_its_target`.
 
 ### The model of 2026-11-11
 
@@ -132,7 +199,7 @@ Built today (section 9):
 - `fetch` takes the whole repository by default, except the contents of the cache overlays: of a cache
   overlay a plain fetch, pull or clone takes only the records, and a command that needs a cache fetches it
   on demand (owner decision 2026-11-13, [remotes](remotes.md)). `fetch --line <name> --overlay <layer>` (built
-  2026-11-11) takes the history of those lines on those layers only; `base` names the base. The old
+  2026-11-11) takes the history of those lines on those layers only; `main` names the bottom layer (`base` before 2026-11-15). The old
   cache flags of transfers (`--caches`, `--no-caches`, `--caches-of`) are removed (exit 2).
 - Since slice 3 an overlay can have `platform=<key>`; since slice 6 a cache is a folder overlay of one
   platform (`target.macos-aarch64`), and a named save records its part in the state. The cache
@@ -650,8 +717,8 @@ extent (`filefrag -v`).
    overlay and in the shared set. The state deletes it from the overlay, and the next assembly
    shows the shared `.env` again. overlayfs keeps a whiteout for this. Does an overlay need a
    delete marker, or does the delete go to every layer that the user may write?
-   Built 2026-11-15: with an overlay target, a delete writes a delete marker in the overlay (section
-   9.6). Without a target the delete still goes to every layer.
+   Built 2026-11-15: in the view of an overlay, a delete writes a delete marker in the overlay
+   (section 9.6).
 2. **Owner of a moved file.** A file of an overlay moves to a path that no pattern matches. Does
    it stay in its overlay (the owner follows the file; btrfs reports moves by inode) or go to
    the shared set (the owner follows the path)? Following the file is safer: a move never
@@ -754,13 +821,10 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay create <name> [--readers <principals>]` | Makes an overlay (an overlay). The caller is its owner and reads it. Readers are principals as in `layr access`: `alice`, `@group`, `uid:1001`, a comma list. Each line has its part; a new line inherits the part of its source. `--mode shared` was removed (owner decision 2026-11-11, exit 2); old shared overlays keep working. Needs the writer role. |
 | `layr overlay list [--json] [--size]`                        | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
 | `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
-| `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
+| `layr overlay use [<overlay>\|main\|--none]`                 | Without an argument: the layers of the view of the current line. With an overlay: the view seen from it, the path of the tree from `main` (section 1); each overlay that the folder did not show takes the line's state on it. `main` and `--none` show `main` alone. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
 | `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next named save, which takes them from the working folder as they are then. The move waits for that named save whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
 | `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
-| `layr save -m <message> --to <overlay>\|shared` | The layer that gets the changes of this save (section 9.3). |
-| `layr rm --to <overlay>\|shared <paths>` | The layer that gets these deletes at the next named save. The target waits in `meta/stage/<line id>.targets`. |
-| `layr line target [<overlay>\|shared\|--none]` | The default target of the current line. Without an argument it prints it (`none` when the line has none). The line owner only; the overlay must be in the view of the line. |
-| `layr overlay create\|set <name> --patches` | The overlay may hold its own versions of shared files (section 9.3). |
+| `layr save -m <message> --to <ancestor>` | The layer that gets the changes of this save: `main` or an overlay on the path of the view (section 1, write rule). |
 | `layr overlay show <name> --json` | Metadata for a reader: name, hidden flag, readers with principal and kind, key manager machine UUIDs, signed epochs, patterns, peers, and current state ID. Person principals omit their age recipient. |
 | `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
 
@@ -812,38 +876,9 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
 4. The records of the overlays first, then one record of the project with the new shared state
    (if the shared set changed) and the new stack. The saved tree becomes the base.
 
-**Write targets (built 2026-11-15).** A shared set of open source goes to a public git remote, and an
-overlay holds proprietary patches: private versions of shared files and private new files. The
-rules above would send an edit of a shared file and a new file to the shared set. A write target
-changes that:
-
-- `save -m <message> --to <overlay>`: the shared set does not change. A change of a file that only
-  the shared set has makes the overlay's copy of it (the copy wins in the view, as any overlay file
-  does). A new file goes to the overlay. A delete or a move of a shared file writes a delete marker in
-  the overlay (section 9.6). A file that an overlay already holds changes in that overlay, as before.
-- `save -m <message> --to shared`: every change goes to the shared set. A file that an overlay holds
-  goes to the shared set and leaves the overlay.
-- `layr line target <overlay>|shared` sets the default target of a line. `save --to` wins over it.
-  `rm --to <target> <path>` sets the target of one delete until the next named save; it wins over
-  both. A path of `overlay move` keeps its meaning: it goes to its overlay and leaves the shared set.
-- A target that the line does not show is refused, and nothing is saved. The text is the same for an
-  unknown overlay and for a hidden overlay that the owner does not read.
-- Storage. The line target is the setting `target.<line id>` (an `overlay.use` record, keyed by the
-  line id, so `line rename` keeps it and `reindex` rebuilds it). For a hidden overlay the overlay's
-  own records hold `hidden.target.<line id>: true`, and the project setting is null, so no record of
-  the project names the overlay.
-- Property `patches` (decision P1, assumed until the owner decides). An overlay holds a copy of a
-  shared file, or hides one, only with `layr overlay set <name> --patches`. A save that needs it
-  refuses and names the property. New files need no property. The rule is `refuse_unpatched` in
-  `src/overlay.rs`.
-- No target (decision P2, assumed until the owner decides). When the line shows an overlay with
-  `patches` and has no target, a named save that would change the shared set refuses and names
-  `--to shared` and `--to <overlay>`. A line without such an overlay works as before. The rule is
-  `refuse_without_target` in `src/overlay.rs`.
-- `save -m <message> <path>` still ignores the path. Mixed work (a public fix and a private patch) is
-  two saves: stage one part, save it with its target, then the other.
-- Test: tests/t258-overlay-patches.sh (one user), tests/t259-overlay-patches-readers.sh (another
-  reader of the project, Linux service mode).
+**Write rule (owner decision 2026-11-15).** Steps 2 and 4 above describe the code before that
+decision. Since then a named save in the view of an overlay writes every change to that overlay,
+and `save --to <ancestor>` names another layer of the path (section 1, "The write rule as built").
 
 A protected line takes a state that changes only its overlays from its owner: the rule protects
 the shared set. A change of the shared set still needs the rule (`--direct`), as before. In the
@@ -868,10 +903,10 @@ owner changes with named saves and a user who merges into the line changes by th
   moves, and copies of overlay files under other names (moved, or the same content). So no state
   of the project holds an overlay file, and `push`, `export`, `sync` and `show`/`grep`
   of a shared state give the shared set only. Push and sync also carry the separate overlay projects.
-- A line whose target is an overlay, or that shows an overlay with `patches` and has no target, keeps
-  no change in its automatic states: each one holds the shared head. So other readers of the project
-  never read a patch through an automatic state. Such changes have no automatic state, like overlay
-  files (section 9.7); `line delete` of such a line with changes needs `--discard`.
+- A line whose folder shows an overlay keeps no change in its automatic states: each one holds the
+  head in `main`. So other readers of the project never read a patch through an automatic state.
+  Such changes have no automatic state, like overlay files (section 9.7); `line delete` of such a line
+  with changes needs `--discard`.
 - Automatic states made before a file moved into an overlay hold it (an automatic state holds the
   whole working folder, ignored files too), and every reader of the project reads them. `overlay
   move --purge` deletes those states of the line. States of the shared set that held a file keep
@@ -892,9 +927,9 @@ owner changes with named saves and a user who merges into the line changes by th
 
 ### 9.6 Answers to the open questions (for this slice)
 
-1. A delete goes to every layer that has the path. With an overlay target (section 9.3) a delete
-   never changes the shared set: the overlay copy goes, and if the shared set has the path, the
-   overlay gets a delete marker. The markers are the file `.layrremoved` at the root of the overlay
+1. A delete goes to the layer of the save (section 1, write rule) and the layers above it. In the
+   view of an overlay a delete never changes `main`: the overlay copy goes, and if a layer below still
+   shows the path, the overlay gets a delete marker. The markers are the file `.layrremoved` at the root of the overlay
    state: one path per line, sorted. Assembly of a line takes those paths of the lower layers out,
    then puts the files of the overlay; no folder gets the file itself. It is an ordinary file of the
    overlay's tree, so peer sync, store pushes, merges of the overlay and its git remote carry it on
@@ -936,9 +971,8 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
 - In shared mode each reader has an own overlay line. A new reader starts from the state of the
   source line (or the owner's); a later change by the owner does not reach other users'
   lines. A key that changes is changed in each reader's lines.
-- An older layr does not know write targets or delete markers. In a line with a target it would save
-  an edit of a shared file to the shared set, and its folder would show `.layrremoved` and the hidden
-  files. Use this version or newer in lines with targets.
+- An older layr does not know the write rule or delete markers: it would save an edit of a file of
+  `main` to `main`. It refuses a store of format 2 (section 1, "The tree as built").
 - Overlay files have no automatic states: their history consists of named states. Automatic states also
   leave out a file that moved from an overlay path and a new file with the same content as an
   overlay file (a copy, an editor's extra copy); a changed copy under another name (a swap file) goes

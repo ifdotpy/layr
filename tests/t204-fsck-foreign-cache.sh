@@ -22,7 +22,7 @@ l push archive -q >/dev/null
 new_fs "$T/peer" 2G
 export LAYR_ROOT=$T/peer/store
 # The clone names the cache overlay: a plain clone takes only its records (docs/remotes.md).
-LAYR_PAPER_KEY_FILE=$T/paper.txt l clone "file://$T/archive" p --overlay base,cache.target >/dev/null
+LAYR_PAPER_KEY_FILE=$T/paper.txt l clone "file://$T/archive" p --overlay main,cache.target >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main"
 O=$LAYR_ROOT/projects/p/meta/overlays/cache.target
 odb=$O/meta/db/layr.sqlite

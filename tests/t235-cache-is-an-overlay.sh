@@ -75,8 +75,10 @@ no "an invalid platform key is refused" l overlay create bad --mode follow --pla
 # 6. An overlay of another platform: no folder of this platform, not in the default view, not fetched.
 ok "a folder overlay of another platform" l overlay create target.other-arch --folder target --platform other-arch --quiet --history last -q
 no "a second overlay of this platform for the folder is refused" l overlay create target.again --folder target --platform "$HERE" -q
-ok "a file overlay of another platform" l overlay create far --mode follow --platform other-arch -q
 ok "a file overlay of this platform" l overlay create near --mode follow --platform "$HERE" -q
+ok "a file overlay of another platform above it" l overlay create far --mode follow --platform other-arch --parent near -q
+# A new line takes the view of the folder where `line new` ran (docs/overlays.md section 1).
+ok "main shows far and near below it" l overlay use far -q
 l line new fresh main >/dev/null
 cd "$P/lines/fresh" || exit 1
 overlays=$(l overlay use | awk '{print $1}' | paste -sd' ' -)
@@ -105,7 +107,7 @@ ok "fsck --overlays" l fsck --overlays
 # The cache flags of transfers are gone (owner decision 2026-11-11): exit status 2 and the replacement.
 out=$(l fetch r --no-caches 2>&1); code=$?
 eq "fetch --no-caches fails with status 2" 2 "$code"
-has "and names --overlay" "--overlay base" "$out"
+has "and names --overlay" "--overlay main" "$out"
 out=$(l fetch r --caches-of main -q 2>&1); code=$?
 eq "fetch --caches-of fails with status 2" 2 "$code"
 has "and names --line" "--line <line>" "$out"

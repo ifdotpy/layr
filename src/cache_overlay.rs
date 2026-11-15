@@ -56,7 +56,6 @@ pub fn cache_props() -> Props {
         prune: None,
         platform: Some(crate::model::cache_platform()),
         trust: Some(crate::overlay::Trust::Protected),
-        patches: false,
     }
 }
 
@@ -373,6 +372,7 @@ impl<'a> Repo<'a> {
             &cache_props(),
             Some(folder),
             key_files.as_ref(),
+            None,
         )?;
         Ok(name)
     }

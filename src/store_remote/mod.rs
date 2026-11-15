@@ -51,7 +51,7 @@ pub struct Options {
     /// `fetch --line <name>`: only the history of these lines (docs/overlays.md, a view is f(line, overlays)).
     /// Empty: every line.
     pub lines: Vec<String>,
-    /// `fetch --overlay <name>`: only these layers; `base` names the base. None: every layer.
+    /// `fetch --overlay <name>`: only these layers; `main` names the bottom layer. None: every layer.
     pub overlays: Option<std::collections::BTreeSet<String>>,
     /// The states of one overlay that `lines` need, set by the overlay fetch (None: every state).
     pub(crate) only_states: Option<std::collections::BTreeSet<String>>,
@@ -60,8 +60,8 @@ pub struct Options {
     pub(crate) plain_cache_fetch: bool,
 }
 
-/// The name of the base layer in `fetch --overlay`.
-pub const BASE_LAYER: &str = "base";
+/// The name of the bottom layer in `fetch --overlay` (`main`, owner decision 2026-11-15).
+pub const BASE_LAYER: &str = crate::overlay::MAIN;
 
 impl Options {
     /// Whether `fetch --overlay` takes the layer `name`.

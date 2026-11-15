@@ -16,15 +16,14 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
 const USAGE: &str =
-    "usage: layr overlay create <name> [--readers <principal>,...] [--mode shared|follow] [--hidden] [--folder <path>] [<properties>]
-       layr overlay set <name> <properties>
+    "usage: layr overlay create <name> [--parent <overlay>] [--readers <principal>,...] [--hidden] [--folder <path>] [<properties>]
+       layr overlay set <name> [--parent <overlay>] <properties>
        layr overlay remote add <name> <remote> <git url> | list <name> | remove <name> <remote>
        layr overlay show-to-project <name>
        layr overlay list [--json] [--size]
        layr overlay readers <name> [<principal>...]
        layr overlay managers <name> [machine:<id>...]
-       layr overlay use [--add|--remove] <name>... | --none
-       layr overlay order [<name>,...]
+       layr overlay use [<overlay>|--none]
        layr overlay move [--purge] <name> <path>... | --cancel [<path>...]
        layr overlay repair <overlay>
        layr overlay remove <cache overlay>
@@ -33,7 +32,7 @@ const USAGE: &str =
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
        layr overlay migrate-parts [-n|--dry-run] [-q]
 properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none
-            --platform <key>|any  --trust protected|readers  --patches|--no-patches";
+            --platform <key>|any  --trust protected|readers";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -98,7 +97,9 @@ pub(crate) fn access_map(owner: u32, readers: &[String]) -> serde_json::Value {
 }
 
 fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = props_spec(Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q").value("--folder"));
+    let spec = props_spec(
+        Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q").value("--folder").value("--parent"),
+    );
     let a = parse(&spec, args)?;
     let props = props_of(&a, Props::default())?;
     let h = here(ctx)?;
@@ -108,6 +109,9 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?.clone();
     check_name("overlay", &name)?;
+    if name == crate::overlay::MAIN {
+        return Err(exit(128, "fatal: 'main' names the bottom overlay (the project's own files); choose another name"));
+    }
     repo.require(ctx, "line.create")?;
     let hidden = a.has("--hidden");
     let folder = a.get("--folder").map(crate::overlay::folder_path).transpose()?;
@@ -131,10 +135,23 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(128, "a folder overlay uses follow mode and is not hidden"));
     }
     let readers = principals(&a.all("--readers"))?;
+    if folder.is_some() && a.get("--parent").is_some() {
+        return Err(exit(128, "fatal: a folder overlay (a cache) has no parent: every view has it"));
+    }
     let _lock = repo.p.lock()?;
     if repo.overlay_info(&name)?.is_some() {
         return Err(exit(128, format!("fatal: overlay '{name}' already exists")));
     }
+    // A patches overlay records its parent (default `main`), so it never takes one from the old project order.
+    let parent = match folder {
+        Some(_) => None,
+        None => {
+            let p = a.get("--parent").unwrap_or(crate::overlay::MAIN).to_string();
+            let policy = policy_of(&access_map(ctx.caller.uid, &readers));
+            check_parent(ctx, repo, &name, hidden, &p, &policy)?;
+            Some(p)
+        }
+    };
     // One folder overlay per folder and platform: build output of each platform is its own overlay.
     if let Some(f) = &folder {
         let clash = |p: &Option<String>| p.is_none() || props.platform.is_none() || *p == props.platform;
@@ -143,7 +160,7 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let key_files = a.get("--key-files").map(key_files_value).transpose()?;
-    make_overlay(ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), key_files.as_ref())?;
+    make_overlay(ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), key_files.as_ref(), parent.as_deref())?;
     if !a.has("-q") {
         let mut who: Vec<String> = vec![ctx.caller.user.clone()];
         who.extend(readers.iter().map(|r| show_principal(r)));
@@ -172,6 +189,7 @@ pub(crate) fn make_overlay(
     props: &Props,
     folder: Option<&str>,
     key_files: Option<&serde_json::Value>,
+    parent: Option<&str>,
 ) -> Result<()> {
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
@@ -241,6 +259,9 @@ pub(crate) fn make_overlay(
         }
         if let Some(k) = key_files {
             cfg.insert(format!("overlay.{name}.key-files"), k.clone());
+        }
+        if let Some(p) = parent {
+            cfg.insert(format!("overlay.{name}.{}", crate::overlay::PARENT), serde_json::json!(p));
         }
         if removed {
             cfg.insert(format!("overlay.{name}.removed"), serde_json::Value::Null);
@@ -351,14 +372,8 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
                 .ok_or_else(|| exit(128, format!("fatal: invalid --trust '{v}' (protected or readers)")))?,
         );
     }
-    if a.has("--patches") && a.has("--no-patches") {
-        return Err(exit(128, "fatal: --patches and --no-patches exclude each other"));
-    }
-    if a.has("--patches") {
-        p.patches = true;
-    }
-    if a.has("--no-patches") {
-        p.patches = false;
+    if a.has("--patches") || a.has("--no-patches") {
+        return Err(exit(2, "--patches was removed: every overlay holds patches of the overlays below it (docs/overlays.md section 1)"));
     }
     if let Some(v) = a.get("--gc") {
         p.gc_lru = crate::overlay::parse_gc(v)
@@ -370,7 +385,7 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
 /// `layr overlay set <name> <properties>`: the owner changes properties. The settings go into the
 /// records of the project, or of the overlay when it is hidden.
 fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&props_spec(Spec::new()), args)?;
+    let a = parse(&props_spec(Spec::new().value("--parent")), args)?;
     let h = here(ctx)?;
     let name = a.pos.first().ok_or_else(|| exit(128, USAGE))?.clone();
     if a.pos.len() != 1 {
@@ -394,6 +409,15 @@ fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(v) = a.get("--key-files") {
         cfg.insert(format!("overlay.{name}.key-files"), key_files_value(v)?);
     }
+    // The parent of a patches overlay (docs/overlays.md section 1): every folder that shows it shows the new path.
+    if let Some(p) = a.get("--parent") {
+        if !h.repo.patches_overlay(&name)? {
+            return Err(exit(128, format!("fatal: overlay '{name}' is a folder overlay (a cache) and has no parent")));
+        }
+        check_parent(ctx, &h.repo, &name, info.hidden, p, &orepo.policy())?;
+        refuse_shown(ctx, &h.repo, &name)?;
+        cfg.insert(format!("overlay.{name}.{}", crate::overlay::PARENT), serde_json::json!(p));
+    }
     if !cfg.is_empty() {
         let mut rec = Record::new("config");
         rec.data = serde_json::json!({"config": cfg});
@@ -410,6 +434,56 @@ fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
         h.repo.after_overlay_move(ctx, &name);
     }
     Ok(0)
+}
+
+/// A policy with the access map `access` (an overlay's policy before its record exists).
+fn policy_of(access: &serde_json::Value) -> Policy {
+    let mut p = Policy::default();
+    for (k, v) in access.as_object().into_iter().flatten() {
+        p.access.insert(k.clone(), v.as_str().and_then(Role::parse).unwrap_or(Role::None));
+    }
+    p
+}
+
+/// The parent `parent` of the patches overlay `name` (docs/overlays.md section 1): `main` or a patches
+/// overlay that the caller sees, not `name` or an overlay above it, never a hidden overlay below a
+/// public one (a public record would name it), and read by every reader of `name` (`policy`).
+fn check_parent(ctx: &Ctx, repo: &Repo, name: &str, hidden: bool, parent: &str, policy: &Policy) -> Result<()> {
+    let mut parent_of = None;
+    if parent != crate::overlay::MAIN {
+        let pinfo = visible_info(ctx, repo, parent)?;
+        if !repo.patches_overlay(parent)? {
+            return Err(exit(128, format!("fatal: overlay '{parent}' is a folder overlay (a cache); a parent is a patches overlay")));
+        }
+        if pinfo.hidden && !hidden {
+            return Err(exit(128, format!("fatal: overlay '{parent}' is hidden; a public overlay cannot be above a hidden one")));
+        }
+        if parent == name || repo.overlay_path(parent)?.iter().any(|n| n == name) {
+            return Err(exit(128, format!("fatal: overlay '{parent}' is '{name}' or above it; the parents would form a loop")));
+        }
+        parent_of = Some(parent);
+    }
+    if let Some(why) = repo.check_readers_rule(name, policy, parent_of)? {
+        return Err(exit(1, format!("error: {why}")));
+    }
+    Ok(())
+}
+
+/// A new parent changes the files of every folder that shows the overlay: refuse while a line of this
+/// machine shows it, so no folder keeps files of the old path that a save would take as changes.
+fn refuse_shown(ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
+    for line in repo.lines()? {
+        if line.machine != ctx.store.machine.id {
+            continue;
+        }
+        if repo.layers(&line)?.iter().any(|l| l.overlay == name) {
+            return Err(exit(
+                1,
+                format!("error: line '{}' shows overlay '{name}'; run 'layr overlay use main' there first, then set the parent", line.name),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The principals with the reader role (or more) of an overlay.
@@ -708,6 +782,12 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = orepo.p.lock()?;
     crate::overlay_managers::of(&h.repo, &name)?.require(&ctx.store.machine.id)?;
     let access = access_map(info.owner, &list);
+    if h.repo.patches_overlay(&name)? {
+        let parent = h.repo.overlay_parent(&name)?;
+        if let Some(why) = h.repo.check_readers_rule(&name, &policy_of(&access), parent.as_deref())? {
+            return Err(exit(1, format!("error: {why}")));
+        }
+    }
     let removed = orepo.policy().access.iter().any(|(principal, role)| *role >= Role::Reader && access.get(principal).is_none());
     let mut record = Record::new("overlay.readers");
     record.data = serde_json::json!({"config":{"access":access}});
@@ -1055,6 +1135,15 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let _lock = repo.p.lock()?;
+    // Each patches overlay of older layr records its parent: the overlay below it in the old project
+    // order (docs/overlays.md section 1, owner decision 2026-11-15).
+    let parents = record_parents(ctx, repo, a.has("-n"))?;
+    if !a.has("-q") {
+        let verb = if a.has("-n") { "would set" } else { "set" };
+        for (o, p) in &parents {
+            outln!(ctx, "{verb} parent {p} on {o}");
+        }
+    }
     // Each line takes its name on every overlay, its old stack (layr before 0.44) becomes the
     // view of its folder and the heads of its lines on the overlays, and no overlay keeps the
     // `cache` flag: a cache is an ordinary overlay (docs/overlays.md section 1a).
@@ -1119,6 +1208,48 @@ fn migrate_parts(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{verb} parts to {} state(s) of {} line(s)", states.len(), moved.len());
     }
     Ok(0)
+}
+
+/// The parents of the patches overlays without one (older layr): each takes the overlay below it in
+/// the old project order (`Repo::overlay_parent`). The parents are found first, then written: a
+/// public overlay in a record of the project, a hidden one in its own records (only one that the
+/// caller administers). Returns overlay and parent. With `dry`, it writes nothing. The caller holds
+/// the project lock.
+fn record_parents(ctx: &Ctx, repo: &Repo, dry: bool) -> Result<Vec<(String, String)>> {
+    let mut found = Vec::new();
+    for name in repo.overlay_names()? {
+        if !repo.patches_overlay(&name)? || repo.overlay_setting(&name, crate::overlay::PARENT)?.is_some() {
+            continue;
+        }
+        let parent = repo.overlay_parent(&name)?.unwrap_or_else(|| crate::overlay::MAIN.to_string());
+        found.push((name, parent));
+    }
+    let mut out = Vec::new();
+    let mut public = serde_json::Map::new();
+    for (name, parent) in found {
+        let key = format!("overlay.{name}.{}", crate::overlay::PARENT);
+        if repo.need_overlay(&name)?.hidden {
+            let orepo = repo.overlay_repo(&name)?;
+            if !orepo.is_admin(ctx) {
+                continue;
+            }
+            if !dry {
+                let _olock = orepo.p.lock()?;
+                let mut rec = Record::new("config");
+                rec.data = serde_json::json!({"config": {key: parent}});
+                orepo.commit_record(ctx, rec)?;
+            }
+        } else {
+            public.insert(key, serde_json::json!(parent));
+        }
+        out.push((name, parent));
+    }
+    if !dry && !public.is_empty() {
+        let mut rec = Record::new("config");
+        rec.data = serde_json::json!({"config": public});
+        repo.commit_record(ctx, rec)?;
+    }
+    Ok(out)
 }
 
 /// The lines and overlays of layr before 0.44, moved to the model of docs/overlays.md section 1: a
@@ -1243,50 +1374,27 @@ fn layer_for(ctx: &Ctx, repo: &Repo, name: &str, line: &crate::model::Line) -> R
     Ok(Layer { overlay: name.to_string(), state: ol.head })
 }
 
-/// `layr overlay order [<name>,...]`: show or set the project order of overlays (setting
-/// `overlays.order`). A new line folder shows its overlays in this order (docs/overlays.md, section
-/// 1a, slice 5); overlays that the list does not name follow in the order of their creation.
-fn order(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new(), args)?;
-    let h = here(ctx)?;
-    let repo = &h.repo;
-    if repo.p.is_overlay() {
-        return Err(exit(1, "error: an overlay has no overlays"));
-    }
-    let names: Vec<String> =
-        a.pos.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
-    if names.is_empty() {
-        for name in repo.project_order()? {
-            let hidden = repo.need_overlay(&name).map(|i| i.hidden).unwrap_or(true);
-            if !hidden || repo.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
-                outln!(ctx, "{name}");
-            }
-        }
-        return Ok(0);
-    }
-    repo.require(ctx, "config")?;
-    let _lock = repo.p.lock()?;
-    for (i, name) in names.iter().enumerate() {
-        let info = repo.overlay_info(name)?.ok_or_else(|| exit(1, format!("error: no overlay '{name}'")))?;
-        // The order is a public setting: a hidden name would show to every reader of the project.
-        if info.hidden {
-            return Err(exit(1, format!("error: overlay '{name}' is hidden; a hidden overlay keeps the order of its creation")));
-        }
-        if names[..i].contains(name) {
-            return Err(exit(128, format!("error: overlay '{name}' is named twice")));
-        }
-    }
-    let mut rec = Record::new("config");
-    rec.data = serde_json::json!({"config": {crate::overlay::ORDER_KEY: names}});
-    repo.commit_record(ctx, rec)?;
-    Ok(0)
+/// `layr overlay order` is gone (owner decision 2026-11-15): each overlay has a parent, and a view is
+/// the path of the tree to one overlay (docs/overlays.md section 1).
+fn order(_ctx: &Ctx, _args: &[String]) -> Result<i32> {
+    Err(exit(
+        2,
+        "layr overlay order was removed: each overlay has a parent overlay. Use layr overlay set <name> --parent <overlay>",
+    ))
 }
 
-/// Set the view of the working folder of the current line: the overlays it shows and their order
-/// (`view.<line id>`, slice 5). The owner's choice: the line's overlay files come and go.
+/// `layr overlay use [<overlay>|--none]`: the view of the working folder of the current line, seen from one
+/// overlay (docs/overlays.md section 1, owner decision 2026-11-15): the path of the tree from `main` to it.
+/// `main` and `--none` show `main` alone. Without an argument it prints the layers of the view.
 fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new().flag("--add").flag("--remove").flag("--none").flag("-f|--force").flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    if a.has("--add") || a.has("--remove") {
+        return Err(exit(
+            2,
+            "layr overlay use --add and --remove were removed: a view shows one overlay and its ancestors. Use layr overlay use <overlay>",
+        ));
+    }
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line()?.clone();
@@ -1307,40 +1415,46 @@ fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
+    if a.pos.len() > 1 || (a.has("--none") && !a.pos.is_empty()) {
+        return Err(exit(2, "usage: layr overlay use [<overlay>|--none]: a view shows one overlay and the overlays below it"));
+    }
+    let top = a.pos.first().filter(|n| n.as_str() != crate::overlay::MAIN).cloned();
+    // A virtual line saves without layers (docs/views.md): it shows `main` only.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if top.is_some() && crate::views::of(repo, &line).is_some() {
+        return Err(exit(1, "error: a virtual line shows main only; use a folder line for the view of an overlay"));
+    }
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
     let _lock = repo.p.lock()?;
     let line = repo.line(&line.id)?;
     let cur = repo.layers(&line)?;
-    let mut names: Vec<String> = Vec::new();
-    if a.has("--add") || a.has("--remove") {
-        names.extend(cur.iter().map(|l| l.overlay.clone()));
-    }
-    for n in &a.pos {
-        refuse_folder(&h.repo, n)?;
-        if a.has("--remove") {
-            names.retain(|x| x != n);
-        } else if !names.contains(n) {
-            names.push(n.clone());
+    let names = match &top {
+        Some(n) => {
+            refuse_folder(&h.repo, n)?;
+            visible_info(ctx, repo, n)?;
+            repo.overlay_path(n)?
         }
-    }
-    if a.has("--none") {
-        names.clear();
-    }
-    // Named overlays take their newest state; with --add and --remove the others stay as shown.
-    let keep = a.has("--add") || a.has("--remove");
-    let mut layers = Vec::new();
+        None => Vec::new(),
+    };
+    // An overlay that the folder shows keeps its state; the others take the line's state on them.
+    let mut layers: Vec<Layer> = Vec::new();
     for n in &names {
         match cur.iter().find(|l| &l.overlay == n) {
-            Some(l) if keep && !a.pos.contains(n) => layers.push(l.clone()),
-            _ => layers.push(layer_for(ctx, repo, n, &line)?),
+            Some(l) => layers.push(l.clone()),
+            None => layers.push(layer_for(ctx, repo, n, &line)?),
+        }
+    }
+    // Folder overlays of older data stay as they are.
+    for l in &cur {
+        if !repo.patches_overlay(&l.overlay)? && !layers.iter().any(|x| x.overlay == l.overlay) {
+            layers.push(l.clone());
         }
     }
     change_stack(ctx, repo, &line, &layers, a.has("-f"))?;
     if !a.has("-q") {
-        if layers.is_empty() {
-            outln!(ctx, "line {} shows no overlays", line.name);
-        } else {
-            outln!(ctx, "line {} shows overlays: {}", line.name, names.join(" "));
+        match &top {
+            None => outln!(ctx, "line {} shows main", line.name),
+            Some(t) => outln!(ctx, "line {} shows {t} (main {})", line.name, names.join(" ")),
         }
     }
     Ok(0)

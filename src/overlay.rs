@@ -111,10 +111,6 @@ pub struct Props {
     /// `protected`: a part that another user saved only from a protected line. `readers`: any
     /// part that the reader may read. None: `protected` for a build-output overlay, else `readers`.
     pub trust: Option<Trust>,
-    /// `patches`: the overlay may hold its own versions of files of the shared set (docs/overlays.md,
-    /// section 9.3). A save that would copy a shared file into an overlay without it, or hide one there,
-    /// refuses. The owner decision on this rule is open (P1): this flag is its only place.
-    pub patches: bool,
 }
 
 /// The `trust` property of an overlay.
@@ -142,7 +138,7 @@ impl Trust {
 }
 
 /// The property names, in the order that `overlay list` shows them.
-pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune", "platform", "trust", "patches"];
+pub const PROPS: &[&str] = &["history", "quiet", "merge", "gc", "prune", "platform", "trust"];
 
 /// A platform key as `--platform` takes it: lowercase letters, digits, `-` and `_` (for example
 /// `macos-aarch64`, `linux-x86_64`).
@@ -219,13 +215,6 @@ impl Props {
             "prune" => self.prune.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
             "platform" => self.platform.as_ref().map(|n| json!(n)).unwrap_or(json!(null)),
             "trust" => self.trust.map(|t| json!(t.name())).unwrap_or(json!(null)),
-            "patches" => {
-                if self.patches {
-                    json!(true)
-                } else {
-                    json!(null)
-                }
-            }
             _ => json!(null),
         }
     }
@@ -243,7 +232,6 @@ impl Props {
         p.prune = get("prune").and_then(|v| v.as_str().and_then(prune_name));
         p.platform = get("platform").and_then(|v| v.as_str().and_then(platform_name));
         p.trust = get("trust").and_then(|v| v.as_str().and_then(Trust::parse));
-        p.patches = get("patches").and_then(|v| v.as_bool()).unwrap_or(false);
         p
     }
 
@@ -273,9 +261,6 @@ impl Props {
         if let Some(t) = self.trust {
             out.push(format!("trust={}", t.name()));
         }
-        if self.patches {
-            out.push("patches".into());
-        }
         out
     }
 
@@ -293,9 +278,6 @@ impl Props {
         }
         if let Some(t) = self.trust {
             v["trust"] = serde_json::json!(t.name());
-        }
-        if self.patches {
-            v["patches"] = serde_json::json!(true);
         }
         v
     }
@@ -450,21 +432,19 @@ pub fn view_key(line_id: &str) -> String {
     format!("view.{line_id}")
 }
 
-/// The name of the shared set as a write target (`save --to shared`, `layr line target shared`).
-pub const SHARED_TARGET: &str = "shared";
-
-/// The settings key of the write target of a line (`layr line target`).
-pub fn target_key(line_id: &str) -> String {
-    format!("target.{line_id}")
-}
-
-/// The setting in the records of a hidden overlay that makes it the write target of a line.
-pub fn hidden_target_key(line_id: &str) -> String {
-    format!("hidden.target.{line_id}")
-}
-
-/// The settings key of the project order of overlays (`layr overlay order`).
+/// The settings key of the project order of overlays of older layr. `layr overlay order` is gone
+/// (owner decision 2026-11-15); the order only gives old overlays their parent (`derived_parent`).
 pub const ORDER_KEY: &str = "overlays.order";
+
+/// The name of the bottom overlay (docs/overlays.md section 1, owner decision 2026-11-15): the
+/// project's own files, which `layr git push` publishes. No overlay can take this name.
+pub const MAIN: &str = "main";
+
+/// The property suffix of the parent of a patches overlay (`overlay.<name>.parent`).
+pub const PARENT: &str = "parent";
+
+/// The longest path of the tree that a view takes; a longer one is a loop.
+const MAX_DEPTH: usize = 64;
 
 /// Record data that sets the view of the working folder of a line: the names of its public
 /// overlays, bottom first.
@@ -700,59 +680,66 @@ pub struct Split {
     pub overlays: Vec<Ops>,
     /// The change list of the whole tree (with renames), for the summary.
     pub list: Vec<Change>,
-    /// Paths of the shared set that a target sends into an overlay (index): a copy of a shared file, or a
-    /// delete marker that hides one. An overlay takes them only with `patches` (`commit_layers`).
-    pub shadows: BTreeSet<(usize, String)>,
-    /// A change went to the shared set by the rules without a target (no `--to`, no line target).
-    pub default_shared: bool,
 }
 
-/// Split the changes from `base` (the line's full tree) to `new` by layer. `shared` and `roots`
-/// are the previous states of the layers; `pending` names paths that `layr overlay move` sends to
-/// an overlay. `target` is the write target of the save (`save --to`, else the line target) and
-/// `per_path` the targets of single paths (`rm --to`); without them the rules are those of
-/// docs/overlays.md section 9.3, unchanged.
+/// Split the changes from `base` (the line's full tree) to `new` by layer (docs/overlays.md section 1,
+/// write rule, owner decision 2026-11-15). `shared` and `roots` are the previous states of the
+/// layers, the path of the view bottom first; `pending` names paths that `layr overlay move` sends to
+/// an overlay. Every other change goes to `target`: the top of the view, or the ancestor of
+/// `save --to`. A new or changed file goes to the target, and the layers above it drop the path (they
+/// would hide the saved file). A delete takes the path out of the target and the layers above it,
+/// and the target gets a delete marker when a layer below it still shows the path. A rename is a
+/// delete of the old path and a new file; inside the target it stays a move (btrfs keeps the inode).
+/// `main` changes only when it is the target.
 pub fn split(
     base: &Path,
     new: &Path,
     shared: &Path,
     roots: &[PathBuf],
     pending: &BTreeMap<String, usize>,
-    target: Option<Owner>,
-    per_path: &BTreeMap<String, Owner>,
+    target: Owner,
 ) -> Result<Split> {
     let list: Vec<Change> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
     let list = changes::with_renames(base, new, list);
+    let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect();
+    let holds = |o: Owner, p: &str| match o {
+        Owner::Shared => has_file(shared, p),
+        Owner::Overlay(i) => has_file(&roots[i], p),
+    };
     let all = |p: &str| -> Vec<Owner> {
-        let mut v: Vec<Owner> = Vec::new();
-        if has_file(shared, p) {
+        std::iter::once(Owner::Shared).chain((0..roots.len()).map(Owner::Overlay)).filter(|o| holds(*o, p)).collect()
+    };
+    // The layers at and above an owner: the target and the layers that would hide its file.
+    let at_or_above = |o: Owner| -> Vec<Owner> {
+        let from = match o {
+            Owner::Shared => 0,
+            Owner::Overlay(i) => i,
+        };
+        let mut v = Vec::new();
+        if o == Owner::Shared {
             v.push(Owner::Shared);
         }
-        for (i, r) in roots.iter().enumerate() {
-            if has_file(r, p) {
-                v.push(Owner::Overlay(i));
-            }
-        }
+        v.extend((from..roots.len()).map(Owner::Overlay));
         v
     };
-    let top = |p: &str| -> Option<Owner> { all(p).into_iter().max() };
-    let in_shared = |p: &str| has_file(shared, p);
-    let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect();
-    let mut s = Split {
-        shared: Ops::default(),
-        overlays: roots.iter().map(|_| Ops::default()).collect(),
-        list: Vec::new(),
-        shadows: BTreeSet::new(),
-        default_shared: false,
+    // Whether the view below overlay `i` shows `p`: the nearest layer below that holds it or hides it.
+    let below_shows = |i: usize, p: &str| -> bool {
+        for j in (0..i).rev() {
+            if removed[j].contains(p) {
+                return false;
+            }
+            if has_file(&roots[j], p) {
+                return true;
+            }
+        }
+        has_file(shared, p)
     };
+    let mut s = Split { shared: Ops::default(), overlays: roots.iter().map(|_| Ops::default()).collect(), list: Vec::new() };
     fn ops(s: &mut Split, o: Owner) -> &mut Ops {
         match o {
             Owner::Shared => &mut s.shared,
             Owner::Overlay(i) => &mut s.overlays[i],
         }
-    }
-    fn size(o: &Ops) -> usize {
-        o.moves.len() + o.dels.len() + o.puts.len()
     }
     // A path that a layer gets shows again: the delete markers of that layer and of the layers above go.
     let unmark = |s: &mut Split, o: Owner, p: &str| {
@@ -773,155 +760,69 @@ pub fn split(
         }
         Ok(())
     };
+    // The path leaves the owner `o` and every layer above it; a lower layer that still shows it is hidden.
+    let take_out = |s: &mut Split, o: Owner, p: &str, keep: Option<Owner>| {
+        for x in at_or_above(o) {
+            if Some(x) != keep && holds(x, p) {
+                ops(s, x).dels.insert(p.to_string());
+            }
+        }
+        if let Owner::Overlay(i) = o {
+            if below_shows(i, p) {
+                s.overlays[i].marks.insert(p.to_string());
+            }
+        }
+    };
     let mut handled: BTreeSet<String> = BTreeSet::new();
     for c in &list {
         handled.insert(c.path.clone());
-        let forced = pending.get(&c.path).map(|i| Owner::Overlay(*i));
-        let to = per_path.get(&c.path).or_else(|| c.old_path.as_ref().and_then(|o| per_path.get(o))).copied().or(target);
         let p = c.path.clone();
-        match (forced, to) {
-            (None, Some(Owner::Shared)) => match (&c.old, &c.new, &c.old_path) {
-                // `--to shared`: the shared set takes the change, also of a path that an overlay holds.
-                (_, None, _) => {
-                    for o in all(&p) {
+        if let Some(i) = pending.get(&p).copied() {
+            // `layr overlay move`: the file goes to its overlay and leaves every other layer.
+            let owner = Owner::Overlay(i);
+            if let Some(old) = &c.old_path {
+                handled.insert(old.clone());
+                for o in all(old) {
+                    ops(&mut s, o).dels.insert(old.clone());
+                }
+            }
+            if c.new.is_some() {
+                check_name(owner, &p)?;
+                for o in all(&p) {
+                    if o != owner {
                         ops(&mut s, o).dels.insert(p.clone());
                     }
                 }
-                (_, Some(_), old) => {
-                    if let Some(old) = old {
-                        handled.insert(old.clone());
-                        for o in all(old) {
-                            if o == Owner::Shared {
-                                s.shared.moves.push((old.clone(), p.clone()));
-                            } else {
-                                ops(&mut s, o).dels.insert(old.clone());
-                            }
-                        }
-                    }
-                    for o in all(&p) {
-                        if o != Owner::Shared {
-                            ops(&mut s, o).dels.insert(p.clone());
-                        }
-                    }
-                    s.shared.puts.insert(p.clone());
-                    unmark(&mut s, Owner::Shared, &p);
-                }
-            },
-            (None, Some(Owner::Overlay(i))) => {
-                // An overlay target: the shared set never changes. A change of a shared file makes the
-                // overlay's copy; a delete or a move hides the shared file with a delete marker.
-                let into = Owner::Overlay(i);
-                match (&c.old, &c.new, &c.old_path) {
-                    (_, None, _) => {
-                        for o in all(&p) {
-                            if o != Owner::Shared {
-                                ops(&mut s, o).dels.insert(p.clone());
-                            }
-                        }
-                        if in_shared(&p) {
-                            s.overlays[i].marks.insert(p.clone());
-                            s.shadows.insert((i, p.clone()));
-                        }
-                    }
-                    (Some(_), Some(_), Some(old)) => {
-                        handled.insert(old.clone());
-                        // A file of an overlay stays in its overlay; a shared file goes to the target.
-                        let owner = match top(old) {
-                            Some(Owner::Overlay(k)) => Owner::Overlay(k),
-                            _ => into,
-                        };
-                        for o in all(old) {
-                            if o == Owner::Shared {
-                                continue;
-                            }
-                            if o == owner {
-                                ops(&mut s, o).moves.push((old.clone(), p.clone()));
-                            } else {
-                                ops(&mut s, o).dels.insert(old.clone());
-                            }
-                        }
-                        if in_shared(old) {
-                            s.overlays[i].marks.insert(old.clone());
-                            s.shadows.insert((i, old.clone()));
-                        }
-                        check_name(owner, &p)?;
-                        ops(&mut s, owner).puts.insert(p.clone());
-                        if let (Owner::Overlay(k), true) = (owner, in_shared(&p)) {
-                            s.shadows.insert((k, p.clone()));
-                        }
-                        unmark(&mut s, owner, &p);
-                    }
-                    (None, Some(_), _) => {
-                        check_name(into, &p)?;
-                        s.overlays[i].puts.insert(p.clone());
-                        if in_shared(&p) {
-                            s.shadows.insert((i, p.clone()));
-                        }
-                        unmark(&mut s, into, &p);
-                    }
-                    (Some(_), Some(_), None) => {
-                        // A file that an overlay holds changes there; a shared file gets its copy in the target.
-                        let owner = match top(&p) {
-                            Some(Owner::Overlay(k)) => Owner::Overlay(k),
-                            _ => into,
-                        };
-                        check_name(owner, &p)?;
-                        ops(&mut s, owner).puts.insert(p.clone());
-                        if owner == into && in_shared(&p) && !has_file(&roots[i], &p) {
-                            s.shadows.insert((i, p.clone()));
-                        }
-                    }
+                ops(&mut s, owner).puts.insert(p.clone());
+                unmark(&mut s, owner, &p);
+            } else {
+                for o in all(&p) {
+                    ops(&mut s, o).dels.insert(p.clone());
                 }
             }
-            _ => {
-                let before = size(&s.shared);
-                match (&c.old, &c.new, &c.old_path) {
-                    // A delete goes to every layer that has the path, so no lower file shows again.
-                    (_, None, _) => {
-                        for o in all(&c.path) {
-                            ops(&mut s, o).dels.insert(c.path.clone());
-                        }
+            continue;
+        }
+        match (&c.new, &c.old_path) {
+            (None, _) => take_out(&mut s, target, &p, None),
+            (Some(_), old) => {
+                check_name(target, &p)?;
+                let mut moved = false;
+                if let Some(old) = old {
+                    handled.insert(old.clone());
+                    // A file of the target keeps its inode: a move inside the target.
+                    if holds(target, old) && !pending.contains_key(old) {
+                        ops(&mut s, target).moves.push((old.clone(), p.clone()));
+                        moved = true;
                     }
-                    // A moved file stays in the layer of its old path: a move never publishes it.
-                    (Some(_), Some(_), Some(old)) => {
-                        handled.insert(old.clone());
-                        let owner = forced.or(top(old)).unwrap_or(Owner::Shared);
-                        for o in all(old) {
-                            if o == owner {
-                                ops(&mut s, o).moves.push((old.clone(), c.path.clone()));
-                            } else {
-                                ops(&mut s, o).dels.insert(old.clone());
-                            }
-                        }
-                        check_name(owner, &c.path)?;
-                        ops(&mut s, owner).puts.insert(c.path.clone());
-                        unmark(&mut s, owner, &c.path);
-                    }
-                    // A new path goes to the shared set, unless `overlay move` named it.
-                    (None, Some(_), _) => {
-                        let owner = forced.unwrap_or(Owner::Shared);
-                        check_name(owner, &c.path)?;
-                        ops(&mut s, owner).puts.insert(c.path.clone());
-                        unmark(&mut s, owner, &c.path);
-                    }
-                    // A change goes to the highest layer that has the path.
-                    (Some(_), Some(_), None) => {
-                        let owner = forced.or(top(&c.path)).unwrap_or(Owner::Shared);
-                        check_name(owner, &c.path)?;
-                        ops(&mut s, owner).puts.insert(c.path.clone());
-                        if forced.is_some() {
-                            for o in all(&c.path) {
-                                if o != owner {
-                                    ops(&mut s, o).dels.insert(c.path.clone());
-                                }
-                            }
-                        }
+                    take_out(&mut s, target, old, moved.then_some(target));
+                }
+                for x in at_or_above(target) {
+                    if x != target && holds(x, &p) {
+                        ops(&mut s, x).dels.insert(p.clone());
                     }
                 }
-                // `overlay move` names its paths: only the rules without a target choose the shared set.
-                if forced.is_none() && size(&s.shared) > before {
-                    s.default_shared = true;
-                }
+                ops(&mut s, target).puts.insert(p.clone());
+                unmark(&mut s, target, &p);
             }
         }
     }
@@ -1515,31 +1416,117 @@ impl<'a> Repo<'a> {
                 layers.push(l);
             }
         }
-        // A hidden overlay keeps its place in the view in its own records (`hidden.view.<line id>`).
-        let mut hidden = Vec::new();
-        for (name, info, op) in hidden_overlays {
+        let hidden_overlays: Vec<(&'b str, &'b Info, &'b Project<'a>)> = hidden_overlays.into_iter().collect();
+        // The layer of a hidden overlay that the owner reads: the head of the line on it, else the part of the head.
+        let hidden_layer = |name: &str, info: &Info, op: &Project| -> Result<Option<Layer>> {
             if !Self::project_reads(op, line.owner) {
-                continue;
-            }
-            let selection = hidden_view(op, &line.id)?;
-            if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
-                continue;
+                return Ok(None);
             }
             let state = match find_overlay_line(&op.db, info, line)? {
                 Some(ol) => ol.head,
                 None => match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned)) {
                     Some(part) => part,
-                    None => continue,
+                    None => return Ok(None),
                 },
             };
+            Ok(Some(Layer { overlay: name.to_string(), state }))
+        };
+        // A hidden overlay keeps its place in the view in its own records (`hidden.view.<line id>`).
+        let mut hidden = Vec::new();
+        for (name, info, op) in &hidden_overlays {
+            let selection = hidden_view(op, &line.id)?;
+            if selection.as_ref().is_some_and(|s| s["enabled"] == false) {
+                continue;
+            }
+            let Some(layer) = hidden_layer(name, info, op)? else { continue };
             let position = selection.as_ref().and_then(|s| s["position"].as_u64()).unwrap_or(u64::MAX);
-            hidden.push((position, Layer { overlay: name.to_string(), state }));
+            hidden.push((position, layer));
         }
         hidden.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.overlay.cmp(&b.1.overlay)));
         for (position, layer) in hidden {
             layers.insert((position as usize).min(layers.len()), layer);
         }
-        Ok(layers)
+        // The view is seen from one overlay (owner decision 2026-11-15): the path of the tree to its top.
+        // Overlays that are no node of the tree (folder overlays of older data) stay above it. The
+        // settings come from the projects open here, so a view opens no project twice.
+        let setting = |name: &str, suffix: &str| -> Result<Option<serde_json::Value>> {
+            let key = format!("overlay.{name}.{suffix}");
+            match hidden_overlays.iter().find(|(n, _, _)| *n == name) {
+                Some((_, _, op)) => op.db.overlay_config(&key),
+                None => self.p.db.overlay_config(&key),
+            }
+        };
+        let names: Vec<String> = layers.iter().map(|l| l.overlay.clone()).collect();
+        let Some(path) = self.view_path(&names, &setting)? else { return Ok(layers) };
+        let mut out = Vec::new();
+        for name in path {
+            if let Some(l) = layers.iter().find(|l| l.overlay == name) {
+                out.push(l.clone());
+                continue;
+            }
+            let layer = match hidden_overlays.iter().find(|(n, _, _)| *n == name) {
+                Some((n, info, op)) => hidden_layer(n, info, op)?,
+                None if self.overlay_info(&name)?.is_some_and(|i| !i.hidden) => self.overlay_layer(Some(line), &line.head, &name)?,
+                None => None,
+            };
+            out.extend(layer);
+        }
+        for l in layers {
+            if !out.iter().any(|o| o.overlay == l.overlay) && setting(&l.overlay, "folder")?.is_some_and(|v| !v.is_null()) {
+                out.push(l);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The path of the tree that a view of the overlays `names` (bottom first, as a working folder
+    /// records them) shows: the path to its top (`view_top`). None: the view of `main`. `setting`
+    /// reads `overlay.<name>.<suffix>`. An overlay without a recorded parent (older layr) takes the
+    /// overlay below it in `names`, so an existing folder keeps its content; outside `names` it takes
+    /// the overlay below it in the old project order (`derived_parent`).
+    fn view_path(
+        &self,
+        names: &[String],
+        setting: &dyn Fn(&str, &str) -> Result<Option<serde_json::Value>>,
+    ) -> Result<Option<Vec<String>>> {
+        let mut nodes = Vec::new();
+        for n in names {
+            if !setting(n, "folder")?.is_some_and(|v| !v.is_null()) {
+                nodes.push(n.clone());
+            }
+        }
+        let parent = |n: &str| -> Result<Option<String>> {
+            if let Some(v) = setting(n, PARENT)? {
+                return Ok(v.as_str().filter(|p| *p != MAIN).map(str::to_owned));
+            }
+            match nodes.iter().position(|x| x == n) {
+                Some(0) => Ok(None),
+                Some(i) => Ok(Some(nodes[i - 1].clone())),
+                None => self.derived_parent(n),
+            }
+        };
+        let path_of = |top: &str| -> Result<Vec<String>> {
+            let mut out = vec![top.to_string()];
+            let mut cur = top.to_string();
+            while let Some(p) = parent(&cur)? {
+                if out.contains(&p) || out.len() > MAX_DEPTH {
+                    bail!("the parents of overlay '{top}' form a loop; set one with 'layr overlay set <name> --parent <overlay>'");
+                }
+                out.push(p.clone());
+                cur = p;
+            }
+            out.reverse();
+            Ok(out)
+        };
+        let mut last = None;
+        for cand in nodes.iter().rev() {
+            let path = path_of(cand)?;
+            if nodes.iter().all(|n| path.contains(n)) {
+                return Ok(Some(path));
+            }
+            last.get_or_insert(path);
+        }
+        Ok(last)
     }
 
     /// The layers that layr before 0.44 kept for `line` in the setting `stack.<line id>`. Only
@@ -1634,30 +1621,163 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// The overlays of the default view of a new line folder of `owner`: every overlay that the owner
-    /// reads and whose `platform` (if set) is this machine's, in the project order. Folder
-    /// overlays are no overlay of the file stack (a line takes their parts as folders). A cache overlay
-    /// is an ordinary overlay (owner decision 2026-11-11): it comes like any other.
-    pub fn default_overlays(&self, owner: u32, _shown: &[String]) -> Result<Vec<String>> {
-        let folders: Vec<String> = self.folder_overlays()?.into_iter().map(|(n, _)| n).collect();
+    // ----- the tree of patch overlays (docs/overlays.md section 1, owner decision 2026-11-15) -----
+
+    /// Whether overlay `name` is of kind `patches`: a node of the tree. A folder overlay (a cache) is
+    /// no node: it has no parent and every view has it.
+    pub fn patches_overlay(&self, name: &str) -> Result<bool> {
+        Ok(self.overlay_info(name)?.is_some() && !self.chunked_overlay(name)?)
+    }
+
+    /// The parent of the patches overlay `name`; None is `main`. A recorded parent is the setting
+    /// `overlay.<name>.parent` (in the overlay's own records when it is hidden). An overlay of an
+    /// older layr has none: its parent is the overlay below it in the old project order
+    /// (`derived_parent`), so an existing folder keeps its content.
+    pub fn overlay_parent(&self, name: &str) -> Result<Option<String>> {
+        match self.overlay_setting(name, PARENT)? {
+            Some(v) => Ok(v.as_str().filter(|p| *p != MAIN).map(str::to_owned)),
+            None => self.derived_parent(name),
+        }
+    }
+
+    /// The parent of an overlay without a recorded parent: the patches overlay below it in the
+    /// project order of older layr (`project_order`). A public overlay never takes a hidden parent:
+    /// a public record would then depend on a name that some readers do not know.
+    fn derived_parent(&self, name: &str) -> Result<Option<String>> {
+        let hidden = self.overlay_info(name)?.is_some_and(|i| i.hidden);
+        let order = self.project_order()?;
+        let Some(pos) = order.iter().position(|n| n == name) else { return Ok(None) };
+        for cand in order[..pos].iter().rev() {
+            let Some(info) = self.overlay_info(cand)? else { continue };
+            if !self.patches_overlay(cand)? || (info.hidden && !hidden) {
+                continue;
+            }
+            return Ok(Some(cand.clone()));
+        }
+        Ok(None)
+    }
+
+    /// The path of the tree from `main` to `top`, bottom first, without `main` and with `top`. A
+    /// loop in the parents (records of two machines that crossed) is an error, never a view.
+    pub fn overlay_path(&self, top: &str) -> Result<Vec<String>> {
+        let mut out = vec![top.to_string()];
+        let mut cur = top.to_string();
+        while let Some(p) = self.overlay_parent(&cur)? {
+            if out.contains(&p) || out.len() > MAX_DEPTH {
+                bail!("the parents of overlay '{top}' form a loop; set one with 'layr overlay set <name> --parent <overlay>'");
+            }
+            out.push(p.clone());
+            cur = p;
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// The overlays whose path goes through `name` (its children, their children and so on).
+    pub fn overlay_descendants(&self, name: &str) -> Result<Vec<String>> {
         let mut out = Vec::new();
-        for name in self.project_order()? {
-            let Some(info) = self.overlay_info(&name)? else { continue };
-            if folders.contains(&name) {
+        for other in self.overlay_names()? {
+            if other != name && self.patches_overlay(&other)? && self.overlay_path(&other).is_ok_and(|p| p.iter().any(|n| n == name)) {
+                out.push(other);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The overlay that the working folder of `line` shows (None: `main`): the top of its path.
+    pub fn line_view_top(&self, line: &Line) -> Result<Option<String>> {
+        for l in self.layers(line)?.into_iter().rev() {
+            if self.patches_overlay(&l.overlay)? {
+                return Ok(Some(l.overlay));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The overlays of a new line folder of `owner`: the path to the overlay of the folder where
+    /// `line new` ran, else none (the view of `main`). The path stops below the first overlay that the
+    /// owner does not read, so the folder of a non-reader never gets its files; an overlay of another
+    /// platform or not on this machine is left out.
+    pub fn default_overlays(&self, ctx: &Ctx, owner: u32) -> Result<Vec<String>> {
+        // The folder of the command: the working folder, or `--project` with `--line`.
+        let folder_line = ctx
+            .locate()
+            .ok()
+            .filter(|l| l.project == self.p.name)
+            .and_then(|l| l.line)
+            .and_then(|n| self.p.db.line_by_name(&n).ok().flatten());
+        let Some(folder_line) = folder_line else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for name in self.layers(&folder_line)?.into_iter().map(|l| l.overlay) {
+            if !self.patches_overlay(&name)? {
                 continue;
             }
-            if other_platform_overlay(info.platform.as_deref()) {
-                continue;
-            }
-            if self.layer_root(&Layer { overlay: name.clone(), state: info.root.clone() }).is_none() {
-                continue;
-            }
+            let Some(info) = self.overlay_info(&name)? else { break };
             if !self.owner_reads(&name, owner)? {
+                break;
+            }
+            if other_platform_overlay(info.platform.as_deref())
+                || self.layer_root(&Layer { overlay: name.clone(), state: info.root.clone() }).is_none()
+            {
                 continue;
             }
             out.push(name);
         }
         Ok(out)
+    }
+
+    /// Every principal that reads `child` (its readers and its owner) reads `ancestor` too
+    /// (docs/overlays.md section 1, readers rule). A principal reads `ancestor` when its policy names
+    /// it or everyone with the reader role, or, for a user, when the policy gives the user's uid or
+    /// groups that role. `main` is read by every reader of the project.
+    pub fn readers_covered(child: &Policy, ancestor: &Policy) -> Option<String> {
+        let reads = |k: &str| -> bool {
+            let denied = |key: &str| ancestor.deny.get(key).is_some_and(|v| v.iter().any(|a| a == "read" || a == "*"));
+            let ok = |key: &str| ancestor.access.get(key).is_some_and(|r| *r >= crate::access::Role::Reader) && !denied(key);
+            if denied(k) {
+                return false;
+            }
+            if ok("*") || ok(k) {
+                return true;
+            }
+            match k.strip_prefix("user:").and_then(|u| u.parse::<u32>().ok()) {
+                Some(uid) => {
+                    let gid = crate::ctx::Caller::from_uid(uid).gid;
+                    ancestor.check(&Who::of(uid, gid), "read").is_ok()
+                }
+                None => false,
+            }
+        };
+        child.access.iter().filter(|(_, r)| **r >= crate::access::Role::Reader).map(|(k, _)| k).find(|k| !reads(k)).cloned()
+    }
+
+    /// The readers rule for overlay `name` with the policy `policy` and the parent `parent`: each
+    /// ancestor is read by every reader of `name`, and `name` is read by every reader of each
+    /// descendant. Returns the refusal text.
+    pub fn check_readers_rule(&self, name: &str, policy: &Policy, parent: Option<&str>) -> Result<Option<String>> {
+        let mut ancestors = Vec::new();
+        if let Some(p) = parent {
+            ancestors = self.overlay_path(p)?;
+        }
+        for a in &ancestors {
+            let ap = Policy::load(&self.overlay_project(a)?);
+            if let Some(who) = Self::readers_covered(policy, &ap) {
+                return Ok(Some(format!(
+                    "{} reads overlay '{name}' but not its ancestor '{a}': a reader of an overlay reads every overlay below it",
+                    crate::access::show_principal(&who)
+                )));
+            }
+        }
+        for d in self.overlay_descendants(name)? {
+            let dp = Policy::load(&self.overlay_project(&d)?);
+            if let Some(who) = Self::readers_covered(&dp, policy) {
+                return Ok(Some(format!(
+                    "{} reads overlay '{d}', which is above '{name}': a reader of an overlay reads every overlay below it",
+                    crate::access::show_principal(&who)
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// The parts that a new state of a line with `layers` names: the state of each overlay that
@@ -1878,70 +1998,15 @@ impl<'a> Repo<'a> {
         fsutil::atomic_write(&f, serde_json::to_string(m)?.as_bytes(), 0o600)
     }
 
-    /// The targets that `rm --to` gave single paths, until the next named save (`meta/stage/<line
-    /// id>.targets`: path to `shared` or an overlay name). A file of its own, not `.moves`, so an older
-    /// layr, which reads only `.moves`, never drops a pending move with it.
-    pub fn pending_targets(&self, line: &Line) -> BTreeMap<String, String> {
-        let f = self.p.meta_dir().join("stage").join(format!("{}.targets", line.id));
-        std::fs::read(&f).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
-    }
-
-    pub fn set_pending_targets(&self, line: &Line, m: &BTreeMap<String, String>) -> Result<()> {
-        let f = self.p.meta_dir().join("stage").join(format!("{}.targets", line.id));
-        if m.is_empty() {
-            let _ = std::fs::remove_file(&f);
-            return Ok(());
-        }
-        fsutil::atomic_write(&f, serde_json::to_string(m)?.as_bytes(), 0o600)
-    }
-
-    /// The write target of a line (`layr line target`): `shared`, the name of an overlay, or None
-    /// (the rules of docs/overlays.md section 9.3). A public target is the setting `target.<line id>`
-    /// (keyed by the line id, as the view is, so `line rename` keeps it). A hidden overlay keeps the
-    /// target in its own records (`hidden.target.<line id>`), so the project never names it; only a
-    /// hidden overlay that the line owner reads counts.
-    pub fn line_target(&self, line: &Line) -> Result<Option<String>> {
-        if self.p.is_overlay() {
-            return Ok(None);
-        }
-        for (name, _, op) in self.hidden_overlays()? {
-            if Self::project_reads(&op, line.owner)
-                && op.db.overlay_config(&hidden_target_key(&line.id))? == Some(serde_json::json!(true))
-            {
-                return Ok(Some(name));
-            }
-        }
-        let key = target_key(&line.id);
-        let value = if line.machine == self.p.store.machine.id {
-            self.p.config_value(&key)?
-        } else {
-            self.p.config_value(&format!("{key}@{}", line.machine))?
-        };
-        Ok(value.and_then(|v| v.as_str().map(str::to_owned)))
-    }
-
-    /// Whether automatic states of `line` hold only the shared head (`working_snapshot_over`): its
-    /// target is an overlay, or it shows an overlay with `patches` and has no target (decision P2: the
-    /// next save does not know yet where a change of a shared file goes). Then no automatic state that
-    /// other readers of the project read holds a change that may be proprietary.
-    pub fn private_target(&self, line: &Line) -> Result<bool> {
+    /// Whether automatic states of `line` hold only the shared head (`working_snapshot_over`): its folder
+    /// shows the view of an overlay, so the next named save writes its changes into that overlay
+    /// (docs/overlays.md section 1, write rule). Then no automatic state that other readers of the project
+    /// read holds a change that is meant to stay in the overlay.
+    pub fn private_view(&self, line: &Line) -> Result<bool> {
         if self.p.is_overlay() {
             return Ok(false);
         }
-        match self.line_target(line)? {
-            Some(t) => Ok(t != SHARED_TARGET),
-            None => self.shows_patches(line),
-        }
-    }
-
-    /// Whether `line` shows an overlay with the property `patches`.
-    pub fn shows_patches(&self, line: &Line) -> Result<bool> {
-        for l in self.layers(line)? {
-            if self.overlay_info(&l.overlay)?.is_some() && self.overlay_props(&l.overlay)?.patches {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self.line_view_top(line)?.is_some())
     }
 
     /// The key of the staging line: it is current while the head and the stack are.
@@ -2440,9 +2505,8 @@ impl<'a> Repo<'a> {
             Some(s) => self.layers(s)?,
             None => Vec::new(),
         };
-        let shown: Vec<String> = source_layers.iter().map(|l| l.overlay.clone()).collect();
         let mut out = Vec::new();
-        for name in self.default_overlays(line.owner, &shown)? {
+        for name in self.default_overlays(ctx, line.owner)? {
             let Some(info) = self.overlay_info(&name)? else { continue };
             let from_source = source_layers.iter().find(|l| l.overlay == name).map(|l| l.state.clone());
             let orepo = self.overlay_repo(&name)?;
@@ -2614,58 +2678,38 @@ pub struct Committed {
     pub fds: Vec<crate::diff::FileDiff>,
 }
 
-/// Decision P1 (assumed, owner decision open): an overlay holds its own version of a shared file, or
-/// hides one with a delete marker, only with the property `patches`. A reader of an overlay without it
-/// never gets a silently replaced reviewed file.
-fn refuse_unpatched(repo: &Repo, layers: &[Layer], shadows: &BTreeSet<(usize, String)>) -> Result<()> {
-    for (i, p) in shadows {
-        let name = &layers[*i].overlay;
-        if !repo.overlay_props(name)?.patches {
-            return Err(crate::cmd::exit(
-                1,
-                format!(
-                    "error: '{p}' is a file of the shared set, and overlay '{name}' has no property 'patches': save it with --to shared, or let the overlay hold patches with 'layr overlay set {name} --patches'"
-                ),
-            ));
+/// The layer that a named save writes (docs/overlays.md section 1, write rule): the top of the view,
+/// or with `save --to <name>` an ancestor on the path of the view (`main` names the bottom layer). A
+/// name that is not on the path (unknown, above the view, or a hidden overlay that the owner does not
+/// read) gets one text, so the refusal does not tell that a hidden overlay exists.
+pub fn save_target(repo: &Repo, layers: &[Layer], line: &Line, to: Option<&str>) -> Result<Owner> {
+    let mut nodes = Vec::new();
+    for (i, l) in layers.iter().enumerate() {
+        if repo.patches_overlay(&l.overlay)? {
+            nodes.push(i);
         }
     }
-    Ok(())
-}
-
-/// Decision P2 (assumed, owner decision open): a line that shows an overlay with `patches` and has
-/// no write target does not guess where a change of a shared file goes.
-fn refuse_without_target(repo: &Repo, line: &Line, default_shared: bool) -> Result<()> {
-    if default_shared && repo.shows_patches(line)? {
-        return Err(crate::cmd::exit(
-            1,
-            format!(
-                "error: line '{}' shows an overlay with patches and has no write target; choose where the changes go: 'layr save --to shared' (the shared set, which git push publishes) or 'layr save --to <overlay>', or set one with 'layr line target'",
-                line.name
-            ),
-        ));
+    match to {
+        None => Ok(nodes.last().map(|i| Owner::Overlay(*i)).unwrap_or(Owner::Shared)),
+        Some(MAIN) => Ok(Owner::Shared),
+        Some(name) => match nodes.iter().find(|i| layers[**i].overlay == name) {
+            Some(i) => Ok(Owner::Overlay(*i)),
+            None => Err(crate::cmd::exit(
+                1,
+                format!(
+                    "error: --to {name}: overlay '{name}' is not on the path of the view of line '{}' (main{}); name main or an overlay of that path",
+                    line.name,
+                    nodes.iter().map(|i| format!(", {}", layers[*i].overlay)).collect::<String>()
+                ),
+            )),
+        },
     }
-    Ok(())
-}
-
-/// The layer of a write target as `save --to`, `rm --to` and `layr line target` name it. A name that
-/// the line does not show (unknown, or a hidden overlay that the owner does not read) gets the same
-/// text, so the refusal does not tell that a hidden overlay exists.
-fn target_owner(by_name: &BTreeMap<&str, usize>, line: &Line, what: &str, name: &str) -> Result<Owner> {
-    if name == SHARED_TARGET {
-        return Ok(Owner::Shared);
-    }
-    by_name.get(name).map(|i| Owner::Overlay(*i)).ok_or_else(|| {
-        crate::cmd::exit(
-            1,
-            format!("error: {what} {name}: line '{}' shows no overlay '{name}' (see 'layr overlay use')", line.name),
-        )
-    })
 }
 
 /// Commit the index of a line with overlays (docs/overlays.md, section 3.2). The caller holds the
 /// project lock and has checked that the caller owns the line. `new_tree` is a read-only snapshot
-/// of the index; it becomes the line's base. `to` is `save --to` (else the line target applies).
-/// Returns None when there is nothing to commit.
+/// of the index; it becomes the line's base. `to` is `save --to` (`save_target`). Returns None when
+/// there is nothing to commit.
 #[allow(clippy::too_many_arguments)]
 pub fn commit_layers(
     ctx: &Ctx,
@@ -2698,25 +2742,11 @@ pub fn commit_layers(
             None => bail!("'{p}' is to move to overlay '{o}', which line '{}' does not show", line.name),
         }
     }
-    // The write target: `save --to`, else the line target, else none (docs/overlays.md section 9.3).
-    let target = match to {
-        Some(t) => Some(target_owner(&by_name, line, "--to", t)?),
-        None => match repo.line_target(line)? {
-            Some(t) => Some(target_owner(&by_name, line, "the line target", &t)?),
-            None => None,
-        },
-    };
-    let mut per_path = BTreeMap::new();
-    for (p, t) in repo.pending_targets(line) {
-        per_path.insert(p, target_owner(&by_name, line, "rm --to", &t)?);
-    }
-    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, target, &per_path)?;
+    // The layer of this save: the top of the view, or the ancestor of `save --to` (docs/overlays.md section 1).
+    let target = save_target(repo, layers, line, to)?;
+    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, target)?;
     if s.shared.is_empty() && s.overlays.iter().all(|o| o.is_empty()) && !allow_empty {
         return Ok(None);
-    }
-    refuse_unpatched(repo, layers, &s.shadows)?;
-    if target.is_none() {
-        refuse_without_target(repo, line, s.default_shared)?;
     }
     // A protected line takes changes of the shared set only through merges; changes of its
     // overlays belong to its owner.
@@ -2922,6 +2952,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_reader_of_an_overlay_must_read_its_ancestor() {
+        use crate::access::Role;
+        let policy = |entries: &[(&str, Role)]| {
+            let mut p = Policy::default();
+            for (k, r) in entries {
+                p.access.insert(k.to_string(), *r);
+            }
+            p
+        };
+        let child = policy(&[("user:4242", Role::Admin), ("group:777", Role::Reader)]);
+        assert_eq!(Repo::readers_covered(&child, &policy(&[("user:4242", Role::Admin)])).as_deref(), Some("group:777"));
+        assert_eq!(Repo::readers_covered(&child, &policy(&[("user:4242", Role::Admin), ("group:777", Role::Reader)])), None);
+        assert_eq!(Repo::readers_covered(&child, &policy(&[("*", Role::Reader)])), None, "everyone reads the ancestor");
+        let mut denied = policy(&[("*", Role::Reader)]);
+        denied.deny.insert("group:777".into(), vec!["read".into()]);
+        denied.access.insert("group:777".into(), Role::Reader);
+        assert!(Repo::readers_covered(&child, &denied).is_some(), "a deny rule for read wins");
+        assert_eq!(Repo::readers_covered(&policy(&[("group:777", Role::None)]), &policy(&[])), None, "no role is no reader");
+    }
+
+    #[test]
     fn the_base_key_names_the_head_and_the_stack() {
         let l = |s: &str| vec![Layer { overlay: "keys".into(), state: s.into() }];
         assert_eq!(base_key("h", &l("a")), base_key("h", &l("a")));
@@ -2984,7 +3035,6 @@ mod tests {
             prune: Some("pnpm".into()),
             platform: Some("linux-x86_64".into()),
             trust: Some(Trust::Protected),
-            patches: true,
         };
         let values: BTreeMap<&str, serde_json::Value> = PROPS.iter().map(|k| (*k, p.value(k))).collect();
         assert_eq!(Props::from_settings(|k| values.get(k).cloned().filter(|v| !v.is_null())), p);
@@ -2997,8 +3047,7 @@ mod tests {
                 "gc=lru:20G",
                 "prune=pnpm",
                 "platform=linux-x86_64",
-                "trust=protected",
-                "patches"
+                "trust=protected"
             ]
         );
         // Defaults are no settings at all, and unknown values read as defaults.
@@ -3083,36 +3132,29 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn split_without_a_target_keeps_the_rules_and_an_overlay_target_keeps_the_shared_set() {
+    fn a_save_writes_every_change_to_its_target() {
         let root = std::env::temp_dir().join(format!("layr-split-{}", ids::new_id()));
         let (shared, overlay, base, new) = split_trees(&root);
         let roots = vec![overlay];
-        let (none, no_paths) = (BTreeMap::new(), BTreeMap::new());
-        let s = split(&base, &new, &shared, &roots, &none, None, &no_paths).unwrap();
-        assert!(s.shared.puts.contains("core.c") && s.shared.puts.contains("new.c"), "the rules without a target");
-        assert!(s.shared.dels.contains("gone.c"));
-        assert_eq!(s.overlays[0].puts, BTreeSet::from([".env".to_string()]), "an overlay file stays in its overlay");
-        assert!(s.default_shared && s.shadows.is_empty() && s.overlays[0].marks.is_empty());
-        // An overlay target: the shared set gets nothing; copies and delete markers go to the overlay.
-        let s = split(&base, &new, &shared, &roots, &none, Some(Owner::Overlay(0)), &no_paths).unwrap();
-        assert!(s.shared.is_empty(), "the shared set never changes: {:?}", s.shared);
+        let none = BTreeMap::new();
+        // The view of the overlay: `main` never changes; copies, new files and delete markers go to the overlay.
+        let s = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0)).unwrap();
+        assert!(s.shared.is_empty(), "main never changes: {:?}", s.shared);
         let o = &s.overlays[0];
         for p in ["core.c", "new.c", "moved2.c", ".env"] {
             assert!(o.puts.contains(p), "{p} goes to the overlay");
         }
-        assert_eq!(o.marks, BTreeSet::from(["gone.c".to_string(), "moved.c".to_string()]), "deletes of shared files are markers");
-        let shadows: Vec<&str> = s.shadows.iter().map(|(_, p)| p.as_str()).collect();
-        assert_eq!(shadows, ["core.c", "gone.c", "moved.c"], "the shared paths that the overlay takes over");
-        assert!(!s.default_shared);
-        // `--to shared`: an overlay file goes to the shared set and leaves the overlay.
-        let s = split(&base, &new, &shared, &roots, &none, Some(Owner::Shared), &no_paths).unwrap();
+        assert_eq!(o.marks, BTreeSet::from(["gone.c".to_string(), "moved.c".to_string()]), "deletes of files of main are markers");
+        // `--to main`: every change goes to main, and a file that the overlay holds leaves it.
+        let s = split(&base, &new, &shared, &roots, &none, Owner::Shared).unwrap();
         assert!(s.shared.puts.contains(".env") && s.overlays[0].dels.contains(".env"));
-        assert!(!s.default_shared && s.shadows.is_empty());
-        // `rm --to <overlay>` for one path: only that delete becomes a marker.
-        let per_path = BTreeMap::from([("gone.c".to_string(), Owner::Overlay(0))]);
-        let s = split(&base, &new, &shared, &roots, &none, None, &per_path).unwrap();
-        assert!(!s.shared.dels.contains("gone.c") && s.overlays[0].marks.contains("gone.c"));
-        assert!(s.shared.puts.contains("core.c"), "the other changes keep the rules");
+        assert!(s.shared.puts.contains("core.c") && s.shared.puts.contains("new.c"));
+        assert!(s.shared.dels.contains("gone.c"));
+        assert!(s.overlays[0].marks.is_empty());
+        // `overlay move` names its overlay: the file leaves main whatever the target is.
+        let moves = BTreeMap::from([("core.c".to_string(), 0usize)]);
+        let s = split(&base, &new, &shared, &roots, &moves, Owner::Shared).unwrap();
+        assert!(s.overlays[0].puts.contains("core.c") && s.shared.dels.contains("core.c"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

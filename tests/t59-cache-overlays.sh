@@ -39,7 +39,7 @@ l remote add test-peer ssh://test/p >/dev/null
 ok "trust another machine" l remote trust test-peer $other_id --public-key $other_key
 l save --overlays -q
 has "the next save --overlays adds it to the readers" "machine:$other_id" "$(l overlay readers $TG)"
-no "overlay use refuses a folder overlay" l overlay use --add $TG
+no "overlay use refuses a folder overlay" l overlay use $TG
 no "overlay move refuses a folder overlay" l overlay move $TG notes.txt
 
 # 2. A new line from the line starts warm (dogfood item 10), and its cache is its own.

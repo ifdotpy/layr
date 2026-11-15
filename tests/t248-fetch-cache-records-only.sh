@@ -28,7 +28,7 @@ l line new side main >/dev/null 2>&1
 l push cloud -q >/dev/null 2>&1
 
 yl() { env LAYR_ROOT="$T/y/store" "$LAYR" "$@"; }
-yl clone "file://$T/archive" p --overlay base -q >/dev/null 2>&1
+yl clone "file://$T/archive" p --overlay main -q >/dev/null 2>&1
 Y=$T/y/store/projects/p/lines
 cd "$Y/main" || exit 1
 states() { ls "$T/$1/store/projects/p/meta/overlays/$TG/states" 2>/dev/null | wc -l | tr -d ' '; }

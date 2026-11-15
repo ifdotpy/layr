@@ -11,7 +11,12 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-pub const FORMAT: u32 = 1;
+/// Format 2 (owner decision 2026-11-15, docs/overlays.md section 1): the store can hold the tree of
+/// patch overlays. A binary of format 1 would save a private edit into `main`, so it must refuse the
+/// store. The data of format 1 is the same; the first open of this binary writes the new marker.
+pub const FORMAT: u32 = 2;
+/// The older format that this binary upgrades in place (metadata only).
+const UPGRADES_FROM: u32 = 1;
 pub const MARKER: &str = "store-version.json";
 const LOCK: &str = ".layr-version.lock";
 
@@ -166,6 +171,9 @@ impl Guard {
     pub fn open(root: &Path) -> Result<Self> {
         let binary = binary();
         if let Some(stored) = marker(root)? {
+            if stored.format == UPGRADES_FROM {
+                return Self::upgrade(root);
+            }
             // Refuse before opening a lock file or changing machine/project data.
             require_compatible(&binary, &stored, "store")?;
             let file = lock_file(root, true)?;
@@ -203,6 +211,22 @@ impl Guard {
         Ok(Self { _file: file })
     }
 
+    /// A marker of format 1: write the marker of this format under the exclusive lease, then take the
+    /// shared one. A concurrent upgrade finds the new marker. Only the marker changes.
+    fn upgrade(root: &Path) -> Result<Self> {
+        let binary = binary();
+        let file = lock_file(root, true).map_err(writable)?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+        let stored = marker(root)?.context("the store version disappeared; refuse access")?;
+        if stored.format == UPGRADES_FROM {
+            crate::fsutil::atomic_write(&root.join(MARKER), &serde_json::to_vec(&binary)?, 0o644).map_err(writable)?;
+        }
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
+        let stored = marker(root)?.context("the store version disappeared; refuse access")?;
+        require_compatible(&binary, &stored, "store")?;
+        Ok(Self { _file: file })
+    }
+
     pub fn ready(&self, root: &Path) -> Result<()> {
         rustix::fs::flock(&self._file, rustix::fs::FlockOperation::LockShared)?;
         let stored = marker(root)?.context("the store version disappeared; refuse access")?;
@@ -216,6 +240,9 @@ pub fn inspect(root: &Path) -> Result<Report> {
     let store = marker(root)?;
     let (state, upgrade) = match &store {
         Some(stored) if stored.format == binary.format => (StoreState::Compatible, None),
+        Some(stored) if stored.format == UPGRADES_FROM => {
+            (StoreState::Upgradable, Some(Upgrade { metadata_only: true, from_format: UPGRADES_FROM, to_format: FORMAT }))
+        }
         Some(_) => (StoreState::Incompatible, None),
         None => match fs::metadata(root) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StoreState::Absent, None),
@@ -276,6 +303,29 @@ mod race_tests {
         assert!(!root.exists());
         let report = serde_json::to_value(inspect(&root).unwrap()).unwrap();
         assert_eq!(report.get("api").and_then(serde_json::Value::as_u64), Some(u64::from(API_MAJOR)));
+    }
+
+    /// A store of format 1 is upgradable: the first open writes format 2, after which a binary of
+    /// format 1 (the same check with its format) refuses it. A later format is refused unchanged.
+    #[test]
+    fn format_one_is_upgraded_and_then_refused_by_format_one() {
+        let root = std::env::temp_dir().join(format!("layr-format-up-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("machine")).unwrap();
+        let old = Version { format: 1, version: "0.47.0".into(), build: "old".into() };
+        fs::write(root.join(MARKER), serde_json::to_vec(&old).unwrap()).unwrap();
+        let report = serde_json::to_value(inspect(&root).unwrap()).unwrap();
+        assert_eq!(report["state"], "upgradable");
+        assert_eq!(report["upgrade"]["fromFormat"], 1);
+        drop(Guard::open(&root).unwrap());
+        let now = marker(&root).unwrap().unwrap();
+        assert_eq!(now.format, FORMAT);
+        assert!(require_compatible(&old, &now, "store").is_err(), "a binary of format 1 refuses the upgraded store");
+        let later = Version { format: FORMAT + 1, version: "9".into(), build: "x".into() };
+        fs::write(root.join(MARKER), serde_json::to_vec(&later).unwrap()).unwrap();
+        assert!(Guard::open(&root).is_err());
+        assert_eq!(marker(&root).unwrap().unwrap().format, FORMAT + 1, "a later format is never rewritten");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// A store that a concurrent first open is making (marker written, machine folder without its

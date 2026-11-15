@@ -150,16 +150,17 @@ Bulk reads of file content through the mount are slow: `rg` over the whole tree 
 
 ## Views of overlays
 
-A view is a line (or a state) with an ordered list of overlays (overlays) above it
-([overlays](overlays.md) section 1). The working folder of a line is its default view. Since slice 5
-(overlays.md section 1a) the view, not the line, holds the overlays:
+A view is a line (or a state) seen from one overlay: the path of the tree of overlays from `main` to
+that overlay ([overlays](overlays.md) section 1, owner decision 2026-11-15). The working folder of a
+line shows one view. The view, not the line, holds the overlays:
 
-- A new line folder shows every overlay that its owner reads, in the project order of overlays
-  (`layr overlay order`). An overlay with a `platform` that is not this machine's is left out.
-- `layr overlay use <names>` changes the view of the current working folder only. The line keeps
+- A new line folder shows the view of the folder where `line new` ran, cut below the first overlay
+  that its owner does not read; run elsewhere, it shows `main`. An overlay with a `platform` that is
+  not this machine's is left out.
+- `layr overlay use <overlay>` changes the view of the current working folder only. The line keeps
   its parts on the other overlays: a save does not clear them.
-- `layr view <line or state> --overlay a,b` prints another view of the same line or state, with
-  those overlays. `--folder <dir>` writes its files to a new folder (on the volume of the store).
+- `layr view <line or state> --overlay <overlay>` prints another view of the same line or state, seen
+  from that overlay. `--folder <dir>` writes its files to a new folder (on the volume of the store).
   That folder is a copy to read or build in, not a working folder: it has no status and no save.
 
 ## Open items

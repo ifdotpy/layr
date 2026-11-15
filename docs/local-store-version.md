@@ -4,7 +4,7 @@ Each local store has a `store-version.json` file at its root.
 This file is independent of the encrypted remote store format.
 
 ```json
-{"format":1,"version":"0.4.0","build":"<source identity>"}
+{"format":2,"version":"0.48.0","build":"<source identity>"}
 ```
 
 `format` controls compatibility.
@@ -54,6 +54,7 @@ A malformed or unreadable marker returns status 128.
 | `absent` | The root does not exist. | Yes, the first normal command can create it. |
 | `empty` | The root contains no store data. | Yes, the first normal command can initialize it. |
 | `unmarked` | The root has no marker and has the layout of format 1 (a machine identity). | Yes, the next open writes the marker. |
+| `upgradable` | The marker has format 1. | Yes, the next open writes format 2 (the marker only). |
 | `compatible` | Both format numbers are equal. | Yes. |
 | `incompatible` | The format numbers differ, or the root has no marker and no machine identity. | No. |
 
@@ -64,14 +65,24 @@ An unmarked root reports the marker write that the next open makes:
 {"metadataOnly":true,"fromFormat":0,"toFormat":1}
 ```
 
+An `upgradable` root reports `{"metadataOnly":true,"fromFormat":1,"toFormat":2}`.
 Other states report `upgrade: null`.
 This classification describes changes to the version marker and its lock file.
 Writing the marker does not change machine identity files or project data.
 
+## Format 2 (owner decision 2026-11-15)
+
+Format 2 has the same data layout as format 1. It tells binaries of format 1 that the store can hold
+the tree of patch overlays ([overlays](overlays.md) section 1): such a binary would save a private
+edit into `main`, which `layr git push` publishes. The first open of a store of format 1 by a binary of
+format 2 writes the new marker under the exclusive lease, through a temporary file and a rename.
+Nothing else changes. From then on a binary of format 1 refuses the store with status 128.
+A daemon of format 1 and a CLI of format 2 refuse each other: upgrade both.
+
 ## Unmarked stores (format 0)
 
 A store without a marker is format 0.
-Its layout is the same as format 1, so no data changes.
+Its layout is the same as formats 1 and 2, so no data changes.
 The first command that opens it writes the marker. No extra step is needed.
 
 - A root without `machine/id` is not a layr store. It is refused, and no file changes.
@@ -155,7 +166,7 @@ Future incompatible object formats need an explicit migration.
 Do not change a format number manually to convert data.
 
 The root `store-version.json` describes the local container, which can hold both v1 and v2 projects.
-Its format remains 1. `layr store-version --json` reports that container format.
+Its format is 2 (it was 1 before 2026-11-15). `layr store-version --json` reports that container format.
 Remote protocol versions and the Layr release version are independent of project storage versions.
 Older binaries can lack object support even when their container format is 1.
 Upgrade all binaries that access a migrated project.

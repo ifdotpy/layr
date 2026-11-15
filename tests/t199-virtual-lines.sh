@@ -220,4 +220,11 @@ ok "checkout the complete virtual state" l line new linked-copy linked
 eq "saved hard links remain linked" "$(stat_field inode "$P/lines/linked-copy/one")" "$(stat_field inode "$P/lines/linked-copy/two")"
 ok "delete the virtual hard-link line" l line delete -D linked
 
+# Overlays (docs/overlays.md section 1, write rule): a virtual line saves without layers, so it shows
+# main only and never takes the view of an overlay, whose changes would go to main.
+ok "an overlay" l overlay create vpriv -q
+ok "a virtual line for the overlay check" l line new vov --view virtual
+has "a virtual line refuses the view of an overlay" "does not support virtual lines" "$(cd "$P/lines/vov" && "$LAYR" overlay use vpriv 2>&1)"
+ok "delete it" l line delete -D --discard vov
+
 finish

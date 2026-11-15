@@ -282,13 +282,12 @@ pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json
 
 Work in a line:
    status [--json] [--no-overlaps] [--no-ignored]
-   diff, add, rm [--to <overlay>|shared], mv, restore, reset, save -m <message>, park, clean, apply
+   diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
 Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
 Lines and states:
    line new <name> [<rev>] [--count N], line list, line delete, line rename, line move <line> [<path>]
-   line target [<overlay>|shared|--none]
-   save -m <message> [-a] [--amend] [--to <overlay>|shared]
+   save -m <message> [-a] [--amend] [--to <ancestor>]
    save [--note <text>] [--all-lines] [--running] [--force] [--overlays [--folder <path>]] [--keep <name>]
    keep [list [--json] | drop <name>... | drop --all]
    park [list/show/pop/apply/drop/clear]

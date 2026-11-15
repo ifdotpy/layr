@@ -131,7 +131,6 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | --- | --- |
 | `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
 | `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
-| `layr overlay create\|set <name> --patches\|--no-patches` | The overlay may hold its own versions of shared files and hide shared files (`overlay.<name>.patches`, [overlays](overlays.md) section 9.3). |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
 | `layr save --overlays` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |
@@ -235,7 +234,7 @@ There are two kinds of remote:
   `layr fetch <remote> --line ...` (the old `--caches-of` is removed) restore only the caches that `line new X <line>` takes for
   those lines: the newest cache of the line, and the newest cache of this platform saved with each machine's
   head of it or that head's nearest ancestor (a CI clone for one commit; a runner whose own main is older than the main
-  of a server queue). `layr fetch <remote> --overlay base` (the old `--no-caches` is removed) reads no cache overlay at all: a merge
+  of a server queue). `layr fetch <remote> --overlay main` (the old `--no-caches` is removed) reads no cache overlay at all: a merge
   machine builds nothing, and every new cache of the check runners was gigabytes per fetch. `--heads` restores only the heads of the lines (and what an
   undo of a line delete needs): the other states of the history stay on the remote, the clone names
   them in `states-left` of the remote's local folder, and a command that reads one restores it

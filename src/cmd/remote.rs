@@ -1156,7 +1156,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 heads: a.has("--heads"),
                 only_line: a.get("--only-line").map(str::to_owned),
                 lines: list_value(&a, "--line"),
-                overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
+                overlays: overlay_layers(&a)?,
                 only_states: None,
                 // A plain fetch takes only the records of the cache overlays; `--overlay` or `--line` takes data.
                 plain_cache_fetch: false,
@@ -1263,6 +1263,19 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     Ok(code)
 }
 
+/// The layers of `--overlay <layer>[,<layer>]` of a transfer, or None for every layer. `main` names the
+/// bottom overlay; its old name `base` fails with exit status 2 (owner decision 2026-11-15).
+fn overlay_layers(a: &crate::args::Parsed) -> Result<Option<std::collections::BTreeSet<String>>> {
+    if a.get("--overlay").is_none() {
+        return Ok(None);
+    }
+    let names = list_value(a, "--overlay");
+    if names.iter().any(|n| n == "base") {
+        return Err(exit(2, "--overlay base was removed: the bottom overlay is main. Use --overlay main"));
+    }
+    Ok(Some(names.into_iter().collect()))
+}
+
 /// The names of `<flag> <name>[,<name>]`.
 fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
     a.get(flag).map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
@@ -1272,7 +1285,7 @@ fn list_value(a: &crate::args::Parsed, flag: &str) -> Vec<String> {
 /// comes (docs/overlays.md section 1a). Each old form fails with exit status 2 and names its replacement.
 fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
     let replacement = if a.has("--no-caches") {
-        Some(("--no-caches", format!("layr {op} <remote> --overlay base (--overlay names the overlays to take)")))
+        Some(("--no-caches", format!("layr {op} <remote> --overlay main (--overlay names the overlays to take)")))
     } else if a.get("--caches-of").is_some() {
         Some(("--caches-of", format!("layr {op} <remote> --line <line>")))
     } else if a.has("--caches") {
@@ -1414,7 +1427,7 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
             only_caches: None,
             lines: Vec::new(),
             // `--overlay <layer>[,<layer>]`: only those layers (`base` is the base), as for a fetch.
-            overlays: a.get("--overlay").map(|_| list_value(&a, "--overlay").into_iter().collect()),
+            overlays: overlay_layers(&a)?,
             only_states: None,
             heads: a.has("--heads"),
             only_line: a.get("--only-line").map(str::to_owned),

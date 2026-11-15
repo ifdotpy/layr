@@ -104,6 +104,9 @@ pub enum StoreState {
     Absent,
     Empty,
     Unmarked,
+    /// The marker has an older format whose data the binary reads; the next open writes the new
+    /// format (metadata only), and from then on binaries of the older format refuse the store.
+    Upgradable,
     Compatible,
     Incompatible,
 }
@@ -112,7 +115,7 @@ impl StoreState {
     /// Whether a command can safely open this store with the current binary.
     pub const fn compatible(self) -> bool {
         match self {
-            Self::Absent | Self::Empty | Self::Unmarked | Self::Compatible => true,
+            Self::Absent | Self::Empty | Self::Unmarked | Self::Upgradable | Self::Compatible => true,
             Self::Incompatible => false,
         }
     }
@@ -171,6 +174,7 @@ impl StoreVersionReport {
     ) -> Result<Self, InvalidReport> {
         let valid_store = match state {
             StoreState::Absent | StoreState::Empty | StoreState::Unmarked => store.is_none(),
+            StoreState::Upgradable => store.as_ref().is_some_and(|stored| stored.format < binary.format),
             StoreState::Compatible => store.as_ref().is_some_and(|stored| stored.format == binary.format),
             StoreState::Incompatible => store.as_ref().is_none_or(|stored| stored.format != binary.format),
         };
@@ -178,7 +182,12 @@ impl StoreVersionReport {
             (StoreState::Unmarked, Some(upgrade)) => {
                 upgrade.metadata_only && upgrade.from_format == 0 && upgrade.to_format == binary.format
             }
-            (StoreState::Unmarked, None) | (_, Some(_)) => false,
+            (StoreState::Upgradable, Some(upgrade)) => {
+                upgrade.metadata_only
+                    && store.as_ref().is_some_and(|stored| stored.format == upgrade.from_format)
+                    && upgrade.to_format == binary.format
+            }
+            (StoreState::Unmarked | StoreState::Upgradable, None) | (_, Some(_)) => false,
             (_, None) => true,
         };
         if !valid_store || !valid_upgrade {
@@ -349,6 +358,7 @@ mod tests {
             (StoreState::Absent, "absent"),
             (StoreState::Empty, "empty"),
             (StoreState::Unmarked, "unmarked"),
+            (StoreState::Upgradable, "upgradable"),
             (StoreState::Compatible, "compatible"),
             (StoreState::Incompatible, "incompatible"),
         ] {
