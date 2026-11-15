@@ -214,7 +214,9 @@ pub(crate) fn active_checks(repo: &Repo, subject: &Subject) -> Result<BTreeMap<S
             for id in rec.data["revokes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 let remove = active
                     .get(id)
-                    .map(|(old, r): &(crate::model::Attestation, Record)| old.signer == a.signer && r.actor.uid == rec.actor.uid)
+                    .map(|(old, r): &(crate::model::Attestation, Record)| {
+                        revokes(&old.signer, r.actor.uid, &a.signer, rec.actor.uid)
+                    })
                     .unwrap_or(false);
                 if remove {
                     active.remove(id);
@@ -223,6 +225,14 @@ pub(crate) fn active_checks(repo: &Repo, subject: &Subject) -> Result<BTreeMap<S
         }
     }
     Ok(active)
+}
+
+/// Whether a revoke of machine `signer` by user `uid` takes back a check result of machine `target_signer` by
+/// user `target_uid`: the same machine, and the same user or root of that machine. The database applies the
+/// same rule (`attestation_revocations`); without the root case a root revoke of a runner's check-user results
+/// was listed but left them active for `checks pending` and merges (251 false failures, 2026-11-14).
+fn revokes(target_signer: &str, target_uid: u32, signer: &str, uid: u32) -> bool {
+    target_signer == signer && (target_uid == uid || uid == 0)
 }
 
 pub fn source_status(repo: &Repo, input: &Input) -> &'static str {
@@ -903,6 +913,15 @@ fn view_results(repo: &Repo, shared: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn root_of_the_signing_machine_revokes_the_results_of_its_users() {
+        use super::revokes;
+        assert!(revokes("m1", 997, "m1", 997), "the same user");
+        assert!(revokes("m1", 997, "m1", 0), "root of the same machine");
+        assert!(!revokes("m1", 997, "m1", 501), "another user");
+        assert!(!revokes("m1", 997, "m2", 0), "root of another machine");
+    }
+
     use super::*;
     fn definition(kind: Kind) -> Probe {
         Probe {

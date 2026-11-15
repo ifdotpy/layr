@@ -149,6 +149,9 @@ Output above the cap is discarded while the command keeps running; `truncated`
 records that fact. Timeout records exit 124. Signals record 128 plus the signal.
 A crash before the signed result commits can rerun that job: execution is at least
 once, and completed results are deduplicated. Check commands must tolerate retries.
+`layr attest revoke <state>` takes back check results of this machine: those of the same user,
+or, run as root, those of every user (a runner's check user, for example). The state is then
+pending again for `checks pending` and for merges.
 
 ## Cloud runners
 
