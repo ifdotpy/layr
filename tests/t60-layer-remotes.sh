@@ -13,7 +13,7 @@ cd $LAYR_ROOT/projects/p/lines/main
 l protect main --remove >/dev/null 2>&1 || true
 l git remote add origin $T/shared.git
 echo n1 > notes.md
-l overlay create notes --mode follow -q
+l overlay create notes -q
 l overlay move notes notes.md >/dev/null
 l save -m notes -q
 # Caches are saved in the view of main (docs/overlays.md section 1, caches per view).

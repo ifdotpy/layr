@@ -4195,9 +4195,6 @@ mod cache_copy_tests {
                     "cache",
                     "--history",
                     "last",
-                    "--quiet",
-                    "--merge",
-                    "union-theirs",
                     "-q"
                 ]
             )?,

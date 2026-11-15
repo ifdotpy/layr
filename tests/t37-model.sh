@@ -402,7 +402,8 @@ for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
     show = json.loads((cli / f'overlay-show-{label}.json').read_text())
     ops = json.loads((cli / f'overlay-ops-{label}.json').read_text())
     # `paths` (docs/overlays.md section 1): the folder of main shows the view of hidden-golden, whose path holds both.
-    assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties', 'paths'}
+    assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties', 'paths', 'kind'}
+    assert show['kind'] == 'patches'
     assert set(show['paths']) == {'patches', 'own', 'hidden', 'waiting'}
     assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
     assert show['access_mode'] == 'private'

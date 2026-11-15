@@ -1,5 +1,5 @@
 #!/bin/bash
-# Overlay properties (docs/cache-overlays.md): history, quiet, merge union-theirs, gc. One user,
+# Overlay kinds and the old properties (docs/cache-overlays.md): history, quiet, merge union-theirs, gc. One user,
 # so it runs on macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
 
@@ -12,18 +12,27 @@ cd $M
 l protect main --remove >/dev/null 2>&1 || true
 states() { ls "$O/$1/states" | wc -l | tr -d ' '; }
 
-# 1. Properties are stored, shown and changed by the owner.
-ok "create with properties" l overlay create notes --mode follow --history last --merge union-theirs -q
-has "list shows the properties" "history=last merge=union-theirs" "$(l overlay list)"
+# 1. Kinds instead of properties (docs/overlays.md section 1, owner decision 2026-11-15): the options that a
+#    kind fixes fail with exit status 2 and name the kind rule; a cache option fails on a patches overlay.
+ok "a patches overlay" l overlay create notes -q
+for opt in "--quiet" "--no-quiet" "--merge union-theirs" "--trust readers" "--mode follow"; do
+    # shellcheck disable=SC2086
+    eq "overlay create $opt fails with exit 2" 2 "$(l overlay create x $opt >/dev/null 2>&1; echo $?)"
+done
+for opt in "--quiet" "--merge union-theirs" "--trust readers" "--history last" "--gc lru:20G" "--prune none"; do
+    # shellcheck disable=SC2086
+    eq "overlay set notes $opt fails with exit 2" 2 "$(l overlay set notes $opt >/dev/null 2>&1; echo $?)"
+done
+has "the refusal names the kind rule" "an overlay has a kind" "$(l overlay set notes --history last 2>&1)"
+has "list shows the kind" "kind=patches" "$(l overlay list)"
+eq "show --json has the kind" patches "$(l overlay show notes --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["kind"])')"
+# Old data: settings that an older layr stored on a patches overlay still act (docs/overlays.md, kinds).
+l config overlay.notes.history 1 >/dev/null
+l config overlay.notes.merge '"union-theirs"' >/dev/null
+has "list shows the stored old settings" "history=last merge=union-theirs" "$(l overlay list)"
 props=$(l overlay show notes --json | python3 -c 'import json,sys; p=json.load(sys.stdin)["properties"]; print(p["history"], p["quiet"], p["merge"], p["gc"])')
-eq "show --json has the properties" "1 False union-theirs none" "$props"
-no "an invalid history fails" l overlay set notes --history 0
-no "an invalid merge fails" l overlay set notes --merge ours
-no "an invalid gc fails" l overlay set notes --gc lru:
-ok "set changes one property" l overlay set notes --gc lru:20G
-has "the other properties stay" "history=last merge=union-theirs gc=lru:20G" "$(l overlay list)"
-ok "set back to the default" l overlay set notes --gc none
-eq "an overlay without properties shows none" "" "$(l overlay create plain -q && l overlay list | grep '^  plain' | cut -f5)"
+eq "show --json has them" "1 False union-theirs none" "$props"
+eq "an overlay without settings shows its kind only" "kind=patches" "$(l overlay create plain -q && l overlay list | grep '^  plain' | cut -f5)"
 
 # 2. history=last keeps the newest state of each overlay line and the empty first state.
 echo n1 > notes.md
@@ -60,7 +69,7 @@ autos() { for id in $(sqlite3 "$O/$1/meta/db/layr.sqlite" "select json_extract(v
 eq "history=last keeps the first state and two line heads" 3 "$(( $(states notes) - $(autos notes) ))"
 
 # The same change with three-way: a conflict (the control for the union).
-ok "a three-way overlay above notes" l overlay create tw --mode follow --parent notes -q
+ok "a three-way overlay above notes" l overlay create tw --parent notes -q
 echo t1 > tw.md
 l overlay move tw tw.md >/dev/null
 ok "first three-way state" l save -m tw1 -q
@@ -74,7 +83,9 @@ l restore --source head tw.md >/dev/null 2>&1 || echo ours > tw.md
 
 # 4. quiet: the files are out of status, diff and add; a named save takes them as they are.
 echo k1 > .env
-ok "a quiet overlay above tw" l overlay create keys --quiet --parent tw -q
+ok "an overlay above tw" l overlay create keys --parent tw -q
+l config overlay.keys.quiet true >/dev/null
+has "with the old setting quiet" "quiet" "$(l overlay list | grep '^. keys')"
 l overlay move keys .env >/dev/null
 ok "the move saves" l save -m keys -q
 echo k2 > .env
@@ -91,7 +102,7 @@ echo k3 > .env
 ok "a named save with both, the shared file to main" l save -m both --to main -q
 eq "the quiet file follows" k3 "$(l overlay show keys head:.env)"
 eq "the shared state has only the shared file" "notes.txt" "$(l show head --name-only --format= | grep .)"
-ok "quiet can be turned off" l overlay set keys --no-quiet
+ok "the old setting can be taken away" l config --unset overlay.keys.quiet
 echo k4 > .env
 has "then status shows it" ".env" "$(l status --short)"
 

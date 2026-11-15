@@ -129,8 +129,8 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 
 | Command | Effect |
 | --- | --- |
-| `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
-| `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
+| `layr overlay create <name> --folder <path> [--history all\|last\|<N>] [--gc none\|lru:<size>] [--platform]` | Makes a cache: always quiet, `merge=union-theirs`, `trust=protected`. Since 2026-11-15 `--quiet`, `--merge`, `--trust` and `--mode` fail with exit status 2 ([overlays](overlays.md) section 1, "Kinds as built"). |
+| `layr overlay set <name> [--history ...] [--gc ...] [--prune ...] [--platform ...]` | Changes the settings of a cache. The owner only. `--folder` cannot change. On a patches overlay these options fail with exit status 2. |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
 | `layr save --overlays` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |

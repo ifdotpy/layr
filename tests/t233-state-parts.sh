@@ -37,7 +37,7 @@ head_of() { l rev-parse "$1"; }
 part_of() { l overlay use | awk -v o="$1" '$1==o{print $2}'; }
 
 # 1. A save of a shared change with a follow overlay records the part in the new state.
-ok "a follow overlay" l overlay create notes --mode follow -q
+ok "a follow overlay" l overlay create notes -q
 echo n1 > notes.md
 l overlay move notes notes.md >/dev/null
 echo s1 > s1.txt
@@ -143,7 +143,7 @@ l init q --from "$T/src" -q >/dev/null
 Q=$LAYR_ROOT/projects/q
 cd "$Q/lines/main" || exit 1
 l protect main >/dev/null 2>&1 || true
-l overlay create keys --mode follow -q
+l overlay create keys -q
 echo k1 > keys.txt
 l overlay move keys keys.txt >/dev/null
 ok "an overlay-only save" l save -qm "keys 1"

@@ -65,18 +65,18 @@ eq "a new line from the line has the part" bin2 "$(cat "$P/lines/warm/target/deb
 l line new old "$h3" >/dev/null
 eq "a new line from a state has the part that the state names" bin2 "$(cat "$P/lines/old/target/debug/x" 2>/dev/null)"
 
-# 5. trust is an overlay property; --platform sets the platform of an overlay.
-ok "trust readers" l overlay set "$G" --trust readers
-has "overlay list shows the trust" "trust=readers" "$(l overlay list)"
-ok "trust protected" l overlay set "$G" --trust protected
-no "an unknown trust value is refused" l overlay set "$G" --trust everyone
-no "an invalid platform key is refused" l overlay create bad --mode follow --platform 'Bad Key'
+# 5. Kinds (docs/overlays.md section 1, owner decision 2026-11-15): a cache is always trust=protected;
+#    --platform still sets the platform of an overlay.
+eq "--trust was removed: a cache is trust=protected (exit 2)" 2 "$(l overlay set "$G" --trust readers >/dev/null 2>&1; echo $?)"
+has "overlay list shows the fixed trust" "trust=protected" "$(l overlay list)"
+has "the refusal names the kind rule" "an overlay has a kind" "$(l overlay set "$G" --trust readers 2>&1)"
+no "an invalid platform key is refused" l overlay create bad --platform 'Bad Key'
 
 # 6. An overlay of another platform: no folder of this platform, not in the default view, not fetched.
-ok "a folder overlay of another platform" l overlay create target.other-arch --folder target --platform other-arch --quiet --history last -q
+ok "a folder overlay of another platform" l overlay create target.other-arch --folder target --platform other-arch --history last -q
 no "a second overlay of this platform for the folder is refused" l overlay create target.again --folder target --platform "$HERE" -q
-ok "a file overlay of this platform" l overlay create near --mode follow --platform "$HERE" -q
-ok "a file overlay of another platform above it" l overlay create far --mode follow --platform other-arch --parent near -q
+ok "a file overlay of this platform" l overlay create near --platform "$HERE" -q
+ok "a file overlay of another platform above it" l overlay create far --platform other-arch --parent near -q
 # A new line takes the view of the folder where `line new` ran (docs/overlays.md section 1).
 ok "main shows far and near below it" l overlay use far -q
 l line new fresh main >/dev/null

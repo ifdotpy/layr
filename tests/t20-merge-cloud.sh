@@ -198,7 +198,7 @@ l init radar-overlays --from "$T/overlay-src" -q >/dev/null
 O=$LAYR_ROOT/projects/radar-overlays/lines
 cd "$O/main"
 echo initial > private-path
-l overlay create private --mode follow -q
+l overlay create private -q
 l overlay move private private-path >/dev/null
 l save -qm private
 l line new -q other main

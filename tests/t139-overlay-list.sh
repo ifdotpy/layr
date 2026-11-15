@@ -8,8 +8,8 @@ printf 'target regenerable\n' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null || exit 1
 cd "$LAYR_ROOT/projects/p/lines/main"
 l protect main --remove >/dev/null 2>&1 || true
-l overlay create public --mode follow --quiet --history last -q || exit 1
-l overlay create private --mode follow --hidden --history 3 -q || exit 1
+l overlay create public -q || exit 1
+l overlay create private --hidden -q || exit 1
 l overlay set private --parent public >/dev/null || exit 1
 # Caches are saved in the view of main only (docs/overlays.md section 1, caches per view).
 mkdir -p target
@@ -40,14 +40,15 @@ tg = os.environ['TG']
 assert [r['name'] for r in rows] == sorted(['offline', 'private', 'public', tg]), rows
 by_name = {r['name']: r for r in rows}
 for row in rows:
-    assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'properties', 'folder', 'state', 'saved'}, row
+    assert set(row) == {'name', 'mode', 'hidden', 'owner', 'readers', 'shown', 'kind', 'properties', 'folder', 'state', 'saved'}, row
+    assert row['kind'] == ('cache' if row['folder'] else 'patches'), row
     assert isinstance(row['owner'], int) and isinstance(row['readers'], list), row
     assert row['mode'] == 'follow', row
 assert by_name['offline']['readers'] == [] and by_name['offline']['saved'] is None, by_name['offline']
 assert by_name['private']['hidden'] and by_name['private']['shown'], by_name['private']
-assert by_name['private']['properties'] == {'history': 3, 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
+assert by_name['private']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
 assert not by_name['public']['hidden'] and by_name['public']['shown'], by_name['public']
-assert by_name['public']['properties'] == {'history': 1, 'quiet': True, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
+assert by_name['public']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
 cache = by_name[tg]
 assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
 assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto', 'platform': tg.split('.', 1)[1], 'trust': 'protected'}, cache
@@ -67,7 +68,8 @@ assert type(cache['size']) is int and cache['size'] == len(b'cache') + len(b'pay
 assert all('size' not in r for r in rows if r['folder'] is None), rows
 PY_SIZE
 out=$(l overlay list)
-has "text listing shows public properties" 'history=last quiet' "$out"
+has "text listing shows the kind of a patches overlay" 'kind=patches' "$out"
+has "and of a cache" 'kind=cache folder=target' "$out"
 has "text listing shows the cache folder" 'folder=target' "$out"
 has "default text leaves size uncomputed" $'cache\t-\tsaved ' "$out"
 sized=$(l overlay list --size)

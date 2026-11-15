@@ -19,7 +19,7 @@ lines_of() {
 }
 id_of() { l line list --json | python3 -c "import json,sys; print(next(x['id'] for x in json.load(sys.stdin) if x['name']=='$1'))"; }
 
-ok "an overlay notes" l overlay create notes --mode follow -q
+ok "an overlay notes" l overlay create notes -q
 echo n1 > notes.md
 l overlay move notes notes.md >/dev/null
 ok "a save" l save -qam one
