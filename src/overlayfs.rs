@@ -2,7 +2,11 @@
 //! Writable branches share an immutable lower tree. A snapshot of a writable tree
 //! copies its changed upper layer. Saved layers are immutable and shared by branches.
 use crate::sys;
+use layr_fs_core::CaptureConsistency;
+#[path = "overlayfs/driver.rs"]
+mod driver;
 use anyhow::{bail, Context, Result};
+pub(crate) use driver::OverlayFs;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -391,7 +395,8 @@ pub fn recover(root: &Path) -> Result<()> {
         sys::overlay_mount(None, &path, None, libc::MS_REMOUNT | libc::MS_RDONLY, None)
             .context("close writers in the cache before its migration")?;
         let copied = (|| -> Result<()> {
-            copy_stable(&path, &state.object(&id).join("data"), &HashSet::new())?;
+            let consistency = copy_stable(&path, &state.object(&id).join("data"), &HashSet::new())?;
+            report_consistency(&path, consistency);
             sync_tree(&state.object(&id).join("data"))
         })();
         if let Err(error) = copied {
@@ -614,18 +619,17 @@ fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Opti
 // copy, but publish only a copy whose before and after scans agree. When writers change the
 // source in every round, the last copy stays and the save marks its state as taken while
 // processes ran.
-fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<()> {
+fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<CaptureConsistency> {
     for _ in 0..3 {
         let before = scan(src, nested)?;
         copy_tree(src, dst, nested, &mut HashMap::new())?;
         if before == scan(src, nested)? {
-            return Ok(());
+            return Ok(CaptureConsistency::ValidatedCopy);
         }
         fs::remove_dir_all(dst)?;
     }
     copy_tree(src, dst, nested, &mut HashMap::new())?;
-    crate::fsutil::mark_unsettled(src);
-    Ok(())
+    Ok(CaptureConsistency::UnsettledCopy)
 }
 // Persist the copied tree before publishing its registry entry. One filesystem
 // flush covers file data, xattrs and directory entries without one fsync per file.
@@ -647,7 +651,7 @@ fn snapshot_layers(
     src: &Path,
     parent: &Entry,
     build: &Building,
-) -> Result<(Vec<String>, bool)> {
+) -> Result<(Vec<String>, bool, CaptureConsistency)> {
     let data = build.dir.join("data");
     if parent.plain {
         // A build can replace a cache directory. Never follow its replacement
@@ -655,17 +659,17 @@ fn snapshot_layers(
         let pinned = pinned_directory(src)?;
         let anchored = PathBuf::from(format!("/proc/self/fd/{}/.", pinned.as_raw_fd()));
         let excluded = nested.iter().map(|p| anchored.join(p.strip_prefix(src).unwrap())).collect();
-        copy_stable(&anchored, &data, &excluded)?;
+        let consistency = copy_stable(&anchored, &data, &excluded)?;
         sync_tree(&data)?;
-        return Ok((Vec::new(), tree_has_links(&data)?));
+        return Ok((Vec::new(), tree_has_links(&data)?, consistency));
     }
     let hard_links = tree_has_links_excluding(src, nested)?;
     let bases: Vec<_> = std::iter::once(parent.lower.clone()).chain(parent.bases.iter().cloned()).collect();
     let option_bytes: usize = bases.iter().map(|id| object_path(home, id).as_os_str().len() + 6).sum();
     if hard_links || bases.len() >= 16 || option_bytes > 2800 {
-        copy_stable(src, &data, nested)?;
+        let consistency = copy_stable(src, &data, nested)?;
         sync_tree(&data)?;
-        return Ok((Vec::new(), hard_links));
+        return Ok((Vec::new(), hard_links, consistency));
     }
     let upper = object_path(home, &parent.info.uuid).join("upper");
     for round in 0..3 {
@@ -678,7 +682,8 @@ fn snapshot_layers(
             Ok(found)
         };
         let before = upper_scan()?;
-        copy_delta(&upper, src, &data, nested, &mut HashMap::new())?;
+        let mut consistency = CaptureConsistency::ValidatedCopy;
+        copy_delta(&upper, src, &data, nested, &mut HashMap::new(), &mut consistency)?;
         // A cache may exist only in a lower layer. Mask it in this snapshot.
         for cache in nested {
             let rel = cache.strip_prefix(src)?;
@@ -700,10 +705,10 @@ fn snapshot_layers(
         // Writers changed the upper layer in every round: keep the last copy (see `copy_stable`).
         if settled || round == 2 {
             if !settled {
-                crate::fsutil::mark_unsettled(src);
+                consistency = CaptureConsistency::UnsettledCopy;
             }
             sync_tree(&data)?;
-            return Ok((bases, false));
+            return Ok((bases, false, consistency));
         }
         fs::remove_dir_all(&data)?;
     }
@@ -745,6 +750,7 @@ fn copy_delta(
     dst: &Path,
     nested: &HashSet<PathBuf>,
     links: &mut HashMap<(u64, u64), PathBuf>,
+    consistency: &mut CaptureConsistency,
 ) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     let m = fs::symlink_metadata(src)?;
@@ -757,7 +763,9 @@ fn copy_delta(
     if attrs.iter().any(|(name, _)| name == b"trusted.overlay.redirect") {
         // Redirects refer to the old lower namespace. Materialize only this
         // moved directory, with an opaque marker to hide its previous target.
-        copy_stable(visible, dst, nested)?;
+        if copy_stable(visible, dst, nested)?.running() {
+            *consistency = CaptureConsistency::UnsettledCopy;
+        }
         sys::overlay_attribute(dst, c"trusted.overlay.opaque", Some(b"y"))?;
         return Ok(());
     }
@@ -771,7 +779,7 @@ fn copy_delta(
         fs::create_dir(dst)?;
         for e in fs::read_dir(&anchored)? {
             let name = e?.file_name();
-            copy_delta(&anchored.join(&name), &visible.join(&name), &dst.join(&name), nested, links)?;
+            copy_delta(&anchored.join(&name), &visible.join(&name), &dst.join(&name), nested, links, consistency)?;
         }
     } else if m.file_type().is_char_device() && m.rdev() == 0 {
         rustix::fs::mknodat(rustix::fs::CWD, dst, rustix::fs::FileType::CharacterDevice, rustix::fs::Mode::empty(), 0)?;
@@ -811,6 +819,17 @@ pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
+    let consistency = OverlayFs::snapshot_path(src, dst, readonly)?;
+    report_consistency(src, consistency);
+    Ok(())
+}
+fn report_consistency(src: &Path, consistency: CaptureConsistency) {
+    if consistency.running() {
+        crate::fsutil::mark_unsettled(src);
+    }
+}
+
+fn snapshot_native(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureConsistency> {
     let src = absolute(src)?;
     let dst = absolute(dst)?;
     valid_path(&dst)?;
@@ -852,7 +871,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         (state.home.clone(), parent, nested, plain, Building::begin(&state.home)?)
     };
     let copied = copy_snapshot(&home, &nested, &src, &dst, readonly, plain, &parent, &build);
-    let (lower, bases, hard_links) = match copied {
+    let (lower, bases, hard_links, consistency) = match copied {
         Ok(value) => value,
         Err(error) => {
             build.discard();
@@ -903,7 +922,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
         state.collect()?;
         return Err(e);
     }
-    Ok(())
+    Ok(consistency)
 }
 // The slow part of a snapshot: no registry lock is held. Returns the lower layer (empty
 // for the new object itself), the bases and the hard-link flag.
@@ -916,12 +935,12 @@ fn copy_snapshot(
     plain: bool,
     parent: &Entry,
     build: &Building,
-) -> Result<(String, Vec<String>, bool)> {
-    let (lower, bases, hard_links) = if parent.info.readonly {
-        (parent.lower.clone(), parent.bases.clone(), parent.hard_links)
+) -> Result<(String, Vec<String>, bool, CaptureConsistency)> {
+    let (lower, bases, hard_links, consistency) = if parent.info.readonly {
+        (parent.lower.clone(), parent.bases.clone(), parent.hard_links, CaptureConsistency::ValidatedCopy)
     } else {
-        let (bases, hard_links) = snapshot_layers(home, nested, src, parent, build)?;
-        (String::new(), bases, hard_links)
+        let (bases, hard_links, consistency) = snapshot_layers(home, nested, src, parent, build)?;
+        (String::new(), bases, hard_links, consistency)
     };
     if plain {
         // A cache is an ordinary directory. Its saved copy remains private.
@@ -937,7 +956,7 @@ fn copy_snapshot(
         let data = if lower.is_empty() { build.dir.join("data") } else { object_path(home, &lower).join("data") };
         prepare_upper(&build.dir, &data)?;
     }
-    Ok((lower, bases, hard_links))
+    Ok((lower, bases, hard_links, consistency))
 }
 fn lock_home(path: &Path) -> Result<PathBuf> {
     if let Some(home) = external_home(&absolute(path)?) {
@@ -963,13 +982,14 @@ pub fn set_readonly(path: &Path) -> Result<()> {
     // Sealing keeps the registry lock: the tree is unmounted and remounted in one step.
     let nested = nested_trees(&state.registry, &path);
     let build = Building::begin(&state.home)?;
-    let (bases, hard_links) = match snapshot_layers(&state.home, &nested, &path, &e, &build) {
+    let (bases, hard_links, consistency) = match snapshot_layers(&state.home, &nested, &path, &e, &build) {
         Ok(value) => value,
         Err(error) => {
             build.discard();
             return Err(error);
         }
     };
+    report_consistency(&path, consistency);
     let lower = build.publish(&state.home)?;
     sys::overlay_unmount(&path).with_context(|| format!("unmount {}", path.display()))?;
     e.hard_links = hard_links;
@@ -1065,6 +1085,9 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
     Ok(())
 }
 pub fn delete_tree(path: &Path) -> Result<()> {
+    OverlayFs::remove_path(path)
+}
+fn delete_tree_native(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let mut state = lock(&path)?;
     valid_path(&path)?;
@@ -1136,7 +1159,13 @@ pub fn clone_file(src: &File, dst: &File) -> io::Result<()> {
     Ok(())
 }
 pub fn clone_range(src: &File, off: u64, len: u64, dst: &File, dst_off: u64) -> io::Result<()> {
-    sys::clone_range(src, off, len, dst, dst_off)
+    use layr_fs_core::{Attempt, ByteRange, ReflinkRange};
+    let Ok(range) = ByteRange::new(off, len) else { return sys::clone_range(src, off, len, dst, dst_off) };
+    match driver::RangeClone.clone_range(src, range, dst, dst_off) {
+        Ok(Attempt::Applied(())) => Ok(()),
+        Ok(Attempt::Unavailable(error)) | Err(layr_fs_core::FsError::Io(error)) => Err(error),
+        Err(error) => Err(io::Error::other(error)),
+    }
 }
 pub fn file_identity(path: &Path) -> Result<Vec<u8>> {
     match sys::overlay_attribute(path, c"trusted.layr.origin", None) {
@@ -1349,16 +1378,8 @@ pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeH
 
 struct UpperHints;
 impl crate::change_hints::ChangeHints for UpperHints {
-    fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
-        (|| -> Result<crate::change_hints::HintSet> {
-            let _t = crate::trace::span("OverlayFS candidates");
-            let (base, tree) = (absolute(base)?, absolute(tree)?);
-            let Some(layers) = own_layers(&base, &tree)? else {
-                return Ok(crate::change_hints::HintSet::Partial);
-            };
-            Ok(crate::change_hints::HintSet::Complete(candidates_in(&base, &tree, layers)?))
-        })()
-        .map_err(layr_fs_core::FsError::backend)
+    fn between(&self, base: &Path, tree: &Path) -> layr_fs_core::Result<crate::change_hints::HintSet> {
+        OverlayFs::default().path_hints(base, tree)
     }
 }
 
