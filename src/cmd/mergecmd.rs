@@ -460,6 +460,29 @@ fn plan_overlays(
     Ok(m)
 }
 
+/// The smallest step of checks per view (docs/overlays.md section 1, owner decision D10): a merge into a line
+/// whose rule names required checks refuses a change of a patches overlay, because those checks run on the
+/// view of `main` only. A cache (a folder overlay) and a merge that changes only `main` are not refused.
+fn refuse_unchecked_overlay_parts(repo: &Repo, line: &Line, ovl: &OverlayMerge) -> Result<()> {
+    let Some(rule) = repo.policy().rule_for(&line.name) else { return Ok(()) };
+    if rule.check.is_empty() {
+        return Ok(());
+    }
+    for name in ovl.names() {
+        if repo.patches_overlay(&name)? {
+            return Err(exit(
+                1,
+                format!(
+                    "error: the merge changes overlay '{name}', and the checks of line '{}' ({}) run on the view of main only; merge the change of '{name}' into a line without required checks, or save it there",
+                    line.name,
+                    rule.check.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The checks of a merge that ran before its commit, with what they were based on. The commit
 /// reads them again under the project lock (`settled_now`): a change of the rule of the line, or
 /// of a check command, stops the merge.
@@ -1800,6 +1823,12 @@ fn merge_rev_inner(
     // A queued merge takes no overlays: its state comes without a line.
     let theirs_parts = if queue.is_none() { Some(theirs.as_str()) } else { None };
     let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message)?;
+    // Checks per view (docs/overlays.md section 1): the checks of a protected line run on the view of main, so a
+    // change of a patches overlay would merge unchecked. It is refused; a merge that changes only main goes on.
+    if let Err(e) = refuse_unchecked_overlay_parts(repo, line, &ovl) {
+        ovl.discard(repo);
+        return Err(e);
+    }
     if queue.is_some() && ovl.conflicts > 0 {
         let paths: Vec<_> = ovl
             .moves
