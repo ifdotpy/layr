@@ -66,7 +66,9 @@
      cache build lock prevents a cache save from overlapping the build. An ordinary head save
      can proceed during the build; follow then builds the new head again. Cache operations take
      the cache build lock before the line lock.
-6. Record the result in the project meta folder (`follow.json`, this machine only): time, ok, text.
+6. After a merge (step 4), each line of this machine whose work the target head now holds frees its caches
+   ([cache overlays](cache-overlays.md) section 22). The result names them: `freed the caches of merged lines: <lines>`.
+7. Record the result in the project meta folder (`follow.json`, this machine only): time, ok, text.
 
 A failed cache step does not undo the merge. Its text is part of the result.
 

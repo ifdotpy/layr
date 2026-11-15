@@ -175,7 +175,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// The paths with unsaved changes in the folder of a line: modified, added, deleted and new files
 /// that are not ignored. Files of quiet overlays (caches) do not count.
-fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
+pub(crate) fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
     let (mut st, _scan, _it, _idx) = repo.status(l)?;
     st.drop_paths(&repo.quiet_paths(l)?);
     let mut out = std::collections::BTreeSet::new();

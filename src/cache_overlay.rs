@@ -1217,6 +1217,136 @@ impl<'a> Repo<'a> {
         }
         Ok(freed)
     }
+
+    /// Free the caches of the lines whose work is now in `into` (docs/cache-overlays.md, section 22): `sources`,
+    /// or every line of this machine when None. A merge took their caches into `into` before, so the caches move
+    /// instead of being copied. Returns the names of the freed lines, and a message for each line that an error
+    /// kept. A line that is not merged, has unsaved changes or runs a build keeps its caches.
+    pub fn free_merged_caches(&self, ctx: &Ctx, into: &Line, sources: Option<Vec<Line>>) -> (Vec<String>, Vec<String>) {
+        let (mut freed, mut errors) = (Vec::new(), Vec::new());
+        let sources = match sources.map(Ok).unwrap_or_else(|| self.lines()) {
+            Ok(lines) => lines,
+            Err(e) => return (freed, vec![format!("{e:#}")]),
+        };
+        for line in sources {
+            let name = line.name.clone();
+            match self.free_if_merged(ctx, into, line) {
+                Ok(true) => freed.push(name),
+                Ok(false) => {}
+                Err(e) => errors.push(format!("caches of line '{name}' not freed: {e:#}")),
+            }
+        }
+        (freed, errors)
+    }
+
+    /// `free_merged_caches` for one line. True when its caches were freed.
+    fn free_if_merged(&self, ctx: &Ctx, into: &Line, line: Line) -> Result<bool> {
+        let line = self.localize(line)?;
+        if line.id == into.id || line.machine != self.p.store.machine.id || self.p.is_overlay() {
+            return Ok(false);
+        }
+        // Only a merge into the line's target frees it: `line.<name>.upstream`, else `main` (docs/review.md). A merge
+        // of main into a work line does not free the caches of main.
+        let target = match self.p.config_value(&format!("line.{}.upstream", line.name))? {
+            Some(serde_json::Value::String(name)) => name,
+            _ => "main".to_string(),
+        };
+        if target != into.name || target == line.name {
+            return Ok(false);
+        }
+        let w = self.working(&line);
+        if !w.is_dir() {
+            return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        if crate::views::of(self, &line).is_some() {
+            return Ok(false);
+        }
+        // A line that lives on keeps its caches: a protected line, or a line that follows a remote branch.
+        if self.policy().rule_for(&line.name).is_some() || crate::follow::target(self, &line)?.is_some() {
+            return Ok(false);
+        }
+        let folders = self.held_cache_folders(&line)?;
+        if folders.is_empty() {
+            return Ok(false);
+        }
+        // A line with no save of its own has no work to merge: a new line can build in its folder now.
+        if self.p.db.line_states(&line.id, StateKind::Commit)?.is_empty() {
+            return Ok(false);
+        }
+        if self.authorize_line(ctx, &line, crate::repo::LineOp::Manage).is_err() {
+            return Ok(false);
+        }
+        let into = self.line(&into.id)?;
+        self.hold(self.pin(&[line.head.as_str(), into.head.as_str()])?);
+        if !crate::cmd::mergecmd::changes_contained(self, &into, &line.head)? {
+            return Ok(false);
+        }
+        let Some(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else { return Ok(false) };
+        if !crate::cmd::branch::unsaved_paths(self, &line)?.is_empty() {
+            return Ok(false);
+        }
+        for (_, folder) in &folders {
+            if build_running(&fsutil::safe_join(&w, folder)?) {
+                return Ok(false);
+            }
+        }
+        let _lock = self.p.lock()?;
+        if self.line(&line.id)?.head != line.head {
+            return Ok(false);
+        }
+        for (name, folder) in &folders {
+            // The folder first: when a later step fails, the saved state stays, and the next merge tries again.
+            self.p.trash(&fsutil::safe_join(&w, folder)?)?;
+            // The line on the overlay goes with its states: the overlay keeps no part for a line without its line
+            // there (`history_kept`). `into` keeps what the merge took.
+            if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                let info = self.need_overlay(name)?;
+                let orepo = self.overlay_repo(name)?;
+                let _olock = orepo.p.lock()?;
+                if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, &line)? {
+                    self.drop_overlay_lines(ctx, &orepo, name, &[ol])?;
+                }
+            }
+            self.apply_history(ctx, name)?;
+        }
+        Ok(true)
+    }
+
+    /// The cache overlays of `line` that hold something: files in the folder, or a saved state of the line.
+    fn held_cache_folders(&self, line: &Line) -> Result<Vec<(String, String)>> {
+        let w = self.working(line);
+        let mut out = Vec::new();
+        for (name, folder) in self.folder_overlays()? {
+            let Some(info) = self.overlay_info(&name)? else { continue };
+            // A folder overlay of no platform can hold files that no build makes again.
+            if info.platform.is_none() {
+                continue;
+            }
+            let files = std::fs::read_dir(fsutil::safe_join(&w, &folder)?).is_ok_and(|mut d| d.next().is_some());
+            let saved = || -> Result<bool> {
+                Ok(self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists()
+                    && crate::overlay::find_overlay_line(&self.overlay_repo(&name)?.p.db, &info, line)?
+                        .is_some_and(|ol| ol.head != info.root))
+            };
+            if (files || saved()?) && self.folder_kind(line, &folder)? == FolderIn::Cache {
+                out.push((name, folder));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Whether a build runs in the cache folder `dir`: a process holds the cargo build lock of one of its profile folders
+/// (`<dir>/<profile>/.cargo-lock`).
+fn build_running(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    entries.flatten().any(|e| {
+        let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(e.path().join(".cargo-lock")) else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    })
 }
 
 /// The build unit that a cache file belongs to: the folder above `deps`, `.fingerprint`, `build` or `incremental`

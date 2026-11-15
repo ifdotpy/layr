@@ -337,6 +337,17 @@ impl<'a> Repo<'a> {
             Ok(_) => {}
             Err(e) => text.push_str(&format!("; caches not taken: {e:#}")),
         }
+        // A merge on the remote (a merge queue, a squash of a pull request) brought the work of local lines: their
+        // caches go (docs/cache-overlays.md, section 22). An error keeps the caches of that line only.
+        if let Ok(now) = self.line(&line.id) {
+            let (freed, errors) = self.free_merged_caches(ctx, &now, None);
+            if !freed.is_empty() {
+                text.push_str(&format!("; freed the caches of merged lines: {}", freed.join(", ")));
+            }
+            for e in errors {
+                let _t = crate::trace::span(e);
+            }
+        }
         Ok(Some(text))
     }
 

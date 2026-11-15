@@ -1441,6 +1441,23 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Err(e) = r {
             eprintln!("warning: caches of '{rev}' not merged: {e:#}");
         }
+        // Its work is in this line now: its own caches go (docs/cache-overlays.md, section 22). An error keeps them and
+        // never undoes the merge.
+        if code == 0 {
+            let r = (|| -> Result<(Vec<String>, Vec<String>)> {
+                let theirs = h.repo.p.db.line_by_name(&rev)?.into_iter().collect();
+                Ok(h.repo.free_merged_caches(ctx, &h.repo.line(&line.id)?, Some(theirs)))
+            })();
+            let (freed, errors) = r.unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")]));
+            if !a.has("-q") {
+                for name in freed {
+                    outln!(ctx, "Freed the caches of merged line '{name}'");
+                }
+            }
+            for e in errors {
+                eprintln!("warning: {e}");
+            }
+        }
     }
     Ok(code)
 }
@@ -1517,6 +1534,26 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         }
     }
     Ok(None)
+}
+
+/// Whether the head of `into` holds the work of state `state`: `state` is its ancestor (a merge), or `state` changed
+/// at least one path since the common state and each such path holds the same content in the head (a squash, on this
+/// machine or on a remote). A state with no change of its own (only a merge of the target) is not merged work.
+pub(crate) fn changes_contained(repo: &Repo, into: &Line, state: &str) -> Result<bool> {
+    if repo.is_ancestor(state, &into.head)? {
+        return Ok(true);
+    }
+    let Some(base) = repo.merge_base(state, &into.head)? else { return Ok(false) };
+    repo.hold(repo.pin(&[base.as_str()])?);
+    let rules = crate::ignore_rules::Rules::new(&repo.working(into));
+    let (base, from, head) = (repo.state_src(&base)?, repo.state_src(state)?, repo.state_src(&into.head)?);
+    let changed = crate::radar::compare(&base, &from, &rules)?;
+    for found in &changed {
+        if crate::radar::recheck(&from, &head, &rules, &found.path)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(!changed.is_empty())
 }
 
 /// A required check has no passing run on a platform that this machine is not: the merge waits for that runner. A

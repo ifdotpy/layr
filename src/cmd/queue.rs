@@ -513,7 +513,21 @@ fn run_entries(
             break;
         }
         match outcome {
-            Ok(0) => {}
+            Ok(0) => {
+                // The line of the merged state frees its caches when its work is in the target (docs/cache-overlays.md,
+                // section 22). An error keeps the caches and never stops the queue.
+                let errors = (|| -> Result<Vec<String>> {
+                    let source = match repo.p.db.state(&entry.state)?.and_then(|s| s.line) {
+                        Some(id) if !repo.p.db.line_deleted(&id)? => repo.p.db.line_by_id(&id)?,
+                        _ => None,
+                    };
+                    let (_, errors) = repo.free_merged_caches(ctx, &target(repo, &entry)?, Some(source.into_iter().collect()));
+                    Ok(errors)
+                })();
+                for e in errors.unwrap_or_else(|e| vec![format!("{e:#}")]) {
+                    eprintln!("layr queue: {e}");
+                }
+            }
             result => {
                 let reason = match result {
                     Err(error) => format!("{error:#}"),
