@@ -86,7 +86,7 @@ l init ov --from $T/osrc -q >/dev/null
 Q=$LAYR_ROOT/projects/ov/lines
 cd $Q/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
-l overlay create notes --mode follow -q >/dev/null
+l overlay create notes -q >/dev/null
 l overlay move -q notes private >/dev/null
 l save -qm "private notes" >/dev/null
 for n in p1 p2 pq; do

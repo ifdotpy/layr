@@ -193,7 +193,7 @@ sh_in layr-o3 g4 "rm .zulip.env"
 in_line layr-o1 main line new -q f1 main
 in_line layr-o1 f1 overlay use -q --none
 sh_in layr-o1 f1 "mkdir -p private && echo 'note 1' > private/notes.md"
-ok "an overlay in follow mode" in_line layr-o1 f1 overlay create notes --mode follow -q
+ok "an overlay in follow mode" in_line layr-o1 f1 overlay create notes -q
 in_line layr-o1 f1 overlay move -q notes private
 ok "commit" in_line layr-o1 f1 save -qm "private notes"
 ok "a line from f1" in_line layr-o1 f1 line new -q f2 f1

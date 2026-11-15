@@ -101,7 +101,15 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Spec::new().value("--readers|-r").value("--mode").flag("--hidden").flag("-q").value("--folder").value("--parent"),
     );
     let a = parse(&spec, args)?;
-    let props = props_of(&a, Props::default())?;
+    refuse_kind_options(&a, "create", a.get("--folder").is_some())?;
+    // A cache (`--folder`) has its fixed behaviour: quiet, union-theirs, trust=protected, `history=last`
+    // unless `--history` says otherwise (owner decision 2026-11-15, kinds).
+    let base = if a.get("--folder").is_some() {
+        Props { history: Some(1), quiet: true, merge: MergeKind::UnionTheirs, trust: Some(crate::overlay::Trust::Protected), ..Props::default() }
+    } else {
+        Props::default()
+    };
+    let props = props_of(&a, base)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     if repo.p.is_overlay() {
@@ -300,6 +308,36 @@ fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The kind of an overlay (docs/overlays.md section 1, owner decision 2026-11-15): `cache` for a folder
+/// overlay, else `patches`.
+pub(crate) fn kind_name(cache: bool) -> &'static str {
+    if cache {
+        "cache"
+    } else {
+        "patches"
+    }
+}
+
+/// Kinds instead of properties (docs/overlays.md section 1): the options of the old properties that a kind
+/// fixes fail with exit status 2; the options of a cache (`--history`, `--gc`, `--prune`, `--key-files`)
+/// fail on a patches overlay. `--platform` stays for now (docs/overlays.md, "Kinds as built").
+fn refuse_kind_options(a: &crate::args::Parsed, cmd: &str, cache: bool) -> Result<()> {
+    const RULE: &str = "an overlay has a kind: a patches overlay has a parent and readers; a cache (--folder) has a folder and history, and is always quiet, union-theirs, of one platform and trust=protected";
+    for flag in ["--mode", "--quiet", "--no-quiet", "--merge", "--trust"] {
+        if a.has(flag) || a.get(flag).is_some() {
+            return Err(exit(2, format!("layr overlay {cmd} {flag} was removed: {RULE}")));
+        }
+    }
+    if !cache {
+        for flag in ["--history", "--gc", "--prune", "--key-files"] {
+            if a.get(flag).is_some() {
+                return Err(exit(2, format!("layr overlay {cmd} {flag} is a setting of a cache: {RULE}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The options of overlay properties (docs/cache-overlays.md, section 4).
 fn props_spec(spec: Spec) -> Spec {
     spec.value("--history")
@@ -398,6 +436,7 @@ fn set(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let _lock = h.repo.p.lock()?;
     let old = h.repo.overlay_props(&name)?;
+    refuse_kind_options(&a, "set", h.repo.chunked_overlay(&name)?)?;
     let new = props_of(&a, old.clone())?;
     let mut cfg = serde_json::Map::new();
     for prop in PROPS {
@@ -509,6 +548,7 @@ struct ListingRow {
     owner: u32,
     readers: Vec<String>,
     shown: bool,
+    kind: &'static str,
     properties: serde_json::Value,
     folder: Option<String>,
     state: Option<String>,
@@ -604,6 +644,7 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 owner: info.owner,
                 readers,
                 shown: shown.contains(&name),
+                kind: kind_name(folder.is_some()),
                 properties: props.to_json(),
                 folder,
                 state: line_state.as_ref().map(|s| s.state.clone()),
@@ -616,6 +657,7 @@ fn list(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if let Some(f) = &folder {
                 described.insert(0, format!("folder={f}"));
             }
+            described.insert(0, format!("kind={}", kind_name(folder.is_some())));
             let keys = settings
                 .overlay_config(&format!("overlay.{name}.key-files"))?
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
@@ -988,6 +1030,7 @@ fn show_json(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "epochs":layr_model::overlays::epochs(&records),
         "patterns":setting("patterns")?.unwrap_or_else(|| serde_json::json!([])),
         "peers":setting("peers")?,"state":state,"properties":h.repo.overlay_props(name)?.to_json(),
+        "kind":kind_name(h.repo.chunked_overlay(name)?),
     });
     // In the view of the current folder: which paths are patches, hidden, or wait for a merge with the parent.
     let mut value = value;
@@ -1852,6 +1895,7 @@ mod tests {
             owner: 1000,
             readers: Vec::new(),
             shown: false,
+            kind: "cache",
             properties: json!({}),
             folder: Some("target".into()),
             state: Some("cache".into()),
@@ -1859,6 +1903,8 @@ mod tests {
             saved: None,
         };
         assert!(serde_json::to_value(&row)?.get("size").is_none());
+        assert_eq!(serde_json::to_value(&row)?["kind"], "cache");
+        assert_eq!((kind_name(true), kind_name(false)), ("cache", "patches"));
         row.size = Some(0);
         assert_eq!(serde_json::to_value(&row)?["size"], 0);
         row.size = Some(123);

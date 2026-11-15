@@ -10,7 +10,7 @@ echo 'target regenerable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main"
-l overlay create cache.target --folder target --quiet --history last --merge union-theirs -q
+l overlay create cache.target --folder target --history last -q
 l config overlay.cache.target.cache true >/dev/null
 mkdir -p target
 echo local > target/out.bin

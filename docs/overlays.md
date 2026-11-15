@@ -80,7 +80,7 @@ Built so far (the rest of this file describes the code until a row says "built")
 | Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
 | Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
 | Move along the tree, checks per view, automatic states | built 2026-11-15, checks in part (below) |
-| Kinds instead of properties | not built: a folder overlay is the kind `cache`, every other overlay the kind `patches`; the property options stay |
+| Kinds instead of properties | built in part 2026-11-15 ("Kinds as built" below) |
 | Caches per view | built 2026-11-15 (below) |
 | Store format step for older binaries | built 2026-11-15 (below) |
 
@@ -223,6 +223,28 @@ Built so far (the rest of this file describes the code until a row says "built")
   the state in X's store when the automatic state of the project goes. An overlay with a limited
   `history` drops such states with its old states; `undo` then restores the head of `main` for the
   view's changes (nothing leaks, but the change is not back).
+
+**Kinds as built (2026-11-15).**
+
+- An overlay has a kind: `cache` (a folder overlay, `--folder`) or `patches` (every other overlay).
+  `overlay list` shows `kind=<kind>` first, and `overlay list --json` and `overlay show --json` have
+  `kind`.
+- `overlay create|set` options `--mode`, `--quiet`, `--no-quiet`, `--merge` and `--trust` fail with
+  exit status 2 and name the kind rule. `--history`, `--gc`, `--prune` and `--key-files` are settings
+  of a cache: on a patches overlay they fail with exit status 2. `--parent` is a setting of a patches
+  overlay. `--hidden` stays.
+- `overlay create --folder` gives a cache its fixed behaviour: quiet, `merge=union-theirs`,
+  `trust=protected` and `history=last` (`--history` changes it). The caches that a save makes have
+  the platform of this machine, as before.
+- Old data. Each existing overlay maps to a kind by its `folder` setting. Every setting that an older
+  layr stored keeps acting as before: on a patches overlay `quiet`, `merge`, `history`, `gc`,
+  `prune`, `platform` and `trust` are still read, and on a cache a stored `trust=readers` or
+  `quiet=false` too. No command changes them any more (`layr config` can take one away). So an old
+  store opens and behaves as before; only the options to set them are gone.
+- Left (not built): `--platform` stays on `overlay create|set`, because the tests of overlays of
+  another platform (t235, t61) make such an overlay with it, and no other command makes one. `--gc`
+  and `--prune` stay on caches: they are the only way to set the size limit and the prune adapter
+  (t59, t117, t122). The internal properties (`Props`) are read as before, not derived from the kind.
 
 **Caches per view as built (2026-11-15).**
 
