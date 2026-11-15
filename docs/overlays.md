@@ -26,6 +26,65 @@ Short result:
 
 ## 1. Model
 
+### A tree of patch overlays (owner decision 2026-11-15)
+
+This decision replaces the rules below and in section 9 where they differ. A company keeps
+proprietary patches on top of open source files, and `layr git push` publishes only the bottom
+set. A private edit must never reach that set by accident.
+
+- **`main`.** The bottom overlay is `main` (older text says "base" or "shared set"). A line and an
+  overlay can have the same name. Commands name it `main` (`--to main`, `--overlay main`). No
+  overlay can be created with the name `main`.
+- **Kinds.** An overlay has a kind: `patches` or `cache`. A patches overlay has a parent and
+  readers. A cache has a folder and `history`; it has no parent, it is in every view, and its other
+  behaviour is fixed (quiet, `union-theirs` merge, one platform, `trust=protected`).
+- **Tree.** Each patches overlay has one parent overlay; `main` is the root. An overlay is a set of
+  patches on top of its parent. `layr overlay create <name> --parent <overlay>` (default `main`),
+  `layr overlay set <name> --parent <overlay>`. There is no project order of overlays.
+- **View.** A view is a line seen from one overlay X: the path from `main` to X (the upper overlay
+  wins) and every cache overlay. A working folder shows one view. `layr view <line> --overlay X`
+  and `layr overlay use X` take one overlay. A new line takes the view overlay of the folder where
+  `line new` ran, else `main`.
+- **Readers.** A reader of X reads every ancestor of X. `main` is read by every reader of the
+  project.
+- **Write rule.** A named save in a view of X writes every change to X: a new file, a patch of a
+  file of an ancestor, a delete. `save -m <message> --to <ancestor>` writes the changes of that one
+  save to an ancestor on the path of the view. Mixed work is two saves: stage the public part, save
+  it with `--to main`, then save the rest. There is no stored write target.
+- **Three states per path.** In X a path is its own version (or a patch), deleted here, or nothing
+  (the parent's version shows). X keeps a path only when it differs from the view of its parent: a
+  save that makes a path equal to the parent drops it from X. `layr restore --parent <path>` puts
+  the parent's version in the folder.
+- **A patch is a patch.** X records, for each patched path, the version of the parent that it was
+  made from. When the parent changes that path, a three-way merge (base: the recorded version, ours:
+  X, theirs: the new parent version) gives X a new version, or a conflict that the user resolves like
+  a merge conflict.
+- **Metadata.** Delete markers and patch bases are one versioned metadata format of an overlay
+  state. It checks every path, merges by structure and travels with sync, store remotes and the
+  overlay's git remote.
+- **Move.** `layr overlay move <overlay> <paths>` moves files along the path of the view. A move out
+  of `main` deletes the file from `main`, and the next `git push` publishes that delete.
+- **Checks.** A merge into overlay O is checked on the view of O. A broken child view never blocks a
+  merge into its parent.
+- **Automatic states.** No state that a non-reader of X can read holds a working change of a view of
+  X.
+- **Caches per view.** A cache saved from a view of X never goes to a view without X, nor to a
+  non-reader of X.
+- **Old binaries.** An older layr refuses a store that holds the new records.
+
+Built so far (the rest of this file describes the code until a row says "built"):
+
+| Part | State |
+| --- | --- |
+| Name `main`, kinds, tree, one-overlay views, readers rule | not built |
+| Write rule and `--to <ancestor>` | not built |
+| Metadata format, patch bases, merge with the parent, `restore --parent` | not built |
+| Move along the tree, checks per view, automatic states | not built |
+| Kinds instead of properties, caches per view | not built |
+| Store format step for older binaries | not built |
+
+### The model of 2026-11-11
+
 Owner decision 2026-11-11. The model below replaces the stack model of this file. The code builds
 it in slices (section 1a); "Built today" after the list says how the code differs.
 
