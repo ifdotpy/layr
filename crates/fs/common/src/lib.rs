@@ -23,7 +23,12 @@ pub fn copy_tree(source: &dyn TreeRead, target: &dyn TreeWrite) -> Result<()> {
             }
             let path = dir.join(name);
             let at = RelDir::Path(path.clone());
-            let meta = required(source, &at)?;
+            let mut meta = required(source, &at)?;
+            // A nonpersistent source timestamp has no physical time to preserve. Use a
+            // fixed epoch for copies onto filesystems that must assign every entry a time.
+            if meta.attributes.stored_time.is_none() {
+                meta.attributes.modified_ns = 0;
+            }
             match meta.kind {
                 FType::Dir => {
                     let mut temporary = meta.attributes.clone();
@@ -48,7 +53,11 @@ pub fn copy_tree(source: &dyn TreeRead, target: &dyn TreeWrite) -> Result<()> {
             }
             Ok(())
         })?;
-        target.set_metadata(dir, &required(source, dir)?.attributes)
+        let mut attributes = required(source, dir)?.attributes;
+        if attributes.stored_time.is_none() {
+            attributes.modified_ns = 0;
+        }
+        target.set_metadata(dir, &attributes)
     }
     folder(source, target, &RelDir::Root, &mut HashMap::new())
 }
@@ -105,7 +114,18 @@ pub fn changes(fs: &dyn Filesystem, before: &FrozenTree, after: &FrozenTree) -> 
             hints::HintSet::Partial => {}
         }
     }
-    candidates(before.reader(), after.reader())
+    let mut entries = candidates(before.reader(), after.reader())?;
+    for entry in &mut entries {
+        if let (Some(old), Some(new)) = (entry.old(), entry.new()) {
+            if old.is_file() && new.is_file() {
+                let mut a = before.reader().open_file(&RelPath::new(entry.src().as_bytes())?)?;
+                let mut b = after.reader().open_file(&RelPath::new(entry.path().as_bytes())?)?;
+                let ranges = changed_ranges(&mut a, old.size, &mut b, new.size)?;
+                entry.set_data(DataEvidence::from_native(&ranges, old.size, new.size).map_err(FsError::Invalid)?);
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Shared clone-to-new dispatch; an unavailable acceleration leaves the full fallback safe.
@@ -116,9 +136,11 @@ pub fn copy_file(
     target: &WorkingTree,
     destination: &RelPath,
 ) -> Result<()> {
-    if let Some(clone) = fs.capabilities(&target.scope()).clone_new {
-        if let Attempt::Applied(()) = clone.clone_new(source, path, target, destination)? {
-            return Ok(());
+    if source.scope().same_instance(&target.scope()) {
+        if let Some(clone) = fs.capabilities(&target.scope()).clone_new {
+            if let Attempt::Applied(()) = clone.clone_new(source, path, target, destination)? {
+                return Ok(());
+            }
         }
     }
     let metadata = required(source.reader(), &RelDir::Path(path.clone()))?;
@@ -157,4 +179,26 @@ pub fn copy_range(
         copied += length;
     }
     Ok(())
+}
+
+/// Shared block evidence for immutable reads. Byte comparison is independent of the driver.
+pub fn changed_ranges(a: &mut dyn std::io::Read, alen: u64, b: &mut dyn std::io::Read, blen: u64) -> Result<Vec<(u64, u64)>> {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let (mut ab, mut bb) = ([0; 4096], [0; 4096]);
+    let mut pos = 0;
+    while pos < alen.max(blen) {
+        let an = usize::try_from(alen.saturating_sub(pos).min(4096)).map_err(|_| FsError::Invalid("block length overflow"))?;
+        let bn = usize::try_from(blen.saturating_sub(pos).min(4096)).map_err(|_| FsError::Invalid("block length overflow"))?;
+        a.read_exact(&mut ab[..an])?;
+        b.read_exact(&mut bb[..bn])?;
+        let len = an.max(bn) as u64;
+        if ab[..an] != bb[..bn] {
+            match ranges.last_mut() {
+                Some((start, size)) if *start + *size == pos => *size += len,
+                _ => ranges.push((pos, len)),
+            }
+        }
+        pos += len;
+    }
+    Ok(ranges)
 }

@@ -34,6 +34,9 @@ impl DirectoryTree {
     pub fn root_file(&self) -> &File {
         &self.root
     }
+    pub fn open_directory(&self, dir: &RelDir) -> Result<File> {
+        self.directory(dir.as_bytes())
+    }
     fn directory(&self, dir: &[u8]) -> Result<File> {
         let mut current = self.root.try_clone()?;
         if !dir.is_empty() {
@@ -56,6 +59,13 @@ impl DirectoryTree {
             None => (b"".as_slice(), bytes),
         };
         Ok((self.directory(parent)?, OsStr::from_bytes(name)))
+    }
+    pub fn open_native_file(&self, path: &RelPath) -> Result<File> {
+        let file = self.open_entry(path, OFlags::RDONLY)?;
+        if !file.metadata()?.is_file() {
+            return Err(FsError::Invalid("not a regular file"));
+        }
+        Ok(file)
     }
     fn open_entry(&self, path: &RelPath, flags: OFlags) -> Result<File> {
         let (parent, name) = self.parent(path)?;
@@ -135,15 +145,15 @@ impl DirectoryTree {
                 Mode::empty(),
             ))?);
             let opened = child.metadata()?;
-            sys(fs::fchmod(
-                &child,
-                Mode::from_raw_mode((opened.mode() | 0o700).try_into().map_err(|_| FsError::Invalid("mode out of range"))?),
-            ))?;
             if opened.dev() != u64::try_from(stat.st_dev).map_err(|_| FsError::Invalid("device out of range"))?
                 || opened.ino() != stat.st_ino
             {
                 return Err(FsError::Invalid("directory replaced during removal"));
             }
+            sys(fs::fchmod(
+                &child,
+                Mode::from_raw_mode((opened.mode() | 0o700).try_into().map_err(|_| FsError::Invalid("mode out of range"))?),
+            ))?;
             for entry in sys(fs::Dir::read_from(&child))? {
                 let entry = sys(entry)?;
                 let name = entry.file_name().to_bytes();
@@ -307,7 +317,7 @@ impl TreeRead for DirectoryTree {
             kind,
             size,
             attributes,
-            link: (kind == FType::File).then_some(LinkIdentity {
+            link: (kind != FType::Dir).then_some(LinkIdentity {
                 device: u64::try_from(stat.st_dev).map_err(|_| FsError::Invalid("device out of range"))?,
                 inode: stat.st_ino,
                 count: u64::from(stat.st_nlink),
@@ -331,11 +341,7 @@ impl TreeRead for DirectoryTree {
         Ok(())
     }
     fn open_file(&self, path: &RelPath) -> Result<Box<dyn ReadSeek + '_>> {
-        let file = self.open_entry(path, OFlags::RDONLY)?;
-        if !file.metadata()?.is_file() {
-            return Err(FsError::Invalid("not a regular file"));
-        }
-        Ok(Box::new(file))
+        Ok(Box::new(self.open_native_file(path)?))
     }
     fn read_link(&self, path: &RelPath) -> Result<Vec<u8>> {
         let (parent, name) = self.parent(path)?;

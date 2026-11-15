@@ -1,5 +1,5 @@
-use crate::directory::{sys, DirectoryTree};
 use layr_fs_core::*;
+use layr_fs_unix::DirectoryTree;
 use rustix::fs::{self, Mode, OFlags};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -8,6 +8,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+fn sys<T>(result: rustix::io::Result<T>) -> Result<T> {
+    result.map_err(|error| FsError::Io(error.into()))
+}
 
 struct Stored {
     name: Vec<u8>,

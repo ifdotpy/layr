@@ -66,6 +66,11 @@ impl std::fmt::Debug for RemovalFailure {
         self.error.fmt(f)
     }
 }
+impl TreeScope {
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lease.instance, &other.lease.instance)
+    }
+}
 impl FrozenTree {
     pub fn reader(&self) -> &dyn TreeRead {
         self.reader.as_ref()
@@ -111,6 +116,18 @@ impl TreeIssuer {
             consistency,
         })
     }
+    /// Trusted registration of an existing working tree grants mutation, never deletion.
+    pub fn import_working(&self, writer: Arc<dyn TreeWrite>) -> WorkingTree {
+        WorkingTree { lease: self.lease(), writer }
+    }
+    /// Trusted ownership transfer at an existing storage adapter's deletion boundary.
+    pub fn own(&self) -> OwnedTree {
+        OwnedTree { lease: self.lease() }
+    }
+    pub fn owned_key(&self, tree: &OwnedTree) -> Result<TreeKey> {
+        self.check(&tree.lease.instance)?;
+        Ok(tree.lease.key.clone())
+    }
     /// Trusted registration of an existing tree conveys reading, never deletion authority.
     pub fn import(&self, reader: Arc<dyn TreeRead>) -> FrozenTree {
         FrozenTree { lease: self.lease(), reader }
@@ -143,6 +160,15 @@ impl TreeIssuer {
         } else {
             Err(FsError::WrongInstance)
         }
+    }
+    /// Attach a readable/writable lease after an exclusively owned resource has been prepared.
+    pub fn attach_working(&self, ownership: &OwnedTree, writer: Arc<dyn TreeWrite>) -> Result<WorkingTree> {
+        self.check(&ownership.lease.instance)?;
+        Ok(WorkingTree { lease: ownership.lease.clone(), writer })
+    }
+    pub fn attach_frozen(&self, ownership: &OwnedTree, reader: Arc<dyn TreeRead>) -> Result<FrozenTree> {
+        self.check(&ownership.lease.instance)?;
+        Ok(FrozenTree { lease: ownership.lease.clone(), reader })
     }
     /// The operation runs only after all readers have released their pin. Errors retain authority.
     pub fn remove(
@@ -214,6 +240,22 @@ mod tests {
         let failed = issuer.remove(ownership, |_| Err(FsError::Invalid("injected remove failure"))).unwrap_err();
         assert!(matches!(failed.error, FsError::Invalid(_)));
         issuer.remove(failed.ownership, |_| Ok(())).unwrap();
+    }
+    #[test]
+    fn reserved_authority_attaches_readers_without_issuing_another_identity() {
+        let issuer = TreeIssuer::default();
+        let other = TreeIssuer::default();
+        let ownership = issuer.own();
+        assert!(matches!(other.attach_working(&ownership, Arc::new(Empty)), Err(FsError::WrongInstance)));
+        let working = issuer.attach_working(&ownership, Arc::new(Empty)).unwrap();
+        let frozen = issuer.attach_frozen(&ownership, Arc::new(Empty)).unwrap();
+        assert!(issuer.working_key(&working).unwrap() == issuer.owned_key(&ownership).unwrap());
+        assert!(issuer.frozen_key(&frozen).unwrap() == issuer.owned_key(&ownership).unwrap());
+        let failure = issuer.remove(ownership, |_| panic!("attached readers pin deletion")).unwrap_err();
+        assert!(matches!(failure.error, FsError::Busy));
+        drop(working);
+        drop(frozen);
+        issuer.remove(failure.ownership, |_| Ok(())).unwrap();
     }
     #[test]
     fn scopes_retain_distinct_tree_identity_and_reject_other_instances() {

@@ -5,6 +5,7 @@ members = [
   "crates/fs/core",
   "crates/fs/common",
   "crates/fs/plain",
+  "crates/fs/unix",
   "crates/store/object-format",
   "crates/layr-api",
   "crates/layr-store",
@@ -37,8 +38,9 @@ undocumented_unsafe_blocks = "deny"
 [workspace.metadata.layers]
 layr-adapter = { layer = 0, dependencies = [], leaf = true }
 layr-api = { layer = 0, dependencies = [], leaf = true }
+layr-fs-unix = { layer = 1, dependencies = ["layr-fs-core"], leaf = true, normal-dependencies = ["layr-fs-core", "rustix"] }
 layr-fs-common = { layer = 1, dependencies = ["layr-fs-core"], leaf = true, normal-dependencies = ["layr-fs-core"] }
-layr-fs-plain = { layer = 2, dependencies = ["layr-fs-core", "layr-fs-common"] }
+layr-fs-plain = { layer = 2, dependencies = ["layr-fs-core", "layr-fs-common", "layr-fs-unix"] }
 layr-fs-core = { layer = 0, dependencies = [], leaf = true, normal-dependencies = ["serde"] }
 layr-stream-codec = { layer = 0, dependencies = [], leaf = true }
 layr-types = { layer = 0, dependencies = [], leaf = true }
@@ -70,6 +72,7 @@ layr = { layer = 3, dependencies = [
   "layr-fs-core",
   "layr-fs-common",
   "layr-fs-plain",
+  "layr-fs-unix",
 ] }
 
 [workspace.package]
@@ -106,6 +109,7 @@ path = "src/main.rs"
 overlayfs = []
 
 [dependencies]
+layr-fs-unix = { path = "crates/fs/unix" }
 layr-fs-common = { path = "crates/fs/common" }
 layr-fs-core = { path = "crates/fs/core", features = ["serde"] }
 layr-stream-codec = { path = "crates/fs/stream-codec" }

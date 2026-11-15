@@ -678,9 +678,10 @@ mod tests {
         }
         let store = Store::open(&root.path.join("store"))?;
         let dir = store.project_dir("p")?;
-        std::fs::create_dir_all(dir.join("meta/db"))?;
-        std::fs::create_dir_all(dir.join("states"))?;
-        std::fs::create_dir_all(dir.join("lines"))?;
+        crate::store::mkdir_mode(&dir.join("meta"), 0o700)?;
+        crate::store::mkdir_mode(&dir.join("meta/db"), 0o700)?;
+        crate::store::mkdir_mode(&dir.join("states"), 0o700)?;
+        crate::store::mkdir_mode(&dir.join("lines"), 0o711)?;
         let working = dir.join("lines/main");
         crate::storage::create_subvolume(&working)?;
         let ctx = Ctx {

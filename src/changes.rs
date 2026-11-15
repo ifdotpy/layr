@@ -3,13 +3,9 @@
 //! A change list is a candidate list: an entry that kept its inode and path has the changed byte
 //! ranges, so a content check reads only those ranges. Other entries are checked in full.
 
-#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
-use crate::compare::pair_rename;
 use crate::compare::DataEvidence;
 pub use crate::compare::EntryChange;
 use crate::fsutil::{self, Meta, Src};
-#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
-use crate::stream;
 use anyhow::Result;
 use layr_hashers::{FastCryptographic, PurposeHasher};
 use layr_hashers::{FastMap, FastSet};
@@ -65,137 +61,10 @@ fn native_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) 
 // Compare fixed blocks when the backend cannot report changed extents.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn changed_ranges(a: &Path, b: &Path) -> Result<Vec<(u64, u64)>> {
-    use std::io::Read;
     let _t = crate::trace::span("content compare");
-    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut a, mut b) = (crate::fsutil::open_regular(a)?, crate::fsutil::open_regular(b)?);
     let (alen, blen) = (a.metadata()?.len(), b.metadata()?.len());
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    let (mut ab, mut bb) = ([0u8; 4096], [0u8; 4096]);
-    let mut pos = 0;
-    while pos < alen.max(blen) {
-        let an = (alen.saturating_sub(pos).min(4096)) as usize;
-        let bn = (blen.saturating_sub(pos).min(4096)) as usize;
-        a.read_exact(&mut ab[..an])?;
-        b.read_exact(&mut bb[..bn])?;
-        let len = an.max(bn) as u64;
-        if ab[..an] != bb[..bn] {
-            match ranges.last_mut() {
-                Some((start, n)) if *start + *n == pos => *n += len,
-                _ => ranges.push((pos, len)),
-            }
-        }
-        pos += len;
-    }
-    Ok(ranges)
-}
-
-#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
-pub(crate) fn build(parent: &Path, child: &Path, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
-    // Every path the stream touched, in the parent and in the child. `Some(ranges)` when the only
-    // entry at the path kept its inode there, so unchanged byte ranges share extents.
-    let mut paths: BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>> = BTreeMap::new();
-    let mut moves: Vec<(String, String, Vec<(u64, crate::compare::RangeEnd)>)> = Vec::new();
-    let mut moved_dirs: Vec<(String, String)> = Vec::new();
-    let deleted: HashSet<String> = entries.iter().filter(|e| e.path.is_none()).filter_map(|e| e.origin.clone()).collect();
-    let touch = |paths: &mut BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>>,
-                 p: &str,
-                 r: Option<Vec<(u64, crate::compare::RangeEnd)>>| match paths.get(p) {
-        Some(_) => {
-            paths.insert(p.to_string(), None);
-        }
-        None => {
-            paths.insert(p.to_string(), r);
-        }
-    };
-    for e in &entries {
-        match (&e.origin, &e.path) {
-            (Some(o), Some(p)) if o == p => touch(&mut paths, p, Some(e.ranges.clone())),
-            (Some(o), Some(p)) => {
-                touch(&mut paths, o, None);
-                touch(&mut paths, p, None);
-                moves.push((o.clone(), p.clone(), e.ranges.clone()));
-                let od = fsutil::lmeta(parent, o).map(|m| m.is_dir()).unwrap_or(false);
-                let nd = fsutil::lmeta(child, p).map(|m| m.is_dir()).unwrap_or(false);
-                if od && nd {
-                    moved_dirs.push((o.clone(), p.clone()));
-                }
-            }
-            (Some(o), None) => touch(&mut paths, o, None),
-            (None, Some(p)) => {
-                touch(&mut paths, p, None);
-                if let Some(l) = &e.linked_from {
-                    touch(&mut paths, l, None);
-                    if deleted.contains(l) {
-                        moves.push((l.clone(), p.clone(), e.ranges.clone()));
-                    }
-                }
-            }
-            (None, None) => {}
-        }
-    }
-    // Content below a moved folder moved too. One walk per outermost moved folder; a folder
-    // moved inside it again maps its own files (the longest moved prefix of a path wins).
-    let map: BTreeMap<String, String> = moved_dirs.iter().map(|(o, p)| (p.clone(), o.clone())).collect();
-    let roots: Vec<&String> = map.keys().filter(|p| !p.match_indices('/').any(|(i, _)| map.contains_key(&p[..i]))).collect();
-    for p in roots {
-        let mut found: Vec<(String, String)> = Vec::new();
-        fsutil::walk(child, p, &mut |rel, _meta| {
-            if let Some((top, from)) = rel.rmatch_indices('/').find_map(|(i, _)| map.get(&rel[..i]).map(|o| (i, o))) {
-                found.push((format!("{from}/{}", &rel[top + 1..]), rel.to_owned()));
-            }
-            Ok(true)
-        })?;
-        for (src, dst) in found {
-            if !paths.contains_key(&dst) {
-                paths.insert(dst.clone(), None);
-                if !paths.contains_key(&src) {
-                    paths.insert(src.clone(), None);
-                }
-                moves.push((src, dst, Vec::new()));
-            }
-        }
-    }
-    let observe = |root: &Path, path: &str| -> Result<Option<Meta>> {
-        match std::fs::symlink_metadata(fsutil::safe_join(root, path)?) {
-            Ok(meta) => Ok(Some(fsutil::meta_of(&meta))),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    };
-    let mut out: BTreeMap<String, EntryChange> = BTreeMap::new();
-    for (p, ranges) in paths {
-        let old = observe(parent, &p)?;
-        let new = observe(child, &p)?;
-        let data = match (ranges, &old, &new) {
-            (Some(ranges), Some(old), Some(new)) => {
-                DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, old.size, new.size)
-            }
-            _ => DataEvidence::Unknown,
-        };
-        if let Some(change) = EntryChange::observed(p.clone(), old, new, data) {
-            out.insert(p, change);
-        }
-    }
-    // Moves: the source is gone in the child and the target is new in the parent.
-    let mut used: HashSet<String> = HashSet::new();
-    for (src, dst, ranges) in moves {
-        if used.contains(&src) || used.contains(&dst) {
-            continue;
-        }
-        let data = match (out.get(&src).and_then(EntryChange::old), out.get(&dst).and_then(EntryChange::new)) {
-            (Some(old), Some(new)) => {
-                DataEvidence::from_ranges(ranges.try_into().map_err(anyhow::Error::msg)?, old.size, new.size)
-            }
-            _ => continue,
-        };
-        pair_rename(&mut out, &src, &dst, data);
-        if !out.get(&dst).is_some_and(|c| c.old_path().is_some()) {
-            continue;
-        }
-        used.insert(src);
-        used.insert(dst);
-    }
-    Ok(out.into_values().collect())
+    Ok(layr_fs_common::changed_ranges(&mut a, alen, &mut b, blen)?)
 }
 
 /// True when the entry changed in a way git would see: type, content, link target or the
@@ -715,8 +584,13 @@ mod tests {
         std::fs::write(parent.join("source"), "data").unwrap();
         std::fs::write(child.join("source"), "data").unwrap();
         std::fs::hard_link(child.join("source"), child.join("link")).unwrap();
-        let entry = stream::Entry { path: Some("link".into()), linked_from: Some("source".into()), ..Default::default() };
-        let result = build(&parent, &child, vec![entry]).unwrap();
+        let entry = crate::stream::Entry { path: Some("link".into()), linked_from: Some("source".into()), ..Default::default() };
+        let result = crate::fs_candidates::build(
+            &layr_fs_unix::DirectoryTree::open(&parent).unwrap(),
+            &layr_fs_unix::DirectoryTree::open(&child).unwrap(),
+            vec![entry],
+        )
+        .unwrap();
         assert!(result.iter().any(|c| c.path() == "source"));
         assert!(result.iter().any(|c| c.path() == "link"));
         std::fs::remove_dir_all(tmp).unwrap();

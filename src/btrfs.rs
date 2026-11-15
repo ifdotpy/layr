@@ -11,7 +11,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+pub(crate) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 const FIRST_FREE_OBJECTID: u64 = 256;
 
 /// A nested subvolume leaves inode 2 at its boundary in a parent snapshot. Unlike a real
@@ -94,15 +94,23 @@ pub fn cache_snapshot(src: &Path, dst: &Path) -> Result<bool> {
 }
 
 pub fn snapshot(src: &Path, dst: &Path, readonly: bool) -> Result<()> {
+    use layr_fs_core::Filesystem;
     let _t = crate::trace::span(format!("snapshot {}", dst.display()));
-    let s = File::open(src).with_context(|| format!("open {}", src.display()))?;
-    let (dir, name) = split_parent(dst)?;
-    sys::subvol_snapshot(s.as_fd(), dir.as_fd(), &name, readonly)
-        .with_context(|| format!("snapshot {} to {}", src.display(), dst.display()))?;
-    if readonly {
-        NEW_SNAPSHOTS.with(|paths| paths.borrow_mut().insert(dst.to_path_buf()));
-    }
-    Ok(())
+    let driver = crate::btrfs_driver::BtrfsFs::for_snapshot(src, dst)?;
+    let result = (|| -> layr_fs_core::Result<()> {
+        let source = driver.working(src)?;
+        let destination = driver.location(dst)?;
+        // The legacy adapter transfers persistence back to the existing path owner.
+        let filesystem: &dyn Filesystem = driver.as_ref();
+        if readonly { drop(filesystem.freeze(&source, destination)?); }
+        else { drop(driver.native_snapshot(&source, destination)?); }
+        Ok(())
+    })();
+    result.map_err(|error| driver.legacy_error(error))
+}
+
+pub(crate) fn remember_snapshot(path: &Path) {
+    NEW_SNAPSHOTS.with(|paths| paths.borrow_mut().insert(path.to_path_buf()));
 }
 
 /// Delete the subvolume at `path`. Nested subvolumes must be deleted first.
@@ -148,6 +156,17 @@ pub fn subvol_info(path: &Path) -> Result<SubvolInfo> {
 /// Delete a subvolume and every subvolume nested inside it, or a plain folder tree. The tree is
 /// walked through descriptors (no link is followed), because a line belongs to its owner.
 pub fn delete_tree(path: &Path) -> Result<()> {
+    use layr_fs_core::Filesystem;
+    // Keep the legacy missing/inaccessible-path behavior at this compatibility boundary.
+    if std::fs::symlink_metadata(path).is_err() { return Ok(()); }
+    // Plain directory/file cleanup still belongs to the descriptor-walking legacy facade.
+    if !is_subvolume(path) { return delete_tree_native(path); }
+    let driver = crate::btrfs_driver::BtrfsFs::for_path(path)?;
+    let ownership = driver.owned(path)?;
+    driver.remove(ownership).map_err(|failure| driver.legacy_removal_error(failure))
+}
+
+pub(crate) fn delete_tree_native(path: &Path) -> Result<()> {
     let _t = crate::trace::span(format!("delete {}", path.display()));
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(());
@@ -204,7 +223,14 @@ pub fn clone_file(src: &File, dst: &File) -> std::io::Result<()> {
 /// Reflink a byte range. Offsets and length must be aligned to the block size, except a range
 /// that ends at the end of the source file.
 pub fn clone_range(src: &File, src_off: u64, len: u64, dst: &File, dst_off: u64) -> std::io::Result<()> {
-    sys::clone_range(src, src_off, len, dst, dst_off)
+    use layr_fs_core::{Attempt, ByteRange, ReflinkRange};
+    let Ok(range) = ByteRange::new(src_off, len) else { return sys::clone_range(src, src_off, len, dst, dst_off); };
+    match crate::btrfs_driver::RangeClone.clone_range(src, range, dst, dst_off) {
+        Ok(Attempt::Applied(())) => Ok(()),
+        Ok(Attempt::Unavailable(error)) => Err(error),
+        Err(layr_fs_core::FsError::Io(error)) => Err(error),
+        Err(error) => Err(std::io::Error::other(error)),
+    }
 }
 
 /// Copies what it reads into a buffer that stays at most `limit` bytes; past that it drops the
@@ -231,15 +257,13 @@ impl<R: Read> Read for Tee<R> {
 
 /// Ask the kernel for a metadata stream and decode it as it arrives, or decode an immutable
 /// pair from the cache. Only a stream that the cache can keep is also buffered.
-pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<crate::stream::Entry>> {
+pub(crate) fn send_no_data_pinned(parent: &Path, child: &Path, p: &File, c: &File) -> Result<Vec<crate::stream::Entry>> {
     let _t = crate::trace::span("send --no-data");
-    let p = File::open(parent)?;
-    let c = File::open(child)?;
     if sys::filesystem_uuid(p.as_fd())? != sys::filesystem_uuid(c.as_fd())? {
         bail!("the snapshots are on different filesystems");
     }
     let is_new = NEW_SNAPSHOTS.with(|paths| paths.borrow().contains(parent) || paths.borrow().contains(child));
-    let cache = if is_new { None } else { crate::send_cache::Cache::for_states(parent, child, &p, &c) };
+    let cache = if is_new { None } else { crate::send_cache::Cache::for_states(parent, child, p, c) };
     if let Some(data) = cache.as_ref().and_then(|cache| cache.read()) {
         return crate::stream::entries_from(&data[..]);
     }
@@ -273,11 +297,6 @@ pub fn send_no_data(parent: &Path, child: &Path) -> Result<Vec<crate::stream::En
         let _ = cache.write(&data);
     }
     Ok(entries)
-}
-
-/// Start a full data `btrfs send` (with an optional parent) writing to stdout of the child.
-pub fn send_command(parent: Option<&Path>, child: &Path) -> Result<Command> {
-    send_optimized(parent, child, &[], false)
 }
 
 /// Extra sources and compressed extents require an explicit agreement with the receiver.
@@ -765,23 +784,6 @@ pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeH
 struct SendHints;
 impl crate::change_hints::ChangeHints for SendHints {
     fn between(&self, base: &Path, tree: &Path) -> std::result::Result<crate::change_hints::HintSet, layr_fs_core::FsError> {
-        (|| -> Result<crate::change_hints::HintSet> {
-            if !subvol_info(base)?.readonly || !subvol_info(tree)?.readonly {
-                return Ok(crate::change_hints::HintSet::Partial);
-            }
-            let entries = send_no_data(base, tree)?;
-            let candidates = crate::changes::build(base, tree, entries)?;
-            // A stream names an inode through one alias. Until we expand inode references,
-            // a changed hard-linked inode requires the full scan to find every visible alias.
-            for change in &candidates {
-                for (root, path, meta) in [(base, change.src(), change.old()), (tree, change.path().as_str(), change.new())] {
-                    if meta.is_some_and(|m| !m.is_dir()) && fs::symlink_metadata(crate::fsutil::safe_join(root, path)?)?.nlink() > 1 {
-                        return Ok(crate::change_hints::HintSet::Partial);
-                    }
-                }
-            }
-            Ok(crate::change_hints::HintSet::Complete(candidates))
-        })()
-        .map_err(layr_fs_core::FsError::backend)
+        crate::btrfs_driver::BtrfsFs::for_path(base)?.legacy_hints(base, tree)
     }
 }

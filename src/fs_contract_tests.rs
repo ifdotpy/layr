@@ -91,11 +91,19 @@ struct Observed {
     conflicts: Vec<String>,
     bytes: Vec<u8>,
 }
+#[derive(Clone, Copy)]
+enum ExpectedCapabilities {
+    Empty,
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    Accelerated,
+}
 fn scenarios(
     fs: &dyn Filesystem,
     location: &dyn Fn(&str) -> layr_fs_core::Result<NewTreeLocation>,
     scratch: &Scratch,
     name: &str,
+    expected_capabilities: ExpectedCapabilities,
+    prepare_removal: &dyn Fn(&str) -> Result<()>,
 ) -> Result<Observed> {
     let seed = MemoryTree::new(attributes(0o755));
     write(&seed, "text", b"one\ntwo\nthree\n")?;
@@ -107,7 +115,11 @@ fn scenarios(
     let base = capture(fs, location, &seed, "base")?;
     let caps = fs.capabilities(&base.tree.scope());
     let Capabilities { change_hints, clone_new, reflink_range } = caps;
-    assert!(change_hints.is_none() && clone_new.is_none() && reflink_range.is_none());
+    match expected_capabilities {
+        ExpectedCapabilities::Empty => assert!(change_hints.is_none() && clone_new.is_none() && reflink_range.is_none()),
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        ExpectedCapabilities::Accelerated => assert!(clone_new.is_some() && reflink_range.is_some()),
+    }
     assert!(fs.changes(&base.tree, &base.tree)?.iter().all(|c| c.old().is_some() && c.new().is_some()));
     let CreatedTree { tree: ours_work, ownership: ours_owner } = fs.materialise(base.tree.reader(), location("ours-work")?)?;
     write(ours_work.writer(), "text", b"one\nOURS\nthree\n")?;
@@ -167,9 +179,10 @@ fn scenarios(
     assert!(merged.tree.reader().metadata(&RelDir::Path(path("added")))?.is_some());
     assert!(merged.tree.reader().metadata(&RelDir::Path(path("old")))?.is_none());
     // Known rollback cleanup has authority; readers must release their pins first.
-    for capture in [base, ours, theirs, merged] {
+    for (name, capture) in [("base", base), ("ours", ours), ("theirs", theirs), ("merged", merged)] {
         let Capture { tree, ownership, .. } = capture;
         drop(tree);
+        prepare_removal(name)?;
         fs.remove(ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
     }
     fs.remove(ours_owner).map_err(|e| anyhow::anyhow!("{}", e.error))?;
@@ -188,9 +201,11 @@ fn scenarios(
 fn plain_and_memory_run_production_save_status_diff_and_merge() -> Result<()> {
     let scratch = Scratch::new()?;
     let memory = MemoryFs::default();
-    let expected = scenarios(&memory, &|name| memory.location(path(name)), &scratch, "memory")?;
+    let expected =
+        scenarios(&memory, &|name| memory.location(path(name)), &scratch, "memory", ExpectedCapabilities::Empty, &|_| Ok(()))?;
     let plain = PlainFs::open(&scratch.directory("plain")?)?;
-    let actual = scenarios(&plain, &|name| plain.location(path(name)), &scratch, "plain")?;
+    let actual =
+        scenarios(&plain, &|name| plain.location(path(name)), &scratch, "plain", ExpectedCapabilities::Empty, &|_| Ok(()))?;
     assert_eq!(actual, expected);
     Ok(())
 }
@@ -1057,5 +1072,264 @@ fn overwrite_availability_never_masks_errors_after_mutation() -> Result<()> {
     let mut bytes = Vec::new();
     tree.open_file(&path("file"))?.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"n");
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn btrfs_core_operations_match_reference_results_and_capabilities() -> Result<()> {
+    let scratch = Scratch::new()?;
+    if !crate::storage::is_supported(&scratch.0) {
+        eprintln!("btrfs conformance unavailable: TMPDIR is not btrfs");
+        return Ok(());
+    }
+    let memory = MemoryFs::default();
+    let expected =
+        scenarios(&memory, &|name| memory.location(path(name)), &scratch, "reference", ExpectedCapabilities::Empty, &|_| Ok(()))?;
+    let native = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let root = scratch.directory("native")?;
+    let actual = scenarios(
+        &native,
+        &|name| native.location(&root.join(name)),
+        &scratch,
+        "btrfs",
+        ExpectedCapabilities::Accelerated,
+        &|name| crate::storage::set_writable(&root.join(name)),
+    )?;
+    assert_eq!(actual, expected);
+
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"cloned")?;
+    let base = capture(&native, &|name| native.location(&root.join(name)), &seed, "clone-base")?;
+    let work = native.materialise(base.tree.reader(), native.location(&root.join("clone-work"))?)?;
+    layr_fs_common::copy_file(&native, &base.tree, &path("file"), &work.tree, &path("copy"))?;
+    let mut cloned = Vec::new();
+    work.tree.reader().open_file(&path("copy"))?.read_to_end(&mut cloned)?;
+    assert_eq!(cloned, b"cloned");
+    assert_eq!(
+        work.tree.reader().metadata(&RelDir::Path(path("file")))?.context("source absent")?.attributes,
+        work.tree.reader().metadata(&RelDir::Path(path("copy")))?.context("clone absent")?.attributes
+    );
+    let source_caps = native.capabilities(&base.tree.scope());
+    assert_eq!(
+        source_caps.change_hints.is_some(),
+        rustix::thread::capabilities(None)?.effective.contains(rustix::thread::CapabilitySet::SYS_ADMIN)
+    );
+    assert!(matches!(
+        source_caps.clone_new.context("clone capability absent")?.clone_new(
+            &base.tree,
+            &path("file"),
+            &work.tree,
+            &path("direct")
+        )?,
+        Attempt::Applied(())
+    ));
+    let memory_source = capture(&memory, &|name| memory.location(path(name)), &seed, "foreign")?;
+    layr_fs_common::copy_file(&native, &memory_source.tree, &path("file"), &work.tree, &path("foreign"))?;
+    let mut copied = Vec::new();
+    work.tree.reader().open_file(&path("foreign"))?.read_to_end(&mut copied)?;
+    assert_eq!(copied, b"cloned");
+    let caps = native.capabilities(&work.tree.scope());
+    assert!(caps.change_hints.is_none(), "live trees cannot advertise immutable change evidence");
+    let scope = base.tree.scope();
+    let failed = native.remove(base.ownership).unwrap_err();
+    assert!(matches!(failed.error, FsError::Busy));
+    drop(base.tree);
+    let failed = native.remove(failed.ownership).unwrap_err();
+    assert!(matches!(failed.error, FsError::Busy), "scope retains its tree pin");
+    drop(scope);
+    // Normal-user deletion requires a writable subvolume; prepare only this owned fixture.
+    crate::storage::set_writable(&root.join("clone-base"))?;
+    native.remove(failed.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    let source_path = scratch.0.join("range-source");
+    let target_path = scratch.0.join("range-target");
+    std::fs::write(&source_path, [vec![b'a'; 4096], vec![b'b'; 4096]].concat())?;
+    std::fs::write(&target_path, vec![b'y'; 8192])?;
+    let source = std::fs::File::open(source_path)?;
+    let target = std::fs::OpenOptions::new().read(true).write(true).open(&target_path)?;
+    assert!(matches!(
+        caps.reflink_range.context("range capability absent")?.clone_range(&source, ByteRange::new(4096, 4096)?, &target, 0)?,
+        Attempt::Applied(())
+    ));
+    assert_eq!(&std::fs::read(target_path)?[..4096], vec![b'b'; 4096]);
+    drop(work.tree);
+    native.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn btrfs_destinations_keep_parent_identity_after_namespace_replacement() -> Result<()> {
+    let scratch = Scratch::new()?;
+    if !crate::storage::is_supported(&scratch.0) {
+        return Ok(());
+    }
+    let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"captured")?;
+    let work = driver.materialise(&seed, driver.location(&scratch.0.join("work"))?)?;
+    let parent = scratch.directory("parent")?;
+    let destination = driver.location(&parent.join("saved"))?;
+    let moved = scratch.0.join("moved-parent");
+    std::fs::rename(&parent, &moved)?;
+    std::fs::create_dir(&parent)?;
+    crate::storage::create_subvolume(&parent.join("saved"))?;
+    std::fs::write(parent.join("saved/file"), b"replacement")?;
+    let saved = driver.freeze(&work.tree, destination)?;
+    let mut bytes = Vec::new();
+    saved.tree.reader().open_file(&path("file"))?.read_to_end(&mut bytes)?;
+    assert_eq!(bytes, b"captured");
+    // Removal addresses the original subvolume ID through the retained parent, even though
+    // the display pathname now names an unrelated subvolume.
+    crate::storage::set_writable(&moved.join("saved"))?;
+    drop(saved.tree);
+    driver.remove(saved.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    assert!(!moved.join("saved").exists());
+    assert_eq!(std::fs::read(parent.join("saved/file"))?, b"replacement");
+    crate::storage::delete_tree(&parent.join("saved"))?;
+    drop(work.tree);
+    driver.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn btrfs_nested_boundaries_keep_state_ids_through_reference_copies() -> Result<()> {
+    let scratch = Scratch::new()?;
+    if !crate::storage::is_supported(&scratch.0) {
+        return Ok(());
+    }
+    let native = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"kept")?;
+    let work_path = scratch.0.join("work");
+    let work = native.materialise(&seed, native.location(&work_path)?)?;
+    crate::storage::create_subvolume(&work_path.join("nested"))?;
+    std::fs::write(work_path.join("nested/excluded"), b"nested subvolume content")?;
+    let snapshot_path = scratch.0.join("snapshot");
+    let snapshot = native.freeze(&work.tree, native.location(&snapshot_path)?)?;
+    let metadata = snapshot.tree.reader().metadata(&RelDir::Path(path("nested")))?.context("boundary absent")?;
+    assert!(metadata.attributes.stored_time.is_none());
+    let store = layr_objects::Store::open(&scratch.directory("objects")?, layr_objects::Keying::Plain)?;
+    let expected = save(&store, snapshot.tree.reader())?;
+    let memory = MemoryFs::default();
+    let memory_copy = capture(&memory, &|name| memory.location(path(name)), snapshot.tree.reader(), "copy")?;
+    assert_eq!(save(&store, memory_copy.tree.reader())?, expected);
+    let plain = PlainFs::open(&scratch.directory("plain")?)?;
+    let plain_copy = capture(&plain, &|name| plain.location(path(name)), snapshot.tree.reader(), "copy")?;
+    assert_eq!(save(&store, plain_copy.tree.reader())?, expected);
+    drop(snapshot.tree);
+    crate::storage::set_writable(&snapshot_path)?;
+    native.remove(snapshot.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    drop(work.tree);
+    native.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn btrfs_pinned_hints_and_removal_survive_root_replacement() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = Scratch::new()?;
+    if !crate::storage::is_supported(&scratch.0) {
+        return Ok(());
+    }
+    let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    write(&seed, "file", b"old")?;
+    let work = driver.materialise(&seed, driver.location(&scratch.0.join("work"))?)?;
+    let before = driver.freeze(&work.tree, driver.location(&scratch.0.join("before"))?)?;
+    write(work.tree.writer(), "file", b"new contents")?;
+    let after = driver.freeze(&work.tree, driver.location(&scratch.0.join("after"))?)?;
+    let hints = driver.hints_with(&before.tree, &after.tree, |base, tree, p, c| {
+        // This callback runs after registry lookup and descriptor selection, immediately
+        // where the real kernel send runs. Replace both namespace entries at that point.
+        for (name, file) in [(base, p), (tree, c)] {
+            let moved = name.with_extension("moved");
+            std::fs::rename(name, &moved)?;
+            crate::storage::create_subvolume(name)?;
+            std::fs::write(name.join("file"), b"unrelated replacement")?;
+            assert_eq!(file.metadata()?.dev(), std::fs::metadata(&moved)?.dev());
+            assert_ne!(file.metadata()?.dev(), std::fs::metadata(name)?.dev());
+        }
+        Ok(vec![crate::stream::Entry { origin: Some("file".into()), path: Some("file".into()), ..Default::default() }])
+    })?;
+    let layr_fs_core::hints::HintSet::Complete(candidates) = hints else {
+        anyhow::bail!("pinned pair lost completeness");
+    };
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].old().unwrap().size, 3);
+    assert_eq!(candidates[0].new().unwrap().size, 12);
+    for (name, saved) in [("before", before), ("after", after)] {
+        crate::storage::set_writable(&scratch.0.join(name).with_extension("moved"))?;
+        drop(saved.tree);
+        let failure = driver.remove(saved.ownership).unwrap_err();
+        assert!(matches!(failure.error, FsError::LocationChanged));
+        assert!(scratch.0.join(name).with_extension("moved").exists());
+        assert_eq!(std::fs::read(scratch.0.join(name).join("file"))?, b"unrelated replacement");
+        crate::storage::delete_tree(&scratch.0.join(name))?;
+        std::fs::rename(scratch.0.join(name).with_extension("moved"), scratch.0.join(name))?;
+        driver.remove(failure.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    }
+    drop(work.tree);
+    driver.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+#[test]
+fn btrfs_deletion_rejects_nonroots_and_ignores_unreadable_files() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new()?;
+    if !crate::storage::is_supported(&scratch.0) {
+        return Ok(());
+    }
+    let driver = crate::btrfs_driver::BtrfsFs::new(std::fs::File::open(&scratch.0)?)?;
+    let seed = MemoryTree::new(attributes(0o755));
+    let root = scratch.0.join("owned");
+    let work = driver.materialise(&seed, driver.location(&root)?)?;
+    std::fs::create_dir(root.join("ordinary"))?;
+    assert!(matches!(driver.owned(&root.join("ordinary")), Err(FsError::Invalid("tree is not a subvolume root"))));
+    assert!(root.exists());
+    std::fs::write(root.join("a"), b"cannot read, can delete")?;
+    std::fs::set_permissions(root.join("a"), std::fs::Permissions::from_mode(0))?;
+    std::fs::create_dir(root.join("b"))?;
+    std::fs::set_permissions(root.join("b"), std::fs::Permissions::from_mode(0))?;
+    crate::storage::create_subvolume(&root.join("z"))?;
+    std::fs::write(root.join("z/kept"), b"nested")?;
+    drop(work.tree);
+    driver.remove(work.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+    assert!(!root.exists());
+    Ok(())
+}
+
+#[test]
+fn stream_normalization_treats_non_directory_ancestors_as_absent() -> Result<()> {
+    let scratch = Scratch::new()?;
+    let before = scratch.directory("before")?;
+    let after = scratch.directory("after")?;
+    std::fs::create_dir(before.join("d"))?;
+    std::fs::write(before.join("d/x"), b"child")?;
+    std::fs::write(after.join("d"), b"replacement")?;
+    let before = layr_fs_unix::DirectoryTree::open(&before)?;
+    let after = layr_fs_unix::DirectoryTree::open(&after)?;
+    for (base, tree, created) in [(&before, &after, false), (&after, &before, true)] {
+        let entries = vec![
+            crate::stream::Entry { origin: Some("d".into()), path: None, ..Default::default() },
+            crate::stream::Entry { origin: None, path: Some("d".into()), ..Default::default() },
+            crate::stream::Entry {
+                origin: (!created).then(|| "d/x".into()),
+                path: created.then(|| "d/x".into()),
+                ..Default::default()
+            },
+        ];
+        let candidates = crate::fs_candidates::build(base, tree, entries)?;
+        let child = candidates.iter().find(|c| c.path() == "d/x").context("child candidate absent")?;
+        assert_eq!(child.old().is_some(), !created);
+        assert_eq!(child.new().is_some(), created);
+        let directory = candidates.iter().find(|c| c.path() == "d").context("directory candidate absent")?;
+        assert_eq!(directory.old().unwrap().is_dir(), !created);
+        assert_eq!(directory.new().unwrap().is_dir(), created);
+    }
     Ok(())
 }

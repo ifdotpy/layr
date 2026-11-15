@@ -562,12 +562,15 @@ struct CloneRange {
 }
 
 fn vol_args(fd: i64, flags: u64, name: &str) -> Result<Box<VolArgsV2>> {
-    let b = name.as_bytes();
-    if b.is_empty() || b.len() >= 4040 || b.contains(&0) || b.contains(&b'/') {
+    vol_args_bytes(fd, flags, name.as_bytes())
+}
+
+fn vol_args_bytes(fd: i64, flags: u64, name: &[u8]) -> Result<Box<VolArgsV2>> {
+    if name.is_empty() || name.len() >= 4040 || name.contains(&0) || name.contains(&b'/') {
         return Err(anyhow!("bad subvolume name {name:?}"));
     }
     let mut a = Box::new(VolArgsV2 { fd, transid: 0, flags, unused: [0; 4], name: [0; 4040] });
-    a.name[..b.len()].copy_from_slice(b);
+    a.name[..name.len()].copy_from_slice(name);
     Ok(a)
 }
 
@@ -613,6 +616,13 @@ pub fn subvol_snapshot(src: BorrowedFd, dir: BorrowedFd, name: &str, readonly: b
 pub fn subvol_destroy(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
     ioctl_ptr(dir, SNAP_DESTROY_V2, &mut *a).with_context(|| format!("delete subvolume {name}"))
+}
+
+/// std/rustix do not expose btrfs subvolume destruction; kernel names are arbitrary bytes.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+pub fn subvol_destroy_bytes(dir: BorrowedFd, name: &[u8]) -> Result<()> {
+    let mut args = vol_args_bytes(0, 0, name)?;
+    ioctl_ptr(dir, SNAP_DESTROY_V2, &mut *args).context("delete nested subvolume")
 }
 
 pub fn subvol_flags(fd: BorrowedFd) -> io::Result<u64> {

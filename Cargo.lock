@@ -1862,6 +1862,7 @@ dependencies = [
  "layr-fs-common",
  "layr-fs-core",
  "layr-fs-plain",
+ "layr-fs-unix",
  "layr-hashers",
  "layr-model",
  "layr-objects",
@@ -1936,6 +1937,15 @@ name = "layr-fs-plain"
 version = "0.47.0"
 dependencies = [
  "layr-fs-common",
+ "layr-fs-core",
+ "layr-fs-unix",
+ "rustix",
+]
+
+[[package]]
+name = "layr-fs-unix"
+version = "0.47.0"
+dependencies = [
  "layr-fs-core",
  "rustix",
 ]

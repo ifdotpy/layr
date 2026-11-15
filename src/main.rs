@@ -22,6 +22,10 @@ mod byte_size;
 mod cache_overlay;
 mod change_hints;
 mod changes;
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
+mod fs_candidates;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs_driver;
 mod compare;
 mod cmd;
 mod db;
