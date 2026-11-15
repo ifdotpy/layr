@@ -79,7 +79,7 @@ Built so far (the rest of this file describes the code until a row says "built")
 | Name `main`, tree, one-overlay views, readers rule | built 2026-11-15 (below) |
 | Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
 | Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
-| Move along the tree, checks per view, automatic states | not built |
+| Move along the tree, checks per view, automatic states | built in part 2026-11-15 (below) |
 | Kinds instead of properties, caches per view | not built |
 | Store format step for older binaries | built 2026-11-15 (below) |
 
@@ -189,6 +189,24 @@ Built so far (the rest of this file describes the code until a row says "built")
   the target's view.
 - Test: tests/t261-overlay-patch-bases.sh, `ops_write_and_clear_overlay_metadata`,
   `metadata_merges_by_structure`.
+
+**Move, checks and automatic states as built (2026-11-15).**
+
+- `layr overlay move <overlay> <paths>`: the overlay must be on the path of the view, or above the
+  overlay that the folder shows (then the folder shows it first, as before). Another overlay is
+  refused and named. The file goes to that overlay and leaves every other layer of the path: a patch
+  moved to an ancestor goes there, and the overlay above drops it. A file of `main` leaves `main`: the
+  command says that the next save deletes it from `main` and that the next `layr git push` publishes
+  that delete.
+- Checks. A line that layr makes itself (the line of a check, the first line of a project) shows
+  `main`, so a check of a merge into `main` runs on the view of `main`, and its build output (which a
+  check gives back as a cache) never holds a file of an overlay. A merge into a line checks `main`
+  only; a part of an overlay that the merge changes is not checked in the view of that overlay (not
+  built). No check of a child view blocks a merge into its parent.
+- Automatic states. The safe rule of the write rule stays: in the view of an overlay, an automatic
+  state holds the head in `main` and no working change, so `undo` and the restore after a refused
+  command do not bring such changes back. Automatic states in the overlay's own store (owner decision
+  D11, preferred) are not built.
 
 ### The model of 2026-11-11
 

@@ -136,6 +136,17 @@ ok "save --to pro" l save -q -am "to pro" --to pro
 eq "pro has it" 1 "$(l overlay show pro head:core.c | grep -c "$MARK to pro")"
 no "deep dropped its copy" l overlay show deep head:core.c
 eq "the folder is clean" "" "$(l status --porcelain)"
+# overlay move along the path (docs/overlays.md section 1): a file of deep moves to pro, and deep drops it.
+echo "/* $MARK move */" > d.c
+l add d.c
+ok "a file of deep" l save -q -m "d"
+ok "deep has it" l overlay show deep head:d.c
+has "a move off the path of the view is refused" "is not on the path of the view" "$(l overlay move other d.c 2>&1)"
+ok "overlay move to pro" l overlay move -q pro d.c
+ok "the save of the move" l save -q -m "d to pro"
+ok "pro has d.c" l overlay show pro head:d.c
+no "deep dropped it" l overlay show deep head:d.c
+no "main never had it" l show head:d.c
 same_lib() { l show head:lib.c; }
 has "main is as before" "lib2" "$(same_lib)"
 eq "and has no patch" 0 "$(l show head:core.c | grep -c "$MARK")"
@@ -154,7 +165,8 @@ no "hidden.c left the folder" test -e hidden.c
 
 # 6. overlay move keeps its meaning: the file leaves main at the next save, and the output says so.
 out=$(l overlay move pro keep.c)
-has "move says that main loses the file" "keep.c" "$out"
+has "move says that main loses the file" "keep.c' is in main: the next save deletes it from main" "$out"
+has "and that the next git push publishes the delete" "the next 'layr git push' publishes that delete" "$out"
 ok "a save after overlay move" l save -q -m "move keep"
 no "main lost keep.c" l show head:keep.c
 ok "pro has it" l overlay show pro head:keep.c
