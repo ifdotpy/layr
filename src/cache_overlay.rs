@@ -151,8 +151,20 @@ pub fn other_platform(platform: Option<&str>) -> bool {
 /// After the pin of the cache state `sid`: whether its tree is still here. `gc` can evict it between the choice of
 /// the cache and the pin (`cmd::admin::evict_caches`); the pin keeps it from then on. False: the folder starts
 /// cold, with a warning.
+/// Whether a read of cache state `id` can give its tree: the state is here, or it is in the object
+/// store and not freed. A freed state stays freed (`Repo::check_state`), even while its objects remain.
+fn cache_readable(orepo: &Repo, id: &str) -> Result<bool> {
+    if orepo.p.has_state(id) {
+        return Ok(true);
+    }
+    if matches!(orepo.p.db.state_flags(id)?, Some((_, true))) {
+        return Ok(false);
+    }
+    Ok(crate::objstore::verified(&orepo.p, id)?.is_some())
+}
+
 fn cache_here(orepo: &Repo, sid: &str, folder: &str) -> Result<bool> {
-    if orepo.p.has_state(sid) || crate::objstore::verified(&orepo.p, sid)?.is_some() {
+    if cache_readable(orepo, sid)? {
         return Ok(true);
     }
     eprintln!("layr: no cache for {folder}: gc evicted state {} meanwhile; the folder starts cold", ids::short(sid));
@@ -529,7 +541,7 @@ impl<'a> Repo<'a> {
     /// see). The empty first state is no cache.
     fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey, protected: bool) -> Result<bool> {
         // A part whose native copy was retired is here as objects: a read builds the copy again (`state_root`).
-        if id == root || !(orepo.p.has_state(id) || crate::objstore::verified(&orepo.p, id)?.is_some()) {
+        if id == root || !cache_readable(orepo, id)? {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
