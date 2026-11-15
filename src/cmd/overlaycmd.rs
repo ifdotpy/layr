@@ -1521,11 +1521,36 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
     let _lock = repo.p.lock()?;
     let mut line = repo.line(&line.id)?;
-    // The line shows the overlay first (its files come into the folder).
+    // The overlay is on the path of the view (docs/overlays.md section 1). An overlay above the one that
+    // the folder shows (or any overlay, in the view of main) becomes the view first: its files come into the
+    // folder. Another overlay is refused: the folder would lose the files of its own path.
     let cur = repo.layers(&line)?;
     if !cur.iter().any(|l| l.overlay == name) {
-        let mut layers = cur.clone();
-        layers.push(layer_for(ctx, repo, &name, &line)?);
+        visible_info(ctx, repo, &name)?;
+        let path = repo.overlay_path(&name)?;
+        let shown: Vec<String> = cur.iter().filter(|l| repo.patches_overlay(&l.overlay).unwrap_or(false)).map(|l| l.overlay.clone()).collect();
+        if !shown.iter().all(|n| path.contains(n)) {
+            return Err(exit(
+                1,
+                format!(
+                    "error: overlay '{name}' is not on the path of the view of line '{}' ({}); run 'layr overlay use {name}' first",
+                    line.name,
+                    std::iter::once("main".to_string()).chain(shown).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let mut layers: Vec<Layer> = Vec::new();
+        for n in &path {
+            match cur.iter().find(|l| &l.overlay == n) {
+                Some(l) => layers.push(l.clone()),
+                None => layers.push(layer_for(ctx, repo, n, &line)?),
+            }
+        }
+        for l in &cur {
+            if !repo.patches_overlay(&l.overlay)? {
+                layers.push(l.clone());
+            }
+        }
         change_stack(ctx, repo, &line, &layers, false)?;
         line = repo.line(&line.id)?;
     }
@@ -1599,7 +1624,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if crate::fsutil::lmeta(&shared, p).is_some() {
                 outln!(
                     ctx,
-                    "note: '{}' is in the shared set: earlier states keep it{}; layr does not rewrite history",
+                    "note: '{}' is in main: the next save deletes it from main, and the next 'layr git push' publishes that delete; earlier states keep it{}; layr does not rewrite history",
                     h.rel(p),
                     if pushed { ", and so may the git remote" } else { "" }
                 );

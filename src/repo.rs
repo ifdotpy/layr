@@ -2191,8 +2191,11 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-        let layers =
-            if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line)? };
+        // A line that layr makes itself (the first line of a project, the line of a check) shows `main`: a
+        // check of a merge into `main` runs on the view of `main` (docs/overlays.md section 1), and its build
+        // output never holds files of an overlay.
+        let _ = source;
+        let layers: Vec<crate::overlay::Layer> = Vec::new();
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> Result<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.
