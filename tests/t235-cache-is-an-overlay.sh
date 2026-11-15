@@ -95,7 +95,9 @@ fetch=$(l fetch r 2>&1)
 eq "fetch takes no overlay of another platform" "" "$(echo "$fetch" | grep -E 'far|other-arch' | grep -v 'an overlay of platform')"
 
 # 7. No flag names caches (owner decision 2026-11-11): `save --overlays` saves the parts of the folder
-#    overlays, and the old spellings fail with exit status 2 and name the new ones.
+#    overlays, and the old spellings fail with exit status 2 and name the new ones. A view of main saves
+#    them (a cache of the view of an overlay is private, docs/overlays.md section 1).
+ok "main shows main" l overlay use main -q
 echo bin3 > target/debug/x
 out=$(l save --overlays 2>&1)
 has "save --overlays saves the overlay" "target: overlay $G" "$out"

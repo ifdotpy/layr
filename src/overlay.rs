@@ -921,7 +921,8 @@ pub struct Split {
 /// Split the changes from `base` (the line's full tree) to `new` by layer (docs/overlays.md section 1,
 /// write rule, owner decision 2026-11-15). `shared` and `roots` are the previous states of the
 /// layers, the path of the view bottom first; `pending` names paths that `layr overlay move` sends to
-/// an overlay. Every other change goes to `target`: the top of the view, or the ancestor of
+/// an overlay, and `sticky` the files of quiet overlays, which stay in their overlay. Every other change
+/// goes to `target`: the top of the view, or the ancestor of
 /// `save --to`. A new or changed file goes to the target, and the layers above it drop the path (they
 /// would hide the saved file). A delete takes the path out of the target and the layers above it,
 /// and the target gets a delete marker when a layer below it still shows the path. A rename is a
@@ -938,6 +939,7 @@ pub fn split(
     shared: &Path,
     roots: &[PathBuf],
     pending: &BTreeMap<String, usize>,
+    sticky: &BTreeMap<String, usize>,
     target: Owner,
     resolving: &BTreeSet<(usize, String)>,
 ) -> Result<Split> {
@@ -1022,8 +1024,9 @@ pub fn split(
     for c in &list {
         handled.insert(c.path.clone());
         let p = c.path.clone();
-        if let Some(i) = pending.get(&p).copied() {
-            // `layr overlay move`: the file goes to its overlay and leaves every other layer.
+        if let Some(i) = pending.get(&p).or_else(|| sticky.get(&p)).copied() {
+            // `layr overlay move`: the file goes to its overlay and leaves every other layer. A file of a
+            // quiet overlay (`sticky`) stays in it whatever the target is: `save --to main` never takes it.
             let owner = Owner::Overlay(i);
             if let Some(old) = &c.old_path {
                 handled.insert(old.clone());
@@ -3066,7 +3069,16 @@ pub fn commit_layers(
             }
         }
     }
-    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, target, &resolving)?;
+    // The files of a quiet overlay come from the working folder, unstaged: they stay in their overlay.
+    let mut sticky = BTreeMap::new();
+    for (i, l) in layers.iter().enumerate() {
+        if repo.overlay_info(&l.overlay)?.is_some() && repo.overlay_props(&l.overlay)?.quiet {
+            for p in overlay_files(&roots[i])? {
+                sticky.entry(p).or_insert(i);
+            }
+        }
+    }
+    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, &sticky, target, &resolving)?;
     if s.shared.is_empty() && s.overlays.iter().all(|o| o.is_empty()) && !allow_empty {
         return Ok(None);
     }
@@ -3685,11 +3697,11 @@ mod tests {
         let none = BTreeMap::new();
         // The view of the overlay: `main` never changes; copies, new files and delete markers go to the overlay.
         let no = BTreeSet::new();
-        let s = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0), &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no).unwrap();
         assert!(s.shared.is_empty(), "main never changes: {:?}", s.shared);
         // A file saved equal to the version of main: the overlay drops its entry.
         std::fs::write(new.join(".env"), "public env").unwrap();
-        let eq = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0), &no).unwrap();
+        let eq = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no).unwrap();
         assert!(eq.overlays[0].dels.contains(".env") && !eq.overlays[0].puts.contains(".env"), "equal to the parent is not stored");
         std::fs::write(new.join(".env"), "private env 2").unwrap();
         let o = &s.overlays[0];
@@ -3700,15 +3712,19 @@ mod tests {
         assert!(o.bases.contains_key("core.c"), "a new patch records the version of main as its base");
         assert!(!o.bases.contains_key("new.c"), "a new file is no patch");
         // `--to main`: every change goes to main, and a file that the overlay holds leaves it.
-        let s = split(&base, &new, &shared, &roots, &none, Owner::Shared, &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no).unwrap();
         assert!(s.shared.puts.contains(".env") && s.overlays[0].dels.contains(".env"));
         assert!(s.shared.puts.contains("core.c") && s.shared.puts.contains("new.c"));
         assert!(s.shared.dels.contains("gone.c"));
         assert!(s.overlays[0].marks.is_empty());
         // `overlay move` names its overlay: the file leaves main whatever the target is.
         let moves = BTreeMap::from([("core.c".to_string(), 0usize)]);
-        let s = split(&base, &new, &shared, &roots, &moves, Owner::Shared, &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no).unwrap();
         assert!(s.overlays[0].puts.contains("core.c") && s.shared.dels.contains("core.c"));
+        // A file of a quiet overlay stays in it, also with `--to main`.
+        let quiet = BTreeMap::from([(".env".to_string(), 0usize)]);
+        let s = split(&base, &new, &shared, &roots, &none, &quiet, Owner::Shared, &no).unwrap();
+        assert!(s.overlays[0].puts.contains(".env") && !s.shared.puts.contains(".env"), "a quiet file never goes to main");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

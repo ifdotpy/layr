@@ -44,7 +44,9 @@ ok "a delete of feat2" l line delete -D feat2
 l gc -q >/dev/null 2>&1
 eq "the overlay keeps no line of the deleted line" "main $(id_of main)" "$(lines_of notes)"
 
-# Build output: an ordinary overlay with properties, no cache flag.
+# Build output: an ordinary overlay with properties, no cache flag. A view of main saves it (a cache of
+# the view of an overlay is private, docs/overlays.md section 1).
+ok "main shows main" l overlay use main -q
 mkdir -p target/debug
 echo bin > target/debug/x
 ok "a save of the build output" l save --overlays -q

@@ -80,7 +80,8 @@ Built so far (the rest of this file describes the code until a row says "built")
 | Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
 | Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
 | Move along the tree, checks per view, automatic states | built in part 2026-11-15 (below) |
-| Kinds instead of properties, caches per view | not built |
+| Kinds instead of properties | not built: a folder overlay is the kind `cache`, every other overlay the kind `patches`; the property options stay |
+| Caches per view | built in part 2026-11-15 (below) |
 | Store format step for older binaries | built 2026-11-15 (below) |
 
 **The tree as built (2026-11-15).**
@@ -138,6 +139,8 @@ Built so far (the rest of this file describes the code until a row says "built")
   index, and before 2026-11-15 it ignored the path.
 - `layr overlay move <overlay> <paths>` keeps its meaning: the files go to that overlay and leave every
   other layer, `main` too.
+- A file of a quiet overlay (its files come from the working folder, unstaged) stays in that overlay
+  whatever the layer of the save is: `save --to main` never takes it.
 - Removed (exit status 2): `layr line target`, `layr rm --to`, `overlay create|set --patches`. The
   settings `target.<line id>`, `hidden.target.<line id>` and `overlay.<name>.patches` that the
   slice of 2026-11-15 wrote are no longer read. The pending file `meta/stage/<line id>.targets` is
@@ -207,6 +210,18 @@ Built so far (the rest of this file describes the code until a row says "built")
   state holds the head in `main` and no working change, so `undo` and the restore after a refused
   command do not bring such changes back. Automatic states in the overlay's own store (owner decision
   D11, preferred) are not built.
+
+**Caches per view as built (2026-11-15).**
+
+- A cache that a folder in the view of an overlay builds holds compiled private code. A cache overlay
+  serves every view, and its readers are the trusted machines, so such a cache is never saved:
+  `save --overlays`, a named save, the follow pass and a check do not make a cache state from the view
+  of an overlay (`save_cache_overlays_in`, which says so). The folder keeps its cache.
+- A view of `main` saves its caches as before. A new line in the view of an overlay starts from the
+  cache of its source line, which only a view of `main` saved; so the line `main` in the view of `main`
+  gets warmth only from views of `main`.
+- Not built: a cache store per view, so that a view of an overlay keeps its own warm cache.
+- Test: tests/t262-overlay-cache-views.sh.
 
 ### The model of 2026-11-11
 
@@ -887,7 +902,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
 
 The metadata JSON fields are `name`, `hidden`, `access_mode`, `readers`, `managers`, `epochs`, `patterns`,
-`peers`, `state`, and `properties` (`history`, `quiet`, `merge`, `gc`; see [cache overlays](cache-overlays.md)). Readers use canonical principals and kinds `user`, `group`, `everyone`,
+`peers`, `state`, `paths` (only when the current folder shows the overlay: `patches`, `own`, `hidden`, `waiting`; section 1), and `properties` (`history`, `quiet`, `merge`, `gc`; see [cache overlays](cache-overlays.md)). Readers use canonical principals and kinds `user`, `group`, `everyone`,
 `machine`, or `person`. Each epoch has `number`, `id`, `time` in milliseconds and `machine`.
 Numbers start at 1 in signed key record application order (time, machine, sequence), rather
 than UUID order. A later signed record for the same epoch ID gets its own number. `reason`

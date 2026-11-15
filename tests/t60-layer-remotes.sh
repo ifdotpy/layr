@@ -16,8 +16,11 @@ echo n1 > notes.md
 l overlay create notes --mode follow -q
 l overlay move notes notes.md >/dev/null
 l save -m notes -q
+# Caches are saved in the view of main (docs/overlays.md section 1, caches per view).
+l overlay use main -q
 rm -rf target; mkdir target; echo bin > target/out
 l save --overlays -q
+l overlay use notes -q
 
 ok "an overlay git remote" l overlay remote add notes notes-gh $T/notes.git
 eq "it is listed" "notes-gh	$T/notes.git" "$(l overlay remote list notes)"
