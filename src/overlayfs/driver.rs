@@ -45,6 +45,7 @@ enum Resource {
     Borrowed(Registered),
     Owned { tree: Registered, home: PathBuf, parent: Arc<File> },
     Removing(Removal),
+    Missing { path: PathBuf, home: PathBuf },
 }
 struct HintPair {
     base: PathBuf,
@@ -221,17 +222,21 @@ impl OverlayFs {
     ) -> Result<()> {
         let path = absolute(path)?;
         let home = home(&path)?;
-        let parent = Arc::new(File::open(path.parent().context("tree has no parent")?)?);
         let identity = match fs::symlink_metadata(&path) {
             Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
             Err(error) => return Err(error.into()),
         };
+        let resource = match File::open(path.parent().context("tree has no parent")?) {
+            Ok(parent) => Resource::Removing(Removal::new(path, home, Arc::new(parent), identity)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && identity == RootIdentity::Absent => {
+                Resource::Missing { path, home }
+            }
+            Err(error) => return Err(error.into()),
+        };
         let driver = Arc::new(Self::default());
         let ownership = driver.issuer.own();
-        driver
-            .trees()?
-            .insert(driver.issuer.owned_key(&ownership)?, Resource::Removing(Removal::new(path, home, parent, identity)));
+        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, resource);
         driver.remove_with(ownership, remove).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
@@ -283,6 +288,7 @@ impl Cleanup {
                 Some(Resource::Published { destination, .. }) => Some(&destination.path),
                 Some(Resource::Owned { tree, .. } | Resource::Borrowed(tree)) => Some(&tree.path),
                 Some(Resource::Removing(removal)) => Some(&removal.path),
+                Some(Resource::Missing { path, .. }) => Some(path),
                 None => None,
             };
             if let Some(path) = path {
@@ -407,6 +413,11 @@ impl OverlayFs {
                 },
                 Resource::Borrowed(_) => return Err(FsError::Invalid("borrowed tree has no deletion authority")),
                 Resource::Removing(_) => {}
+                Resource::Missing { path, home } => {
+                    backend(remove_missing(path, home))?;
+                    trees.remove(key);
+                    return Ok(());
+                }
             }
             let Resource::Removing(removal) = resource else { return Err(FsError::Invalid("tree still pinned")) };
             backend(remove(removal))?;
@@ -954,6 +965,27 @@ mod tests {
         fs::remove_dir_all(&destination)?;
         fs::rename(&original, &destination)?;
         driver.remove(failure.ownership).unwrap();
+        Ok(())
+    }
+    #[test]
+    fn missing_paths_keep_parent_metadata_and_missing_parent_recovery() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let parent = fixture.root.join("work");
+        let home = fixture.root.join("registry");
+        fs::create_dir(&parent)?;
+        fs::create_dir(&home)?;
+        fs::create_dir(home.join("objects"))?;
+        let before = fs::metadata(&parent)?;
+        OverlayFs::remove_path_with(&parent.join("absent"), |_| Ok(home.clone()), Removal::run)?;
+        let after = fs::metadata(&parent)?;
+        assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
+        fs::remove_dir(home.join("objects"))?;
+        let missing = parent.join("absent/child");
+        let error = OverlayFs::remove_path_with(&missing, |_| Ok(home.clone()), Removal::run).unwrap_err();
+        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        fs::create_dir(home.join("objects"))?;
+        driver.remove(failure.ownership).unwrap();
+        assert!(!parent.join("absent").exists());
         Ok(())
     }
     #[test]

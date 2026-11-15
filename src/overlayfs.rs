@@ -1339,11 +1339,26 @@ impl Removal {
                 state.registry.trees.remove(&path);
                 state.save()?;
             }
-            self.stage = RemovalStage::Directory;
+            self.stage = if self.identity == RootIdentity::Absent { RemovalStage::Collect } else { RemovalStage::Directory };
         }
         self.remove_directory()?;
         state.collect()
     }
+}
+fn remove_missing(path: &Path, home: &Path) -> Result<()> {
+    let mut state = lock_at(home.to_path_buf())?;
+    valid_path(path)?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => bail!("owned tree location changed"),
+    }
+    let previous = state.registry.trees.len();
+    state.registry.trees.retain(|key, _| !key.starts_with(path));
+    if state.registry.trees.len() != previous {
+        state.save()?;
+    }
+    state.collect()
 }
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     delete_tree(path)
