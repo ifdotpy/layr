@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS bases (state TEXT PRIMARY KEY, base TEXT);
 
 /// Version of the derived tables. Records never change shape; a database with an older version
 /// drops its derived tables, creates them new and rebuilds them from the records.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 const DERIVED: &[&str] = &[
     "record_lines",
@@ -1915,7 +1915,7 @@ mod tests {
         assert!(db.stale, "main schema 9 must trigger a rebuild instead of creating an empty index");
         assert!(db.rebuild(true, |_| Ok(()))?);
         assert_eq!(db.log_records(Some("wanted"), 1)?[0].id, rec.id);
-        assert_eq!(db.conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?, 10);
+        assert_eq!(db.conn.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?, SCHEMA_VERSION);
         drop(db);
         std::fs::remove_dir_all(dir)?;
         Ok(())
@@ -2539,6 +2539,51 @@ mod tests {
         assert!(db.queue_entry(id).unwrap().is_none());
         db.derive(&event(5, Some("pending")), &|_| true, "local").unwrap();
         assert_eq!(db.queue_entries(Some(&entry.target_line)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_pending_queue_entry_keeps_its_state() {
+        let db = memory();
+        let id = "01a12290-0000-7000-8000-000000000013";
+        let state = "01a12290-0000-7000-8000-000000000015";
+        let entry = QueueEntry {
+            id: id.into(),
+            into: "main".into(),
+            target_line: "01a12290-0000-7000-8000-000000000014".into(),
+            state: state.into(),
+            change_id: None,
+            added_by: 0,
+            time: 1,
+            status: "pending".into(),
+            attempts: 0,
+            result: None,
+            reason: None,
+            probes: None,
+            title: None,
+        };
+        let event = |seq, status: Option<&str>| {
+            let mut rec = state_record(seq, id, vec![]);
+            rec.states.clear();
+            rec.op = "queue.result".into();
+            let after = status.map(|status| {
+                let mut entry = entry.clone();
+                entry.status = status.into();
+                entry
+            });
+            rec.data = serde_json::json!({"queue_change":QueueChange{id:id.into(),before:None,after}});
+            rec
+        };
+        let queue_owners = || {
+            db.owner_rows().unwrap().into_iter().filter(|(_, kind, _)| kind == "queue").collect::<Vec<_>>()
+        };
+        db.derive(&event(1, Some("pending")), &|_| true, "local").unwrap();
+        assert_eq!(queue_owners(), vec![(state.to_string(), "queue".to_string(), id.to_string())]);
+        db.derive(&event(2, Some("failed")), &|_| true, "local").unwrap();
+        assert!(queue_owners().is_empty(), "a failed entry releases its state");
+        db.derive(&event(3, Some("pending")), &|_| true, "local").unwrap();
+        assert_eq!(queue_owners().len(), 1, "a requeued entry keeps it again");
+        db.derive(&event(4, None), &|_| true, "local").unwrap();
+        assert!(queue_owners().is_empty(), "a removed entry releases its state");
     }
     #[test]
     fn check_reuse_preserves_argument_boundaries() {
