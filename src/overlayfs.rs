@@ -483,15 +483,11 @@ fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -
     *publication = driver::Publication::Tree { home: state.home.clone(), identity: (metadata.dev(), metadata.ino()) };
     state.registry.trees.insert(path.clone(), entry.clone());
     state.save()?;
-    if let Err(e) = state.mount(&path, &entry) {
-        state.registry.trees.remove(&path);
-        state.save()?;
-        fs::remove_dir(&path)?;
-        state.collect()?;
-        return Err(e);
+    state.mount(&path, &entry)?;
+    if !entry.plain {
+        let metadata = fs::symlink_metadata(&path)?;
+        *publication = driver::Publication::Tree { home: state.home.clone(), identity: (metadata.dev(), metadata.ino()) };
     }
-    let metadata = fs::symlink_metadata(&path)?;
-    *publication = driver::Publication::Tree { home: state.home.clone(), identity: (metadata.dev(), metadata.ino()) };
     Ok(())
 }
 // A source writer must not silently produce a mixed snapshot.
@@ -918,9 +914,6 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut dri
         Ok(entry) => entry,
         Err(error) => {
             build.discard();
-            if plain {
-                let _ = fs::remove_dir_all(&dst);
-            }
             return Err(error);
         }
     };
@@ -939,13 +932,7 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut dri
     }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
-    if let Err(e) = state.mount(&dst, &entry) {
-        state.registry.trees.remove(&dst);
-        state.save()?;
-        fs::remove_dir(&dst)?;
-        state.collect()?;
-        return Err(e);
-    }
+    state.mount(&dst, &entry)?;
     if !plain {
         let metadata = fs::symlink_metadata(&dst)?;
         *publication = driver::Publication::Tree { home, identity: (metadata.dev(), metadata.ino()) };
@@ -1121,8 +1108,9 @@ enum RemovalStage {
     Directory,
     Collect,
 }
+#[derive(PartialEq, Eq)]
 enum RootIdentity {
-    Observe,
+    Unpinned,
     Absent,
     Expected(u64, u64),
 }
@@ -1134,13 +1122,10 @@ struct Removal {
     parent: std::sync::Arc<File>,
 }
 impl Removal {
-    fn new(path: PathBuf, home: PathBuf, parent: std::sync::Arc<File>) -> Self {
-        Self { path, home, parent, identity: RootIdentity::Observe, stage: RemovalStage::Trees }
+    fn new(path: PathBuf, home: PathBuf, parent: std::sync::Arc<File>, identity: RootIdentity) -> Self {
+        Self { path, home, parent, identity, stage: RemovalStage::Trees }
     }
-    fn validate(&mut self) -> Result<()> {
-        if matches!(self.stage, RemovalStage::Collect) {
-            return Ok(());
-        }
+    fn observe(&self) -> Result<RootIdentity> {
         let held_parent = self.parent.metadata()?;
         let parent = self.path.parent().context("owned tree has no parent")?;
         let actual_parent = fs::symlink_metadata(parent)?;
@@ -1149,26 +1134,29 @@ impl Removal {
             "owned tree parent changed"
         );
         match fs::symlink_metadata(&self.path) {
-            Ok(actual) => {
-                anyhow::ensure!(!matches!(self.identity, RootIdentity::Absent), "owned tree location changed");
-                if let RootIdentity::Expected(device, inode) = self.identity {
-                    anyhow::ensure!((actual.dev(), actual.ino()) == (device, inode), "owned tree location changed");
-                }
-                self.identity = RootIdentity::Expected(actual.dev(), actual.ino());
-                Ok(())
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.identity = RootIdentity::Absent;
-                Ok(())
-            }
+            Ok(actual) => Ok(RootIdentity::Expected(actual.dev(), actual.ino())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(RootIdentity::Absent),
             Err(error) => Err(error.into()),
         }
     }
+    fn validate(&mut self) -> Result<()> {
+        if matches!(self.stage, RemovalStage::Collect) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !matches!(self.identity, RootIdentity::Unpinned),
+            "unmounted directory could not be pinned; manual recovery required"
+        );
+        let actual = self.observe()?;
+        anyhow::ensure!(actual == self.identity || actual == RootIdentity::Absent, "owned tree location changed");
+        self.identity = actual;
+        Ok(())
+    }
     fn after_unmount(&mut self) -> Result<()> {
-        // A normal unmount reveals a different directory. Validate that remaining resource
-        // on subsequent attempts, rather than requiring the old mounted-tree identity.
-        self.identity = RootIdentity::Observe;
-        self.validate()
+        // A failed observation must stay non-destructive on every later retry.
+        self.identity = RootIdentity::Unpinned;
+        self.identity = self.observe()?;
+        Ok(())
     }
     fn directory_removed(&mut self) {
         self.stage = RemovalStage::Collect;
@@ -1208,7 +1196,12 @@ fn delete_tree_native(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let home = home_of(&path)?;
     let parent = std::sync::Arc::new(File::open(path.parent().context("tree has no parent")?)?);
-    Removal::new(path, home, parent).run()
+    let identity = match fs::symlink_metadata(&path) {
+        Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
+        Err(error) => return Err(error.into()),
+    };
+    Removal::new(path, home, parent, identity).run()
 }
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     delete_tree(path)

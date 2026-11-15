@@ -211,22 +211,21 @@ impl OverlayFs {
         });
         result.map(|_| ()).map_err(|error| driver.error(error))
     }
+    fn owned(&self, path: &Path, home: PathBuf) -> layr_fs_core::Result<OwnedTree> {
+        let registered = self.register(path)?;
+        let parent = Arc::new(File::open(registered.path.parent().ok_or(FsError::Invalid("tree has no parent"))?)?);
+        let ownership = self.issuer.own();
+        self.trees()?.insert(self.issuer.owned_key(&ownership)?, Resource::Owned { tree: registered, home, parent });
+        Ok(ownership)
+    }
     pub(super) fn remove_path(path: &Path) -> Result<()> {
+        let path = absolute(path)?;
         // Ordinary cleanup includes files and missing paths; those convey no managed-tree token.
-        if !is_subvolume(path) {
-            return delete_tree_native(path);
+        if !is_subvolume(&path) {
+            return delete_tree_native(&path);
         }
         let driver = Arc::new(Self::default());
-        let registered = driver.register(path)?;
-        let ownership = driver.issuer.own();
-        driver.trees()?.insert(
-            driver.issuer.owned_key(&ownership)?,
-            Resource::Owned {
-                tree: registered,
-                home: home_of(path)?,
-                parent: Arc::new(File::open(path.parent().ok_or(FsError::Invalid("tree has no parent"))?)?),
-            },
-        );
+        let ownership = driver.owned(&path, home_of(&path)?)?;
         driver.remove(ownership).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
@@ -359,8 +358,12 @@ impl OverlayFs {
                 Resource::Owned { tree, home, parent } => {
                     tree.validate()?;
                     let held = tree.directory.root_file().metadata()?;
-                    let mut removal = Removal::new(tree.path.clone(), home.clone(), parent.clone());
-                    removal.identity = RootIdentity::Expected(held.dev(), held.ino());
+                    let removal = Removal::new(
+                        tree.path.clone(),
+                        home.clone(),
+                        parent.clone(),
+                        RootIdentity::Expected(held.dev(), held.ino()),
+                    );
                     // No reader lease remains. Drop the mount descriptor before normal unmount.
                     *resource = Resource::Removing(removal);
                 }
@@ -376,13 +379,22 @@ impl OverlayFs {
                         )));
                     }
                     Publication::Objects(home) => {
-                        let mut removal = Removal::new(destination.path.clone(), home.clone(), destination.parent.clone());
+                        let mut removal = Removal::new(
+                            destination.path.clone(),
+                            home.clone(),
+                            destination.parent.clone(),
+                            RootIdentity::Absent,
+                        );
                         removal.stage = RemovalStage::Collect;
                         *resource = Resource::Removing(removal);
                     }
                     Publication::Tree { home, identity } => {
-                        let mut removal = Removal::new(destination.path.clone(), home.clone(), destination.parent.clone());
-                        removal.identity = RootIdentity::Expected(identity.0, identity.1);
+                        let removal = Removal::new(
+                            destination.path.clone(),
+                            home.clone(),
+                            destination.parent.clone(),
+                            RootIdentity::Expected(identity.0, identity.1),
+                        );
                         *resource = Resource::Removing(removal);
                     }
                 },
@@ -705,6 +717,64 @@ mod tests {
             })
             .unwrap();
         assert!(fixture.driver.trees()?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn failed_post_unmount_observation_never_adopts_a_later_replacement() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let parent = fixture.root.join("parent");
+        fs::create_dir(&parent)?;
+        let destination = parent.join("tree");
+        let (created, _) = fixture.driver.create_with(fixture.driver.location(&destination)?, |path, publication| {
+            fs::create_dir(path)?;
+            publication.directory(&fixture.root, Some(&fs::symlink_metadata(path)?));
+            Ok(CaptureConsistency::ValidatedCopy)
+        })?;
+        drop(created.tree);
+        let held_parent = fixture.root.join("held-parent");
+        let failure = fixture
+            .driver
+            .remove_with(created.ownership, |removal| {
+                fs::rename(&parent, &held_parent)?;
+                fs::create_dir(&parent)?;
+                assert!(removal.after_unmount().is_err());
+                anyhow::bail!("post-unmount parent validation failed")
+            })
+            .unwrap_err();
+        fs::remove_dir(&parent)?;
+        fs::rename(&held_parent, &parent)?;
+        fs::rename(&destination, parent.join("original"))?;
+        fs::create_dir(&destination)?;
+        fs::write(destination.join("foreign"), b"keep")?;
+        let failure = fixture.driver.remove_with(failure.ownership, Removal::validate).unwrap_err();
+        assert!(failure.error.to_string().contains("could not be pinned"));
+        assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
+        Ok(())
+    }
+    #[test]
+    fn bare_relative_tree_uses_its_normalized_parent_locator() -> Result<()> {
+        const CHILD: &str = "LAYR_OVERLAY_RELATIVE_REMOVAL_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let driver = OverlayFs::default();
+            fs::create_dir("tree")?;
+            fs::create_dir("objects")?;
+            let ownership = driver.owned(Path::new("tree"), PathBuf::from(root))?;
+            driver.remove(ownership).unwrap();
+            assert!(!Path::new("tree").exists());
+            return Ok(());
+        }
+        let fixture = Fixture::new()?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "storage::driver::tests::bare_relative_tree_uses_its_normalized_parent_locator",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &fixture.root)
+            .current_dir(&fixture.root)
+            .status()?;
+        anyhow::ensure!(status.success(), "isolated relative-removal test failed");
         Ok(())
     }
     #[test]
