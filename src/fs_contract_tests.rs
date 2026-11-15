@@ -1538,3 +1538,41 @@ fn layered_enumeration_propagates_failed_upper_observations() -> Result<()> {
     assert!(matches!(result, Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied));
     Ok(())
 }
+
+#[test]
+fn sparse_native_layers_read_and_encode_lower_entries_below_missing_upper_ancestors() -> Result<()> {
+    use layr_fs_common::{LayeredTree, ReadLayer};
+    use std::{collections::BTreeSet, io::Read, sync::Arc};
+    let scratch = Scratch::new()?;
+    let upper = scratch.directory("sparse-upper")?;
+    let lower = scratch.directory("sparse-lower")?;
+    std::fs::write(upper.join("changed.txt"), b"upper")?;
+    std::os::unix::fs::symlink("missing", upper.join("escape"))?;
+    std::fs::create_dir_all(lower.join("dir/deep"))?;
+    std::fs::write(lower.join("dir/deep/file"), b"lower")?;
+    #[cfg(target_os = "macos")]
+    let readers: [Arc<dyn TreeRead>; 2] =
+        [Arc::new(crate::storage::ApfsTree::open(&upper)?), Arc::new(crate::storage::ApfsTree::open(&lower)?)];
+    #[cfg(not(target_os = "macos"))]
+    let readers: [Arc<dyn TreeRead>; 2] =
+        [Arc::new(layr_fs_unix::DirectoryTree::open(&upper)?), Arc::new(layr_fs_unix::DirectoryTree::open(&lower)?)];
+    let missing = RelDir::Path(path("dir/deep/file"));
+    assert!(readers[0].kind(&missing)?.is_none());
+    assert!(readers[0].metadata(&missing)?.is_none());
+    let non_directory = RelDir::Path(path("changed.txt/child"));
+    assert!(readers[0].kind(&non_directory)?.is_none());
+    assert!(readers[0].metadata(&non_directory)?.is_none());
+    let through_link = RelDir::Path(path("escape/child"));
+    assert!(readers[0].kind(&through_link).is_err());
+    assert!(readers[0].metadata(&through_link).is_err());
+    let layered = LayeredTree::new(readers.into_iter().map(|reader| ReadLayer { reader, removed: BTreeSet::new() }).collect())?;
+    assert!(layered.metadata(&missing)?.is_some());
+    let mut bytes = Vec::new();
+    layered.open_file(&path("dir/deep/file"))?.read_to_end(&mut bytes)?;
+    assert_eq!(bytes, b"lower");
+    let store = layr_objects::Store::open(&scratch.directory("sparse-objects")?, layr_objects::Keying::Plain)?;
+    let (tree, times) = save(&store, &layered)?;
+    let output = crate::object_tree::ObjectTree::new(store, layr_objects::StateRef { tree, times }, &scratch.0)?;
+    assert_eq!(output.read("dir/deep/file")?, b"lower");
+    Ok(())
+}

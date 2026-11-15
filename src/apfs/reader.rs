@@ -10,7 +10,7 @@ pub(crate) struct ApfsTree {
 }
 impl ApfsTree {
     pub(crate) fn open(path: &Path) -> layr_fs_core::Result<Self> {
-        let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+        let path = driver::absolute(path)?;
         Ok(Self { directory: DirectoryTree::open(&path)?, path })
     }
     pub(super) fn validate(&self) -> layr_fs_core::Result<()> {
@@ -22,8 +22,11 @@ impl ApfsTree {
         Ok(())
     }
     fn nested(path: &Path) -> layr_fs_core::Result<bool> {
-        if !fs::symlink_metadata(path)?.is_dir() {
-            return Ok(false);
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(false),
+            Err(error) => return Err(error.into()),
         }
         match subvol_info(path) {
             Ok(_) => Ok(true),

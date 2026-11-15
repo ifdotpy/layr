@@ -1243,11 +1243,12 @@ thread_local! {
 /// copy is a consistent copy of `src` from a moment before the lock; a cache is build output,
 /// and a few seconds older output warms a line as well.
 pub fn prepare_snapshot(src: &Path, dir: &Path, readonly: bool) -> Result<()> {
+    let canonical_source = driver::absolute(src)?;
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("prepared-{}", crate::store::temp_name()));
     let report = ApfsFs::snapshot_path(src, &path, readonly, driver::Links::Keep, driver::PreparedCopy::Fresh)?;
     report_consistency(src, report.consistency);
-    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: src.to_path_buf(), readonly, path, consistency: report.consistency }));
+    PREPARED.with(|p| p.borrow_mut().push(Prepared { src: canonical_source, readonly, path, consistency: report.consistency }));
     Ok(())
 }
 

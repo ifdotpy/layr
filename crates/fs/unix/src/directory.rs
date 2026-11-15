@@ -55,12 +55,26 @@ impl DirectoryTree {
         if !dir.is_empty() {
             RelPath::new(dir)?;
             for name in dir.split(|b| *b == b'/') {
-                current = File::from(sys(fs::openat(
+                let name = OsStr::from_bytes(name);
+                let opened = match fs::openat(
                     &current,
-                    OsStr::from_bytes(name),
+                    name,
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
-                ))?);
+                ) {
+                    Err(error @ (rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP)) => {
+                        // Linux reports ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a symlink.
+                        // Keep traversal rejection distinct from an absent/non-directory ancestor.
+                        if fs::statat(&current, name, AtFlags::SYMLINK_NOFOLLOW)
+                            .is_ok_and(|stat| fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::Symlink)
+                        {
+                            return Err(FsError::Invalid("path goes through a symbolic link"));
+                        }
+                        return Err(FsError::Io(error.into()));
+                    }
+                    result => sys(result)?,
+                };
+                current = File::from(opened);
             }
         }
         Ok(current)
@@ -287,7 +301,15 @@ impl TreeRead for DirectoryTree {
         let stat = match path {
             RelDir::Root => sys(fs::fstat(&self.root))?,
             RelDir::Path(path) => {
-                let (parent, name) = self.parent(path)?;
+                let (parent, name) = match self.parent(path) {
+                    Ok(pair) => pair,
+                    Err(FsError::Io(error))
+                        if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
+                    {
+                        return Ok(None)
+                    }
+                    Err(error) => return Err(error),
+                };
                 match fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
                     Ok(stat) => stat,
                     Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(None),
@@ -308,7 +330,11 @@ impl TreeRead for DirectoryTree {
             RelDir::Path(path) => {
                 let (parent, name) = match self.parent(path) {
                     Ok(pair) => pair,
-                    Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(FsError::Io(error))
+                        if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
+                    {
+                        return Ok(None)
+                    }
                     Err(error) => return Err(error),
                 };
                 let stat = match fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {

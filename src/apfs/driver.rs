@@ -121,12 +121,16 @@ pub(crate) struct ApfsFs {
     trees: Mutex<HashMap<TreeKey, Resource>>,
     destinations: Mutex<HashMap<TreeKey, Destination>>,
 }
-fn absolute(path: &Path) -> layr_fs_core::Result<PathBuf> {
+pub(super) fn absolute(path: &Path) -> layr_fs_core::Result<PathBuf> {
     let path = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
     if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
         return Err(FsError::Invalid("parent component in APFS path"));
     }
-    Ok(path.components().collect())
+    // Resolve external aliases such as macOS /tmp -> /private/tmp, preserving the final
+    // component so a tree symlink never becomes deletion authority for its target.
+    let parent = path.parent().ok_or(FsError::Invalid("APFS tree has no parent"))?;
+    let name = path.file_name().ok_or(FsError::Invalid("APFS tree has no name"))?;
+    Ok(fs::canonicalize(parent)?.join(name))
 }
 fn stable_namespace(path: &Path) -> layr_fs_core::Result<bool> {
     let uid = rustix::process::geteuid().as_raw();
@@ -155,8 +159,10 @@ impl ApfsFs {
             let metadata = fs::symlink_metadata(candidate)?;
             if metadata.is_dir()
                 && metadata.dev() == device
-                && metadata.uid() == uid
-                && metadata.mode() & 0o022 == 0
+                && ((metadata.uid() == uid && metadata.mode() & 0o022 == 0)
+                    // A root-owned sticky parent protects each private operation directory
+                    // from other users; the retained anchor descriptor locates all mutations.
+                    || (metadata.uid() == 0 && metadata.mode() & 0o1000 != 0))
                 && stable_namespace(candidate)?
             {
                 let anchor = Arc::new(File::open(candidate)?);
@@ -378,12 +384,12 @@ impl ApfsFs {
         result.map_err(|error| driver.error(error))
     }
     pub(super) fn remove_path(path: &Path) -> Result<()> {
-        let path = absolute(path)?;
-        match fs::symlink_metadata(&path) {
+        match fs::symlink_metadata(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
             Ok(_) => {}
         }
+        let path = absolute(path)?;
         if !fs::symlink_metadata(&path)?.is_dir() {
             // The legacy facade owns no directory custody for a standalone file or link.
             return delete_tree_native(&path);
@@ -709,5 +715,51 @@ impl Pinned {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires macOS /tmp and an APFS volume; cross-compiled on Linux"]
+    fn temporary_aliases_and_sticky_parent_children_keep_cleanup_authority() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        // These are direct children of the root-owned sticky directory, with no user-owned
+        // ancestor available above them. /tmp and /var also exercise the system aliases.
+        for parent in [Path::new("/tmp"), Path::new("/private/tmp"), Path::new("/var/tmp")] {
+            let path = parent.join(format!("layr-apfs-location-{}", crate::ids::new_id()));
+            create_subvolume(&path)?;
+            fs::write(path.join("file"), b"owned")?;
+            let driver = ApfsFs::for_destination(&path, Links::Keep, PreparedCopy::Fresh)?;
+            assert_eq!(driver.anchor_path, fs::canonicalize(parent)?);
+            let expected = driver.anchor.metadata()?;
+            let stage = driver.operation()?;
+            io(rustix::fs::mkdirat(stage.parent.as_ref(), OsStr::from_bytes(stage.name.as_bytes()), Mode::from_raw_mode(0o700)))?;
+            assert_eq!(stage.parent.metadata()?.ino(), expected.ino());
+            stage.remove()?;
+            ApfsFs::remove_path(&path)?;
+            assert!(!path.exists());
+        }
+        let scratch = Path::new("/tmp").join(format!("layr-apfs-alias-{}", crate::ids::new_id()));
+        fs::create_dir(&scratch)?;
+        fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
+        let result = (|| -> Result<()> {
+            let target = scratch.join("target");
+            create_subvolume(&target)?;
+            fs::write(target.join("sentinel"), b"keep")?;
+            symlink("target", scratch.join("link"))?;
+            // Canonicalisation of the parent must not adopt the final symlink target.
+            ApfsFs::remove_path(&scratch.join("link"))?;
+            assert_eq!(fs::read(target.join("sentinel"))?, b"keep");
+            ApfsFs::remove_path(&target)?;
+            ApfsFs::remove_path(&scratch.join("missing/child"))?;
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&scratch);
+        result?;
+        cleanup?;
+        Ok(())
     }
 }
