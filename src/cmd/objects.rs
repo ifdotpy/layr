@@ -62,7 +62,10 @@ pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full:
         _ => None,
     };
     let pin = h.repo.pin(&[&id])?;
-    let source = h.repo.state_src(&id)?;
+    let source = {
+        let _t = crate::trace::named(|| format!("import {}: source", crate::ids::short(&id)));
+        h.repo.state_src(&id)?
+    };
     let root = crate::objstore::SnapshotSource(&source);
     let previous = match parent {
         Some(tree) => Some(tree),
@@ -74,14 +77,23 @@ pub(crate) fn import_state(h: &Here, store: &Store, rev: &str, cold: bool, full:
     };
     let temperature = if cold { Temperature::Cold } else { Temperature::Hot };
     let options = WriteOptions { temperature, previous, exclude: Vec::new(), similar: false };
-    let incremental = if full { None } else { crate::objstore::write_base(&h.repo, store, &id, first.as_deref(), &source)? };
+    let incremental = if full {
+        None
+    } else {
+        let _t = crate::trace::named(|| format!("import {}: write base", crate::ids::short(&id)));
+        crate::objstore::write_base(&h.repo, store, &id, first.as_deref(), &source)?
+    };
     let (report, changed) = match incremental {
         Some((r, paths)) => {
             let base = layr_objects::write::Base { tree: r.tree, times: r.times };
             let n = paths.len();
+            let _t = crate::trace::named(|| format!("import {}: write {n} changed path(s)", crate::ids::short(&id)));
             (layr_objects::write::write_changed_from(store, &root, &base, &paths, &options)?, Some(n))
         }
-        None => (layr_objects::write::write_tree_from(store, &root, &options)?, None),
+        None => {
+            let _t = crate::trace::named(|| format!("import {}: full write", crate::ids::short(&id)));
+            (layr_objects::write::write_tree_from(store, &root, &options)?, None)
+        }
     };
     drop(pin);
     let tree = report.tree.expect("a write gives a tree");
@@ -249,9 +261,15 @@ pub(crate) fn run_verify(
     }
     let started = Instant::now();
     let copy = Copy(&job.copy);
-    let made = layr_objects::checkout_with(store, &job.tree, Some(&job.times), copy.0)?;
+    let made = {
+        let _t = crate::trace::span("verify: checkout");
+        layr_objects::checkout_with(store, &job.tree, Some(&job.times), copy.0)?
+    };
     let checkout_seconds = started.elapsed().as_secs_f64();
-    let cmp = layr_objects::compare_with(&job.root, copy.0, true);
+    let cmp = {
+        let _t = crate::trace::span("verify: compare");
+        layr_objects::compare_with(&job.root, copy.0, true)
+    };
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
     drop(copy);
     Ok((made, cmp?, checkout_seconds, compare_seconds))
