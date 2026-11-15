@@ -50,8 +50,17 @@ bash tests/apfs-ownership-bases.sh
 bash tests/apfs-lock-hold.sh
 bash tests/save-unsettled.sh
 # The tests of ci.yml's macos job, without its sudo step (tests/apfs-service.sh): checks never run as root here.
-bash tests/run.sh --tag macos-plain
-LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh --tag macos
-LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh t115-project-copy
-LAYR_APFS_TEST_ROOT="$case_root" LAYR_TEST_DIRECT_MAIN=1 bash tests/run.sh --tag apfs-case
+# The shell tests run at once (tests/run.sh, LAYR_TEST_JOBS; each has its own folder on the volume). That needs
+# Bash 4.3 for the runner of the list: macOS has 3.2, Homebrew a newer one. 8 at once ran 40 macos tests in 113 s,
+# one at a time in 349 s, with the same results (2026-11-14).
+tests=(bash tests/run.sh)
+if /opt/homebrew/bin/bash -c '((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)))' 2>/dev/null; then
+    tests=(/opt/homebrew/bin/bash tests/run.sh)
+    cpus=$(sysctl -n hw.ncpu)
+    export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$(( cpus / 2 < 8 ? (cpus / 2 < 1 ? 1 : cpus / 2) : 8 ))}
+fi
+"${tests[@]}" --tag macos-plain
+LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag macos
+LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" t115-project-copy
+LAYR_APFS_TEST_ROOT="$case_root" LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag apfs-case
 LAYR_APFS_TEST_ROOT="$case_root" python3 tests/apfs-thin.py --binary "$LAYR" --root "$case_root"

@@ -875,6 +875,7 @@ fn execute(
         // cp -a also copies the source root's mode over the prepared folder.
         // Restore traversal for the suite's unprivileged service clients.
         std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
+        copy_cache_folders(repo, dir, &private.path)?;
         // In its mount namespace the check sees its copy at /work and its home at /home/check, as a sandboxed
         // check does: the caches that a sandboxed check gives back (target/, the dependencies' sources below the
         // home) fit without a rebuild. The two host folders are only mount points.
@@ -956,6 +957,39 @@ fn execute(
         }
     }
     Ok(result)
+}
+
+/// The cache folders of the check copy `dir` into the root copy `private` of a privileged check. A snapshot leaves out
+/// nested subvolumes, and `copy_caches` places each cache as one, so the root copy got an empty `target/` and every
+/// privileged suite built from cold (all 363 units of layr, 13 minutes on a runner, 2026-11-14). Each cache is frozen
+/// as the copy is (a read-only snapshot) and copied in, sharing its blocks. A plain cache folder (a check that started
+/// cold) is in the snapshot already.
+#[cfg(target_os = "linux")]
+fn copy_cache_folders(repo: &Repo, dir: &std::path::Path, private: &std::path::Path) -> Result<()> {
+    let mut folders: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
+    for p in repo.cache_paths(dir)? {
+        if !folders.contains(&p) {
+            folders.push(p);
+        }
+    }
+    for folder in folders {
+        let Ok(source) = crate::fsutil::safe_join(dir, &folder) else { continue };
+        if !crate::storage::is_subvolume(&source) {
+            continue;
+        }
+        let frozen = repo.temp_snapshot(&source, true)?;
+        let target = private.join(&folder);
+        std::fs::DirBuilder::new().recursive(true).create(&target)?;
+        let status = std::process::Command::new("/bin/cp")
+            .args(["-a", "--no-preserve=ownership", "--reflink=auto", "--"])
+            .arg(frozen.path.join("."))
+            .arg(&target)
+            .status()?;
+        if !status.success() {
+            bail!("cannot copy the cache folder {folder} into the private privileged check folder");
+        }
+    }
+    Ok(())
 }
 
 /// The caches that a passing check of a head of the protected line `line` built in its copy `dir`, saved with that

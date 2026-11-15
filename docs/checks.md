@@ -108,6 +108,12 @@ the sandbox, so pin key variables in the project (`[workspace.metadata.layr-rete
 The copy's caches are relocated to the place where the check sees them (`/work` on Linux, the
 private copy on macOS), so a unit with a compiled-in path of another line builds again.
 
+A privileged check on Linux starts warm too. Its root copy is made from a read-only Btrfs snapshot
+of the check copy, and a snapshot leaves out nested subvolumes, so each cache folder of the check
+copy (`target/`, a nested subvolume) is frozen the same way and copied into the root copy, sharing
+its blocks (`copy_cache_folders` in `src/cmd/checks.rs`, t256). Before this, each privileged suite
+of layr built all 363 units again (13 minutes on the x86_64 runner, 2026-11-14).
+
 A passing check of a head of a protected line in `checks.lines` gives its caches back. The executor
 saves the cache folders of the copy as cache states saved with that head, on the line
 `<line>.checks-<os>-<arch>` (for example `main.checks-linux-aarch64`). The first such check makes

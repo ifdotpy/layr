@@ -133,7 +133,9 @@ cleanup() {
     if [ "$(uname -s)" = Darwin ]; then
         # Sealed entries carry the immutable flag (the root, an older store) or a deny ACL entry.
         chflags -R nouchg "$T" 2>/dev/null || true
-        /bin/chmod -R -N "$T" 2>/dev/null || true
+        # chmod -N opens each entry, and the open of a FIFO waits for a writer: the FIFO of upstream-fixes.py
+        # (t50) held the cleanup until the 900 s timeout. A FIFO or a socket needs no ACL removed for rm.
+        find "$T" ! -type p ! -type s -exec /bin/chmod -N {} + 2>/dev/null || true
         chmod -R u+w "$T" 2>/dev/null || true
         rm -rf "$T"
         return
