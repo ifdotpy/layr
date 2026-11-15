@@ -208,21 +208,52 @@ pub(crate) fn compare_checkout(
     state: &str,
     r: &StateRef,
 ) -> Result<(layr_objects::CheckoutReport, layr_objects::Comparison, f64, f64)> {
-    let started = Instant::now();
+    let (job, pin) = prepare_verify(h, state, r)?;
+    let result = run_verify(store, &job);
+    drop(pin);
+    result
+}
+
+/// The part of a verification that reads the project: the pin of the state and its complete
+/// tree. It stays on the thread that holds the project database; `run_verify` needs only files.
+pub(crate) struct VerifyJob {
+    root: std::path::PathBuf,
+    copy: std::path::PathBuf,
+    tree: Id,
+    times: Id,
+}
+
+pub(crate) fn prepare_verify(h: &Here, state: &str, r: &StateRef) -> Result<(VerifyJob, crate::free::Pin)> {
     let work = h.repo.p.work_dir();
     std::fs::create_dir_all(&work)?;
-    let tmp = crate::repo::Temp { path: work.join(crate::store::temp_name()) };
-    let made = layr_objects::checkout_with(store, &r.tree, Some(&r.times), &tmp.path)?;
-    let checkout_seconds = started.elapsed().as_secs_f64();
     let pin = h.repo.pin(&[state])?;
-    let cmp = layr_objects::compare_with(&h.repo.state_root(state)?, &tmp.path, true);
-    drop(pin);
+    let root = h.repo.state_root(state)?;
+    Ok((VerifyJob { root, copy: work.join(crate::store::temp_name()), tree: r.tree, times: r.times }, pin))
+}
+
+/// Check the tree out into a private copy, compare it with the snapshot byte by byte, and delete
+/// the copy at once (not through the trash: a migration verifies thousands of states under one
+/// store lock, and discarded copies would wait in the trash until that lock ends). This walk
+/// touches only files, so several states can be verified at the same time (`layr migrate`).
+pub(crate) fn run_verify(
+    store: &Store,
+    job: &VerifyJob,
+) -> Result<(layr_objects::CheckoutReport, layr_objects::Comparison, f64, f64)> {
+    struct Copy<'p>(&'p std::path::Path);
+    impl Drop for Copy<'_> {
+        fn drop(&mut self) {
+            // Read-only folders of the copy must open again before the copy goes.
+            make_writable(self.0);
+            let _ = crate::storage::delete_tree(self.0);
+        }
+    }
+    let started = Instant::now();
+    let copy = Copy(&job.copy);
+    let made = layr_objects::checkout_with(store, &job.tree, Some(&job.times), copy.0)?;
+    let checkout_seconds = started.elapsed().as_secs_f64();
+    let cmp = layr_objects::compare_with(&job.root, copy.0, true);
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
-    // Read-only folders of the copy must open again before the copy goes. The copy is deleted now, not
-    // discarded: a migration verifies thousands of states under one store lock, and discarded copies wait
-    // in the trash until that lock ends.
-    make_writable(&tmp.path);
-    tmp.delete_now();
+    drop(copy);
     Ok((made, cmp?, checkout_seconds, compare_seconds))
 }
 
