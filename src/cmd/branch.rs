@@ -710,6 +710,12 @@ pub(crate) fn delete_recorded(
 ) -> Result<()> {
     // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
     let staged = staged_state(ctx, repo, l)?;
+    // An OverlayFS folder is a mount. Unmount it before the record: an unmount error then keeps
+    // the line, and its folder is mounted again by the next command.
+    #[cfg(feature = "overlayfs")]
+    if made {
+        crate::storage::release_tree(&repo.working(l))?;
+    }
     // Record first, then delete the folder: the content is in the saved state.
     let mut rec = Record::new("line.delete");
     rec.lines.insert(
