@@ -1138,11 +1138,55 @@ enum RemovalStage {
     RemoveForeignCustody(std::sync::Arc<PrivateDirectory>),
     Collect,
 }
-#[derive(PartialEq, Eq)]
+struct PinnedMountpoint {
+    _directory: File,
+    device: u64,
+    inode: u64,
+}
+impl PinnedMountpoint {
+    fn new(directory: File) -> Result<Self> {
+        let metadata = directory.metadata()?;
+        Ok(Self { _directory: directory, device: metadata.dev(), inode: metadata.ino() })
+    }
+    fn below(parent: &File, name: &std::ffi::OsStr) -> Result<Self> {
+        use rustix::{
+            fs::{openat, Mode, OFlags},
+            mount::{open_tree, OpenTreeFlags},
+        };
+        // std cannot look below a mount. A nonrecursive detached clone of the parent
+        // excludes child mounts, so this pins the covered directory before unmount.
+        let detached = open_tree(
+            parent,
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE | OpenTreeFlags::OPEN_TREE_CLOEXEC | OpenTreeFlags::AT_EMPTY_PATH,
+        )?;
+        let directory = File::from(openat(
+            &detached,
+            name,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        Self::new(directory)
+    }
+}
 enum RootIdentity {
-    Unpinned,
     Absent,
     Expected(u64, u64),
+    Mountpoint(PinnedMountpoint),
+}
+impl RootIdentity {
+    fn key(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Absent => None,
+            Self::Expected(device, inode) => Some((*device, *inode)),
+            Self::Mountpoint(pin) => Some((pin.device, pin.inode)),
+        }
+    }
+}
+impl PartialEq for RootIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
 }
 struct Removal {
     path: PathBuf,
@@ -1173,20 +1217,18 @@ impl Removal {
         if matches!(self.stage, RemovalStage::Collect) {
             return Ok(());
         }
-        anyhow::ensure!(
-            !matches!(self.identity, RootIdentity::Unpinned),
-            "unmounted directory could not be pinned; manual recovery required"
-        );
         let actual = self.observe()?;
         anyhow::ensure!(actual == self.identity || actual == RootIdentity::Absent, "owned tree location changed");
-        self.identity = actual;
+        if actual == RootIdentity::Absent {
+            self.identity = RootIdentity::Absent;
+        }
         Ok(())
     }
-    fn after_unmount(&mut self) -> Result<()> {
-        // A failed observation must stay non-destructive on every later retry.
-        self.identity = RootIdentity::Unpinned;
-        self.identity = self.observe()?;
-        Ok(())
+    fn after_unmount(&mut self, covered: PinnedMountpoint) -> Result<()> {
+        // Authority comes from the covered directory pinned before unmount, never from
+        // the first pathname observation after unmount (which may already be foreign).
+        self.identity = RootIdentity::Mountpoint(covered);
+        self.validate()
     }
     fn directory_removed(&mut self) {
         self.stage = RemovalStage::Collect;
@@ -1285,9 +1327,13 @@ impl Removal {
             paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
             for path in paths {
                 if mounted(&path)? {
-                    sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
                     if path == self.path {
-                        self.after_unmount()?;
+                        let name = self.path.file_name().context("owned mountpoint has no name")?;
+                        let covered = PinnedMountpoint::below(&self.parent, name)?;
+                        sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
+                        self.after_unmount(covered)?;
+                    } else {
+                        sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
                     }
                 }
                 state.registry.trees.remove(&path);
@@ -1298,17 +1344,6 @@ impl Removal {
         self.remove_directory()?;
         state.collect()
     }
-}
-fn delete_tree_native(path: &Path) -> Result<()> {
-    let path = absolute(path)?;
-    let home = home_of(&path)?;
-    let parent = std::sync::Arc::new(File::open(path.parent().context("tree has no parent")?)?);
-    let identity = match fs::symlink_metadata(&path) {
-        Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
-        Err(error) => return Err(error.into()),
-    };
-    Removal::new(path, home, parent, identity).run()
 }
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     delete_tree(path)

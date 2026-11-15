@@ -211,22 +211,28 @@ impl OverlayFs {
         });
         result.map(|_| ()).map_err(|error| driver.error(error))
     }
-    fn owned(&self, path: &Path, home: PathBuf) -> layr_fs_core::Result<OwnedTree> {
-        let registered = self.register(path)?;
-        let parent = Arc::new(File::open(registered.path.parent().ok_or(FsError::Invalid("tree has no parent"))?)?);
-        let ownership = self.issuer.own();
-        self.trees()?.insert(self.issuer.owned_key(&ownership)?, Resource::Owned { tree: registered, home, parent });
-        Ok(ownership)
-    }
     pub(super) fn remove_path(path: &Path) -> Result<()> {
+        Self::remove_path_with(path, home_of, Removal::run)
+    }
+    fn remove_path_with(
+        path: &Path,
+        home: impl FnOnce(&Path) -> Result<PathBuf>,
+        remove: impl FnOnce(&mut Removal) -> Result<()>,
+    ) -> Result<()> {
         let path = absolute(path)?;
-        // Ordinary cleanup includes files and missing paths; those convey no managed-tree token.
-        if !is_subvolume(&path) {
-            return delete_tree_native(&path);
-        }
+        let home = home(&path)?;
+        let parent = Arc::new(File::open(path.parent().context("tree has no parent")?)?);
+        let identity = match fs::symlink_metadata(&path) {
+            Ok(metadata) => RootIdentity::Expected(metadata.dev(), metadata.ino()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => RootIdentity::Absent,
+            Err(error) => return Err(error.into()),
+        };
         let driver = Arc::new(Self::default());
-        let ownership = driver.owned(&path, home_of(&path)?)?;
-        driver.remove(ownership).map_err(|failure| {
+        let ownership = driver.issuer.own();
+        driver
+            .trees()?
+            .insert(driver.issuer.owned_key(&ownership)?, Resource::Removing(Removal::new(path, home, parent, identity)));
+        driver.remove_with(ownership, remove).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
                 failure: Box::new(failure),
@@ -695,7 +701,8 @@ mod tests {
                 // A normal unmount exposes the original mountpoint, with another inode/device.
                 fs::rename(&removal.path, fixture.root.join("old-mount"))?;
                 fs::create_dir(&removal.path)?;
-                removal.after_unmount()?;
+                let covered = PinnedMountpoint::new(File::open(&removal.path)?)?;
+                removal.after_unmount(covered)?;
                 anyhow::bail!("injected registry persistence failure after unmount")
             })
             .unwrap_err();
@@ -814,9 +821,10 @@ mod tests {
         let failure = fixture
             .driver
             .remove_with(created.ownership, |removal| {
+                let covered = PinnedMountpoint::new(File::open(&removal.path)?)?;
                 fs::rename(&parent, &held_parent)?;
                 fs::create_dir(&parent)?;
-                assert!(removal.after_unmount().is_err());
+                assert!(removal.after_unmount(covered).is_err());
                 anyhow::bail!("post-unmount parent validation failed")
             })
             .unwrap_err();
@@ -826,7 +834,7 @@ mod tests {
         fs::create_dir(&destination)?;
         fs::write(destination.join("foreign"), b"keep")?;
         let failure = fixture.driver.remove_with(failure.ownership, Removal::validate).unwrap_err();
-        assert!(failure.error.to_string().contains("could not be pinned"));
+        assert!(failure.error.to_string().contains("owned tree location changed"));
         assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
         Ok(())
     }
@@ -834,11 +842,9 @@ mod tests {
     fn bare_relative_tree_uses_its_normalized_parent_locator() -> Result<()> {
         const CHILD: &str = "LAYR_OVERLAY_RELATIVE_REMOVAL_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
-            let driver = OverlayFs::default();
             fs::create_dir("tree")?;
             fs::create_dir("objects")?;
-            let ownership = driver.owned(Path::new("tree"), PathBuf::from(root))?;
-            driver.remove(ownership).unwrap();
+            OverlayFs::remove_path_with(Path::new("tree"), |_| Ok(PathBuf::from(root)), Removal::run)?;
             assert!(!Path::new("tree").exists());
             return Ok(());
         }
@@ -854,6 +860,100 @@ mod tests {
             .current_dir(&fixture.root)
             .status()?;
         anyhow::ensure!(status.success(), "isolated relative-removal test failed");
+        Ok(())
+    }
+    #[test]
+    fn successful_post_unmount_observation_cannot_authorize_a_substitution() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("tree");
+        fs::create_dir(&destination)?;
+        let covered = PinnedMountpoint::new(File::open(&destination)?)?;
+        let error = OverlayFs::remove_path_with(
+            &destination,
+            |_| Ok(fixture.root.clone()),
+            |removal| {
+                fs::rename(&destination, fixture.root.join("original-mountpoint"))?;
+                fs::create_dir(&destination)?;
+                fs::write(destination.join("foreign"), b"keep")?;
+                removal.after_unmount(covered)
+            },
+        )
+        .unwrap_err();
+        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        let failure = driver.remove_with(failure.ownership, Removal::validate).unwrap_err();
+        assert!(failure.error.to_string().contains("owned tree location changed"));
+        assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
+        Ok(())
+    }
+    #[test]
+    fn ordinary_path_failure_retains_partial_private_deletion_through_anyhow() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("ordinary");
+        fs::create_dir(&destination)?;
+        fs::write(destination.join("one"), b"one")?;
+        fs::write(destination.join("two"), b"two")?;
+        let error = OverlayFs::remove_path_with(
+            &destination,
+            |_| Ok(fixture.root.clone()),
+            |removal| {
+                removal.validate()?;
+                removal.stage = RemovalStage::Directory;
+                removal.remove_directory_with(|stage| {
+                    if let RemovalStage::Verified(custody) = stage {
+                        fs::remove_file(format!("/proc/self/fd/{}/tree/one", custody.directory.as_raw_fd()))?;
+                        anyhow::bail!("injected partial deletion failure");
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        assert!(!destination.exists());
+        fs::remove_dir(fixture.root.join("lock"))?;
+        fs::create_dir(fixture.root.join("objects"))?;
+        driver.remove(failure.ownership).unwrap();
+        assert!(!fs::read_dir(&fixture.root)?.any(|entry| entry.unwrap().file_name().as_bytes().starts_with(b".remove-")));
+        Ok(())
+    }
+    #[test]
+    fn ordinary_path_failure_retains_foreign_custody_until_restoration() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("ordinary");
+        fs::create_dir(&destination)?;
+        let original = fixture.root.join("original");
+        let mut substituted = false;
+        let error = OverlayFs::remove_path_with(
+            &destination,
+            |_| Ok(fixture.root.clone()),
+            |removal| {
+                removal.validate()?;
+                fs::rename(&destination, &original)?;
+                fs::create_dir(&destination)?;
+                fs::write(destination.join("foreign"), b"keep")?;
+                removal.stage = RemovalStage::Directory;
+                removal.remove_directory_with(|stage| {
+                    if matches!(stage, RemovalStage::RestoreForeign(_)) && !substituted {
+                        fs::create_dir(&destination)?;
+                        fs::write(destination.join("blocker"), b"keep too")?;
+                        substituted = true;
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        assert_eq!(fs::read(destination.join("blocker"))?, b"keep too");
+        fs::remove_dir_all(&destination)?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        fs::create_dir(fixture.root.join("objects"))?;
+        let failure = driver.remove(failure.ownership).unwrap_err();
+        assert!(failure.error.to_string().contains("replacement restored"));
+        assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
+        fs::remove_dir_all(&destination)?;
+        fs::rename(&original, &destination)?;
+        driver.remove(failure.ownership).unwrap();
         Ok(())
     }
     #[test]
