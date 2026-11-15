@@ -170,15 +170,20 @@ Built so far (the rest of this file describes the code until a row says "built")
   execute bit) drops X's entry and its marker, so a patch that upstream accepted goes away.
 - Patch base. When X first takes a path that the parent view shows, `meta.json` records the hash of
   that version and `bases/` its content. Later saves of the patch keep the base.
-- Merge with the parent (`rebase_patches`). After `layr merge` (and `pull`) into a line, and after
-  `layr overlay use`, each patch of the view whose parent version changed merges with it, from the
-  bottom of the path: a clean three-way merge (base: the recorded version, ours: X, theirs: the
-  parent now) gives X a new version and base; an overlap gives the file conflict markers and a
-  `content` conflict, resolved by a save; a binary file or a parent that deleted or renamed the path
-  gives a conflict of kind `parent`, and X keeps its version until a save of the path, which takes
-  the parent's version as the new base (or makes it an own file). Only the owner of the line merges,
-  on its machine, when it reads every overlay of the path; a path with a local change waits. A
-  failure is a warning and never undoes the merge.
+- Merge with the parent (`rebase_patches`). After every merge into a line (`layr merge`, `layr pull`,
+  `layr git pull` and the follow pass all use `merge_rev`), and after `layr overlay use`, each patch of the
+  view whose parent version changed merges with it, from the bottom of the path: a clean three-way merge
+  (base: the recorded version, ours: X, theirs: the parent now) gives X a new version and base; an
+  overlap gives the file conflict markers and a `content` conflict, resolved by a save; a binary file
+  or a parent that deleted or renamed the path gives a conflict of kind `parent`, and X keeps its
+  version until a save of the path, which takes the parent's version as the new base (or makes it an
+  own file). Only the owner of the line merges, on its machine, when it reads every overlay of the
+  path; for another caller (for example the daemon of the follow pass, or a user who does not read X)
+  the patches wait, `status` says "waits for a merge with the parent", and the next `merge`, `pull`
+  or `overlay use` of the owner does it. A path with a local change waits too. The merge is one step:
+  the new states are made first, then the folder takes the new versions (a local change that came
+  meanwhile refuses), and only then the lines on the overlays move; a failure discards the new states,
+  so nothing is recorded. A failure is a warning and never undoes the merge of the line.
 - Waiting patches. `layr status` (long form) says where named saves go and lists, per overlay of the
   path, its patches, the paths it hides and the patches that wait for a merge with the parent; a named
   save prints the same for the overlays that it changed; `layr overlay show <X> --json` has `paths`

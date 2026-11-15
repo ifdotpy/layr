@@ -3344,7 +3344,7 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
         v.into_iter().collect()
     };
     let mut new_layers = layers.clone();
-    let mut changed = false;
+    let mut made: Vec<(usize, Line, StateRec)> = Vec::new();
     for i in 0..new_layers.len() {
         let name = new_layers[i].overlay.clone();
         if !repo.patches_overlay(&name)? {
@@ -3439,14 +3439,47 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
             st.conflicts.extend(old.conflicts.into_iter().filter(|c| c.kind == PARENT_CONFLICT));
         }
         st.conflicts.extend(conflicts);
-        move_overlay_line(&orepo, ctx, "overlay.rebase", &ol, &st.id, vec![st.clone()])?;
-        new_layers[i].state = st.id;
-        changed = true;
+        new_layers[i].state = st.id.clone();
+        made.push((i, ol, st));
     }
-    if changed {
-        let line = repo.line(&line.id)?;
-        set_layers_from(ctx, repo, &line, &shown, &local, &new_layers, false, "overlay.rebase")?;
+    if made.is_empty() {
+        return Ok(msgs);
     }
+    // One step: the folder takes the new versions, then the overlay lines move. A change of the folder that
+    // came during the merge refuses, and then no new state is recorded (the patches wait).
+    let discard = |made: &[(usize, Line, StateRec)]| {
+        for (i, _, st) in made {
+            if let Ok(o) = repo.overlay_repo(&layers[*i].overlay) {
+                o.discard_states(std::slice::from_ref(st));
+            }
+        }
+    };
+    let step = (|| -> Result<Temp> {
+        let view = repo.assemble(line, &line.head, &new_layers)?;
+        let (st, _scan, _it, _idx) = repo.status(line)?;
+        let mut now = st.local_paths();
+        now.extend(st.ignored.iter().cloned());
+        now.extend(local.iter().cloned());
+        repo.apply_delta(&shown, &view.path, &repo.working(line), own, &now, false)?;
+        Ok(view)
+    })();
+    let view = match step {
+        Ok(v) => v,
+        Err(e) => {
+            discard(&made);
+            return Err(e);
+        }
+    };
+    for (n, (i, ol, st)) in made.iter().enumerate() {
+        let orepo = repo.overlay_repo(&layers[*i].overlay)?;
+        let _lock = orepo.p.lock()?;
+        if let Err(e) = move_overlay_line(&orepo, ctx, "overlay.rebase", ol, &st.id, vec![st.clone()]) {
+            discard(&made[n..]);
+            return Err(e);
+        }
+    }
+    repo.drop_stage(line)?;
+    repo.install_base(line, view, &line.head, &new_layers)?;
     Ok(msgs)
 }
 
