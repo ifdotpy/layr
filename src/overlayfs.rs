@@ -946,8 +946,10 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut dri
         state.collect()?;
         return Err(e);
     }
-    let metadata = fs::symlink_metadata(&dst)?;
-    *publication = driver::Publication::Tree { home, identity: (metadata.dev(), metadata.ino()) };
+    if !plain {
+        let metadata = fs::symlink_metadata(&dst)?;
+        *publication = driver::Publication::Tree { home, identity: (metadata.dev(), metadata.ino()) };
+    }
     Ok(consistency)
 }
 // The slow part of a snapshot: no registry lock is held. Returns the lower layer (empty

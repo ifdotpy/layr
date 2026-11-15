@@ -272,7 +272,19 @@ impl std::fmt::Debug for Cleanup {
 }
 impl Cleanup {
     fn fmt_error(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; cleanup requires retry: {}", self.cause, self.failure.error)
+        write!(f, "{}; cleanup requires retry: {}", self.cause, self.failure.error)?;
+        if let (Ok(key), Ok(trees)) = (self.driver.issuer.owned_key(&self.failure.ownership), self.driver.trees()) {
+            let path = match trees.get(&key) {
+                Some(Resource::Published { destination, .. }) => Some(&destination.path),
+                Some(Resource::Owned { tree, .. } | Resource::Borrowed(tree)) => Some(&tree.path),
+                Some(Resource::Removing(removal)) => Some(&removal.path),
+                None => None,
+            };
+            if let Some(path) = path {
+                write!(f, "; pending tree {}", path.display())?;
+            }
+        }
+        Ok(())
     }
 }
 impl std::fmt::Display for Cleanup {
@@ -280,7 +292,11 @@ impl std::fmt::Display for Cleanup {
         self.fmt_error(f)
     }
 }
-impl std::error::Error for Cleanup {}
+impl std::error::Error for Cleanup {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
 impl Filesystem for OverlayFs {
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
         let (created, _) = self.create_with(dst, |dst, publication| {
