@@ -3446,12 +3446,8 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
     // The full tree that the folder shows now: the folder takes the new versions from it.
     let shown = repo.head_tree(line)?;
     // A path with a local change waits: the merge must not take the place of work that is not saved.
-    let local: BTreeSet<String> = {
-        let (st, _scan, _it, _idx) = repo.status(line)?;
-        let mut v = st.local_paths();
-        v.extend(st.ignored.iter().cloned());
-        v.into_iter().collect()
-    };
+    // The folder is read only when a patch has a parent that changed (a named save calls this each time).
+    let mut local: Option<BTreeSet<String>> = None;
     let mut new_layers = layers.clone();
     let mut made: Vec<(usize, Line, StateRec)> = Vec::new();
     for i in 0..new_layers.len() {
@@ -3478,8 +3474,14 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
             if now.as_deref() == Some(b.as_str()) {
                 continue;
             }
-            if local.contains(p) {
-                msgs.push(format!("overlay {name}: {p} waits for a merge with the parent: it has local changes; save them, then run 'layr overlay use {}'", layers.last().map(|l| l.overlay.as_str()).unwrap_or(&name)));
+            if local.is_none() {
+                let (st, _scan, _it, _idx) = repo.status(line)?;
+                let mut v = st.local_paths();
+                v.extend(st.ignored.iter().cloned());
+                local = Some(v.into_iter().collect());
+            }
+            if local.as_ref().is_some_and(|l| l.contains(p)) {
+                msgs.push(format!("overlay {name}: {p} waits for a merge with the parent: it has local changes; save them (the save merges it), or restore them and run 'layr overlay use {}'", layers.last().map(|l| l.overlay.as_str()).unwrap_or(&name)));
                 continue;
             }
             let conflict = |kind: &str| crate::model::Conflict { path: p.clone(), kind: kind.into(), base: None, ours: None, theirs: None };
@@ -3568,7 +3570,7 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
         let (st, _scan, _it, _idx) = repo.status(line)?;
         let mut now = st.local_paths();
         now.extend(st.ignored.iter().cloned());
-        now.extend(local.iter().cloned());
+        now.extend(local.iter().flatten().cloned());
         repo.apply_delta(&shown, &view.path, &repo.working(line), own, &now, false)?;
         Ok(view)
     })();

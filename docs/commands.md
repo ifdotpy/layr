@@ -610,7 +610,9 @@ the text. The files that the save left out are still named on stderr.
 - With nothing to save, the object is `{"saved": false, "state": null, "short": null, "line": {...},
   "reason": "nothing to save"}` and the exit status is 1, as in text.
 - In a line with overlays, the object also has `overlays`: `[{"overlay": "<name>", "state": "<uuid>",
-  "short": "<id>"}]`. When only overlays changed, `state` is null and `saved` is true.
+  "short": "<id>"}]`. When only overlays changed, `state` is null and `saved` is true. It also has
+  `parent_merge`: the lines of text of the patches that the save merged with their parent (empty when
+  none waited; docs/overlays.md section 1).
 
 `layr save --json` and `layr save --overlays --json` write one object per line (one line of output for
 each line; `--all-lines` writes several):
