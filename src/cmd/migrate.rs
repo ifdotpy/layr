@@ -503,6 +503,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 for d in differences.iter().take(20) {
                     outln!(ctx, "\t{d}");
                 }
+                let _ = ctx.out.borrow_mut().flush();
                 record(&mut pending, &table)?;
                 return Err(exit(
                     1,
@@ -528,6 +529,9 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 i.seconds,
                 how
             );
+            // A guard or a waiter reads this line from a file: with the output redirected it is block-buffered, and
+            // without a flush it would arrive many states late and be lost when the run is stopped.
+            let _ = ctx.out.borrow_mut().flush();
             pending.push(id.clone());
             if stop_after == Some(n + 1) {
                 // Test hook (tests/t202-migrate.sh): an interruption after the table write and before
