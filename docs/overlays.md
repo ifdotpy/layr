@@ -81,7 +81,7 @@ Built so far (the rest of this file describes the code until a row says "built")
 | Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
 | Move along the tree, checks per view, automatic states | built 2026-11-15, checks in part (below) |
 | Kinds instead of properties | not built: a folder overlay is the kind `cache`, every other overlay the kind `patches`; the property options stay |
-| Caches per view | built in part 2026-11-15 (below) |
+| Caches per view | built 2026-11-15 (below) |
 | Store format step for older binaries | built 2026-11-15 (below) |
 
 **The tree as built (2026-11-15).**
@@ -226,14 +226,20 @@ Built so far (the rest of this file describes the code until a row says "built")
 
 **Caches per view as built (2026-11-15).**
 
-- A cache that a folder in the view of an overlay builds holds compiled private code. A cache overlay
-  serves every view, and its readers are the trusted machines, so such a cache is never saved:
-  `save --overlays`, a named save, the follow pass and a check do not make a cache state from the view
-  of an overlay (`save_cache_overlays_in`, which says so). The folder keeps its cache.
-- A view of `main` saves its caches as before. A new line in the view of an overlay starts from the
-  cache of its source line, which only a view of `main` saved; so the line `main` in the view of `main`
-  gets warmth only from views of `main`.
-- Not built: a cache store per view, so that a view of an overlay keeps its own warm cache.
+- A cache that a folder in the view of overlay X builds holds compiled private code. It goes to the
+  cache of the view of X: a folder overlay `<folder>.<platform>.view.<X>` with the cache properties
+  and the setting `view=<X>`, whose readers are the readers of X (not the trusted machines), hidden
+  when X is hidden (`ensure_view_cache_overlay`). `save --overlays`, a named save and the follow pass
+  write it; a check line shows `main` and writes the cache of `main`.
+- A line takes a cache in this order (`cache_chain`): the cache of its view, then the cache of the
+  view of each overlay below it whose owner reads it, then the cache of `main`; the first whose key
+  fits wins. So a view of X with no cache of its own starts from the cache of the view below it, and
+  the view of `main` takes only caches of `main` (the line `main` gets warmth only from views of
+  `main`). A view whose path does not hold X never takes the cache of the view of X.
+- A merge unites the caches of `main`, and the caches of a view only in a line that shows that view
+  (`pull_caches`). The cache of a view is an ordinary overlay: `history`, `overlay log|diff`, push to and
+  fetch from a store remote (encrypted for its readers) work as for the cache of `main`.
+- `overlay list` shows it with its folder; `folder_overlays` (the caches of `main`) leaves it out.
 - Test: tests/t262-overlay-cache-views.sh.
 
 ### The model of 2026-11-11

@@ -446,6 +446,9 @@ pub const ORDER_KEY: &str = "overlays.order";
 /// project's own files, which `layr git push` publishes. No overlay can take this name.
 pub const MAIN: &str = "main";
 
+/// The setting suffix of a cache of the view of an overlay (`overlay.<name>.view`): the overlay of that view.
+pub const VIEW: &str = "view";
+
 /// The property suffix of the parent of a patches overlay (`overlay.<name>.parent`).
 pub const PARENT: &str = "parent";
 
@@ -502,15 +505,53 @@ impl Repo<'_> {
             .collect())
     }
 
-    /// The folder overlays of every platform: name, folder and `platform`.
+    /// The folder overlays of every platform that serve the view of `main`: name, folder and `platform`.
+    /// The cache of the view of an overlay (`view_cache_overlays`) is not one of them.
     pub fn all_folder_overlays(&self) -> Result<Vec<(String, String, Option<String>)>> {
         let mut out = Vec::new();
         for name in self.overlay_names()? {
+            if self.overlay_setting(&name, VIEW)?.is_some_and(|v| !v.is_null()) {
+                continue;
+            }
             if let Some(f) = self.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) {
                 let p = self.overlay_setting(&name, "platform")?.and_then(|v| v.as_str().and_then(crate::overlay::platform_name));
                 out.push((name, f, p));
             }
         }
+        Ok(out)
+    }
+
+    /// The caches of the views of overlays on this platform (docs/overlays.md section 1, caches per view):
+    /// name, folder and the overlay of the view. Only a view whose path holds that overlay takes them.
+    pub fn view_cache_overlays(&self) -> Result<Vec<(String, String, String)>> {
+        let mut out = Vec::new();
+        for name in self.overlay_names()? {
+            let Some(view) = self.overlay_setting(&name, VIEW)?.and_then(|v| v.as_str().map(str::to_owned)) else { continue };
+            let Some(f) = self.overlay_setting(&name, "folder")?.and_then(|v| v.as_str().map(str::to_owned)) else { continue };
+            let p = self.overlay_setting(&name, "platform")?.and_then(|v| v.as_str().and_then(platform_name));
+            if !other_platform_overlay(p.as_deref()) {
+                out.push((name, f, view));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The cache overlays that serve `folder` in the folder of `line`, whose view has the overlays `path`
+    /// (bottom first), best first: the cache of the view of each overlay of the path that its owner reads (from the top), then the cache of `main`. The view of
+    /// `main` has only the cache of `main`.
+    pub fn cache_chain(&self, line: &Line, path: &[String], folder: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if !path.is_empty() {
+            let views = self.view_cache_overlays()?;
+            for x in path.iter().rev() {
+                for (name, f, v) in &views {
+                    if f == folder && v == x && self.owner_reads(name, line.owner).unwrap_or(false) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        }
+        out.extend(self.folder_overlay_of(folder)?);
         Ok(out)
     }
 
@@ -1649,7 +1690,7 @@ impl<'a> Repo<'a> {
         Ok(Policy::load(&op).check(&Who::of(uid, gid), "read").is_ok())
     }
 
-    fn owner_reads(&self, name: &str, owner: u32) -> Result<bool> {
+    pub(crate) fn owner_reads(&self, name: &str, owner: u32) -> Result<bool> {
         let gid = crate::ctx::Caller::from_uid(owner).gid;
         self.reads_overlay(name, owner, gid)
     }
