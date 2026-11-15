@@ -224,8 +224,8 @@ fn verify_jobs(ctx: &Ctx) -> usize {
 
 /// Below this free space (`LAYR_MIGRATE_MIN_FREE_GIB`, default 40) a new verification waits for the
 /// running ones: an old state with large files checks out to tens of GiB.
-fn low_disk(work: &Path) -> bool {
-    let min_gib: u64 = std::env::var("LAYR_MIGRATE_MIN_FREE_GIB").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+fn low_disk(ctx: &Ctx, work: &Path) -> bool {
+    let min_gib: u64 = ctx.env("LAYR_MIGRATE_MIN_FREE_GIB").and_then(|v| v.parse().ok()).unwrap_or(40);
     rustix::fs::statvfs(work).map(|s| s.f_bavail.saturating_mul(s.f_frsize) < min_gib << 30).unwrap_or(false)
 }
 
@@ -538,7 +538,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let i = super::objects::import_state(&h, &store, id, cold, full, None)
                 .with_context(|| format!("import state {}", ids::short(id)))?;
             let r = StateRef { tree: i.tree, times: i.times };
-            while running.len() >= jobs || (!running.is_empty() && low_disk(&work)) {
+            while running.len() >= jobs || (!running.is_empty() && low_disk(ctx, &work)) {
                 finish(&mut running)?;
             }
             let (job, pin) =
