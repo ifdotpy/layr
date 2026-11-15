@@ -79,7 +79,7 @@ Built so far (the rest of this file describes the code until a row says "built")
 | Name `main`, tree, one-overlay views, readers rule | built 2026-11-15 (below) |
 | Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
 | Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
-| Move along the tree, checks per view, automatic states | built in part 2026-11-15 (below) |
+| Move along the tree, checks per view, automatic states | built 2026-11-15, checks in part (below) |
 | Kinds instead of properties | not built: a folder overlay is the kind `cache`, every other overlay the kind `patches`; the property options stay |
 | Caches per view | built in part 2026-11-15 (below) |
 | Store format step for older binaries | built 2026-11-15 (below) |
@@ -211,10 +211,18 @@ Built so far (the rest of this file describes the code until a row says "built")
   check gives back as a cache) never holds a file of an overlay. A merge into a line checks `main`
   only; a part of an overlay that the merge changes is not checked in the view of that overlay (not
   built). No check of a child view blocks a merge into its parent.
-- Automatic states. The safe rule of the write rule stays: in the view of an overlay, an automatic
-  state holds the head in `main` and no working change, so `undo` and the restore after a refused
-  command do not bring such changes back. Automatic states in the overlay's own store (owner decision
-  D11, preferred) are not built.
+- Automatic states (built 2026-11-15). In the view of an overlay X, an automatic state of the project
+  holds the head in `main` and no working change, so no state that a non-reader of X reads holds such
+  a change. The working content goes to an automatic state in X's own store, and X's records name it
+  (`auto.<state of the project>`), so no record of the project names it; only readers of X read it
+  (a reader of X reads every overlay below it). `undo` and the restore after a refused command take
+  the working content from there (`Repo::working_source`), and the check "did the folder change since
+  the last automatic state" compares those states. The thin layers of APFS and the save layer made
+  before the lock are not used in such a view: they would hold the content in the project's store.
+  Left: `line delete` of such a line with changes still needs `--discard`; `gc` does not yet drop
+  the state in X's store when the automatic state of the project goes. An overlay with a limited
+  `history` drops such states with its old states; `undo` then restores the head of `main` for the
+  view's changes (nothing leaks, but the change is not back).
 
 **Caches per view as built (2026-11-15).**
 

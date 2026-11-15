@@ -45,6 +45,15 @@ echo "/* $MARK auto */" >> core.c
 l save -q --force
 eq "the automatic state holds no patch" 0 "$(l show main@{0}:core.c 2>/dev/null | grep -c "$MARK")"
 no "nor the proprietary file" l show main@{0}:pro-feature.c
+# The working change lives in an automatic state of pro's own store (docs/overlays.md section 1), so undo
+# of a restore brings it back, and no state of the project holds it.
+ok "restore drops the working change" l restore core.c
+eq "the folder lost it" 0 "$(grep -c "$MARK auto" core.c)"
+ok "undo of the restore" l undo
+eq "the change is back" 1 "$(grep -c "$MARK auto" core.c)"
+eq "the automatic state of the project before the restore holds no patch" 0 "$(l show main@{0}:core.c 2>/dev/null | grep -c "$MARK")"
+has "pro's records hold the working content" "auto." "$(sqlite3 "$LAYR_ROOT/projects/p/meta/overlays/pro/meta/db/layr.sqlite" "select key from config")"
+eq "no record of the project names those states" 0 "$(sqlite3 "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" "select raw from records" | grep -c 'auto\.')"
 ok "the patch goes to pro" l save -q -am "pro work 2"
 l git push -q origin main >/dev/null 2>&1
 eq "the git remote has no patch" 0 "$(leaks)"

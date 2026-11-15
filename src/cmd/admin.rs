@@ -700,13 +700,19 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
 /// Revert the working changes of an operation (from `after` to `before`). Only what the operation
 /// changed goes back: a path that later work changed keeps its content.
 fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bool) -> Result<()> {
+    // An automatic state of the view of an overlay keeps the working content in that overlay's store.
+    let (after_root, after_full) = repo.working_source(line, after)?;
+    let (before_root, before_full) = repo.working_source(line, before)?;
+    if after_full != before_full {
+        return restore_working(repo, line, before);
+    }
     let cur = repo.scan(line)?;
-    let later: BTreeSet<String> = changes::file_changes(&repo.state_src(after)?, &cur.path)?
+    let later: BTreeSet<String> = changes::file_changes(&after_root, &cur.path)?
         .into_iter()
         .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
         .flatten()
         .collect();
-    repo.apply_delta(&repo.state_root(after)?, &repo.state_root(before)?, &repo.working(line), repo.own(line), &later, force)?;
+    repo.apply_delta(&after_root, &before_root, &repo.working(line), repo.own(line), &later, force)?;
     Ok(())
 }
 
@@ -1048,12 +1054,13 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
 
 /// Make the working folder equal to a state (all paths, untracked and ignored included).
 pub(crate) fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<()> {
-    let target = repo.state_root(state)?;
+    // An automatic state of the view of an overlay keeps the whole working content in that overlay's store.
+    let (target, full) = repo.working_source(line, state)?;
     let scan = repo.scan(line)?;
     let w = repo.working(line);
     let own = repo.own(line);
-    // Automatic states leave the overlay files out: those files stay as they are.
-    let private = repo.private_paths(line)?;
+    // Automatic states of the project leave the overlay files out: those files stay as they are.
+    let private = if full { BTreeSet::new() } else { repo.private_paths(line)? };
     let list: Vec<_> = changes::file_changes(&scan.path, &target)?
         .into_iter()
         .filter(|c| {
