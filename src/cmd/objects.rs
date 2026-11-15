@@ -218,9 +218,11 @@ pub(crate) fn compare_checkout(
     let cmp = layr_objects::compare_with(&h.repo.state_root(state)?, &tmp.path, true);
     drop(pin);
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
-    // Read-only folders of the copy must open again before the copy goes.
+    // Read-only folders of the copy must open again before the copy goes. The copy is deleted now, not
+    // discarded: a migration verifies thousands of states under one store lock, and discarded copies wait
+    // in the trash until that lock ends.
     make_writable(&tmp.path);
-    drop(tmp);
+    tmp.delete_now();
     Ok((made, cmp?, checkout_seconds, compare_seconds))
 }
 
