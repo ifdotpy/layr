@@ -103,9 +103,14 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
         .flag("--all-lines")
         .value("--save-back")
         .value("--keep")
+        .value("--to")
         .flag("--json")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
+    // The write target of a named save (docs/overlays.md, section 9.3); an automatic state has none.
+    if a.has("--to") && !(a.has("-m") || a.has("-F")) {
+        return Err(exit(2, "--to names the target of a named save: use it with -m <message>"));
+    }
     if let Some(name) = a.get("--keep") {
         valid_keep_name(name)?;
         if a.has("--all-lines") || a.has("--caches") || a.has("-m") || a.has("-F") || a.has("--amend") {

@@ -617,3 +617,31 @@ fn project_access_mode_and_epoch_metadata_follow_signed_order_without_keys() {
     assert_eq!(epochs[1]["reason"], "audience closed");
     assert!(!serde_json::to_string(&epochs).unwrap().contains("never-emit"));
 }
+
+#[test]
+fn write_targets_fold_from_view_records_and_hidden_overlays_name_themselves() {
+    let mut parent = record(1, "project");
+    parent.lines.insert("line".into(), line("shared", "a"));
+    parent.data = json!({"config":{}});
+    let mut target = record(2, "overlay.use");
+    target.data = json!({"config":{"target.line":"shared"}});
+    let mut own = record(1, "project");
+    own.project = "overlay-project".into();
+    own.data = json!({"config":{"overlay":{"project":"project","name":"hidden","hidden":true,"mode":"follow"}}});
+    let mut hidden = record(2, "overlay.use");
+    hidden.project = "overlay-project".into();
+    hidden.data = json!({"config":{"hidden.target.line":true}});
+    let public = Model::from_records([parent.clone(), target.clone()], "a").unwrap();
+    let line = public.projects["project"].line_list().remove(0);
+    assert_eq!(public.write_target("project", &line).unwrap().as_deref(), Some("shared"));
+    let mut cleared = record(3, "overlay.use");
+    cleared.data = json!({"config":{"target.line":null}});
+    let none = Model::from_records([parent.clone(), target.clone(), cleared], "a").unwrap();
+    assert_eq!(none.write_target("project", &line).unwrap(), None);
+    let reader = Model::from_records([parent.clone(), own, hidden], "a").unwrap();
+    assert_eq!(reader.write_target("project", &line).unwrap().as_deref(), Some("hidden"));
+    // A reader of the parent project only sees no target and no name.
+    let other = Model::from_records([parent], "a").unwrap();
+    assert_eq!(other.write_target("project", &line).unwrap(), None);
+    assert!(!serde_json::to_string(&other).unwrap().contains("hidden"));
+}

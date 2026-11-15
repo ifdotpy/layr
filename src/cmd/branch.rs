@@ -38,10 +38,88 @@ pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if sub == "show" {
         return crate::views::show(ctx, rest);
     }
+    if sub == "target" {
+        return line_target(ctx, rest);
+    }
     if !matches!(sub.as_str(), "new" | "list" | "delete" | "rename") {
-        return Err(exit(2, "usage: layr line new/list/delete/rename/move/show"));
+        return Err(exit(2, "usage: layr line new/list/delete/rename/move/show/target"));
     }
     line_command(ctx, rest, sub)
+}
+
+/// `layr line target [<overlay>|shared|--none]`: the write target of the current line (docs/overlays.md,
+/// section 9.3). Without an argument it prints the target (`none` when the line has none). Only the
+/// owner of the line sets it, to `shared` or an overlay that the line shows. A public target is the
+/// setting `target.<line id>` of the project; a hidden overlay keeps it in its own records
+/// (`hidden.target.<line id>`), so no record of the project names it.
+fn line_target(ctx: &Ctx, args: &[String]) -> Result<i32> {
+    use crate::overlay::{hidden_target_key, target_key, SHARED_TARGET};
+    let a = parse(&Spec::new().flag("--none").flag("-q|--quiet"), args)?;
+    let usage = || exit(2, "usage: layr line target [<overlay>|shared|--none]");
+    if a.pos.len() > 1 || (a.has("--none") && !a.pos.is_empty()) {
+        return Err(usage());
+    }
+    let h = here(ctx)?;
+    let repo = &h.repo;
+    if repo.p.is_overlay() {
+        return Err(exit(1, "error: an overlay has no write targets"));
+    }
+    let line = h.line()?.clone();
+    if a.pos.is_empty() && !a.has("--none") {
+        outln!(ctx, "{}", repo.line_target(&line)?.unwrap_or_else(|| "none".into()));
+        return Ok(0);
+    }
+    if ctx.caller.uid != line.owner {
+        return Err(exit(1, format!("permission denied: only the owner of line '{}' sets its write target", line.name)));
+    }
+    let want = a.pos.first().cloned();
+    let _lock = repo.p.lock()?;
+    let line = repo.line(&line.id)?;
+    let hidden_want = match want.as_deref() {
+        None | Some(SHARED_TARGET) => None,
+        Some(name) => {
+            if !repo.layers(&line)?.iter().any(|l| l.overlay == name) {
+                return Err(exit(1, format!("error: line '{}' shows no overlay '{name}' (see 'layr overlay use')", line.name)));
+            }
+            repo.need_overlay(name)?.hidden.then(|| name.to_string())
+        }
+    };
+    // The hidden overlays that the owner reads: each says in its own records whether it is the target.
+    for name in repo.overlay_names()? {
+        if !repo.need_overlay(&name)?.hidden || !repo.reads_overlay(&name, ctx.caller.uid, ctx.caller.gid)? {
+            continue;
+        }
+        let orepo = repo.overlay_repo(&name)?;
+        let key = hidden_target_key(&line.id);
+        let value = if hidden_want.as_deref() == Some(name.as_str()) { serde_json::json!(true) } else { serde_json::Value::Null };
+        let old = orepo.p.db.overlay_config(&key)?.unwrap_or(serde_json::Value::Null);
+        if old == value {
+            continue;
+        }
+        let _olock = orepo.p.lock()?;
+        let mut record = Record::new("overlay.use");
+        record.data = serde_json::json!({"config": {key: value}});
+        orepo.commit_record(ctx, record)?;
+    }
+    // The public setting: `shared` or a public overlay; null for none and for a hidden target.
+    let public = match (&want, &hidden_want) {
+        (Some(w), None) => serde_json::json!(w),
+        _ => serde_json::Value::Null,
+    };
+    let key = target_key(&line.id);
+    if repo.p.config_value(&key)?.unwrap_or(serde_json::Value::Null) != public {
+        // The record kind of a view change (`overlay.use`): a line owner writes it, and both folds read its settings.
+        let mut record = Record::new("overlay.use");
+        record.data = serde_json::json!({"config": {key: public}});
+        repo.commit_record(ctx, record)?;
+    }
+    if !a.has("-q") {
+        match &want {
+            Some(w) => outln!(ctx, "line {}: named saves go to {w}", line.name),
+            None => outln!(ctx, "line {}: no write target", line.name),
+        }
+    }
+    Ok(0)
 }
 
 /// The checked absolute target of `layr line move <line> <path>`.
@@ -350,7 +428,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                                 .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
                                 .flatten()
                                 .any(|p| private.contains(&p));
-                            if changed || !repo.pending_moves(&l).is_empty() {
+                            // A line whose automatic states hold only the shared head keeps no change at all.
+                            let any = st.staged.len() + st.unstaged.len() + st.untracked.len() > 0;
+                            if changed || !repo.pending_moves(&l).is_empty() || (any && repo.private_target(&l)?) {
                                 return Err(exit(
                                     1,
                                     format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard"),

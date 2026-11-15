@@ -33,7 +33,7 @@ const USAGE: &str =
        layr overlay log|show|diff|grep|ls-files|blame <name> [<args>]
        layr overlay migrate-parts [-n|--dry-run] [-q]
 properties: --history all|last|<N>  --quiet|--no-quiet  --merge three-way|union-theirs  --gc none|lru:<size>  --key-files <files>|none
-            --platform <key>|any  --trust protected|readers";
+            --platform <key>|any  --trust protected|readers  --patches|--no-patches";
 
 pub fn overlay(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
@@ -290,6 +290,8 @@ fn props_spec(spec: Spec) -> Spec {
         .value("--prune")
         .value("--platform")
         .value("--trust")
+        .flag("--patches")
+        .flag("--no-patches")
 }
 
 /// `--key-files a,b` as the setting value; `none` clears it.
@@ -348,6 +350,15 @@ fn props_of(a: &crate::args::Parsed, base: Props) -> Result<Props> {
             crate::overlay::Trust::parse(v)
                 .ok_or_else(|| exit(128, format!("fatal: invalid --trust '{v}' (protected or readers)")))?,
         );
+    }
+    if a.has("--patches") && a.has("--no-patches") {
+        return Err(exit(128, "fatal: --patches and --no-patches exclude each other"));
+    }
+    if a.has("--patches") {
+        p.patches = true;
+    }
+    if a.has("--no-patches") {
+        p.patches = false;
     }
     if let Some(v) = a.get("--gc") {
         p.gc_lru = crate::overlay::parse_gc(v)

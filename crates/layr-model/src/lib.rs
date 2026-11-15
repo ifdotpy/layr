@@ -104,6 +104,24 @@ impl Model {
             .cloned()
     }
 
+    /// The write target of a line (docs/overlays.md section 9.3, `layr line target`): `shared` or an
+    /// overlay name, as layr reads it (`Repo::line_target`). A hidden overlay names itself in its own
+    /// records (`hidden.target.<line id>`); else the setting `target.<line id>` of the parent project.
+    pub fn write_target(&self, parent: &str, line: &Line) -> Result<Option<String>> {
+        let project = self.projects.get(parent).context("unknown parent project")?;
+        for overlay in self.overlay_projects(parent) {
+            let Some(info) = overlay.overlay_setting("overlay") else { continue };
+            if info["hidden"] == true
+                && overlay.overlay_setting(&format!("hidden.target.{}", line.id)) == Some(&Value::Bool(true))
+            {
+                return Ok(info["name"].as_str().map(String::from));
+            }
+        }
+        let key = format!("target.{}", line.id);
+        let value = project.setting(&format!("{key}@{}", line.machine)).or_else(|| project.setting(&key));
+        Ok(value.and_then(|v| v.as_str()).map(String::from))
+    }
+
     /// The layers of a line (docs/overlays.md section 1): the overlays of its view (setting
     /// `view.<line id>`, else the overlay names of its old stack), each at the head of the line on
     /// that overlay, else at the part that the head names, else at the state of the old stack. Hidden

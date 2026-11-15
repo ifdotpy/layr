@@ -591,6 +591,8 @@ extent (`filefrag -v`).
    overlay and in the shared set. The state deletes it from the overlay, and the next assembly
    shows the shared `.env` again. overlayfs keeps a whiteout for this. Does an overlay need a
    delete marker, or does the delete go to every layer that the user may write?
+   Built 2026-11-15: with an overlay target, a delete writes a delete marker in the overlay (section
+   9.6). Without a target the delete still goes to every layer.
 2. **Owner of a moved file.** A file of an overlay moves to a path that no pattern matches. Does
    it stay in its overlay (the owner follows the file; btrfs reports moves by inode) or go to
    the shared set (the owner follows the path)? Following the file is safer: a move never
@@ -696,6 +698,10 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay use [<name>...]`                              | Without names: the stack of the current line. With names: the stack, bottom first; each overlay takes its newest state for this line. `--add` and `--remove` change one overlay and keep the others; `--none` clears the stack. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
 | `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next named save, which takes them from the working folder as they are then. The move waits for that named save whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
 | `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
+| `layr save -m <message> --to <overlay>\|shared` | The layer that gets the changes of this save (section 9.3). |
+| `layr rm --to <overlay>\|shared <paths>` | The layer that gets these deletes at the next named save. The target waits in `meta/stage/<line id>.targets`. |
+| `layr line target [<overlay>\|shared\|--none]` | The default target of the current line. Without an argument it prints it (`none` when the line has none). The line owner only; the overlay must be in the view of the line. |
+| `layr overlay create\|set <name> --patches` | The overlay may hold its own versions of shared files (section 9.3). |
 | `layr overlay show <name> --json` | Metadata for a reader: name, hidden flag, readers with principal and kind, key manager machine UUIDs, signed epochs, patterns, peers, and current state ID. Person principals omit their age recipient. |
 | `layr overlay log <name> --ops [--json]` | All operations from the overlay's own signed records, newest first. JSON is an array with the CLI operation name, actor, time and record ID. Payloads and key material are omitted. |
 
@@ -747,6 +753,39 @@ The other commands work on the line as a whole, as in section 2: `status`, `diff
 4. The records of the overlays first, then one record of the project with the new shared state
    (if the shared set changed) and the new stack. The saved tree becomes the base.
 
+**Write targets (built 2026-11-15).** A shared set of open source goes to a public git remote, and an
+overlay holds proprietary patches: private versions of shared files and private new files. The
+rules above would send an edit of a shared file and a new file to the shared set. A write target
+changes that:
+
+- `save -m <message> --to <overlay>`: the shared set does not change. A change of a file that only
+  the shared set has makes the overlay's copy of it (the copy wins in the view, as any overlay file
+  does). A new file goes to the overlay. A delete or a move of a shared file writes a delete marker in
+  the overlay (section 9.6). A file that an overlay already holds changes in that overlay, as before.
+- `save -m <message> --to shared`: every change goes to the shared set. A file that an overlay holds
+  goes to the shared set and leaves the overlay.
+- `layr line target <overlay>|shared` sets the default target of a line. `save --to` wins over it.
+  `rm --to <target> <path>` sets the target of one delete until the next named save; it wins over
+  both. A path of `overlay move` keeps its meaning: it goes to its overlay and leaves the shared set.
+- A target that the line does not show is refused, and nothing is saved. The text is the same for an
+  unknown overlay and for a hidden overlay that the owner does not read.
+- Storage. The line target is the setting `target.<line id>` (an `overlay.use` record, keyed by the
+  line id, so `line rename` keeps it and `reindex` rebuilds it). For a hidden overlay the overlay's
+  own records hold `hidden.target.<line id>: true`, and the project setting is null, so no record of
+  the project names the overlay.
+- Property `patches` (decision P1, assumed until the owner decides). An overlay holds a copy of a
+  shared file, or hides one, only with `layr overlay set <name> --patches`. A save that needs it
+  refuses and names the property. New files need no property. The rule is `refuse_unpatched` in
+  `src/overlay.rs`.
+- No target (decision P2, assumed until the owner decides). When the line shows an overlay with
+  `patches` and has no target, a named save that would change the shared set refuses and names
+  `--to shared` and `--to <overlay>`. A line without such an overlay works as before. The rule is
+  `refuse_without_target` in `src/overlay.rs`.
+- `save -m <message> <path>` still ignores the path. Mixed work (a public fix and a private patch) is
+  two saves: stage one part, save it with its target, then the other.
+- Test: tests/t258-overlay-patches.sh (one user), tests/t259-overlay-patches-readers.sh (another
+  reader of the project, Linux service mode).
+
 A protected line takes a state that changes only its overlays from its owner: the rule protects
 the shared set. A change of the shared set still needs the rule (`--direct`), as before. In the
 same way, the checks, approvals and path rules of a protected line apply to the shared set of a
@@ -770,6 +809,10 @@ owner changes with named saves and a user who merges into the line changes by th
   moves, and copies of overlay files under other names (moved, or the same content). So no state
   of the project holds an overlay file, and `push`, `export`, `sync` and `show`/`grep`
   of a shared state give the shared set only. Push and sync also carry the separate overlay projects.
+- A line whose target is an overlay, or that shows an overlay with `patches` and has no target, keeps
+  no change in its automatic states: each one holds the shared head. So other readers of the project
+  never read a patch through an automatic state. Such changes have no automatic state, like overlay
+  files (section 9.7); `line delete` of such a line with changes needs `--discard`.
 - Automatic states made before a file moved into an overlay hold it (an automatic state holds the
   whole working folder, ignored files too), and every reader of the project reads them. `overlay
   move --purge` deletes those states of the line. States of the shared set that held a file keep
@@ -790,7 +833,15 @@ owner changes with named saves and a user who merges into the line changes by th
 
 ### 9.6 Answers to the open questions (for this slice)
 
-1. A delete goes to every layer that has the path.
+1. A delete goes to every layer that has the path. With an overlay target (section 9.3) a delete
+   never changes the shared set: the overlay copy goes, and if the shared set has the path, the
+   overlay gets a delete marker. The markers are the file `.layrremoved` at the root of the overlay
+   state: one path per line, sorted. Assembly of a line takes those paths of the lower layers out,
+   then puts the files of the overlay; no folder gets the file itself. It is an ordinary file of the
+   overlay's tree, so peer sync, store pushes, merges of the overlay and its git remote carry it on
+   btrfs, OverlayFS and APFS alike (the xattr `com.layr.removed` of thin layers is lost by a git
+   remote, so it was not used). A new file at a hidden path takes its marker out. A three-way merge of
+   the overlay merges the file as text; `merge=union-theirs` takes the incoming file whole.
 2. A moved file stays in its layer (the owner follows the file).
 3. `overlay move` wins over ignore rules: an ignored file can move into an overlay. Routing
    patterns are not built.
@@ -826,6 +877,9 @@ shared set only, which is safe but not a decision), 9 to 11 (folder overlays), 1
 - In shared mode each reader has an own overlay line. A new reader starts from the state of the
   source line (or the owner's); a later change by the owner does not reach other users'
   lines. A key that changes is changed in each reader's lines.
+- An older layr does not know write targets or delete markers. In a line with a target it would save
+  an edit of a shared file to the shared set, and its folder would show `.layrremoved` and the hidden
+  files. Use this version or newer in lines with targets.
 - Overlay files have no automatic states: their history consists of named states. Automatic states also
   leave out a file that moved from an overlay path and a new file with the same content as an
   overlay file (a copy, an editor's extra copy); a changed copy under another name (a swap file) goes
