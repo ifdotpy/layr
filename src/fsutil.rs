@@ -74,6 +74,9 @@ pub enum ComparisonIo {
 
 /// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
 pub trait Src: Sync {
+    fn core_reader(&self) -> Option<&dyn layr_fs_core::TreeRead> {
+        None
+    }
     #[cfg(test)]
     fn comparison_io(&self, _path: &str, _io: ComparisonIo) {}
     /// The path to read `rel` from; it may not exist. Fails for a path through a link.
@@ -383,6 +386,12 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
     #[cfg(test)]
     root.comparison_io(rel, ComparisonIo::Metadata);
+    if let Some(reader) = root.core_reader() {
+        return reader
+            .metadata(&layr_fs_core::RelDir::from_bytes(rel.as_bytes()).ok()?)
+            .ok()?
+            .map(|m| layr_fs_common::observation(&m));
+    }
     if let Some(o) = root.objects() {
         return o.meta(rel).ok().flatten();
     }
@@ -467,6 +476,9 @@ fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
 
 pub fn read_link_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
+    if let Some(reader) = root.core_reader() {
+        return Ok(reader.read_link(&layr_fs_core::RelPath::new(rel.as_bytes())?)?);
+    }
     if let Some(o) = root.objects() {
         let entry = o.entry(rel)?.context("object path does not exist")?;
         let layr_objects::Node::Symlink { target } = entry.entry.node else { bail!("object path is not a symbolic link") };
@@ -499,6 +511,15 @@ pub fn open_regular(p: &Path) -> Result<File> {
 
 /// Read a regular file (not following links) of at most `MAX_TEXT` bytes.
 pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    if let Some(reader) = root.core_reader() {
+        let path = layr_fs_core::RelPath::new(rel.as_bytes())?;
+        let metadata = reader.metadata(&layr_fs_core::RelDir::Path(path.clone()))?.context("reader entry absent")?;
+        anyhow::ensure!(metadata.kind == FType::File && metadata.size <= MAX_TEXT, "reader entry is not a bounded regular file");
+        let mut bytes = Vec::new();
+        reader.open_file(&path)?.take(MAX_TEXT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= MAX_TEXT, "reader file grew beyond text limit");
+        return Ok(bytes);
+    }
     if let Some(o) = root.objects() {
         let meta = o.meta(rel)?.context("object path does not exist")?;
         anyhow::ensure!(meta.is_file(), "object path is not a file");
@@ -519,13 +540,17 @@ pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
 /// Binary by the git rule (a NUL byte in the first 8000 bytes), or larger than `MAX_TEXT`.
 /// Reads at most 8000 bytes. Not a regular file: false.
 pub fn is_binary_file(root: &(impl Src + ?Sized), rel: &str) -> bool {
-    let f = match root.at(rel).and_then(|p| open_regular(&p)) {
-        Ok(f) => f,
-        Err(_) => return false,
+    let metadata = match lmeta(root, rel) {
+        Some(metadata) if metadata.is_file() => metadata,
+        _ => return false,
     };
-    if f.metadata().map(|m| m.len() > MAX_TEXT).unwrap_or(false) {
+    if metadata.size > MAX_TEXT {
         return true;
     }
+    let f = match open_source(root, rel, &metadata) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
     let mut v = Vec::new();
     f.take(8000).read_to_end(&mut v).is_ok() && v.contains(&0)
 }
@@ -540,6 +565,10 @@ pub fn copy_regular(src: &Path, dst: &Path) -> Result<()> {
 
 /// Copy a regular file in pieces to `out`.
 pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io::Write) -> Result<()> {
+    if let Some(reader) = root.core_reader() {
+        std::io::copy(&mut reader.open_file(&layr_fs_core::RelPath::new(rel.as_bytes())?)?, out)?;
+        return Ok(());
+    }
     if let Some(o) = root.objects() {
         anyhow::ensure!(o.meta(rel)?.is_some_and(|m| m.is_file()), "object path is not a regular file");
         out.write_all(&o.read(rel)?)?;
@@ -614,7 +643,24 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
+pub(crate) fn open_source<'a>(
+    source: &'a (impl Src + ?Sized),
+    path: &str,
+    observed: &Meta,
+) -> Result<Box<dyn layr_fs_core::ReadSeek + 'a>> {
+    if let Some(reader) = source.core_reader() {
+        return Ok(reader.open_file(&layr_fs_core::RelPath::new(path.as_bytes())?)?);
+    }
+    let file = open_regular(&source.at(path)?)?;
+    anyhow::ensure!(matches_observation(&file.metadata()?, observed), "file changed since observation");
+    Ok(Box::new(file))
+}
+fn same_range(
+    a: &mut (impl layr_fs_core::ReadSeek + ?Sized),
+    b: &mut (impl layr_fs_core::ReadSeek + ?Sized),
+    off: u64,
+    len: u64,
+) -> Result<bool> {
     let _t = crate::trace::span("content compare");
     a.seek(SeekFrom::Start(off))?;
     b.seek(SeekFrom::Start(off))?;
@@ -639,7 +685,7 @@ fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
     })
 }
 
-fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
+fn read_full(f: &mut (impl Read + ?Sized), buf: &mut [u8]) -> Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         let r = f.read(&mut buf[n..])?;
@@ -681,7 +727,7 @@ pub fn same_entry_observed(
         return Ok(false);
     }
     match ma.ftype {
-        FType::Symlink => Ok(read_link(ra, pa)? == read_link(rb, pb)?),
+        FType::Symlink => Ok(read_link_bytes(ra, pa)? == read_link_bytes(rb, pb)?),
         FType::Dir | FType::Special => Ok(true),
         FType::File => {
             if ma.size != mb.size {
@@ -719,6 +765,19 @@ pub fn same_entry_observed(
                 ra.comparison_io(pa, ComparisonIo::Open);
                 rb.comparison_io(pb, ComparisonIo::Open);
             }
+            if ra.core_reader().is_some() || rb.core_reader().is_some() {
+                let mut a = open_source(ra, pa, ma)?;
+                let mut b = open_source(rb, pb, mb)?;
+                if let Some(ranges) = ranges {
+                    for (offset, length) in ranges.bounded(ma.size) {
+                        if !same_range(&mut a, &mut b, offset, length)? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                return same_range(&mut a, &mut b, 0, ma.size);
+            }
             let mut a = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(ra.at(pa)?)?;
             let mut b = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(rb.at(pb)?)?;
             let (opened_a, opened_b) = (a.metadata()?, b.metadata()?);
@@ -751,6 +810,10 @@ fn same_blob(
     store: &layr_objects::Store,
     blob: layr_objects::Id,
 ) -> Result<bool> {
+    if let Some(reader) = src.core_reader() {
+        let mut file = reader.open_file(&layr_fs_core::RelPath::new(path.as_bytes())?)?;
+        return Ok(store.hash_reader(&mut file, meta.size)? == blob);
+    }
     // Validate the descriptor rather than reopening its path after checking the observation.
     // A replacement link is never followed and a replacement FIFO cannot block.
     #[cfg(test)]
@@ -858,6 +921,84 @@ fn copy_entry_impl(
     _replace_index: bool,
     now: bool,
 ) -> Result<()> {
+    if let Some(reader) = src_root.core_reader() {
+        use layr_fs_core::{RelDir, RelPath};
+        let relative = RelPath::new(src_rel.as_bytes())?;
+        let meta = reader.metadata(&RelDir::Path(relative.clone()))?.context("reader source absent")?;
+        refuse_case_clash(dst_root, dst_rel)?;
+        let tree = crate::tree::Tree::open(dst_root)?;
+        tree.mkdirs_for(dst_rel, own)?;
+        if meta.kind == FType::Symlink {
+            use std::os::unix::ffi::OsStrExt;
+            let bytes = reader.read_link(&relative)?;
+            let (parent, name) = dst_rel.rsplit_once('/').unwrap_or(("", dst_rel));
+            tree.remove(dst_rel)?;
+            rustix::fs::symlinkat(std::ffi::OsStr::from_bytes(&bytes), tree.open_folder(parent)?, name)?;
+            if let Some((uid, gid)) = own {
+                tree.chown(dst_rel, uid, gid)?;
+            }
+            return Ok(());
+        }
+        let finish = |file: &File| -> Result<()> {
+            // Core states use the stored xattr vocabulary; native ACL adapters remain on
+            // their existing path until their driver migration supplies explicit policy.
+            let mode = meta.attributes.mode;
+            fchown(file, own)?;
+            file.set_permissions(fs::Permissions::from_mode(mode | 0o200))?;
+            let synchronized = (|| -> Result<()> {
+                let size = rustix::fs::flistxattr_query(file)?;
+                let mut names = vec![0; size];
+                let size = rustix::fs::flistxattr(file, names.as_mut_slice())?;
+                for name in names[..size].split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+                    if layr_objects::fsx::keep_xattr(name) && !meta.attributes.xattrs.iter().any(|(wanted, _)| wanted == name) {
+                        rustix::fs::fremovexattr(file, name)?;
+                    }
+                }
+                for (name, value) in &meta.attributes.xattrs {
+                    if layr_objects::fsx::keep_xattr(name) {
+                        use std::os::unix::ffi::OsStrExt;
+                        rustix::fs::fsetxattr(file, std::ffi::OsStr::from_bytes(name), value, rustix::fs::XattrFlags::empty())?;
+                    }
+                }
+                Ok(())
+            })();
+            let restored = file.set_permissions(fs::Permissions::from_mode(mode));
+            synchronized?;
+            restored?;
+            let stamp = meta.attributes.modified_ns;
+            if now {
+                set_mtime(file, 0, rustix::fs::UTIME_NOW as i64)?;
+            } else {
+                set_mtime(file, stamp.div_euclid(1_000_000_000), stamp.rem_euclid(1_000_000_000))?;
+            }
+            Ok(())
+        };
+        return match meta.kind {
+            FType::Dir => {
+                tree.mkdirs(dst_rel, own)?;
+                finish(&tree.open_folder(dst_rel)?)
+            }
+            FType::File => {
+                let fill = |output: &File| -> Result<()> {
+                    output.set_len(0)?;
+                    std::io::copy(&mut reader.open_file(&relative)?, &mut &*output)?;
+                    finish(output)
+                };
+                if !_replace_index {
+                    if let Some(output) = tree.open_write(dst_rel)? {
+                        if output.metadata()?.nlink() == 1 {
+                            return fill(&output);
+                        }
+                    }
+                }
+                if tree.stat(dst_rel).is_some_and(|meta| meta.is_dir()) {
+                    tree.remove(dst_rel)?;
+                }
+                tree.replace_file_atomic(dst_rel, fill)
+            }
+            _ => bail!("cannot copy a special file"),
+        };
+    }
     let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
     refuse_case_clash(dst_root, dst_rel)?;
@@ -1153,6 +1294,11 @@ pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta
     };
     #[cfg(test)]
     let f: &mut dyn FnMut(&str, &Meta) -> Result<bool> = &mut counted;
+    if let Some(reader) = root.core_reader() {
+        return Ok(layr_fs_common::walk(reader, &layr_fs_core::RelDir::from_bytes(rel.as_bytes())?, &mut |path, meta| {
+            f(path.utf8()?, &layr_fs_common::observation(meta)).map_err(layr_fs_core::FsError::backend)
+        })?);
+    }
     if let Some(o) = root.objects() {
         return o.walk(rel, f);
     }

@@ -15,8 +15,13 @@ pub enum HintSet {
     Partial,
 }
 
-pub trait ChangeHints: Sync {
+pub trait PathChangeHints: Sync {
     /// Both trees must be stable for the duration of comparison. A live working directory
     /// must first be captured; this contract is not a journal since the last cached status.
     fn between(&self, base: &Path, tree: &Path) -> Result<HintSet, FsError>;
+}
+
+/// Candidate evidence bound to issued immutable trees. Partial evidence always selects a scan.
+pub trait ChangeHints: Send + Sync {
+    fn between(&self, base: &crate::FrozenTree, tree: &crate::FrozenTree) -> Result<HintSet, FsError>;
 }

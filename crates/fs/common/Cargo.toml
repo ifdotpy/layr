@@ -1,0 +1,13 @@
+[package]
+name = "layr-fs-common"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+layr-fs-core = { path = "../core" }

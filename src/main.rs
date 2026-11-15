@@ -31,6 +31,8 @@ mod disk;
 mod errors;
 mod free;
 mod fsutil;
+#[cfg(test)]
+mod fs_contract_tests;
 mod gitbridge;
 mod ids;
 use layr_store::http;
@@ -42,6 +44,7 @@ mod lineops;
 mod linepaths;
 mod machine_trust;
 mod merge;
+mod write_source;
 mod model;
 mod objstore;
 mod object_tree;

@@ -641,6 +641,11 @@ impl Store {
 
     /// Hash an already-open file with the length observed on that descriptor.
     pub fn hash_open_file(&self, f: &mut File, len: u64) -> Result<Id> {
+        self.hash_reader(f, len)
+    }
+
+    /// Hash a core reader with the object's existing keying and reusable scratch.
+    pub fn hash_reader(&self, f: &mut impl std::io::Read, len: u64) -> Result<Id> {
         thread_local! {
             static BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
@@ -671,6 +676,28 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Stream a representation-independent file through the existing object publication path.
+    pub fn put_reader_with(
+        &self,
+        reader: &mut dyn std::io::Read,
+        temperature: Temperature,
+        bases: &[Id],
+        judge: bool,
+    ) -> Result<(Id, u64)> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let temporary = self.temp();
+        let result = (|| {
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+            std::io::copy(reader, &mut file)?;
+            drop(file);
+            self.put_file_with(&temporary, temperature, bases, judge)
+        })();
+        let cleanup = fs::remove_file(&temporary);
+        let result = result?;
+        cleanup?;
+        Ok(result)
     }
 
     /// A hot write: clone (or copy) the file into `tmp/`, hash the copy, and publish it. The id is

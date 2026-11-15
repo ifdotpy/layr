@@ -26,6 +26,9 @@ fn candidates_with_hints(
     child: &(impl Src + ?Sized),
     hints: Option<&dyn crate::change_hints::ChangeHints>,
 ) -> Result<Vec<EntryChange>> {
+    if parent.core_reader().is_some() || child.core_reader().is_some() {
+        return object_change_candidates(parent, child);
+    }
     // Object identities are not native snapshot identities. Never apply native hints to them.
     if parent.objects().is_none() && child.objects().is_none() {
         if let (Some(hints), Some(base), Some(tree)) = (hints, parent.folder(), child.folder()) {
@@ -226,13 +229,20 @@ pub fn really_changed(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized),
 /// True when two entries hold the same stored attributes (and ACL on APFS).
 fn stored_same(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), path: &str) -> bool {
     #[cfg(target_os = "macos")]
-    if parent.objects().is_none() && child.objects().is_none() {
+    if parent.objects().is_none() && child.objects().is_none() && parent.core_reader().is_none() && child.core_reader().is_none()
+    {
         return match (parent.at(path), child.at(path)) {
             (Ok(a), Ok(b)) => crate::thin::stored_metadata_same(&a, &b).unwrap_or(false),
             _ => false,
         };
     }
     fn attrs(src: &(impl Src + ?Sized), path: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if let Some(reader) = src.core_reader() {
+            let metadata = reader
+                .metadata(&layr_fs_core::RelDir::from_bytes(path.as_bytes())?)?
+                .ok_or_else(|| anyhow::anyhow!("reader entry absent"))?;
+            return Ok(metadata.attributes.xattrs.into_iter().filter(|(name, _)| layr_objects::fsx::keep_xattr(name)).collect());
+        }
         if let Some(tree) = src.objects() {
             return Ok(tree.entry(path)?.ok_or_else(|| anyhow::anyhow!("object path missing"))?.entry.xattrs);
         }

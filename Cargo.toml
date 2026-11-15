@@ -3,6 +3,8 @@ members = [
   "crates/core/types",
   "crates/fs/stream-codec",
   "crates/fs/core",
+  "crates/fs/common",
+  "crates/fs/plain",
   "crates/store/object-format",
   "crates/layr-api",
   "crates/layr-store",
@@ -35,6 +37,8 @@ undocumented_unsafe_blocks = "deny"
 [workspace.metadata.layers]
 layr-adapter = { layer = 0, dependencies = [], leaf = true }
 layr-api = { layer = 0, dependencies = [], leaf = true }
+layr-fs-common = { layer = 1, dependencies = ["layr-fs-core"], leaf = true, normal-dependencies = ["layr-fs-core"] }
+layr-fs-plain = { layer = 2, dependencies = ["layr-fs-core", "layr-fs-common"] }
 layr-fs-core = { layer = 0, dependencies = [], leaf = true, normal-dependencies = ["serde"] }
 layr-stream-codec = { layer = 0, dependencies = [], leaf = true }
 layr-types = { layer = 0, dependencies = [], leaf = true }
@@ -50,7 +54,7 @@ layr-object-format = { layer = 1, dependencies = [
 layr-store = { layer = 1, dependencies = ["layr-hashers", "layr-object-format"] }
 layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
 layr-model = { layer = 2, dependencies = ["layr-hashers", "layr-store", "layr-types"] }
-layr-objects = { layer = 2, dependencies = ["layr-hashers", "layr-object-format", "layr-store"] }
+layr-objects = { layer = 2, dependencies = ["layr-fs-core", "layr-hashers", "layr-object-format", "layr-store"] }
 layr-retest = { layer = 2, dependencies = ["layr-cache"] }
 layr = { layer = 3, dependencies = [
   "layr-adapter",
@@ -64,6 +68,8 @@ layr = { layer = 3, dependencies = [
   "layr-types",
   "layr-stream-codec",
   "layr-fs-core",
+  "layr-fs-common",
+  "layr-fs-plain",
 ] }
 
 [workspace.package]
@@ -100,6 +106,7 @@ path = "src/main.rs"
 overlayfs = []
 
 [dependencies]
+layr-fs-common = { path = "crates/fs/common" }
 layr-fs-core = { path = "crates/fs/core", features = ["serde"] }
 layr-stream-codec = { path = "crates/fs/stream-codec" }
 layr-types = { path = "crates/core/types" }
@@ -163,6 +170,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 wtransport = { version = "0.7", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+layr-fs-plain = { path = "crates/fs/plain" }
 # The runner tests: a self-signed WebTransport server and a client that skips its certificate.
 wtransport = { version = "0.7", default-features = false, features = [
   "ring",

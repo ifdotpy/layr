@@ -1859,7 +1859,9 @@ dependencies = [
  "layr-adapter",
  "layr-api",
  "layr-cache",
+ "layr-fs-common",
  "layr-fs-core",
+ "layr-fs-plain",
  "layr-hashers",
  "layr-model",
  "layr-objects",
@@ -1915,11 +1917,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "layr-fs-common"
+version = "0.47.0"
+dependencies = [
+ "layr-fs-core",
+]
+
+[[package]]
 name = "layr-fs-core"
 version = "0.47.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "layr-fs-plain"
+version = "0.47.0"
+dependencies = [
+ "layr-fs-common",
+ "layr-fs-core",
+ "rustix",
 ]
 
 [[package]]
@@ -1971,6 +1989,7 @@ dependencies = [
  "anyhow",
  "hex",
  "hmac",
+ "layr-fs-core",
  "layr-hashers",
  "layr-object-format",
  "layr-store",

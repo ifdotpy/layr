@@ -102,6 +102,15 @@ impl TreeIssuer {
         let lease = self.lease();
         crate::Capture { tree: FrozenTree { lease: lease.clone(), reader }, consistency, ownership: OwnedTree { lease } }
     }
+    /// The driver has completed a private copy and relinquishes all writable handles.
+    pub fn seal(&self, created: CreatedTree, consistency: crate::CaptureConsistency) -> Result<crate::Capture> {
+        self.check(&created.tree.lease.instance)?;
+        Ok(crate::Capture {
+            tree: FrozenTree { lease: created.tree.lease, reader: created.tree.writer },
+            ownership: created.ownership,
+            consistency,
+        })
+    }
     /// Trusted registration of an existing tree conveys reading, never deletion authority.
     pub fn import(&self, reader: Arc<dyn TreeRead>) -> FrozenTree {
         FrozenTree { lease: self.lease(), reader }
@@ -174,8 +183,20 @@ mod tests {
         fn put(&self, _: &RelPath, _: EntryData<'_>, _: &EntryAttributes) -> Result<()> {
             Ok(())
         }
+        fn rename_new(&self, _: &RelPath, _: &RelPath) -> Result<()> {
+            Err(FsError::Invalid("absent"))
+        }
         fn remove_entry(&self, _: &RelPath) -> Result<()> {
             Ok(())
+        }
+        fn remove_empty_dir(&self, _: &RelPath) -> Result<bool> {
+            Ok(true)
+        }
+        fn overwrite_file(&self, _: &RelPath, _: &mut dyn std::io::Read, _: i64) -> Result<crate::Attempt<()>> {
+            Err(FsError::Invalid("absent"))
+        }
+        fn write_range(&self, _: &RelPath, _: u64, _: &[u8], _: i64) -> Result<()> {
+            Err(FsError::Invalid("absent"))
         }
         fn set_metadata(&self, _: &RelDir, _: &EntryAttributes) -> Result<()> {
             Ok(())

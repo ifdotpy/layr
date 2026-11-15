@@ -16,6 +16,7 @@ pub enum FsError {
     Invalid(&'static str),
     WrongInstance,
     Busy,
+    Cleanup { cause: Box<FsError>, failure: Box<RemovalFailure> },
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }
 impl FsError {
@@ -30,6 +31,7 @@ impl std::fmt::Display for FsError {
             Self::Invalid(s) => f.write_str(s),
             Self::WrongInstance => f.write_str("filesystem handle belongs to another instance"),
             Self::Busy => f.write_str("tree still has active readers"),
+            Self::Cleanup { cause, failure } => write!(f, "{cause}; cleanup requires retry: {}", failure.error),
             Self::Backend(e) => e.fmt(f),
         }
     }
@@ -38,6 +40,7 @@ impl std::error::Error for FsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::Cleanup { cause, .. } => Some(cause.as_ref()),
             Self::Backend(e) => Some(e.as_ref()),
             _ => None,
         }
@@ -92,7 +95,16 @@ pub trait TreeRead: Send + Sync {
 /// Mutations required by the shared copy and merge executors. Drivers enforce exclusive tree ownership.
 pub trait TreeWrite: TreeRead {
     fn put(&self, path: &RelPath, data: EntryData<'_>, attributes: &EntryAttributes) -> Result<()>;
+    /// Move an entry/subtree without replacing a destination; preserve link identities.
+    fn rename_new(&self, source: &RelPath, destination: &RelPath) -> Result<()>;
     fn remove_entry(&self, path: &RelPath) -> Result<()>;
+    /// Remove only an empty directory; false means it still contains entries.
+    fn remove_empty_dir(&self, path: &RelPath) -> Result<bool>;
+    /// Mutate an existing regular file, preserving its inode and every hard-link alias.
+    /// Unavailable is returned before reading the source or changing the destination.
+    fn overwrite_file(&self, path: &RelPath, source: &mut dyn Read, modified_ns: i64) -> Result<Attempt<()>>;
+    /// Overwrite an in-bounds byte range without truncating or changing link identities.
+    fn write_range(&self, path: &RelPath, offset: u64, bytes: &[u8], modified_ns: i64) -> Result<()>;
     fn set_metadata(&self, path: &RelDir, attributes: &EntryAttributes) -> Result<()>;
 }
 pub enum EntryData<'a> {
@@ -141,7 +153,7 @@ pub struct Capabilities<'a> {
 #[must_use]
 pub enum Attempt<T> {
     Applied(T),
-    Unavailable,
+    Unavailable(std::io::Error),
 }
 
 /// Clone into an exclusively prepared destination, preserving the requested entry's metadata.

@@ -12,6 +12,7 @@ use crate::compare::DataEvidence;
 use crate::fsutil::{self, FType, Meta, Src};
 use crate::model::{Conflict, ConflictKind, ConflictEntryKind};
 use crate::repo::skip_path;
+use crate::write_source::WriteSrc;
 use anyhow::{bail, Context, Result};
 use ignore::gitignore::GitignoreBuilder;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -22,7 +23,7 @@ pub struct Input<'a> {
     pub base: &'a dyn Src,
     pub ours: &'a dyn Src,
     pub theirs: &'a dyn Src,
-    pub result: &'a Path,
+    pub result: &'a WriteSrc<'a>,
     pub base_id: &'a str,
     pub ours_id: &'a str,
     pub theirs_id: &'a str,
@@ -217,7 +218,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     fn take_theirs(&mut self, tp: &str, rp: &str) -> Result<()> {
-        fsutil::copy_entry(self.i.theirs, tp, self.i.result, rp, None)?;
+        self.i.result.copy_from(self.i.theirs, tp, rp)?;
         self.out.changed.insert(rp.to_string());
         Ok(())
     }
@@ -288,9 +289,8 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
                     c.conflict(&dst, ConflictKind::AddAdd);
                     continue;
                 }
-                fsutil::make_parents(i.result, &dst, None)?;
-                std::fs::rename(fsutil::safe_join(i.result, &src)?, fsutil::safe_join(i.result, &dst)?)
-                    .with_context(|| format!("move {src} to {dst}"))?;
+                i.result.make_parents(&dst)?;
+                i.result.rename(&src, &dst).with_context(|| format!("move {src} to {dst}"))?;
                 c.out.changed.insert(dst.clone());
                 c.out.changed.insert(src.clone());
                 prune(i.result, i.theirs, &src)?;
@@ -321,8 +321,8 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
             match (&a_b, &a_r) {
                 (Some(b), Some(r)) if !b.is_dir() && !r.is_dir() => {
                     if c.same(i.base, &p, i.result, &q)? {
-                        fsutil::remove_entry(i.result, &q)?;
-                        std::fs::create_dir_all(fsutil::safe_join(i.result, &q)?)?;
+                        i.result.remove(&q)?;
+                        i.result.mkdirs(&q)?;
                         c.out.changed.insert(q.clone());
                     } else {
                         c.conflict(&p, ConflictKind::TypeChange { ours: ConflictEntryKind::File, theirs: ConflictEntryKind::Directory });
@@ -337,10 +337,10 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
                     if dir_has_entries(i.theirs, &p) {
                         c.conflict(&p, ConflictKind::OursDeletedDirectoryWithAddedFiles);
                     }
-                    std::fs::create_dir_all(fsutil::safe_join(i.result, &q)?)?;
+                    i.result.mkdirs(&q)?;
                 }
                 (_, None) => {
-                    fsutil::make_parents(i.result, &format!("{q}/x"), None)?;
+                    i.result.make_parents(&format!("{q}/x"))?;
                 }
                 _ => {}
             }
@@ -356,14 +356,14 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
                 OursAt::Deleted => {}
                 OursAt::Unchanged => {
                     if a_r.is_some() {
-                        fsutil::remove_entry(i.result, &q)?;
+                        i.result.remove(&q)?;
                         c.out.changed.insert(q.clone());
                         prune(i.result, i.theirs, &q)?;
                     }
                 }
                 OursAt::Changed | OursAt::Moved(_) => {
                     if a_b.is_some() && a_r.is_some() && c.same(i.base, &p, i.result, &q)? {
-                        fsutil::remove_entry(i.result, &q)?;
+                        i.result.remove(&q)?;
                         c.out.changed.insert(q.clone());
                     } else if a_b.is_some() {
                         c.conflict(&q, ConflictKind::ModifyDelete);
@@ -408,9 +408,8 @@ fn merge_tree(i: &Input, sides: &MergeSides, attributes_only: bool) -> Result<Ou
     // 3. Folders deleted by theirs, deepest first.
     dir_deletes.sort_by_key(|p| std::cmp::Reverse(p.len()));
     for p in dir_deletes {
-        let rp = fsutil::safe_join(i.result, &p)?;
-        if rp.exists() {
-            if std::fs::remove_dir(&rp).is_err() {
+        if let Some(metadata) = fsutil::lmeta(i.result, &p) {
+            if !metadata.is_dir() || !i.result.remove_empty_dir(&p)? {
                 c.conflict(&p, ConflictKind::TheirsDeletedChangedDirectory);
             } else {
                 c.out.changed.insert(p.clone());
@@ -433,8 +432,7 @@ fn derive_rules(i: &Input, attrs: &Attrs) -> Result<BTreeMap<String, DeriveRule>
         return Ok(BTreeMap::new());
     }
     let mut paths = BTreeSet::new();
-    let result = i.result.to_path_buf();
-    for root in [i.base, i.ours, i.theirs, &result] {
+    for root in [i.base, i.ours, i.theirs, i.result as &dyn Src] {
         fsutil::walk(root, "", &mut |p, m| {
             if skip_path(p) {
                 return Ok(false);
@@ -462,7 +460,7 @@ fn derive_rules(i: &Input, attrs: &Attrs) -> Result<BTreeMap<String, DeriveRule>
             _ => continue,
         };
         if !rules.contains_key(&name) {
-            let mut b = GitignoreBuilder::new(i.result);
+            let mut b = GitignoreBuilder::new("");
             if let Some(inputs) = (i.config)(&format!("derive.inputs.{name}")) {
                 for pattern in inputs.split_whitespace() {
                     b.add_line(None, pattern)?;
@@ -475,18 +473,18 @@ fn derive_rules(i: &Input, attrs: &Attrs) -> Result<BTreeMap<String, DeriveRule>
     Ok(rules)
 }
 
-fn derive_matches(rule: &DeriveRule, root: &Path, p: &str) -> bool {
-    rule.inputs.matched_path_or_any_parents(root.join(p), false).is_ignore()
+fn derive_matches(rule: &DeriveRule, p: &str) -> bool {
+    rule.inputs.matched_path_or_any_parents(Path::new(p), false).is_ignore()
 }
 
 /// Stable topological order. Unresolved nodes contain a cycle or depend on one.
-fn derive_order(rules: &BTreeMap<String, DeriveRule>, root: &Path) -> (Vec<String>, BTreeSet<String>) {
+fn derive_order(rules: &BTreeMap<String, DeriveRule>) -> (Vec<String>, BTreeSet<String>) {
     let mut pending: BTreeSet<String> = rules.keys().cloned().collect();
     let mut order = Vec::new();
     loop {
         let next = pending
             .iter()
-            .find(|name| !pending.iter().any(|other| rules[other].outputs.iter().any(|p| derive_matches(&rules[*name], root, p))))
+            .find(|name| !pending.iter().any(|other| rules[other].outputs.iter().any(|p| derive_matches(&rules[*name], p))))
             .cloned();
         match next {
             Some(n) => {
@@ -515,18 +513,18 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryCh
             }
         }
     }
-    let (order, cyclic) = derive_order(&rules, i.result);
+    let (order, cyclic) = derive_order(&rules);
     // Downstream rules also run when an upstream output needs regeneration.
     let mut active: BTreeSet<String> = rules
         .iter()
-        .filter(|(_, rule)| changed.iter().any(|p| rule.outputs.contains(p) || derive_matches(rule, i.result, p)))
+        .filter(|(_, rule)| changed.iter().any(|p| rule.outputs.contains(p) || derive_matches(rule, p)))
         .map(|(n, _)| n.clone())
         .collect();
     loop {
         let outputs: BTreeSet<String> = active.iter().flat_map(|n| rules[n].outputs.iter().cloned()).collect();
         let before = active.len();
         for (name, rule) in &rules {
-            if outputs.iter().any(|p| derive_matches(rule, i.result, p)) {
+            if outputs.iter().any(|p| derive_matches(rule, p)) {
                 active.insert(name.clone());
             }
         }
@@ -546,7 +544,7 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryCh
             continue;
         }
         let rule = &rules[&name];
-        let dependency_failed = failed.iter().any(|n| rules[n].outputs.iter().any(|p| derive_matches(rule, i.result, p)));
+        let dependency_failed = failed.iter().any(|n| rules[n].outputs.iter().any(|p| derive_matches(rule, p)));
         let result = match (i.config)(&format!("derive.command.{name}")) {
             Some(cmd) if !dependency_failed => run_derive(i, &cmd, &rule.outputs),
             _ => Ok(false),
@@ -567,9 +565,9 @@ fn run_derives(c: &mut Ctx, rules: BTreeMap<String, DeriveRule>, ours: &[EntryCh
 
 fn keep_derive_ours(i: &Input, p: &str) -> Result<()> {
     if fsutil::lmeta(i.ours, p).is_some() {
-        fsutil::copy_entry(i.ours, p, i.result, p, None)?;
+        i.result.copy_from(i.ours, p, p)?;
     } else if fsutil::lmeta(i.result, p).is_some() {
-        fsutil::remove_entry(i.result, p)?;
+        i.result.remove(p)?;
     }
     Ok(())
 }
@@ -607,7 +605,7 @@ fn run_derive(i: &Input, cmd: &str, outputs: &BTreeSet<String>) -> Result<bool> 
         };
         for (p, mut f) in files {
             let mode = fsutil::lmeta(i.ours, &p).map(|m| m.mode).unwrap_or(0o644);
-            fsutil::write_file_from(i.result, &p, &mut f, mode, None)?;
+            i.result.write_from(&p, &mut f, mode)?;
         }
         Ok(true)
     })();
@@ -632,7 +630,7 @@ fn dir_has_entries(root: &dyn Src, p: &str) -> bool {
         && found
 }
 
-fn prune(result: &Path, theirs: &dyn Src, rel: &str) -> Result<()> {
+fn prune(result: &WriteSrc, theirs: &dyn Src, rel: &str) -> Result<()> {
     let mut comps: Vec<&str> = rel.split('/').collect();
     comps.pop();
     while !comps.is_empty() {
@@ -640,8 +638,7 @@ fn prune(result: &Path, theirs: &dyn Src, rel: &str) -> Result<()> {
         if fsutil::lmeta(theirs, &d).is_some() {
             break;
         }
-        let p = fsutil::safe_join(result, &d)?;
-        if std::fs::remove_dir(&p).is_err() {
+        if !result.remove_empty_dir(&d)? {
             break;
         }
         comps.pop();
@@ -654,11 +651,11 @@ fn add_add(c: &mut Ctx, p: &str, q: &str) -> Result<()> {
     let (mr, mt) = (fsutil::lmeta(i.result, q).unwrap(), fsutil::lmeta(i.theirs, p).unwrap());
     if mr.ftype == FType::File && mt.ftype == FType::File {
         let driver = driver_for(c, q, i.result, q, i.theirs, p);
-        let small = !too_big(&fsutil::safe_join(i.result, q)?) && !too_big(&i.theirs.at(p)?);
+        let small = mr.size <= fsutil::MAX_TEXT && mt.size <= fsutil::MAX_TEXT;
         if (driver == "text" || driver == "union") && small {
             let empty = tempfile_path("base")?;
             std::fs::write(&empty, b"")?;
-            let r = run_merge_file(i, &fsutil::safe_join(i.result, q)?, &empty, &i.theirs.at(p)?, driver == "union");
+            let r = run_merge_file(i, q, &empty, "", i.theirs, p, driver == "union");
             let _ = std::fs::remove_file(&empty);
             c.out.changed.insert(q.to_string());
             c.out.messages.push(format!("Auto-merging {q}"));
@@ -719,8 +716,8 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
         let o_changed = !c.content_same(i.base, bp, i.result, rp)?;
         if !o_changed {
             let mode = fsutil::lmeta(i.result, rp).unwrap().mode;
-            fsutil::copy_entry(i.theirs, tp, i.result, rp, None)?;
-            fsutil::set_mode(i.result, rp, mode)?;
+            i.result.copy_from(i.theirs, tp, rp)?;
+            i.result.set_mode(rp, mode)?;
             c.out.changed.insert(rp.to_string());
         } else if !c.content_same(i.result, rp, i.theirs, tp)? {
             let tr = theirs.ranges(tp);
@@ -733,7 +730,7 @@ fn file_merge(c: &mut Ctx, bp: &str, tp: &str, rp: &str, ours: &Side, theirs: &S
     let (mb, mr, mt) = (mb, fsutil::lmeta(i.result, rp).unwrap_or(mr), mt);
     if mb.executable() != mt.executable() && mr.executable() == mb.executable() {
         let m = if mt.executable() { mr.mode | 0o111 } else { mr.mode & !0o111 };
-        fsutil::set_mode(i.result, rp, m)?;
+        i.result.set_mode(rp, m)?;
         c.out.changed.insert(rp.to_string());
     } else if mb.executable() != mt.executable() && mr.executable() != mt.executable() {
         c.conflict(rp, ConflictKind::Mode);
@@ -772,6 +769,21 @@ fn tempfile_path(tag: &str) -> Result<PathBuf> {
 /// Copy a version into a private file, in pieces and without following links. Anything but a
 /// regular file (a link, a folder, nothing) is copied as an empty file: a link in a merged tree
 /// must never make the service read the file it points to.
+fn export_version(source: &dyn Src, rel: &str, destination: &Path) -> Result<()> {
+    if source.core_reader().is_none() {
+        return copy_version(&source.at(rel)?, destination);
+    }
+    let meta = fsutil::lmeta(source, rel).context("tool input absent")?;
+    if !meta.is_file() {
+        bail!("tool input is not a regular file");
+    }
+    let mut input = fsutil::open_source(source, rel, &meta)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(destination)?;
+    std::io::copy(&mut input, &mut output)?;
+    Ok(())
+}
+
 fn copy_version(src: &Path, dst: &Path) -> Result<()> {
     if fsutil::copy_regular(src, dst).is_err() {
         let _ = std::fs::remove_file(dst);
@@ -781,18 +793,12 @@ fn copy_version(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// A regular file too large for a text merge.
-fn too_big(p: &Path) -> bool {
-    std::fs::symlink_metadata(p).map(|m| m.is_file() && m.len() > fsutil::MAX_TEXT).unwrap_or(false)
-}
-
-/// `git merge-file` on private copies: writes the result into `ours`, returns the number of
-/// conflicts.
-fn run_merge_file(i: &Input, ours: &Path, base: &Path, theirs: &Path, union: bool) -> Result<i32> {
+fn run_merge_file(i: &Input, rp: &str, base: &dyn Src, bp: &str, theirs: &dyn Src, tp: &str, union: bool) -> Result<i32> {
     let dir = private_dir()?;
     let (o, b, t) = (dir.join("ours"), dir.join("base"), dir.join("theirs"));
-    copy_version(ours, &o)?;
-    copy_version(base, &b)?;
-    copy_version(theirs, &t)?;
+    export_version(i.result, rp, &o)?;
+    export_version(base, bp, &b)?;
+    export_version(theirs, tp, &t)?;
     let mut cmd = Command::new("git");
     cmd.arg("merge-file");
     if union {
@@ -803,13 +809,8 @@ fn run_merge_file(i: &Input, ours: &Path, base: &Path, theirs: &Path, union: boo
     let res = match st {
         Ok(st) => match st.code() {
             Some(n) if n >= 0 => {
-                // Write in place (same inode), never through a link.
-                let data = std::fs::read(&o)?;
-                use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(ours)?;
-                f.set_len(0)?;
-                f.write_all(&data)?;
+                // Import in place: all aliases retain the merged content and inode.
+                i.result.overwrite(rp, &mut std::fs::File::open(&o)?)?;
                 Ok(n)
             }
             _ => Err(anyhow::anyhow!("git merge-file failed")),
@@ -830,19 +831,20 @@ fn run_driver(
     theirs_ranges: DataEvidence,
 ) -> Result<()> {
     let i = c.i;
-    let r_path = fsutil::safe_join(i.result, rp)?;
-    let b_path = i.base.at(bp)?;
-    let t_path = i.theirs.at(tp)?;
     c.out.changed.insert(rp.to_string());
     match driver {
-        "text" | "union" if [&r_path, &b_path, &t_path].iter().any(|p| too_big(p)) => {
-            c.conflict(rp, ConflictKind::BinaryTooLarge { limit_mib: fsutil::MAX_TEXT >> 20 })
-        }
         "text" | "union" => {
-            c.out.messages.push(format!("Auto-merging {rp}"));
-            let n = run_merge_file(i, &r_path, &b_path, &t_path, driver == "union")?;
-            if n > 0 {
-                c.conflict(rp, ConflictKind::Content);
+            if [(i.base, bp), (i.result as &dyn Src, rp), (i.theirs, tp)]
+                .iter()
+                .any(|(source, path)| fsutil::lmeta(*source, path).is_none_or(|m| m.size > fsutil::MAX_TEXT))
+            {
+                c.conflict(rp, ConflictKind::BinaryTooLarge { limit_mib: fsutil::MAX_TEXT >> 20 });
+            } else {
+                c.out.messages.push(format!("Auto-merging {rp}"));
+                let n = run_merge_file(i, rp, i.base, bp, i.theirs, tp, driver == "union")?;
+                if n > 0 {
+                    c.conflict(rp, ConflictKind::Content);
+                }
             }
         }
         "ours" => {}
@@ -864,7 +866,7 @@ fn run_driver(
                 }
             };
             c.out.messages.push(format!("Auto-merging {rp} ({name})"));
-            if !run_command_driver(i, &cmd, &b_path, &r_path, &t_path, rp)? {
+            if !run_command_driver(i, &cmd, bp, tp, rp)? {
                 c.conflict(rp, ConflictKind::DriverFailed { name: name.to_string() });
             } else {
                 verify(c, rp)?;
@@ -889,14 +891,14 @@ fn verify(c: &mut Ctx, rp: &str) -> Result<()> {
     };
     let dir = private_dir()?;
     let a = dir.join("result");
-    copy_version(&fsutil::safe_join(i.result, rp)?, &a)?;
+    export_version(i.result, rp, &a)?;
     hand_over(&dir, i.run_as.as_ref())?;
     let ok = shell_at(&cmd.replace("%A", &sh_quote(&a)).replace("%P", &sh_quote_str(rp)), i.run_as.as_ref(), i.allow_root, None);
     remove_private(&dir, i.run_as.as_ref());
     let ok = ok?;
     if !ok {
         // Keep ours: copy back the ours version.
-        fsutil::copy_entry(i.ours, rp, i.result, rp, None)?;
+        i.result.copy_from(i.ours, rp, rp)?;
         c.conflict(rp, ConflictKind::VerifyFailed { name: name.to_string() });
     }
     Ok(())
@@ -927,7 +929,7 @@ fn hand_over(d: &Path, run_as: &crate::privs::FsIdentity) -> Result<()> {
 /// permissions and without following a link: whatever the user leaves at that name, the
 /// service reads only what the user can read.
 /// False when there is no regular file to take.
-fn take_command_output(path: &Path, run_as: &crate::privs::FsIdentity, result: &Path, rp: &str) -> Result<bool> {
+fn take_command_output(path: &Path, run_as: &crate::privs::FsIdentity, result: &WriteSrc, rp: &str) -> Result<bool> {
     let opened = crate::privs::as_user_fs(run_as, || {
         use std::os::unix::fs::OpenOptionsExt;
         let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
@@ -941,7 +943,7 @@ fn take_command_output(path: &Path, run_as: &crate::privs::FsIdentity, result: &
         Err(_) => return Ok(false),
     };
     let mode = fsutil::lmeta(result, rp).map(|m| m.mode).unwrap_or(0o644);
-    fsutil::write_file_from(result, rp, &mut f, mode, None)?;
+    result.write_from(rp, &mut f, mode)?;
     Ok(true)
 }
 
@@ -975,12 +977,12 @@ fn shell_at(cmd: &str, run_as: &crate::privs::FsIdentity, allow_root: bool, dir:
 
 /// A configured driver command, as in git: `%O` base, `%A` ours (the result is written here),
 /// `%B` theirs, `%P` path, `%L` marker size.
-fn run_command_driver(i: &Input, cmd: &str, b: &Path, r: &Path, t: &Path, rp: &str) -> Result<bool> {
+fn run_command_driver(i: &Input, cmd: &str, bp: &str, tp: &str, rp: &str) -> Result<bool> {
     let dir = private_dir()?;
     let (o, a, bb) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
-    copy_version(b, &o)?;
-    copy_version(r, &a)?;
-    copy_version(t, &bb)?;
+    export_version(i.base, bp, &o)?;
+    export_version(i.result, rp, &a)?;
+    export_version(i.theirs, tp, &bb)?;
     hand_over(&dir, i.run_as.as_ref())?;
     let full = cmd
         .replace("%O", &sh_quote(&o))
@@ -1022,7 +1024,9 @@ fn changed_blocks(
     size: u64,
 ) -> Result<DataEvidence> {
     use std::io::Read;
-    let (mut a, mut b) = (fsutil::open_regular(&base.at(bp)?)?, fsutil::open_regular(&child.at(cp)?)?);
+    let ma = fsutil::lmeta(base, bp).context("base entry absent")?;
+    let mb = fsutil::lmeta(child, cp).context("child entry absent")?;
+    let (mut a, mut b) = (fsutil::open_source(base, bp, &ma)?, fsutil::open_source(child, cp, &mb)?);
     let (mut ab, mut bb) = ([0; 4096], [0; 4096]);
     let mut ranges: Vec<(u64, crate::compare::RangeEnd)> = Vec::new();
     let mut pos = 0;
@@ -1061,10 +1065,20 @@ fn block_merge(
     if mb.size != mo.size || mb.size != mt.size {
         return Ok(false);
     }
-    if matches!(ours_ranges, DataEvidence::Unknown) && (i.base.objects().is_some() || i.ours.objects().is_some()) {
+    if matches!(ours_ranges, DataEvidence::Unknown)
+        && (i.base.objects().is_some()
+            || i.ours.objects().is_some()
+            || i.base.core_reader().is_some()
+            || i.ours.core_reader().is_some())
+    {
         ours_ranges = changed_blocks(i.base, bp, i.result, rp, mb.size)?;
     }
-    if matches!(theirs_ranges, DataEvidence::Unknown) && (i.base.objects().is_some() || i.theirs.objects().is_some()) {
+    if matches!(theirs_ranges, DataEvidence::Unknown)
+        && (i.base.objects().is_some()
+            || i.theirs.objects().is_some()
+            || i.base.core_reader().is_some()
+            || i.theirs.core_reader().is_some())
+    {
         theirs_ranges = changed_blocks(i.base, bp, i.theirs, tp, mb.size)?;
     }
     if matches!(ours_ranges, DataEvidence::Unknown) || matches!(theirs_ranges, DataEvidence::Unknown) {
@@ -1078,22 +1092,9 @@ fn block_merge(
     if overlaps(&or, &tr) {
         return Ok(false);
     }
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut src = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(i.theirs.at(tp)?)?;
-    let mut dst =
-        std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(fsutil::safe_join(i.result, rp)?)?;
-    for (off, len) in tr {
-        if crate::storage::clone_range(&src, off, len, &dst, off).is_ok() {
-            continue;
-        }
-        let mut buf = vec![0u8; len as usize];
-        src.seek(SeekFrom::Start(off))?;
-        src.read_exact(&mut buf)?;
-        dst.seek(SeekFrom::Start(off))?;
-        dst.write_all(&buf)?;
-    }
-    dst.sync_all()?;
+    let native_source = if i.theirs.core_reader().is_none() { Some(fsutil::open_regular(&i.theirs.at(tp)?)?) } else { None };
+    let mut source = fsutil::open_source(i.theirs, tp, &mt)?;
+    i.result.patch(rp, source.as_mut(), native_source.as_ref(), &tr)?;
     Ok(true)
 }
 
@@ -1115,7 +1116,7 @@ mod evidence_tests {
             base: &base,
             ours: &ours,
             theirs: &theirs,
-            result: &result,
+            result: &WriteSrc::Native(&result),
             base_id: "01a12290-0000-7000-8000-000000000001",
             ours_id: "01a12290-0000-7000-8000-000000000002",
             theirs_id: "01a12290-0000-7000-8000-000000000003",
@@ -1148,7 +1149,7 @@ mod evidence_tests {
             base: &base,
             ours: &ours,
             theirs: &theirs,
-            result: &result,
+            result: &WriteSrc::Native(&result),
             base_id: "base",
             ours_id: "ours",
             theirs_id: "theirs",
@@ -1189,10 +1190,10 @@ mod derive_tests {
             ("z".into(), rule("middle", "src/**")),
             ("b".into(), rule("independent", "other")),
         ]);
-        let (order, cycles) = derive_order(&rules, Path::new("/tree"));
+        let (order, cycles) = derive_order(&rules);
         assert_eq!(order, ["b", "z", "a"]);
         assert!(cycles.is_empty());
-        assert!(derive_matches(&rules["z"], Path::new("/tree"), "src/deep/input"));
+        assert!(derive_matches(&rules["z"], "src/deep/input"));
     }
 
     #[test]
@@ -1203,11 +1204,11 @@ mod derive_tests {
             ("c".into(), rule("last", "second")),
             ("d".into(), rule("independent", "source")),
         ]);
-        let (order, cycles) = derive_order(&rules, Path::new("/tree"));
+        let (order, cycles) = derive_order(&rules);
         assert_eq!(order, ["d"]);
         assert_eq!(cycles, BTreeSet::from(["a".into(), "b".into(), "c".into()]));
         let rules = BTreeMap::from([("self".into(), rule("output", "output"))]);
-        assert!(!derive_order(&rules, Path::new("/tree")).1.is_empty());
+        assert!(!derive_order(&rules).1.is_empty());
     }
 
     #[test]
@@ -1226,7 +1227,7 @@ mod derive_tests {
                 base: &root.join("base"),
                 ours: &root.join("ours"),
                 theirs: &root.join("theirs"),
-                result: &result,
+                result: &WriteSrc::Native(&result),
                 base_id: "01a12290-0000-7000-8000-000000000001",
                 ours_id: "01a12290-0000-7000-8000-000000000002",
                 theirs_id: "01a12290-0000-7000-8000-000000000003",
@@ -1325,7 +1326,7 @@ mod merge_sides_tests {
                 base: &base,
                 ours: &ours,
                 theirs: &theirs,
-                result: &result,
+                result: &WriteSrc::Native(&result),
                 base_id: "01a12290-0000-7000-8000-000000000001",
                 ours_id: "01a12290-0000-7000-8000-000000000002",
                 theirs_id: "01a12290-0000-7000-8000-000000000003",

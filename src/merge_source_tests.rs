@@ -28,7 +28,10 @@ impl Fixture {
         )?;
         let tree = crate::object_tree::ObjectTree::new(
             store,
-            layr_objects::StateRef { tree: written.tree.context("missing tree")?, times: written.times.context("missing times")? },
+            layr_objects::StateRef {
+                tree: written.tree.context("missing tree")?,
+                times: written.times.context("missing times")?,
+            },
             &self.0.join("reads"),
         )?;
         std::fs::remove_dir_all(native)?;
@@ -45,11 +48,25 @@ impl Fixture {
             fsutil::copy_entry(&ours, p, &result, p, None)?;
             Ok(true)
         })?;
-        merge(&Input {
+        let memory = layr_fs_plain::MemoryFs::default();
+        use layr_fs_core::Filesystem;
+        let output = if ours_portable && theirs_portable {
+            Some(memory.materialise(
+                &layr_fs_plain::DirectoryTree::open(&result)?,
+                memory.location(layr_fs_core::RelPath::new(b"output".to_vec())?)?,
+            )?)
+        } else {
+            None
+        };
+        let destination = match &output {
+            Some(output) => WriteSrc::Core { tree: output.tree.writer(), modified_ns: 1234 },
+            None => WriteSrc::Native(&result),
+        };
+        let outcome = merge(&Input {
             base: &base,
             ours: &ours,
             theirs: &theirs,
-            result: &result,
+            result: &destination,
             base_id: "01a12290-0000-7000-8000-000000000001",
             ours_id: "01a12290-0000-7000-8000-000000000002",
             theirs_id: "01a12290-0000-7000-8000-000000000003",
@@ -62,7 +79,17 @@ impl Fixture {
             },
             run_as: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()).fs_identity()?,
             allow_root: false,
-        })
+        })?;
+        if let Some(output) = output {
+            // Export only after the production executor has finished, for the existing native
+            // assertions below. No native output path exists inside the Memory merge.
+            std::fs::remove_dir_all(&result)?;
+            std::fs::create_dir(&result)?;
+            layr_fs_common::copy_tree(output.tree.writer(), &layr_fs_plain::DirectoryTree::open(&result)?)?;
+            drop(output.tree);
+            memory.remove(output.ownership).map_err(|e| anyhow::anyhow!("{}", e.error))?;
+        }
+        Ok(outcome)
     }
 }
 impl Drop for Fixture {
@@ -86,7 +113,10 @@ fn object_merges_pair_moves_and_preserve_edits_without_native_states() -> Result
         let out = f.merge(ours_portable, theirs_portable)?;
         assert_eq!(out.conflicts.len(), 1, "{:?}", out.conflicts);
         assert_eq!(out.conflicts[0].path, "Q.txt");
-        assert!(matches!(&out.conflicts[0].details, crate::model::ConflictDetails::Known { kind: ConflictKind::RenameRename { .. }, .. }));
+        assert!(matches!(
+            &out.conflicts[0].details,
+            crate::model::ConflictDetails::Known { kind: ConflictKind::RenameRename { .. }, .. }
+        ));
         assert_eq!(std::fs::read_to_string(f.0.join("result/A2.txt"))?, "one\nOURS\nthree\n");
         assert!(!f.0.join("result/A.txt").exists());
     }

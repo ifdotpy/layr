@@ -190,6 +190,16 @@ impl<'db> SqlTxn<'db> {
         Ok(Self { db, state: TransactionState::Active, effects: Default::default(), witnesses: Default::default() })
     }
     fn finish(mut self) -> CommitResolution<CommittedWrite> {
+        #[cfg(test)]
+        if super::FAIL_BEFORE_COMMIT.with(|flag| flag.replace(false)) {
+            let error = anyhow!("injected: failure before COMMIT");
+            let rollback = self.db.conn.execute_batch("ROLLBACK");
+            self.state = TransactionState::Finished;
+            return match rollback {
+                Ok(()) => CommitResolution::NotCommitted(error),
+                Err(_) => CommitResolution::Unknown(CommitRecovery { cause: error }),
+            };
+        }
         #[allow(unused_mut)]
         let mut committed = self.db.conn.execute_batch("COMMIT").map_err(anyhow::Error::from);
         #[cfg(test)]

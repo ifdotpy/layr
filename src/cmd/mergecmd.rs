@@ -105,7 +105,7 @@ fn merge_trees_at(
         base: &base_root,
         ours: &ours_source,
         theirs: &theirs_root,
-        result: &work.path,
+        result: &crate::write_source::WriteSrc::Native(&work.path),
         base_id: base,
         ours_id: ours,
         theirs_id: theirs,

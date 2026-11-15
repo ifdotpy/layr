@@ -190,7 +190,7 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 base: &base,
                 ours: &scan.path,
                 theirs: &theirs,
-                result: &work.path,
+                result: &crate::write_source::WriteSrc::Native(&work.path),
                 base_id: &base_id,
                 ours_id: &line.head,
                 theirs_id: &id,
