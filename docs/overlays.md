@@ -210,7 +210,11 @@ Built so far (the rest of this file describes the code until a row says "built")
   `main`, so a check of a merge into `main` runs on the view of `main`, and its build output (which a
   check gives back as a cache) never holds a file of an overlay. A merge into a line checks `main`
   only; a part of an overlay that the merge changes is not checked in the view of that overlay (not
-  built). No check of a child view blocks a merge into its parent.
+  built). Smallest step (2026-11-15): a merge into a line whose rule names required checks
+  (`protect --check`) refuses a change of a patches overlay and names the overlay, since those checks
+  would not see it; a merge that changes only `main` (or a cache) is checked and goes on. Left: the
+  checks of the view of the overlay, as the merging user, gating only that part. No check of a child
+  view blocks a merge into its parent. Test: tests/t265-overlay-merge-checks.sh.
 - Automatic states (built 2026-11-15). In the view of an overlay X, an automatic state of the project
   holds the head in `main` and no working change, so no state that a non-reader of X reads holds such
   a change. The working content goes to an automatic state in X's own store, and X's records name it
