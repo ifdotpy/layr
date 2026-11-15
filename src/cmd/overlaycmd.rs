@@ -1544,7 +1544,8 @@ fn change_stack(ctx: &Ctx, repo: &Repo, line: &crate::model::Line, layers: &[Lay
         return Err(exit(1, "error: the line has staged changes; save them or unstage them ('layr restore --staged') first"));
     }
     for (p, o) in repo.pending_moves(line) {
-        if !layers.iter().any(|l| l.overlay == o) {
+        // `main` is on the path of every view.
+        if o != crate::overlay::MAIN && !layers.iter().any(|l| l.overlay == o) {
             return Err(exit(
                 1,
                 format!(
@@ -1579,8 +1580,12 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let name = a.rest()[0].clone();
     let specs = h.specs(&a.rest()[1..])?;
-    repo.need_overlay(&name)?;
-    refuse_folder(repo, &name)?;
+    // `overlay move main <paths>`: the whole file goes down to `main`, the bottom of every path.
+    let to_main = name == crate::overlay::MAIN;
+    if !to_main {
+        repo.need_overlay(&name)?;
+        refuse_folder(repo, &name)?;
+    }
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
     let _lock = repo.p.lock()?;
     let mut line = repo.line(&line.id)?;
@@ -1588,7 +1593,7 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // the folder shows (or any overlay, in the view of main) becomes the view first: its files come into the
     // folder. Another overlay is refused: the folder would lose the files of its own path.
     let cur = repo.layers(&line)?;
-    if !cur.iter().any(|l| l.overlay == name) {
+    if !to_main && !cur.iter().any(|l| l.overlay == name) {
         visible_info(ctx, repo, &name)?;
         let path = repo.overlay_path(&name)?;
         let shown: Vec<String> = cur.iter().filter(|l| repo.patches_overlay(&l.overlay).unwrap_or(false)).map(|l| l.overlay.clone()).collect();
@@ -1654,6 +1659,10 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
             holding.push(st.id);
         }
     }
+    // A move to `main` makes the files public: the automatic states that hold them need no note.
+    if to_main {
+        holding.clear();
+    }
     if a.has("--purge") && !holding.is_empty() {
         let mut deleted = Vec::new();
         for id in &holding {
@@ -1683,6 +1692,25 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let shared = repo.state_root(&line.head)?;
         let pushed = !repo.p.db.remote_refs()?.is_empty();
         for p in &paths {
+            if to_main {
+                outln!(ctx, "move to main at the next state: {}", h.rel(p));
+                // Only a file that an overlay of the view holds changes main.
+                let holders: Vec<String> = repo
+                    .layers(&line)?
+                    .iter()
+                    .filter(|l| repo.layer_root(l).is_some_and(|r| crate::fsutil::lmeta(&r, p).is_some()))
+                    .map(|l| l.overlay.clone())
+                    .collect();
+                if !holders.is_empty() {
+                    outln!(
+                        ctx,
+                        "note: '{}' has content of overlay {}: the next save gives main the whole file as the folder shows it, every reader of the project reads it, and the next 'layr git push' publishes it",
+                        h.rel(p),
+                        holders.join(", ")
+                    );
+                }
+                continue;
+            }
             outln!(ctx, "move to overlay {name} at the next state: {}", h.rel(p));
             // Only a file that no overlay of the path holds moves out of main (a patch leaves main as it is).
             let in_overlay = repo.layers(&line)?.iter().any(|l| repo.layer_root(l).is_some_and(|r| crate::fsutil::lmeta(&r, p).is_some()));

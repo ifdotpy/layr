@@ -16,8 +16,13 @@ echo s1 > key.txt; l overlay move secret key.txt >/dev/null
 echo a >> notes.txt
 ok "a save with the hidden part" l save -qam one --to main
 h1=$(l rev-parse head)
+# Mixed work is two saves: a file that only the hidden overlay has never goes to main with --to main.
 echo s2 > key.txt; echo b >> notes.txt
-ok "a second save" l save -qam two --to main
+has "save --to main of the hidden file is refused" "is a file of overlay 'secret' only" "$(l save -qam two --to main 2>&1)"
+l add notes.txt
+ok "a second save: the public part" l save -qm two --to main
+no "main has no key.txt" l show head:key.txt
+ok "and the hidden part" l save -qam two-secret
 h2=$(l rev-parse head)
 eq "the public records never name the hidden overlay" "" "$(sqlite3 "$P/meta/db/layr.sqlite" "select count(*) from records where raw like '%secret%'" | grep -v '^0$')"
 has "the overlay records the part of the first state" "hidden.part." "$(sqlite3 "$P/meta/overlays/secret/meta/db/layr.sqlite" "select raw from records" | grep -o 'hidden.part.[^"]*' | head -1)"

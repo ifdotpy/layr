@@ -123,7 +123,7 @@ l overlay move tokens token.env >/dev/null
 ok 'private overlay commit accepts the secret' l save -qm private
 printf 'sk_overlay_1234567890\n' > public.txt
 l add public.txt
-no 'a private overlay value cannot enter the shared set' l save -qm leak
+no 'a private overlay value cannot enter the shared set' l save -qm leak --to main
 # Large files use a stream check, including tokens across a 1 MiB boundary.
 l line new -q large "$GOOD"
 cd ../large

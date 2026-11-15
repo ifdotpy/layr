@@ -426,7 +426,8 @@ impl Repo<'_> {
             }
         }
         for (path, overlay) in self.pending_moves(line) {
-            if !self.reads_overlay(&overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+            // A move to `main` is a move to the public layer: its reader is every reader of the project.
+            if overlay != crate::overlay::MAIN && !self.reads_overlay(&overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
                 hidden.insert(path);
             }
         }

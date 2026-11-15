@@ -93,14 +93,43 @@ ok "save --to main" l save -q -am "public fix" --to main
 has "main has the fix" "fix" "$(l show head:lib.c)"
 no "pro has no copy of lib.c" l overlay show pro head:lib.c
 eq "the folder is clean after it" "" "$(l status --porcelain)"
-# A patch of pro saved with --to main: main takes it, and pro drops its copy.
-echo "int pub2;" >> pub.c
-ok "a private copy of pub.c" l save -q -am "private pub"
+# A file with a patch of pro saved with --to main: only the change of this save goes to main, as a
+# cherry-pick in Git (owner decision 2026-11-15). The patch stays in pro.
+printf 'int pub(void) { return 0; }\n1\n2\n3\n4\n5\n' > pub.c
+ok "a longer pub.c in main" l save -q -am "long pub" --to main
+echo "int pub2; /* private */" >> pub.c
+ok "a private patch of pub.c" l save -q -am "private pub"
 ok "pub.c is in pro" l overlay show pro head:pub.c
+sed_inplace -e 's/^1$/one/' pub.c
+ok "save --to main of a public change of the patched file" l save -q -am "public one" --to main
+eq "main has the change" one "$(l show head:pub.c | sed -n 2p)"
+eq "main has no private line" 0 "$(l show head:pub.c | grep -c private)"
+eq "pro keeps its patch" 1 "$(l overlay show pro head:pub.c | grep -c private)"
+eq "pro has the change too" one "$(l overlay show pro head:pub.c | sed -n 2p)"
+eq "the folder is clean after it" "" "$(l status --porcelain)"
+eq "no patch waits" 0 "$(l status | grep -c "waits for a merge")"
+# A change next to the patch cannot go alone: refused, and nothing is saved.
 echo "int pub3;" >> pub.c
-ok "save --to main publishes it" l save -q -am "publish pub" --to main
-has "main has it" "pub3" "$(l show head:pub.c)"
+out=$(l save -q -am "publish pub" --to main 2>&1)
+has "a change that touches the patch is refused" "touches the patch of overlay 'pro'" "$out"
+has "the refusal names the move" "layr overlay move main pub.c" "$out"
+eq "main did not take it" 0 "$(l show head:pub.c | grep -c pub3)"
+eq "the change is still in the folder" " M pub.c" "$(l status --porcelain)"
+# A file that only pro has is refused too.
+echo "/* more */" >> pro-feature.c
+has "a file of pro only is refused" "is a file of overlay 'pro' only" "$(l save -q -am "x" --to main 2>&1)"
+no "main still has no proprietary file" l show head:pro-feature.c
+l add pro-feature.c
+ok "the change of the proprietary file goes to pro" l save -q -m "pro feature"
+# overlay move main publishes a whole file: main takes the version of the folder, and pro drops its copy.
+out=$(l overlay move main pub.c)
+has "overlay move main says what the next save does" "move to main at the next state: pub.c" "$out"
+has "and that the file has content of pro" "has content of overlay pro" "$out"
+ok "the save of the move" l save -q -m "publish pub"
+has "main has the whole file" "pub3" "$(l show head:pub.c)"
+eq "also the line that was private" 1 "$(l show head:pub.c | grep -c private)"
 no "the copy of pro is gone" l overlay show pro head:pub.c
+eq "the folder is clean after the move" "" "$(l status --porcelain)"
 # Mixed work is two saves: stage the public part and save it with --to main, then save the rest.
 echo "int lib2;" >> lib.c
 echo "/* $MARK mixed */" >> core.c
@@ -140,11 +169,22 @@ echo "/* $MARK deep */" >> core.c
 ok "a save in the view of deep" l save -q -am "deep patch"
 eq "deep has the patch" 1 "$(l overlay show deep head:core.c | grep -c "$MARK deep")"
 eq "pro does not" 0 "$(l overlay show pro head:core.c | grep -c "$MARK deep")"
-echo "/* $MARK to pro */" >> core.c
+# --to pro of a file that deep patches: pro gets only the change of the save, and deep keeps its patch.
+{ echo "/* $MARK to pro */"; cat core.c; } > core.c.new && cat core.c.new > core.c && rm core.c.new
 ok "save --to pro" l save -q -am "to pro" --to pro
 eq "pro has it" 1 "$(l overlay show pro head:core.c | grep -c "$MARK to pro")"
-no "deep dropped its copy" l overlay show deep head:core.c
+eq "pro has no patch of deep" 0 "$(l overlay show pro head:core.c | grep -c "$MARK deep")"
+eq "deep keeps its patch" 1 "$(l overlay show deep head:core.c | grep -c "$MARK deep")"
 eq "the folder is clean" "" "$(l status --porcelain)"
+eq "no patch waits after it" 0 "$(l status | grep -c "waits for a merge")"
+# A change next to the patch of deep is refused. The whole file moves down with overlay move.
+echo "/* $MARK deep 2 */" >> core.c
+has "a change next to the patch of deep is refused" "touches the patch of overlay 'deep'" "$(l save -q -am "x" --to pro 2>&1)"
+ok "overlay move to pro of the patched file" l overlay move -q pro core.c
+ok "the save of the move of core.c" l save -q -am "core to pro"
+eq "pro has the whole file" 1 "$(l overlay show pro head:core.c | grep -c "$MARK deep 2")"
+no "deep dropped its copy" l overlay show deep head:core.c
+eq "the folder is clean after the move of core.c" "" "$(l status --porcelain)"
 # overlay move along the path (docs/overlays.md section 1): a file of deep moves to pro, and deep drops it.
 echo "/* $MARK move */" > d.c
 l add d.c

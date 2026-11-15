@@ -880,6 +880,9 @@ pub struct Ops {
     pub unbases: BTreeSet<String>,
     /// Where the content of each new base is: hash to the root and path of that version.
     pub blobs: BTreeMap<String, (PathBuf, String)>,
+    /// Paths of `puts` whose content is not in the saved tree: path to the root that holds it (the
+    /// version that `save --to <ancestor>` made for the ancestor, `Split::down`).
+    pub srcs: BTreeMap<String, PathBuf>,
 }
 
 impl Ops {
@@ -915,8 +918,9 @@ impl Ops {
             }
             prune(&t, p);
         }
+        let from = |p: &String| self.srcs.get(p).map(|r| r.as_path()).unwrap_or(src);
         for p in &self.puts {
-            fsutil::copy_entry(src, p, dst, p, own)?;
+            fsutil::copy_entry(from(p), p, dst, p, own)?;
         }
         let mut meta = old.clone();
         meta.removed.extend(self.marks.iter().cloned());
@@ -932,7 +936,7 @@ impl Ops {
         // The times last: an entry made by a copy changes the time of its folder. Cargo compares the times of the
         // cache, so every copied entry gets the source's time, on every file system (union and snapshot alike).
         for p in &self.puts {
-            fsutil::keep_times(&src.join(p), &dst.join(p))?;
+            fsutil::keep_times(&from(p).join(p), &dst.join(p))?;
         }
         // Folders too (a file copy changes the time of the folder it is in, so folders come last).
         let mut folders = Vec::new();
@@ -961,12 +965,30 @@ pub enum Owner {
     Overlay(usize),
 }
 
+/// A layer of the path of a view, for `split`: its name and whether it is a patches overlay.
+pub struct LayerKind {
+    pub name: String,
+    pub patches: bool,
+}
+
+/// The version of a path that `save --to <ancestor>` gives the ancestor when an overlay above it keeps
+/// a patch of the path: the version of the ancestor with only the change of this save.
+pub struct Down {
+    pub data: Vec<u8>,
+    pub mode: u32,
+    /// The overlay (index) whose patch takes this version as its new base, with the hash of the version.
+    pub base_of: Option<(usize, String)>,
+}
+
 /// The split of a change list by layer.
 pub struct Split {
     pub shared: Ops,
     pub overlays: Vec<Ops>,
     /// The change list of the whole tree (with renames), for the summary.
     pub list: Vec<Change>,
+    /// The target's versions that are not in the saved tree, by path. The caller writes them to a tree
+    /// and names that tree in `Ops::srcs` and `Ops::blobs` (`commit_layers`).
+    pub down: BTreeMap<String, Down>,
 }
 
 /// Split the changes from `base` (the line's full tree) to `new` by layer (docs/overlays.md section 1,
@@ -979,6 +1001,15 @@ pub struct Split {
 /// and the target gets a delete marker when a layer below it still shows the path. A rename is a
 /// delete of the old path and a new file; inside the target it stays a move (btrfs keeps the inode).
 /// `main` changes only when it is the target.
+///
+/// `save --to <ancestor>` of a file that a patches overlay above the ancestor holds works as a cherry-pick
+/// in Git (owner decision 2026-11-15): the ancestor gets only the change of this save (a three-way merge;
+/// base: the version that the folder showed, ours: the version of the view of the ancestor, theirs: the
+/// saved version), and the overlay keeps its patch and shows the saved version. A change that overlaps
+/// the patch, a file that is not text, a file that only the overlay has, and a rename of such a file are
+/// refused: the private part of the file never goes down as a side effect. `layr overlay move main` moves
+/// a whole file to `main` (`publish`): `main` takes the version that the view shows, and every overlay
+/// drops its entry and its marker.
 ///
 /// An overlay keeps a path only when it differs from the view of its parent: a file saved equal to the
 /// version below drops the overlay's entry (and its marker). A file that the overlay takes from the view
@@ -993,6 +1024,8 @@ pub fn split(
     sticky: &BTreeMap<String, usize>,
     target: Owner,
     resolving: &BTreeSet<(usize, String)>,
+    kinds: &[LayerKind],
+    publish: &BTreeSet<String>,
 ) -> Result<Split> {
     let list: Vec<Change> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
     let list = changes::with_renames(base, new, list);
@@ -1032,7 +1065,26 @@ pub fn split(
         has_file(shared, p).then(|| shared.to_path_buf())
     };
     let below_shows = |i: usize, p: &str| below(i, p).is_some();
-    let mut s = Split { shared: Ops::default(), overlays: roots.iter().map(|_| Ops::default()).collect(), list: Vec::new() };
+    let mut s = Split {
+        shared: Ops::default(),
+        overlays: roots.iter().map(|_| Ops::default()).collect(),
+        list: Vec::new(),
+        down: BTreeMap::new(),
+    };
+    let target_name = match target {
+        Owner::Shared => MAIN.to_string(),
+        Owner::Overlay(i) => kinds.get(i).map(|k| k.name.clone()).unwrap_or_default(),
+    };
+    // The patches overlays above the target that hold `p`, bottom first.
+    let patch_holders = |p: &str| -> Vec<usize> {
+        let from = match target {
+            Owner::Shared => 0,
+            Owner::Overlay(i) => i + 1,
+        };
+        (from..roots.len()).filter(|j| kinds.get(*j).is_some_and(|k| k.patches) && has_file(&roots[*j], p)).collect()
+    };
+    let refuse = |text: String| -> anyhow::Error { crate::cmd::exit(1, format!("error: --to {target_name}: {text}")) };
+    let whole = |p: &str| format!("to move the whole file, run 'layr overlay move {target_name} {p}', then save");
     fn ops(s: &mut Split, o: Owner) -> &mut Ops {
         match o {
             Owner::Shared => &mut s.shared,
@@ -1111,10 +1163,31 @@ pub fn split(
         unmark(s, owner, p);
         Ok(())
     };
+    // `layr overlay move main` of `p`: `main` holds the version that the view shows, and no overlay keeps
+    // an entry or a marker for the path.
+    let publish_into = |s: &mut Split, p: &str| {
+        for j in 0..roots.len() {
+            if has_file(&roots[j], p) {
+                s.overlays[j].dels.insert(p.to_string());
+            }
+        }
+        if !same_entry(shared, new, p).unwrap_or(false) {
+            s.shared.puts.insert(p.to_string());
+        }
+        unmark(s, Owner::Shared, p);
+    };
     let mut handled: BTreeSet<String> = BTreeSet::new();
     for c in &list {
         handled.insert(c.path.clone());
         let p = c.path.clone();
+        if publish.contains(&p) && c.new.is_some() && !sticky.contains_key(&p) {
+            if let Some(old) = &c.old_path {
+                handled.insert(old.clone());
+                take_out(&mut s, Owner::Shared, old, None);
+            }
+            publish_into(&mut s, &p);
+            continue;
+        }
         if let Some(i) = pending.get(&p).or_else(|| sticky.get(&p)).copied() {
             // `layr overlay move`: the file goes to its overlay (`move_into`). A file of a quiet overlay
             // (`sticky`) stays in it whatever the target is: `save --to main` never takes it.
@@ -1133,6 +1206,67 @@ pub fn split(
             (None, _) => take_out(&mut s, target, &p, None),
             (Some(_), old) => {
                 check_name(target, &p)?;
+                // `save --to <ancestor>` of a file with a patch above the ancestor: only the change goes down.
+                let holders = patch_holders(&p);
+                let mut kept: Option<(usize, Vec<u8>, u32)> = None;
+                if let Some(old) = old {
+                    if let Some(a) = patch_holders(old).last() {
+                        return Err(refuse(format!(
+                            "'{old}' has a patch of overlay '{}', so its rename to '{p}' cannot go to {target_name}; save it without --to, or {}",
+                            kinds[*a].name,
+                            whole(old)
+                        )));
+                    }
+                } else if let (Some(a), true) = (holders.last().copied(), has_file(base, &p)) {
+                    let name = &kinds[a].name;
+                    let view = match target {
+                        Owner::Shared => has_file(shared, &p).then(|| shared.to_path_buf()),
+                        Owner::Overlay(t) if removed[t].contains(&p) => None,
+                        Owner::Overlay(t) if has_file(&roots[t], &p) => Some(roots[t].clone()),
+                        Owner::Overlay(t) => below(t, &p),
+                    };
+                    let Some(view) = view else {
+                        return Err(refuse(format!(
+                            "'{p}' is a file of overlay '{name}' only ({target_name} does not have it), so the save would publish the whole file; save it without --to, or {}",
+                            whole(&p)
+                        )));
+                    };
+                    let file = |r: &Path| fsutil::lmeta(r, &p).is_some_and(|m| !m.is_dir() && m.ftype != fsutil::FType::Symlink);
+                    let merged = if file(base) && file(view.as_path()) && file(new) {
+                        merge_text(&fsutil::read_file(base, &p)?, &fsutil::read_file(view.as_path(), &p)?, &fsutil::read_file(new, &p)?, "save")?
+                    } else {
+                        None
+                    };
+                    let data = match merged {
+                        Some((data, true)) => data,
+                        Some((_, false)) => {
+                            return Err(refuse(format!(
+                                "the change of '{p}' touches the patch of overlay '{name}' (the same lines or the lines next to them), so it cannot go to {target_name} alone; save it without --to, or {}",
+                                whole(&p)
+                            )))
+                        }
+                        None => {
+                            return Err(refuse(format!(
+                                "'{p}' has a patch of overlay '{name}' and is not a text file, so layr cannot take only the change of this save; save it without --to, or {}",
+                                whole(&p)
+                            )))
+                        }
+                    };
+                    let mode = if fsutil::lmeta(new, &p).is_some_and(|m| m.executable()) { 0o755 } else { 0o644 };
+                    kept = Some((a, data, mode));
+                }
+                // The version that the target gets equals `r`'s version of the path.
+                let same_as_target = |r: &Path| -> bool {
+                    match &kept {
+                        None => same_entry(r, new, &p).unwrap_or(false),
+                        Some((_, data, mode)) => fsutil::lmeta(r, &p).is_some_and(|m| {
+                            !m.is_dir()
+                                && m.ftype != fsutil::FType::Symlink
+                                && m.executable() == (*mode == 0o755)
+                                && fsutil::read_file(r, &p).is_ok_and(|d| &d == data)
+                        }),
+                    }
+                };
                 let mut moved = false;
                 if let Some(old) = old {
                     handled.insert(old.clone());
@@ -1144,14 +1278,51 @@ pub fn split(
                     take_out(&mut s, target, old, moved.then_some(target));
                 }
                 for x in at_or_above(target) {
-                    if x != target && holds(x, &p) {
+                    // The patches overlays above the target keep their entry when only the change goes down.
+                    let keeps = kept.is_some() && matches!(x, Owner::Overlay(j) if holders.contains(&j));
+                    if x != target && holds(x, &p) && !keeps {
                         ops(&mut s, x).dels.insert(p.clone());
                     }
+                }
+                if let Some((a, data, mode)) = &kept {
+                    use layr_hashers::Digest;
+                    // The top holder shows the saved version. When the target is its parent view of the path and
+                    // its patch is not waiting, the target's new version is its new base; else the patch waits
+                    // for the merge with the parent at the end of the save (`rebase_patches`).
+                    let first = holders.first() == Some(a);
+                    let hidden_between = match target {
+                        Owner::Shared => (0..*a).any(|j| removed[j].contains(&p)),
+                        Owner::Overlay(t) => ((t + 1)..*a).any(|j| removed[j].contains(&p)),
+                    };
+                    let parent_is_target = first && !hidden_between;
+                    let equal = fsutil::lmeta(new, &p).is_some_and(|m| m.executable() == (*mode == 0o755))
+                        && fsutil::read_file(new, &p).is_ok_and(|d| &d == data);
+                    let mut base_of = None;
+                    if parent_is_target && equal {
+                        // The saved version is the target's new version: the overlay keeps no entry.
+                        s.overlays[*a].dels.insert(p.clone());
+                    } else {
+                        s.overlays[*a].puts.insert(p.clone());
+                        let view_hash = match target {
+                            Owner::Shared => version_hash(shared, &p)?,
+                            Owner::Overlay(t) if has_file(&roots[t], &p) => version_hash(roots[t].as_path(), &p)?,
+                            Owner::Overlay(t) => match below(t, &p) {
+                                Some(r) => version_hash(r.as_path(), &p)?,
+                                None => None,
+                            },
+                        };
+                        if parent_is_target && view_hash.is_some() && metas[*a].bases.get(&p) == view_hash.as_ref() {
+                            let h = hex::encode(layr_hashers::ContentAddress::digest(data));
+                            s.overlays[*a].bases.insert(p.clone(), h.clone());
+                            base_of = Some((*a, h));
+                        }
+                    }
+                    s.down.insert(p.clone(), Down { data: data.clone(), mode: *mode, base_of });
                 }
                 if let Owner::Overlay(i) = target {
                     let under = below(i, &p);
                     // Equal to the view of the parent: the overlay keeps no entry for the path.
-                    if !moved && under.as_ref().is_some_and(|r| same_entry(r, new, &p).unwrap_or(false)) {
+                    if !moved && under.as_ref().is_some_and(|r| same_as_target(r.as_path())) {
                         if holds(target, &p) {
                             ops(&mut s, target).dels.insert(p.clone());
                         }
@@ -1186,6 +1357,13 @@ pub fn split(
             continue;
         }
         move_into(&mut s, *i, p)?;
+    }
+    // Moves of unchanged files to `main`.
+    for p in publish {
+        if handled.contains(p) || !has_file(new, p) || sticky.contains_key(p) {
+            continue;
+        }
+        publish_into(&mut s, p);
     }
     s.list = list;
     Ok(s)
@@ -3185,7 +3363,13 @@ pub fn commit_layers(
     }
     let by_name: BTreeMap<&str, usize> = layers.iter().enumerate().map(|(i, l)| (l.overlay.as_str(), i)).collect();
     let mut pending = BTreeMap::new();
+    // `layr overlay move main`: these paths go to `main` whole.
+    let mut publish = BTreeSet::new();
     for (p, o) in repo.pending_moves(line) {
+        if o == MAIN {
+            publish.insert(p);
+            continue;
+        }
         match by_name.get(o.as_str()) {
             Some(i) => {
                 pending.insert(p, *i);
@@ -3213,9 +3397,42 @@ pub fn commit_layers(
             }
         }
     }
-    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, &sticky, target, &resolving)?;
+    let mut kinds = Vec::new();
+    for l in layers {
+        kinds.push(LayerKind { name: l.overlay.clone(), patches: repo.patches_overlay(&l.overlay)? });
+    }
+    let mut s = split(&base, &new_tree.path, &shared_root, &roots, &pending, &sticky, target, &resolving, &kinds, &publish)?;
     if s.shared.is_empty() && s.overlays.iter().all(|o| o.is_empty()) && !allow_empty {
         return Ok(None);
+    }
+    // `save --to <ancestor>` of a file with a patch above the ancestor: the versions of the ancestor are
+    // not in the saved tree. They go to a copy of it, written through `Tree` (never by path), and the
+    // target takes them from there.
+    let down_tree = if s.down.is_empty() { None } else { Some(repo.temp_work(&new_tree.path)?) };
+    if let Some(work) = &down_tree {
+        let t = Tree::open(&work.path)?;
+        let own = repo.own(line);
+        for (p, d) in std::mem::take(&mut s.down) {
+            if t.stat(&p).is_some() {
+                t.remove(&p)?;
+            }
+            t.mkdirs_for(&p, own)?;
+            {
+                use std::io::Write;
+                let mut f = t.create(&p, d.mode)?;
+                f.write_all(&d.data)?;
+            }
+            let ops = match target {
+                Owner::Shared => &mut s.shared,
+                Owner::Overlay(i) => &mut s.overlays[i],
+            };
+            if ops.puts.contains(&p) {
+                ops.srcs.insert(p.clone(), work.path.clone());
+            }
+            if let Some((a, h)) = d.base_of {
+                s.overlays[a].blobs.insert(h, (work.path.clone(), p.clone()));
+            }
+        }
     }
     // A protected line takes changes of the shared set only through merges; changes of its
     // overlays belong to its owner.
@@ -3901,14 +4118,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("layr-split-{}", ids::new_id()));
         let (shared, overlay, base, new) = split_trees(&root);
         let roots = vec![overlay];
+        let kinds = vec![LayerKind { name: "pro".into(), patches: true }];
+        let no_paths: BTreeSet<String> = BTreeSet::new();
         let none = BTreeMap::new();
         // The view of the overlay: `main` never changes; copies, new files and delete markers go to the overlay.
         let no = BTreeSet::new();
-        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no, &kinds, &no_paths).unwrap();
         assert!(s.shared.is_empty(), "main never changes: {:?}", s.shared);
         // A file saved equal to the version of main: the overlay drops its entry.
         std::fs::write(new.join(".env"), "public env").unwrap();
-        let eq = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no).unwrap();
+        let eq = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no, &kinds, &no_paths).unwrap();
         assert!(eq.overlays[0].dels.contains(".env") && !eq.overlays[0].puts.contains(".env"), "equal to the parent is not stored");
         std::fs::write(new.join(".env"), "private env 2").unwrap();
         let o = &s.overlays[0];
@@ -3918,24 +4137,49 @@ mod tests {
         assert_eq!(o.marks, BTreeSet::from(["gone.c".to_string(), "moved.c".to_string()]), "deletes of files of main are markers");
         assert!(o.bases.contains_key("core.c"), "a new patch records the version of main as its base");
         assert!(!o.bases.contains_key("new.c"), "a new file is no patch");
-        // `--to main`: every change goes to main, and a file that the overlay holds leaves it.
-        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no).unwrap();
-        assert!(s.shared.puts.contains(".env") && s.overlays[0].dels.contains(".env"));
+        // `--to main`: a change of a file that the overlay patches cannot go to main when it overlaps the patch.
+        let e = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).err().expect("refused");
+        assert!(format!("{e:#}").contains("touches the patch of overlay 'pro'"), "{e:#}");
+        // Only the change of the save goes to main (a cherry-pick): the overlay keeps its patch.
+        let lines = |a: &str, z: &str| format!("{a}\n2\n3\n4\n5\n{z}\n");
+        std::fs::write(shared.join(".env"), lines("1", "public")).unwrap();
+        std::fs::write(roots[0].join(".env"), lines("1", "private")).unwrap();
+        std::fs::write(base.join(".env"), lines("1", "private")).unwrap();
+        std::fs::write(new.join(".env"), lines("one", "private")).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).unwrap();
+        assert_eq!(s.down[".env"].data, lines("one", "public").into_bytes(), "main gets the change, not the patch");
+        assert!(s.shared.puts.contains(".env") && s.overlays[0].puts.contains(".env") && !s.overlays[0].dels.contains(".env"));
         assert!(s.shared.puts.contains("core.c") && s.shared.puts.contains("new.c"));
         assert!(s.shared.dels.contains("gone.c"));
         assert!(s.overlays[0].marks.is_empty());
+        // A file that only the overlay has is refused.
+        std::fs::write(roots[0].join("own.c"), "own").unwrap();
+        std::fs::write(base.join("own.c"), "own").unwrap();
+        std::fs::write(new.join("own.c"), "own 2").unwrap();
+        let e = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).err().expect("refused");
+        assert!(format!("{e:#}").contains("is a file of overlay 'pro' only"), "{e:#}");
+        // `overlay move main`: the whole file goes to main, and the overlay drops it.
+        let publish = BTreeSet::from(["own.c".to_string(), ".env".to_string()]);
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no, &kinds, &publish).unwrap();
+        assert!(s.shared.puts.contains("own.c") && s.overlays[0].dels.contains("own.c"));
+        assert!(s.shared.puts.contains(".env") && s.overlays[0].dels.contains(".env") && s.down.is_empty());
+        for f in ["own.c"] {
+            for d in [&roots[0], &base, &new] {
+                std::fs::remove_file(d.join(f)).unwrap();
+            }
+        }
         // `overlay move` names its overlay: the file leaves main whatever the target is.
         let moves = BTreeMap::from([("core.c".to_string(), 0usize)]);
-        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no, &kinds, &no_paths).unwrap();
         assert!(s.overlays[0].puts.contains("core.c") && s.shared.dels.contains("core.c"));
         // A patch moved to an overlay: the layers below keep their version, and the overlay records its base.
         let moves = BTreeMap::from([(".env".to_string(), 0usize)]);
-        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &moves, &none, Owner::Shared, &no, &kinds, &no_paths).unwrap();
         assert!(s.overlays[0].puts.contains(".env") && !s.shared.dels.contains(".env"), "main keeps its .env");
         assert!(s.overlays[0].bases.contains_key(".env"), "the moved patch has the version of main as its base");
         // A file of a quiet overlay stays in it, also with `--to main`.
         let quiet = BTreeMap::from([(".env".to_string(), 0usize)]);
-        let s = split(&base, &new, &shared, &roots, &none, &quiet, Owner::Shared, &no).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, &quiet, Owner::Shared, &no, &kinds, &no_paths).unwrap();
         assert!(s.overlays[0].puts.contains(".env") && !s.shared.puts.contains(".env"), "a quiet file never goes to main");
         let _ = std::fs::remove_dir_all(&root);
     }
