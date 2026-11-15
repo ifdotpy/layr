@@ -93,6 +93,9 @@ lock rules as `watch`, attested in the same way. Its JSON line and exit code are
 of different checks can go on at the same time in one project, so a CI runner can start each
 privileged suite of a state in its own process. Two runs of the same check refuse each other, and
 a watcher or a run without `--only` refuses to start while any of them runs (and the other way round).
+`--slot <1-7>` gives a run of `--only` its own slot: runs of the same check in different slots go
+on at the same time, so a CI runner checks several states with one check at once. The runner gives
+each slot another state; layr does not keep two slots off one state.
 
 `layr checks run --state <rev> --planned-only` runs only jobs that a watcher already plans for that
 state. It does not add change checks to an unrelated state. It can restore the selected state from the
