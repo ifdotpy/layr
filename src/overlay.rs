@@ -2733,7 +2733,61 @@ impl<'a> Repo<'a> {
         // A part that is here only as objects (its native copy retired) counts too, so history=last drops it.
         let mut all: Vec<String> = orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
         all.extend(orepo.p.db.object_only_states()?);
-        Ok(all.into_iter().filter(|id| !keep.contains(id)).collect())
+        // The working content of a live automatic state of the project stays (`save_private_working`).
+        let (live, _) = self.auto_states(orepo)?;
+        Ok(all.into_iter().filter(|id| !keep.contains(id) && !live.contains(id)).collect())
+    }
+
+    /// The automatic states of the overlay project `orepo` that keep the working content of an automatic
+    /// state of the project (`auto.<state>`): those whose state of the project is live, and the settings
+    /// whose state of the project is gone (with the overlay state they name).
+    pub fn auto_states(&self, orepo: &Repo) -> Result<(BTreeSet<String>, Vec<(String, String)>)> {
+        let mut live = BTreeSet::new();
+        let mut dead = Vec::new();
+        for (key, value) in orepo.p.db.config_all()? {
+            let Some(state) = key.strip_prefix("auto.") else { continue };
+            let Some(id) = serde_json::from_str::<serde_json::Value>(&value).ok().and_then(|v| v.as_str().map(str::to_owned)) else { continue };
+            let gone = self.p.db.state_flags(state)?.is_none_or(|(_, deleted)| deleted);
+            if gone {
+                dead.push((key, id));
+            } else {
+                live.insert(id);
+            }
+        }
+        Ok((live, dead))
+    }
+
+    /// `gc`: the overlay states that kept the working content of automatic states of the project that are
+    /// gone (a dropped automatic state, a deleted line) go too, with their settings.
+    pub fn drop_dead_auto_states(&self, ctx: &Ctx) -> Result<usize> {
+        let mut n = 0;
+        for name in self.overlay_names()? {
+            let Ok(orepo) = self.overlay_repo(&name) else { continue };
+            let _lock = orepo.p.lock()?;
+            let (_, dead) = self.auto_states(&orepo)?;
+            if dead.is_empty() {
+                continue;
+            }
+            let present: BTreeSet<String> = orepo.p.db.present_states()?.into_iter().map(|(id, _)| id).collect();
+            let mut deleted = Vec::new();
+            let mut cfg = serde_json::Map::new();
+            for (key, id) in dead {
+                if present.contains(&id) && orepo.p.delete_state(&id)? {
+                    deleted.push(id);
+                }
+                cfg.insert(key, serde_json::Value::Null);
+            }
+            n += deleted.len();
+            let mut rec = Record::new("overlay.use");
+            rec.data = serde_json::json!({"config": cfg});
+            orepo.commit_record(ctx, rec)?;
+            if !deleted.is_empty() {
+                let mut rec = Record::new("gc");
+                rec.data = serde_json::json!({"deleted": deleted, "auto": true});
+                orepo.commit_record(ctx, rec)?;
+            }
+        }
+        Ok(n)
     }
 
     /// The states of cache overlay `name` that its records keep, on every machine and platform (the
