@@ -1,5 +1,5 @@
 #!/bin/bash
-# Overlay kinds and the old properties (docs/cache-overlays.md): history, quiet, merge union-theirs, gc. One user,
+# Overlay kinds and the old properties (docs/cache-overlays.md): history, quiet, merge union-theirs. One user,
 # so it runs on macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
 
@@ -30,8 +30,8 @@ eq "show --json has the kind" patches "$(l overlay show notes --json | python3 -
 l config overlay.notes.history 1 >/dev/null
 l config overlay.notes.merge '"union-theirs"' >/dev/null
 has "list shows the stored old settings" "history=last merge=union-theirs" "$(l overlay list)"
-props=$(l overlay show notes --json | python3 -c 'import json,sys; p=json.load(sys.stdin)["properties"]; print(p["history"], p["quiet"], p["merge"], p["gc"])')
-eq "show --json has them" "1 False union-theirs none" "$props"
+props=$(l overlay show notes --json | python3 -c 'import json,sys; p=json.load(sys.stdin)["properties"]; print(p["history"], p["quiet"], p["merge"], "gc" in p)')
+eq "show --json has them, and no gc" "1 False union-theirs False" "$props"
 eq "an overlay without settings shows its kind only" "kind=patches" "$(l overlay create plain -q && l overlay list | grep '^  plain' | cut -f5)"
 
 # 2. history=last keeps the newest state of each overlay line and the empty first state.

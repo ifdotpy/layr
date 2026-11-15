@@ -46,12 +46,12 @@ for row in rows:
     assert row['mode'] == 'follow', row
 assert by_name['offline']['readers'] == [] and by_name['offline']['saved'] is None, by_name['offline']
 assert by_name['private']['hidden'] and by_name['private']['shown'], by_name['private']
-assert by_name['private']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
+assert by_name['private']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'prune': 'auto'}
 assert not by_name['public']['hidden'] and by_name['public']['shown'], by_name['public']
-assert by_name['public']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
+assert by_name['public']['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'prune': 'auto'}
 cache = by_name[tg]
 assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
-assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'gc': 'none', 'prune': 'auto', 'platform': tg.split('.', 1)[1], 'trust': 'protected'}, cache
+assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'prune': 'auto', 'platform': tg.split('.', 1)[1], 'trust': 'protected'}, cache
 assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
 # Fix the measured tree at exactly 12 bytes, excluding the saved source-time metadata.

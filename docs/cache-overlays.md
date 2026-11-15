@@ -39,7 +39,9 @@ of it; "Built today" below says how the code still differs.
 - Storage: cache overlays go into v2 objects ([objects](objects.md)) like any overlay. A state
   record names one tree and one times table per overlay.
 - Space: layered storage and the cleanup of old layers (`history=last`) save space. No size cap
-  applies to a cache: the owner rejects `gc lru:<size>` for caches.
+  applies to a cache: it takes the space that it needs. The setting `gc lru:<size>` and its option
+  `--gc` were removed on 2026-11-15 (owner decision); the prune adapter (section 18) removes what a
+  build no longer needs.
 
 Built today:
 
@@ -71,7 +73,7 @@ The properties as built:
   | `history` | `all`, `last`, `<N>` | `all` | How many states each overlay line keeps. `last` is `1`. Older states of the line are deleted at the next state of the line and by `gc`. |
   | `quiet` | on or off | off | The overlay files are not in `status`, `diff` and `add`. Their changes go into the overlay without the index (section 4). |
   | `merge` | `three-way`, `union-theirs` | `three-way` | How a merge of a line combines the follow overlay. `union-theirs`: the result has every file of both sides; on the same path the incoming line wins; no conflicts. |
-  | `gc` | `none`, `lru:<size>` | `none` | Built, but not for caches (owner decision 2026-11-11: no size cap for caches). `gc` removes build units from the working folders of the overlay, least recently read first, until the overlay folder of each line is at most `<size>` (`500M`, `20G`). A unit is all files of one cargo hash in one profile (`deps`, `.fingerprint`, `build`, `incremental`); any other file is its own unit. Folders that this empties go too. |
+  | `gc` | (removed) | | Removed on 2026-11-15 (owner decision: a cache has no size limit). `overlay create\|set --gc` fails with exit status 2. A value that an older layr stored is not read, and `overlay list` does not show it. |
   | `folder` | a path | none | A **folder overlay**: the overlay is the whole folder at that path (section 3). |
   | `platform` | a platform key (`<os>-<arch>`) or none | none | The overlay of one platform (overlays.md section 1a, slice 3): shown, fetched and pushed only on that platform; a plain fetch or clone takes only its records, and a command that needs a cache fetches it on demand. Each part also records the key of its build (section 6); a line takes a part only when that key fits. |
   | `trust` | `protected`, `readers` | `protected` for a folder overlay | `protected`: a part that another user saved is taken only from a protected line (design.md section 5). `readers`: any part that the user reads. |
@@ -119,7 +121,7 @@ rules ignore it. The folder may be absent. Other lines ignore the overlay:
 
 - `overlay list` shows `not a cache path in this line` for it, with no repair hint.
 - `overlay repair` of it exits 0 and prints the same message. It changes nothing.
-- A line's `line new`, `merge`, `follow` and `gc lru:<size>` skip the folder.
+- A line's `line new`, `merge` and `follow` skip the folder.
 - A plain `save` and `save --caches` of another line do not touch it.
 
 The `overlay list` and `overlay repair` rule covers every folder overlay. The skip rule covers
@@ -129,8 +131,8 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 
 | Command | Effect |
 | --- | --- |
-| `layr overlay create <name> --folder <path> [--history all\|last\|<N>] [--gc none\|lru:<size>] [--platform]` | Makes a cache: always quiet, `merge=union-theirs`, `trust=protected`. Since 2026-11-15 `--quiet`, `--merge`, `--trust` and `--mode` fail with exit status 2 ([overlays](overlays.md) section 1, "Kinds as built"). |
-| `layr overlay set <name> [--history ...] [--gc ...] [--prune ...] [--platform ...]` | Changes the settings of a cache. The owner only. `--folder` cannot change. On a patches overlay these options fail with exit status 2. |
+| `layr overlay create <name> --folder <path> [--history all\|last\|<N>] [--prune <adapter>] [--platform]` | Makes a cache: always quiet, `merge=union-theirs`, `trust=protected`. Since 2026-11-15 `--quiet`, `--merge`, `--trust` and `--mode` fail with exit status 2 ([overlays](overlays.md) section 1, "Kinds as built"). |
+| `layr overlay set <name> [--history ...] [--prune ...] [--platform ...]` | Changes the settings of a cache. The owner only. `--folder` cannot change. On a patches overlay these options fail with exit status 2. |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
 | `layr save --overlays` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |
@@ -141,7 +143,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | `layr overlay remove <cache overlay>` | Removes the cache overlay from the project (section 18). Refuses a versioned overlay. |
 | `layr overlay list` | Also shows, for each folder overlay in a line, the state of its folder and its saved state; add `--size` to recursively measure its apparent file size (was `layr cache list -v`). |
 | `layr cache add\|remove\|list\|repair\|pull` | Removed. Section 15 names the replacements. |
-| `layr gc [-n] [--dedup]` | Also applies `history` to overlay lines and `gc lru:<size>` to working folders. With `--dedup`, also shares equal cache content (section 16). |
+| `layr gc [-n] [--dedup]` | Also applies `history` to overlay lines. With `--dedup`, also shares equal cache content (section 16). |
 | `layr overlay remote add <overlay> <remote> <git URL>` | The overlay's history goes to its own git repository (section 7). Refused for a cache overlay. |
 | `layr push [--dry-run]` | Pushes every layer to each of its remotes (section 7). `--dry-run` lists layer, remote and size. |
 
@@ -365,7 +367,7 @@ Each slice is one pull request that leaves `main` green.
    that no file names (a system compiler) is not in the key.
 4. **LRU on APFS.** macOS updates access times lazily; `lru` uses the access time and the
    modification time, whichever is newer. Owner decision 2026-11-11: no size cap for caches;
-   `history=last` and layered storage save space.
+   `history=last` and layered storage save space. The code of `lru` was removed on 2026-11-15.
 
 ## 11. Built: slice a
 
@@ -386,7 +388,8 @@ Built on 2026-10-27: the properties `history`, `quiet`, `merge` and `gc` for fil
   names `overlay set <name> --merge union-theirs`.
 - `quiet`: as section 4.1. A pending `overlay move` into a quiet overlay is not in `status`
   either. The summary of `save` still counts the quiet files.
-- `gc=lru:<size>` is stored and shown; slice b applies it (it needs folder overlays).
+- `gc=lru:<size>` is stored and shown; slice b applies it (it needs folder overlays). Removed on
+  2026-11-15: a cache has no size limit.
 
 ## 12. Built: slice b
 
@@ -434,8 +437,8 @@ Built on 2026-10-27: folder overlays and caches as cache overlays. Tests:
   beyond `history` or of deleted lines, overlay lines of deleted lines, and old cache snapshots of
   states. The operations that make cache data dead delete it, so the report is 0 after
   them; it exits 1 when it finds some. It only reads.
-- `save --caches` applies `gc=lru:<size>` to the folders it saves (before, only `gc` did), and `gc` applies it to the folder of each line (the newer of access and change time;
-  apparent sizes) and deletes the cache states of deleted lines.
+- `save --caches` applied `gc=lru:<size>` to the folders it saved, and `gc` applied it to the folder of each
+  line, until 2026-11-15 (the size limit was removed). `gc` deletes the cache states of deleted lines.
 - `line delete` also deletes the lines of the line on the overlays (each overlay; before 0.44 only
   the cache overlay lines `line-<id>.<platform>`), and their states at once (the overlay's `history` keeps only the heads of the overlay lines
   that stay and the states that lines show). `undo` of that delete restores the line but not its

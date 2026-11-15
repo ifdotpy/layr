@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cache overlays (docs/cache-overlays.md): `regenerable` folders become folder overlays; a line has
-# caches, so new lines from a line start warm; a merge brings caches back; `gc lru:<size>` limits
-# them; `overlay list` and `overlay repair` replace the removed `cache` commands. One user, so it
+# caches, so new lines from a line start warm; a merge brings caches back; a cache has no size
+# limit; `overlay list` and `overlay repair` replace the removed `cache` commands. One user, so it
 # runs on macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
 
@@ -92,17 +92,22 @@ eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/d
 eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"
 
-# 6. gc lru:<size> trims the cache folder of a line at its save --overlays, oldest files first, with no gc.
+# 6. A cache has no size limit (owner decision 2026-11-15): --gc was removed, and a limit that an older
+# layr stored does nothing. A cache takes the space that it needs.
 head -c 300000 /dev/zero > $P/rel/target/debug/big
 head -c 150000 /dev/zero > $P/rel/target/debug/mid
 touch -t 200001010000 $P/rel/target/debug/x
 touch -t 200101010000 $P/rel/target/debug/mid
-ok "set a size limit" l overlay set $TG --gc lru:400K
+eq "overlay set --gc fails with exit 2" 2 "$(l overlay set $TG --gc lru:400K >/dev/null 2>&1; echo $?)"
+has "the refusal says that a cache has no size limit" "a cache has no size limit" "$(l overlay set $TG --gc lru:400K 2>&1)"
+l config overlay.$TG.gc lru:400K >/dev/null 2>&1
 (cd $P/rel && l save --overlays -q >/dev/null 2>&1)
-no "the oldest file went" test -e $P/rel/target/debug/x
-no "the next oldest went until the folder fits" test -e $P/rel/target/debug/mid
-ok "the newest file stayed" test -e $P/rel/target/debug/big
-ok "a line under the limit keeps its files" test -e $P/main/target/debug/w
+ok "a stored limit removes no old file" test -e $P/rel/target/debug/x
+ok "nor the next oldest" test -e $P/rel/target/debug/mid
+ok "the newest file stays" test -e $P/rel/target/debug/big
+l gc >/dev/null 2>&1
+ok "gc removes no file of the cache either" test -e $P/rel/target/debug/x
+no "overlay list shows no gc setting" sh -c 'echo "$1" | grep -q "gc="' sh "$(l overlay list)"
 
 # 7. A folder overlay made by hand.
 ok "overlay create --folder" l overlay create deps --folder vendor/cache -q
