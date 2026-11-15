@@ -10,7 +10,10 @@ ln -s t1 L; ln -s t1 M; ln -s t1 N; printf 'echo hi\n' > S.sh; chmod 644 S.sh; e
 echo q > Q.txt; echo c > c.txt; seq 1 10 | sed 's/^/z /' > Z.txt; echo w > W.txt
 l init m --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/m/lines
-cd $P/main && l line new -q topic
+cd $P/main
+# These cases record ordinary conflicts; protected-line refusals are covered by t258.
+l protect main --remove >/dev/null || exit 1
+l line new -q topic
 # ours (main)
 cd $P/main
 sed_inplace 's/^a 2$/a 2 OURS/' A.txt; rm -rf X; rm L; ln -s t2 L; rm N; ln -s t2 N; printf 'echo hi\necho ours\n' > S.sh

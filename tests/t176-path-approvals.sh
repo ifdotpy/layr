@@ -82,14 +82,24 @@ out = run(['protect'], success=True).stdout
 check('keep-approvals docs' in out, 'the rule lists the paths that keep approvals')
 p = merge(v2)
 check(p.returncode == 0, 'a version that changed only docs after the approval merges: ' + p.stderr)
+check((main / 'src/x.rs').read_text() == 'code v1\n', 'the docs-only amend merges the approved code version')
+merged = run(['rev-parse', 'head']).stdout
 v3 = save('src/x.rs', 'code v3\n', 'amend')
 p = merge(v3)
-check(p.returncode != 0 and 'approval' in p.stderr, 'a version that changed code after the approval needs a new one')
+check(p.returncode != 0 and 'approval' in p.stderr, 'a version that changed code after the approval needs a new one: ' + p.stderr)
+check(run(['rev-parse', 'head']).stdout == merged and (main / 'src/x.rs').read_text() == 'code v1\n',
+      'the unapproved conflicting amend leaves the merged head and code unchanged')
 run(['protect', 'main', '--keep-approvals', ''])
 v4 = save('docs/a.md', 'doc v4\n', 'amend')
 approve(v3, ann)
 p = merge(v4)
-check(p.returncode != 0, 'without --keep-approvals an approval holds only its exact state')
+check(p.returncode != 0 and 'approval' in p.stderr,
+      'without --keep-approvals an approval holds only its exact state: ' + p.stderr)
+p = merge(v3)
+check(p.returncode != 0 and 'protected line' in p.stderr and 'conflict' in p.stderr,
+      'the approved code amend still refuses its conflict before merging: ' + p.stderr)
+check(run(['rev-parse', 'head']).stdout == merged and (main / 'src/x.rs').read_text() == 'code v1\n',
+      'the approved conflicting amend leaves the merged head and code unchanged')
 
 # An owner of secret/: a change of it needs bob's approval as well. A new line from main.
 run(['protect', 'main', '--owner', 'secret=person:bob@example.com'])
