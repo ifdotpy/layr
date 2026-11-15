@@ -837,6 +837,26 @@ fn readers(ctx: &Ctx, args: &[String]) -> Result<i32> {
         record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
     }
     orepo.commit_record(ctx, record)?;
+    drop(_lock);
+    // The caches of the view of this overlay (docs/overlays.md section 1, caches per view) take the same
+    // readers in the same command, so a store remote encrypts them for those readers only. Reads also check
+    // the readers of the overlay itself (`Repo::reads_overlay`).
+    for cache in h.repo.overlay_names()? {
+        if h.repo.overlay_setting(&cache, crate::overlay::VIEW)?.and_then(|v| v.as_str().map(str::to_owned)).as_deref() != Some(name.as_str()) {
+            continue;
+        }
+        let crepo = h.repo.overlay_repo(&cache)?;
+        let cinfo = h.repo.need_overlay(&cache)?;
+        let _clock = crepo.p.lock()?;
+        let caccess = access_map(cinfo.owner, &list);
+        let gone = crepo.policy().access.iter().any(|(principal, role)| *role >= Role::Reader && caccess.get(principal).is_none());
+        let mut record = Record::new("overlay.readers");
+        record.data = serde_json::json!({"config":{"access":caccess}});
+        if gone {
+            record.data["config"]["overlay.revocation"] = serde_json::json!(ids::new_id());
+        }
+        crepo.commit_record(ctx, record)?;
+    }
     Ok(0)
 }
 

@@ -1687,7 +1687,15 @@ impl<'a> Repo<'a> {
             return Ok(true);
         }
         let op = self.overlay_project(name)?;
-        Ok(Policy::load(&op).check(&Who::of(uid, gid), "read").is_ok())
+        if Policy::load(&op).check(&Who::of(uid, gid), "read").is_err() {
+            return Ok(false);
+        }
+        // The cache of the view of overlay X (docs/overlays.md section 1): only a reader of X reads it, also when
+        // the cache's own readers are older than a change of X's readers.
+        match self.overlay_setting(name, VIEW)?.and_then(|v| v.as_str().map(str::to_owned)) {
+            Some(x) if x != name => self.reads_overlay(&x, uid, gid),
+            _ => Ok(true),
+        }
     }
 
     pub(crate) fn owner_reads(&self, name: &str, owner: u32) -> Result<bool> {

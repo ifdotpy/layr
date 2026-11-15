@@ -262,6 +262,11 @@ Built so far (the rest of this file describes the code until a row says "built")
   (`pull_caches`). The cache of a view is an ordinary overlay: `history`, `overlay log|diff`, push to and
   fetch from a store remote (encrypted for its readers) work as for the cache of `main`.
 - `overlay list` shows it with its folder; `folder_overlays` (the caches of `main`) leaves it out.
+- Readers. Only a reader of X reads the cache of the view of X: every read checks the cache's own
+  readers and the readers of X (`Repo::reads_overlay`). `overlay readers X` gives the caches of the
+  view of X the same readers in the same command (a revocation when a reader goes), so a store remote
+  encrypts them for those readers only. Test: t262 (one user), tests/t263-view-cache-readers.sh
+  (another user, Linux service mode).
 - Test: tests/t262-overlay-cache-views.sh.
 
 ### The model of 2026-11-11
