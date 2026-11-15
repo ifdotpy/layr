@@ -63,11 +63,12 @@ pub(crate) struct Cleanup {
     pub(crate) driver: Arc<dyn Filesystem>,
     pub(crate) failure: RemovalFailure,
     cause: CleanupCause,
+    description: String,
     guards: Vec<composition::CaptureLocation>,
 }
 enum CleanupCause {
     Operation(FsError),
-    Retained { description: String, recovery: Box<Cleanup> },
+    Retained(Box<Cleanup>),
 }
 impl std::fmt::Debug for Cleanup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,18 +77,14 @@ impl std::fmt::Debug for Cleanup {
 }
 impl std::fmt::Display for Cleanup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.cause {
-            CleanupCause::Operation(cause) => write!(f, "{cause:#}"),
-            CleanupCause::Retained { description, .. } => f.write_str(description),
-        }?;
-        write!(f, "; cleanup requires retry: {:#}", self.failure.error)
+        write!(f, "{}; cleanup requires retry: {:#}", self.description, self.failure.error)
     }
 }
 impl std::error::Error for Cleanup {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match &self.cause {
             CleanupCause::Operation(cause) => cause,
-            CleanupCause::Retained { recovery, .. } => recovery.as_ref(),
+            CleanupCause::Retained(recovery) => recovery.as_ref(),
         })
     }
 }
@@ -97,7 +94,8 @@ pub(crate) fn operation_error(driver: Arc<dyn Filesystem>, error: FsError) -> an
 fn retained_error(driver: Arc<dyn Filesystem>, error: FsError, guards: Vec<composition::CaptureLocation>) -> anyhow::Error {
     match error {
         FsError::Cleanup { cause, failure } => {
-            anyhow::Error::new(Cleanup { driver, cause: CleanupCause::Operation(*cause), failure: *failure, guards })
+            let description = format!("{cause:#}");
+            anyhow::Error::new(Cleanup { driver, cause: CleanupCause::Operation(*cause), failure: *failure, description, guards })
         }
         error => error.into(),
     }
@@ -306,25 +304,30 @@ impl Cleanup {
     pub(crate) fn after(driver: Arc<dyn Filesystem>, failure: RemovalFailure, cause: anyhow::Error) -> Self {
         let description = format!("{cause:#}");
         let cause = match cause.downcast::<Self>() {
-            Ok(recovery) => CleanupCause::Retained { description, recovery: Box::new(recovery) },
+            Ok(recovery) => CleanupCause::Retained(Box::new(recovery)),
             Err(error) => CleanupCause::Operation(FsError::backend(error)),
         };
-        Self { driver, failure, cause, guards: Vec::new() }
+        Self { driver, failure, cause, description, guards: Vec::new() }
     }
     /// Resume all retained receipts in order; private capture directories stay alive until
     /// cleanup succeeds. Dropping an error grants no authority over a replacement tree.
     pub(crate) fn retry(self) -> std::result::Result<(), Self> {
-        let Self { driver, mut failure, mut cause, guards } = self;
+        let Self { driver, mut failure, mut cause, description, guards } = self;
         loop {
             if let Err(next) = driver.remove(failure.ownership) {
-                return Err(Self { driver, failure: next, cause, guards });
+                return Err(Self { driver, failure: next, cause, description, guards });
             }
             match cause {
                 CleanupCause::Operation(FsError::Cleanup { cause: inner, failure: next }) => {
                     cause = CleanupCause::Operation(*inner);
                     failure = *next;
                 }
-                CleanupCause::Retained { recovery, .. } => return recovery.retry(),
+                CleanupCause::Retained(recovery) => {
+                    return recovery.retry().map_err(|mut remaining| {
+                        remaining.description = description;
+                        remaining
+                    })
+                }
                 CleanupCause::Operation(_) => return Ok(()),
             }
         }

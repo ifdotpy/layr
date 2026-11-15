@@ -320,6 +320,7 @@ mod transport_identity_tests {
         assert!(format!("{error:#}").contains("inner operation failed"));
         rustix::fs::fchmod(outer_child.as_fd(), rustix::fs::Mode::from_raw_mode(0o700))?;
         let error = error.retry().expect_err("the inner operation must still report its retained failure");
+        assert!(format!("{error:#}").contains("inner operation failed"), "retry must retain the original context");
         use std::os::unix::fs::MetadataExt;
         assert_eq!(outer_root.metadata()?.nlink(), 0);
         assert!(inner_root.metadata()?.nlink() > 0);

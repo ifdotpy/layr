@@ -74,47 +74,15 @@ impl CaptureSession {
     }
 
     pub(crate) fn discard(&self) -> Result<()> {
-        let mut failures = Vec::new();
+        let mut result = Ok(());
         for Prepared { driver, capture, .. } in self.prepared.take() {
             drop(capture.tree);
             if let Err(failure) = driver.remove(capture.ownership) {
-                failures.push(Cleanup {
-                    driver,
-                    failure,
-                    cause: CleanupCause::Operation(FsError::Invalid("unused prepared capture cleanup failed")),
-                    guards: Vec::new(),
-                });
+                let cause = result.err().unwrap_or_else(|| anyhow::anyhow!("unused prepared capture cleanup failed"));
+                result = Err(anyhow::Error::new(Cleanup::after(driver, failure, cause)));
             }
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow::Error::new(CaptureCleanup(failures)))
-        }
-    }
-}
-
-/// A command can retry failed cleanup even after converting the error to anyhow::Error.
-pub(crate) struct CaptureCleanup(Vec<Cleanup>);
-impl std::fmt::Debug for CaptureCleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl std::fmt::Display for CaptureCleanup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} unused capture(s) require cleanup", self.0.len())
-    }
-}
-impl std::error::Error for CaptureCleanup {}
-impl CaptureCleanup {
-    pub(crate) fn retry(self) -> std::result::Result<(), Self> {
-        let remaining = self.0.into_iter().filter_map(|cleanup| cleanup.retry().err()).collect::<Vec<_>>();
-        if remaining.is_empty() {
-            Ok(())
-        } else {
-            Err(Self(remaining))
-        }
+        result
     }
 }
 
@@ -123,5 +91,47 @@ impl Drop for CaptureSession {
         if let Err(error) = self.discard() {
             eprintln!("warning: {error:#}");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", not(feature = "overlayfs")))]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    #[test]
+    fn discarded_preparations_share_the_owned_cleanup_chain_across_drivers() -> Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir().join(format!("prepared-cleanup-{}", crate::ids::new_id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let session = CaptureSession::default();
+        let source = layr_fs_plain::MemoryTree::new(EntryAttributes {
+            mode: 0o700,
+            uid: rustix::process::geteuid().as_raw(),
+            gid: rustix::process::getegid().as_raw(),
+            modified_ns: 0,
+            stored_time: Some(0),
+            xattrs: Vec::new(),
+            acl: None,
+        });
+        let mut leases = Vec::new();
+        for name in ["first", "second"] {
+            let destination = root.join(name);
+            let driver = composition::operation(None, &destination, CapturePurpose::State)?;
+            let capture = driver.freeze(FreezeSource::Reader(&source), driver.location(&destination)?)?;
+            leases.push(capture.tree.clone());
+            session.prepared.borrow_mut().push(Prepared { source: destination, driver, capture });
+        }
+        let error = session.discard().expect_err("live readers must retain both preparations");
+        assert!(session.prepared.borrow().is_empty());
+        let recovery = error.downcast::<Cleanup>()?;
+        drop(leases.pop());
+        let recovery = recovery.retry().expect_err("the first preparation still has a reader");
+        assert!(root.join("first").exists());
+        assert!(!root.join("second").exists());
+        drop(leases.pop());
+        recovery.retry().map_err(anyhow::Error::new)?;
+        assert!(!root.join("first").exists());
+        std::fs::remove_dir(root)?;
+        Ok(())
     }
 }

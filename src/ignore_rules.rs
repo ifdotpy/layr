@@ -203,7 +203,9 @@ impl Rules {
                         }
                         Some(attribute) => {
                             let unset = format!("-{attribute}");
-                            for line in String::from_utf8_lossy(&self.read_rule(&rel)).lines() {
+                            let bytes = self.read_rule(&rel);
+                            let text = std::str::from_utf8(&bytes).unwrap_or_default();
+                            for line in text.lines() {
                                 let mut words = line.split_whitespace();
                                 let pattern = match words.next() {
                                     Some(p) if !p.starts_with('#') => p,
@@ -285,6 +287,31 @@ fn add_ignore_bytes(builder: &mut GitignoreBuilder, origin: PathBuf, bytes: &[u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_attributes_are_rejected_as_a_whole_for_live_and_logical_readers() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-attribute-bytes-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("nested"))?;
+        for dir in ["", "nested"] {
+            let rule = root.join(dir).join(".layrattributes");
+            let path = if dir.is_empty() { "cache".to_owned() } else { format!("{dir}/cache") };
+            for (bytes, matched) in [
+                (b"cache regenerable\n".as_slice(), true),
+                (b"cache regenerable\n\xff\n".as_slice(), false),
+                (b"\xff\ncache regenerable\n".as_slice(), false),
+            ] {
+                std::fs::write(&rule, bytes)?;
+                let live = Rules::attribute(&root, "regenerable");
+                let logical = Rules::of(&crate::source::Source::native(&root));
+                let logical = Rules { files: &[".layrattributes"], attribute: Some("regenerable"), ..logical };
+                assert_eq!(live.ignored(&path, true), matched, "live: {path}: {bytes:?}");
+                assert_eq!(logical.ignored(&path, true), matched, "logical: {path}: {bytes:?}");
+            }
+            std::fs::remove_file(rule)?;
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn live_captured_and_logical_ignore_bytes_match_gitignore_bom_and_invalid_utf8() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("layr-ignore-bytes-{}", crate::ids::new_id()));
