@@ -32,6 +32,11 @@ has "the cache of the view of pro exists" "$VC" "$(l overlay list)"
 has "its readers are the readers of pro, not the trusted machines" "$(id -un)" "$(l overlay readers $VC)"
 eq "and no machine" "" "$(l overlay readers $VC | grep machine:)"
 has "overlay log of the cache of the view" "cache target of line priv" "$(l overlay log $VC --format=%s)"
+# The readers of the cache follow the readers of pro in the same command (a store remote encrypts for them).
+ok "pro gets a second reader" l overlay readers pro "$(id -un)" uid:1
+has "the cache of the view has it too" "$(id -un 1)" "$(l overlay readers $VC)"
+ok "pro loses it" l overlay readers pro "$(id -un)"
+eq "the cache of the view loses it at once" "" "$(l overlay readers $VC | grep -x "$(id -un 1)")"
 echo private-bin-2 > target/debug/x
 ok "a second version" l save --overlays -q
 eq "history=last keeps one version for the line" private-bin-2 "$(l overlay show $VC head:debug/x 2>/dev/null || cat target/debug/x)"
