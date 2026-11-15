@@ -1285,24 +1285,6 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
     discard_prepared(&h.repo);
     let code = code?;
-    // The patches of the view of the line merge with a parent that the merge changed (docs/overlays.md
-    // section 1). A failure leaves them waiting and never undoes the merge.
-    if code == 0 {
-        let r = (|| -> Result<Vec<String>> {
-            let _lock = h.repo.p.lock()?;
-            let now = h.repo.line(&line.id)?;
-            crate::overlay::rebase_patches(ctx, &h.repo, &now)
-        })();
-        match r {
-            Ok(msgs) if !a.has("-q") => {
-                for m in msgs {
-                    outln!(ctx, "{m}");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("warning: the patches of the view wait for a merge with the parent: {e:#}"),
-        }
-    }
     // The caches of a merged line go with it, taken and saved as the follow pass does (docs/cache-overlays.md,
     // section 5). They are regenerable: a failure is reported and never undoes the merge.
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
@@ -1665,7 +1647,27 @@ pub fn merge_queued(
 pub(crate) const REFUSE_CONFLICTS: &str = "--refuse-conflicts";
 
 pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args::Parsed) -> Result<i32> {
-    merge_rev_inner(ctx, repo, line, rev, a, None)
+    let code = merge_rev_inner(ctx, repo, line, rev, a, None)?;
+    // The patches of the view of the line merge with a parent that the merge moved (docs/overlays.md
+    // section 1): after `merge`, `pull` and the follow pass alike. A failure leaves them waiting and never
+    // undoes the merge.
+    if code == 0 {
+        let r = (|| -> Result<Vec<String>> {
+            let _lock = repo.p.lock()?;
+            let now = repo.line(&line.id)?;
+            crate::overlay::rebase_patches(ctx, repo, &now)
+        })();
+        match r {
+            Ok(msgs) if !a.has("-q") => {
+                for m in msgs {
+                    outln!(ctx, "{m}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: the patches of the view wait for a merge with the parent: {e:#}"),
+        }
+    }
+    Ok(code)
 }
 
 fn merge_rev_inner(

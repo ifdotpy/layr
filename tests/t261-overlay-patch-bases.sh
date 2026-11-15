@@ -57,6 +57,20 @@ eq "pro has both changes" "one-up ten-pro" "$(l overlay show pro head:lib.c | se
 eq "the folder too" "one-up ten-pro" "$(sed -n '1p;$p' lib.c | paste -sd' ' -)"
 eq "the folder is clean" "" "$(l status --porcelain)"
 eq "nothing waits" "" "$(paths waiting)"
+# A local change of the patched path: the patch waits, and no state of pro is recorded.
+cd $LAYR_ROOT/projects/p/lines/up
+sed_inplace -e 's/^2$/two-up/' lib.c
+ok "up changes the second line" l save -qam "up two"
+cd $M
+echo "/* local */" >> lib.c
+pro_before=$(l overlay use | awk '$1=="pro"{print $2}')
+has "the merge says that the patch waits" "waits for a merge with the parent" "$(l merge up 2>&1)"
+eq "no state of pro is recorded" "$pro_before" "$(l overlay use | awk '$1=="pro"{print $2}')"
+has "status says that it waits" "pro: waits for a merge with the parent: lib.c" "$(l status)"
+ok "the local change goes" l restore lib.c
+has "overlay use merges it" "lib.c: merged with the parent" "$(l overlay use pro 2>&1)"
+eq "the folder has the change of up" two-up "$(sed -n 2p lib.c)"
+eq "nothing waits after it" "" "$(paths waiting)"
 
 # 3. An overlap: conflict markers, resolved by a save.
 cd $LAYR_ROOT/projects/p/lines/up
