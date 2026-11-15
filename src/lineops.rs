@@ -194,6 +194,7 @@ impl Repo<'_> {
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
+                crate::cache_overlay::hint_view(&line.id, layers.iter().map(|l| l.overlay.clone()).collect());
                 // On OverlayFS the caches are taken after the folder move (`commit_prepared_lines`): a
                 // mount under a moved folder is lost by MS_MOVE. Elsewhere a take is a snapshot taken
                 // before the store lock, and it runs first so `prepare_at` does not copy the folder again.

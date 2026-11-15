@@ -46,6 +46,16 @@ pub fn cache_overlay_name(folder: &str, platform: &str) -> String {
     format!("folder-{}.{platform}", &hex::encode(layr_hashers::ContentAddress::digest(folder.as_bytes()))[..12])
 }
 
+thread_local! {
+    /// The overlays of the view of a line that `line new` prepares, before its record names them.
+    static VIEW_HINT: std::cell::RefCell<BTreeMap<String, Vec<String>>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// The overlays of the view of the new line `line_id` for the caches that it takes (`place_caches`).
+pub fn hint_view(line_id: &str, overlays: Vec<String>) {
+    VIEW_HINT.with(|h| h.borrow_mut().insert(line_id.to_string(), overlays));
+}
+
 /// The properties of a build-output overlay of this platform (docs/cache-overlays.md, section 2).
 pub fn cache_props() -> Props {
     Props {
@@ -377,6 +387,49 @@ impl<'a> Repo<'a> {
         Ok(name)
     }
 
+    /// The cache overlay of `folder` in the view of overlay `x`, made when missing (docs/overlays.md section 1,
+    /// caches per view): a folder overlay with the cache properties and `view=<x>`, whose readers are the
+    /// readers of `x` (not the trusted machines), hidden when `x` is hidden. The caller holds the project lock.
+    fn ensure_view_cache_overlay(&self, ctx: &Ctx, folder: &str, x: &str) -> Result<String> {
+        for (n, f, v) in self.view_cache_overlays()? {
+            if f == folder && v == x {
+                return Ok(n);
+            }
+        }
+        let name = format!("{}.view.{x}", cache_overlay_name(folder, &crate::model::cache_platform()));
+        crate::store::check_name("overlay", &name)?;
+        if self.overlay_info(&name)?.is_some() {
+            bail!("overlay '{name}' exists and does not hold folder {folder} of the view of {x}");
+        }
+        let info = self.need_overlay(x)?;
+        let policy = crate::access::Policy::load(&self.overlay_project(x)?);
+        let readers: Vec<String> =
+            policy.access.iter().filter(|(_, r)| **r >= crate::access::Role::Reader).map(|(k, _)| k.clone()).collect();
+        let key_files = self.p.config_value("cache.key-files")?.filter(|v| v.is_array());
+        crate::cmd::overlaycmd::make_overlay(
+            ctx,
+            self,
+            &name,
+            &readers,
+            Mode::Follow,
+            info.hidden,
+            &cache_props(),
+            Some(folder),
+            key_files.as_ref(),
+            None,
+        )?;
+        let mut rec = crate::model::Record::new("config");
+        rec.data = serde_json::json!({"config": {format!("overlay.{name}.{}", crate::overlay::VIEW): x}});
+        if info.hidden {
+            let orepo = self.overlay_repo(&name)?;
+            let _lock = orepo.p.lock()?;
+            orepo.commit_record(ctx, rec)?;
+        } else {
+            self.commit_record(ctx, rec)?;
+        }
+        Ok(name)
+    }
+
     /// The readers of cache overlay `name` besides its owner: the machines this project trusts (this
     /// machine included), so that store copies and peer sync give caches only to them. A limited
     /// machine reads it while its trust lasts and when the trust names it (docs/ci-trust.md). Local
@@ -468,23 +521,18 @@ impl<'a> Repo<'a> {
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
-        // A cache built in the view of an overlay holds compiled private code (docs/overlays.md section 1,
-        // caches per view). A cache overlay serves every view and its readers are the trusted machines, so
-        // such a cache is never saved: the folder keeps it, and a view of `main` saves the shared ones.
-        if !paths.is_empty() && self.line_view_top(line)?.is_some() {
-            eprintln!(
-                "note: line {} shows overlay {}: its caches stay in the folder and are not saved (a cache of a view of an overlay is private)",
-                line.name,
-                self.line_view_top(line)?.unwrap_or_default()
-            );
-            return Ok(out);
-        }
+        // A cache built in the view of an overlay X holds compiled private code (docs/overlays.md section 1,
+        // caches per view): it goes to the cache of that view, which only readers of X read.
+        let view = self.line_view_top(line)?;
         for p in paths {
             let cp = fsutil::safe_join(w, p)?;
             if !btrfs::is_subvolume(&cp) {
                 continue;
             }
-            let name = self.ensure_cache_overlay(ctx, p)?;
+            let name = match &view {
+                Some(x) => self.ensure_view_cache_overlay(ctx, p, x)?,
+                None => self.ensure_cache_overlay(ctx, p)?,
+            };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
@@ -816,7 +864,19 @@ impl<'a> Repo<'a> {
         self.hold(self.pin(&held)?);
         let ignored = Rules::new(w);
         let (uid, gid) = self.owner_ids(line);
-        for (name, folder) in self.folder_overlays()? {
+        // The folders of the caches of `main`, and of the views that the line's path holds.
+        let mut folders = self.folder_overlays()?;
+        // The view of a line that `line new` makes is recorded with the line: until then its overlays are the hint.
+        let mut path: Vec<String> = self.layers(line)?.into_iter().map(|l| l.overlay).collect();
+        if path.is_empty() {
+            path = VIEW_HINT.with(|h| h.borrow().get(&line.id).cloned()).unwrap_or_default();
+        }
+        for (n, f, v) in self.view_cache_overlays()? {
+            if path.contains(&v) && !folders.iter().any(|(_, x)| *x == f) {
+                folders.push((n, f));
+            }
+        }
+        for (name, folder) in folders {
             // Versioned files win: a folder that the start state holds files in comes from the
             // state. Otherwise the cache below replaces what the folder holds now: an old cache
             // of the state (`states/<id>@<folder>`, applied before), else the line would start
@@ -835,8 +895,22 @@ impl<'a> Repo<'a> {
                 Some(s) => Source::Line(s),
                 None => Source::State(start),
             };
-            let key = self.cache_key(ctx, &name, w, uid)?;
-            let Some(sid) = self.cache_source(&name, &from, uid, &key)? else {
+            // The cache of the view of the line (docs/overlays.md section 1, caches per view), else of the
+            // nearest view below it whose key fits, else of `main`. The view of `main` takes only the cache of
+            // `main`.
+            let mut found = None;
+            for cand in self.cache_chain(line, &path, &folder)? {
+                if !self.has_overlay_here(&cand, &folder) {
+                    continue;
+                }
+                let key = self.cache_key(ctx, &cand, w, uid)?;
+                if let Some(sid) = self.cache_source(&cand, &from, uid, &key)? {
+                    found = Some((cand, sid));
+                    break;
+                }
+            }
+            let Some((name, sid)) = found else {
+                let key = self.cache_key(ctx, &name, w, uid)?;
                 self.report_key_miss(&name, &folder, &from, uid, &key.parts);
                 continue;
             };
@@ -880,7 +954,16 @@ impl<'a> Repo<'a> {
         let (uid, gid) = self.owner_ids(line);
         let own = self.own(line);
         let shared = self.policy().rule_for(&line.name).is_some();
-        for (name, folder) in self.folder_overlays()? {
+        // The caches of `main`, and the caches of the views that the path of the line holds (docs/overlays.md
+        // section 1, caches per view): a merge unites the caches of a view only in a line that shows it.
+        let mut list = self.folder_overlays()?;
+        let path: Vec<String> = self.layers(line)?.into_iter().map(|l| l.overlay).collect();
+        for (n, f, v) in self.view_cache_overlays()? {
+            if path.contains(&v) && self.owner_reads(&n, line.owner).unwrap_or(false) {
+                list.push((n, f));
+            }
+        }
+        for (name, folder) in list {
             if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? || !self.has_overlay_here(&name, &folder) {
                 continue;
             }
