@@ -20,6 +20,10 @@ else
     chmod -R u+rwX "$CARGO_HOME"
 fi
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH" CARGO_NET_OFFLINE=true
+# Line tables only: panics and backtraces keep files and lines, and the test binaries are a fraction of
+# the size. With full debug info three suites in parallel kept a 3000-IOPS runner disk at its limit
+# with linker writes alone (rust-lld, 2026-11-13).
+export CARGO_PROFILE_DEV_DEBUG=line-tables-only
 if [ "$(uname -s)" = Linux ]; then
     # One rustc job per CPU, at most one per 2 GiB of memory; one shell test per CPU.
     cpus=$(nproc)

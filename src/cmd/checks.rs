@@ -1423,7 +1423,18 @@ mod policy_tests {
         // fork/dup retains the same open file descriptions after the executor drops its files.
         let inherited = xfs.iter().chain(&other).map(|lock| lock.0.try_clone().unwrap()).collect::<Vec<_>>();
         drop((xfs, other));
-        let full = checks_locks(&meta, &[]).unwrap();
+        // A child that another test forks keeps copies of the dropped locks until its exec: try again
+        // until the full executor gets the lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let full = loop {
+            match checks_locks(&meta, &[]) {
+                Ok(locks) => break locks,
+                Err(e) if std::time::Instant::now() < deadline && format!("{e:#}").contains("already active") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(e) => panic!("{e:#}"),
+            }
+        };
         let only = checks_locks(&meta, &names(&["unit"])).unwrap_err();
         assert!(format!("{only:#}").contains("already active"), "{only:#}");
         let inherited_full = full[0].0.try_clone().unwrap();
