@@ -330,6 +330,7 @@ impl Filesystem for OverlayFs {
 }
 impl hints::ChangeHints for OverlayFs {
     fn between(&self, base: &FrozenTree, tree: &FrozenTree) -> layr_fs_core::Result<hints::HintSet> {
+        let _t = crate::trace::span("OverlayFS candidates");
         let (base, tree) = (self.path(self.issuer.frozen_key(base)?)?, self.path(self.issuer.frozen_key(tree)?)?);
         let loaded;
         let layers = if let Some(pair) = &self.hint_pair {
@@ -717,6 +718,84 @@ mod tests {
             })
             .unwrap();
         assert!(fixture.driver.trees()?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn replacement_after_validation_is_restored_from_private_custody() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let original = fixture.root.join("original");
+        let (created, _) = fixture.driver.create_with(fixture.driver.location(&destination)?, |path, publication| {
+            fs::create_dir(path)?;
+            fs::write(path.join("owned"), b"original")?;
+            publication.directory(&fixture.root, Some(&fs::symlink_metadata(path)?));
+            Ok(CaptureConsistency::ValidatedCopy)
+        })?;
+        drop(created.tree);
+        let failure = fixture
+            .driver
+            .remove_with(created.ownership, |removal| {
+                removal.validate()?;
+                // A writer substitutes a tree during registry persistence, after validation.
+                fs::rename(&destination, &original)?;
+                fs::create_dir(&destination)?;
+                fs::write(destination.join("foreign"), b"keep")?;
+                removal.stage = RemovalStage::Directory;
+                removal.remove_directory()
+            })
+            .unwrap_err();
+        assert!(failure.error.to_string().contains("replacement restored"));
+        assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
+        assert_eq!(fs::read(original.join("owned"))?, b"original");
+        fs::remove_dir_all(&destination)?;
+        fs::rename(&original, &destination)?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        fs::create_dir(fixture.root.join("objects"))?;
+        fixture.driver.remove(failure.ownership).unwrap();
+        assert!(!destination.exists());
+        assert!(!fs::read_dir(&fixture.root)?.any(|entry| entry.unwrap().file_name().as_bytes().starts_with(b".remove-")));
+        Ok(())
+    }
+    #[test]
+    fn moved_custody_is_removed_only_through_its_retained_descriptor() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let moved = fixture.root.join("moved-custody");
+        let (created, _) = fixture.driver.create_with(fixture.driver.location(&destination)?, |path, publication| {
+            fs::create_dir(path)?;
+            fs::write(path.join("owned"), b"original")?;
+            publication.directory(&fixture.root, Some(&fs::symlink_metadata(path)?));
+            Ok(CaptureConsistency::ValidatedCopy)
+        })?;
+        drop(created.tree);
+        let mut public_custody = None;
+        let failure = fixture
+            .driver
+            .remove_with(created.ownership, |removal| {
+                removal.validate()?;
+                removal.stage = RemovalStage::Directory;
+                removal.remove_directory_with(|stage| {
+                    if let RemovalStage::Verified(custody) = stage {
+                        let path = fixture.root.join(&custody.location.name);
+                        fs::rename(&path, &moved)?;
+                        fs::create_dir(&path)?;
+                        fs::create_dir(path.join("tree"))?;
+                        fs::write(path.join("tree/foreign"), b"keep")?;
+                        public_custody = Some(path);
+                    }
+                    Ok(())
+                })
+            })
+            .unwrap_err();
+        assert!(failure.error.to_string().contains("custody directory moved"));
+        let public_custody = public_custody.unwrap();
+        assert_eq!(fs::read(public_custody.join("tree/foreign"))?, b"keep");
+        assert!(!moved.join("tree").exists());
+        fs::remove_dir_all(&public_custody)?;
+        fs::rename(moved, &public_custody)?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        fs::create_dir(fixture.root.join("objects"))?;
+        fixture.driver.remove(failure.ownership).unwrap();
         Ok(())
     }
     #[test]

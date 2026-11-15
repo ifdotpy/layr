@@ -1103,9 +1103,39 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
 pub fn delete_tree(path: &Path) -> Result<()> {
     OverlayFs::remove_path(path)
 }
+struct PrivateLocation {
+    parent: std::sync::Arc<File>,
+    name: std::ffi::OsString,
+}
+struct PrivateDirectory {
+    location: PrivateLocation,
+    directory: File,
+}
+impl PrivateDirectory {
+    fn remove_empty(&self) -> Result<()> {
+        let actual =
+            rustix::fs::statat(self.location.parent.as_ref(), &self.location.name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        let expected = self.directory.metadata()?;
+        anyhow::ensure!(
+            (actual.st_dev as u64, actual.st_ino as u64) == (expected.dev(), expected.ino()),
+            "removal custody directory moved"
+        );
+        // Only unlink an empty directory here. Recursive deletion uses the private FD,
+        // so a replacement in the writable parent can never have its contents removed.
+        rustix::fs::unlinkat(self.location.parent.as_ref(), &self.location.name, rustix::fs::AtFlags::REMOVEDIR)?;
+        Ok(())
+    }
+}
 enum RemovalStage {
     Trees,
     Directory,
+    OpenCustody(PrivateLocation),
+    EmptyCustody(std::sync::Arc<PrivateDirectory>),
+    Candidate(std::sync::Arc<PrivateDirectory>),
+    Verified(std::sync::Arc<PrivateDirectory>),
+    RestoreForeign(std::sync::Arc<PrivateDirectory>),
+    RemoveCustody(std::sync::Arc<PrivateDirectory>),
+    RemoveForeignCustody(std::sync::Arc<PrivateDirectory>),
     Collect,
 }
 #[derive(PartialEq, Eq)]
@@ -1161,10 +1191,95 @@ impl Removal {
     fn directory_removed(&mut self) {
         self.stage = RemovalStage::Collect;
     }
+    fn remove_directory(&mut self) -> Result<()> {
+        self.remove_directory_with(|_| Ok(()))
+    }
+    fn remove_directory_with(&mut self, mut before: impl FnMut(&RemovalStage) -> Result<()>) -> Result<()> {
+        use rustix::fs::{renameat_with, AtFlags, RenameFlags};
+        loop {
+            before(&self.stage)?;
+            match &self.stage {
+                RemovalStage::Directory => {
+                    let name = std::ffi::OsString::from(format!(".remove-{}", crate::ids::new_id()));
+                    // A sibling stays on the same filesystem even for a plain cache inside
+                    // an OverlayFS mount. Its private contents are accessed only via its FD.
+                    rustix::fs::mkdirat(self.parent.as_ref(), &name, rustix::fs::Mode::from_raw_mode(0o700))?;
+                    self.stage = RemovalStage::OpenCustody(PrivateLocation { parent: self.parent.clone(), name });
+                }
+                RemovalStage::OpenCustody(location) => {
+                    let directory = File::from(rustix::fs::openat(
+                        location.parent.as_ref(),
+                        &location.name,
+                        rustix::fs::OFlags::RDONLY
+                            | rustix::fs::OFlags::DIRECTORY
+                            | rustix::fs::OFlags::NOFOLLOW
+                            | rustix::fs::OFlags::CLOEXEC,
+                        rustix::fs::Mode::empty(),
+                    )?);
+                    let metadata = directory.metadata()?;
+                    anyhow::ensure!(
+                        metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o777 == 0o700,
+                        "unsafe removal custody directory"
+                    );
+                    self.stage = RemovalStage::EmptyCustody(std::sync::Arc::new(PrivateDirectory {
+                        location: PrivateLocation { parent: location.parent.clone(), name: location.name.clone() },
+                        directory,
+                    }));
+                }
+                RemovalStage::EmptyCustody(custody) => {
+                    let name = self.path.file_name().context("owned tree has no name")?;
+                    match renameat_with(self.parent.as_ref(), name, &custody.directory, "tree", RenameFlags::NOREPLACE) {
+                        Ok(()) => self.stage = RemovalStage::Candidate(custody.clone()),
+                        Err(rustix::io::Errno::NOENT) => self.stage = RemovalStage::RemoveCustody(custody.clone()),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                RemovalStage::Candidate(custody) => {
+                    let metadata = rustix::fs::statat(&custody.directory, "tree", AtFlags::SYMLINK_NOFOLLOW)?;
+                    let expected = RootIdentity::Expected(metadata.st_dev as u64, metadata.st_ino as u64);
+                    self.stage = if expected == self.identity {
+                        RemovalStage::Verified(custody.clone())
+                    } else {
+                        RemovalStage::RestoreForeign(custody.clone())
+                    };
+                }
+                RemovalStage::Verified(custody) => {
+                    let path = PathBuf::from(format!("/proc/self/fd/{}/tree", custody.directory.as_raw_fd()));
+                    match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path)?,
+                        Ok(_) => fs::remove_file(&path)?,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    self.stage = RemovalStage::RemoveCustody(custody.clone());
+                }
+                RemovalStage::RestoreForeign(custody) => {
+                    let name = self.path.file_name().context("owned tree has no name")?;
+                    // Never overwrite a new occupant. Failed restoration keeps the foreign
+                    // candidate in private custody and the ownership token can retry it.
+                    renameat_with(&custody.directory, "tree", self.parent.as_ref(), name, RenameFlags::NOREPLACE)?;
+                    self.stage = RemovalStage::RemoveForeignCustody(custody.clone());
+                }
+                RemovalStage::RemoveCustody(custody) => {
+                    custody.remove_empty()?;
+                    self.directory_removed();
+                }
+                RemovalStage::RemoveForeignCustody(custody) => {
+                    custody.remove_empty()?;
+                    self.stage = RemovalStage::Directory;
+                    bail!("owned tree location changed; replacement restored");
+                }
+                RemovalStage::Collect => return Ok(()),
+                RemovalStage::Trees => bail!("trees must be unmounted before removal custody"),
+            }
+        }
+    }
     fn run(&mut self) -> Result<()> {
         let mut state = lock_at(self.home.clone())?;
-        valid_path(&self.path)?;
-        self.validate()?;
+        if matches!(self.stage, RemovalStage::Trees | RemovalStage::Directory) {
+            valid_path(&self.path)?;
+            self.validate()?;
+        }
         if matches!(self.stage, RemovalStage::Trees) {
             let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(&self.path)).cloned().collect();
             paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
@@ -1180,15 +1295,7 @@ impl Removal {
             }
             self.stage = RemovalStage::Directory;
         }
-        if matches!(self.stage, RemovalStage::Directory) {
-            match fs::symlink_metadata(&self.path) {
-                Ok(m) if m.is_dir() => fs::remove_dir_all(&self.path)?,
-                Ok(_) => fs::remove_file(&self.path)?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            self.directory_removed();
-        }
+        self.remove_directory()?;
         state.collect()
     }
 }
