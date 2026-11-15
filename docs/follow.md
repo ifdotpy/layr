@@ -97,6 +97,15 @@ it the daemon opens `~/Library/Application Support/layr`, and `layr follow` pass
 store. After an earlier install, stop the agent first (below) and bootstrap again.
 The daemon log's first line names the store (`... (store <root>)`).
 
+A follow of a gateway remote (`layr+https`) needs a credential. The pass takes only
+`LAYR_GATEWAY_TOKEN_FILE` and `LAYR_GATEWAY_CA_FILE` from the daemon's own environment, or the person
+session of `layr login`. Without one, each pass fails with `gateway: HTTP 401`:
+
+    plutil -replace EnvironmentVariables.LAYR_GATEWAY_TOKEN_FILE -string "$HOME/.config/layr-secrets/<grant>" ~/Library/LaunchAgents/ws.layr.daemon.plist
+    launchctl bootout gui/$(id -u)/ws.layr.daemon; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ws.layr.daemon.plist
+
+`launchctl kickstart` does not read the plist again.
+
 Logs: `~/Library/Logs/layr-daemon.log`. Stop: `launchctl bootout gui/$(id -u)/ws.layr.daemon`.
 
 `layr follow` prints one warning line when no daemon of this user serves the store: none runs, or
