@@ -468,6 +468,17 @@ impl<'a> Repo<'a> {
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
+        // A cache built in the view of an overlay holds compiled private code (docs/overlays.md section 1,
+        // caches per view). A cache overlay serves every view and its readers are the trusted machines, so
+        // such a cache is never saved: the folder keeps it, and a view of `main` saves the shared ones.
+        if !paths.is_empty() && self.line_view_top(line)?.is_some() {
+            eprintln!(
+                "note: line {} shows overlay {}: its caches stay in the folder and are not saved (a cache of a view of an overlay is private)",
+                line.name,
+                self.line_view_top(line)?.unwrap_or_default()
+            );
+            return Ok(out);
+        }
         for p in paths {
             let cp = fsutil::safe_join(w, p)?;
             if !btrfs::is_subvolume(&cp) {

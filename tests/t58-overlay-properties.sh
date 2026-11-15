@@ -57,7 +57,7 @@ eq "no conflicts" "" "$(l status --short)"
 eq "history=last keeps the first state and two line heads" 3 "$(states notes)"
 
 # The same change with three-way: a conflict (the control for the union).
-ok "a three-way overlay" l overlay create tw --mode follow -q
+ok "a three-way overlay above notes" l overlay create tw --mode follow --parent notes -q
 echo t1 > tw.md
 l overlay move tw tw.md >/dev/null
 ok "first three-way state" l save -m tw1 -q
@@ -71,7 +71,7 @@ l restore --source head tw.md >/dev/null 2>&1 || echo ours > tw.md
 
 # 4. quiet: the files are out of status, diff and add; a named save takes them as they are.
 echo k1 > .env
-ok "a quiet overlay" l overlay create keys --quiet -q
+ok "a quiet overlay above tw" l overlay create keys --quiet --parent tw -q
 l overlay move keys .env >/dev/null
 ok "the move saves" l save -m keys -q
 echo k2 > .env
@@ -85,7 +85,7 @@ eq "the overlay has the working content" k2 "$(l overlay show keys head:.env)"
 echo x >> notes.txt
 l add notes.txt
 echo k3 > .env
-ok "a named save with both" l save -m both -q
+ok "a named save with both, the shared file to main" l save -m both --to main -q
 eq "the quiet file follows" k3 "$(l overlay show keys head:.env)"
 eq "the shared state has only the shared file" "notes.txt" "$(l show head --name-only --format= | grep .)"
 ok "quiet can be turned off" l overlay set keys --no-quiet

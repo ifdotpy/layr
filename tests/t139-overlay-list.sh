@@ -11,7 +11,7 @@ l protect main --remove >/dev/null 2>&1 || true
 l overlay create public --mode follow --quiet --history last -q || exit 1
 l overlay create private --mode follow --hidden --history 3 -q || exit 1
 l overlay set private --parent public >/dev/null || exit 1
-l overlay use private >/dev/null || exit 1
+# Caches are saved in the view of main only (docs/overlays.md section 1, caches per view).
 mkdir -p target
 printf cache > target/result
 l save --overlays -q || exit 1
@@ -22,6 +22,7 @@ mkdir -p other
 printf removed > other/result
 l save --overlays -q || exit 1
 l overlay remove "$(overlay other)" >/dev/null || exit 1
+l overlay use private >/dev/null || exit 1
 # A replica can know a public overlay descriptor before receiving its project.
 python3 - "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" <<'PYFIXTURE'
 import json, os, sqlite3, sys

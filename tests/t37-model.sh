@@ -256,7 +256,7 @@ if [ "$(uname -s)" = Linux ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
 fi
 
 l remote add store "file://$T/archive" --paper-key-out "$T/paper" >/dev/null
-l overlay create hidden-golden --hidden --readers nobody -q
+l overlay create hidden-golden --hidden --parent secrets --readers nobody -q
 printf 'hidden golden bytes\n' > hidden.txt
 l overlay move hidden-golden hidden.txt -q
 l save -qm hidden-golden-state
@@ -401,7 +401,9 @@ for name, label in [('secrets', 'visible'), ('hidden-golden', 'hidden-reader')]:
     records = [json.loads(line)['r'] for line, in db.execute('select raw from records order by time, machine, seq')]
     show = json.loads((cli / f'overlay-show-{label}.json').read_text())
     ops = json.loads((cli / f'overlay-ops-{label}.json').read_text())
-    assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties'}
+    # `paths` (docs/overlays.md section 1): the folder of main shows the view of hidden-golden, whose path holds both.
+    assert set(show) == {'name', 'hidden', 'access_mode', 'readers', 'managers', 'epochs', 'patterns', 'peers', 'state', 'properties', 'paths'}
+    assert set(show['paths']) == {'patches', 'own', 'hidden', 'waiting'}
     assert show['properties'] == {'history': 'all', 'quiet': False, 'merge': 'three-way', 'gc': 'none', 'prune': 'auto'}
     assert show['access_mode'] == 'private'
     assert show['name'] == name and show['hidden'] == (label == 'hidden-reader')
