@@ -50,7 +50,9 @@ set. A private edit must never reach that set by accident.
 - **Write rule.** A named save in a view of X writes every change to X: a new file, a patch of a
   file of an ancestor, a delete. `save -m <message> --to <ancestor>` writes the changes of that one
   save to an ancestor on the path of the view. Mixed work is two saves: stage the public part, save
-  it with `--to main`, then save the rest. There is no stored write target.
+  it with `--to main`, then save the rest. There is no stored write target. When an overlay above the
+  ancestor has a patch of the file, the ancestor gets only the change of the save, as a cherry-pick
+  in Git, and the patch stays in its overlay (owner decision 2026-11-15).
 - **Three states per path.** In X a path is its own version (or a patch), deleted here, or nothing
   (the parent's version shows). X keeps a path only when it differs from the view of its parent: a
   save that makes a path equal to the parent drops it from X. `layr restore --parent <path>` puts
@@ -130,9 +132,27 @@ Built so far (the rest of this file describes the code until a row says "built")
   (a delete of the old path and a new file; inside X it stays a move). `main` does not change. The
   view of `main` alone writes `main`, as before.
 - `layr save -m <message> --to <ancestor>`: the changes of this save go to `main` or to an overlay on
-  the path of the view; the layers above it drop the path, so the saved file shows. Another name (an
-  unknown overlay, one off the path, a hidden one that the owner does not read, the old name
-  `shared`) is refused with one text, and nothing is saved. `--to` needs `-m` or `-F`.
+  the path of the view. Another name (an unknown overlay, one off the path, a hidden one that the
+  owner does not read, the old name `shared`) is refused with one text, and nothing is saved. `--to`
+  needs `-m` or `-F`.
+- `--to <ancestor>` of a file that a patches overlay above the ancestor holds (`split`, built
+  2026-11-15). The rule is the one of `git cherry-pick`: a save is a change, and only the change
+  goes down. The ancestor gets a three-way merge (base: the version that the folder showed before the
+  save, ours: the version of the view of the ancestor, theirs: the saved version). The overlay keeps
+  its entry and shows the saved version; its patch takes the new version of the ancestor as its base
+  (a patch that already waited merges at the end of the save). So the private part of a file never
+  goes down as a side effect of a save. These saves are refused, with exit status 1, and nothing is
+  saved:
+  - the change overlaps the patch (the same lines or the lines next to them, as in Git);
+  - the file is not text (a binary file, a link);
+  - only the overlay has the file (the view of the ancestor does not show it);
+  - the save renames a file that the overlay holds.
+  Each refusal names the two ways on: a save without `--to`, or `layr overlay move <ancestor> <path>`,
+  which moves the whole file.
+- `layr overlay move main <paths>` moves whole files down to `main`: after the next save `main` holds
+  the version that the folder shows, and every overlay of the view drops its entry and its marker for
+  the path. The command says that the file has content of an overlay and that every reader of the
+  project reads it after the save. It is the only way that the content of a patch reaches `main`.
 - Mixed work is two saves: `layr add <public paths>`, `layr save -m <message> --to main` (a save
   takes the index), then `layr save -am <message>` for the rest.
 - `layr save -m <message> <path>` fails with exit status 128 and names `layr add`: a save takes the
@@ -978,7 +998,7 @@ are in `tests/t16-overlays.sh`; the model is in `src/overlay.rs`.
 | `layr overlay list [--json] [--size]`                        | The overlays of the project: mode, owner, readers. `*` marks those the current line shows. |
 | `layr overlay readers <name> [<principals>...]`             | Without principals: the readers. With them: sets the readers (the owner only).             |
 | `layr overlay use [<overlay>\|main\|--none]`                 | Without an argument: the layers of the view of the current line. With an overlay: the view seen from it, the path of the tree from `main` (section 1); each overlay that the folder did not show takes the line's state on it. `main` and `--none` show `main` alone. The owner of the line only, who must read each overlay. The overlay files come into the folder or leave it; a local change in the way refuses (`-f` overwrites). |
-| `layr overlay move [--purge] <name> <paths>...`             | The files (a folder: all files below it) go to the overlay at the next named save, which takes them from the working folder as they are then. The move waits for that named save whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
+| `layr overlay move [--purge] <name> <paths>...`             | `<name>` is an overlay or `main` (the whole file goes down to `main`; section 1, "The write rule as built"). The files (a folder: all files below it) go to the overlay at the next named save, which takes them from the working folder as they are then. The move waits for that named save whatever happens to the index; `--cancel [<paths>]` drops it. The line shows the overlay first if it did not. `--purge` deletes the automatic states of the line that hold the files. |
 | `layr overlay log\|show\|diff\|grep\|ls-files\|blame <name> [<args>]` | The command on the overlay's own history, as a reader: at the overlay line of the current line, else the caller's, else the owner's. `layr --project <project>%<name>` names an overlay too; it takes only reading commands. |
 | `layr save -m <message> --to <ancestor>` | The layer that gets the changes of this save: `main` or an overlay on the path of the view (section 1, write rule). |
 | `layr overlay show <name> --json` | Metadata for a reader: name, hidden flag, readers with principal and kind, key manager machine UUIDs, signed epochs, patterns, peers, and current state ID. Person principals omit their age recipient. |

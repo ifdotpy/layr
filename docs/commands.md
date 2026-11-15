@@ -17,7 +17,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | records       | `op export`, `op import` (JSONL) |
 | copies        | `export <folder>`                                                                              |
 | views         | `view [<rev or line>] [--overlay <overlay>] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state, seen from that overlay: the path of the tree from `main`; `--folder` writes the files of the view to a new folder; see overlays.md section 1), `view save [<line>] [--json]`, `view show <id> [--json]` |
-| overlays      | `overlay create <name> [--parent <overlay>] [--readers <principals>] [--hidden] [--folder <path> [--history all\|last\|<N>] [--gc none\|lru:<size>] [--prune <adapter>]] [--platform <key>\|any]`, `overlay set <name> [--parent <overlay>] [<cache settings>]` (an overlay has a kind, `patches` or `cache`; `--mode`, `--quiet`, `--merge` and `--trust` were removed, exit 2; overlays.md section 1, "Kinds as built"), `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [<overlay>\|main\|--none]` (the view of the current working folder, seen from one overlay; overlays.md section 1), `overlay move [--purge] <name> <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
+| overlays      | `overlay create <name> [--parent <overlay>] [--readers <principals>] [--hidden] [--folder <path> [--history all\|last\|<N>] [--gc none\|lru:<size>] [--prune <adapter>]] [--platform <key>\|any]`, `overlay set <name> [--parent <overlay>] [<cache settings>]` (an overlay has a kind, `patches` or `cache`; `--mode`, `--quiet`, `--merge` and `--trust` were removed, exit 2; overlays.md section 1, "Kinds as built"), `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [<overlay>\|main\|--none]` (the view of the current working folder, seen from one overlay; overlays.md section 1), `overlay move [--purge] <name>|main <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
 | refs          | `ref set <name> <rev> [--expect <rev\|none>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
 | queue         | `queue add <rev> [--into <line>] [-m <conventional title>] [--json]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
@@ -200,7 +200,10 @@ and up to 20 names, then `and N more`.
 `save -m <message> --to <ancestor>` names the layer that gets the changes of this save, in a line
 with overlays ([overlays](overlays.md), section 1, write rule): `main` or an overlay on the path of
 the view. Without `--to`, a named save writes every change to the overlay that the folder shows. Another
-name is refused, and nothing is saved. `--to` needs `-m` or `-F`. `save` takes the index: a path
+name is refused, and nothing is saved. `--to` needs `-m` or `-F`. When an overlay above the ancestor has a
+patch of a saved file, the ancestor gets only the change of the save (as `git cherry-pick`), and a
+change that overlaps the patch is refused; `layr overlay move main <path>` moves a whole file to
+`main`. `save` takes the index: a path
 argument fails with exit status 128 (stage it with `layr add`). `line target`, `rm --to` and
 `overlay create|set --patches` were removed (exit status 2).
 `save --amend` replaces the current head state. Without a new message, it keeps the current message.
