@@ -131,6 +131,7 @@ cache overlays only: a folder overlay made with `overlay create --folder` is not
 | --- | --- |
 | `layr overlay create <name> [--history all\|last\|<N>] [--quiet] [--merge three-way\|union-theirs] [--gc none\|lru:<size>] [--folder <path>] [--platform]` | Makes an overlay with these properties. |
 | `layr overlay set <name> [--history ...] [--quiet\|--no-quiet] [--merge ...] [--gc ...] [--platform\|--no-platform]` | Changes properties. The owner only. A record `overlay.set` keeps the change. `--folder` cannot change. |
+| `layr overlay create\|set <name> --patches\|--no-patches` | The overlay may hold its own versions of shared files and hide shared files (`overlay.<name>.patches`, [overlays](overlays.md) section 9.3). |
 | `layr overlay list`, `layr overlay show <name> --json` | Also show the properties. |
 | `layr save --overlays` | For each cache path of the line (`regenerable`, in `.layrattributes` or the project setting): makes its cache overlay when missing, makes the folder a nested layer when a tool made a plain folder, and saves a new state of the overlay line of this line (one clone). Older states go by `history`. |
 | `layr save -m <message>` | Also saves the quiet file overlays of the stack from the working folder (section 4.1). |

@@ -774,16 +774,27 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--cached").flag("-r").flag("-f|--force").flag("-q|--quiet").flag("-n|--dry-run");
+    let spec = Spec::new().flag("--cached").flag("-r").flag("-f|--force").flag("-q|--quiet").flag("-n|--dry-run").value("--to");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line()?.clone();
     let specs = h.specs(&a.rest())?;
     if specs.is_empty() {
-        return Err(exit(128, "usage: layr rm [--cached] [-r] [-f] <path>..."));
+        return Err(exit(128, "usage: layr rm [--cached] [-r] [-f] [--to <overlay>|shared] <path>..."));
     }
     let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
+    // `--to`: the layer that the next named save gives the delete (docs/overlays.md, section 9.3). The
+    // index does not know layers, so the target waits next to it (`pending_targets`).
+    let to = a.get("--to").map(str::to_owned);
+    if let Some(t) = to.as_deref().filter(|t| *t != crate::overlay::SHARED_TARGET) {
+        if !h.repo.layers(&line)?.iter().any(|l| l.overlay == t) {
+            return Err(exit(
+                1,
+                format!("error: --to {t}: line '{}' shows no overlay '{t}' (see 'layr overlay use')", line.name),
+            ));
+        }
+    }
     let w = h.repo.working(&line);
     // A thin index takes the removals as one change of its top layer; no complete index.
     #[cfg(target_os = "macos")]
@@ -881,6 +892,15 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
             }
             removed.extend(files);
+        }
+        if let Some(t) = &to {
+            if h.repo.is_stacked(&line)? {
+                let mut targets = h.repo.pending_targets(&line);
+                for r in &removed {
+                    targets.insert(r.clone(), t.clone());
+                }
+                h.repo.set_pending_targets(&line, &targets)?;
+            }
         }
     }
     if !a.has("-q") {
@@ -1289,6 +1309,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--allow-conflict-markers")
         .value("--author")
         .flag("-s|--signoff")
+        .value("--to")
         .flag("--json");
     let a = parse(&spec, args)?;
     // `--json` prints one object in place of the text (docs/commands.md, "save --json").
@@ -1302,6 +1323,12 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let head = h.repo.state(&line.head)?;
     let stacked = h.repo.is_stacked(&line)?;
+    let to = a.get("--to");
+    if !stacked {
+        // Without overlays every change goes to the shared set. An overlay target here would publish
+        // what was meant to stay private: refuse it, before any work.
+        refuse_overlay_target(&h.repo, &line, to)?;
+    }
     if a.has("--amend") {
         if stacked {
             return Err(exit(1, "error: --amend is not available in a line with overlays yet; make a new state"));
@@ -1424,7 +1451,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             Output::Text
         };
-        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
+        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, to, nothing);
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
     // its changes against the head say whether there is anything to commit.
@@ -1621,6 +1648,7 @@ fn commit_stacked(
     allow_empty: bool,
     out: Output,
     author: Option<(String, String)>,
+    to: Option<&str>,
     nothing: impl Fn(&Here, &Line) -> Result<i32>,
 ) -> Result<i32> {
     let repo = &h.repo;
@@ -1652,12 +1680,14 @@ fn commit_stacked(
         repo.temp_snapshot(&src, true)?
     };
     let summary = out != Output::Quiet;
-    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
+    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary, to)?
+    {
         Some(d) => d,
         None => return nothing(h, line),
     };
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
+    repo.set_pending_targets(line, &BTreeMap::new())?;
     if out == Output::Json {
         let overlays: Vec<_> = done
             .overlays
@@ -1694,6 +1724,23 @@ fn commit_stacked(
         print_fds(ctx, &done.fds);
     }
     Ok(0)
+}
+
+/// `save --to <overlay>` and a line target that names an overlay, in a line that shows no overlays:
+/// the change would go to the shared set. The text is the one of `commit_layers` for a name that the
+/// line does not show, so it does not tell whether a hidden overlay of that name exists.
+fn refuse_overlay_target(repo: &crate::repo::Repo, line: &Line, to: Option<&str>) -> Result<()> {
+    let (what, name) = match to {
+        Some(t) => ("--to", t.to_string()),
+        None => match repo.line_target(line)? {
+            Some(t) => ("the line target", t),
+            None => return Ok(()),
+        },
+    };
+    if name == crate::overlay::SHARED_TARGET {
+        return Ok(());
+    }
+    Err(exit(1, format!("error: {what} {name}: line '{}' shows no overlay '{name}' (see 'layr overlay use')", line.name)))
 }
 
 /// What a named save prints.

@@ -56,6 +56,7 @@ pub fn cache_props() -> Props {
         prune: None,
         platform: Some(crate::model::cache_platform()),
         trust: Some(crate::overlay::Trust::Protected),
+        patches: false,
     }
 }
 
