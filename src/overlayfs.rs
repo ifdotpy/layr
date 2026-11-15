@@ -4,7 +4,7 @@
 use crate::sys;
 use layr_fs_core::CaptureConsistency;
 #[path = "overlayfs/driver.rs"]
-mod driver;
+pub(crate) mod driver;
 use anyhow::{bail, Context, Result};
 pub(crate) use driver::OverlayFs;
 use serde::{Deserialize, Serialize};
@@ -433,7 +433,7 @@ fn finish_cache_restore(state: &mut Locked, path: &Path, entry: &Entry) -> Resul
             &parent,
             std::ffi::OsStr::new(&temp_name),
             Some(entry.lower.as_bytes()),
-            || {},
+            |_| {},
         )?;
         // Replaces only an empty mountpoint. Never replace existing user data.
         rustix::fs::renameat(&parent, &temp_name, &parent, name)?;
@@ -477,7 +477,10 @@ fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -
         plain: state.registry.trees.iter().any(|(p, e)| path.starts_with(p) && !e.info.readonly && !e.plain),
     };
     fs::create_dir(&path)?;
-    *publication = driver::Publication::Tree(state.home.clone());
+    publication.directory(&state.home, None);
+    let metadata = fs::symlink_metadata(&path)?;
+    anyhow::ensure!(metadata.is_dir() && metadata.uid() == 0, "created OverlayFS directory was replaced");
+    *publication = driver::Publication::Tree { home: state.home.clone(), identity: (metadata.dev(), metadata.ino()) };
     state.registry.trees.insert(path.clone(), entry.clone());
     state.save()?;
     if let Err(e) = state.mount(&path, &entry) {
@@ -487,6 +490,8 @@ fn create_subvolume_native(path: &Path, publication: &mut driver::Publication) -
         state.collect()?;
         return Err(e);
     }
+    let metadata = fs::symlink_metadata(&path)?;
+    *publication = driver::Publication::Tree { home: state.home.clone(), identity: (metadata.dev(), metadata.ino()) };
     Ok(())
 }
 // A source writer must not silently produce a mixed snapshot.
@@ -591,20 +596,27 @@ fn pinned_directory(path: &Path) -> Result<File> {
     }
     Ok(File::from(dir))
 }
-fn copy_cache(src: &Path, dst: &Path, created: impl FnOnce()) -> Result<()> {
+fn copy_cache(src: &Path, dst: &Path, created: impl FnMut(Option<&fs::Metadata>)) -> Result<()> {
     let parent = pinned_directory(dst.parent().context("cache parent")?)?;
     copy_cache_at(src, &parent, dst.file_name().context("cache name")?, None, created)
 }
-fn copy_cache_at(src: &Path, parent: &File, name: &std::ffi::OsStr, marker: Option<&[u8]>, created: impl FnOnce()) -> Result<()> {
+fn copy_cache_at(
+    src: &Path,
+    parent: &File,
+    name: &std::ffi::OsStr,
+    marker: Option<&[u8]>,
+    mut created: impl FnMut(Option<&fs::Metadata>),
+) -> Result<()> {
     use rustix::fs::{mkdirat, openat, Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     mkdirat(parent, name, Mode::from_raw_mode(0o700))?;
-    created();
+    created(None);
     let root = File::from(openat(parent, name, flags, Mode::empty())?);
     let m = root.metadata()?;
     if m.uid() != 0 || m.mode() & 0o777 != 0o700 {
         bail!("cache destination changed during restore");
     }
+    created(Some(&m));
     let anchored = PathBuf::from(format!("/proc/self/fd/{}/.", root.as_raw_fd()));
     let before = scan(src, &HashSet::new())?;
     copy_tree_at(src, src, &anchored, &HashSet::new(), &mut HashMap::new(), true)?;
@@ -920,7 +932,10 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut dri
     File::open(state.object(&entry.lower))?.sync_all()?;
     if !plain {
         fs::create_dir(&dst)?;
-        *publication = driver::Publication::Tree(home.clone());
+        publication.directory(&home, None);
+        let metadata = fs::symlink_metadata(&dst)?;
+        anyhow::ensure!(metadata.is_dir() && metadata.uid() == 0, "created OverlayFS directory was replaced");
+        *publication = driver::Publication::Tree { home: home.clone(), identity: (metadata.dev(), metadata.ino()) };
     }
     state.registry.trees.insert(dst.clone(), entry.clone());
     state.save()?;
@@ -931,6 +946,8 @@ fn snapshot_native(src: &Path, dst: &Path, readonly: bool, publication: &mut dri
         state.collect()?;
         return Err(e);
     }
+    let metadata = fs::symlink_metadata(&dst)?;
+    *publication = driver::Publication::Tree { home, identity: (metadata.dev(), metadata.ino()) };
     Ok(consistency)
 }
 // The slow part of a snapshot: no registry lock is held. Returns the lower layer (empty
@@ -956,9 +973,9 @@ fn copy_snapshot(
         // A cache is an ordinary directory. Its saved copy remains private.
         if parent.plain {
             let data = if lower.is_empty() { build.dir.join("data") } else { object_path(home, &lower).join("data") };
-            copy_cache(&data, dst, || *publication = driver::Publication::Tree(home.to_path_buf()))?;
+            copy_cache(&data, dst, |metadata| publication.directory(home, metadata))?;
         } else {
-            copy_cache(src, dst, || *publication = driver::Publication::Tree(home.to_path_buf()))?;
+            copy_cache(src, dst, |metadata| publication.directory(home, metadata))?;
         }
         sync_tree(dst)?;
     } else if !readonly && hard_links {
@@ -1097,9 +1114,7 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
 pub fn delete_tree(path: &Path) -> Result<()> {
     OverlayFs::remove_path(path)
 }
-#[derive(Default)]
 enum RemovalStage {
-    #[default]
     Trees,
     Directory,
     Collect,
@@ -1114,15 +1129,23 @@ struct Removal {
     home: PathBuf,
     identity: RootIdentity,
     stage: RemovalStage,
+    parent: std::sync::Arc<File>,
 }
 impl Removal {
-    fn new(path: PathBuf, home: PathBuf) -> Self {
-        Self { path, home, identity: RootIdentity::Observe, stage: RemovalStage::Trees }
+    fn new(path: PathBuf, home: PathBuf, parent: std::sync::Arc<File>) -> Self {
+        Self { path, home, parent, identity: RootIdentity::Observe, stage: RemovalStage::Trees }
     }
     fn validate(&mut self) -> Result<()> {
         if matches!(self.stage, RemovalStage::Collect) {
             return Ok(());
         }
+        let held_parent = self.parent.metadata()?;
+        let parent = self.path.parent().context("owned tree has no parent")?;
+        let actual_parent = fs::symlink_metadata(parent)?;
+        anyhow::ensure!(
+            actual_parent.is_dir() && (actual_parent.dev(), actual_parent.ino()) == (held_parent.dev(), held_parent.ino()),
+            "owned tree parent changed"
+        );
         match fs::symlink_metadata(&self.path) {
             Ok(actual) => {
                 anyhow::ensure!(!matches!(self.identity, RootIdentity::Absent), "owned tree location changed");
@@ -1182,7 +1205,8 @@ impl Removal {
 fn delete_tree_native(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let home = home_of(&path)?;
-    Removal::new(path, home).run()
+    let parent = std::sync::Arc::new(File::open(path.parent().context("tree has no parent")?)?);
+    Removal::new(path, home, parent).run()
 }
 pub fn delete_subvolume(path: &Path) -> Result<()> {
     delete_tree(path)
@@ -1703,10 +1727,10 @@ mod tests {
         let fd = pinned_directory(&parent)?;
         fs::rename(&parent, &moved)?;
         std::os::unix::fs::symlink(&outside, &parent)?;
-        copy_cache_at(&src, &fd, std::ffi::OsStr::new("cache"), None, || {})?;
+        copy_cache_at(&src, &fd, std::ffi::OsStr::new("cache"), None, |_| {})?;
         assert_eq!(fs::read(moved.join("cache/file"))?, b"cache");
         assert_eq!(fs::metadata(moved.join("cache/file"))?.ino(), fs::metadata(moved.join("cache/hard"))?.ino());
-        assert!(copy_cache(&src, &parent.join("escape"), || {}).is_err());
+        assert!(copy_cache(&src, &parent.join("escape"), |_| {}).is_err());
         assert_eq!(fs::read_dir(&outside)?.count(), 0);
         drop(fd);
         fs::remove_dir_all(root)?;

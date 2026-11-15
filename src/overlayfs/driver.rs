@@ -28,12 +28,22 @@ impl Registered {
 pub(super) enum Publication {
     Untouched,
     Objects(PathBuf),
-    Tree(PathBuf),
+    Unpinned(PathBuf),
+    Tree { home: PathBuf, identity: (u64, u64) },
 }
+impl Publication {
+    pub(super) fn directory(&mut self, home: &Path, metadata: Option<&fs::Metadata>) {
+        *self = match metadata {
+            Some(metadata) => Self::Tree { home: home.to_path_buf(), identity: (metadata.dev(), metadata.ino()) },
+            None => Self::Unpinned(home.to_path_buf()),
+        };
+    }
+}
+
 enum Resource {
-    Published { path: PathBuf, publication: Publication },
+    Published { destination: Destination, publication: Publication },
     Borrowed(Registered),
-    Owned { tree: Registered, home: PathBuf },
+    Owned { tree: Registered, home: PathBuf, parent: Arc<File> },
     Removing(Removal),
 }
 struct HintPair {
@@ -43,7 +53,7 @@ struct HintPair {
 }
 struct Destination {
     path: PathBuf,
-    parent: File,
+    parent: Arc<File>,
 }
 #[derive(Default)]
 pub(crate) struct OverlayFs {
@@ -82,16 +92,16 @@ impl OverlayFs {
     }
     fn location(&self, path: &Path) -> layr_fs_core::Result<NewTreeLocation> {
         let path = backend(absolute(path))?;
-        let parent = File::open(path.parent().ok_or(FsError::Invalid("destination has no parent"))?)?;
+        let parent = Arc::new(File::open(path.parent().ok_or(FsError::Invalid("destination has no parent"))?)?);
         let name = RelPath::new(path.file_name().ok_or(FsError::Invalid("destination has no name"))?.as_bytes())?;
-        let location = self.issuer.location(name, Arc::new(parent.try_clone()?))?;
+        let location = self.issuer.location(name, parent.clone())?;
         self.destinations
             .lock()
             .map_err(|_| FsError::Invalid("OverlayFS destination registry lock poisoned"))?
             .insert(self.issuer.location_key(&location)?, Destination { path, parent });
         Ok(location)
     }
-    fn destination(&self, location: NewTreeLocation) -> layr_fs_core::Result<PathBuf> {
+    fn destination(&self, location: NewTreeLocation) -> layr_fs_core::Result<Destination> {
         let key = self.issuer.location_key(&location)?;
         let dst = self
             .destinations
@@ -105,7 +115,7 @@ impl OverlayFs {
             return Err(FsError::LocationChanged);
         }
         match fs::symlink_metadata(&dst.path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(dst.path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(dst),
             Err(error) => Err(error.into()),
             Ok(_) => Err(FsError::Invalid("destination already exists")),
         }
@@ -130,8 +140,9 @@ impl OverlayFs {
         let key = self.issuer.owned_key(&ownership)?;
         let mut trees = self.trees()?;
         let mut publication = Publication::Untouched;
-        let result = backend(create(&dst, &mut publication));
-        trees.insert(key.clone(), Resource::Published { path: dst.clone(), publication });
+        let result = backend(create(&dst.path, &mut publication));
+        let path = dst.path.clone();
+        trees.insert(key.clone(), Resource::Published { destination: dst, publication });
         let consistency = match result {
             Ok(consistency) => consistency,
             Err(cause) => {
@@ -139,13 +150,19 @@ impl OverlayFs {
                 return Err(self.rollback(ownership, cause));
             }
         };
-        let result = self.register(&dst).and_then(|registered| {
+        let result = self.register(&path).and_then(|registered| {
             let tree = self.issuer.attach_working(&ownership, registered.directory.clone())?;
-            let Some(Resource::Published { publication: Publication::Tree(home), .. }) = trees.get(&key) else {
+            let Some(Resource::Published { destination, publication: Publication::Tree { home, identity } }) = trees.get(&key)
+            else {
                 return Err(FsError::Invalid("native creation did not publish its tree"));
             };
-            let home = home.clone();
-            trees.insert(key, Resource::Owned { tree: registered, home });
+            let held = registered.directory.root_file().metadata()?;
+            if (held.dev(), held.ino()) != *identity {
+                return Err(FsError::LocationChanged);
+            }
+            registered.validate()?;
+            let (home, parent) = (home.clone(), destination.parent.clone());
+            trees.insert(key, Resource::Owned { tree: registered, home, parent });
             Ok(tree)
         });
         drop(trees);
@@ -202,7 +219,14 @@ impl OverlayFs {
         let driver = Arc::new(Self::default());
         let registered = driver.register(path)?;
         let ownership = driver.issuer.own();
-        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, Resource::Owned { tree: registered, home: home_of(path)? });
+        driver.trees()?.insert(
+            driver.issuer.owned_key(&ownership)?,
+            Resource::Owned {
+                tree: registered,
+                home: home_of(path)?,
+                parent: Arc::new(File::open(path.parent().ok_or(FsError::Invalid("tree has no parent"))?)?),
+            },
+        );
         driver.remove(ownership).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
@@ -231,17 +255,15 @@ impl OverlayFs {
     fn error(self: Arc<Self>, error: FsError) -> anyhow::Error {
         // Retain the driver together with cleanup authority across the path-based boundary.
         match error {
-            FsError::Cleanup { cause, failure } => {
-                anyhow::Error::new(Cleanup { _driver: self, cause: *cause, failure: *failure })
-            }
+            FsError::Cleanup { cause, failure } => anyhow::Error::new(Cleanup { driver: self, cause: *cause, failure: *failure }),
             error => anyhow::Error::new(error),
         }
     }
 }
-struct Cleanup {
-    _driver: Arc<OverlayFs>,
+pub(crate) struct Cleanup {
+    pub(crate) driver: Arc<OverlayFs>,
     cause: FsError,
-    failure: RemovalFailure,
+    pub(crate) failure: RemovalFailure,
 }
 impl std::fmt::Debug for Cleanup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -318,25 +340,35 @@ impl OverlayFs {
             let mut trees = self.trees()?;
             let resource = trees.get_mut(key).ok_or(FsError::Invalid("tree absent"))?;
             match resource {
-                Resource::Owned { tree, home } => {
+                Resource::Owned { tree, home, parent } => {
                     tree.validate()?;
                     let held = tree.directory.root_file().metadata()?;
-                    let mut removal = Removal::new(tree.path.clone(), home.clone());
+                    let mut removal = Removal::new(tree.path.clone(), home.clone(), parent.clone());
                     removal.identity = RootIdentity::Expected(held.dev(), held.ino());
                     // No reader lease remains. Drop the mount descriptor before normal unmount.
                     *resource = Resource::Removing(removal);
                 }
-                Resource::Published { path, publication } => match publication {
+                Resource::Published { destination, publication } => match publication {
                     Publication::Untouched => {
                         trees.remove(key);
                         return Ok(());
                     }
+                    Publication::Unpinned(home) => {
+                        return Err(FsError::backend(anyhow::anyhow!(
+                            "new directory could not be pinned; registry {} requires recovery",
+                            home.display()
+                        )));
+                    }
                     Publication::Objects(home) => {
-                        let mut removal = Removal::new(path.clone(), home.clone());
+                        let mut removal = Removal::new(destination.path.clone(), home.clone(), destination.parent.clone());
                         removal.stage = RemovalStage::Collect;
                         *resource = Resource::Removing(removal);
                     }
-                    Publication::Tree(home) => *resource = Resource::Removing(Removal::new(path.clone(), home.clone())),
+                    Publication::Tree { home, identity } => {
+                        let mut removal = Removal::new(destination.path.clone(), home.clone(), destination.parent.clone());
+                        removal.identity = RootIdentity::Expected(identity.0, identity.1);
+                        *resource = Resource::Removing(removal);
+                    }
                 },
                 Resource::Borrowed(_) => return Err(FsError::Invalid("borrowed tree has no deletion authority")),
                 Resource::Removing(_) => {}
@@ -367,7 +399,7 @@ mod tests {
     use super::*;
     struct Fixture {
         root: PathBuf,
-        driver: OverlayFs,
+        driver: Arc<OverlayFs>,
     }
     impl Fixture {
         fn new() -> Result<Self> {
@@ -376,7 +408,7 @@ mod tests {
             // Native rollback cannot open this fake registry lock, so tests exercise
             // recovery through retained ownership without requiring a root-owned store.
             fs::create_dir(root.join("lock"))?;
-            Ok(Self { root, driver: OverlayFs::default() })
+            Ok(Self { root, driver: Arc::new(OverlayFs::default()) })
         }
         fn tree(&self, name: &str) -> Result<FrozenTree> {
             let path = self.root.join(name);
@@ -452,7 +484,7 @@ mod tests {
         assert!(matches!(other.changes(&base, &tree), Err(FsError::WrongInstance)));
         fs::rename(fixture.root.join("base"), fixture.root.join("held"))?;
         fs::create_dir(fixture.root.join("base"))?;
-        let result = hints::ChangeHints::between(&fixture.driver, &base, &tree);
+        let result = hints::ChangeHints::between(fixture.driver.as_ref(), &base, &tree);
         assert!(matches!(result, Err(FsError::LocationChanged)));
         Ok(())
     }
@@ -481,7 +513,8 @@ mod tests {
             .driver
             .create_with(location, |path, publication| {
                 fs::create_dir(path)?;
-                *publication = Publication::Tree(fixture.root.clone());
+                let metadata = fs::symlink_metadata(path)?;
+                *publication = Publication::Tree { home: fixture.root.clone(), identity: (metadata.dev(), metadata.ino()) };
                 Ok(CaptureConsistency::ValidatedCopy)
             })
             .err()
@@ -508,7 +541,8 @@ mod tests {
         let location = fixture.driver.location(&fixture.root.join("new"))?;
         let (created, _) = fixture.driver.create_with(location, |path, publication| {
             fs::create_dir(path)?;
-            *publication = Publication::Tree(fixture.root.clone());
+            let metadata = fs::symlink_metadata(path)?;
+            *publication = Publication::Tree { home: fixture.root.clone(), identity: (metadata.dev(), metadata.ino()) };
             Ok(CaptureConsistency::ValidatedCopy)
         })?;
         let key = fixture.driver.issuer.owned_key(&created.ownership)?;
@@ -543,7 +577,8 @@ mod tests {
             .driver
             .create_with(location, |path, publication| {
                 fs::create_dir(path)?;
-                *publication = Publication::Tree(fixture.root.clone());
+                let metadata = fs::symlink_metadata(path)?;
+                *publication = Publication::Tree { home: fixture.root.clone(), identity: (metadata.dev(), metadata.ino()) };
                 anyhow::bail!("injected registry save failure")
             })
             .err()
@@ -562,13 +597,65 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn detected_cache_replacement_survives_public_error_recovery() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let held = fixture.root.join("held");
+        let location = fixture.driver.location(&destination)?;
+        let core_error = fixture
+            .driver
+            .create_with(location, |path, publication| {
+                fs::create_dir(path)?;
+                publication.directory(&fixture.root, Some(&fs::symlink_metadata(path)?));
+                // Match the cache-copy boundary: its retained descriptor detects a replacement
+                // after copying, then returns an error. Cleanup must not adopt the new directory.
+                fs::rename(path, &held)?;
+                fs::create_dir(path)?;
+                fs::write(path.join("foreign"), b"keep")?;
+                anyhow::bail!("cache destination moved during restore")
+            })
+            .err()
+            .unwrap();
+        let error = fixture.driver.clone().error(core_error);
+        let Cleanup { driver, failure, .. } = error.downcast::<Cleanup>()?;
+        fs::remove_dir(fixture.root.join("lock"))?;
+        fs::create_dir(fixture.root.join("objects"))?;
+        let failure = driver.remove(failure.ownership).unwrap_err();
+        assert!(failure.error.to_string().contains("owned tree location changed"));
+        assert_eq!(fs::read(destination.join("foreign"))?, b"keep");
+        fs::remove_dir_all(&destination)?;
+        fs::rename(held, &destination)?;
+        driver.remove(failure.ownership).unwrap();
+        assert!(!destination.exists());
+        Ok(())
+    }
+    #[test]
+    fn descriptor_acquisition_failure_never_adopts_an_unobserved_directory() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let error = fixture
+            .driver
+            .create_with(fixture.driver.location(&destination)?, |path, publication| {
+                fs::create_dir(path)?;
+                publication.directory(&fixture.root, None);
+                anyhow::bail!("injected descriptor acquisition failure")
+            })
+            .err()
+            .unwrap();
+        let FsError::Cleanup { failure, .. } = error else { panic!("must retain uncertain directory authority") };
+        assert!(failure.error.to_string().contains("could not be pinned"));
+        assert!(destination.is_dir());
+        Ok(())
+    }
+    #[test]
     fn removal_retries_after_unmount_and_after_directory_removal() -> Result<()> {
         let fixture = Fixture::new()?;
         let destination = fixture.root.join("new");
         let location = fixture.driver.location(&destination)?;
         let (created, _) = fixture.driver.create_with(location, |path, publication| {
             fs::create_dir(path)?;
-            *publication = Publication::Tree(fixture.root.clone());
+            let metadata = fs::symlink_metadata(path)?;
+            *publication = Publication::Tree { home: fixture.root.clone(), identity: (metadata.dev(), metadata.ino()) };
             Ok(CaptureConsistency::ValidatedCopy)
         })?;
         drop(created.tree);
