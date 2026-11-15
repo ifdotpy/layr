@@ -25,6 +25,8 @@ l overlay create other -q
 ok "the folder of main shows pro" l overlay use pro -q
 has "the line shows it" "pro" "$(l overlay use)"
 head0=$(l rev-parse head)
+# The delete markers of pro: its metadata (docs/overlays.md section 1), which no folder shows.
+hidden() { l overlay show pro head:.layrmeta/meta.json 2>/dev/null | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("removed",[])))'; }
 same_main() { eq "$1" "" "$(l diff --name-only "$head0" head)"; }
 
 # 1. The leak of the old rules: a private edit of a file of main and a new private file, saved with -a.
@@ -53,7 +55,8 @@ ok "a save of a delete" l save -q -am "drop util"
 ok "main keeps util.c" l show head:util.c
 no "the folder lacks it" test -e util.c
 eq "status is clean" "" "$(l status --porcelain)"
-eq "pro hides it" util.c "$(l overlay show pro head:.layrremoved)"
+eq "pro hides it" util.c "$(hidden)"
+no "the folder has no metadata" test -e .layrmeta
 ok "a line from here, then the view of main" l line new pub main -q
 cd $LAYR_ROOT/projects/p/lines/pub
 ok "pub shows main" l overlay use main -q
@@ -64,13 +67,13 @@ echo "int util2;" > util.c
 l add util.c
 ok "a file at a hidden path comes back" l save -q -am "util again"
 eq "in pro" "int util2;" "$(l overlay show pro head:util.c)"
-no "and the marker is gone" l overlay show pro head:.layrremoved
+eq "and the marker is gone" "" "$(hidden)"
 ok "layr mv of a file of main" l mv moved.c moved2.c
 ok "a save of the move" l save -q -m "move it"
 ok "main keeps moved.c" l show head:moved.c
 no "and has no moved2.c" l show head:moved2.c
 ok "pro has moved2.c" l overlay show pro head:moved2.c
-has "and hides moved.c" moved.c "$(l overlay show pro head:.layrremoved)"
+has "and hides moved.c" moved.c "$(hidden)"
 same_main "main still did not change"
 l git push -q origin main >/dev/null 2>&1
 eq "the git remote has no patch after the deletes" 0 "$(leaks)"
@@ -159,7 +162,7 @@ ok "pro has it" l overlay show pro head:keep.c
 git init -q --bare -b main $T/pro.git
 ok "an overlay git remote" l overlay remote add pro pro-gh $T/pro.git
 ok "push every layer" l push -q
-has "the overlay remote has the markers" "moved.c" "$(git --git-dir=$T/pro.git show main:.layrremoved)"
+has "the overlay remote has the markers" "moved.c" "$(git --git-dir=$T/pro.git show main:.layrmeta/meta.json)"
 eq "the git remote of main has no private patch" 0 "$(leaks)"
 ok "fsck is clean" l fsck
 ok "reindex" l reindex -q

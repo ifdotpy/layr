@@ -221,11 +221,14 @@ eq "status lists the conflict" "UU private/notes.md" "$(in_line layr-o1 f1 statu
 sh_in layr-o1 f1 "printf 'top\nnote 1 (both)\nnote 2\nnote 3\n' > private/notes.md && $L save -qam resolved"
 eq "the resolution clears it" "" "$(in_line layr-o1 f1 status --porcelain)"
 eq "the overlay has the resolution" "note 1 (both)" "$(in_line layr-o1 f1 overlay show notes head:private/notes.md | sed -n 2p)"
-# A merge of a line with a follow overlay brings the overlay into the view of the target; the
-# merger must read it.
+# A merge of a line with a follow overlay merges the target line's part on it, and the view of the
+# target folder stays as it was (docs/overlays.md section 1); the merger must read the overlay.
 in_line layr-o1 main line new -q m1 main
-ok "a merge brings the overlay into the target" in_line layr-o1 m1 merge -q f2
-has "the target shows it now" "notes" "$(in_line layr-o1 m1 overlay use)"
+in_line layr-o1 m1 overlay use -q --none
+ok "a merge takes the overlay part" in_line layr-o1 m1 merge -q f2
+no "the target folder does not show it" test -e $P/m1/private/notes.md
+ok "the target shows it after overlay use" in_line layr-o1 m1 overlay use -q notes
+ok "with the merged notes" test -e $P/m1/private/notes.md
 in_line layr-o2 main line new -q m2 main
 has "a merger who does not read an overlay of the line is refused" "needs the read right of its overlay" "$(in_line layr-o2 m2 merge f2 2>&1)"
 

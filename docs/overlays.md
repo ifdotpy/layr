@@ -78,7 +78,7 @@ Built so far (the rest of this file describes the code until a row says "built")
 | --- | --- |
 | Name `main`, tree, one-overlay views, readers rule | built 2026-11-15 (below) |
 | Write rule and `--to <ancestor>` | built 2026-11-15 (below) |
-| Metadata format, patch bases, merge with the parent, `restore --parent` | not built |
+| Metadata format, patch bases, merge with the parent, `restore --parent` | built 2026-11-15 (below) |
 | Move along the tree, checks per view, automatic states | not built |
 | Kinds instead of properties, caches per view | not built |
 | Store format step for older binaries | built 2026-11-15 (below) |
@@ -149,6 +149,46 @@ Built so far (the rest of this file describes the code until a row says "built")
   overlay's own store; not built.)
 - Test: tests/t258-overlay-patches.sh (one user), tests/t259-overlay-patches-readers.sh (another
   reader of the project, Linux service mode), `a_save_writes_every_change_to_its_target`.
+
+**Patches as built (2026-11-15).**
+
+- Metadata. An overlay state keeps its metadata in the folder `.layrmeta` at its root:
+  `meta.json` (`{"v":1,"removed":[<path>...],"bases":{<path>:<sha256>}}`) and `bases/<sha256>`, the
+  content of each base. No view shows the folder, and a save refuses a file of the view at that path.
+  It is a part of the overlay's tree, so peer sync, store remotes and the overlay's git remote carry
+  it. A reader takes only paths that `layr_store::paths::check_rel` accepts (relative, inside the
+  tree) and that are no metadata paths, and only well-formed hashes; it refuses a newer version `v`
+  (it cannot know what such a state hides). A path with a newline works (JSON keeps it). A merge of
+  the overlay between lines merges the metadata by structure (`merge_meta`): per path the side that
+  changed it wins, ours when both changed it; a path that the merged tree holds is never hidden. The
+  file `.layrremoved` of the slice of 2026-11-15 (not released) is no longer read.
+- Three states per path. In overlay X a path is its own version (a patch when the parent view has
+  the path, else an own file), deleted here (a delete marker), or nothing (the parent's version
+  shows). A save that makes a path equal to the view of the parent (same content, link target and
+  execute bit) drops X's entry and its marker, so a patch that upstream accepted goes away.
+- Patch base. When X first takes a path that the parent view shows, `meta.json` records the hash of
+  that version and `bases/` its content. Later saves of the patch keep the base.
+- Merge with the parent (`rebase_patches`). After `layr merge` (and `pull`) into a line, and after
+  `layr overlay use`, each patch of the view whose parent version changed merges with it, from the
+  bottom of the path: a clean three-way merge (base: the recorded version, ours: X, theirs: the
+  parent now) gives X a new version and base; an overlap gives the file conflict markers and a
+  `content` conflict, resolved by a save; a binary file or a parent that deleted or renamed the path
+  gives a conflict of kind `parent`, and X keeps its version until a save of the path, which takes
+  the parent's version as the new base (or makes it an own file). Only the owner of the line merges,
+  on its machine, when it reads every overlay of the path; a path with a local change waits. A
+  failure is a warning and never undoes the merge.
+- Waiting patches. `layr status` (long form) says where named saves go and lists, per overlay of the
+  path, its patches, the paths it hides and the patches that wait for a merge with the parent; a named
+  save prints the same for the overlays that it changed; `layr overlay show <X> --json` has `paths`
+  (`patches`, `own`, `hidden`, `waiting`) for the view of the current folder.
+- `layr restore --parent <path>` (a file, a folder or `.`) puts the version of the parent view in the
+  working folder and the stage, so the next save drops X's entry. In the view of `main` it is refused.
+- Merges of lines. A merge of a line that shows an overlay that the target's folder does not show
+  merges the target line's part on that overlay (its line there moves, and the new state names the
+  part) but does not change the view of the target folder. Before 2026-11-15 the overlay came into
+  the target's view.
+- Test: tests/t261-overlay-patch-bases.sh, `ops_write_and_clear_overlay_metadata`,
+  `metadata_merges_by_structure`.
 
 ### The model of 2026-11-11
 
@@ -929,14 +969,17 @@ owner changes with named saves and a user who merges into the line changes by th
 
 1. A delete goes to the layer of the save (section 1, write rule) and the layers above it. In the
    view of an overlay a delete never changes `main`: the overlay copy goes, and if a layer below still
-   shows the path, the overlay gets a delete marker. The markers are the file `.layrremoved` at the root of the overlay
-   state: one path per line, sorted. Assembly of a line takes those paths of the lower layers out,
-   then puts the files of the overlay; no folder gets the file itself. It is an ordinary file of the
-   overlay's tree, so peer sync, store pushes, merges of the overlay and its git remote carry it on
-   btrfs, OverlayFS and APFS alike (the xattr `com.layr.removed` of thin layers is lost by a git
-   remote, so it was not used). A new file at a hidden path takes its marker out. A three-way merge of
-   the overlay merges the file as text; `merge=union-theirs` takes the incoming file whole.
-2. A moved file stays in its layer (the owner follows the file).
+   shows the path, the overlay gets a delete marker. Since 2026-11-15 the markers are in the metadata
+   folder of the overlay state (section 1, "Patches as built"); before, they were the file
+   `.layrremoved` at the root of the overlay state, one path per line. Assembly of a line takes those
+   paths of the lower layers out, then puts the files of the overlay; no folder gets the metadata
+   itself. It is part of the overlay's tree, so peer sync, store pushes, merges of the overlay and
+   its git remote carry it on btrfs, OverlayFS and APFS alike (the xattr `com.layr.removed` of thin
+   layers is lost by a git remote, so it was not used). A new file at a hidden path takes its marker
+   out. A three-way merge of the overlay merges the metadata by structure; `merge=union-theirs` takes
+   the incoming tree whole.
+2. A moved file of an overlay stays in its layer. Since 2026-11-15 a rename in the view of an overlay
+   writes that overlay (section 1, write rule).
 3. `overlay move` wins over ignore rules: an ignored file can move into an overlay. Routing
    patterns are not built.
 5. Automatic states leave the overlay files out (one more step per save in a line with overlays:

@@ -443,6 +443,11 @@ pub const MAIN: &str = "main";
 /// The property suffix of the parent of a patches overlay (`overlay.<name>.parent`).
 pub const PARENT: &str = "parent";
 
+/// The kind of a conflict of a patch with its parent that no text merge can show (a binary file, a parent
+/// that deleted or renamed the path): the overlay keeps its version, and the next save of the path takes
+/// the version of the parent as its base (`split`).
+pub const PARENT_CONFLICT: &str = "parent";
+
 /// The longest path of the tree that a view takes; a longer one is a loop.
 const MAX_DEPTH: usize = 64;
 
@@ -538,49 +543,265 @@ fn has_file(root: &Path, p: &str) -> bool {
     fsutil::lmeta(root, p).map(|m| !m.is_dir()).unwrap_or(false)
 }
 
-/// The delete markers of an overlay state (docs/overlays.md, section 9.6): a file at the root of the
-/// state that lists the paths the overlay hides from the layers below it, one path per line, sorted.
-/// It is an ordinary file of the overlay's tree, so sync, store pushes, merges and the overlay's git
-/// remote carry it as they carry the other files. Assembly reads it and never puts it in a folder.
-pub const REMOVED_FILE: &str = ".layrremoved";
+/// The metadata of an overlay state (docs/overlays.md section 1, owner decision 2026-11-15): a folder at
+/// the root of the state that no view shows. `meta.json` holds the delete markers and the patch bases;
+/// `bases/<sha256>` holds the content of each base. It is part of the overlay's tree, so peer sync,
+/// store remotes and the overlay's git remote carry it; a merge of the overlay merges it by structure
+/// (`merge_meta`), never as text.
+pub const META_DIR: &str = ".layrmeta";
+const META_FILE: &str = ".layrmeta/meta.json";
+const META_BASES: &str = ".layrmeta/bases";
+/// The version of `meta.json`. A reader refuses a newer one: it cannot know what such a state hides.
+const META_VERSION: u64 = 1;
 
-/// The paths that the overlay state `root` hides (`REMOVED_FILE`). A state without the file hides none.
-/// An overlay state can come from another machine, so a line that is not a relative path inside the
-/// tree (absolute, or with `.` or `..`) is not a marker: assembly must never remove a path outside.
-pub fn removed_paths(root: &Path) -> BTreeSet<String> {
-    match std::fs::read_to_string(root.join(REMOVED_FILE)) {
-        Ok(text) => {
-            text.lines().filter(|l| !l.is_empty() && layr_store::paths::check_rel(l).is_ok()).map(str::to_owned).collect()
+/// Whether `p` is a path of the metadata of an overlay state.
+pub fn is_meta_path(p: &str) -> bool {
+    p == META_DIR || p.starts_with(".layrmeta/")
+}
+
+/// The metadata of one overlay state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Meta {
+    /// The paths that the overlay hides from the layers below it ("deleted here").
+    pub removed: BTreeSet<String>,
+    /// For each patch: the SHA-256 (hex) of the version of the parent view that it was made from.
+    pub bases: BTreeMap<String, String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MetaFile {
+    v: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    bases: BTreeMap<String, String>,
+}
+
+/// A path that metadata may name: relative, inside the tree (`layr_store::paths::check_rel`), not a path
+/// of the metadata itself. A newline is allowed: JSON keeps it.
+pub fn meta_path_ok(p: &str) -> bool {
+    !p.is_empty() && layr_store::paths::check_rel(p).is_ok() && !is_meta_path(p) && !skip_path(p)
+}
+
+fn hash_ok(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+impl Meta {
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.bases.is_empty()
+    }
+
+    /// Parse `meta.json`. A newer version is an error. A path that is not a relative path inside the tree
+    /// (absolute, with `.` or `..`, or a metadata path) and a malformed hash are left out: an overlay state
+    /// can come from another machine, and assembly must never remove a path outside the tree.
+    pub fn parse(data: &[u8]) -> Result<Meta> {
+        let f: MetaFile = serde_json::from_slice(data).map_err(|e| anyhow!("invalid overlay metadata: {e}"))?;
+        if f.v != META_VERSION {
+            bail!("overlay metadata of version {} needs a newer layr (this layr reads version {META_VERSION})", f.v);
         }
-        Err(_) => BTreeSet::new(),
+        Ok(Meta {
+            removed: f.removed.into_iter().filter(|p| meta_path_ok(p)).collect(),
+            bases: f.bases.into_iter().filter(|(p, h)| meta_path_ok(p) && hash_ok(h)).collect(),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let f = MetaFile { v: META_VERSION, removed: self.removed.iter().cloned().collect(), bases: self.bases.clone() };
+        let mut v = serde_json::to_vec_pretty(&f).expect("metadata serializes");
+        v.push(b'\n');
+        v
     }
 }
 
-/// The files of an overlay state that a view shows: its files without its delete markers.
-pub fn overlay_files(root: &Path) -> Result<Vec<String>> {
-    Ok(files_of(root)?.into_iter().filter(|p| p != REMOVED_FILE).collect())
+/// The metadata of the overlay state `root`; a state without it has none. The folder and the file are read
+/// without following links.
+pub fn read_meta(root: &(impl fsutil::Src + ?Sized)) -> Result<Meta> {
+    if !fsutil::lmeta(root, META_DIR).is_some_and(|m| m.is_dir()) || fsutil::lmeta(root, META_FILE).is_none() {
+        return Ok(Meta::default());
+    }
+    Meta::parse(&fsutil::read_file(root, META_FILE)?)
 }
 
-/// Write the delete markers `set` into the writable state `dst` (none: no file).
-fn write_removed(dst: &Path, set: &BTreeSet<String>, own: Option<(u32, u32)>) -> Result<()> {
-    let f = dst.join(REMOVED_FILE);
-    if set.is_empty() {
-        if f.symlink_metadata().is_ok() {
-            std::fs::remove_file(&f)?;
+/// The paths that the overlay state `root` hides (`Meta::removed`).
+pub fn removed_paths(root: &Path) -> Result<BTreeSet<String>> {
+    Ok(read_meta(root)?.removed)
+}
+
+/// The files of an overlay state that a view shows: its files without its metadata.
+pub fn overlay_files(root: &Path) -> Result<Vec<String>> {
+    Ok(files_of(root)?.into_iter().filter(|p| !is_meta_path(p)).collect())
+}
+
+/// The content address of a version of a file: SHA-256 of its bytes (of `link:<target>` for a link).
+pub fn version_hash(root: &(impl fsutil::Src + ?Sized), p: &str) -> Result<Option<String>> {
+    use layr_hashers::Digest;
+    let Some(m) = fsutil::lmeta(root, p) else { return Ok(None) };
+    if m.is_dir() {
+        return Ok(None);
+    }
+    let data = if m.ftype == fsutil::FType::Symlink {
+        format!("link:{}", fsutil::read_link(root, p)?).into_bytes()
+    } else {
+        fsutil::read_file(root, p)?
+    };
+    Ok(Some(hex::encode(layr_hashers::ContentAddress::digest(&data))))
+}
+
+/// Whether `p` is the same entry in two trees: the same kind, content (or link target) and execute bit.
+fn same_entry(a: &Path, b: &Path, p: &str) -> Result<bool> {
+    let (Some(ma), Some(mb)) = (fsutil::lmeta(a, p), fsutil::lmeta(b, p)) else { return Ok(false) };
+    let link = |m: &fsutil::Meta| m.ftype == fsutil::FType::Symlink;
+    if ma.is_dir() || mb.is_dir() || link(&ma) != link(&mb) {
+        return Ok(false);
+    }
+    if link(&ma) {
+        return Ok(fsutil::read_link(a, p)? == fsutil::read_link(b, p)?);
+    }
+    if ma.size != mb.size || ma.executable() != mb.executable() || ma.size > fsutil::MAX_TEXT {
+        return Ok(false);
+    }
+    Ok(fsutil::read_file(a, p)? == fsutil::read_file(b, p)?)
+}
+
+/// Write the metadata `meta` into the writable state `dst`: `meta.json`, the base blobs that it names
+/// (from `blobs`, else kept from the state), and no blob that it does not name. No metadata: no folder.
+fn write_meta(dst: &Path, meta: &Meta, blobs: &BTreeMap<String, (PathBuf, String)>, own: Option<(u32, u32)>) -> Result<()> {
+    let t = Tree::open(dst)?;
+    if meta.is_empty() {
+        if fsutil::lmeta(dst, META_DIR).is_some() {
+            t.remove(META_DIR)?;
         }
         return Ok(());
     }
-    let mut text = String::new();
-    for p in set {
-        text.push_str(p);
-        text.push('\n');
-    }
     // A state of the store: the store writes it, as `Ops::apply` copies files into it.
-    std::fs::write(&f, text)?;
+    let dir = dst.join(META_DIR);
+    if fsutil::lmeta(dst, META_DIR).is_some_and(|m| !m.is_dir()) {
+        t.remove(META_DIR)?;
+    }
+    std::fs::create_dir_all(dir.join("bases"))?;
+    let tmp = dir.join("meta.json.tmp");
+    std::fs::write(&tmp, meta.to_bytes())?;
+    std::fs::rename(&tmp, dir.join("meta.json"))?;
+    let wanted: BTreeSet<&String> = meta.bases.values().collect();
+    for h in &wanted {
+        let rel = format!("{META_BASES}/{h}");
+        if fsutil::lmeta(dst, &rel).is_some() {
+            continue;
+        }
+        let (root, p) = blobs.get(*h).ok_or_else(|| anyhow!("the base {h} of an overlay patch is missing"))?;
+        fsutil::copy_entry(root.as_path(), p, dst, &rel, own)?;
+    }
+    for e in std::fs::read_dir(dir.join("bases"))? {
+        let name = e?.file_name().to_string_lossy().into_owned();
+        if !wanted.contains(&name) {
+            t.remove(&format!("{META_BASES}/{name}"))?;
+        }
+    }
     if let Some((uid, gid)) = own {
-        std::os::unix::fs::lchown(&f, Some(uid), Some(gid))?;
+        for rel in [META_DIR, META_BASES, META_FILE] {
+            std::os::unix::fs::lchown(dst.join(rel), Some(uid), Some(gid))?;
+        }
     }
     Ok(())
+}
+
+/// Write merged metadata into the writable merge result `dst`; each base blob comes from the first of
+/// `roots` (the merged states) that holds it.
+pub fn write_merged_meta(dst: &Path, meta: &Meta, roots: &[PathBuf], own: Option<(u32, u32)>) -> Result<()> {
+    let mut blobs = BTreeMap::new();
+    for h in meta.bases.values() {
+        let rel = format!("{META_BASES}/{h}");
+        if let Some(r) = roots.iter().find(|r| fsutil::lmeta(r.as_path(), &rel).is_some_and(|m| m.is_file())) {
+            blobs.insert(h.clone(), (r.clone(), rel));
+        }
+    }
+    // A merged folder may hold a text merge of `meta.json`: it is written again whole.
+    let mut meta = meta.clone();
+    meta.bases.retain(|_, h| blobs.contains_key(h) || fsutil::lmeta(dst, &format!("{META_BASES}/{h}")).is_some_and(|m| m.is_file()));
+    write_meta(dst, &meta, &blobs, own)
+}
+
+/// The root of the version of `p` that the view below layer `i` shows: the nearest layer below that holds
+/// it, unless a layer between hides it; else `main` when it holds it.
+pub fn below_root(shared: &Path, roots: &[PathBuf], removed: &[BTreeSet<String>], i: usize, p: &str) -> Option<PathBuf> {
+    for j in (0..i).rev() {
+        if removed[j].contains(p) {
+            return None;
+        }
+        if has_file(&roots[j], p) {
+            return Some(roots[j].clone());
+        }
+    }
+    has_file(shared, p).then(|| shared.to_path_buf())
+}
+
+/// What `patch_report` says of one overlay of a view.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct PatchReport {
+    pub overlay: String,
+    /// Versions of files of the parent view.
+    pub patches: Vec<String>,
+    /// Files that the parent view does not have (or that have no recorded base).
+    pub own: Vec<String>,
+    /// Paths of the parent view that this overlay deletes.
+    pub hidden: Vec<String>,
+    /// Patches whose parent version changed since the patch was made.
+    pub waiting: Vec<String>,
+}
+
+impl PatchReport {
+    /// The text of `layr status` and `layr save`: one line per kind that has paths.
+    pub fn lines(&self) -> Vec<String> {
+        let list = |v: &[String]| {
+            let mut s: Vec<String> = v.iter().take(10).cloned().collect();
+            if v.len() > 10 {
+                s.push(format!("and {} more", v.len() - 10));
+            }
+            s.join(", ")
+        };
+        let mut out = Vec::new();
+        if !self.patches.is_empty() {
+            out.push(format!("{}: patches of the parent: {}", self.overlay, list(&self.patches)));
+        }
+        if !self.hidden.is_empty() {
+            out.push(format!("{}: hidden from the parent: {}", self.overlay, list(&self.hidden)));
+        }
+        if !self.waiting.is_empty() {
+            out.push(format!("{}: waits for a merge with the parent: {}", self.overlay, list(&self.waiting)));
+        }
+        out
+    }
+}
+
+/// Merge the metadata of three overlay states by structure (a merge of the overlay between lines): per
+/// path, the side that changed it wins; when both changed it differently, ours. A path that the merged
+/// tree holds is never hidden by its own marker.
+pub fn merge_meta(base: &Meta, ours: &Meta, theirs: &Meta, merged: &Path) -> Meta {
+    fn pick<T: Clone + PartialEq>(b: Option<T>, o: Option<T>, t: Option<T>) -> Option<T> {
+        if o == t || t == b {
+            o
+        } else {
+            t
+        }
+    }
+    let mut out = Meta::default();
+    let paths: BTreeSet<&String> = base.removed.iter().chain(&ours.removed).chain(&theirs.removed).collect();
+    for p in paths {
+        let on = pick(base.removed.contains(p).then_some(()), ours.removed.contains(p).then_some(()), theirs.removed.contains(p).then_some(()));
+        if on.is_some() && !has_file(merged, p) {
+            out.removed.insert(p.clone());
+        }
+    }
+    let keys: BTreeSet<&String> = base.bases.keys().chain(ours.bases.keys()).chain(theirs.bases.keys()).collect();
+    for p in keys {
+        if let Some(h) = pick(base.bases.get(p).cloned(), ours.bases.get(p).cloned(), theirs.bases.get(p).cloned()) {
+            if has_file(merged, p) {
+                out.bases.insert(p.clone(), h);
+            }
+        }
+    }
+    out
 }
 
 /// Remove parent folders of `rel` that became empty (states hold files, as git trees do).
@@ -602,17 +823,30 @@ pub struct Ops {
     pub marks: BTreeSet<String>,
     /// Delete markers to take out: the path shows again (from this layer or a lower one).
     pub unmarks: BTreeSet<String>,
+    /// Patch bases to set: path to the hash of the version of the parent view (`Meta::bases`).
+    pub bases: BTreeMap<String, String>,
+    /// Patch bases to drop (the path is no patch any more). A deleted or moved path drops its base too.
+    pub unbases: BTreeSet<String>,
+    /// Where the content of each new base is: hash to the root and path of that version.
+    pub blobs: BTreeMap<String, (PathBuf, String)>,
 }
 
 impl Ops {
     pub fn is_empty(&self) -> bool {
-        self.moves.is_empty() && self.dels.is_empty() && self.puts.is_empty() && self.marks.is_empty() && self.unmarks.is_empty()
+        self.moves.is_empty()
+            && self.dels.is_empty()
+            && self.puts.is_empty()
+            && self.marks.is_empty()
+            && self.unmarks.is_empty()
+            && self.bases.is_empty()
+            && self.unbases.is_empty()
     }
 
     /// Apply to `dst` (writable) with the content of `src`: moves first (the inode stays, so btrfs
     /// reports the move), then deletes, then reflink copies.
     pub fn apply(&self, dst: &Path, src: &Path, own: Option<(u32, u32)>) -> Result<()> {
         let t = Tree::open(dst)?;
+        let old = read_meta(dst)?;
         for (o, p) in &self.moves {
             if t.stat(o).is_some() {
                 if t.stat(p).is_none() {
@@ -633,14 +867,16 @@ impl Ops {
         for p in &self.puts {
             fsutil::copy_entry(src, p, dst, p, own)?;
         }
-        if !self.marks.is_empty() || !self.unmarks.is_empty() {
-            let old = removed_paths(dst);
-            let mut set = old.clone();
-            set.extend(self.marks.iter().cloned());
-            set.retain(|p| !self.unmarks.contains(p));
-            if set != old {
-                write_removed(dst, &set, own)?;
-            }
+        let mut meta = old.clone();
+        meta.removed.extend(self.marks.iter().cloned());
+        meta.removed.retain(|p| !self.unmarks.contains(p));
+        for (o, _) in &self.moves {
+            meta.bases.remove(o);
+        }
+        meta.bases.retain(|p, _| !self.dels.contains(p) && !self.unbases.contains(p));
+        meta.bases.extend(self.bases.iter().map(|(p, h)| (p.clone(), h.clone())));
+        if meta != old {
+            write_meta(dst, &meta, &self.blobs, own)?;
         }
         // The times last: an entry made by a copy changes the time of its folder. Cargo compares the times of the
         // cache, so every copied entry gets the source's time, on every file system (union and snapshot alike).
@@ -691,6 +927,11 @@ pub struct Split {
 /// and the target gets a delete marker when a layer below it still shows the path. A rename is a
 /// delete of the old path and a new file; inside the target it stays a move (btrfs keeps the inode).
 /// `main` changes only when it is the target.
+///
+/// An overlay keeps a path only when it differs from the view of its parent: a file saved equal to the
+/// version below drops the overlay's entry (and its marker). A file that the overlay takes from the view
+/// below (a new patch) records that version as its base; a patch keeps its base, except a path in
+/// `resolving` (a conflict with the parent that this save resolves), which takes the version below now.
 pub fn split(
     base: &Path,
     new: &Path,
@@ -698,10 +939,12 @@ pub fn split(
     roots: &[PathBuf],
     pending: &BTreeMap<String, usize>,
     target: Owner,
+    resolving: &BTreeSet<(usize, String)>,
 ) -> Result<Split> {
     let list: Vec<Change> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
     let list = changes::with_renames(base, new, list);
-    let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect();
+    let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect::<Result<_>>()?;
+    let metas: Vec<Meta> = roots.iter().map(|r| read_meta(r.as_path())).collect::<Result<_>>()?;
     let holds = |o: Owner, p: &str| match o {
         Owner::Shared => has_file(shared, p),
         Owner::Overlay(i) => has_file(&roots[i], p),
@@ -722,18 +965,20 @@ pub fn split(
         v.extend((from..roots.len()).map(Owner::Overlay));
         v
     };
-    // Whether the view below overlay `i` shows `p`: the nearest layer below that holds it or hides it.
-    let below_shows = |i: usize, p: &str| -> bool {
+    // The root of the version of `p` that the view below overlay `i` shows: the nearest layer below that
+    // holds it, unless a layer between hides it.
+    let below = |i: usize, p: &str| -> Option<PathBuf> {
         for j in (0..i).rev() {
             if removed[j].contains(p) {
-                return false;
+                return None;
             }
             if has_file(&roots[j], p) {
-                return true;
+                return Some(roots[j].clone());
             }
         }
-        has_file(shared, p)
+        has_file(shared, p).then(|| shared.to_path_buf())
     };
+    let below_shows = |i: usize, p: &str| below(i, p).is_some();
     let mut s = Split { shared: Ops::default(), overlays: roots.iter().map(|_| Ops::default()).collect(), list: Vec::new() };
     fn ops(s: &mut Split, o: Owner) -> &mut Ops {
         match o {
@@ -753,10 +998,10 @@ pub fn split(
             }
         }
     };
-    // The file of the delete markers is no file of the view: no layer gets it from a folder.
+    // The metadata of an overlay is no file of the view: no layer gets it from a folder.
     let check_name = |o: Owner, p: &str| -> Result<()> {
-        if matches!(o, Owner::Overlay(_)) && p == REMOVED_FILE {
-            bail!("'{REMOVED_FILE}' is the name of the delete markers of an overlay; rename the file");
+        if matches!(o, Owner::Overlay(_)) && (is_meta_path(p) || !meta_path_ok(p)) {
+            bail!("'{p}' cannot be a file of an overlay ('{META_DIR}' holds the metadata of an overlay); rename the file");
         }
         Ok(())
     };
@@ -819,6 +1064,33 @@ pub fn split(
                 for x in at_or_above(target) {
                     if x != target && holds(x, &p) {
                         ops(&mut s, x).dels.insert(p.clone());
+                    }
+                }
+                if let Owner::Overlay(i) = target {
+                    let under = below(i, &p);
+                    // Equal to the view of the parent: the overlay keeps no entry for the path.
+                    if !moved && under.as_ref().is_some_and(|r| same_entry(r, new, &p).unwrap_or(false)) {
+                        if holds(target, &p) {
+                            ops(&mut s, target).dels.insert(p.clone());
+                        }
+                        unmark(&mut s, target, &p);
+                        continue;
+                    }
+                    let had = holds(target, &p) && metas[i].bases.contains_key(&p);
+                    match &under {
+                        // A new patch, or a conflict with the parent that this save resolves: the version below
+                        // is its base.
+                        Some(r) if !had || resolving.contains(&(i, p.clone())) => {
+                            if let Some(h) = version_hash(r.as_path(), &p)? {
+                                s.overlays[i].blobs.insert(h.clone(), (r.clone(), p.clone()));
+                                s.overlays[i].bases.insert(p.clone(), h);
+                            }
+                        }
+                        Some(_) => {}
+                        // The parent does not show the path: an own file, no patch.
+                        None => {
+                            s.overlays[i].unbases.insert(p.clone());
+                        }
                     }
                 }
                 ops(&mut s, target).puts.insert(p.clone());
@@ -1694,6 +1966,46 @@ impl<'a> Repo<'a> {
         Ok(None)
     }
 
+    /// The state of the paths of each overlay of the view of `line` (docs/overlays.md section 1): its patches
+    /// (with the version of the parent that each was made from), its own files, the paths it hides, and the
+    /// patches whose parent changed since (they wait for a merge with the parent, `rebase_patches`).
+    pub fn patch_report(&self, line: &Line) -> Result<Vec<PatchReport>> {
+        let layers = self.layers(line)?;
+        let shared = self.state_root(&line.head)?;
+        let mut roots = Vec::new();
+        let mut removed = Vec::new();
+        for l in &layers {
+            let root = self.layer_root(l).ok_or_else(|| anyhow!("overlay '{}' is not on this machine", l.overlay))?;
+            removed.push(removed_paths(&root)?);
+            roots.push(root);
+        }
+        let mut out = Vec::new();
+        for (i, l) in layers.iter().enumerate() {
+            if !self.patches_overlay(&l.overlay)? {
+                continue;
+            }
+            let meta = read_meta(roots[i].as_path())?;
+            let mut r = PatchReport { overlay: l.overlay.clone(), hidden: meta.removed.iter().cloned().collect(), ..Default::default() };
+            for p in overlay_files(&roots[i])? {
+                match meta.bases.get(&p) {
+                    Some(h) => {
+                        let now = match below_root(&shared, &roots, &removed, i, &p) {
+                            Some(root) => version_hash(root.as_path(), &p)?,
+                            None => None,
+                        };
+                        if now.as_ref() != Some(h) {
+                            r.waiting.push(p.clone());
+                        }
+                        r.patches.push(p);
+                    }
+                    None => r.own.push(p),
+                }
+            }
+            out.push(r);
+        }
+        Ok(out)
+    }
+
     /// The overlays of a new line folder of `owner`: the path to the overlay of the folder where
     /// `line new` ran, else none (the view of `main`). The path stops below the first overlay that the
     /// owner does not read, so the folder of a non-reader never gets its files; an overlay of another
@@ -2121,11 +2433,12 @@ impl<'a> Repo<'a> {
 
     /// Reflink copies of the files of each overlay state into `dst`, from the bottom. A layer
     /// whose overlay is not on this machine adds nothing (`check_stack` refuses a commit then).
-    /// The delete markers of a layer (`REMOVED_FILE`) take those paths of the lower layers out first.
+    /// The delete markers of a layer (`Meta::removed`) take those paths of the lower layers out first; its
+    /// metadata folder never comes into a view.
     pub fn put_layers(&self, dst: &Path, layers: &[Layer], own: Option<(u32, u32)>) -> Result<()> {
         for l in layers {
             if let Some(root) = self.layer_root(l) {
-                let removed = removed_paths(&root);
+                let removed = removed_paths(&root)?;
                 if !removed.is_empty() {
                     // `dst` is a writable snapshot of the store (`assemble`, the line's base), not a folder of the caller.
                     let t = Tree::open(dst)?;
@@ -2744,7 +3057,16 @@ pub fn commit_layers(
     }
     // The layer of this save: the top of the view, or the ancestor of `save --to` (docs/overlays.md section 1).
     let target = save_target(repo, layers, line, to)?;
-    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, target)?;
+    // A conflict of a patch with its parent (`rebase_patches`) is resolved by the next save of that path.
+    let mut resolving = BTreeSet::new();
+    for (i, l) in layers.iter().enumerate() {
+        for c in orepos[i].p.db.state(&l.state)?.map(|s| s.conflicts).unwrap_or_default() {
+            if c.kind == PARENT_CONFLICT {
+                resolving.insert((i, c.path));
+            }
+        }
+    }
+    let s = split(&base, &new_tree.path, &shared_root, &roots, &pending, target, &resolving)?;
     if s.shared.is_empty() && s.overlays.iter().all(|o| o.is_empty()) && !allow_empty {
         return Ok(None);
     }
@@ -2916,18 +3238,201 @@ pub fn commit_layers(
     Ok(Some(Committed { shared, overlays, fds }))
 }
 
+/// A three-way text merge of one file (`git merge-file -p`): the result and whether it is clean. None when a
+/// version is binary or too large for a text merge.
+fn merge_text(base: &[u8], ours: &[u8], theirs: &[u8], label: &str) -> Result<Option<(Vec<u8>, bool)>> {
+    let binary = |d: &[u8]| d.len() as u64 > fsutil::MAX_TEXT || d[..d.len().min(8000)].contains(&0);
+    if binary(base) || binary(ours) || binary(theirs) {
+        return Ok(None);
+    }
+    let dir = std::env::temp_dir().join(format!("layr-rebase-{}", ids::new_id()));
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    }
+    let res = (|| -> Result<Option<(Vec<u8>, bool)>> {
+        let (o, b, t) = (dir.join("ours"), dir.join("base"), dir.join("theirs"));
+        std::fs::write(&o, ours)?;
+        std::fs::write(&b, base)?;
+        std::fs::write(&t, theirs)?;
+        let out = std::process::Command::new("git")
+            .args(["merge-file", "-p", "-L", "overlay", "-L", "base", "-L", label])
+            .arg(&o)
+            .arg(&b)
+            .arg(&t)
+            .output()?;
+        match out.status.code() {
+            Some(0) => Ok(Some((out.stdout, true))),
+            Some(n) if n > 0 && n < 128 => Ok(Some((out.stdout, false))),
+            _ => bail!("git merge-file failed: {}", String::from_utf8_lossy(&out.stderr)),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    res
+}
+
+/// The merge of each patch of the view of `line` with its parent (docs/overlays.md section 1, "a patch is a
+/// patch"): when the version of the parent view of a patched path is no longer the base of the patch, a
+/// three-way merge (base: the recorded version, ours: the overlay's version, theirs: the parent's version
+/// now). A clean merge gives the overlay a new version and base. An overlap gives the file conflict markers
+/// and a conflict that the next save resolves; a binary file and a parent that deleted or renamed the path
+/// give a conflict of kind `parent`, and the overlay keeps its version. Only a reader of every overlay of
+/// the path merges: for another caller the patches wait for the next reader (`patch_report`). The overlays
+/// are merged from the bottom, so an upper overlay merges with the merged lower one. Returns what it did,
+/// as lines of text; the working folder takes the new versions (a local change in the way refuses).
+pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>> {
+    let mut msgs = Vec::new();
+    if repo.p.is_overlay() || ctx.caller.uid != line.owner || line.machine != repo.p.store.machine.id {
+        return Ok(msgs);
+    }
+    let layers = repo.layers(line)?;
+    if layers.is_empty() {
+        return Ok(msgs);
+    }
+    for l in &layers {
+        if !repo.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid)? || repo.layer_root(l).is_none() {
+            return Ok(msgs);
+        }
+    }
+    let shared = repo.state_root(&line.head)?;
+    let own = repo.own(line);
+    // The full tree that the folder shows now: the folder takes the new versions from it.
+    let shown = repo.head_tree(line)?;
+    // A path with a local change waits: the merge must not take the place of work that is not saved.
+    let local: BTreeSet<String> = {
+        let (st, _scan, _it, _idx) = repo.status(line)?;
+        let mut v = st.local_paths();
+        v.extend(st.ignored.iter().cloned());
+        v.into_iter().collect()
+    };
+    let mut new_layers = layers.clone();
+    let mut changed = false;
+    for i in 0..new_layers.len() {
+        let name = new_layers[i].overlay.clone();
+        if !repo.patches_overlay(&name)? {
+            continue;
+        }
+        let roots: Vec<PathBuf> = new_layers.iter().map(|l| repo.layer_root(l).expect("checked above")).collect();
+        let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect::<Result<_>>()?;
+        let meta = read_meta(roots[i].as_path())?;
+        let orepo = repo.overlay_repo(&name)?;
+        let work = orepo.temp_work(&roots[i])?;
+        let mut ops = Ops::default();
+        let mut conflicts = Vec::new();
+        for (p, b) in &meta.bases {
+            if !has_file(&roots[i], p) {
+                continue;
+            }
+            let under = below_root(&shared, &roots, &removed, i, p);
+            let now = match &under {
+                Some(r) => version_hash(r.as_path(), p)?,
+                None => None,
+            };
+            if now.as_deref() == Some(b.as_str()) {
+                continue;
+            }
+            if local.contains(p) {
+                msgs.push(format!("overlay {name}: {p} waits for a merge with the parent: it has local changes; save them, then run 'layr overlay use {}'", layers.last().map(|l| l.overlay.as_str()).unwrap_or(&name)));
+                continue;
+            }
+            let conflict = |kind: &str| crate::model::Conflict { path: p.clone(), kind: kind.into(), base: None, ours: None, theirs: None };
+            let blob = format!("{META_BASES}/{b}");
+            let (Some(r), Some(now)) = (under, now) else {
+                msgs.push(format!("overlay {name}: {p}: the parent deleted or renamed it; the overlay keeps its version (a conflict)"));
+                conflicts.push(conflict(PARENT_CONFLICT));
+                continue;
+            };
+            let texts = (fsutil::read_file(roots[i].as_path(), &blob), fsutil::read_file(roots[i].as_path(), p), fsutil::read_file(r.as_path(), p));
+            let merged = match texts {
+                (Ok(base), Ok(ours), Ok(theirs)) => merge_text(&base, &ours, &theirs, "parent")?,
+                _ => None,
+            };
+            match merged {
+                Some((data, clean)) => {
+                    let t = Tree::open(&work.path)?;
+                    if t.stat(p).is_some() {
+                        t.remove(p)?;
+                    }
+                    std::fs::write(work.path.join(p), &data)?;
+                    ops.puts.insert(p.clone());
+                    ops.bases.insert(p.clone(), now.clone());
+                    ops.blobs.insert(now.clone(), (r.clone(), p.clone()));
+                    if clean {
+                        msgs.push(format!("overlay {name}: {p}: merged with the parent"));
+                    } else {
+                        msgs.push(format!("overlay {name}: {p}: conflict with the parent; fix the markers and save"));
+                        conflicts.push(conflict("content"));
+                    }
+                }
+                None => {
+                    msgs.push(format!("overlay {name}: {p}: a binary file changed in the parent; the overlay keeps its version (a conflict)"));
+                    conflicts.push(conflict(PARENT_CONFLICT));
+                }
+            }
+        }
+        // A conflict of kind `parent` that is open already is not made again.
+        let open: BTreeSet<String> = orepo
+            .p
+            .db
+            .state(&new_layers[i].state)?
+            .map(|s| s.conflicts.into_iter().filter(|c| c.kind == PARENT_CONFLICT).map(|c| c.path).collect())
+            .unwrap_or_default();
+        conflicts.retain(|c| !(c.kind == PARENT_CONFLICT && open.contains(&c.path)));
+        if ops.is_empty() && conflicts.is_empty() {
+            continue;
+        }
+        let info = repo.need_overlay(&name)?;
+        let _lock = orepo.p.lock()?;
+        let ol = orepo.ensure_overlay_line(ctx, &info, line, &new_layers[i].state)?;
+        if ol.head != new_layers[i].state {
+            bail!("overlay '{name}' changed in another line since this line took it; run 'layr overlay use {name}'");
+        }
+        let prev = new_layers[i].state.clone();
+        let mut st = next_state(&orepo, ctx, &prev, &work.path, &ops, own, vec![prev.clone()], "Merge the patches with the parent", Some(&ol.id))?;
+        if let Some(old) = orepo.p.db.state(&prev)? {
+            st.conflicts.extend(old.conflicts.into_iter().filter(|c| c.kind == PARENT_CONFLICT));
+        }
+        st.conflicts.extend(conflicts);
+        move_overlay_line(&orepo, ctx, "overlay.rebase", &ol, &st.id, vec![st.clone()])?;
+        new_layers[i].state = st.id;
+        changed = true;
+    }
+    if changed {
+        let line = repo.line(&line.id)?;
+        set_layers_from(ctx, repo, &line, &shown, &local, &new_layers, false, "overlay.rebase")?;
+    }
+    Ok(msgs)
+}
+
 /// Change the stack of a line to `layers` and its working folder with it: overlay files come and
 /// go, local changes stay (a change in the way refuses, unless `force`). The caller holds the
 /// project lock and owns the line.
 pub fn set_layers(ctx: &Ctx, repo: &Repo, line: &Line, layers: &[Layer], force: bool, op: &str) -> Result<Vec<Change>> {
     let old = repo.head_tree(line)?;
     let (st, _scan, _it, _idx) = repo.status(line)?;
-    let view = repo.assemble(line, &line.head, layers)?;
-    let wdir = repo.working(line);
     // An ignored file of the user (a key of its own) is a local file too: never overwritten.
     let mut local = st.local_paths();
     local.extend(st.ignored.iter().cloned());
-    let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &local, force)?;
+    set_layers_from(ctx, repo, line, &old, &local, layers, force, op)
+}
+
+/// `set_layers` from the full tree `old` that the folder showed and its local paths `local`, both taken
+/// before the overlay lines moved.
+#[allow(clippy::too_many_arguments)]
+pub fn set_layers_from(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    old: &Path,
+    local: &BTreeSet<String>,
+    layers: &[Layer],
+    force: bool,
+    op: &str,
+) -> Result<Vec<Change>> {
+    let old = old.to_path_buf();
+    let view = repo.assemble(line, &line.head, layers)?;
+    let wdir = repo.working(line);
+    let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), local, force)?;
     let mut rec = Record::new(op);
     rec.data = serde_json::json!({
         "line": line.id,
@@ -3087,26 +3592,67 @@ mod tests {
     }
 
     #[test]
-    fn ops_write_and_clear_delete_markers() {
+    fn ops_write_and_clear_overlay_metadata() {
         let root = std::env::temp_dir().join(format!("layr-marks-{}", ids::new_id()));
         let (src, dst) = (root.join("src"), root.join("dst"));
         for d in [&src, &dst] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let ops = Ops { marks: ["b.c".to_string(), "a/x.c".to_string()].into(), ..Default::default() };
+        let ops = Ops { marks: ["b.c".to_string(), "a/x.c".to_string(), "new\nline.c".to_string()].into(), ..Default::default() };
         assert!(!ops.is_empty(), "a marker alone is a change of the layer");
         ops.apply(&dst, &src, None).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join(REMOVED_FILE)).unwrap(), "a/x.c\nb.c\n", "one sorted path per line");
-        assert_eq!(removed_paths(&dst), BTreeSet::from(["a/x.c".to_string(), "b.c".to_string()]));
+        let meta = read_meta(dst.as_path()).unwrap();
+        assert_eq!(meta.removed, BTreeSet::from(["a/x.c".to_string(), "b.c".to_string(), "new\nline.c".to_string()]), "a newline in a path works");
         std::fs::write(dst.join("kept.c"), "x").unwrap();
-        assert_eq!(overlay_files(&dst).unwrap(), ["kept.c"], "a view never gets the marker file");
-        Ops { unmarks: ["b.c".to_string()].into(), ..Default::default() }.apply(&dst, &src, None).unwrap();
-        assert_eq!(removed_paths(&dst), BTreeSet::from(["a/x.c".to_string()]));
-        Ops { unmarks: ["a/x.c".to_string()].into(), ..Default::default() }.apply(&dst, &src, None).unwrap();
-        assert!(!dst.join(REMOVED_FILE).exists(), "no markers: no file");
-        // A marker file of another machine: only relative paths inside the tree count.
-        std::fs::write(dst.join(REMOVED_FILE), "/etc/passwd\n../outside\na/../../b\n./c\nok/d.c\n").unwrap();
-        assert_eq!(removed_paths(&dst), BTreeSet::from(["ok/d.c".to_string()]));
+        assert_eq!(overlay_files(&dst).unwrap(), ["kept.c"], "a view never gets the metadata");
+        // A patch base: the hash of the version below, and its content in the metadata folder.
+        std::fs::write(src.join("lib.c"), "parent version").unwrap();
+        let h = version_hash(src.as_path(), "lib.c").unwrap().unwrap();
+        let ops = Ops {
+            unmarks: ["b.c".to_string()].into(),
+            bases: [("lib.c".to_string(), h.clone())].into(),
+            blobs: [(h.clone(), (src.clone(), "lib.c".to_string()))].into(),
+            ..Default::default()
+        };
+        ops.apply(&dst, &src, None).unwrap();
+        let meta = read_meta(dst.as_path()).unwrap();
+        assert_eq!(meta.bases.get("lib.c"), Some(&h));
+        assert!(!meta.removed.contains("b.c"));
+        assert_eq!(std::fs::read_to_string(dst.join(format!("{META_BASES}/{h}"))).unwrap(), "parent version");
+        // A delete drops the base and its blob.
+        Ops { dels: ["lib.c".to_string()].into(), unmarks: meta.removed.clone(), ..Default::default() }.apply(&dst, &src, None).unwrap();
+        assert!(!dst.join(META_DIR).exists(), "no metadata: no folder");
+        // Metadata of another machine: only relative paths inside the tree count; a newer version is refused.
+        std::fs::create_dir_all(dst.join(META_DIR)).unwrap();
+        let bad = r#"{"v":1,"removed":["/etc/passwd","../outside","a/../../b","./c",".layrmeta/meta.json","ok/d.c"],"bases":{"x":"nothex","../y":"00"}}"#;
+        std::fs::write(dst.join(META_FILE), bad).unwrap();
+        let meta = read_meta(dst.as_path()).unwrap();
+        assert_eq!(meta.removed, BTreeSet::from(["ok/d.c".to_string()]));
+        assert!(meta.bases.is_empty());
+        std::fs::write(dst.join(META_FILE), r#"{"v":2,"removed":["a"]}"#).unwrap();
+        assert!(read_meta(dst.as_path()).is_err(), "a newer version is refused, not read as no markers");
+        // A link in place of the metadata folder is not followed.
+        std::fs::remove_dir_all(dst.join(META_DIR)).unwrap();
+        std::os::unix::fs::symlink(&src, dst.join(META_DIR)).unwrap();
+        assert!(read_meta(dst.as_path()).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn metadata_merges_by_structure() {
+        let root = std::env::temp_dir().join(format!("layr-meta-merge-{}", ids::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kept.c"), "x").unwrap();
+        let m = |removed: &[&str], bases: &[(&str, &str)]| Meta {
+            removed: removed.iter().map(|s| s.to_string()).collect(),
+            bases: bases.iter().map(|(p, h)| (p.to_string(), h.to_string())).collect(),
+        };
+        let base = m(&["a", "b"], &[("kept.c", "1")]);
+        let ours = m(&["a", "c"], &[("kept.c", "1")]);
+        let theirs = m(&["b", "d", "kept.c"], &[("kept.c", "2")]);
+        let out = merge_meta(&base, &ours, &theirs, &root);
+        assert_eq!(out.removed, BTreeSet::from(["c".to_string(), "d".to_string()]), "each side's change wins; a held file is never hidden");
+        assert_eq!(out.bases.get("kept.c").map(String::as_str), Some("2"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3138,22 +3684,30 @@ mod tests {
         let roots = vec![overlay];
         let none = BTreeMap::new();
         // The view of the overlay: `main` never changes; copies, new files and delete markers go to the overlay.
-        let s = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0)).unwrap();
+        let no = BTreeSet::new();
+        let s = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0), &no).unwrap();
         assert!(s.shared.is_empty(), "main never changes: {:?}", s.shared);
+        // A file saved equal to the version of main: the overlay drops its entry.
+        std::fs::write(new.join(".env"), "public env").unwrap();
+        let eq = split(&base, &new, &shared, &roots, &none, Owner::Overlay(0), &no).unwrap();
+        assert!(eq.overlays[0].dels.contains(".env") && !eq.overlays[0].puts.contains(".env"), "equal to the parent is not stored");
+        std::fs::write(new.join(".env"), "private env 2").unwrap();
         let o = &s.overlays[0];
         for p in ["core.c", "new.c", "moved2.c", ".env"] {
             assert!(o.puts.contains(p), "{p} goes to the overlay");
         }
         assert_eq!(o.marks, BTreeSet::from(["gone.c".to_string(), "moved.c".to_string()]), "deletes of files of main are markers");
+        assert!(o.bases.contains_key("core.c"), "a new patch records the version of main as its base");
+        assert!(!o.bases.contains_key("new.c"), "a new file is no patch");
         // `--to main`: every change goes to main, and a file that the overlay holds leaves it.
-        let s = split(&base, &new, &shared, &roots, &none, Owner::Shared).unwrap();
+        let s = split(&base, &new, &shared, &roots, &none, Owner::Shared, &no).unwrap();
         assert!(s.shared.puts.contains(".env") && s.overlays[0].dels.contains(".env"));
         assert!(s.shared.puts.contains("core.c") && s.shared.puts.contains("new.c"));
         assert!(s.shared.dels.contains("gone.c"));
         assert!(s.overlays[0].marks.is_empty());
         // `overlay move` names its overlay: the file leaves main whatever the target is.
         let moves = BTreeMap::from([("core.c".to_string(), 0usize)]);
-        let s = split(&base, &new, &shared, &roots, &moves, Owner::Shared).unwrap();
+        let s = split(&base, &new, &shared, &roots, &moves, Owner::Shared, &no).unwrap();
         assert!(s.overlays[0].puts.contains("core.c") && s.shared.dels.contains("core.c"));
         let _ = std::fs::remove_dir_all(&root);
     }
