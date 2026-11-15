@@ -25,6 +25,16 @@ impl Registered {
         Ok(())
     }
 }
+enum Resource {
+    Published(PathBuf),
+    Readable(Registered),
+    Detached { path: PathBuf, identity: (u64, u64) },
+}
+struct HintPair {
+    base: PathBuf,
+    tree: PathBuf,
+    layers: CandidateLayers,
+}
 struct Destination {
     path: PathBuf,
     parent: File,
@@ -32,14 +42,21 @@ struct Destination {
 #[derive(Default)]
 pub(crate) struct OverlayFs {
     issuer: TreeIssuer,
-    trees: Mutex<HashMap<TreeKey, Registered>>,
+    trees: Mutex<HashMap<TreeKey, Resource>>,
+    hint_pair: Option<HintPair>,
+    #[cfg(test)]
+    fail_registration: std::sync::atomic::AtomicBool,
     destinations: Mutex<HashMap<TreeKey, Destination>>,
 }
 impl OverlayFs {
-    fn trees(&self) -> layr_fs_core::Result<std::sync::MutexGuard<'_, HashMap<TreeKey, Registered>>> {
+    fn trees(&self) -> layr_fs_core::Result<std::sync::MutexGuard<'_, HashMap<TreeKey, Resource>>> {
         self.trees.lock().map_err(|_| FsError::Invalid("OverlayFS handle registry lock poisoned"))
     }
     fn register(&self, path: &Path) -> layr_fs_core::Result<Registered> {
+        #[cfg(test)]
+        if self.fail_registration.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            return Err(FsError::Invalid("injected registration failure"));
+        }
         let path = backend(absolute(path))?;
         let directory = Arc::new(DirectoryTree::open(&path)?);
         Ok(Registered { path, directory })
@@ -48,16 +65,13 @@ impl OverlayFs {
         backend(subvol_info(path))?;
         let registered = self.register(path)?;
         let tree = self.issuer.import_working(registered.directory.clone());
-        self.trees()?.insert(self.issuer.working_key(&tree)?, registered);
+        self.trees()?.insert(self.issuer.working_key(&tree)?, Resource::Readable(registered));
         Ok(tree)
     }
     fn frozen(&self, path: &Path) -> layr_fs_core::Result<FrozenTree> {
-        if !backend(subvol_info(path))?.readonly {
-            return Err(FsError::Invalid("OverlayFS tree is not sealed"));
-        }
         let registered = self.register(path)?;
         let tree = self.issuer.import(registered.directory.clone());
-        self.trees()?.insert(self.issuer.frozen_key(&tree)?, registered);
+        self.trees()?.insert(self.issuer.frozen_key(&tree)?, Resource::Readable(registered));
         Ok(tree)
     }
     fn location(&self, path: &Path) -> layr_fs_core::Result<NewTreeLocation> {
@@ -92,15 +106,38 @@ impl OverlayFs {
     }
     fn path(&self, key: TreeKey) -> layr_fs_core::Result<PathBuf> {
         let trees = self.trees()?;
-        let tree = trees.get(&key).ok_or(FsError::Invalid("tree absent"))?;
+        let Some(Resource::Readable(tree)) = trees.get(&key) else { return Err(FsError::Invalid("tree is not readable")) };
         tree.validate()?;
         Ok(tree.path.clone())
     }
-    fn created(&self, path: &Path) -> layr_fs_core::Result<CreatedTree> {
-        let registered = self.register(path)?;
-        let created = self.issuer.create(registered.directory.clone());
-        self.trees()?.insert(self.issuer.owned_key(&created.ownership)?, registered);
-        Ok(created)
+    fn create_with(
+        &self,
+        dst: NewTreeLocation,
+        create: impl FnOnce(&Path) -> Result<CaptureConsistency>,
+    ) -> layr_fs_core::Result<(CreatedTree, CaptureConsistency)> {
+        let dst = self.destination(dst)?;
+        // Reserve authority and the registry slot before the native operation can publish.
+        let ownership = self.issuer.own();
+        let key = self.issuer.owned_key(&ownership)?;
+        let mut trees = self.trees()?;
+        let consistency = backend(create(&dst))?;
+        trees.insert(key.clone(), Resource::Published(dst.clone()));
+        let result = self.register(&dst).and_then(|registered| {
+            let tree = self.issuer.attach_working(&ownership, registered.directory.clone())?;
+            trees.insert(key, Resource::Readable(registered));
+            Ok(tree)
+        });
+        drop(trees);
+        match result {
+            Ok(tree) => Ok((CreatedTree { tree, ownership }, consistency)),
+            Err(cause) => Err(self.rollback(ownership, cause)),
+        }
+    }
+    fn rollback(&self, ownership: OwnedTree, cause: FsError) -> FsError {
+        match self.remove(ownership) {
+            Ok(()) => cause,
+            Err(failure) => FsError::Cleanup { cause: Box::new(cause), failure: Box::new(failure) },
+        }
     }
     fn copy_native(
         &self,
@@ -109,9 +146,7 @@ impl OverlayFs {
         readonly: bool,
     ) -> layr_fs_core::Result<(CreatedTree, CaptureConsistency)> {
         let src = self.path(self.issuer.working_key(source)?)?;
-        let dst = self.destination(dst)?;
-        let consistency = backend(snapshot_native(&src, &dst, readonly))?;
-        Ok((self.created(&dst)?, consistency))
+        self.create_with(dst, |dst| snapshot_native(&src, dst, readonly))
     }
     pub(super) fn snapshot_path(src: &Path, dst: &Path, readonly: bool) -> Result<CaptureConsistency> {
         let driver = Arc::new(Self::default());
@@ -136,7 +171,7 @@ impl OverlayFs {
         let driver = Arc::new(Self::default());
         let registered = driver.register(path)?;
         let ownership = driver.issuer.own();
-        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, registered);
+        driver.trees()?.insert(driver.issuer.owned_key(&ownership)?, Resource::Readable(registered));
         driver.remove(ownership).map_err(|failure| {
             driver.error(FsError::Cleanup {
                 cause: Box::new(FsError::Invalid("OverlayFS removal requires recovery")),
@@ -144,13 +179,20 @@ impl OverlayFs {
             })
         })
     }
-    pub(super) fn path_hints(&self, base: &Path, tree: &Path) -> layr_fs_core::Result<hints::HintSet> {
-        // Preserve partial evidence for unmanaged pairs, as before the handle adapter.
-        if backend(own_layers(base, tree))?.is_none() {
-            return Ok(hints::HintSet::Partial);
-        }
-        let (base, tree) = (self.frozen(base)?, self.frozen(tree)?);
-        match self.capabilities(&base.scope()).change_hints {
+    pub(super) fn path_hints(base: &Path, tree: &Path) -> layr_fs_core::Result<hints::HintSet> {
+        Self::path_hints_with(base, tree, own_layers)
+    }
+    fn path_hints_with(
+        base: &Path,
+        tree: &Path,
+        load: impl FnOnce(&Path, &Path) -> Result<Option<CandidateLayers>>,
+    ) -> layr_fs_core::Result<hints::HintSet> {
+        let (base, tree) = (backend(absolute(base))?, backend(absolute(tree))?);
+        let Some(layers) = backend(load(&base, &tree))? else { return Ok(hints::HintSet::Partial) };
+        // One operation-local registry snapshot supplies both registrations and the capability.
+        let driver = Self { hint_pair: Some(HintPair { base: base.clone(), tree: tree.clone(), layers }), ..Self::default() };
+        let (base, tree) = (driver.frozen(&base)?, driver.frozen(&tree)?);
+        match driver.capabilities(&base.scope()).change_hints {
             Some(hints) => hints.between(&base, &tree),
             None => Ok(hints::HintSet::Partial),
         }
@@ -188,9 +230,10 @@ impl std::fmt::Display for Cleanup {
 impl std::error::Error for Cleanup {}
 impl Filesystem for OverlayFs {
     fn materialise(&self, source: &dyn TreeRead, dst: NewTreeLocation) -> layr_fs_core::Result<CreatedTree> {
-        let dst = self.destination(dst)?;
-        backend(create_subvolume(&dst))?;
-        let created = self.created(&dst)?;
+        let (created, _) = self.create_with(dst, |dst| {
+            create_subvolume(dst)?;
+            Ok(CaptureConsistency::UnsettledCopy)
+        })?;
         if let Err(cause) = layr_fs_common::copy_tree(source, created.tree.writer()) {
             drop(created.tree);
             return match self.remove(created.ownership) {
@@ -210,14 +253,7 @@ impl Filesystem for OverlayFs {
         layr_fs_common::changes(self, before, after)
     }
     fn remove(&self, ownership: OwnedTree) -> std::result::Result<(), RemovalFailure> {
-        self.issuer.remove(ownership, |key| {
-            let mut trees = self.trees()?;
-            let tree = trees.get(key).ok_or(FsError::Invalid("tree absent"))?;
-            tree.validate()?;
-            backend(delete_tree_native(&tree.path))?;
-            trees.remove(key);
-            Ok(())
-        })
+        self.remove_with(ownership, delete_tree_native)
     }
     fn capabilities(&self, scope: &TreeScope) -> Capabilities<'_> {
         if self.issuer.scope_key(scope).ok().and_then(|key| self.trees().ok().map(|trees| trees.contains_key(&key))) != Some(true)
@@ -229,19 +265,52 @@ impl Filesystem for OverlayFs {
 }
 impl hints::ChangeHints for OverlayFs {
     fn between(&self, base: &FrozenTree, tree: &FrozenTree) -> layr_fs_core::Result<hints::HintSet> {
-        self.hints_with(base, tree, own_layers)
+        let (base, tree) = (self.path(self.issuer.frozen_key(base)?)?, self.path(self.issuer.frozen_key(tree)?)?);
+        let loaded;
+        let layers = if let Some(pair) = &self.hint_pair {
+            if pair.base != base || pair.tree != tree {
+                return Ok(hints::HintSet::Partial);
+            }
+            &pair.layers
+        } else {
+            loaded = backend(own_layers(&base, &tree))?;
+            let Some(layers) = &loaded else { return Ok(hints::HintSet::Partial) };
+            layers
+        };
+        Ok(hints::HintSet::Complete(backend(candidates_in(&base, &tree, layers))?))
     }
 }
 impl OverlayFs {
-    fn hints_with(
+    fn remove_with(
         &self,
-        base: &FrozenTree,
-        tree: &FrozenTree,
-        layers: impl FnOnce(&Path, &Path) -> Result<Option<CandidateLayers>>,
-    ) -> layr_fs_core::Result<hints::HintSet> {
-        let (base, tree) = (self.path(self.issuer.frozen_key(base)?)?, self.path(self.issuer.frozen_key(tree)?)?);
-        let Some(layers) = backend(layers(&base, &tree))? else { return Ok(hints::HintSet::Partial) };
-        Ok(hints::HintSet::Complete(backend(candidates_in(&base, &tree, layers))?))
+        ownership: OwnedTree,
+        remove: impl FnOnce(&Path) -> Result<()>,
+    ) -> std::result::Result<(), RemovalFailure> {
+        self.issuer.remove(ownership, |key| {
+            let mut trees = self.trees()?;
+            let resource = trees.get_mut(key).ok_or(FsError::Invalid("tree absent"))?;
+            if let Resource::Readable(tree) = resource {
+                tree.validate()?;
+                let held = tree.directory.root_file().metadata()?;
+                let detached = Resource::Detached { path: tree.path.clone(), identity: (held.dev(), held.ino()) };
+                // No reader lease remains. Drop the mount descriptor before normal unmount.
+                *resource = detached;
+            }
+            let path = match resource {
+                Resource::Published(path) => path,
+                Resource::Detached { path, identity } => {
+                    let actual = fs::symlink_metadata(&*path)?;
+                    if !actual.is_dir() || (actual.dev(), actual.ino()) != *identity {
+                        return Err(FsError::LocationChanged);
+                    }
+                    path
+                }
+                Resource::Readable(_) => return Err(FsError::Invalid("tree still pinned")),
+            };
+            backend(remove(path))?;
+            trees.remove(key);
+            Ok(())
+        })
     }
 }
 pub(super) struct RangeClone;
@@ -275,7 +344,7 @@ mod tests {
             fs::create_dir(&path)?;
             let registered = self.driver.register(&path)?;
             let tree = self.driver.issuer.import(registered.directory.clone());
-            self.driver.trees()?.insert(self.driver.issuer.frozen_key(&tree)?, registered);
+            self.driver.trees()?.insert(self.driver.issuer.frozen_key(&tree)?, Resource::Readable(registered));
             Ok(tree)
         }
     }
@@ -296,9 +365,13 @@ mod tests {
         fs::write(fixture.root.join("base/gone"), b"removed")?;
         fs::write(upper.join("gone"), b"")?;
         fs::write(upper.join("edit"), b"tree")?;
-        let hints = fixture
-            .driver
-            .hints_with(&base, &tree, |_, _| Ok(Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() })))?;
+        let loads = std::cell::Cell::new(0);
+        let hints = OverlayFs::path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |base, tree| {
+            loads.set(loads.get() + 1);
+            assert!(base.is_absolute() && tree.is_absolute());
+            Ok(Some(CandidateLayers { dirs: vec![upper], nested: HashSet::new() }))
+        })?;
+        assert_eq!(loads.get(), 1);
         let hints::HintSet::Complete(changes) = hints else { panic!("shared layers must supply complete hints") };
         assert_eq!(changes.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(), ["edit", "gone"]);
         assert!(changes.iter().find(|c| c.path() == "gone").unwrap().new().is_none());
@@ -307,7 +380,10 @@ mod tests {
             changes.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(),
             fallback.iter().map(|c| c.path().as_str()).collect::<Vec<_>>()
         );
-        assert!(matches!(fixture.driver.hints_with(&base, &tree, |_, _| Ok(None))?, hints::HintSet::Partial));
+        assert!(matches!(
+            OverlayFs::path_hints_with(&fixture.root.join("base"), &fixture.root.join("tree"), |_, _| Ok(None))?,
+            hints::HintSet::Partial
+        ));
         Ok(())
     }
     struct NoHints<'a>(&'a OverlayFs);
@@ -337,7 +413,7 @@ mod tests {
         assert!(matches!(other.changes(&base, &tree), Err(FsError::WrongInstance)));
         fs::rename(fixture.root.join("base"), fixture.root.join("held"))?;
         fs::create_dir(fixture.root.join("base"))?;
-        let result = fixture.driver.hints_with(&base, &tree, |_, _| panic!("must reject before consulting layers"));
+        let result = hints::ChangeHints::between(&fixture.driver, &base, &tree);
         assert!(matches!(result, Err(FsError::LocationChanged)));
         Ok(())
     }
@@ -353,6 +429,85 @@ mod tests {
         let destination = fixture.driver.location(&parent.join("new"))?;
         std::os::unix::fs::symlink("absent", parent.join("new"))?;
         assert!(fixture.driver.destination(destination).is_err());
+        Ok(())
+    }
+    #[test]
+    fn registration_failure_retains_cleanup_authority() -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let fixture = Fixture::new()?;
+        let destination = fixture.root.join("new");
+        let location = fixture.driver.location(&destination)?;
+        fixture.driver.fail_registration.store(true, Ordering::Relaxed);
+        let error = fixture
+            .driver
+            .create_with(location, |path| {
+                fs::create_dir(path)?;
+                Ok(CaptureConsistency::ValidatedCopy)
+            })
+            .err()
+            .unwrap();
+        // A plain fixture has no privileged registry. Failed native cleanup must retain
+        // the reserved ownership so the operation can recover without a mounted filesystem.
+        let FsError::Cleanup { cause, failure } = error else { panic!("cleanup authority was lost") };
+        assert!(cause.to_string().contains("injected registration"));
+        fixture
+            .driver
+            .remove_with(failure.ownership, |path| {
+                assert_eq!(path, destination);
+                fs::remove_dir(path)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!destination.exists());
+        assert!(fixture.driver.trees()?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn removal_drops_the_mount_pin_before_unmount_and_retains_retry() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let location = fixture.driver.location(&fixture.root.join("new"))?;
+        let (created, _) = fixture.driver.create_with(location, |path| {
+            fs::create_dir(path)?;
+            Ok(CaptureConsistency::ValidatedCopy)
+        })?;
+        let key = fixture.driver.issuer.owned_key(&created.ownership)?;
+        let pin = {
+            let trees = fixture.driver.trees()?;
+            let Resource::Readable(tree) = trees.get(&key).unwrap() else { panic!("tree must be pinned") };
+            Arc::downgrade(&tree.directory)
+        };
+        drop(created.tree);
+        let failure = fixture
+            .driver
+            .remove_with(created.ownership, |_| {
+                assert!(pin.upgrade().is_none(), "normal unmount must hold no tree descriptor");
+                anyhow::bail!("injected unmount failure")
+            })
+            .unwrap_err();
+        fixture
+            .driver
+            .remove_with(failure.ownership, |path| {
+                fs::remove_dir(path)?;
+                Ok(())
+            })
+            .unwrap();
+        Ok(())
+    }
+    #[test]
+    fn relative_hint_adapter_normalizes_before_its_only_registry_load() -> Result<()> {
+        let root = PathBuf::from(format!("target/overlay-driver-relative-{}", crate::ids::new_id()));
+        fs::create_dir_all(root.join("base"))?;
+        fs::create_dir(root.join("tree"))?;
+        let loads = std::cell::Cell::new(0);
+        let result = OverlayFs::path_hints_with(&root.join("base"), &root.join("tree"), |base, tree| {
+            loads.set(loads.get() + 1);
+            assert_eq!(base, absolute(&root.join("base"))?);
+            assert_eq!(tree, absolute(&root.join("tree"))?);
+            Ok(Some(CandidateLayers { dirs: Vec::new(), nested: HashSet::new() }))
+        });
+        fs::remove_dir_all(root)?;
+        assert_eq!(loads.get(), 1);
+        assert!(matches!(result?, hints::HintSet::Complete(entries) if entries.is_empty()));
         Ok(())
     }
     #[test]

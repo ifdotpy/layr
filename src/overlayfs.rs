@@ -1262,9 +1262,10 @@ struct CandidateLayers {
 }
 
 fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
-    let Ok(state) = lock(parent) else {
-        return Ok(None);
-    };
+    let Ok(state) = lock(parent) else { return Ok(None) };
+    Ok(own_layers_in(&state, parent, child))
+}
+fn own_layers_in(state: &Locked, parent: &Path, child: &Path) -> Option<CandidateLayers> {
     let stack = |path: &Path| -> Option<Vec<(String, PathBuf)>> {
         let e = state.registry.trees.get(path).filter(|e| !e.plain && !e.hard_links)?;
         let mut layers = Vec::new();
@@ -1277,7 +1278,7 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
         Some(layers)
     };
     let (Some(a), Some(b)) = (stack(parent), stack(child)) else {
-        return Ok(None);
+        return None;
     };
     let (mut i, mut j) = (a.len(), b.len());
     while i > 0 && j > 0 && a[i - 1].0 == b[j - 1].0 {
@@ -1285,12 +1286,12 @@ fn own_layers(parent: &Path, child: &Path) -> Result<Option<CandidateLayers>> {
         j -= 1;
     }
     if i == a.len() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(CandidateLayers {
+    Some(CandidateLayers {
         dirs: a[..i].iter().chain(&b[..j]).map(|(_, dir)| dir.clone()).collect(),
         nested: state.registry.trees.keys().filter(|p| p.as_path() != parent && p.as_path() != child).cloned().collect(),
-    }))
+    })
 }
 // Every path a layer holds (files, folders, whiteouts), and whether the layer hides
 // the lower content of a folder (opaque or redirected).
@@ -1379,13 +1380,13 @@ pub(crate) fn change_hints() -> Option<&'static dyn crate::change_hints::ChangeH
 struct UpperHints;
 impl crate::change_hints::ChangeHints for UpperHints {
     fn between(&self, base: &Path, tree: &Path) -> layr_fs_core::Result<crate::change_hints::HintSet> {
-        OverlayFs::default().path_hints(base, tree)
+        OverlayFs::path_hints(base, tree)
     }
 }
 
-fn candidates_in(parent: &Path, child: &Path, layers: CandidateLayers) -> Result<Vec<crate::compare::EntryChange>> {
+fn candidates_in(parent: &Path, child: &Path, layers: &CandidateLayers) -> Result<Vec<crate::compare::EntryChange>> {
     let (parent, child) = (absolute(parent)?, absolute(child)?);
-    let entries = changed_entries(&parent, &child, &layers)?;
+    let entries = changed_entries(&parent, &child, layers)?;
     let mut changes: BTreeMap<_, _> = entries
         .iter()
         .filter_map(|(p, (old, new))| {
@@ -1460,7 +1461,7 @@ mod tests {
                 sys::overlay_attribute(&upper.join("opaque"), c"user.overlay.opaque", Some(b"y"))?;
             }
             let layers = CandidateLayers { dirs: vec![upper], nested: HashSet::new() };
-            assert!(candidates_in(&base, &tree, layers).is_err(), "{source}: incomplete enumeration cannot authorize Complete");
+            assert!(candidates_in(&base, &tree, &layers).is_err(), "{source}: incomplete enumeration cannot authorize Complete");
             assert!(
                 crate::changes::candidates(&base, &tree).is_err(),
                 "{source}: full fallback also rejects the invalid visible path"
@@ -1485,7 +1486,7 @@ mod tests {
             fs::write(tree.join("edit"), if tree == &parent { b"before".as_slice() } else { b"after!!".as_slice() })?;
         }
         fs::write(upper.join("edit"), b"after!!")?;
-        let result = candidates_in(&parent, &child, CandidateLayers { dirs: vec![upper], nested: HashSet::new() });
+        let result = candidates_in(&parent, &child, &CandidateLayers { dirs: vec![upper], nested: HashSet::new() });
         for tree in [&parent, &child] {
             fs::set_permissions(tree.join("lower"), fs::Permissions::from_mode(0o700))?;
         }
@@ -1524,7 +1525,7 @@ mod tests {
         fs::write(upper.join("nested/cache"), b"private")?;
         let layers =
             CandidateLayers { dirs: vec![upper], nested: [parent.join("nested"), child.join("nested")].into_iter().collect() };
-        let changes = candidates_in(&parent, &child, layers)?;
+        let changes = candidates_in(&parent, &child, &layers)?;
         let paths: Vec<_> = changes.iter().map(|c| c.path().as_str()).collect();
         assert_eq!(paths, ["gone", "gone/file", "opaque", "opaque/hidden", "replace", "replace/file"]);
         assert!(changes.iter().filter(|c| c.path().ends_with("/file") || c.path() == "opaque/hidden").all(|c| c.new().is_none()));
@@ -1545,7 +1546,7 @@ mod tests {
             dirs: vec![upper],
             nested: [absolute(&parent)?.join("nested"), absolute(&child)?.join("nested")].into_iter().collect(),
         };
-        assert!(candidates_in(&parent, &child, layers)?.is_empty());
+        assert!(candidates_in(&parent, &child, &layers)?.is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1566,7 +1567,7 @@ mod tests {
         for path in ["old", "new", "link-a", "link-b", "link-c", "link-d"] {
             fs::write(upper.join(path), b"")?;
         }
-        let changes = candidates_in(&parent, &child, CandidateLayers { dirs: vec![upper], nested: HashSet::new() })?;
+        let changes = candidates_in(&parent, &child, &CandidateLayers { dirs: vec![upper], nested: HashSet::new() })?;
         let renamed = changes.iter().find(|c| c.path() == "new").unwrap();
         assert_eq!(renamed.old_path().map(String::as_str), Some("old"));
         assert!(!changes.iter().any(|c| c.path() == "old"));
