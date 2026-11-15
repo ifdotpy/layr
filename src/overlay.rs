@@ -565,9 +565,13 @@ fn has_file(root: &Path, p: &str) -> bool {
 pub const REMOVED_FILE: &str = ".layrremoved";
 
 /// The paths that the overlay state `root` hides (`REMOVED_FILE`). A state without the file hides none.
+/// An overlay state can come from another machine, so a line that is not a relative path inside the
+/// tree (absolute, or with `.` or `..`) is not a marker: assembly must never remove a path outside.
 pub fn removed_paths(root: &Path) -> BTreeSet<String> {
     match std::fs::read_to_string(root.join(REMOVED_FILE)) {
-        Ok(text) => text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect(),
+        Ok(text) => {
+            text.lines().filter(|l| !l.is_empty() && layr_store::paths::check_rel(l).is_ok()).map(str::to_owned).collect()
+        }
         Err(_) => BTreeSet::new(),
     }
 }
@@ -3051,6 +3055,9 @@ mod tests {
         assert_eq!(removed_paths(&dst), BTreeSet::from(["a/x.c".to_string()]));
         Ops { unmarks: ["a/x.c".to_string()].into(), ..Default::default() }.apply(&dst, &src, None).unwrap();
         assert!(!dst.join(REMOVED_FILE).exists(), "no markers: no file");
+        // A marker file of another machine: only relative paths inside the tree count.
+        std::fs::write(dst.join(REMOVED_FILE), "/etc/passwd\n../outside\na/../../b\n./c\nok/d.c\n").unwrap();
+        assert_eq!(removed_paths(&dst), BTreeSet::from(["ok/d.c".to_string()]));
         let _ = std::fs::remove_dir_all(&root);
     }
 
