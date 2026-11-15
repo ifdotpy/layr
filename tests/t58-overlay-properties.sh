@@ -54,7 +54,10 @@ has "the merge names the overlay" "Merged overlays: notes" "$out"
 eq "the incoming file wins" topic "$(cat notes.md)"
 eq "the files of both sides are there" "b.md c.md notes.md" "$(l overlay ls-files notes | tr '\n' ' ' | sed 's/ $//')"
 eq "no conflicts" "" "$(l status --short)"
-eq "history=last keeps the first state and two line heads" 3 "$(states notes)"
+# The automatic states that keep the working content of the view of notes (docs/overlays.md section 1)
+# are no states of its history.
+autos() { for id in $(sqlite3 "$O/$1/meta/db/layr.sqlite" "select json_extract(value, '\$') from config where key like 'auto.%'"); do [ -e "$O/$1/states/$id" ] && echo "$id"; done | wc -l | tr -d ' '; }
+eq "history=last keeps the first state and two line heads" 3 "$(( $(states notes) - $(autos notes) ))"
 
 # The same change with three-way: a conflict (the control for the union).
 ok "a three-way overlay above notes" l overlay create tw --mode follow --parent notes -q

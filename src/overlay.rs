@@ -432,6 +432,12 @@ pub fn view_key(line_id: &str) -> String {
     format!("view.{line_id}")
 }
 
+/// The setting in the records of an overlay that names the automatic state of its store that holds the working
+/// content of the project's automatic state `state` (a folder in the view of the overlay).
+pub fn auto_key(state: &str) -> String {
+    format!("auto.{state}")
+}
+
 /// The settings key of the project order of overlays of older layr. `layr overlay order` is gone
 /// (owner decision 2026-11-15); the order only gives old overlays their parent (`derived_parent`).
 pub const ORDER_KEY: &str = "overlays.order";

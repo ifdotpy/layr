@@ -752,6 +752,43 @@ impl<'a> Repo<'a> {
         self.working_snapshot_over(ctx, line, parents, message, &line.head)
     }
 
+    /// The working content of `line` (folder `w`), whose folder shows the view of an overlay X, as an
+    /// automatic state of X's own store. The records of X say which automatic state of the line it belongs
+    /// to (`auto.<state>`), so no record of the project names it, and only readers of X read it (a reader of
+    /// X reads every overlay below it). The caller holds the project lock.
+    fn save_private_working(&self, ctx: &Ctx, line: &Line, w: &Path, state: &str, message: &str) -> Result<()> {
+        let top = self.line_view_top(line)?.ok_or_else(|| anyhow::anyhow!("line '{}' shows no overlay", line.name))?;
+        let orepo = self.overlay_repo(&top)?;
+        let _lock = orepo.p.lock()?;
+        let st = orepo.new_state(ctx, w, StateKind::Auto, Vec::new(), message, None)?;
+        let mut rec = Record::new("overlay.use");
+        rec.data = serde_json::json!({"config": {crate::overlay::auto_key(state): st.id}});
+        rec.states.push(st.clone());
+        if let Err(e) = orepo.commit_record(ctx, rec) {
+            orepo.discard_states(std::slice::from_ref(&st));
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The tree to restore a working folder from for the automatic state `state` of `line`: the state
+    /// that keeps its working content in the store of an overlay of the line's path (`save_private_working`),
+    /// else the state itself. The second value says whether it holds the whole working content.
+    pub fn working_source(&self, line: &Line, state: &str) -> Result<(PathBuf, bool)> {
+        if !self.p.is_overlay() {
+            for l in self.layers(line)?.into_iter().rev() {
+                let Ok(op) = self.overlay_project(&l.overlay) else { continue };
+                if let Some(id) = op.db.overlay_config(&crate::overlay::auto_key(state))?.and_then(|v| v.as_str().map(str::to_owned)) {
+                    let orepo = Repo { p: op, ctx: self.ctx };
+                    if let Ok(root) = orepo.state_root(&id) {
+                        return Ok((root, true));
+                    }
+                }
+            }
+        }
+        Ok((self.state_root(state)?, false))
+    }
+
     /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
     /// working content, only the few entries that differ are copied.
     pub fn working_snapshot_over(
@@ -774,7 +811,14 @@ impl<'a> Repo<'a> {
         // that may be proprietary (docs/overlays.md, section 9.4). Its changes have no automatic state.
         if self.private_view(line)? {
             let head = self.state_root(&line.head)?;
-            return self.new_state(ctx, &head, StateKind::Auto, parents, message, Some(line));
+            let st = self.new_state(ctx, &head, StateKind::Auto, parents, message, Some(line))?;
+            // The working content goes to the store of the overlay that the folder shows, which only its
+            // readers read (docs/overlays.md section 1, automatic states): `undo` and the restore after a
+            // refused command take it from there (`working_source`). A failure keeps the safe state.
+            if let Err(e) = self.save_private_working(ctx, line, &w, &st.id, message) {
+                eprintln!("warning: the working changes of line {} have no automatic state: {e:#}", line.name);
+            }
+            return Ok(st);
         }
         let private = self.private_paths(line)?;
         #[cfg(not(target_os = "macos"))]
@@ -1226,7 +1270,8 @@ impl<'a> Repo<'a> {
     #[cfg(target_os = "macos")]
     fn prepare_save_layer(&self, line: &Line) -> Result<()> {
         let w = self.working(line);
-        if !w.exists() || !self.private_paths(line)?.is_empty() || !self.thin_line(line)? {
+        // The view of an overlay: no layer of the working content in the store of the project.
+        if !w.exists() || !self.private_paths(line)?.is_empty() || self.private_view(line)? || !self.thin_line(line)? {
             return Ok(());
         }
         // A cache that a tool made again as a plain folder is made a cache under the lock first.
@@ -1287,6 +1332,12 @@ impl<'a> Repo<'a> {
         if !self.tree_available(&prev) {
             return Ok(true);
         }
+        // In the view of an overlay the working content is in the overlay's store (`working_source`).
+        let (old, old_full) = self.working_source(line, &prev)?;
+        let (new, new_full) = self.working_source(line, id)?;
+        if old_full || new_full {
+            return Ok(old_full != new_full || changes::any_file_change(old.as_path(), new.as_path(), skip_path)?);
+        }
         let base = self.state_src(&prev)?;
         changes::any_file_change(&base, &self.state_src(id)?, skip_path)
     }
@@ -1321,7 +1372,9 @@ impl<'a> Repo<'a> {
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
         #[cfg(target_os = "macos")]
-        if !force && self.private_paths(line)?.is_empty() && self.thin_line(line)? {
+        // The view of an overlay goes to `working_snapshot_over`, which keeps the working content in the
+        // overlay's store: a thin layer here would hold it in the store of the project.
+        if !force && self.private_paths(line)?.is_empty() && !self.private_view(line)? && self.thin_line(line)? {
             // Compare before any copy: an unchanged folder makes no state. One scan of the
             // working folder serves the comparison and the layer over the head.
             let prev = self.save_base(line)?;
