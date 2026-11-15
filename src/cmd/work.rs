@@ -1691,6 +1691,16 @@ fn commit_stacked(
     };
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
+    // The patches of the view that wait for a merge with the parent merge now (docs/overlays.md section 1):
+    // the save made their paths clean, or it changed the parent (`--to`). A failure leaves them waiting and
+    // never undoes the save.
+    let merged = match crate::overlay::rebase_patches(ctx, repo, &repo.line(&line.id)?) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            eprintln!("warning: the patches of the view wait for a merge with the parent: {e:#}");
+            Vec::new()
+        }
+    };
     if out == Output::Json {
         let overlays: Vec<_> = done
             .overlays
@@ -1709,6 +1719,7 @@ fn commit_stacked(
         };
         value["amend"] = serde_json::json!(false);
         value["overlays"] = serde_json::json!(overlays);
+        value["parent_merge"] = serde_json::json!(merged);
         outln!(ctx, "{value}");
     } else if out == Output::Text {
         let subject = message.lines().next().unwrap_or("");
@@ -1725,6 +1736,9 @@ fn commit_stacked(
             }
         }
         print_fds(ctx, &done.fds);
+        for m in &merged {
+            outln!(ctx, "{m}");
+        }
         // Which paths of the saved overlays are patches, hidden, or wait for a merge with the parent.
         let line = repo.line(&line.id)?;
         for r in repo.patch_report(&line)? {

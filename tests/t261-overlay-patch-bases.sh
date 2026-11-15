@@ -71,6 +71,33 @@ ok "the local change goes" l restore lib.c
 has "overlay use merges it" "lib.c: merged with the parent" "$(l overlay use pro 2>&1)"
 eq "the folder has the change of up" two-up "$(sed -n 2p lib.c)"
 eq "nothing waits after it" "" "$(paths waiting)"
+# A named save of the local change merges the patch that waits: no second command.
+cd $LAYR_ROOT/projects/p/lines/up
+sed_inplace -e 's/^3$/three-up/' lib.c
+ok "up changes the third line" l save -qam "up three"
+cd $M
+sed_inplace -e 's/^5$/five-local/' lib.c
+has "the merge says that a save merges it" "save them (the save merges it)" "$(l merge up 2>&1)"
+eq "the patch waits" lib.c "$(paths waiting)"
+out=$(l save -am "local five")
+has "the save merges the patch with the parent" "lib.c: merged with the parent" "$out"
+eq "the folder has the change of up and the local change" "three-up five-local" "$(sed -n '3p;5p' lib.c | paste -sd' ' -)"
+eq "pro has both" "three-up five-local" "$(l overlay show pro head:lib.c | sed -n '3p;5p' | paste -sd' ' -)"
+eq "nothing waits after the save" "" "$(paths waiting)"
+eq "the folder is clean after the save" "" "$(l status --porcelain)"
+# The same with --json: the object lists what the save merged.
+cd $LAYR_ROOT/projects/p/lines/up
+sed_inplace -e 's/^8$/eight-up/' lib.c
+ok "up changes the eighth line" l save -qam "up eight"
+cd $M
+sed_inplace -e 's/^6$/six-local/' lib.c
+l merge up >/dev/null 2>&1
+out=$(l save -am "local six" --json)
+has "save --json lists the merge" '"parent_merge":["overlay pro: lib.c: merged with the parent"]' "$out"
+eq "the folder has the eighth line of up" eight-up "$(sed -n 8p lib.c)"
+echo z > new.c
+has "a save with nothing to merge has an empty list" '"parent_merge":[]' "$(l save -am "z" --json)"
+eq "the folder is clean after it" "" "$(l status --porcelain)"
 
 # 3. An overlap: conflict markers, resolved by a save.
 cd $LAYR_ROOT/projects/p/lines/up
