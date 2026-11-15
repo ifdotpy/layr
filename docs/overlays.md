@@ -247,6 +247,26 @@ Built so far (the rest of this file describes the code until a row says "built")
   and `--prune` stay on caches: they are the only way to set the size limit and the prune adapter
   (t59, t117, t122). The internal properties (`Props`) are read as before, not derived from the kind.
 
+**Older peers (risk, 2026-11-15).** The store format 2 stops an older layr from opening a store
+that this layr opened. Nothing stops an older layr on another machine that takes the records of such
+a project from a store remote or by peer sync into its own store of format 1. From the code of layr
+0.47 (read, not run), such a binary:
+
+- ignores `overlay.<name>.parent`: its folders show the old lists of overlays, a new line shows every
+  overlay that its owner reads, and a named save there sends an edit of a file of `main` and a new
+  file to `main` (the old rules). This is the leak that the write rule closes, on that machine.
+- does not know `.layrmeta`: the folder of a view shows `.layrmeta/meta.json` and the base blobs as
+  files, and the paths that an overlay hides come back.
+- ignores the settings `auto.<state>` and the field `kind`.
+- sees a cache of a view (`<folder>.<platform>.view.<X>`) as a second cache overlay of the same folder
+  and platform, and can give its content to a folder in the view of `main` of a reader of X.
+
+No transfer check exists that a binary of 0.47 honours and that this layr can use for only such
+projects: a store remote checks the versions of its tree headers, indexes and chunk indexes, and a
+change of one of them refuses the whole project for every older reader, also projects without
+overlays; Layr Cloud reads the same files. That is an owner decision, so it is not built. Until then:
+upgrade every machine of a project before it uses overlays with parents.
+
 **Caches per view as built (2026-11-15).**
 
 - A cache that a folder in the view of overlay X builds holds compiled private code. It goes to the
