@@ -1597,10 +1597,6 @@ impl<'a> Repo<'a> {
     /// `limit` names the paths (with their ignore files) that the caller reads: only they are
     /// scanned and compared, and the lists hold nothing else (APFS).
     pub fn status_for_add(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
-        self.status_for_add_inner(line, scan, index, limit)
-    }
-
-    fn status_for_add_inner(&self, line: &Line, scan: &Path, index: &Snap, limit: Option<&BTreeSet<String>>) -> Result<Status> {
         if let Some(paths) = limit {
             let mut status = Status::default();
             let list = changes::file_changes_of(index, scan, changes::candidates_selected(index, scan, paths)?)?;

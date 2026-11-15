@@ -692,13 +692,7 @@ impl LayerWrite {
         drop(created.tree);
         match self.driver.remove(created.ownership) {
             Ok(()) => cause,
-            Err(failure) => crate::fs::operation_error(
-                self.driver.clone(),
-                layr_fs_core::FsError::Cleanup {
-                    cause: Box::new(layr_fs_core::FsError::backend(cause)),
-                    failure: Box::new(failure),
-                },
-            ),
+            Err(failure) => anyhow::Error::new(crate::fs::Cleanup::after(self.driver.clone(), failure, cause)),
         }
     }
     fn working(mut self) -> Result<crate::fs::OwnedWorking> {

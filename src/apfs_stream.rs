@@ -29,8 +29,10 @@ pub fn send(root: &Path, parent: Option<(&Path, &str)>, out: &mut dyn Write) -> 
     let uuid = uuid::Uuid::parse_str(info.received_uuid.as_deref().unwrap_or(&info.uuid))?;
     let name = root.file_name().context("snapshot has no name")?.as_bytes();
     let plan = match parent {
-        Some((p, id)) => plan(p, root)?.map(|plan| (uuid::Uuid::parse_str(id), plan)),
-        None => None,
+        Some((p, id)) if p.is_dir() && crate::fs::host().namespace.info(p).is_ok_and(|info| info.readonly) => {
+            plan(p, root)?.map(|plan| (uuid::Uuid::parse_str(id), plan))
+        }
+        _ => None,
     };
     out.write_all(b"btrfs-stream\0\x01\0\0\0")?;
     match plan {
@@ -190,20 +192,11 @@ struct Plan {
 /// Request complete state evidence from the same reader comparison used by save/status.
 /// Native codecs execute the resulting plan; backend identity never selects the algorithm.
 fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
-    if !parent.is_dir() || !crate::fs::host().namespace.info(parent).is_ok_and(|info| info.readonly) {
-        return Ok(None);
-    }
-    let before = crate::source::Source::native(parent);
-    let after = crate::source::Source::native(child);
-    let changes = crate::changes::state_changes(&before, &after)?;
-    plan_from_changes(parent, child, changes)
-}
-fn plan_from_changes(parent: &Path, child: &Path, changes: Vec<crate::compare::EntryChange>) -> Result<Option<Plan>> {
     use crate::fsutil::FType;
     use layr_fs_core::{RelDir, RelPath, TreeRead};
     let before = crate::source::Source::native(parent);
     let after = crate::source::Source::native(child);
-    let changes = crate::changes::without_moves(changes);
+    let changes = crate::changes::state_changes(&before, &after)?;
     let mut remove = BTreeMap::new();
     let mut create = std::collections::BTreeSet::new();
     let mut attributes = std::collections::BTreeSet::from([String::new()]);
@@ -571,10 +564,7 @@ mod tests {
         fs::write(parent.join("kept"), b"same")?;
         fs::write(child.join("kept"), b"same")?;
         crate::stream_fs::attribute(&parent.join("kept"), c"user.layr.gone", Some(b"old"))?;
-        let before = crate::source::Source::native(&parent);
-        let after = crate::source::Source::native(&child);
-        let changes = layr_fs_common::candidates(&before, &after)?;
-        let plan = plan_from_changes(&parent, &child, changes)?.expect("ordinary files support an incremental plan");
+        let plan = plan(&parent, &child)?.expect("ordinary files support an incremental plan");
         assert_eq!(
             plan.remove,
             vec![("dir/replace/nested/file".into(), false), ("dir/replace/nested".into(), true), ("dir/replace".into(), true)]
@@ -594,9 +584,52 @@ mod tests {
         fs::create_dir(&child)?;
         fs::write(child.join("one"), b"linked")?;
         fs::hard_link(child.join("one"), child.join("two"))?;
-        let changes =
-            layr_fs_common::candidates(&crate::source::Source::native(&parent), &crate::source::Source::native(&child))?;
-        assert!(plan_from_changes(&parent, &child, changes)?.is_none());
+        assert!(plan(&parent, &child)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_plan_keeps_join_split_and_regroup_evidence_when_bytes_and_attributes_match() -> Result<()> {
+        let sandbox = Sandbox::plain()?;
+        let cases = [
+            ("join", vec![vec!["a"], vec!["b"]], vec![vec!["a", "b"]]),
+            ("split", vec![vec!["a", "b"]], vec![vec!["a"], vec!["b"]]),
+            ("regroup", vec![vec!["a", "b"], vec!["c", "d"]], vec![vec!["a", "c"], vec!["b", "d"]]),
+        ];
+        for (case, old, new) in cases {
+            let parent = sandbox.0.join(format!("{case}-before"));
+            let child = sandbox.0.join(format!("{case}-after"));
+            for (root, groups) in [(&parent, &old), (&child, &new)] {
+                fs::create_dir(root)?;
+                for group in groups {
+                    let first = root.join(group[0]);
+                    fs::write(&first, b"identical")?;
+                    for alias in &group[1..] {
+                        fs::hard_link(&first, root.join(alias))?;
+                    }
+                    File::open(first)?.set_times(
+                        std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1234567)),
+                    )?;
+                }
+            }
+            let before = crate::source::Source::native(&parent);
+            let after = crate::source::Source::native(&child);
+            let names = old.iter().flatten().copied().collect::<Vec<_>>();
+            for name in &names {
+                assert_eq!(
+                    crate::fs::metadata(&before, name)?.attributes,
+                    crate::fs::metadata(&after, name)?.attributes,
+                    "{case}: {name}"
+                );
+            }
+            let changes = crate::changes::state_changes(&before, &after)?;
+            assert_eq!(
+                changes.iter().map(|change| change.path().as_str()).collect::<std::collections::BTreeSet<_>>(),
+                names.into_iter().collect(),
+                "{case}"
+            );
+            assert!(plan(&parent, &child)?.is_none(), "{case} must request a complete inode map");
+        }
         Ok(())
     }
 

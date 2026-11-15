@@ -81,7 +81,7 @@ impl CaptureSession {
                 failures.push(Cleanup {
                     driver,
                     failure,
-                    cause: FsError::Invalid("unused prepared capture cleanup failed"),
+                    cause: CleanupCause::Operation(FsError::Invalid("unused prepared capture cleanup failed")),
                     guards: Vec::new(),
                 });
             }

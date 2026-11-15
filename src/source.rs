@@ -71,9 +71,6 @@ impl Source {
             Self::Layers(layered) => layered.top(),
         }
     }
-    pub fn path(&self, relative: &str) -> Result<PathBuf> {
-        self.at(relative)
-    }
     pub(crate) fn of_state(project: &crate::store::Project, id: &str) -> Result<Self> {
         #[cfg(target_os = "macos")]
         {

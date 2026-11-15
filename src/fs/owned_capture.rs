@@ -12,10 +12,7 @@ impl ResourceOwner {
         let Some(ownership) = self.ownership.take() else { return cause };
         match self.driver.remove(ownership) {
             Ok(()) => cause,
-            Err(failure) => operation_error(
-                self.driver.clone(),
-                FsError::Cleanup { cause: Box::new(FsError::backend(cause)), failure: Box::new(failure) },
-            ),
+            Err(failure) => anyhow::Error::new(Cleanup::after(self.driver.clone(), failure, cause)),
         }
     }
     pub(crate) fn discard(mut self) -> Result<()> {
@@ -290,6 +287,52 @@ pub(crate) fn retain_owned(path: &Path) -> Result<ResourceOwner> {
 mod transport_identity_tests {
     use super::*;
     use anyhow::{Context, Result};
+    #[test]
+    fn nested_abort_retry_retains_each_driver_and_its_capture_guards() -> Result<()> {
+        use std::os::{
+            fd::AsFd,
+            unix::fs::{DirBuilderExt, PermissionsExt},
+        };
+        let root = std::env::temp_dir().join(format!("nested-cleanup-{}", crate::ids::new_id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let mut fixtures = Vec::new();
+        for label in ["inner", "outer"] {
+            let guard = composition::capture_location(&root.join(label))?;
+            std::fs::create_dir(&guard.path)?;
+            let blocked = guard.path.join("blocked");
+            std::fs::create_dir(&blocked)?;
+            std::fs::write(blocked.join("keep"), b"pending cleanup")?;
+            let held = std::fs::File::open(&guard.path)?;
+            let child = std::fs::File::open(&blocked)?;
+            let owner = retain_owned(&guard.path)?;
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0))?;
+            let parent = guard.path.parent().unwrap().to_path_buf();
+            fixtures.push((owner, guard, parent, held, child));
+        }
+        let (outer, outer_guard, outer_parent, outer_root, outer_child) = fixtures.pop().unwrap();
+        let (inner, inner_guard, inner_parent, inner_root, inner_child) = fixtures.pop().unwrap();
+        assert!(!Arc::ptr_eq(&outer.driver, &inner.driver));
+        let mut error = inner.abort(anyhow::anyhow!("primary failure")).downcast::<Cleanup>()?;
+        error.guards.push(inner_guard);
+        let cause = anyhow::Error::new(error).context("inner operation failed");
+        let mut error = outer.abort(cause).downcast::<Cleanup>()?;
+        error.guards.push(outer_guard);
+        assert!(format!("{error:#}").contains("inner operation failed"));
+        rustix::fs::fchmod(outer_child.as_fd(), rustix::fs::Mode::from_raw_mode(0o700))?;
+        let error = error.retry().expect_err("the inner operation must still report its retained failure");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(outer_root.metadata()?.nlink(), 0);
+        assert!(inner_root.metadata()?.nlink() > 0);
+        assert!(!outer_parent.exists(), "the completed owner's guard is released");
+        assert!(inner_parent.exists(), "the pending owner's guard must remain");
+        rustix::fs::fchmod(inner_child.as_fd(), rustix::fs::Mode::from_raw_mode(0o700))?;
+        error.retry().map_err(anyhow::Error::new)?;
+        assert_eq!(inner_root.metadata()?.nlink(), 0);
+        assert!(!inner_parent.exists());
+        std::fs::remove_dir(root)?;
+        Ok(())
+    }
+
     #[test]
     fn received_identity_requires_exclusive_authority_and_restores_readonly_on_failure() -> Result<()> {
         let root = crate::repo::Temp::directory(

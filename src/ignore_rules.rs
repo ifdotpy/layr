@@ -178,19 +178,13 @@ impl Rules {
         let mut b = GitignoreBuilder::new(&base);
         let mut any = false;
         if let Some(policy) = &self.captured {
-            use std::io::BufRead;
             let local = dir.is_empty().then_some((LOCAL_EXCLUDE.to_string(), policy.local.as_slice()));
             let files = self.files.iter().filter_map(|name| {
                 let rel = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
                 policy.files.get(&rel).and_then(Option::as_ref).map(|bytes| (rel, bytes.as_slice()))
             });
             for (rel, bytes) in local.into_iter().chain(files) {
-                // Match GitignoreBuilder::add's line and BOM handling, including partial
-                // parsing before an invalid UTF-8 line, while consuming only captured bytes.
-                for (i, line) in bytes.lines().map_while(Result::ok).enumerate() {
-                    let line = if i == 0 { line.trim_start_matches('\u{feff}') } else { &line };
-                    let _ = b.add_line(Some(self.root.join(&rel)), line);
-                }
+                add_ignore_bytes(&mut b, self.root.join(&rel), bytes);
                 any = true;
             }
         } else {
@@ -205,9 +199,7 @@ impl Rules {
                 if self.is_file(&rel) {
                     match self.attribute {
                         None => {
-                            for line in String::from_utf8_lossy(&self.read_rule(&rel)).lines() {
-                                let _ = b.add_line(None, line);
-                            }
+                            add_ignore_bytes(&mut b, self.root.join(&rel), &self.read_rule(&rel));
                         }
                         Some(attribute) => {
                             let unset = format!("-{attribute}");
@@ -277,5 +269,51 @@ fn optional_rule(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Ok(_) => Ok(None),
         Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// Match GitignoreBuilder::add, including BOM stripping and partial parsing before the
+/// first invalid UTF-8 line. Both live and captured readers consume the same bytes.
+fn add_ignore_bytes(builder: &mut GitignoreBuilder, origin: PathBuf, bytes: &[u8]) {
+    use std::io::BufRead;
+    for (index, line) in bytes.lines().map_while(Result::ok).enumerate() {
+        let line = if index == 0 { line.trim_start_matches('\u{feff}') } else { &line };
+        let _ = builder.add_line(Some(origin.clone()), line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn live_captured_and_logical_ignore_bytes_match_gitignore_bom_and_invalid_utf8() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-ignore-bytes-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        // A local info directory prevents another test's external line policy from applying.
+        std::fs::create_dir_all(root.join(".git/info"))?;
+        for file in [".gitignore", ".layrignore", "nested/.gitignore", LOCAL_EXCLUDE] {
+            let rule = root.join(file);
+            std::fs::create_dir_all(rule.parent().unwrap())?;
+            std::fs::write(&rule, b"\xef\xbb\xbfignored\r\nlater\ninvalid_\xff\npost\n")?;
+            let dir = if file.starts_with("nested/") { "nested/" } else { "" };
+            let paths = [format!("{dir}ignored"), format!("{dir}later"), format!("{dir}invalid_\u{fffd}"), format!("{dir}post")];
+            let live = Rules::new(&root);
+            let captured = Rules::captured(&root, paths.iter().map(String::as_str), &live.local_policy()?)?;
+            let logical = Rules::of(&crate::source::Source::native(&root));
+            let base = if dir.is_empty() { root.clone() } else { root.join("nested") };
+            let mut expected = GitignoreBuilder::new(&base);
+            expected.add(&rule);
+            let expected = expected.build()?;
+            for (index, path) in paths.iter().enumerate() {
+                let ignored = expected.matched(root.join(path), false).is_ignore();
+                assert_eq!(ignored, index < 2, "reference: {file}: {path}");
+                assert_eq!(live.ignored(path, false), ignored, "live: {file}: {path}");
+                assert_eq!(captured.ignored(path, false), ignored, "captured: {file}: {path}");
+                assert_eq!(logical.ignored(path, false), ignored, "logical: {file}: {path}");
+            }
+            std::fs::remove_file(rule)?;
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

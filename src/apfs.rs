@@ -104,7 +104,7 @@ pub(crate) struct ScanEntry {
     pub(crate) fingerprint: Fingerprint,
     pub(crate) meta: crate::fsutil::Meta,
     pub(crate) data: Option<crate::sys::ApfsDataIdentity>,
-    /// The number of names of the inode. Not part of the comparison.
+    /// Link counts preserve conservative group evidence in full-state comparisons.
     pub(crate) nlink: u64,
     /// The creation time: the file identity for moves (`native_file_identity`).
     pub(crate) birth: (i64, i64),
@@ -1359,7 +1359,8 @@ fn candidates_scanned_with(
     let unchanged = |p: &String| match (a.get(p), b.get(p)) {
         (Some(x), Some(y)) if same_meta(x, y) && x.meta.is_dir() => true,
         (Some(x), Some(y)) if same_meta(x, y) && x.meta.is_file() => {
-            x.meta.size == y.meta.size
+            !(times && (x.nlink > 1 || y.nlink > 1))
+                && x.meta.size == y.meta.size
                 && x.meta.mtime == y.meta.mtime
                 && x.fingerprint.0 == y.fingerprint.0
                 && x.data.zip(y.data).is_some_and(|(d, e)| {

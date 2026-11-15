@@ -442,7 +442,14 @@ pub(crate) fn state_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?S
         };
         let before = crate::fs::metadata(parent, candidate.path())?;
         let after = crate::fs::metadata(child, candidate.path())?;
-        if before.kind != after.kind || before.attributes != after.attributes || really_changed(parent, child, &candidate)? {
+        // Inode numbers cannot establish equality across reader domains. Keep possible
+        // link-group changes even when the entries' bytes and attributes are identical.
+        let linked = before.link.is_some_and(|link| link.count > 1) || after.link.is_some_and(|link| link.count > 1);
+        if linked
+            || before.kind != after.kind
+            || before.attributes != after.attributes
+            || really_changed(parent, child, &candidate)?
+        {
             changes.push(candidate);
         }
     }
