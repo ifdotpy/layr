@@ -137,8 +137,7 @@ Built so far (the rest of this file describes the code until a row says "built")
   takes the index), then `layr save -am <message>` for the rest.
 - `layr save -m <message> <path>` fails with exit status 128 and names `layr add`: a save takes the
   index, and before 2026-11-15 it ignored the path.
-- `layr overlay move <overlay> <paths>` keeps its meaning: the files go to that overlay and leave every
-  other layer, `main` too.
+- `layr overlay move <overlay> <paths>`: see "Move, checks and automatic states as built" below.
 - A file of a quiet overlay (its files come from the working folder, unstaged) stays in that overlay
   whatever the layer of the save is: `save --to main` never takes it.
 - Removed (exit status 2): `layr line target`, `layr rm --to`, `overlay create|set --patches`. The
@@ -197,10 +196,11 @@ Built so far (the rest of this file describes the code until a row says "built")
 
 - `layr overlay move <overlay> <paths>`: the overlay must be on the path of the view, or above the
   overlay that the folder shows (then the folder shows it first, as before). Another overlay is
-  refused and named. The file goes to that overlay and leaves every other layer of the path: a patch
-  moved to an ancestor goes there, and the overlay above drops it. A file of `main` leaves `main`: the
-  command says that the next save deletes it from `main` and that the next `layr git push` publishes
-  that delete.
+  refused and named. After the next save the overlay holds the version that the view shows, the
+  overlays above it drop their entry, and the layers below it keep theirs; when a layer below shows
+  the path, the overlay records the file as a patch with that version as its base. A file that only
+  `main` holds (no overlay has it) moves out of `main`: the command says that the next save deletes
+  it from `main` and that the next `layr git push` publishes that delete.
 - Checks. A line that layr makes itself (the line of a check, the first line of a project) shows
   `main`, so a check of a merge into `main` runs on the view of `main`, and its build output (which a
   check gives back as a cache) never holds a file of an overlay. A merge into a line checks `main`

@@ -147,6 +147,18 @@ ok "the save of the move" l save -q -m "d to pro"
 ok "pro has d.c" l overlay show pro head:d.c
 no "deep dropped it" l overlay show deep head:d.c
 no "main never had it" l show head:d.c
+# A patch of a file of main moved from deep to pro: pro takes the version of the view, deep drops it, and
+# main keeps its own version.
+echo "/* $MARK patch move */" >> lib.c
+ok "a patch of lib.c in deep" l save -q -am "deep lib"
+ok "overlay move of the patch to pro" l overlay move -q pro lib.c
+ok "the save of the patch move" l save -q -m "lib to pro"
+eq "pro has the patch" 1 "$(l overlay show pro head:lib.c | grep -c "$MARK patch move")"
+no "deep dropped it" l overlay show deep head:lib.c
+ok "main keeps lib.c" l show head:lib.c
+eq "main has no patch" 0 "$(l show head:lib.c | grep -c "$MARK")"
+has "pro records it as a patch" "lib.c" "$(l overlay show pro --json | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["paths"]["patches"]))')"
+eq "the folder is clean" "" "$(l status --porcelain)"
 same_lib() { l show head:lib.c; }
 has "main is as before" "lib2" "$(same_lib)"
 eq "and has no patch" 0 "$(l show head:core.c | grep -c "$MARK")"

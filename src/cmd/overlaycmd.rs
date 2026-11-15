@@ -1621,7 +1621,9 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let pushed = !repo.p.db.remote_refs()?.is_empty();
         for p in &paths {
             outln!(ctx, "move to overlay {name} at the next state: {}", h.rel(p));
-            if crate::fsutil::lmeta(&shared, p).is_some() {
+            // Only a file that no overlay of the path holds moves out of main (a patch leaves main as it is).
+            let in_overlay = repo.layers(&line)?.iter().any(|l| repo.layer_root(l).is_some_and(|r| crate::fsutil::lmeta(&r, p).is_some()));
+            if crate::fsutil::lmeta(&shared, p).is_some() && !in_overlay {
                 outln!(
                     ctx,
                     "note: '{}' is in main: the next save deletes it from main, and the next 'layr git push' publishes that delete; earlier states keep it{}; layr does not rewrite history",
