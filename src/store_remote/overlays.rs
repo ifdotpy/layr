@@ -301,7 +301,7 @@ pub(crate) fn published(
     trusted: &BTreeMap<String, VerifyingKey>,
     authorities: &BTreeMap<String, crate::overlay_managers::Authority>,
 ) -> Result<(BTreeMap<String, Published>, Vec<String>)> {
-    published_objects(backend, parent, recipient, trusted, authorities, backend.list("overlays/")?)
+    published_objects(backend, parent, recipient, trusted, authorities, backend.overlay_key_objects()?)
 }
 fn published_objects(
     backend: &Backend,
@@ -361,7 +361,7 @@ pub(crate) fn discover_hidden(
     cached: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, (Published, String, crate::overlay_managers::Authority)>> {
     let mut found: BTreeMap<String, (Published, String, crate::overlay_managers::Authority)> = BTreeMap::new();
-    let objects = backend.list("overlays/")?;
+    let objects = backend.overlay_key_objects()?;
     for object in objects {
         let parts: Vec<_> = object.key.split('/').collect();
         if parts.len() != 4 || parts[2] != "keys" || !parts[3].ends_with(".age") {
