@@ -1044,6 +1044,20 @@ impl Gateway {
         Ok(objects)
     }
 
+    /// The overlay folders (`overlays/<id>/`) of the store, from one folder listing (`delimiter=/`). None when
+    /// the gateway does not list folders (an older gateway, or a public reader): the caller then lists
+    /// `overlays/` in full.
+    pub fn overlay_folders(&self) -> Result<Option<Vec<String>>> {
+        if self.is_public() {
+            return Ok(None);
+        }
+        let response = self.read_request_query("objects", &[("prefix", "overlays/"), ("delimiter", "/")])?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        Ok(overlay_folders(&bytes(response, 1 << 20)?))
+    }
+
     pub fn release_stream(&self, key: &str) -> Result<Option<Response>> {
         let logical = epoch_path(key).map(|(_, key)| key).unwrap_or(key);
         if !super::format::release_file(logical) {
@@ -1159,6 +1173,25 @@ impl Gateway {
     }
 }
 
+/// The `prefixes` of a folder listing of `overlays/`, each `overlays/<uuid>/`. None for any other answer
+/// (an older gateway answers with objects and no `prefixes`).
+fn overlay_folders(body: &[u8]) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if value.get("objects").and_then(|o| o.as_array()).is_some_and(|o| !o.is_empty()) {
+        return None;
+    }
+    let mut folders = Vec::new();
+    for prefix in value.get("prefixes")?.as_array()? {
+        let prefix = prefix.as_str()?;
+        let id = prefix.strip_prefix("overlays/")?.strip_suffix('/')?;
+        if !crate::model::is_uuid(id) {
+            return None;
+        }
+        folders.push(prefix.to_string());
+    }
+    Some(folders)
+}
+
 fn overlay_keys_prefix(prefix: &str) -> bool {
     let parts: Vec<_> = prefix.split('/').collect();
     parts.len() == 4 && parts[0] == "overlays" && crate::model::is_uuid(parts[1]) && parts[2] == "keys" && parts[3].is_empty()
@@ -1195,6 +1228,25 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_overlay_folder_listing_names_only_overlay_folders() {
+        let a = "01a1d0ab-1111-7000-8000-000000000001";
+        let b = "01a1d0ab-2222-7000-8000-000000000002";
+        let body = serde_json::json!({"objects": [], "prefixes": [format!("overlays/{a}/"), format!("overlays/{b}/")]});
+        assert_eq!(
+            overlay_folders(&serde_json::to_vec(&body).unwrap()),
+            Some(vec![format!("overlays/{a}/"), format!("overlays/{b}/")])
+        );
+        // An older gateway ignores the delimiter and returns objects: the caller lists in full.
+        let old = serde_json::json!({"objects": [{"key": format!("overlays/{a}/keys/x.json"), "modified": 1}]});
+        assert_eq!(overlay_folders(&serde_json::to_vec(&old).unwrap()), None);
+        for bad in ["overlays/not-a-uuid/", "records/x/", "overlays/../", &format!("overlays/{a}")] {
+            let body = serde_json::json!({"objects": [], "prefixes": [bad]});
+            assert_eq!(overlay_folders(&serde_json::to_vec(&body).unwrap()), None, "{bad}");
+        }
+        assert_eq!(overlay_folders(b"not json"), None);
+    }
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     // macOS check sandboxes deny TCP. The same HTTP fixtures use a private Unix socket there;
