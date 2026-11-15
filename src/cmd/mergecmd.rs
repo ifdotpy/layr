@@ -289,21 +289,11 @@ fn discard_prepared(repo: &Repo) {
 pub struct OverlayMerge {
     /// The stack of the line after the merge.
     layers: Vec<Layer>,
-<<<<<<< head
     /// The merged parts on overlays that the view of the line does not show: the line keeps them (its line
     /// on each overlay moves), and its folder does not show them (docs/overlays.md section 1).
     extra: Vec<Layer>,
-    /// Overlay, its line of the merged line (none for an overlay that keeps parts), the new head, the
-    /// new state (none for a fast-forward).
-    moves: Vec<(String, Option<Line>, String, Option<StateRec>)>,
-||||||| base
-    /// Overlay, its line of the merged line (none for an overlay that keeps parts), the new head, the
-    /// new state (none for a fast-forward).
-    moves: Vec<(String, Option<Line>, String, Option<StateRec>)>,
-=======
     /// Overlay, its planned line, the new head, and the new state (none for a fast-forward).
     moves: Vec<(String, Line, String, Option<StateRec>)>,
->>>>>>> main
     messages: Vec<String>,
     conflicts: usize,
 }
@@ -663,7 +653,8 @@ impl CleanMerge {
                 None => repo.state(&candidate.head)?,
             };
             require_conflict_free(&head)?;
-            for layer in &candidate.overlays.layers {
+            // Also the parts on overlays that the view of the line does not show (`extra`): the line keeps them.
+            for layer in candidate.overlays.layers.iter().chain(&candidate.overlays.extra) {
                 let o = repo.overlay_repo(&layer.overlay)?;
                 let state = match candidate
                     .overlays
@@ -1835,8 +1826,9 @@ pub fn merge_queued(
 pub(crate) const REFUSE_CONFLICTS: &str = "--refuse-conflicts";
 
 pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args::Parsed) -> Result<i32> {
-<<<<<<< head
-    let code = merge_rev_inner(ctx, repo, line, rev, a, None)?;
+    let result = merge_rev_inner(ctx, repo, line, rev, a, None);
+    discard_prepared(repo);
+    let code = result?;
     // The patches of the view of the line merge with a parent that the merge moved (docs/overlays.md
     // section 1): after `merge`, `pull` and the follow pass alike. A failure leaves them waiting and never
     // undoes the merge.
@@ -1857,13 +1849,6 @@ pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args
         }
     }
     Ok(code)
-||||||| base
-    merge_rev_inner(ctx, repo, line, rev, a, None)
-=======
-    let result = merge_rev_inner(ctx, repo, line, rev, a, None);
-    discard_prepared(repo);
-    result
->>>>>>> main
 }
 
 fn merge_rev_inner(
@@ -1998,19 +1983,13 @@ fn merge_rev_inner(
     // The follow overlays merge with the line: all of them or none.
     // A queued merge takes no overlays: its state comes without a line.
     let theirs_parts = if queue.is_none() { Some(theirs.as_str()) } else { None };
-<<<<<<< head
-    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message)?;
+    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message, rule.as_ref())?;
     // Checks per view (docs/overlays.md section 1): the checks of a protected line run on the view of main, so a
     // change of a patches overlay would merge unchecked. It is refused; a merge that changes only main goes on.
     if let Err(e) = refuse_unchecked_overlay_parts(repo, line, &ovl) {
         ovl.discard(repo);
         return Err(e);
     }
-||||||| base
-    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message)?;
-=======
-    let ovl = plan_overlays(ctx, repo, line, theirs_line.as_ref(), theirs_parts, &label, &message, rule.as_ref())?;
->>>>>>> main
     if queue.is_some() && ovl.conflicts > 0 {
         let paths: Vec<_> = ovl
             .moves
