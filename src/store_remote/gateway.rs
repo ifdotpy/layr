@@ -550,9 +550,9 @@ impl Gateway {
                 request = request.header(CDN_CAPABILITY, "1");
             }
             if let Some(data) = &data {
-                request = request
-                    .header("content-type", if action == "token" { "application/json" } else { "application/octet-stream" })
-                    .body(data.clone());
+                let content_type =
+                    if matches!(action, "token" | "cdn" | "batch") { "application/json" } else { "application/octet-stream" };
+                request = request.header("content-type", content_type).body(data.clone());
             }
             let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE);
             send_again(idempotent, || {
@@ -1388,6 +1388,44 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn json_requests_and_object_uploads_send_their_content_types() {
+        use std::io::{Read, Write};
+        let (listener, address) = test_listener();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                let length: usize =
+                    head.lines().find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                assert_eq!(body, b"{}");
+                requests.push(head);
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            requests
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        address.configure(&mut gateway);
+        for action in ["batch", "cdn", "token", "objects/states/test.age"] {
+            let method = if action.starts_with("objects/") { Method::PUT } else { Method::POST };
+            assert!(gateway.send(method, action, None, None, Some(b"{}".to_vec())).unwrap().status().is_success());
+        }
+        for (head, action) in server.join().unwrap().iter().zip(["batch", "cdn", "token", "objects/states/test.age"]) {
+            let kind = if action.starts_with("objects/") { "application/octet-stream" } else { "application/json" };
+            assert!(head.contains(&format!("content-type: {kind}\r\n")), "{action}: {head}");
+        }
     }
 
     #[test]
