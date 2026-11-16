@@ -35,8 +35,9 @@ def records(path):
  db=sqlite3.connect((path/'meta/db/layr.sqlite').as_uri()+'?mode=ro',uri=True)
  try:return [json.loads(r)['r'] for r, in db.execute('select raw from records')]
  finally:db.close()
+# A file of the project: the folder may show an overlay, so the save names main (the write rule, docs/overlays.md section 1).
 def save(name,content):
- (line/name).write_text(content);run(['--line','main','add',name]);run(['--line','main','save','-qm',content.strip()]);return run(['--line','main','rev-parse','head']).stdout.strip()
+ (line/name).write_text(content);run(['--line','main','add',name]);run(['--line','main','save','-qm',content.strip(),'--to','main']);return run(['--line','main','rev-parse','head']).stdout.strip()
 a=json.loads(run(['remote','self','--json']).stdout);b=json.loads(run(['remote','self','--json'],B).stdout);c=json.loads(run(['remote','self','--json'],C).stdout)
 run(['init','project','-q']);A['LAYR_PROJECT']='project';line=root/'owner/store/projects/project/lines/main';project=line.parent.parent
 first=save('shared.txt','epoch zero\n')
