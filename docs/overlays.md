@@ -208,7 +208,9 @@ Built so far (the rest of this file describes the code until a row says "built")
   meanwhile refuses), and only then the lines on the overlays move; a failure discards the new states,
   so nothing is recorded. A failure is a warning and never undoes the merge of the line.
 - Waiting patches. `layr status` (long form) says where named saves go and lists, per overlay of the
-  path, its patches, the paths it hides and the patches that wait for a merge with the parent; a named
+  path, its patches, the paths it hides and the patches that wait for a merge with the parent. Only a
+  caller who reads every overlay of the path sees this text: for another caller the output is the one
+  of a line that shows `main`, so a hidden overlay leaves no trace (t39); a named
   save prints the same for the overlays that it changed; `layr overlay show <X> --json` has `paths`
   (`patches`, `own`, `hidden`, `waiting`) for the view of the current folder.
 - `layr restore --parent <path>` (a file, a folder or `.`) puts the version of the parent view in the

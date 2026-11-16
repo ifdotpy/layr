@@ -61,7 +61,7 @@ refuse(['remote','mode','archive','service'],'service mode requires a configured
 check(hashes()==old_hashes,'missing service configuration changes no objects')
 # New overlays are private independently of parent opening.
 run(['--line','main','overlay','create','visible','--readers','machine:'+a['id'],'-q'])
-run(['--line','main','overlay','create','hidden-rotation-731','--hidden','--readers','machine:'+a['id'],'-q'])
+run(['--line','main','overlay','create','hidden-rotation-731','--hidden','--parent','visible','--readers','machine:'+a['id'],'-q'])
 (line/'visible-layer.txt').write_text('explicit public overlay bytes\n')
 run(['--line','main','overlay','move','visible','visible-layer.txt','-q']);run(['--line','main','save','-qm','Visible overlay state'])
 (line/'hidden-layer.txt').write_text('hidden layer bytes\n')

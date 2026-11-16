@@ -42,7 +42,7 @@ ok "the owner makes an overlay" in_line layr-o1 main overlay create keychain -q
 root_state=$(l --project sap config overlay.keychain | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')
 details=$(in_line layr-o1 main overlay show keychain --json)
 ok "an unused overlay reports its root state and no epochs" python3 -c 'import json,sys; row=json.loads(sys.argv[1]); assert row["state"]==sys.argv[2] and row["epochs"]==[] and len(row["managers"])==1 and not row["hidden"]' "$details" "$root_state"
-eq "it lists with its mode and reader" "keychain	follow	owner layr-o1	readers layr-o1" "$(in_line layr-o1 main overlay list | sed 's/^ *//')"
+eq "it lists with its mode, reader and kind" "keychain	follow	owner layr-o1	readers layr-o1	kind=patches" "$(in_line layr-o1 main overlay list | sed 's/^ *//')"
 out=$(in_line layr-o1 main overlay move keychain .codex-keychain.envrc)
 has "move names the next commit" "move to overlay keychain at the next state: .codex-keychain.envrc" "$out"
 has "status shows the move" "keychain: .codex-keychain.envrc" "$(in_line layr-o1 main status)"
@@ -90,7 +90,9 @@ no "for other users too" in_line layr-o3 t3 show main@{0}:.codex-keychain.envrc
 sh_in layr-o1 main "cp .codex-keychain.envrc .codex-keychain.envrc~ && echo other > other.txt"
 in_line layr-o1 main save -q
 no "a copy of the file is not in the automatic state" in_line layr-o1 main show head@{0}:.codex-keychain.envrc~
-ok "another new file is" in_line layr-o1 main show head@{0}:other.txt
+# A working change of a view of an overlay lives in the store of that overlay (docs/overlays.md section 1,
+# automatic states): the automatic state of the project holds no new file of that view.
+no "another new file of the view is not in it either" in_line layr-o1 main show head@{0}:other.txt
 sh_in layr-o1 main "rm .codex-keychain.envrc~ other.txt"
 
 # 3. The owner changes the file and commits: only the overlay's history moves.
@@ -240,7 +242,8 @@ eq "the overlay is back" "note 3" "$(in_line layr-o1 f1 overlay show notes head:
 # A refused undo leaves the overlay lines as they were.
 sh_in layr-o1 f1 "$L save -qam 'note 4 again' && echo s >> s2.txt && $L save -qam 'shared after'"
 id=$(in_line layr-o1 f1 op log -n 2 | awk 'NR==2{print $1}')
-has "an undo of an older commit is refused" "changed after this operation" "$(in_line layr-o1 f1 undo $id 2>&1)"
+# The later save went to the overlay of the view (the write rule), so the refusal names the overlays of the line.
+has "an undo of an older commit is refused" "changed after this" "$(in_line layr-o1 f1 undo $id 2>&1)"
 eq "and the overlay keeps its state" "note 4" "$(in_line layr-o1 f1 overlay show notes head:private/notes.md | tail -1)"
 ok "the line still commits to the overlay" sh_in layr-o1 f1 "echo 'note 5' >> private/notes.md && $L save -qam 'note 5'"
 # A move waits for the next commit, whatever happens to the index.

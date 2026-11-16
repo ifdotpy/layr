@@ -142,7 +142,7 @@ with open('large.bin', 'wb') as f:
     f.write(b'sk_boundary_1234567890')
 LARGE
 l add large.bin
-OUT=$(l save -qm large-leak 2>&1)
+OUT=$(l save -qm large-leak --to main 2>&1)
 has 'a large file finds a secret across a chunk boundary' 'large.bin:byte 1048571' "$OUT"
 no 'the large-file refusal hides the value' sh -c 'case "$1" in *sk_boundary_1234567890*) exit 0;; *) exit 1;; esac' sh "$OUT"
 # The service enforces the admin boundary for declassification.

@@ -283,7 +283,16 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "{s}");
     }
     // The view of the folder and the state of the patches of each overlay of its path (docs/overlays.md section 1).
-    if let Some(top) = h.repo.line_view_top(&line)? {
+    // Only a reader of every overlay of the path sees this: the text names the overlays and their paths. For
+    // another caller the output is the one of a line that shows `main`, byte for byte, so a hidden overlay
+    // leaves no trace (t39).
+    let mut reads_view = true;
+    for l in h.repo.layers(&line)? {
+        if !h.repo.reads_overlay(&l.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+            reads_view = false;
+        }
+    }
+    if let Some(top) = h.repo.line_view_top(&line)?.filter(|_| reads_view) {
         outln!(ctx, "Named saves go to overlay {top} (layr save -m <message> --to main writes main)");
         for r in h.repo.patch_report(&line)? {
             for line in r.lines() {

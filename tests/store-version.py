@@ -52,7 +52,7 @@ run(store, "projects")
 report = inspect(store)
 assert report["state"] == "compatible" and report["compatible"]
 current = report["binary"]
-assert current["format"] == 1 and current["version"] == package and current["build"] != "unknown"
+assert current["format"] == 2 and current["version"] == package and current["build"] != "unknown"
 assert report["store"] == current
 marker = store / "store-version.json"
 assert json.loads(marker.read_text()) == current
@@ -69,13 +69,22 @@ assert inspect(store)["compatible"]
 assert json.loads(marker.read_text()) == other
 print("PASS same-format package and build differences remain compatible", flush=True)
 
-for number in (0, 2, 999):
+# Format 1 is the format before the tree of overlays: this binary upgrades it in place, one way (only the marker).
+marker.write_text(json.dumps(dict(other, format=1)))
+upgrade = inspect(store)["upgrade"]
+assert upgrade and upgrade["fromFormat"] == 1 and upgrade["toFormat"] == 2, upgrade
+run(store, "projects")
+assert json.loads(marker.read_text())["format"] == 2, "the first open upgrades the marker"
+print("PASS a store of format 1 is upgraded at its first open", flush=True)
+marker.write_text(json.dumps(other))
+
+for number in (0, 3, 999):
     stored = dict(other, format=number)
     marker.write_text(json.dumps(stored))
     before = tree(store)
     for args in [("projects",), ("status",), ("init", "forbidden", "-q")]:
         result = run(store, *args, code=128)
-        for text in (f"format {number}", "format 1", other["version"], other["build"], current["version"], current["build"]):
+        for text in (f"format {number}", f"format {current['format']}", other["version"], other["build"], current["version"], current["build"]):
             assert text in result.stderr, (text, result.stderr)
         assert tree(store) == before, "incompatible access changed the store"
     assert not inspect(store)["compatible"]
@@ -107,11 +116,11 @@ with (store / ".layr-version.lock").open("r+") as lease:
             raise AssertionError("the command did not wait for the format lease")
         except subprocess.TimeoutExpired:
             pass
-        marker.write_text(json.dumps(dict(other, format=2)))
+        marker.write_text(json.dumps(dict(other, format=3)))
         before = tree(store)
         fcntl.flock(lease, fcntl.LOCK_UN)
         stdout, stderr = proc.communicate(timeout=15)
-        assert proc.returncode == 128 and "format 2" in stderr, (stdout, stderr)
+        assert proc.returncode == 128 and "format 3" in stderr, (stdout, stderr)
         assert tree(store) == before
     finally:
         if proc.poll() is None:
