@@ -19,6 +19,12 @@ This page is part of the [Layr documentation](../README.md#documentation).
 An initialized submodule keeps its original `sub/.git` file during `init --from`.
 Its `gitdir` path can become invalid in the imported folder.
 
+layr stores raw bytes and applies no Git filters. `init --from-git` takes a tracked file that differs
+from its blob only by the line endings that `.gitattributes` converts (`eol=crlf`, which `git status`
+shows clean) as unchanged: the line keeps the blob bytes, and a note on stderr counts such paths. Any
+other filter, Git LFS included, is not undone: the bytes on disk are saved as the folder's change, so a
+line of an LFS checkout holds the content, not the pointers (`tests/t261-init-git-conversion.sh`).
+
 Source inspection suggests a Linux service import can fail for a caller without root access.
 `copy_folder` creates directories as root, then copies files with the caller's permissions.
 The caller can lack write access to these directories.
