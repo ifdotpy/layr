@@ -224,21 +224,9 @@ impl Repo<'_> {
                     }
                 };
                 self.put_layers(tmp, &layers, self.own(line))?;
-<<<<<<< head
                 crate::cache_overlay::hint_view(&line.id, layers.iter().map(|l| l.overlay.clone()).collect());
-                // On OverlayFS the caches are taken after the folder move (`commit_prepared_lines`): a
-                // mount under a moved folder is lost by MS_MOVE. Elsewhere a take is a snapshot taken
-                // before the store lock, and it runs first so `prepare_at` does not copy the folder again.
-                #[cfg(not(feature = "overlayfs"))]
-                let cached = self.take_caches(ctx, line, start, source, tmp)?;
-                #[cfg(feature = "overlayfs")]
-                let cached: Vec<String> = Vec::new();
-                self.prepare_at(line, start, tmp, &cached)?;
-                let mut rec = Record::new("line.create");
-=======
                 self.prepare_at(line, start, tmp, &[])?;
                 let mut rec = crate::model::DraftRecord::new("line.create");
->>>>>>> fs-legacy-facades
                 rec.data = serde_json::json!({"name": line.name, "start": start});
                 if !layers.is_empty() {
                     let base = self.temp_snapshot(tmp, true)?;

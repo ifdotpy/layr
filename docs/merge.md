@@ -133,7 +133,12 @@ queue in that command. A separate configured daemon can still run the queue.
 Start a worker's daemon with `--manual-queue` to disable its automatic request
 and queue passes. The worker can still apply requests and run the queue explicitly.
 
-<<<<<<< head
+`layr queue add topic --into main --expect-head <state>` pins the target head as well as the
+source. The runner enforces the saved head under the target line lock, including after checks.
+If it differs, the entry becomes `failed` and names the expected and observed heads. This is
+useful when landing a replayed stack whose delta was prepared for one exact target tree.
+Entries without this option keep the existing behavior (see [the queue](review.md#ref-protection-and-the-merge-queue)).
+
 ### Merge train
 
 A merge train checks several queue entries at once. The merge job of Layr Cloud (infra/aws/ci_job.py
@@ -148,13 +153,6 @@ the target has its squash message and names exactly its queued state. The entry 
 so its run only marks it done, with no candidate and no second set of checks (`squash_landed` in
 src/cmd/mergecmd.rs). A later version of the same change names another state, so it merges as usual.
 The target's history passed its protection, so a squash there needs no new check.
-=======
-`layr queue add topic --into main --expect-head <state>` pins the target head as well as the
-source. The runner enforces the saved head under the target line lock, including after checks.
-If it differs, the entry becomes `failed` and names the expected and observed heads. This is
-useful when landing a replayed stack whose delta was prepared for one exact target tree.
-Entries without this option keep the existing behavior (see [the queue](review.md#ref-protection-and-the-merge-queue)).
->>>>>>> fs-legacy-facades
 
 ### Queue probe limits
 

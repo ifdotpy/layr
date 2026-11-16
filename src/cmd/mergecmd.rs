@@ -48,13 +48,7 @@ fn merge_states_with_commands(
         allow_commands && p.line == line.id && p.base == base && p.ours == ours && p.theirs == theirs && p.label == theirs_label
     });
     let prepared = prepared.map(|p| (p.work, p.out));
-<<<<<<< head
-    #[cfg(not(target_os = "macos"))]
-    let prepared = None;
     let (work, mut out) = match prepared {
-=======
-    let (work, out) = match prepared {
->>>>>>> fs-legacy-facades
         Some(p) => p,
         None => merge_trees(ctx, repo, line, base, ours, theirs, theirs_label, allow_commands)?,
     };
@@ -160,23 +154,12 @@ struct PreparedMerge {
     out: merge::Outcome,
 }
 
-<<<<<<< head
-/// The reads of `merge <rev>` before the store lock (APFS): the status, the trees of the states,
-/// and the merge result. Errors only lose the
-/// preparation; the merge under the lock reads everything again.
-#[cfg(target_os = "macos")]
-fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, protected: bool) -> Result<()> {
-    let _t = crate::trace::span("prepare merge");
-    repo.prepare_status_report(line)?;
-    let theirs = revs::resolve(repo, Some(line), rev)?;
-=======
 /// The reads of `merge <rev>` before the store lock: the automatic state of the working
 /// folder, the status, the trees of the states, and the merge result. Errors only lose the
 /// preparation; the merge under the lock reads everything again.
 fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<Option<PreparedMerge>> {
     let _t = crate::trace::span("prepare merge");
     let theirs = revs::resolve_state(repo, Some(line), rev)?;
->>>>>>> fs-legacy-facades
     let head = line.head.as_str();
     if theirs == head || repo.is_ancestor(&theirs, head)? {
         return Ok(None);
@@ -185,14 +168,7 @@ fn prepare_merge(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str) -> Result<Optio
         // A fast-forward reads the layers of the new head (`finish`): it needs no complete tree.
         return Ok(None);
     }
-<<<<<<< head
-    let Some(base) = repo.merge_base(head, &theirs)? else { return Ok(()) };
-    if protected {
-        require_clean_inputs(repo, &[&base, head, &theirs])?;
-    }
-=======
     let Some(base) = repo.merge_base(&repo.source_id(head)?, &repo.source_id(&theirs)?)? else { return Ok(None) };
->>>>>>> fs-legacy-facades
     let label = repo.p.db.line_by_name(rev)?.map(|l| l.name).unwrap_or_else(|| rev.to_string());
     let (work, out) = merge_trees(ctx, repo, line, &base, head, &theirs, &label, true)?;
     repo.prepare_capture(&work.path)?;
@@ -318,28 +294,18 @@ impl OverlayMerge {
     }
 
     /// The records in the overlays, before the record of the line.
-<<<<<<< head
-    fn record(&self, ctx: &Ctx, repo: &Repo, line: &Line) -> Result<()> {
-        for (name, ol, head, st) in &self.moves {
-            let o = repo.overlay_repo(name)?;
-            let _lock = o.p.lock()?;
-            let info = repo.need_overlay(name)?;
-            let ol = if o.p.db.line_by_id(&ol.id)?.is_some() {
-                o.ensure_overlay_line(ctx, &info, line, &ol.head)?
-            } else {
-                o.overlay_line_create(ctx, &ol.name, &ol.head, ol.owner, Some(&ol.id))?
-            };
-            crate::overlay::move_overlay_line(&o, ctx, "merge", &ol, head, st.iter().cloned().collect())?;
-=======
-    fn record(&self, ctx: &Ctx, repo: &Repo, line_id: &str) -> crate::db::PublishResult<()> {
+    fn record(&self, ctx: &Ctx, repo: &Repo, line: &Line) -> crate::db::PublishResult<()> {
         for (name, ol, head, st) in &self.moves {
             let o = repo.overlay_repo(name)?;
             let _lock = o.p.lock_maintenance()?;
-            match ol {
-                Some(ol) => crate::overlay::move_overlay_line(&_lock, &o, ctx, "merge", ol, head, st.iter().cloned().collect())?,
-                None => return Err(anyhow::anyhow!("line {line_id} has no line in overlay '{name}'").into()),
-            }
->>>>>>> fs-legacy-facades
+            let info = repo.need_overlay(name)?;
+            // The planned overlay line is recorded only now: a protected merge that refused recorded nothing.
+            let ol = if o.p.db.line_by_id(&ol.id)?.is_some() {
+                o.ensure_overlay_line(&_lock, ctx, &info, line, &ol.head)?
+            } else {
+                o.overlay_line_create(&_lock, ctx, &ol.name, &ol.head, ol.owner, Some(&ol.id))?
+            };
+            crate::overlay::move_overlay_line(&_lock, &o, ctx, "merge", &ol, head, st.iter().cloned().collect())?;
         }
         Ok(())
     }
@@ -423,7 +389,6 @@ fn plan_overlays(
             if tl.state == ours_s || o.is_ancestor(&tl.state, &ours_s)? {
                 continue;
             }
-<<<<<<< head
             // Plan the overlay line without recording it: a protected merge may still refuse.
             let ol = crate::overlay::find_overlay_line(&o.p.db, &info, line)?.unwrap_or(Line {
                 id: if o.p.db.line_by_id(&line.id)?.is_none() { line.id.clone() } else { ids::new_id() },
@@ -432,13 +397,6 @@ fn plan_overlays(
                 owner: line.owner,
                 machine: o.p.store.machine.id.clone(),
             });
-=======
-            // The line of this line on the overlay, made at the state that this line shows when missing.
-            let ol = {
-                let _lock = o.p.lock_maintenance()?;
-                o.ensure_overlay_line(&_lock, ctx, &info, line, &ours_s)?
-            };
->>>>>>> fs-legacy-facades
             let write_line = ol.clone();
             if o.is_ancestor(&ours_s, &tl.state)? {
                 m.layers[i].state = tl.state.clone();
@@ -745,6 +703,7 @@ impl MergeCommit {
 /// Merges reach `finish` only through this boundary; protected results have already been validated.
 #[allow(clippy::too_many_arguments)]
 fn finish_merge(
+    leases: &crate::store::LineLeaseSet,
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
@@ -753,16 +712,16 @@ fn finish_merge(
     data: serde_json::Value,
     queue: Option<&QueuedMerge<'_>>,
     settled: &Settled<'_>,
-) -> Result<Vec<changes::Change>> {
+) -> Result<Vec<changes::EntryChange>> {
     let candidate = match commit {
         MergeCommit::Protected(CleanMerge(candidate)) | MergeCommit::Ordinary(candidate) => candidate,
     };
     // Save preparation can restore caches, so even it waits for conflict validation.
-    repo.prepare_save(line).inspect_err(|_| candidate.discard(repo))?;
-    let working = {
-        let _commit = repo.p.lock()?;
-        repo.working_state(ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })
-    };
+    let prepared = repo.prepare_save(ctx, line).inspect_err(|_| candidate.discard(repo))?;
+    let working = (|| -> Result<Option<String>> {
+        let locked = leases.lock(&repo.p)?;
+        prepared.working_state(&locked, ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })
+    })();
     let working = match working {
         Ok(w) => w,
         Err(e) => {
@@ -771,6 +730,7 @@ fn finish_merge(
         }
     };
     finish(
+        leases,
         ctx,
         repo,
         line,
@@ -878,17 +838,13 @@ fn finish(
             }
         }
         if let Some(o) = ovl.filter(|o| o.changed()) {
-<<<<<<< head
-            o.record(ctx, repo, line)?;
-=======
-            if let Err(e) = o.record(ctx, repo, &line.id) {
+            if let Err(e) = o.record(ctx, repo, line) {
                 if matches!(e, crate::db::CommitResolution::Unknown(_)) {
                     pending.overlay_cleanup = crate::repo::PublicationCleanup::Recover;
                 }
                 return Err(e);
             }
             pending.overlay_cleanup = crate::repo::PublicationCleanup::Keep;
->>>>>>> fs-legacy-facades
         }
         parent_attempted = true;
         repo.commit_record(locked, ctx, rec)?;
@@ -1528,13 +1484,9 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return caches_only(ctx, &h.repo, &line, &rev, a.has("-q"));
     }
     let before = line.head.clone();
-<<<<<<< head
-    let code = merge_rev(ctx, &h.repo, &line, &rev, &a)?;
-=======
     let code = merge_rev(ctx, &h.repo, &line, &rev, &a);
     h.repo.discard_prepared();
     let code = code?;
->>>>>>> fs-legacy-facades
     // The caches of a merged line go with it, taken and saved as the follow pass does (docs/cache-overlays.md,
     // section 5). They are regenerable: a failure is reported and never undoes the merge.
     if let Some(theirs) = h.repo.p.db.line_by_name(&rev)? {
@@ -1659,7 +1611,7 @@ pub(crate) fn changes_contained(repo: &Repo, into: &Line, state: &str) -> Result
     if repo.is_ancestor(state, &into.head)? {
         return Ok(true);
     }
-    let Some(base) = repo.merge_base(state, &into.head)? else { return Ok(false) };
+    let Some(base) = repo.merge_base(&repo.source_id(state)?, &repo.source_id(&into.head)?)? else { return Ok(false) };
     repo.hold(repo.pin(&[base.as_str()])?);
     let rules = crate::ignore_rules::Rules::new(&repo.working(into));
     let (base, from, head) = (repo.state_src(&base)?, repo.state_src(state)?, repo.state_src(&into.head)?);
@@ -1938,7 +1890,7 @@ pub fn merge_queued(
         }
         merge_rev_inner(ctx, repo, line, &entry.state, &args, Some(&queue))
     })();
-    discard_prepared(repo);
+    repo.discard_prepared();
     (result, queue.probes.into_inner())
 }
 
@@ -1948,14 +1900,14 @@ pub(crate) const REFUSE_CONFLICTS: &str = "--refuse-conflicts";
 
 pub fn merge_rev(ctx: &Ctx, repo: &Repo, line: &Line, rev: &str, a: &crate::args::Parsed) -> Result<i32> {
     let result = merge_rev_inner(ctx, repo, line, rev, a, None);
-    discard_prepared(repo);
+    repo.discard_prepared();
     let code = result?;
     // The patches of the view of the line merge with a parent that the merge moved (docs/overlays.md
     // section 1): after `merge`, `pull` and the follow pass alike. A failure leaves them waiting and never
     // undoes the merge.
     if code == 0 {
         let r = (|| -> Result<Vec<String>> {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let now = repo.line(&line.id)?;
             crate::overlay::rebase_patches(ctx, repo, &now)
         })();
@@ -2003,14 +1955,9 @@ fn merge_rev_inner(
     };
     repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
     if queue.is_none() {
-<<<<<<< head
-        repo.hold(repo.pin(&[&revs::resolve(repo, Some(line), rev)?])?);
-    }
-=======
         repo.hold(repo.pin(&[&revs::resolve_state(repo, Some(line), rev)?])?);
     }
     let prepared_merge = if queue.is_none() { prepare_merge(ctx, repo, line, rev).ok().flatten() } else { None };
->>>>>>> fs-legacy-facades
     if let Some(q) = queue {
         if let Some(expected) = &q.entry.expected_head {
             expected.check(&line.head)?;
@@ -2047,42 +1994,18 @@ fn merge_rev_inner(
         }
     }
     let rule = repo.authorize_line(ctx, line, crate::repo::LineOp::Merge { expect, hint: hint.as_deref() })?;
-<<<<<<< head
     if rule.is_some() {
         require_clean_inputs(repo, &[&line.head, &theirs])?;
     }
-=======
-    repo.prepare_working_caches(line)?;
-    let (prepared, automatic) = if repo.uses_native_hints(line)? {
-        (None, None)
-    } else {
-        let prepared = repo.prepare_status_report(line).ok();
-        let automatic = if prepared.as_ref().map(|p| p.needs_save(repo, line)).transpose()?.unwrap_or(true) {
-            Some(repo.prepare_save(ctx, line)?)
-        } else {
-            None
-        };
-        (prepared, automatic)
-    };
-    {
-        let _ready = crate::trace::span("prepared comparison ready");
-    }
-    crate::store::test_pause();
-    // The frozen comparison is reused by the pre-save and merge checks.
-    let (w, st) = {
+    // The working state is saved only after the merge passed its conflict validation (`finish_merge`): even
+    // the preparation of a save restores caches, and a protected merge that refuses changes nothing. Here the
+    // status only, from a comparison prepared before the lock.
+    let prepared = repo.prepare_status_report(line).ok();
+    let st = {
+        let _t = crate::trace::span("merge: locked status");
         let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
-        match prepared.map(|p| p.revalidate(repo, &locked)).transpose()?.flatten() {
-            Some(validated) => validated.working_state(repo, ctx, line, "before a layr command", automatic)?,
-            None => {
-                let w = match automatic {
-                    Some(prepared) => prepared.working_state(&locked, ctx, line, "before a layr command")?,
-                    None => repo.working_state(&locked, ctx, line, "before a layr command")?,
-                };
-                (w, repo.status_report(line)?)
-            }
-        }
+        repo.locked_status_report(&locked, line, prepared)?
     };
->>>>>>> fs-legacy-facades
     let checks = rule.as_ref().map(|r| r.check.clone()).unwrap_or_default();
     let settled = Settled {
         expect,
@@ -2131,12 +2054,8 @@ fn merge_rev_inner(
             if queue.is_some_and(|q| q.run_probes || q.checked_only) {
                 checks_unlocked(ctx, repo, line, &head, &head, &settled, true, queue, &mut held)?;
             }
-<<<<<<< head
             finish_merge(
-=======
-            finish(
                 held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
->>>>>>> fs-legacy-facades
                 ctx,
                 repo,
                 line,
@@ -2147,9 +2066,9 @@ fn merge_rev_inner(
                 &settled,
             )?;
         } else {
-            repo.prepare_save(line)?;
-            let _commit = repo.p.lock()?;
-            repo.working_state(ctx, line, "before a layr command")?;
+            let prepared = repo.prepare_save(ctx, line)?;
+            let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
+            prepared.working_state(&locked, ctx, line, "before a layr command")?;
         }
         if !a.has("-q") {
             outln!(ctx, "Already up to date.");
@@ -2201,19 +2120,15 @@ fn merge_rev_inner(
         let commit =
             MergeCommit::new(repo, MergeCandidate { head: head.clone(), states: vec![], overlays: ovl }, rule.is_some())?;
         if !commit.candidate().overlays.changed() {
-            repo.prepare_save(line)?;
-            let _commit = repo.p.lock()?;
-            repo.working_state(ctx, line, "before a layr command")?;
+            let prepared = repo.prepare_save(ctx, line)?;
+            let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
+            prepared.working_state(&locked, ctx, line, "before a layr command")?;
             outln!(ctx, "Already up to date.");
             return Ok(0);
         }
         // Only the overlays changed: the shared set stays.
-<<<<<<< head
         finish_merge(
-=======
-        finish(
             held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
->>>>>>> fs-legacy-facades
             ctx,
             repo,
             line,
@@ -2250,12 +2165,8 @@ fn merge_rev_inner(
         if !checks.is_empty() || run_probes {
             local = checks_unlocked(ctx, repo, line, &head, &theirs, &settled, quiet, queue, &mut held)?;
         }
-<<<<<<< head
         finish_merge(
-=======
-        finish(
             held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
->>>>>>> fs-legacy-facades
             ctx,
             repo,
             line,
@@ -2286,10 +2197,6 @@ fn merge_rev_inner(
     if rule.is_some() {
         require_clean_inputs(repo, &[&base]).inspect_err(|_| ovl.discard(repo))?;
     }
-    #[cfg(target_os = "macos")]
-    if queue.is_none() {
-        let _ = prepare_merge(ctx, repo, line, rev, rule.is_some());
-    }
     // A queued merge that waits for its checks keeps its candidate: the next pass (also a fresh clone that fetched
     // the record) takes the same state while the target head is the same, so the runners check one state.
     if queue.is_some()
@@ -2317,12 +2224,8 @@ fn merge_rev_inner(
             }
             verify_candidate(queue, &sid)?;
             local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
-<<<<<<< head
             finish_merge(
-=======
-            finish(
                 held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
->>>>>>> fs-legacy-facades
                 ctx,
                 repo,
                 line,
@@ -2352,13 +2255,9 @@ fn merge_rev_inner(
         parents,
         &message,
         !queue.is_some_and(|q| q.candidate_only),
-<<<<<<< head
+        prepared_merge,
     )
     .inspect_err(|_| ovl.discard(repo))?;
-=======
-        prepared_merge,
-    )?;
->>>>>>> fs-legacy-facades
     let sid = state.id.clone();
     let nconf = out.conflicts.len();
     // A queued merge and a follow pass (`REFUSE_CONFLICTS`) never leave a merge with conflicts.
@@ -2401,34 +2300,22 @@ fn merge_rev_inner(
         }
         // The result becomes a state of its own record, so the check runs on exactly the content
         // that the line will take, and a failed result stays for inspection.
-<<<<<<< head
-        let mut rec = Record::new("merge.candidate");
-        rec.states = commit.candidate().states.clone();
-=======
         let mut rec = crate::model::DraftRecord::new("merge.candidate");
-        rec.states = states.clone();
->>>>>>> fs-legacy-facades
+        rec.states = commit.candidate().states.clone();
         rec.data =
             serde_json::json!({"line": line.id, "theirs": theirs, "head": head, "squash": a.has("--squash"), "message": message});
         if queue.is_some_and(|q| q.candidate_only) {
             rec.data["commands_disabled"] = serde_json::json!(true);
         }
-<<<<<<< head
-        if let Err(e) = repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())) {
-            commit.candidate().discard(repo);
-            return Err(e);
-=======
         if let Err(e) =
             repo.commit_line(held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?, line, &head, |locked, _| {
                 repo.commit_record(locked, ctx, rec).map(|_| ())
             })
         {
             if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
-                crate::repo::discard_unrecorded(repo, &states);
-                ovl.discard(repo);
+                commit.candidate().discard(repo);
             }
             return Err(e.into());
->>>>>>> fs-legacy-facades
         }
         // Recorded: the states of the finish below come from the candidate record.
         commit.recorded();
@@ -2438,12 +2325,8 @@ fn merge_rev_inner(
         }
         local = checks_unlocked(ctx, repo, line, &head, &sid, &settled, quiet, queue, &mut held)?;
     }
-<<<<<<< head
     finish_merge(
-=======
-    finish(
         held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?,
->>>>>>> fs-legacy-facades
         ctx,
         repo,
         line,
@@ -2802,7 +2685,6 @@ mod tests {
     };
 
     #[test]
-<<<<<<< head
     fn protected_candidates_validate_new_and_recorded_heads_and_overlay_states() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("layr-clean-merge-{}", ids::new_id()));
         let ctx = Ctx {
@@ -2811,21 +2693,23 @@ mod tests {
             cwd: dir.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let project = |name: &str| -> Result<Project<'_>> {
             let dir = ctx.store.project_dir(name)?;
             std::fs::create_dir_all(dir.join("meta/db"))?;
             let p = Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: name.into(),
                 id: ids::new_id(),
                 db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
                 dir,
             };
-            let mut record = Record::new("project");
+            let mut record = crate::model::DraftRecord::new("project");
             record.data = serde_json::json!({"id":p.id,"name":name,"config":{}});
-            p.append(record, &ctx.actor())?;
+            p.lock_maintenance()?.append(record, &ctx.actor())?;
             Ok(p)
         };
         let repo = Repo { p: project("p")?, ctx: None };
@@ -2840,9 +2724,9 @@ mod tests {
         let clean = state(false);
         let conflicted = state(true);
         for r in [&repo, &overlay] {
-            let mut record = Record::new("state");
+            let mut record = crate::model::DraftRecord::new("state");
             record.states = vec![clean.clone(), conflicted.clone()];
-            r.p.append(record, &ctx.actor())?;
+            r.p.lock_maintenance()?.append(record, &ctx.actor())?;
         }
         let before = (repo.p.db.records_mark()?, overlay.p.db.records_mark()?);
         require_clean_inputs(&repo, &[&clean.id, &clean.id])?;
@@ -2892,7 +2776,10 @@ mod tests {
         drop(repo);
         drop(ctx);
         std::fs::remove_dir_all(dir)?;
-=======
+        Ok(())
+    }
+
+    #[test]
     fn overlay_commit_error_does_not_suppress_parent_rollback() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-overlay-commit-{}", crate::ids::new_id()));
         let store = Store::open(&root.join("store"))?;
@@ -2929,7 +2816,6 @@ mod tests {
         drop(repo);
         drop(store);
         std::fs::remove_dir_all(root)?;
->>>>>>> fs-legacy-facades
         Ok(())
     }
 

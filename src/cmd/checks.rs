@@ -997,7 +997,7 @@ fn copy_cache_folders(repo: &Repo, dir: &std::path::Path, private: &std::path::P
     }
     for folder in folders {
         let Ok(source) = crate::fsutil::safe_join(dir, &folder) else { continue };
-        if !crate::storage::is_subvolume(&source) {
+        if !crate::fs::host().namespace.managed(&source) {
             continue;
         }
         let frozen = repo.temp_snapshot(&source, true)?;

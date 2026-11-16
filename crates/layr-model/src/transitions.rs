@@ -204,6 +204,9 @@ pub enum ConflictKind {
     OursDeletedDirectoryWithChangedFile,
     TheirsDeletedChangedDirectory,
     DeriveCycle,
+    /// An overlay's patch and its parent overlay changed a file in a way that no text merge joins (the parent
+    /// deleted or renamed it, or the file is not text): the overlay keeps its version (docs/overlays.md section 1).
+    Parent,
     DeriveFailed {
         name: String,
     },
@@ -229,6 +232,7 @@ impl ConflictKind {
         use std::borrow::Cow::{Borrowed, Owned};
         match self {
             Self::Content => Borrowed("content"),
+            Self::Parent => Borrowed("parent"),
             Self::AddAdd => Borrowed("add/add"),
             Self::ModifyDelete => Borrowed("modify/delete"),
             Self::DeleteModify => Borrowed("delete/modify"),
@@ -330,6 +334,7 @@ impl TryFrom<ConflictWire> for Conflict {
             "directory deleted by ours, theirs changed or added a file" => Some(OursDeletedDirectoryWithChangedFile),
             "theirs deleted a directory that ours changed" => Some(TheirsDeletedChangedDirectory),
             "derive dependency cycle" => Some(DeriveCycle),
+            "parent" => Some(Parent),
             "binary (overlapping blocks)" => Some(BinaryOverlappingBlocks),
             label => {
                 if let Some(destinations) = label.strip_prefix("rename/rename (").and_then(|s| s.strip_suffix(')')) {

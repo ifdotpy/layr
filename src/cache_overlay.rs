@@ -408,7 +408,14 @@ impl<'a> Repo<'a> {
     /// The cache overlay of `folder` in the view of overlay `x`, made when missing (docs/overlays.md section 1,
     /// caches per view): a folder overlay with the cache properties and `view=<x>`, whose readers are the
     /// readers of `x` (not the trusted machines), hidden when `x` is hidden. The caller holds the project lock.
-    fn ensure_view_cache_overlay(&self, ctx: &Ctx, folder: &str, x: &str) -> Result<String> {
+    fn ensure_view_cache_overlay(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        folder: &str,
+        x: &str,
+    ) -> Result<String> {
+        locked.check(&self.p)?;
         for (n, f, v) in self.view_cache_overlays()? {
             if f == folder && v == x {
                 return Ok(n);
@@ -424,7 +431,8 @@ impl<'a> Repo<'a> {
         let readers: Vec<String> =
             policy.access.iter().filter(|(_, r)| **r >= crate::access::Role::Reader).map(|(k, _)| k.clone()).collect();
         let key_files = self.p.config_value("cache.key-files")?.filter(|v| v.is_array());
-        crate::cmd::overlaycmd::make_overlay(
+        crate::overlay::create::make_overlay(
+            locked,
             ctx,
             self,
             &name,
@@ -436,14 +444,14 @@ impl<'a> Repo<'a> {
             key_files.as_ref(),
             None,
         )?;
-        let mut rec = crate::model::Record::new("config");
+        let mut rec = crate::model::DraftRecord::new("config");
         rec.data = serde_json::json!({"config": {format!("overlay.{name}.{}", crate::overlay::VIEW): x}});
         if info.hidden {
             let orepo = self.overlay_repo(&name)?;
-            let _lock = orepo.p.lock()?;
-            orepo.commit_record(ctx, rec)?;
+            let lock = orepo.p.lock_maintenance()?;
+            orepo.commit_record(&lock, ctx, rec)?;
         } else {
-            self.commit_record(ctx, rec)?;
+            self.commit_record(locked, ctx, rec)?;
         }
         Ok(name)
     }
@@ -551,14 +559,10 @@ impl<'a> Repo<'a> {
             if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
-<<<<<<< head
             let name = match &view {
-                Some(x) => self.ensure_view_cache_overlay(ctx, p, x)?,
-                None => self.ensure_cache_overlay(ctx, p)?,
+                Some(x) => self.ensure_view_cache_overlay(locked, ctx, p, x)?,
+                None => self.ensure_cache_overlay(locked, ctx, p)?,
             };
-=======
-            let name = self.ensure_cache_overlay(locked, ctx, p)?;
->>>>>>> fs-legacy-facades
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
@@ -883,7 +887,7 @@ impl<'a> Repo<'a> {
             return Ok(taken);
         }
         let overlays = self.folder_overlays()?;
-        if overlays.is_empty() {
+        if overlays.is_empty() && self.view_cache_overlays()?.is_empty() {
             return Ok(taken);
         }
         // The start state (its caches are read) and the source head stay for the command.
@@ -892,9 +896,8 @@ impl<'a> Repo<'a> {
         self.hold(self.pin(&held)?);
         let ignored = Rules::new(w);
         let (uid, gid) = self.owner_ids(line);
-<<<<<<< head
         // The folders of the caches of `main`, and of the views that the line's path holds.
-        let mut folders = self.folder_overlays()?;
+        let mut folders = overlays;
         // The view of a line that `line new` makes is recorded with the line: until then its overlays are the hint.
         let mut path: Vec<String> = self.layers(line)?.into_iter().map(|l| l.overlay).collect();
         if path.is_empty() {
@@ -906,9 +909,6 @@ impl<'a> Repo<'a> {
             }
         }
         for (name, folder) in folders {
-=======
-        for (name, folder) in overlays {
->>>>>>> fs-legacy-facades
             // Versioned files win: a folder that the start state holds files in comes from the
             // state. Otherwise the cache below replaces what the folder holds now: an old cache
             // of the state (`states/<id>@<folder>`, applied before), else the line would start
@@ -1303,7 +1303,6 @@ impl<'a> Repo<'a> {
         crate::fsutil::atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
     }
 
-<<<<<<< head
     /// Free the caches of the lines whose work is now in `into` (docs/cache-overlays.md, section 22): `sources`,
     /// or every line of this machine when None. A merge took their caches into `into` before, so the caches move
     /// instead of being copied. Returns the names of the freed lines, and a message for each line that an error
@@ -1320,27 +1319,11 @@ impl<'a> Repo<'a> {
                 Ok(true) => freed.push(name),
                 Ok(false) => {}
                 Err(e) => errors.push(format!("caches of line '{name}' not freed: {e:#}")),
-=======
-    /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
-    /// files of the folder that were used least recently (the newer of access and change time)
-    /// until the folder is at most the size. Returns the deleted bytes.
-    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --overlays`: the folders that a
-    /// build may have grown, with no walk of the other lines.
-    pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
-        let mut freed = 0;
-        let w = self.working(line);
-        for (name, folder) in self.folder_overlays()?.into_iter().filter(|(_, f)| folders.contains(f)) {
-            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
-            let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-            if crate::fs::host().namespace.managed(&cp) {
-                freed += lru_trim(&cp, limit)?;
->>>>>>> fs-legacy-facades
             }
         }
         (freed, errors)
     }
 
-<<<<<<< head
     /// `free_merged_caches` for one line. True when its caches were freed.
     fn free_if_merged(&self, ctx: &Ctx, into: &Line, line: Line) -> Result<bool> {
         let line = self.localize(line)?;
@@ -1365,7 +1348,7 @@ impl<'a> Repo<'a> {
             return Ok(false);
         }
         // A line that lives on keeps its caches: a protected line, or a line that follows a remote branch.
-        if self.policy().rule_for(&line.name).is_some() || crate::follow::target(self, &line)?.is_some() {
+        if self.policy().rule_for(&line.name).is_some() || crate::cmd::follow_engine::target(self, &line)?.is_some() {
             return Ok(false);
         }
         let folders = self.held_cache_folders(&line)?;
@@ -1384,7 +1367,7 @@ impl<'a> Repo<'a> {
         if !crate::cmd::mergecmd::changes_contained(self, &into, &line.head)? {
             return Ok(false);
         }
-        let Some(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else { return Ok(false) };
+        let crate::store::LockAttempt::Acquired(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else { return Ok(false) };
         if !crate::cmd::branch::unsaved_paths(self, &line)?.is_empty() {
             return Ok(false);
         }
@@ -1393,47 +1376,9 @@ impl<'a> Repo<'a> {
                 return Ok(false);
             }
         }
-        let _lock = self.p.lock()?;
+        let _lock = self.p.lock_maintenance()?;
         if self.line(&line.id)?.head != line.head {
             return Ok(false);
-=======
-    pub fn cache_gc_lru(&self) -> Result<u64> {
-        let mut freed = 0;
-        for (name, folder) in self.folder_overlays()? {
-            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
-            for line in self.lines()? {
-                let w = self.working(&line);
-                if !self.applies_in(&name, &folder, &w)? {
-                    continue;
-                }
-                let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
-                if !crate::fs::host().namespace.managed(&cp) {
-                    continue;
-                }
-                freed += lru_trim(&cp, limit)?;
-            }
-        }
-        Ok(freed)
-    }
-}
-
-/// Delete the least recently used build units below `root` (all files of one unit together, `unit_of`) until the
-/// sizes add up to `limit` at most, then the folders that this left empty. Deleting single files left units with a
-/// fingerprint and no outputs, and empty unit folders.
-pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut units: BTreeMap<String, (i64, u64, Vec<String>)> = BTreeMap::new();
-    let mut total = 0u64;
-    fsutil::walk(root, "", &mut |rel, m| {
-        if !m.is_dir() {
-            let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
-            let unit =
-                units.entry(crate::cache_hook::unit_of(rel).unwrap_or_else(|| rel.to_string())).or_insert((0, 0, Vec::new()));
-            unit.0 = unit.0.max(used);
-            unit.1 += m.size;
-            unit.2.push(rel.to_string());
-            total += m.size;
->>>>>>> fs-legacy-facades
         }
         for (name, folder) in &folders {
             // The folder first: when a later step fails, the saved state stays, and the next merge tries again.
@@ -1443,9 +1388,9 @@ pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
             if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
                 let info = self.need_overlay(name)?;
                 let orepo = self.overlay_repo(name)?;
-                let _olock = orepo.p.lock()?;
+                let _olock = orepo.p.lock_maintenance()?;
                 if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, &line)? {
-                    self.drop_overlay_lines(ctx, &orepo, name, &[ol])?;
+                    self.drop_overlay_lines(&_olock, ctx, &orepo, name, &[ol])?;
                 }
             }
             self.apply_history(ctx, name)?;
@@ -1492,74 +1437,7 @@ fn build_running(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< head
     use crate::overlay::folder_path;
-=======
-    use crate::overlay::{folder_path, tree_size};
-
-    #[test]
-    fn the_lru_trim_removes_whole_units_and_their_empty_folders() {
-        let root = std::env::temp_dir().join(format!("layr-lru-{}", crate::ids::new_id()));
-        let write = |rel: &str, bytes: usize, age: i64| {
-            let p = root.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, vec![0u8; bytes]).unwrap();
-            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age as u64);
-            let f = std::fs::File::options().write(true).open(&p).unwrap();
-            f.set_times(std::fs::FileTimes::new().set_accessed(t).set_modified(t)).unwrap();
-        };
-        // An old unit: its fingerprint, its rlib and its build script folder.
-        write("debug/.fingerprint/old-0123456789abcdef/lib-old", 10, 9000);
-        write("debug/deps/libold-0123456789abcdef.rlib", 1000, 9000);
-        write("debug/build/old-0123456789abcdef/out/gen.rs", 10, 9000);
-        // Cargo 1.100 stores the fingerprint and output together under the unit hash.
-        write("debug/build/other/1234567890abcdef/fingerprint/lib-other", 10, 9000);
-        write("debug/build/other/1234567890abcdef/out/libother-1234567890abcdef.rlib", 10, 9000);
-        // A new unit that stays.
-        write("debug/.fingerprint/new-fedcba9876543210/lib-new", 10, 10);
-        write("debug/deps/libnew-fedcba9876543210.rlib", 1000, 10);
-        crate::cache_hook::register(layr_cache::adapters());
-        let freed = lru_trim(&root, 1010).unwrap();
-        assert_eq!(freed, 1040, "the whole old unit goes");
-        assert!(!root.join("debug/.fingerprint/old-0123456789abcdef").exists(), "no empty unit folder stays");
-        assert!(!root.join("debug/build/old-0123456789abcdef").exists());
-        assert!(!root.join("debug/build/other/1234567890abcdef").exists());
-        assert!(root.join("debug/deps/libnew-fedcba9876543210.rlib").exists());
-        assert!(root.join("debug/.fingerprint/new-fedcba9876543210/lib-new").exists());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
->>>>>>> fs-legacy-facades
-
-    #[test]
-    fn lru_keeps_nested_legacy_unit_files_together() {
-        let root = std::env::temp_dir().join(format!("layr-lru-nested-{}", crate::ids::new_id()));
-        let fingerprint = root.join("debug/.fingerprint/foo-0123456789abcdef/lib-foo");
-        let output = root.join("debug/build/foo-0123456789abcdef/out/build/generated/1111111111111111/file");
-        for path in [&fingerprint, &output] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, vec![0u8; 10]).unwrap();
-        }
-        crate::cache_hook::register(layr_cache::adapters());
-        assert_eq!(lru_trim(&root, 10).unwrap(), 20);
-        assert!(!fingerprint.exists() && !output.exists());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn lru_keeps_custom_profile_units_whole() {
-        let root = std::env::temp_dir().join(format!("layr-lru-build-profile-{}", crate::ids::new_id()));
-        let base = root.join("build/build/foo/0123456789abcdef");
-        let fingerprint = base.join("fingerprint/lib-foo");
-        let output = base.join("out/libfoo-0123456789abcdef.rlib");
-        for path in [&fingerprint, &output] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, vec![0u8; 10]).unwrap();
-        }
-        crate::cache_hook::register(layr_cache::adapters());
-        assert_eq!(lru_trim(&root, 10).unwrap(), 20);
-        assert!(!fingerprint.exists() && !output.exists());
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     #[test]
     fn folder_paths_and_cache_names() {

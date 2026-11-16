@@ -247,7 +247,6 @@ pub(crate) struct VerifyJob {
 pub(crate) fn prepare_verify(h: &Here, state: &str, r: &StateRef) -> Result<(VerifyJob, crate::free::Pin)> {
     let work = h.repo.p.work_dir();
     std::fs::create_dir_all(&work)?;
-<<<<<<< head
     let pin = h.repo.pin(&[state])?;
     let root = h.repo.state_root(state)?;
     Ok((VerifyJob { root, copy: work.join(crate::store::temp_name()), tree: r.tree, times: r.times }, pin))
@@ -266,7 +265,7 @@ pub(crate) fn run_verify(
         fn drop(&mut self) {
             // Read-only folders of the copy must open again before the copy goes.
             make_writable(self.0);
-            let _ = crate::storage::delete_tree(self.0);
+            let _ = crate::fs::remove(self.0);
         }
     }
     let started = Instant::now();
@@ -278,18 +277,11 @@ pub(crate) fn run_verify(
     let checkout_seconds = started.elapsed().as_secs_f64();
     let cmp = {
         let _t = crate::trace::span("verify: compare");
-        layr_objects::compare_with(&job.root, copy.0, true)
+        // Entry kinds through the host file system (whiteouts and special files of each backend).
+        layr_objects::compare::compare_with_kinds(&job.root, copy.0, true, |path, metadata| {
+            crate::fs::host().namespace.entry_kind(path, metadata)
+        })
     };
-=======
-    let tmp = crate::repo::Temp::directory(work.join(crate::store::temp_name()), 0o700)?;
-    let made = layr_objects::checkout_with(store, &r.tree, Some(&r.times), &tmp.path)?;
-    let checkout_seconds = started.elapsed().as_secs_f64();
-    let pin = h.repo.pin(&[state])?;
-    let cmp = layr_objects::compare::compare_with_kinds(&h.repo.state_root(state)?, &tmp.path, true, |path, metadata| {
-        crate::fs::host().namespace.entry_kind(path, metadata)
-    });
-    drop(pin);
->>>>>>> fs-legacy-facades
     let compare_seconds = started.elapsed().as_secs_f64() - checkout_seconds;
     drop(copy);
     Ok((made, cmp?, checkout_seconds, compare_seconds))

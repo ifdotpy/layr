@@ -337,6 +337,17 @@ impl<'a> Repo<'a> {
             Ok(_) => {}
             Err(e) => text.push_str(&format!("; caches not taken: {e:#}")),
         }
+        // A merge on the remote (a merge queue, a squash of a pull request) brought the work of local lines: their
+        // caches go (docs/cache-overlays.md, section 22). An error keeps the caches of that line only.
+        if let Ok(now) = self.line(&line.id) {
+            let (freed, errors) = self.free_merged_caches(ctx, &now, None);
+            if !freed.is_empty() {
+                text.push_str(&format!("; freed the caches of merged lines: {}", freed.join(", ")));
+            }
+            for e in errors {
+                let _t = crate::trace::span(e);
+            }
+        }
         Ok(Some(text))
     }
 
@@ -650,7 +661,7 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
         store: Store::open(root)?,
         caller: caller.clone(),
         cwd,
-        env: HashMap::new(),
+        env: daemon_credentials(|name| std::env::var(name).ok()),
         author: Default::default(),
         captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
@@ -659,9 +670,32 @@ fn with_repo<T>(root: &Path, caller: &Caller, cwd: PathBuf, name: &str, f: impl 
     f(&repo, &ctx)
 }
 
+/// The gateway credentials of the daemon's own environment (its LaunchAgent or unit), for the follow pass.
+/// The pass had an empty environment, so a follow of a gateway remote got HTTP 401 on every tick
+/// (2026-11-15): only a person session of `layr login` reached it, and an owner gateway has none.
+fn daemon_credentials(get: impl Fn(&str) -> Option<String>) -> HashMap<String, String> {
+    ["LAYR_GATEWAY_TOKEN_FILE", "LAYR_GATEWAY_CA_FILE"]
+        .into_iter()
+        .filter_map(|name| get(name).filter(|value| !value.is_empty()).map(|value| (name.to_string(), value)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_for_stable_head, repo_key, StoreCaches};
+    use super::{build_for_stable_head, daemon_credentials, repo_key, StoreCaches};
+    #[test]
+    fn a_follow_pass_takes_only_the_gateway_credentials_of_the_daemon() {
+        let env = |name: &str| match name {
+            "LAYR_GATEWAY_TOKEN_FILE" => Some("/home/u/.config/token".to_string()),
+            "LAYR_GATEWAY_CA_FILE" => Some(String::new()),
+            "AWS_SECRET_ACCESS_KEY" => Some("secret".to_string()),
+            _ => None,
+        };
+        let got = daemon_credentials(env);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got["LAYR_GATEWAY_TOKEN_FILE"], "/home/u/.config/token");
+        assert!(daemon_credentials(|_| None).is_empty());
+    }
     use crate::repo::Repo;
     use std::time::Duration;
 
