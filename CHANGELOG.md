@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.48.0](https://github.com/ifdotpy/layr/compare/v0.47.0...v0.48.0) (2026-11-16)
+
+
+### Features
+
+* **checks:** Run one check of several states at once with checks run --slot
+* **checks:** Add a scoped check watcher for laptop runners
+* **queue:** Take a titled entry as merged when a merge train landed its squash
+
+
+### Performance Improvements
+
+* **fetch:** List the overlay keys per folder, not every overlay object
+* **migrate:** Verify a state built from Git against its commit instead of a checkout
+* **migrate:** Verify states on parallel threads and journal them in import order
+* **migrate:** Trace the phases of import and verify, and flush each progress line
+* **objects:** Keep the native copy of each line head on Linux for the next incremental write
+
+
+### Bug Fixes
+
+* **caches:** A freed cache state no longer stops line new
+* **checks:** A root revoke takes back the check results of every user of the machine
+* **checks:** Build warm and stop the macOS cleanup hang on FIFOs
+* **ci:** Make check locking and copy assertions deterministic
+* **cli:** Show save --overlays [--folder] and fsck --overlays in the help
+* **fetch:** Never wait for the parent project's lock while an overlay is locked
+* **follow:** Give the daemon's follow pass the gateway credentials of the daemon
+* **gc:** Keep the state of a pending queue entry
+* **line:** Delete a line that a process uses on OverlayFS
+* **merge:** A merge into a protected line refuses conflicts before recording anything
+* **merge:** Free the caches of a line when its work is merged
+* **migrate:** Delete each verification checkout at once instead of through the trash
+* **migrate:** Read LAYR_MIGRATE_MIN_FREE_GIB from the command environment
+
 ## [0.47.0](https://github.com/ifdotpy/layr/compare/v0.46.0...v0.47.0) (2026-11-13)
 
 
