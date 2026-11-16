@@ -158,6 +158,11 @@ a new toolchain or a focused command leaves the files of the units that no later
 `layr retest sweep` never compiles: it stops at the first unit that is not fresh and skips that folder (see
 "Freshness").
 
+Cargo 1.100 stores each unit under `build/<package>/<hash>`, with its fingerprint and outputs in that
+unit folder. The sweeper also recognizes the earlier `deps` and `.fingerprint` layout because existing
+caches can outlive a toolchain upgrade. Keep that support until all pre-1.100 cache states have been
+retired, including remote and restored states.
+
 ### Live set
 
 The live set is the set of unit hashes that the standard build commands use in this tree. The commands
@@ -165,9 +170,8 @@ are in the root `Cargo.toml` of the workspace:
 
 ```toml
 [workspace.metadata.layr-retest]
-env = { RUSTUP_TOOLCHAIN = "1.99.1-aarch64-apple-darwin", RUSTC_WRAPPER = "", CARGO_INCREMENTAL = "0" }
-sweep = [["build", "--workspace", "--exclude", "studio-native-client", "--tests", "--bins", "--examples", "--locked"]]
-retest = [["test", "--workspace", "--no-run"]]
+env = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }
+sweep = [["build", "--locked"], ["build", "--release", "--locked"], ["test", "--locked", "--no-run"]]
 ```
 
 - `env` holds strings. A table named `macos` or `linux` in it applies on that OS only, over the plain values, for
@@ -520,7 +524,7 @@ Cargo reads the rustflags from the first set source of: `CARGO_ENCODED_RUSTFLAGS
 | target value in the parent folder, build value in the line | the parent target value only |
 
 Two sources have two sections: a target value hides the build value. So one variable cannot add
-the flag to every project. `cargo config get` is nightly only (not usable on 1.99.1). A
+the flag to every project. `cargo config get` is nightly only. A
 `RUSTC_WRAPPER` that adds the flag would replace the `sccache` wrapper of `~/.cargo/config.toml`.
 
 Choice: `layr retest` reads the config files that cargo reads for the line (`$CARGO_HOME`, then

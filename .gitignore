@@ -1,3 +1,6 @@
 /target
 *.img
 /.layr-retest
+
+# lychee's local link-check cache
+.lycheecache

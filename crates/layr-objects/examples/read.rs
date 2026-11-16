@@ -9,10 +9,10 @@
 //! the operating system cache can stay warm. `--state` requires the named local state to reference
 //! the measured tree (every listed tree for `sample`).
 use anyhow::{bail, ensure, Context, Result};
+use layr_hashers::{ContentAddress as Sha256, Digest};
 use layr_objects::tree::Node;
 use layr_objects::{Id, Keying, Store};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Instant;
 

@@ -1,0 +1,9 @@
+id: no-unwrap-new-leaves
+language: Rust
+severity: error
+message: Propagate or handle errors in new leaf libraries.
+files:
+  - crates/core/*/src/**/*.rs
+  - crates/fs/core/src/**/*.rs
+rule:
+  pattern: $VALUE.unwrap()

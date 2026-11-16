@@ -1,6 +1,7 @@
 //! Records of the operation log and the objects they describe.
 
 use serde::{Deserialize, Serialize};
+pub use crate::transitions::*;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -13,18 +14,6 @@ pub struct Author {
     /// `LAYR_SESSION`. Free text: layr shows it and never decides anything from it.
     #[serde(default, alias = "agent", skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Conflict {
-    pub path: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ours: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theirs: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,8 +137,61 @@ pub struct RefChange {
     pub after: Option<RefState>,
 }
 
+/// An exact target head, resolved when an operation is prepared.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub struct HeadExpectation(String);
+
+impl TryFrom<String> for HeadExpectation {
+    type Error = &'static str;
+
+    fn try_from(head: String) -> Result<Self, Self::Error> {
+        if !crate::validation::is_uuid(&head) {
+            return Err("expected head must be a full state UUID");
+        }
+        Ok(Self(head))
+    }
+}
+
+impl From<HeadExpectation> for String {
+    fn from(head: HeadExpectation) -> Self {
+        head.0
+    }
+}
+
+impl HeadExpectation {
+    pub fn check(&self, found: &str) -> Result<(), HeadMismatch> {
+        if self.0 == found {
+            Ok(())
+        } else {
+            Err(HeadMismatch { expected: self.0.clone(), found: found.to_string() })
+        }
+    }
+}
+
+/// A target head mismatch is permanent for the prepared operation, unlike a retryable head race.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeadMismatch {
+    pub expected: String,
+    pub found: String,
+}
+
+impl std::fmt::Display for HeadMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "target head mismatch: expected {}, found {}", self.expected, self.found)
+    }
+}
+
+impl std::error::Error for HeadMismatch {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueueEntry {
+    /// The target must still have this head when the runner takes its line lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<HeadExpectation>,
+    /// A machine-readable failure, alongside the existing human-readable reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<HeadMismatch>,
     pub id: String,
     pub into: String,
     pub target_line: String,
@@ -196,12 +238,6 @@ pub struct Attestation {
     pub time: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Subject {
-    pub kind: String,
-    pub id: String,
-}
-
 /// The pointers of a line at one time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineState {
@@ -209,18 +245,6 @@ pub struct LineState {
     pub head: String,
     pub owner: u32,
     pub machine: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LineChange {
-    pub before: Option<LineState>,
-    pub after: Option<LineState>,
-    /// Automatic states of the working content before and after the operation, when the
-    /// operation changed the working content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_before: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,16 +274,68 @@ pub struct Record {
     pub data: serde_json::Value,
 }
 
+/// An operation being prepared, before the appender assigns its identity and sequence.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct DraftRecord {
+    pub op: String,
+    pub states: Vec<StateRec>,
+    pub lines: BTreeMap<String, LineChange>,
+    pub data: serde_json::Value,
+}
+
+/// Identity assigned under the project lock. Zero is reserved for untrusted previews
+/// and legacy machine bootstrap records read from the wire, never for a new append.
+pub struct RecordIdentity {
+    pub id: layr_types::RecordId,
+    pub machine: layr_types::MachineId,
+    pub project: layr_types::ProjectId,
+    pub seq: std::num::NonZeroU64,
+    pub time: i64,
+    pub actor: Actor,
+}
+
+impl DraftRecord {
+    pub fn new(op: &str) -> Self {
+        Self { op: op.into(), states: Vec::new(), lines: BTreeMap::new(), data: serde_json::Value::Null }
+    }
+
+    pub fn sign(
+        self,
+        identity: RecordIdentity,
+        key: &ed25519_dalek::SigningKey,
+    ) -> anyhow::Result<layr_store::record::SignedRecord> {
+        let record = Record {
+            id: identity.id.to_string(),
+            machine: identity.machine.to_string(),
+            project: identity.project.to_string(),
+            seq: identity.seq.get(),
+            time: identity.time,
+            actor: identity.actor,
+            op: self.op,
+            states: self.states,
+            lines: self.lines,
+            data: self.data,
+        };
+        crate::validation::validate(&record)?;
+        let body = serde_json::to_string(&record)?;
+        let signature = layr_store::keys::sign_bytes(body.as_bytes(), key);
+        layr_store::record::parse_line(&format!("{{\"r\":{body},\"s\":\"{signature}\"}}"))
+    }
+}
+
 impl Record {
-    pub fn new(op: &str) -> Record {
-        Record {
+    /// An explicitly untrusted preview/fixture, with no publishable identity. This
+    /// never supplies signature or authorization proof and must not be appended.
+    pub fn untrusted_preview(op: &str) -> Self {
+        Self {
             id: String::new(),
             machine: String::new(),
+            project: String::new(),
             seq: 0,
             time: 0,
-            op: op.to_string(),
-            project: String::new(),
             actor: Actor { uid: 0, name: String::new(), session: None },
+            op: op.into(),
             states: Vec::new(),
             lines: BTreeMap::new(),
             data: serde_json::Value::Null,
@@ -291,4 +367,41 @@ pub struct Comment {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+}
+
+#[cfg(test)]
+mod head_expectation_tests {
+    use super::*;
+
+    const BEFORE: &str = "01a12290-0000-7000-8000-000000000001";
+    const AFTER: &str = "01a12290-0000-7000-8000-000000000002";
+
+    #[test]
+    fn exact_head_check_returns_typed_mismatch() {
+        let expected = HeadExpectation::try_from(BEFORE.to_string()).unwrap();
+        assert!(expected.check(BEFORE).is_ok());
+        let mismatch = expected.check(AFTER).unwrap_err();
+        assert_eq!(mismatch, HeadMismatch { expected: BEFORE.into(), found: AFTER.into() });
+        assert_eq!(mismatch.to_string(), format!("target head mismatch: expected {BEFORE}, found {AFTER}"));
+        assert_eq!(serde_json::to_value(&expected).unwrap(), BEFORE);
+        assert!(serde_json::from_str::<HeadExpectation>(r#""not-a-state""#).is_err());
+    }
+
+    #[test]
+    fn legacy_queue_entries_omit_expectation_and_failure() {
+        let value = serde_json::json!({
+            "id": BEFORE, "into": "main", "target_line": BEFORE, "state": AFTER,
+            "added_by": 1000, "time": 1, "status": "pending", "attempts": 0
+        });
+        let mut entry: QueueEntry = serde_json::from_value(value.clone()).unwrap();
+        assert!(entry.expected_head.is_none());
+        assert!(entry.failure.is_none());
+        assert_eq!(serde_json::to_value(&entry).unwrap(), value);
+        entry.expected_head = Some(HeadExpectation::try_from(BEFORE.to_string()).unwrap());
+        entry.failure = Some(entry.expected_head.as_ref().unwrap().check(AFTER).unwrap_err());
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["expected_head"], BEFORE);
+        assert_eq!(encoded["failure"], serde_json::json!({"expected": BEFORE, "found": AFTER}));
+        assert_eq!(serde_json::from_value::<QueueEntry>(encoded).unwrap(), entry);
+    }
 }

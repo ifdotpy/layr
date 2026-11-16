@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,46 +29,7 @@ pub fn take_unsettled() -> bool {
     UNSETTLED.swap(false, Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum FType {
-    File,
-    Dir,
-    Symlink,
-    Special,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)]
-pub struct Meta {
-    pub ftype: FType,
-    pub mode: u32,
-    pub size: u64,
-    pub ino: u64,
-    pub uid: u32,
-    pub gid: u32,
-    pub mtime: i64,
-}
-
-impl Meta {
-    pub fn is_file(&self) -> bool {
-        self.ftype == FType::File
-    }
-    pub fn is_dir(&self) -> bool {
-        self.ftype == FType::Dir
-    }
-    pub fn executable(&self) -> bool {
-        self.mode & 0o111 != 0
-    }
-    /// The git mode of this entry: 100644, 100755, 120000 or 040000.
-    pub fn git_mode(&self) -> u32 {
-        match self.ftype {
-            FType::Symlink => 0o120000,
-            FType::Dir => 0o040000,
-            _ if self.executable() => 0o100755,
-            _ => 0o100644,
-        }
-    }
-}
+pub use crate::compare::{FType, Meta};
 
 pub fn meta_of(m: &fs::Metadata) -> Meta {
     let ft = m.file_type();
@@ -103,24 +64,33 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(cur)
 }
 
+/// Logical comparison I/O; descriptor validation is deliberately measured separately by strace.
+#[cfg(test)]
+pub enum ComparisonIo {
+    Metadata,
+    Open,
+    Hashed(u64),
+}
+
 /// A tree to read: a folder, or on APFS a thin state over its base (`thin::Layered`).
 pub trait Src: Sync {
+    fn core_reader(&self) -> Option<&dyn layr_fs_core::TreeRead> {
+        None
+    }
+    #[cfg(test)]
+    fn comparison_io(&self, _path: &str, _io: ComparisonIo) {}
     /// The path to read `rel` from; it may not exist. Fails for a path through a link.
     fn at(&self, rel: &str) -> Result<PathBuf>;
     /// The folder, when the tree is one complete folder.
     fn folder(&self) -> Option<&Path>;
-    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> { None }
-    /// The layers, when the tree is not one folder.
-    #[cfg(target_os = "macos")]
-    fn layered(&self) -> Option<&crate::thin::Layered> {
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
         None
     }
 }
 impl Src for Path {
     fn at(&self, rel: &str) -> Result<PathBuf> {
         // Every read of a live folder passes here: a validated read checks these paths again.
-        #[cfg(target_os = "macos")]
-        crate::storage::note_read(self, [rel]);
+        crate::fs::observations::note_read(self, [rel]);
         safe_join(self, rel)
     }
     fn folder(&self) -> Option<&Path> {
@@ -129,25 +99,11 @@ impl Src for Path {
 }
 impl Src for PathBuf {
     fn at(&self, rel: &str) -> Result<PathBuf> {
-        #[cfg(target_os = "macos")]
-        crate::storage::note_read(self, [rel]);
+        crate::fs::observations::note_read(self, [rel]);
         safe_join(self, rel)
     }
     fn folder(&self) -> Option<&Path> {
         Some(self)
-    }
-}
-#[cfg(target_os = "macos")]
-impl Src for crate::thin::Layered {
-    fn at(&self, rel: &str) -> Result<PathBuf> {
-        self.path(rel)
-    }
-    fn folder(&self) -> Option<&Path> {
-        self.is_complete().then(|| self.bottom())
-    }
-    fn layered(&self) -> Option<&crate::thin::Layered> { Some(self) }
-    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
-        if self.layers.is_empty() { self.object_base.as_deref() } else { None }
     }
 }
 
@@ -402,7 +358,17 @@ pub fn refuse_case_collisions<'a>(dst: &Path, paths: impl Iterator<Item = &'a st
 
 /// Metadata of `rel` below `root` without following a final link. `None` if absent.
 pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
-    if let Some(o) = root.objects() { return o.meta(rel).ok().flatten(); }
+    #[cfg(test)]
+    root.comparison_io(rel, ComparisonIo::Metadata);
+    if let Some(reader) = root.core_reader() {
+        return reader
+            .metadata(&layr_fs_core::RelDir::from_bytes(rel.as_bytes()).ok()?)
+            .ok()?
+            .map(|m| layr_fs_common::observation(&m));
+    }
+    if let Some(o) = root.objects() {
+        return o.meta(rel).ok().flatten();
+    }
     let p = root.at(rel).ok()?;
     exact_metadata(&p, rel).map(|m| meta_of(&m))
 }
@@ -411,27 +377,35 @@ pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
 /// stores exactly that name. On a volume that ignores case, `readme` also finds `README`;
 /// for Layr these are two paths.
 pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
-    let m = fs::symlink_metadata(path).ok()?;
+    exact_metadata_checked(path, rel).ok().flatten()
+}
+/// Reader adapters must preserve IO failure rather than interpreting it as an absent name.
+pub(crate) fn exact_metadata_checked(path: &Path, rel: &str) -> std::io::Result<Option<fs::Metadata>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
     #[cfg(target_os = "macos")]
-    if !rel.is_empty() && !crate::sys::case_sensitive_dev(m.dev(), path) && !stored_exactly(path, rel, &m) {
-        return None;
+    if !rel.is_empty() && !crate::sys::case_sensitive_dev(metadata.dev(), path) && !stored_exactly(path, rel, &metadata)? {
+        return Ok(None);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = rel;
-    Some(m)
+    Ok(Some(metadata))
 }
 
 /// True when the listing of folder `dir` has exactly `name`. The last listing is kept per
 /// thread while the folder stays the same: status checks each hard-linked file of a folder.
 #[cfg(target_os = "macos")]
-fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
+fn listed(dir: &Path, name: &std::ffi::OsStr) -> std::io::Result<bool> {
     use std::cell::RefCell;
     use std::collections::HashSet;
     type Listing = (PathBuf, (u64, u64, i64, i64), HashSet<std::ffi::OsString>);
     thread_local!(static LAST: RefCell<Option<Listing>> = const { RefCell::new(None) });
-    let Ok(m) = fs::symlink_metadata(dir) else {
-        return false;
-    };
+    let m = fs::symlink_metadata(dir)?;
     // A new, removed or renamed entry changes the ctime of the folder; tools can set its mtime
     // back, but not its ctime.
     let key = (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
@@ -439,57 +413,59 @@ fn listed(dir: &Path, name: &std::ffi::OsStr) -> bool {
         if !last.as_ref().is_some_and(|(d, k, _)| d == dir && *k == key) {
             *last = None;
             // A listing with an error is not kept.
-            let names = fs::read_dir(dir).and_then(|rd| rd.map(|e| e.map(|e| e.file_name())).collect::<std::io::Result<_>>());
-            let Ok(names) = names else {
-                return false;
-            };
+            let names = fs::read_dir(dir)?.map(|entry| entry.map(|entry| entry.file_name())).collect::<std::io::Result<_>>()?;
             *last = Some((dir.to_path_buf(), key, names));
         }
-        last.as_ref().is_some_and(|(_, _, names)| names.contains(name))
+        Ok(last.as_ref().is_some_and(|(_, _, names)| names.contains(name)))
     })
 }
 
 /// True when the volume stores the last `rel` components of `path` with exactly these names.
 #[cfg(target_os = "macos")]
-fn stored_exactly(path: &Path, rel: &str, m: &fs::Metadata) -> bool {
-    // The kernel names a file with several links by one of them, maybe another one: check the
-    // name in the listing of its folder, and the folder by its own stored path.
-    if !m.is_dir() && m.nlink() > 1 {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return false;
+fn stored_exactly(path: &Path, rel: &str, metadata: &fs::Metadata) -> std::io::Result<bool> {
+    // A hard link may be named by another alias in the kernel's full-path result.
+    if !metadata.is_dir() && metadata.nlink() > 1 {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return Ok(false) };
+        if !listed(parent, name)? {
+            return Ok(false);
+        }
+        return match rel.rsplit_once('/') {
+            Some((dir, _)) => stored_exactly(parent, dir, &fs::symlink_metadata(parent)?),
+            None => Ok(true),
         };
-        return listed(parent, name)
-            && rel.rsplit_once('/').is_none_or(|(dir, _)| {
-                stored_exactly(parent, dir, &fs::symlink_metadata(parent).ok().unwrap_or_else(|| m.clone()))
-            });
     }
-    match crate::sys::stored_path(path) {
-        Some(stored) => {
-            let stored = stored.to_string_lossy();
-            stored.ends_with(&format!("/{rel}")) || *stored == *rel
-        }
-        // Without the full path: compare each name.
-        None => {
-            let mut at = path.to_path_buf();
-            for part in rel.rsplit('/') {
-                if crate::sys::stored_name(&at).is_none_or(|n| n != part) {
-                    return false;
-                }
-                at.pop();
-            }
-            true
-        }
+    if let Some(stored) = crate::sys::stored_path(path) {
+        let stored = stored.to_string_lossy();
+        return Ok(stored.ends_with(&format!("/{rel}")) || *stored == *rel);
     }
+    // A failed full-path query is not absence. Fall back to fallible directory listings.
+    let mut at = path.to_path_buf();
+    for part in rel.rsplit('/') {
+        let Some(parent) = at.parent() else { return Ok(false) };
+        if !listed(parent, std::ffi::OsStr::new(part))? {
+            return Ok(false);
+        }
+        at.pop();
+    }
+    Ok(true)
 }
 
-pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+pub fn read_link_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    if let Some(reader) = root.core_reader() {
+        return Ok(reader.read_link(&layr_fs_core::RelPath::new(rel.as_bytes())?)?);
+    }
     if let Some(o) = root.objects() {
         let entry = o.entry(rel)?.context("object path does not exist")?;
         let layr_objects::Node::Symlink { target } = entry.entry.node else { bail!("object path is not a symbolic link") };
-        return Ok(String::from_utf8_lossy(&target).into_owned());
+        return Ok(target);
     }
     let p = root.at(rel)?;
-    Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.to_string_lossy().into_owned())
+    Ok(fs::read_link(&p).with_context(|| format!("readlink {}", p.display()))?.as_os_str().as_bytes().to_vec())
+}
+
+pub fn read_link(root: &(impl Src + ?Sized), rel: &str) -> Result<String> {
+    Ok(String::from_utf8_lossy(&read_link_bytes(root, rel)?).into_owned())
 }
 
 /// Files larger than this are binary for diff, grep, blame, rename detection and merge: their
@@ -511,6 +487,15 @@ pub fn open_regular(p: &Path) -> Result<File> {
 
 /// Read a regular file (not following links) of at most `MAX_TEXT` bytes.
 pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
+    if let Some(reader) = root.core_reader() {
+        let path = layr_fs_core::RelPath::new(rel.as_bytes())?;
+        let metadata = reader.metadata(&layr_fs_core::RelDir::Path(path.clone()))?.context("reader entry absent")?;
+        anyhow::ensure!(metadata.kind == FType::File && metadata.size <= MAX_TEXT, "reader entry is not a bounded regular file");
+        let mut bytes = Vec::new();
+        reader.open_file(&path)?.take(MAX_TEXT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= MAX_TEXT, "reader file grew beyond text limit");
+        return Ok(bytes);
+    }
     if let Some(o) = root.objects() {
         let meta = o.meta(rel)?.context("object path does not exist")?;
         anyhow::ensure!(meta.is_file(), "object path is not a file");
@@ -531,13 +516,17 @@ pub fn read_file(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
 /// Binary by the git rule (a NUL byte in the first 8000 bytes), or larger than `MAX_TEXT`.
 /// Reads at most 8000 bytes. Not a regular file: false.
 pub fn is_binary_file(root: &(impl Src + ?Sized), rel: &str) -> bool {
-    let f = match root.at(rel).and_then(|p| open_regular(&p)) {
-        Ok(f) => f,
-        Err(_) => return false,
+    let metadata = match lmeta(root, rel) {
+        Some(metadata) if metadata.is_file() => metadata,
+        _ => return false,
     };
-    if f.metadata().map(|m| m.len() > MAX_TEXT).unwrap_or(false) {
+    if metadata.size > MAX_TEXT {
         return true;
     }
+    let f = match open_source(root, rel, &metadata) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
     let mut v = Vec::new();
     f.take(8000).read_to_end(&mut v).is_ok() && v.contains(&0)
 }
@@ -552,6 +541,10 @@ pub fn copy_regular(src: &Path, dst: &Path) -> Result<()> {
 
 /// Copy a regular file in pieces to `out`.
 pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io::Write) -> Result<()> {
+    if let Some(reader) = root.core_reader() {
+        std::io::copy(&mut reader.open_file(&layr_fs_core::RelPath::new(rel.as_bytes())?)?, out)?;
+        return Ok(());
+    }
     if let Some(o) = root.objects() {
         anyhow::ensure!(o.meta(rel)?.is_some_and(|m| m.is_file()), "object path is not a regular file");
         out.write_all(&o.read(rel)?)?;
@@ -564,7 +557,10 @@ pub fn copy_file_to(root: &(impl Src + ?Sized), rel: &str, out: &mut dyn std::io
 
 /// The bytes of an entry for diffs: file content, or the link target for a symbolic link.
 pub fn entry_bytes(root: &(impl Src + ?Sized), rel: &str) -> Result<Vec<u8>> {
-    let meta = match root.objects() { Some(objects) => objects.meta(rel)?, None => lmeta(root, rel) };
+    let meta = match root.objects() {
+        Some(objects) => objects.meta(rel)?,
+        None => lmeta(root, rel),
+    };
     match meta {
         Some(m) if m.ftype == FType::Symlink => Ok(read_link(root, rel)?.into_bytes()),
         Some(m) if m.ftype == FType::File => read_file(root, rel),
@@ -585,20 +581,12 @@ pub fn copy_open_file(src: &File, dst_root: &Path, dst_rel: &str) -> Result<()> 
     refuse_case_clash(dst_root, dst_rel)?;
     let t = crate::tree::Tree::open(dst_root)?;
     t.mkdirs_for(dst_rel, None)?;
-    #[cfg(target_os = "macos")]
     let cloned = t.clone_new_file(src, dst_rel)?;
-    #[cfg(not(target_os = "macos"))]
-    let cloned: Option<File> = None;
     let d = match cloned {
         Some(d) => d,
         None => {
             let d = t.create(dst_rel, m.mode() & 0o7777)?;
-            if crate::storage::clone_file(src, &d).is_err() {
-                d.set_len(0)?;
-                let (mut from, mut to) = (src.try_clone()?, d.try_clone()?);
-                from.seek(SeekFrom::Start(0))?;
-                std::io::copy(&mut from, &mut to)?;
-            }
+            layr_fs_unix::copy_contents(src, &d)?;
             d
         }
     };
@@ -623,7 +611,24 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
+pub(crate) fn open_source<'a>(
+    source: &'a (impl Src + ?Sized),
+    path: &str,
+    observed: &Meta,
+) -> Result<Box<dyn layr_fs_core::ReadSeek + 'a>> {
+    if let Some(reader) = source.core_reader() {
+        return Ok(reader.open_file(&layr_fs_core::RelPath::new(path.as_bytes())?)?);
+    }
+    let file = open_regular(&source.at(path)?)?;
+    anyhow::ensure!(matches_observation(&file.metadata()?, observed), "file changed since observation");
+    Ok(Box::new(file))
+}
+fn same_range(
+    a: &mut (impl layr_fs_core::ReadSeek + ?Sized),
+    b: &mut (impl layr_fs_core::ReadSeek + ?Sized),
+    off: u64,
+    len: u64,
+) -> Result<bool> {
     let _t = crate::trace::span("content compare");
     a.seek(SeekFrom::Start(off))?;
     b.seek(SeekFrom::Start(off))?;
@@ -648,23 +653,7 @@ fn same_range(a: &mut File, b: &mut File, off: u64, len: u64) -> Result<bool> {
     })
 }
 
-/// The byte ranges as sorted, disjoint `(offset, length)` pairs inside a file of `size` bytes:
-/// overlapping and adjacent ranges merge, so no byte is compared twice.
-fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
-    let mut v: Vec<(u64, u64)> =
-        ranges.iter().filter(|(off, _)| *off < size).map(|(off, len)| (*off, off.saturating_add(*len).min(size))).collect();
-    v.sort_unstable();
-    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
-    for (start, end) in v {
-        match out.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => out.push((start, end)),
-        }
-    }
-    out.into_iter().map(|(start, end)| (start, end - start)).collect()
-}
-
-fn read_full(f: &mut File, buf: &mut [u8]) -> Result<usize> {
+fn read_full(f: &mut (impl Read + ?Sized), buf: &mut [u8]) -> Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         let r = f.read(&mut buf[n..])?;
@@ -683,60 +672,89 @@ pub fn same_entry(
     pa: &str,
     rb: &(impl Src + ?Sized),
     pb: &str,
-    ranges: Option<&[(u64, u64)]>,
+    ranges: Option<&crate::compare::ChangedRanges>,
 ) -> Result<bool> {
-    let left_entry = ra.objects().map(|objects| objects.entry(pa)).transpose()?.flatten();
-    let right_entry = rb.objects().map(|objects| objects.entry(pb)).transpose()?.flatten();
-    let left = match ra.objects() {
-        Some(_) => left_entry.as_ref().map(|e| e.meta()),
-        None => lmeta(ra, pa),
-    };
-    let right = match rb.objects() {
-        Some(_) => right_entry.as_ref().map(|e| e.meta()),
-        None => lmeta(rb, pb),
-    };
+    let left = if let Some(tree) = ra.objects() { tree.meta(pa)? } else { lmeta(ra, pa) };
+    let right = if let Some(tree) = rb.objects() { tree.meta(pb)? } else { lmeta(rb, pb) };
     let (ma, mb) = match (left, right) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => return Ok(true),
         _ => return Ok(false),
     };
+    same_entry_observed((ra, pa, &ma), (rb, pb, &mb), ranges)
+}
+
+/// Compare observations already supplied by a candidate producer. Descriptor validation and
+/// content reads remain necessary for mutable files, even when their timestamps match.
+pub fn same_entry_observed(
+    (ra, pa, ma): (&(impl Src + ?Sized), &str, &Meta),
+    (rb, pb, mb): (&(impl Src + ?Sized), &str, &Meta),
+    ranges: Option<&crate::compare::ChangedRanges>,
+) -> Result<bool> {
     if ma.ftype != mb.ftype {
         return Ok(false);
     }
     match ma.ftype {
-        FType::Symlink => Ok(read_link(ra, pa)? == read_link(rb, pb)?),
+        FType::Symlink => Ok(read_link_bytes(ra, pa)? == read_link_bytes(rb, pb)?),
         FType::Dir | FType::Special => Ok(true),
         FType::File => {
             if ma.size != mb.size {
                 return Ok(false);
             }
             if let Some(o) = ra.objects() {
-                let entry = left_entry.context("missing object entry")?;
+                let entry = o.entry(pa)?.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
                     if let Some(other) = rb.objects() {
-                        if let Some(entry) = right_entry {
+                        if let Some(entry) = other.entry(pb)? {
                             if let layr_objects::Node::File { blob: other_blob, .. } = entry.entry.node {
                                 if blob == other_blob {
                                     return Ok(true);
                                 }
                             }
                         }
+                        #[cfg(test)]
+                        {
+                            ra.comparison_io(pa, ComparisonIo::Open);
+                            rb.comparison_io(pb, ComparisonIo::Open);
+                        }
                         return Ok(o.read(pa)? == other.read(pb)?);
                     }
-                    return Ok(o.store.hash_file(&rb.at(pb)?)?.0 == blob);
+                    return same_blob(rb, pb, mb, &o.store, blob);
                 }
             }
             if let Some(o) = rb.objects() {
-                let entry = right_entry.context("missing object entry")?;
+                let entry = o.entry(pb)?.context("missing object entry")?;
                 if let layr_objects::Node::File { blob, .. } = entry.entry.node {
-                    return Ok(o.store.hash_file(&ra.at(pa)?)?.0 == blob);
+                    return same_blob(ra, pa, ma, &o.store, blob);
                 }
             }
-            let mut a = open_ro(&ra.at(pa)?)?;
-            let mut b = open_ro(&rb.at(pb)?)?;
+            #[cfg(test)]
+            {
+                ra.comparison_io(pa, ComparisonIo::Open);
+                rb.comparison_io(pb, ComparisonIo::Open);
+            }
+            if ra.core_reader().is_some() || rb.core_reader().is_some() {
+                let mut a = open_source(ra, pa, ma)?;
+                let mut b = open_source(rb, pb, mb)?;
+                if let Some(ranges) = ranges {
+                    for (offset, length) in ranges.bounded(ma.size) {
+                        if !same_range(&mut a, &mut b, offset, length)? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                return same_range(&mut a, &mut b, 0, ma.size);
+            }
+            let mut a = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(ra.at(pa)?)?;
+            let mut b = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(rb.at(pb)?)?;
+            let (opened_a, opened_b) = (a.metadata()?, b.metadata()?);
+            if !matches_observation(&opened_a, ma) || !matches_observation(&opened_b, mb) {
+                return Ok(false);
+            }
             match ranges {
                 Some(rs) => {
-                    for (off, len) in merged_ranges(rs, ma.size) {
+                    for (off, len) in rs.bounded(ma.size) {
                         if !same_range(&mut a, &mut b, off, len)? {
                             return Ok(false);
                         }
@@ -747,6 +765,37 @@ pub fn same_entry(
             }
         }
     }
+}
+
+fn matches_observation(opened: &fs::Metadata, observed: &Meta) -> bool {
+    opened.is_file() && opened.len() == observed.size && (opened.mode() & 0o111 != 0) == observed.executable()
+}
+
+fn same_blob(
+    src: &(impl Src + ?Sized),
+    path: &str,
+    meta: &Meta,
+    store: &layr_objects::Store,
+    blob: layr_objects::Id,
+) -> Result<bool> {
+    if let Some(reader) = src.core_reader() {
+        let mut file = reader.open_file(&layr_fs_core::RelPath::new(path.as_bytes())?)?;
+        return Ok(store.hash_reader(&mut file, meta.size)? == blob);
+    }
+    // Validate the descriptor rather than reopening its path after checking the observation.
+    // A replacement link is never followed and a replacement FIFO cannot block.
+    #[cfg(test)]
+    src.comparison_io(path, ComparisonIo::Open);
+    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(src.at(path)?)?;
+    let opened = file.metadata()?;
+    if !matches_observation(&opened, meta) {
+        return Ok(false);
+    }
+    let _hash = crate::trace::named(|| format!("compare file hash {path}"));
+    let id = store.hash_open_file(&mut file, opened.len())?;
+    #[cfg(test)]
+    src.comparison_io(path, ComparisonIo::Hashed(opened.len()));
+    Ok(id == blob)
 }
 
 /// Create the parent folders of `rel` below `root`, with owner `own`.
@@ -840,6 +889,84 @@ fn copy_entry_impl(
     _replace_index: bool,
     now: bool,
 ) -> Result<()> {
+    if let Some(reader) = src_root.core_reader() {
+        use layr_fs_core::{RelDir, RelPath};
+        let relative = RelPath::new(src_rel.as_bytes())?;
+        let meta = reader.metadata(&RelDir::Path(relative.clone()))?.context("reader source absent")?;
+        refuse_case_clash(dst_root, dst_rel)?;
+        let tree = crate::tree::Tree::open(dst_root)?;
+        tree.mkdirs_for(dst_rel, own)?;
+        if meta.kind == FType::Symlink {
+            use std::os::unix::ffi::OsStrExt;
+            let bytes = reader.read_link(&relative)?;
+            let (parent, name) = dst_rel.rsplit_once('/').unwrap_or(("", dst_rel));
+            tree.remove(dst_rel)?;
+            rustix::fs::symlinkat(std::ffi::OsStr::from_bytes(&bytes), tree.open_folder(parent)?, name)?;
+            if let Some((uid, gid)) = own {
+                tree.chown(dst_rel, uid, gid)?;
+            }
+            return Ok(());
+        }
+        let finish = |file: &File| -> Result<()> {
+            // Core states use the stored xattr vocabulary; native ACL adapters remain on
+            // their existing path until their driver migration supplies explicit policy.
+            let mode = meta.attributes.mode;
+            fchown(file, own)?;
+            file.set_permissions(fs::Permissions::from_mode(mode | 0o200))?;
+            let synchronized = (|| -> Result<()> {
+                let size = rustix::fs::flistxattr_query(file)?;
+                let mut names = vec![0; size];
+                let size = rustix::fs::flistxattr(file, names.as_mut_slice())?;
+                for name in names[..size].split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+                    if layr_objects::fsx::keep_xattr(name) && !meta.attributes.xattrs.iter().any(|(wanted, _)| wanted == name) {
+                        rustix::fs::fremovexattr(file, name)?;
+                    }
+                }
+                for (name, value) in &meta.attributes.xattrs {
+                    if layr_objects::fsx::keep_xattr(name) {
+                        use std::os::unix::ffi::OsStrExt;
+                        rustix::fs::fsetxattr(file, std::ffi::OsStr::from_bytes(name), value, rustix::fs::XattrFlags::empty())?;
+                    }
+                }
+                Ok(())
+            })();
+            let restored = file.set_permissions(fs::Permissions::from_mode(mode));
+            synchronized?;
+            restored?;
+            let stamp = meta.attributes.modified_ns;
+            if now {
+                set_mtime(file, 0, rustix::fs::UTIME_NOW as i64)?;
+            } else {
+                set_mtime(file, stamp.div_euclid(1_000_000_000), stamp.rem_euclid(1_000_000_000))?;
+            }
+            Ok(())
+        };
+        return match meta.kind {
+            FType::Dir => {
+                tree.mkdirs(dst_rel, own)?;
+                finish(&tree.open_folder(dst_rel)?)
+            }
+            FType::File => {
+                let fill = |output: &File| -> Result<()> {
+                    output.set_len(0)?;
+                    std::io::copy(&mut reader.open_file(&relative)?, &mut &*output)?;
+                    finish(output)
+                };
+                if !_replace_index {
+                    if let Some(output) = tree.open_write(dst_rel)? {
+                        if output.metadata()?.nlink() == 1 {
+                            return fill(&output);
+                        }
+                    }
+                }
+                if tree.stat(dst_rel).is_some_and(|meta| meta.is_dir()) {
+                    tree.remove(dst_rel)?;
+                }
+                tree.replace_file_atomic(dst_rel, fill)
+            }
+            _ => bail!("cannot copy a special file"),
+        };
+    }
     let src = src_root.at(src_rel)?;
     let m = fs::symlink_metadata(&src).with_context(|| format!("stat {}", src.display()))?;
     refuse_case_clash(dst_root, dst_rel)?;
@@ -892,19 +1019,13 @@ fn copy_entry_impl(
         }
         fchown(d, own)
     };
-    #[cfg(target_os = "macos")]
     if _replace_index && t.replace_index_file(&s, dst_rel, finish)? {
         return Ok(());
     }
     // Keep the inode of a file that is there: btrfs then reports an in-place change with byte
     // ranges, and running tools keep their file handles.
     let fill = |d: &File| -> Result<()> {
-        if crate::storage::clone_file(&s, d).is_err() {
-            let mut s2 = open_ro(&src)?;
-            let mut d2 = d.try_clone()?;
-            d2.set_len(0)?;
-            std::io::copy(&mut s2, &mut d2)?;
-        }
+        layr_fs_unix::copy_contents(&s, d)?;
         // Linux clones and copies carry no attributes: keep the user ones, as an APFS clone does.
         #[cfg(target_os = "linux")]
         sync_user_xattrs(&s, d)?;
@@ -916,8 +1037,15 @@ fn copy_entry_impl(
         if let Some(old) = t.open_write(dst_rel)? {
             // btrfs: a reflink swaps the whole content of a single-link file in one step. The
             // inode stays, and moves are found by inode. Elsewhere the new file gets a new inode.
-            #[cfg(target_os = "linux")]
-            if old.metadata()?.nlink() == 1 && rustix::fs::ioctl_ficlone(&old, &s).is_ok() {
+            let replaced = if old.metadata()?.nlink() == 1 {
+                match crate::fs::host().file_copies.replace_content {
+                    Some(clone) => matches!(clone(&s, &old)?, layr_fs_core::Attempt::Applied(())),
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if replaced {
                 #[cfg(target_os = "linux")]
                 sync_user_xattrs(&s, &old)?;
                 return finish(&old);
@@ -950,10 +1078,7 @@ fn copy_entry_impl(
             (d, false)
         }
         None => {
-            #[cfg(target_os = "macos")]
             let cloned = t.clone_new_file(&s, dst_rel)?;
-            #[cfg(target_os = "linux")]
-            let cloned: Option<File> = None;
             match cloned {
                 Some(d) => (d, true),
                 None => (t.create(dst_rel, m.mode() & 0o7777)?, false),
@@ -983,14 +1108,14 @@ pub fn copy_metadata(src: &File, dst: &File) -> Result<()> {
 /// Copy extended attributes through descriptors without replacing a layer identity.
 pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
     let directory = src.metadata()?.is_dir();
-    let size = rustix::fs::flistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::flistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|name| !name.is_empty()) {
         if directory && name == b"com.layr.subvolume" {
             continue;
         }
-        let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1003,11 +1128,11 @@ pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
 /// either: setting one can need privileges, and the policy labels new files.
 #[cfg(target_os = "linux")]
 fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
-    let size = rustix::fs::flistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::flistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_")) {
-        let size = rustix::fs::fgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1019,7 +1144,7 @@ fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
     let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let size = rustix::fs::flistxattr_query(file)?;
         let mut bytes = vec![0; size];
         let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
         Ok(bytes[..size]
@@ -1041,7 +1166,7 @@ fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
     let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr(file, &mut [] as &mut [u8])?;
+        let size = rustix::fs::flistxattr_query(file)?;
         let mut bytes = vec![0; size];
         let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
         Ok(bytes[..size]
@@ -1057,7 +1182,7 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
         }
     }
     for name in source {
-        let size = rustix::fs::fgetxattr(src, name.as_slice(), &mut [] as &mut [u8])?;
+        let size = rustix::fs::fgetxattr_query(src, name.as_slice())?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name.as_slice(), value.as_mut_slice())?;
         rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1068,11 +1193,11 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
 /// Linux symlink descriptors do not support fgetxattr. The caller pins both parent folders.
 #[cfg(target_os = "linux")]
 pub fn copy_symlink_xattrs(src: &Path, dst: &Path) -> Result<()> {
-    let size = rustix::fs::llistxattr(src, &mut [] as &mut [u8])?;
+    let size = rustix::fs::llistxattr_query(src)?;
     let mut names = vec![0; size];
     let size = rustix::fs::llistxattr(src, names.as_mut_slice())?;
     for name in names[..size].split(|b| *b == 0).filter(|name| !name.is_empty()) {
-        let size = rustix::fs::lgetxattr(src, name, &mut [] as &mut [u8])?;
+        let size = rustix::fs::lgetxattr_query(src, name)?;
         let mut value = vec![0; size];
         let size = rustix::fs::lgetxattr(src, name, value.as_mut_slice())?;
         rustix::fs::lsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
@@ -1128,57 +1253,46 @@ pub fn set_mode(root: &Path, rel: &str, mode: u32) -> Result<()> {
 /// Walk all entries below `root/rel` (not following links, not entering nested subvolumes).
 /// Paths are relative to `root`. Folders are reported before their content.
 pub fn walk(root: &(impl Src + ?Sized), rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
-    if let Some(o) = root.objects() { return o.walk(rel, f); }
+    #[cfg(test)]
+    let mut counted = |path: &str, meta: &Meta| {
+        root.comparison_io(path, ComparisonIo::Metadata);
+        f(path, meta)
+    };
+    #[cfg(test)]
+    let f: &mut dyn FnMut(&str, &Meta) -> Result<bool> = &mut counted;
+    if let Some(reader) = root.core_reader() {
+        return Ok(layr_fs_common::walk(reader, &layr_fs_core::RelDir::from_bytes(rel.as_bytes())?, &mut |path, meta| {
+            f(path.utf8()?, &layr_fs_common::observation(meta)).map_err(layr_fs_core::FsError::backend)
+        })?);
+    }
+    if let Some(o) = root.objects() {
+        return o.walk(rel, f);
+    }
     match root.folder() {
         Some(dir) => walk_folder(dir, rel, f),
-        #[cfg(target_os = "macos")]
-        None => {
-            let layered = root.layered().expect("a tree that is not a folder has layers");
-            // Entries come sorted by path, so the content of a folder follows it.
-            let mut skip: Option<String> = None;
-            for (path, m) in layered.entries(rel)? {
-                if skip.as_ref().is_some_and(|s| path.starts_with(s.as_str())) {
-                    continue;
-                }
-                skip = None;
-                if !f(&path, &m)? && m.is_dir() {
-                    skip = Some(format!("{path}/"));
-                }
-            }
-            Ok(())
-        }
-        #[cfg(not(target_os = "macos"))]
-        None => unreachable!("only APFS has layered trees"),
+        None => bail!("source has neither a reader nor a native folder"),
     }
 }
 
 fn walk_folder(root: &Path, rel: &str, f: &mut dyn FnMut(&str, &Meta) -> Result<bool>) -> Result<()> {
     let start = safe_join(root, rel)?;
-    let dev = match fs::symlink_metadata(&start) {
-        Ok(m) => m.dev(),
-        Err(_) => return Ok(()),
-    };
+    let dev = fs::symlink_metadata(&start)?.dev();
     let mut stack = vec![rel.to_string()];
     while let Some(dir) = stack.pop() {
         let p = if dir.is_empty() { root.to_path_buf() } else { root.join(&dir) };
-        let rd = match fs::read_dir(&p) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let mut names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut names = fs::read_dir(&p)?
+            .map(|entry| entry?.file_name().into_string().map_err(|_| anyhow!("non-UTF-8 file name in {}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
         names.sort();
         let mut subdirs = Vec::new();
         for n in names {
             let child = if dir.is_empty() { n.clone() } else { format!("{dir}/{n}") };
-            let m = match fs::symlink_metadata(root.join(&child)) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+            let m = fs::symlink_metadata(root.join(&child))?;
             let meta = meta_of(&m);
             if meta.is_dir()
                 && (m.dev() != dev
                     || ((cfg!(target_os = "macos") || cfg!(feature = "overlayfs"))
-                        && crate::storage::is_subvolume(&root.join(&child))))
+                        && crate::fs::host().namespace.managed(&root.join(&child))))
             {
                 continue;
             }
@@ -1283,16 +1397,20 @@ pub fn open_dir_nofollow(path: &Path) -> Result<File> {
         .with_context(|| format!("open folder {}", path.display()))
 }
 
-/// Open a regular file `name` of an open folder for reading: never a link, a device or a pipe.
+/// Open a regular cached stream through its retained parent, without following a leaf link.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn open_file_at(dir: &File, name: &str) -> Result<File> {
     use rustix::fs::{Mode, OFlags};
-    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty())
-        .with_context(|| format!("open {name}"))?;
-    let f = File::from(fd);
-    if !f.metadata()?.is_file() {
+    let file = File::from(rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?);
+    if !file.metadata()?.is_file() {
         bail!("{name} is not a regular file");
     }
-    Ok(f)
+    Ok(file)
 }
 
 /// Read a regular file `name` of an open folder; `None` if absent, a link or not a file.
@@ -1370,23 +1488,12 @@ pub fn git_writable(w: &Path, writable: bool) {
 
 /// Whether a known directory is a nested storage root.
 pub fn is_layer(root: &Path, rel: &str, m: &Meta) -> bool {
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    {
-        let _ = (root, rel);
-        m.is_dir() && m.ino == 256
-    }
-    #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-    {
-        m.is_dir() && crate::storage::is_subvolume(&root.join(rel))
-    }
+    (crate::fs::host().nested_entry)(root, rel, m)
 }
 
 /// Move a managed tree, including its mount when the backend requires it.
 pub fn rename_tree(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
-    #[cfg(feature = "overlayfs")]
-    return crate::storage::rename_tree(from.as_ref(), to.as_ref());
-    #[cfg(not(feature = "overlayfs"))]
-    Ok(fs::rename(from, to)?)
+    crate::fs::move_tree(from.as_ref(), to.as_ref())
 }
 
 /// Disk space of a folder for `layr du`: the allocated bytes of its files, and the bytes that
@@ -1574,8 +1681,40 @@ pub fn fiemap_space(root: &Path) -> Result<Space> {
 
 #[cfg(test)]
 mod range_tests {
-    use super::{copy_index_entry, merged_ranges};
+    use super::copy_index_entry;
+    fn merged_ranges(ranges: &[(u64, u64)], size: u64) -> Vec<(u64, u64)> {
+        crate::compare::ChangedRanges::from_native(ranges).unwrap().bounded(size)
+    }
     use std::fs;
+
+    #[test]
+    fn copying_metadata_keeps_empty_and_nonempty_attributes() {
+        let root = std::env::temp_dir().join(format!("layr-metadata-attributes-{}", crate::ids::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        for directory in [false, true] {
+            let source = root.join(format!("source-{directory}"));
+            let destination = root.join(format!("destination-{directory}"));
+            for path in [&source, &destination] {
+                if directory {
+                    fs::create_dir(path).unwrap();
+                } else {
+                    fs::write(path, b"data").unwrap();
+                }
+            }
+            let source = fs::File::open(source).unwrap();
+            let destination = fs::File::open(destination).unwrap();
+            for (name, value) in [("user.layr-empty", b"".as_slice()), ("user.layr-value", b"value".as_slice())] {
+                rustix::fs::fsetxattr(&source, name, value, rustix::fs::XattrFlags::empty()).unwrap();
+            }
+            super::copy_metadata(&source, &destination).unwrap();
+            for (name, expected) in [("user.layr-empty", b"".as_slice()), ("user.layr-value", b"value".as_slice())] {
+                let mut value = [0; 32];
+                let len = rustix::fs::fgetxattr(&destination, name, &mut value[..]).unwrap();
+                assert_eq!(&value[..len], expected);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

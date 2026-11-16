@@ -280,7 +280,7 @@ impl Store {
 }
 
 pub fn open_named(name: &str, repo: &Repo) -> Result<Store> {
-    let url = crate::cmd::remote::remote_url(repo, name)?;
+    let url = crate::remote_config::remote_url(repo, name)?;
     let pin = repo
         .p
         .config_value(&format!("cloud.remote.{name}.store"))?
@@ -304,10 +304,11 @@ pub fn store_copies(repo: &Repo) -> Result<std::collections::BTreeMap<String, Ve
     for rec in repo.p.db.records_with_op("push")? {
         let data = &rec.data;
         let (Some(name), Some(url)) = (data["remote"].as_str(), data["url"].as_str()) else { continue };
-        if data["result"] != "success" || !matches!(crate::cmd::remote::kind(url), Ok(crate::cmd::remote::Kind::Store)) {
+        if data["result"] != "success" || !matches!(crate::remote_config::kind(url), Ok(crate::remote_config::Kind::Store)) {
             continue;
         }
-        if crate::cmd::remote::remote_url(repo, name).ok().as_deref() != Some(url) || !store_dir(repo, url).join("read").is_file()
+        if crate::remote_config::remote_url(repo, name).ok().as_deref() != Some(url)
+            || !store_dir(repo, url).join("read").is_file()
         {
             continue;
         }
@@ -360,7 +361,7 @@ pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
     // A `--heads` clone or fetch left the state on the remote that it read.
     for (key, _) in repo.p.db.config_all()? {
         let Some(name) = key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
-        let Ok(url) = crate::cmd::remote::remote_url(repo, name) else { continue };
+        let Ok(url) = crate::remote_config::remote_url(repo, name) else { continue };
         let left = std::fs::read_to_string(states_left_file(&store_dir(repo, &url))).unwrap_or_default();
         if left.lines().any(|line| line == id) && !names.iter().any(|n| n == name) {
             names.push(name.to_string());
@@ -445,13 +446,7 @@ fn write_on_demand_marks(repo: &Repo, url: &str, marks: &mut OnDemandMarks) -> R
     crate::fsutil::atomic_write(&path, &serde_json::to_vec(marks)?, 0o600)
 }
 
-fn fetch_caches_inner(
-    ctx: &Ctx,
-    repo: &Repo,
-    start: &str,
-    source: Option<&crate::model::Line>,
-    quiet: bool,
-) -> Result<()> {
+fn fetch_caches_inner(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate::model::Line>, quiet: bool) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
     }
@@ -477,7 +472,7 @@ fn fetch_caches_inner(
     }
     let mut errors = Vec::new();
     for name in store_remote_names(repo)? {
-        let url = crate::cmd::remote::remote_url(repo, &name)?;
+        let url = crate::remote_config::remote_url(repo, &name)?;
         let mut marks = read_on_demand_marks(repo, &url);
         let now = crate::ids::now_ms();
         if marks.failed_at.is_some_and(|at| now - at < FAILED_FOR) {
@@ -584,7 +579,7 @@ pub fn cache_stores(ctx: &Ctx, repo: &Repo) -> Vec<CacheStore> {
     let Ok(names) = store_remote_names(repo) else { return out };
     for name in names {
         let read = (|| -> Result<Option<CacheStore>> {
-            let url = crate::cmd::remote::remote_url(repo, &name)?;
+            let url = crate::remote_config::remote_url(repo, &name)?;
             if !store_dir(repo, &url).join("read").is_file() {
                 return Ok(None);
             }
@@ -678,8 +673,8 @@ pub fn store_remote_names(repo: &Repo) -> Result<Vec<String>> {
         .into_iter()
         .filter_map(|(key, _)| key.strip_prefix("cloud.remote.").and_then(|k| k.strip_suffix(".url")).map(str::to_owned))
         .filter(|name| {
-            crate::cmd::remote::remote_url(repo, name)
-                .is_ok_and(|url| matches!(crate::cmd::remote::kind(&url), Ok(crate::cmd::remote::Kind::Store)))
+            crate::remote_config::remote_url(repo, name)
+                .is_ok_and(|url| matches!(crate::remote_config::kind(&url), Ok(crate::remote_config::Kind::Store)))
         })
         .collect();
     remotes.sort();
@@ -735,7 +730,7 @@ fn mark_read(dir: &std::path::Path) -> Result<()> {
 pub fn restorable(repo: &Repo, id: &str) -> Result<bool> {
     #[cfg(target_os = "macos")]
     let roots: Vec<std::path::PathBuf> =
-        crate::thin::Layered::of_state(&repo.p, id)?.layers.into_iter().map(|layer| layer.root).collect();
+        crate::thin::Layered::of_state(&repo.p, id)?.layers().iter().map(|layer| layer.root.clone()).collect();
     #[cfg(not(target_os = "macos"))]
     let roots = vec![repo.p.state_path(id)];
     for root in roots {
@@ -779,7 +774,7 @@ impl Store {
         // the next free number), and it can take minutes on a large store.
         index::write(self, repo)
     }
-    fn connect(&mut self, ctx: &Ctx) -> Result<()> {
+    pub(crate) fn connect(&mut self, ctx: &Ctx) -> Result<()> {
         self.connect_transport(ctx)?;
         epochs::connect(self)
     }
@@ -788,7 +783,7 @@ impl Store {
         self.backend = self.backend.root().clone();
         self.epoch = None;
         self.epoch_public = false;
-        self.backend.as_caller(ctx);
+        self.backend.as_caller(ctx)?;
         let public_only = self.force_public
             || (self.public_clone
                 && ctx.env("LAYR_GATEWAY_TOKEN_FILE").is_none()
@@ -813,7 +808,7 @@ impl Store {
             }
             legacy_probe = true;
             self.backend = Backend::open(&self.url)?;
-            self.backend.as_caller(ctx);
+            self.backend.as_caller(ctx)?;
         }
         if let Backend::Gateway(gateway) = &mut self.backend {
             if public_only {
@@ -996,7 +991,7 @@ impl Store {
     }
 
     /// Caller holds the project lock. Config records carry the machine signature.
-    pub fn save_pin(&self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
+    pub fn save_pin(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, name: &str) -> Result<()> {
         if let Some(pin) = &self.pin {
             let mut pin = pin.clone();
             // Learn the public paper recipient once. LAYR_PAPER_KEY_FILE may hold the paper key of
@@ -1029,7 +1024,8 @@ impl Store {
                         .ok()
                         .is_some_and(|identity| keys::recipient_of(&identity).ok().as_deref() == Some(current_recipient.as_str()))
                     {
-                        crate::cmd::admin::set_config(
+                        crate::project_config::set_config(
+                            locked,
                             ctx,
                             repo,
                             &format!("cloud.remote.{name}.public"),
@@ -1041,13 +1037,20 @@ impl Store {
             let key = format!("cloud.remote.{name}.store");
             let value = serde_json::to_value(&pin)?;
             if repo.p.config_value(&key)?.as_ref() != Some(&value) {
-                crate::cmd::admin::set_config(ctx, repo, &key, value)?;
+                crate::project_config::set_config(locked, ctx, repo, &key, value)?;
             }
         }
         Ok(())
     }
 
-    pub fn trust_store(&mut self, ctx: &Ctx, repo: &Repo, name: &str, recipient: &str) -> Result<()> {
+    pub fn trust_store(
+        &mut self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        repo: &Repo,
+        name: &str,
+        recipient: &str,
+    ) -> Result<()> {
         recipient.parse::<age::x25519::Recipient>().map_err(|e| anyhow::anyhow!("invalid store recipient: {e}"))?;
         let previous = self.pin.take();
         let descriptor = self.connect(ctx).and_then(|_| self.root_descriptor());
@@ -1067,7 +1070,7 @@ impl Store {
             recipient: descriptor.recipient,
             paper_recipient: None,
         });
-        self.save_pin(ctx, repo, name)
+        self.save_pin(locked, ctx, repo, name)
     }
 
     fn root_descriptor(&self) -> Result<Descriptor> {
@@ -1272,8 +1275,13 @@ impl Store {
             // The segments that an earlier fetch or push read and checked are not read again (`seen-records`): a
             // runner that pushes after each check reads only the new segments, not the whole log each time.
             let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-            let records =
-                reader::records_with_local(&self.backend, &identity, &descriptor.project, &local, Some(&reader::seen_file(&self.dir)))?;
+            let records = reader::records_with_local(
+                &self.backend,
+                &identity,
+                &descriptor.project,
+                &local,
+                Some(&reader::seen_file(&self.dir)),
+            )?;
             manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
         } else if self.force_public {
             self.require_private_access()?;
@@ -1355,7 +1363,8 @@ impl Store {
         }
         let lines = report.clone_lines.take().unwrap_or(repo.p.db.lines()?);
         let only = if let Some(name) = &opts.only_line {
-            let line = lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+            let line =
+                lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
             Some(std::collections::BTreeSet::from([line.id.clone()]))
         } else {
             None
@@ -1406,13 +1415,15 @@ impl Store {
                 }
             }
             if created {
-                let _lock = repo.p.lock()?;
-                let mut record = crate::model::Record::new("line.adopt");
+                let _lock = repo.p.lock_maintenance()?;
+                let mut record = crate::model::DraftRecord::new("line.adopt");
                 record.lines.insert(
                     local.id.clone(),
                     crate::model::LineChange {
-                        before: repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
-                        after: Some(repo.line_state(&local, &local.head)),
+                        transition: crate::model::LineTransition::from_endpoints(
+                            repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
+                            Some(repo.line_state(&local, &local.head)),
+                        ),
                         working_before: None,
                         working_after: None,
                     },
@@ -1421,7 +1432,7 @@ impl Store {
                 record.data = serde_json::json!({
                     "folder_view": repo.public_view_data(&local.id, &shown)?,
                 });
-                repo.commit_record(ctx, record)?;
+                repo.commit_record(&_lock, ctx, record)?;
             }
         }
         crate::fsutil::atomic_write(&self.dir.join("pending-lines.json"), &serde_json::to_vec(&pending)?, 0o600)?;
@@ -1483,10 +1494,10 @@ impl Store {
             crate::privs::as_caller_fs(ctx, || crate::person::create(path, &invite))?;
         }
         let created = !existing && self.backend.put_new(&slot, keys::seal_slot(&identity, recipient)?)?;
-        let _lock = repo.p.lock()?;
-        let mut record = crate::model::Record::new("project.reader");
+        let _lock = repo.p.lock_maintenance()?;
+        let mut record = crate::model::DraftRecord::new("project.reader");
         record.data = serde_json::json!({"principal":format!("person:{login}"),"recipient":recipient,"store":anchor.recipient});
-        repo.commit_record(ctx, record)?;
+        repo.commit_record(&_lock, ctx, record)?;
         if let Backend::Gateway(g) = &self.backend {
             g.person_call(reqwest::Method::POST,&format!("/api/people/{login}/inbox"),None,Some(&serde_json::json!({"data":base64::engine::general_purpose::STANDARD.encode(invite)})))
                 .context("the person slot is in place, but the invite did not reach the inbox; register the person key and run grant again")?;
@@ -1528,111 +1539,6 @@ impl Store {
     }
 }
 
-/// The CLI commands use the same named-remote configuration as push and fetch.
-pub fn command(ctx: &Ctx, operation: &str, args: &[String]) -> Result<i32> {
-    let args = &crate::cmd::overlay_args(operation, args, &[("--caches", "--overlays")])?;
-    let spec = crate::args::Spec::new()
-        .value("--remote")
-        .flag("--files")
-        .flag("--json")
-        .flag("-n|--dry-run")
-        .flag("-q|--quiet")
-        .flag("--caches");
-    let a = crate::args::parse(&spec, args)?;
-    let name = a.get("--remote").context("name a remote with --remote <name>")?;
-    let h = crate::cmd::here(ctx)?;
-    h.repo.require(ctx, if operation == "gc" { "gc" } else { "fsck" })?;
-    let mut store = open_named(name, &h.repo)?;
-    store.connect(ctx)?;
-    match operation {
-        "fsck" if a.has("--caches") => {
-            // Read only: what a sweep would delete (`sweep`).
-            let (mut trees, mut bytes) = (0, 0);
-            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, true)? {
-                outln!(
-                    ctx,
-                    "remote {name} overlay {overlay}: {} unreachable cache state(s), {} part(s), {} bytes; {} unreachable chunk(s) in {} pack object(s), {} bytes; {} tree(s) with missing chunks; {} state(s) not known here kept",
-                    swept.trees.len(),
-                    swept.parts.len(),
-                    swept.bytes,
-                    swept.chunks,
-                    swept.packs.len(),
-                    swept.chunk_bytes,
-                    swept.missing,
-                    swept.unknown
-                );
-                trees += swept.trees.len() + swept.parts.len() + swept.packs.len() + swept.missing;
-                bytes += swept.bytes + swept.chunk_bytes;
-            }
-            outln!(ctx, "remote {name}: unreachable cache data: {trees} object(s), {bytes} bytes");
-            if trees > 0 {
-                return Ok(1);
-            }
-        }
-        "fsck" => {
-            let report = store.verify(a.has("--files"))?;
-            if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&report)?);
-            } else {
-                outln!(
-                    ctx,
-                    "remote {name}: {} records, {} states, {} verified files, {} overlaps",
-                    report.records,
-                    report.states,
-                    report.files,
-                    report.overlaps
-                );
-                for gap in &report.gaps {
-                    outln!(ctx, "gap: {gap}");
-                }
-            }
-            if !report.gaps.is_empty() {
-                return Ok(1);
-            }
-        }
-        "log" => {
-            for line in store.log()? {
-                if a.has("--json") {
-                    outln!(ctx, "{line}");
-                } else {
-                    let record = crate::oplog::parse_line(&line, None)?.record;
-                    for state in record.states {
-                        outln!(ctx, "{} {} {}", crate::ids::short(&state.id), state.time, state.message);
-                    }
-                }
-            }
-        }
-        "gc" => {
-            for (overlay, swept) in overlays::sweep_caches(&store, ctx, &h.repo, a.has("-n"))? {
-                if let Some(refused) = &swept.refused {
-                    eprintln!("warning: overlay {overlay}: the remote refused a delete ({refused}); the rest stays");
-                }
-                if !a.has("-q") && (!swept.trees.is_empty() || !swept.packs.is_empty()) {
-                    let verb = if a.has("-n") { "would delete" } else { "deleted" };
-                    outln!(
-                        ctx,
-                        "overlay {overlay}: {verb} {} dead cache state(s), {} bytes; {} dead chunk(s) in {} pack object(s), {} bytes; {} dead chunk(s) wait for a later pass",
-                        swept.trees.len(),
-                        swept.bytes,
-                        swept.chunks,
-                        swept.packs.len(),
-                        swept.chunk_bytes,
-                        swept.chunks_waiting
-                    );
-                }
-            }
-            let deleted = store.gc(a.has("-n"))?;
-            if a.has("--json") {
-                outln!(ctx, "{}", serde_json::to_string(&deleted)?);
-            } else if !a.has("-q") {
-                outln!(ctx, "{} {} orphan remote parts", if a.has("-n") { "would delete" } else { "deleted" }, deleted.len());
-            }
-        }
-        _ => bail!("unknown remote store operation"),
-    }
-    Ok(0)
-}
-
 /// The daemon's pass (docs/cache-overlays.md): for each project of the store at `root` and each of its
 /// store remotes, delete the dead cache states, so a remote that nobody pushes to loses them too. A
 /// remote that cannot be reached now is tried at the next pass.
@@ -1648,6 +1554,7 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             cwd: std::path::PathBuf::from("/"),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let Ok(repo) = Repo::open(&ctx, &project) else { continue };
@@ -1660,7 +1567,7 @@ pub fn sweep_tick(root: &std::path::Path, caller: crate::ctx::Caller) {
             .filter_map(|(k, _)| {
                 // A setting of this machine is `<key>@<machine>`.
                 let name = k.split('@').next()?.strip_prefix("cloud.remote.")?.strip_suffix(".url")?.to_string();
-                let url = crate::cmd::remote::remote_url(&repo, &name).ok()?;
+                let url = crate::remote_config::remote_url(&repo, &name).ok()?;
                 ["file://", "s3://", "layr+https://"].iter().any(|s| url.starts_with(s)).then_some(name)
             })
             .collect::<std::collections::BTreeSet<_>>()
@@ -1702,7 +1609,6 @@ pub(crate) fn validate_gateway_url(url: &str) -> Result<()> {
 mod pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    use crate::model::Record;
 
     #[test]
     fn changed_file_descriptor_stops_writer_fetch_clone_and_mount_before_encryption_or_decryption() {
@@ -1714,6 +1620,7 @@ mod pin_tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();
@@ -1721,6 +1628,7 @@ mod pin_tests {
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
             p: crate::store::Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -1729,14 +1637,21 @@ mod pin_tests {
             },
             ctx: None,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
-        repo.p.append(record, &ctx.actor()).unwrap();
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
-        store.save_pin(&ctx, &repo, "archive").unwrap();
+        crate::project_config::set_config(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo,
+            "cloud.remote.archive.url",
+            serde_json::json!(url),
+        )
+        .unwrap();
+        store.save_pin(&repo.p.lock_maintenance().unwrap(), &ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         let pin = store.pin.clone().unwrap();
         let attacker = keys::generate_identity();
@@ -1791,7 +1706,6 @@ mod pin_tests {
 mod mode_pin_tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
-    use crate::model::Record;
 
     #[test]
     fn a_pinned_secret_store_rewritten_as_plain_stops_fetch_and_push() {
@@ -1803,6 +1717,7 @@ mod mode_pin_tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         let dir = ctx.store.project_dir("p").unwrap();
@@ -1810,6 +1725,7 @@ mod mode_pin_tests {
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
             p: crate::store::Project {
+                lease: Default::default(),
                 store: &ctx.store,
                 name: "p".into(),
                 dir: dir.clone(),
@@ -1818,14 +1734,21 @@ mod mode_pin_tests {
             },
             ctx: None,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":project_id,"name":"p","config":{}});
-        repo.p.append(record, &ctx.actor()).unwrap();
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let url = format!("file://{}", root.join("remote").display());
         let mut store = open(&url, &repo).unwrap();
         store.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() }).unwrap();
-        crate::cmd::admin::set_config(&ctx, &repo, "cloud.remote.archive.url", serde_json::json!(url)).unwrap();
-        store.save_pin(&ctx, &repo, "archive").unwrap();
+        crate::project_config::set_config(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo,
+            "cloud.remote.archive.url",
+            serde_json::json!(url),
+        )
+        .unwrap();
+        store.save_pin(&repo.p.lock_maintenance().unwrap(), &ctx, &repo, "archive").unwrap();
         let mut store = open(&url, &repo).unwrap();
         assert_eq!(store.pin.as_ref().unwrap().mode, Mode::Secret);
         // Someone with write access to the folder rewrites store.json as a plain Private store.
@@ -1929,14 +1852,14 @@ fn own_line_moves(repo: &Repo, machine: &str) -> Result<std::collections::BTreeM
     type Move = ((i64, u64), String, Option<String>);
     let mut moves: std::collections::BTreeMap<String, Move> = Default::default();
     for line in repo.p.export_jsonl()?.lines() {
-        let record = crate::oplog::parse_line(line, None)?.record;
+        let record = crate::oplog::parse_line(line)?.record;
         if record.machine != machine {
             continue;
         }
         for (id, change) in &record.lines {
             let order = (record.time, record.seq);
             if moves.get(id).is_none_or(|(newest, ..)| order >= *newest) {
-                moves.insert(id.clone(), (order, record.id.clone(), change.after.as_ref().map(|after| after.head.clone())));
+                moves.insert(id.clone(), (order, record.id.clone(), change.after().map(|after| after.head.clone())));
             }
         }
     }
@@ -2058,7 +1981,7 @@ fn fetch_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
 #[cfg(test)]
 mod clone_head_tests {
     use super::*;
-    use crate::model::{LineChange, LineState, Record};
+    use crate::model::{LineChange, LineState};
 
     #[test]
     fn clone_uses_the_creator_head_after_a_later_foreign_adoption() -> Result<()> {
@@ -2076,36 +1999,50 @@ mod clone_head_tests {
         let new = crate::ids::new_id();
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
         let change = |head: &str, machine: &str| LineChange {
-            before: None,
-            after: Some(LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() }),
+            transition: crate::model::LineTransition::Create {
+                after: LineState { name: "main".into(), head: head.into(), owner: 501, machine: machine.into() },
+            },
             working_before: None,
             working_after: None,
         };
-        let mut creation = Record::new("project");
+        let mut creation = crate::model::Record::untrusted_preview("project");
         creation.project = project.clone();
         creation.machine = creator.clone();
-        creation.seq = 1;
+        creation.seq = 2;
         creation.time = 1;
         creation.data = serde_json::json!({"id":project,"name":"p","config":{}});
         creation.lines.insert(line.clone(), change(&old, &creator));
-        let mut update = Record::new("commit");
+        let mut update = crate::model::Record::untrusted_preview("commit");
         update.project = project.clone();
         update.machine = creator.clone();
-        update.seq = 2;
+        update.seq = 3;
         update.time = 2;
         update.lines.insert(line.clone(), change(&new, &creator));
-        let mut adoption = Record::new("line.adopt");
+        let mut adoption = crate::model::Record::untrusted_preview("line.adopt");
         adoption.project = project.clone();
         adoption.machine = peer.clone();
-        adoption.seq = 1;
+        adoption.seq = 2;
         adoption.time = 3;
         adoption.lines.insert(line.clone(), change(&old, &peer));
+        for machine in [&creator, &peer] {
+            let mut announcement = crate::model::Record::untrusted_preview("machine");
+            announcement.id = crate::ids::new_id();
+            announcement.project = project.clone();
+            announcement.machine = machine.clone();
+            announcement.seq = 1;
+            announcement.data = serde_json::json!({"public_key":hex::encode(key.verifying_key().to_bytes())});
+            db.test_insert_record(&announcement, &crate::oplog::sign_line(&announcement, &key)?)?;
+            db.test_derive(&announcement, &|_| false, &store.machine.id)?;
+        }
         for mut record in [creation, update, adoption] {
             record.id = crate::ids::new_id();
-            db.insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
-            db.derive(&record, &|_| false, &store.machine.id)?;
+            db.test_insert_record(&record, &crate::oplog::sign_line(&record, &key)?)?;
+            db.test_derive(&record, &|_| false, &store.machine.id)?;
         }
-        let mut repo = Repo { p: crate::store::Project { store: &store, name: "p".into(), dir, id: project, db }, ctx: None };
+        let mut repo = Repo {
+            p: crate::store::Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: project, db },
+            ctx: None,
+        };
         assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, old, "the foreign row reproduces the stale selection");
         let remote = open(&format!("file://{}", root.join("remote").display()), &repo)?;
         let selected = reader::clone_lines(&remote, &repo)?;
@@ -2113,24 +2050,32 @@ mod clone_head_tests {
         assert!(repo.p.db.line_heads(&line)?.contains(&(peer, old)), "the foreign head remains available");
         let caller = crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw());
         let local_head = crate::ids::new_id();
-        let mut own = Record::new("line.adopt");
+        let mut own = crate::model::Record::untrusted_preview("line.adopt");
         own.id = crate::ids::new_id();
         own.project = repo.p.id.clone();
         own.machine = store.machine.id.clone();
         own.seq = 1;
         own.time = 4;
         let mut own_change = change(&local_head, &store.machine.id);
-        own_change.after.as_mut().unwrap().owner = caller.uid;
+        (match &mut own_change.transition {
+            crate::model::LineTransition::Move { after, .. } | crate::model::LineTransition::Create { after } => after,
+            _ => panic!("fixture needs after"),
+        })
+        .owner = caller.uid;
         own.lines.insert(line.clone(), own_change);
-        repo.p.db.insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
-        repo.p.db.derive(&own, &|_| false, &store.machine.id)?;
+        repo.p.db.test_insert_record(&own, &crate::oplog::sign_line(&own, &store.machine.key)?)?;
+        repo.p.db.test_derive(&own, &|_| false, &store.machine.id)?;
         let local = repo.p.db.line_by_id(&line)?.unwrap();
         let working = repo.working(&local);
         std::fs::create_dir_all(&working)?;
         std::fs::write(working.join("keep"), "local work")?;
         let ctx = crate::ctx::Ctx {
-            store: crate::store::Store::open(&root.join("local"))?, caller,
-            cwd: root.clone(), env: Default::default(), author: Default::default(),
+            store: crate::store::Store::open(&root.join("local"))?,
+            caller,
+            cwd: root.clone(),
+            env: Default::default(),
+            author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
         assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected))?.is_empty());
@@ -2151,8 +2096,16 @@ mod clone_head_tests {
         const MERGED: &str = "01a1c000-0000-7000-8000-000000000005";
         const LINE: &str = "01a1c000-0000-7000-8000-000000000006";
         const QUEUE: &str = "01a1c000-0000-7000-8000-000000000007";
-        let signed = |machine: &str, seq: u64, time: i64, op: &str, data: Value, lines: Value, states: Value, key: &SigningKey| -> Result<String> {
-            let record: Record = serde_json::from_value(json!({
+        let signed = |machine: &str,
+                      seq: u64,
+                      time: i64,
+                      op: &str,
+                      data: Value,
+                      lines: Value,
+                      states: Value,
+                      key: &SigningKey|
+         -> Result<String> {
+            let record: crate::model::Record = serde_json::from_value(json!({
                 "id":crate::ids::new_id(),"project":PROJECT,"machine":machine,"seq":seq,"time":time,"op":op,
                 "actor":{"uid":1,"name":"fixture"},"data":data,"lines":lines,"states":states,
             }))?;
@@ -2166,31 +2119,98 @@ mod clone_head_tests {
             let store = crate::store::Store::open(&root.join("local"))?;
             let dir = store.project_dir("p")?;
             std::fs::create_dir_all(dir.join("meta/db"))?;
-            let mut repo = Repo { p: crate::store::Project { store: &store, name:"p".into(), dir:dir.clone(), id:PROJECT.into(), db:crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))? }, ctx:None };
-            let owner = SigningKey::from_bytes(&[7;32]);
-            let merger = SigningKey::from_bytes(&[8;32]);
+            let mut repo = Repo {
+                p: crate::store::Project {
+                    lease: Default::default(),
+                    store: &store,
+                    name: "p".into(),
+                    dir: dir.clone(),
+                    id: PROJECT.into(),
+                    db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+                },
+                ctx: None,
+            };
+            let owner = SigningKey::from_bytes(&[7; 32]);
+            let merger = SigningKey::from_bytes(&[8; 32]);
             let mut trust = json!({"machine":MERGER,"public_key":hex::encode(merger.verifying_key().to_bytes())});
-            if let Some(role) = role { trust["role"] = json!(role); }
-            let pending = json!({"id":QUEUE,"into":"main","target_line":LINE,"state":MERGED,"added_by":1,"time":4,"status":"pending"});
+            if let Some(role) = role {
+                trust["role"] = json!(role);
+            }
+            let pending =
+                json!({"id":QUEUE,"into":"main","target_line":LINE,"state":MERGED,"added_by":1,"time":4,"status":"pending"});
             let mut done = pending.clone();
-            done["status"] = json!("done"); done["result"] = json!(MERGED);
+            done["status"] = json!("done");
+            done["result"] = json!(MERGED);
             let records = vec![
-                signed(OWNER,1,1,"machine",json!({"public_key":hex::encode(owner.verifying_key().to_bytes())}),json!({}),json!([]),&owner)?,
-                signed(MERGER,1,1,"machine",json!({"public_key":hex::encode(merger.verifying_key().to_bytes())}),json!({}),json!([]),&merger)?,
-                signed(OWNER,2,2,"project",json!({"id":PROJECT,"name":"p","config":{"queue.merge-machine":MERGER}}),json!({LINE:{"before":null,"after":head(BASE,OWNER)}}),json!([state(BASE,vec![])]),&owner)?,
-                signed(OWNER,3,3,"machine.trust",trust,json!({}),json!([]),&owner)?,
-                signed(OWNER,4,4,"queue.add",json!({"queue_change":{"id":QUEUE,"before":null,"after":pending}}),json!({}),json!([]),&owner)?,
-                signed(MERGER,2,5,"queue.result",json!({"queue_change":{"id":QUEUE,"before":pending,"after":done}}),json!({LINE:{"before":head(BASE,OWNER),"after":head(MERGED,OWNER)}}),json!([state(MERGED,vec![BASE])]),&merger)?,
-                signed(MERGER,3,6,"line.adopt",json!({"line":LINE}),json!({LINE:{"before":head(MERGED,OWNER),"after":head(BASE,MERGER)}}),json!([]),&merger)?,
+                signed(
+                    OWNER,
+                    1,
+                    1,
+                    "machine",
+                    json!({"public_key":hex::encode(owner.verifying_key().to_bytes())}),
+                    json!({}),
+                    json!([]),
+                    &owner,
+                )?,
+                signed(
+                    MERGER,
+                    1,
+                    1,
+                    "machine",
+                    json!({"public_key":hex::encode(merger.verifying_key().to_bytes())}),
+                    json!({}),
+                    json!([]),
+                    &merger,
+                )?,
+                signed(
+                    OWNER,
+                    2,
+                    2,
+                    "project",
+                    json!({"id":PROJECT,"name":"p","config":{"queue.merge-machine":MERGER}}),
+                    json!({LINE:{"before":null,"after":head(BASE,OWNER)}}),
+                    json!([state(BASE, vec![])]),
+                    &owner,
+                )?,
+                signed(OWNER, 3, 3, "machine.trust", trust, json!({}), json!([]), &owner)?,
+                signed(
+                    OWNER,
+                    4,
+                    4,
+                    "queue.add",
+                    json!({"queue_change":{"id":QUEUE,"before":null,"after":pending}}),
+                    json!({}),
+                    json!([]),
+                    &owner,
+                )?,
+                signed(
+                    MERGER,
+                    2,
+                    5,
+                    "queue.result",
+                    json!({"queue_change":{"id":QUEUE,"before":pending,"after":done}}),
+                    json!({LINE:{"before":head(BASE,OWNER),"after":head(MERGED,OWNER)}}),
+                    json!([state(MERGED, vec![BASE])]),
+                    &merger,
+                )?,
+                signed(
+                    MERGER,
+                    3,
+                    6,
+                    "line.adopt",
+                    json!({"line":LINE}),
+                    json!({LINE:{"before":head(MERGED,OWNER),"after":head(BASE,MERGER)}}),
+                    json!([]),
+                    &merger,
+                )?,
             ];
-            repo.p.import_lines(&records, crate::store::Trust::All)?;
-            let remote = open(&format!("file://{}",root.join("remote").display()), &repo)?;
+            repo.p.lock_maintenance().unwrap().import_lines(&records, crate::store::Trust::All)?;
+            let remote = open(&format!("file://{}", root.join("remote").display()), &repo)?;
             let lines = reader::clone_lines(&remote, &repo)?;
-            assert_eq!(lines.iter().find(|line| line.id==LINE).unwrap().head, MERGED, "role {role:?}");
+            assert_eq!(lines.iter().find(|line| line.id == LINE).unwrap().head, MERGED, "role {role:?}");
             drop(repo);
             std::fs::remove_dir_all(root)?;
         }
         Ok(())
     }
-
 }

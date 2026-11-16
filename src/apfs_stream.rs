@@ -8,40 +8,10 @@ use std::{
     path::Path,
 };
 
-// btrfs uses CRC32C with zero seed and no final inversion.
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            c = (c >> 1) ^ (0x82f63b78u32 & 0u32.wrapping_sub(c & 1));
-            bit += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-};
-fn crc(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |c, b| (c >> 8) ^ CRC_TABLE[((c as u8) ^ b) as usize])
-}
+use layr_stream_codec::{CommandHeader, DecodeLimits, ReceiveDecoder, Version};
 
 fn command(out: &mut dyn Write, code: u16, attrs: &[(u16, &[u8])]) -> Result<()> {
-    let mut v = vec![0; 10];
-    for &(t, value) in attrs {
-        let len = u16::try_from(value.len()).context("stream attribute exceeds 64 KiB")?;
-        v.extend(t.to_le_bytes());
-        v.extend(len.to_le_bytes());
-        v.extend(value);
-    }
-    let len = (v.len() - 10) as u32;
-    v[..4].copy_from_slice(&len.to_le_bytes());
-    v[4..6].copy_from_slice(&code.to_le_bytes());
-    let checksum = crc(&v);
-    v[6..10].copy_from_slice(&checksum.to_le_bytes());
-    out.write_all(&v)?;
+    out.write_all(&layr_stream_codec::encode_command(code, attrs, DecodeLimits::default())?)?;
     Ok(())
 }
 fn time(sec: i64, nano: i64) -> Vec<u8> {
@@ -52,15 +22,17 @@ fn time(sec: i64, nano: i64) -> Vec<u8> {
 /// Send the immutable tree `root`. With a `parent` that the receiver has (`parent_uuid` names
 /// it), the stream holds only the differences; a tree with hard links is sent complete.
 pub fn send(root: &Path, parent: Option<(&Path, &str)>, out: &mut dyn Write) -> Result<()> {
-    let info = crate::storage::subvol_info(root)?;
+    let info = crate::fs::host().namespace.info(root)?;
     if !info.readonly {
         bail!("only immutable snapshots can be sent");
     }
     let uuid = uuid::Uuid::parse_str(info.received_uuid.as_deref().unwrap_or(&info.uuid))?;
     let name = root.file_name().context("snapshot has no name")?.as_bytes();
     let plan = match parent {
-        Some((p, id)) => plan(p, root)?.map(|plan| (uuid::Uuid::parse_str(id), plan)),
-        None => None,
+        Some((p, id)) if p.is_dir() && crate::fs::host().namespace.info(p).is_ok_and(|info| info.readonly) => {
+            plan(p, root)?.map(|plan| (uuid::Uuid::parse_str(id), plan))
+        }
+        _ => None,
     };
     out.write_all(b"btrfs-stream\0\x01\0\0\0")?;
     match plan {
@@ -217,168 +189,79 @@ struct Plan {
     meta: Vec<(String, Vec<Vec<u8>>)>,
 }
 
-/// The plan from `parent` to `child`, or `None` when a complete stream must be sent.
-#[cfg(target_os = "macos")]
+/// Request complete state evidence from the same reader comparison used by save/status.
+/// Native codecs execute the resulting plan; backend identity never selects the algorithm.
 fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
     use crate::fsutil::FType;
-    if !parent.is_dir() || !crate::storage::subvol_info(parent).is_ok_and(|i| i.readonly) {
-        return Ok(None);
-    }
-    let a = crate::storage::scan_with_data(parent, true)?;
-    let b = crate::storage::scan_with_data(child, true)?;
-    // Hard links need the inode map of a complete stream.
-    if a.values().chain(b.values()).any(|e| e.meta.ftype == FType::File && e.nlink > 1) {
-        return Ok(None);
-    }
-    let same_content = |rel: &str, x: &crate::storage::ScanEntry, y: &crate::storage::ScanEntry| -> Result<bool> {
-        if x.meta.size != y.meta.size {
-            return Ok(false);
-        }
-        // A shared clone with valid change counters holds the same data, as in `candidates`.
-        let shared = x.fingerprint.0 == y.fingerprint.0
-            && x.data.zip(y.data).is_some_and(|(d, e)| {
-                d.generation.is_some() && e.generation.is_some() && d.clone_id.is_some() && d.clone_id == e.clone_id
-            });
-        if shared {
-            return Ok(true);
-        }
-        // Compare in blocks: a large file never sits in memory.
-        let (mut f, mut g) = (File::open(parent.join(rel))?, File::open(child.join(rel))?);
-        let (mut p, mut q) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
-        loop {
-            let n = f.read(&mut p)?;
-            if n == 0 {
-                return Ok(true);
-            }
-            g.read_exact(&mut q[..n])?;
-            if p[..n] != q[..n] {
-                return Ok(false);
-            }
-        }
-    };
-    let mut gone = Vec::new();
-    let mut fresh = std::collections::BTreeSet::new();
-    for (rel, y) in &b {
-        if rel.is_empty() {
-            continue;
-        }
-        let renew = match a.get(rel) {
-            None => true,
-            Some(x) if x.meta.ftype != y.meta.ftype => true,
-            Some(x) if y.meta.ftype == FType::File => !same_content(rel, x, y)?,
-            Some(_) if y.meta.ftype == FType::Symlink => fs::read_link(parent.join(rel))? != fs::read_link(child.join(rel))?,
-            Some(_) => false,
-        };
-        if renew {
-            fresh.insert(rel.clone());
-            if a.contains_key(rel) {
-                gone.push(rel.clone());
-            }
-        }
-    }
-    gone.extend(a.keys().filter(|rel| !rel.is_empty() && !b.contains_key(*rel)).cloned());
-    // A removed path takes its content with it; the receiver removes each entry.
-    let mut remove = std::collections::BTreeSet::new();
-    for g in &gone {
-        let prefix = format!("{g}/");
-        remove.insert(g.clone());
-        remove.extend(a.range(prefix.clone()..).map(|(k, _)| k).take_while(|k| k.starts_with(&prefix)).cloned());
-    }
-    // The receiver removes and makes entries in their folders, which changes the folder times:
-    // those folders get their times again.
-    let touched: std::collections::BTreeSet<&str> =
-        remove.iter().chain(&fresh).map(|r| r.rsplit_once('/').map(|(d, _)| d).unwrap_or("")).collect();
-    let mut meta = Vec::new();
-    for (rel, y) in &b {
-        if fresh.contains(rel) {
-            meta.push((rel.clone(), Vec::new()));
-            continue;
-        }
-        let Some(x) = a.get(rel) else { continue };
-        let names = |x: &Path| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-            Ok(stream_xattrs(x, &fs::symlink_metadata(x)?)?.into_iter().collect())
-        };
-        let (old, new) = (names(&parent.join(rel))?, names(&child.join(rel))?);
-        let changed = x.meta.mode != y.meta.mode
-            || (x.fingerprint.4, x.fingerprint.5) != (y.fingerprint.4, y.fingerprint.5)
-            || old != new
-            || touched.contains(rel.as_str());
-        if changed {
-            meta.push((rel.clone(), old.keys().filter(|k| !new.contains_key(*k)).cloned().collect()));
-        }
-    }
-    let remove = remove.into_iter().rev().map(|r| (r.clone(), a[&r].meta.ftype == FType::Dir)).collect();
-    Ok(Some(Plan { remove, create: fresh.into_iter().collect(), meta }))
-}
-
-#[cfg(feature = "overlayfs")]
-fn same_content(a: &Path, b: &Path) -> Result<bool> {
-    let (mut a, mut b) = (File::open(a)?, File::open(b)?);
-    let (mut x, mut y) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
-    loop {
-        let n = a.read(&mut x)?;
-        if n == 0 {
-            return Ok(true);
-        }
-        b.read_exact(&mut y[..n])?;
-        if x[..n] != y[..n] {
-            return Ok(false);
-        }
-    }
-}
-
-/// The plan from `parent` to `child` on OverlayFS. Both trees are layers over shared lower
-/// layers, so only the paths that their own layers hold can differ (`changed_paths`). Without
-/// a shared layer, and for hard links, a complete stream is sent.
-#[cfg(feature = "overlayfs")]
-fn plan(parent: &Path, child: &Path) -> Result<Option<Plan>> {
-    let Some(names) = crate::storage::changed_paths(parent, child)? else {
-        return Ok(None);
-    };
+    use layr_fs_core::{RelDir, RelPath, TreeRead};
+    let before = crate::source::Source::native(parent);
+    let after = crate::source::Source::native(child);
+    let changes = crate::changes::state_changes(&before, &after)?;
     let mut remove = BTreeMap::new();
     let mut create = std::collections::BTreeSet::new();
-    let mut dirs = vec![String::new()];
-    let mut kept = Vec::new();
-    for rel in &names {
-        let (old, new) = (fs::symlink_metadata(parent.join(rel)).ok(), fs::symlink_metadata(child.join(rel)).ok());
-        match (old, new) {
-            (None, None) => {}
-            (Some(o), None) => {
-                remove.insert(rel.clone(), o.is_dir());
-            }
-            (None, Some(_)) => {
-                create.insert(rel.clone());
-            }
-            (Some(o), Some(n)) if o.is_dir() && n.is_dir() => dirs.push(rel.clone()),
-            (Some(o), Some(n)) => {
-                // The receiver keeps a file only when its content is proven equal. Times can be
-                // restored by tools, so they prove nothing.
-                let same = if n.is_file() {
-                    o.is_file() && o.len() == n.len() && same_content(&parent.join(rel), &child.join(rel))?
-                } else if n.file_type().is_symlink() {
-                    o.file_type().is_symlink() && fs::read_link(parent.join(rel))? == fs::read_link(child.join(rel))?
-                } else {
-                    false
-                };
-                if same {
-                    // Keep the file, send its attributes, mode and times again.
-                    kept.push(rel.clone());
-                } else {
-                    remove.insert(rel.clone(), o.is_dir());
-                    create.insert(rel.clone());
-                }
+    let mut attributes = std::collections::BTreeSet::from([String::new()]);
+    for change in &changes {
+        let relative = RelPath::new(change.path().as_bytes())?;
+        let at = RelDir::Path(relative.clone());
+        for metadata in [before.metadata(&at)?, after.metadata(&at)?].into_iter().flatten() {
+            // Unchanged groups outside complete evidence remain in the received parent.
+            // A touched link group needs the inode map of a full stream.
+            if metadata.kind == FType::File && metadata.link.is_some_and(|link| link.count > 1) {
+                return Ok(None);
             }
         }
+        let renew = match (change.old(), change.new()) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(old), Some(new)) if old.ftype != new.ftype => true,
+            (Some(old), Some(new)) if old.is_file() => {
+                !(old.size == new.size && matches!(change.data(), crate::compare::DataEvidence::Equal))
+                    && !crate::fsutil::same_entry_observed((&before, change.path(), old), (&after, change.path(), new), None)?
+            }
+            (Some(_), Some(new)) if new.ftype == FType::Symlink => before.read_link(&relative)? != after.read_link(&relative)?,
+            _ => false,
+        };
+        if change.old().is_some() && (change.new().is_none() || renew) {
+            if change.old().is_some_and(|metadata| metadata.is_dir()) {
+                layr_fs_common::walk(&before, &at, &mut |path, metadata| {
+                    remove.insert(path.utf8()?.to_owned(), metadata.kind == FType::Dir);
+                    Ok(true)
+                })?;
+            }
+            remove.insert(change.path().clone(), change.old().is_some_and(|metadata| metadata.is_dir()));
+        }
+        if renew {
+            create.insert(change.path().clone());
+        }
+        if change.new().is_some() {
+            attributes.insert(change.path().clone());
+        }
     }
-    let attrs = |p: &Path| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-        Ok(stream_xattrs(p, &fs::symlink_metadata(p)?)?.into_iter().collect())
+    // Namespace edits change directory times. Restore every surviving ancestor, including
+    // ancestors absent from the data candidates supplied by a native hint.
+    for path in remove.keys().chain(&create) {
+        let mut parent = path.as_str();
+        while let Some((ancestor, _)) = parent.rsplit_once('/') {
+            attributes.insert(ancestor.to_owned());
+            parent = ancestor;
+        }
+    }
+    let xattrs = |path: &Path| -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        Ok(stream_xattrs(path, &fs::symlink_metadata(path)?)?.into_iter().collect())
     };
     let mut meta = Vec::new();
-    for rel in &dirs {
-        let (old, new) = (attrs(&parent.join(rel))?, attrs(&child.join(rel))?);
-        meta.push((rel.clone(), old.keys().filter(|k| !new.contains_key(*k)).cloned().collect()));
+    for path in attributes {
+        if after.kind(&RelDir::from_bytes(path.as_bytes())?)?.is_none() {
+            continue;
+        }
+        let new = xattrs(&child.join(&path))?;
+        let old = if !create.contains(&path) && before.kind(&RelDir::from_bytes(path.as_bytes())?)?.is_some() {
+            xattrs(&parent.join(&path))?
+        } else {
+            BTreeMap::new()
+        };
+        meta.push((path, old.keys().filter(|name| !new.contains_key(*name)).cloned().collect()));
     }
-    meta.extend(create.iter().chain(&kept).map(|rel| (rel.clone(), Vec::new())));
     Ok(Some(Plan { remove: remove.into_iter().rev().collect(), create: create.into_iter().collect(), meta }))
 }
 
@@ -397,17 +280,8 @@ fn send_plan(root: &Path, plan: &Plan, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn value<'a>(attrs: &[(u16, &'a [u8])], key: u16) -> Result<&'a [u8]> {
-    attrs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).with_context(|| format!("stream missing attribute {key}"))
-}
-fn number(attrs: &[(u16, &[u8])], key: u16) -> Result<u64> {
-    Ok(u64::from_le_bytes(value(attrs, key)?.try_into().context("invalid integer")?))
-}
 fn path(root: &Path, bytes: &[u8], follow: bool) -> Result<std::path::PathBuf> {
     let rel = std::str::from_utf8(bytes)?;
-    if bytes.contains(&0) {
-        bail!("NUL in stream path");
-    }
     let p = crate::fsutil::safe_join(root, rel)?;
     if follow && fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("stream operation follows a symbolic link");
@@ -416,249 +290,240 @@ fn path(root: &Path, bytes: &[u8], follow: bool) -> Result<std::path::PathBuf> {
 }
 /// Validate before applying. All writes stay in a private temporary directory.
 /// Only a complete, sealed tree becomes visible under its state name.
-pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::recv::Expect) -> Result<()> {
+pub fn receive(src: &mut dyn Read, dir: &Path, expected: &crate::receive_stream::Expect) -> Result<()> {
     use std::{
         io::{Seek, SeekFrom},
-        os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
     };
     let staging = dir.join(format!(".receive-{}", crate::ids::new_id()));
-    fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    let staging_owner = crate::repo::Temp::directory(staging.clone(), 0o700)?;
     let result = (|| -> Result<()> {
         let mut spool =
             fs::OpenOptions::new().create_new(true).read(true).write(true).mode(0o600).open(staging.join("stream"))?;
-        let parent = crate::recv::check(src, &mut spool, expected)?;
+        let parent = crate::receive_stream::check(src, &mut spool, expected)?;
         spool.seek(SeekFrom::Start(0))?;
-        let root = staging.join("tree");
+        let root = dir.join(format!(".receive-tree-{}", crate::ids::new_id()));
         let mut head = [0; 17];
         spool.read_exact(&mut head)?;
-        let version = u32::from_le_bytes(head[13..].try_into()?);
-        if version > 2 {
+        let version = Version::decode(&head)?;
+        if version.number() > 2 {
             bail!("portable receive supports send stream versions 1 and 2");
         }
-        if let Some(p) = &parent {
-            crate::storage::snapshot(p, &root, false)?;
-        } else {
-            crate::storage::create_subvolume(&root)?;
-        }
-        // Delay permissions until all content is in place. Key by inode to survive renames.
-        let mut modes = BTreeMap::new();
-        fn prepare(p: &Path, modes: &mut BTreeMap<u64, u32>) -> Result<()> {
-            let m = fs::symlink_metadata(p)?;
-            if m.file_type().is_symlink() {
-                return Ok(());
-            }
-            modes.insert(m.ino(), m.mode() & 0o7777);
-            fs::set_permissions(p, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
-            if m.is_dir() {
-                for e in fs::read_dir(p)? {
-                    prepare(&e?.path(), modes)?;
+        let working = match &parent {
+            Some(parent) => crate::repo::Temp::capture(
+                parent,
+                root.clone(),
+                crate::fs::Protection::Writable,
+                crate::fs::CapturePurpose::State,
+            )?,
+            None => crate::repo::Temp::empty(root.clone())?,
+        };
+        let replay = (|| -> Result<_> {
+            // Delay permissions until all content is in place. Key by inode to survive renames.
+            let mut modes = BTreeMap::new();
+            fn prepare(p: &Path, modes: &mut BTreeMap<u64, u32>) -> Result<()> {
+                let m = fs::symlink_metadata(p)?;
+                if m.file_type().is_symlink() {
+                    return Ok(());
                 }
+                modes.insert(m.ino(), m.mode() & 0o7777);
+                fs::set_permissions(p, fs::Permissions::from_mode((m.mode() & 0o7777) | 0o700))?;
+                if m.is_dir() {
+                    for e in fs::read_dir(p)? {
+                        prepare(&e?.path(), modes)?;
+                    }
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        prepare(&root, &mut modes)?;
-        let mut times: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
-        loop {
-            let mut hdr = [0; 10];
-            spool.read_exact(&mut hdr)?;
-            let len = u32::from_le_bytes(hdr[..4].try_into()?) as usize;
-            if len > 16 << 20 {
-                bail!("stream command exceeds limit");
-            }
-            let code = u16::from_le_bytes(hdr[4..6].try_into()?);
-            let checksum = u32::from_le_bytes(hdr[6..10].try_into()?);
-            let mut body = vec![0; len];
-            spool.read_exact(&mut body)?;
-            hdr[6..].fill(0);
-            let mut checked = hdr.to_vec();
-            checked.extend(&body);
-            if crc(&checked) != checksum {
-                bail!("stream checksum mismatch");
-            }
-            let at = crate::recv::attrs(&body, version)?;
-            if code == 1 || code == 2 {
-                continue;
-            }
-            if code == 21 {
-                break;
-            }
-            let p = path(&root, value(&at, 15)?, !matches!(code, 8..=14 | 19 | 20))?;
-            // On a volume that ignores case, README and Readme are one entry: refuse instead of
-            // failing on an unclear error or replacing the other entry.
-            let clash = |q: &Path| -> Result<()> {
-                if let Some(stored) = crate::fsutil::case_clash(q) {
-                    bail!(
+            prepare(&root, &mut modes)?;
+            let mut times: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
+            let limits = DecodeLimits::default();
+            let mut decoder = ReceiveDecoder::new(version, limits);
+            loop {
+                let mut hdr = [0; 10];
+                spool.read_exact(&mut hdr)?;
+                let frame = CommandHeader::decode(&hdr, limits)?;
+                let mut body = vec![0; frame.body_len()];
+                spool.read_exact(&mut body)?;
+                let command = decoder.decode(frame, &body)?;
+                let code = command.code();
+                if code == 1 || code == 2 {
+                    continue;
+                }
+                if code == 21 {
+                    decoder.finish()?;
+                    break;
+                }
+                let p = path(&root, command.value(15)?, !matches!(code, 8..=14 | 19 | 20))?;
+                // On a volume that ignores case, README and Readme are one entry: refuse instead of
+                // failing on an unclear error or replacing the other entry.
+                let clash = |q: &Path| -> Result<()> {
+                    if let Some(stored) = crate::fsutil::case_clash(q) {
+                        bail!(
                         "{} and {stored} differ only in case, and this volume does not tell them apart; use a case-sensitive APFS volume for the store",
                         q.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                     );
+                    }
+                    Ok(())
+                };
+                if matches!(code, 3 | 4 | 8 | 10) {
+                    clash(&p)?;
+                }
+                match code {
+                    3 => {
+                        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p)?;
+                    }
+                    4 => {
+                        fs::create_dir(&p)?;
+                    }
+                    8 => {
+                        std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(command.value(17)?), &p)?;
+                    }
+                    9 => {
+                        let to = path(&root, command.value(16)?, false)?;
+                        // A rename of an entry to another case of its own name is no clash: the
+                        // entry that `to` finds is `p` itself, in the same folder.
+                        let itself = to.parent() == p.parent()
+                            && crate::fsutil::case_clash(&to).is_some_and(|s| p.file_name() == Some(s.as_ref()));
+                        if !itself {
+                            clash(&to)?;
+                        }
+                        fs::rename(&p, to)?;
+                    }
+                    10 => {
+                        let from = path(&root, command.value(17)?, true)?;
+                        if !fs::symlink_metadata(&from)?.is_file() {
+                            bail!("hardlink source is not a file");
+                        }
+                        fs::hard_link(from, &p)?;
+                    }
+                    11 => fs::remove_file(&p)?,
+                    12 => fs::remove_dir(&p)?,
+                    13 | 14 => {
+                        let raw = command.value(13)?;
+                        if raw.starts_with(b"system.posix_acl_") || raw.starts_with(b"security.") {
+                            bail!("APFS cannot enforce the Linux security attribute {}", String::from_utf8_lossy(raw));
+                        }
+                        #[cfg(target_os = "macos")]
+                        let name = if let Some(encoded) =
+                            raw.strip_prefix(b"user.layr.apfs.").or_else(|| raw.strip_prefix(b"trusted.layr.apfs."))
+                        {
+                            hex::decode(encoded)?
+                        } else {
+                            raw.to_vec()
+                        };
+                        #[cfg(feature = "overlayfs")]
+                        let name = {
+                            if !raw.starts_with(b"user.") {
+                                bail!("unsupported portable attribute namespace");
+                            }
+                            raw.to_vec()
+                        };
+                        if name == b"com.layr.subvolume"
+                            || name == b"com.layr.origin"
+                            || name == b"trusted.layr.origin"
+                            || name == b"trusted.layr.cache-restore"
+                        {
+                            bail!("stream cannot set internal APFS metadata");
+                        }
+                        let name = std::ffi::CString::new(name)?;
+                        if code == 13 {
+                            crate::stream_fs::attribute(&p, &name, Some(command.value(14)?))?;
+                        } else {
+                            crate::stream_fs::remove_attribute(&p, &name)?;
+                        }
+                    }
+                    15 => {
+                        let mut f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
+                        f.seek(SeekFrom::Start(command.number(18)?))?;
+                        f.write_all(command.value(19)?)?;
+                    }
+                    16 => {
+                        let source_id = uuid::Uuid::from_slice(command.value(20)?)?.to_string();
+                        let source_root = if source_id == expected.uuid {
+                            root.clone()
+                        } else if let Some(p) = (expected.parent)(&source_id) {
+                            p
+                        } else {
+                            expected
+                                .clones
+                                .iter()
+                                .find(|(u, _, _)| *u == source_id)
+                                .map(|(_, _, p)| p.clone())
+                                .context("clone source unavailable")?
+                        };
+                        let from = path(&source_root, command.value(22)?, true)?;
+                        if !fs::metadata(&from)?.is_file() {
+                            bail!("clone source is not a file");
+                        }
+                        let mut input = File::open(from)?;
+                        let mut output = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
+                        let len = command.number(24)?;
+                        let start = command.number(23)?;
+                        if start.checked_add(len).is_none_or(|end| end > input.metadata().map(|m| m.len()).unwrap_or(0)) {
+                            bail!("clone range exceeds source");
+                        }
+                        input.seek(SeekFrom::Start(start))?;
+                        output.seek(SeekFrom::Start(command.number(18)?))?;
+                        if std::io::copy(&mut input.take(len), &mut output)? != len {
+                            bail!("short clone source");
+                        }
+                    }
+                    17 => {
+                        fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?.set_len(command.number(4)?)?
+                    }
+                    18 => {
+                        modes.insert(fs::symlink_metadata(&p)?.ino(), (command.number(5)? & 0o7777) as u32);
+                    }
+                    // Numeric owners do not identify the same user on two machines.
+                    // APFS stores belong to the local user; worktree access is applied by layr.
+                    19 => {}
+                    20 => {
+                        let t = command.value(10)?;
+                        let sec = i64::from_le_bytes(t[..8].try_into()?);
+                        let ns = u32::from_le_bytes(t[8..].try_into()?);
+                        times.insert(fs::symlink_metadata(&p)?.ino(), (sec, ns as i64));
+                    }
+                    _ => bail!("portable receive cannot apply stream command {code}"),
+                }
+            }
+            fn finish(p: &Path, modes: &BTreeMap<u64, u32>, times: &BTreeMap<u64, (i64, i64)>) -> Result<()> {
+                let m = fs::symlink_metadata(p)?;
+                if m.is_dir() {
+                    for e in fs::read_dir(p)? {
+                        finish(&e?.path(), modes, times)?;
+                    }
+                }
+                if let Some(&(s, n)) = times.get(&m.ino()) {
+                    crate::stream_fs::mtime(p, s, n)?;
+                }
+                if !m.file_type().is_symlink() {
+                    if let Some(&mode) = modes.get(&m.ino()) {
+                        fs::set_permissions(p, fs::Permissions::from_mode(mode))?;
+                    }
                 }
                 Ok(())
-            };
-            if matches!(code, 3 | 4 | 8 | 10) {
-                clash(&p)?;
             }
-            match code {
-                3 => {
-                    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p)?;
-                }
-                4 => {
-                    fs::create_dir(&p)?;
-                }
-                8 => {
-                    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(value(&at, 17)?), &p)?;
-                }
-                9 => {
-                    let to = path(&root, value(&at, 16)?, false)?;
-                    // A rename of an entry to another case of its own name is no clash: the
-                    // entry that `to` finds is `p` itself, in the same folder.
-                    let itself = to.parent() == p.parent()
-                        && crate::fsutil::case_clash(&to).is_some_and(|s| p.file_name() == Some(s.as_ref()));
-                    if !itself {
-                        clash(&to)?;
-                    }
-                    fs::rename(&p, to)?;
-                }
-                10 => {
-                    let from = path(&root, value(&at, 17)?, true)?;
-                    if !fs::symlink_metadata(&from)?.is_file() {
-                        bail!("hardlink source is not a file");
-                    }
-                    fs::hard_link(from, &p)?;
-                }
-                11 => fs::remove_file(&p)?,
-                12 => fs::remove_dir(&p)?,
-                13 | 14 => {
-                    let raw = value(&at, 13)?;
-                    if raw.starts_with(b"system.posix_acl_") || raw.starts_with(b"security.") {
-                        bail!("APFS cannot enforce the Linux security attribute {}", String::from_utf8_lossy(raw));
-                    }
-                    #[cfg(target_os = "macos")]
-                    let name = if let Some(encoded) =
-                        raw.strip_prefix(b"user.layr.apfs.").or_else(|| raw.strip_prefix(b"trusted.layr.apfs."))
-                    {
-                        hex::decode(encoded)?
-                    } else {
-                        raw.to_vec()
-                    };
-                    #[cfg(feature = "overlayfs")]
-                    let name = {
-                        if !raw.starts_with(b"user.") {
-                            bail!("unsupported portable attribute namespace");
-                        }
-                        raw.to_vec()
-                    };
-                    if name == b"com.layr.subvolume"
-                        || name == b"com.layr.origin"
-                        || name == b"trusted.layr.origin"
-                        || name == b"trusted.layr.cache-restore"
-                    {
-                        bail!("stream cannot set internal APFS metadata");
-                    }
-                    let name = std::ffi::CString::new(name)?;
-                    if code == 13 {
-                        crate::stream_fs::attribute(&p, &name, Some(value(&at, 14)?))?;
-                    } else {
-                        crate::stream_fs::remove_attribute(&p, &name)?;
-                    }
-                }
-                15 => {
-                    let mut f = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
-                    f.seek(SeekFrom::Start(number(&at, 18)?))?;
-                    f.write_all(value(&at, 19)?)?;
-                }
-                16 => {
-                    let source_id = uuid::Uuid::from_slice(value(&at, 20)?)?.to_string();
-                    let source_root = if source_id == expected.uuid {
-                        root.clone()
-                    } else if let Some(p) = (expected.parent)(&source_id) {
-                        p
-                    } else {
-                        expected
-                            .clones
-                            .iter()
-                            .find(|(u, _, _)| *u == source_id)
-                            .map(|(_, _, p)| p.clone())
-                            .context("clone source unavailable")?
-                    };
-                    let from = path(&source_root, value(&at, 22)?, true)?;
-                    if !fs::metadata(&from)?.is_file() {
-                        bail!("clone source is not a file");
-                    }
-                    let mut input = File::open(from)?;
-                    let mut output = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?;
-                    let len = number(&at, 24)?;
-                    let start = number(&at, 23)?;
-                    if start.checked_add(len).is_none_or(|end| end > input.metadata().map(|m| m.len()).unwrap_or(0)) {
-                        bail!("clone range exceeds source");
-                    }
-                    input.seek(SeekFrom::Start(start))?;
-                    output.seek(SeekFrom::Start(number(&at, 18)?))?;
-                    if std::io::copy(&mut input.take(len), &mut output)? != len {
-                        bail!("short clone source");
-                    }
-                }
-                17 => fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&p)?.set_len(number(&at, 4)?)?,
-                18 => {
-                    modes.insert(fs::symlink_metadata(&p)?.ino(), (number(&at, 5)? & 0o7777) as u32);
-                }
-                // Numeric owners do not identify the same user on two machines.
-                // APFS stores belong to the local user; worktree access is applied by layr.
-                19 => {
-                    number(&at, 6)?;
-                    number(&at, 7)?;
-                }
-                20 => {
-                    let t = value(&at, 10)?;
-                    if t.len() != 12 {
-                        bail!("invalid stream time");
-                    }
-                    let sec = i64::from_le_bytes(t[..8].try_into()?);
-                    let ns = u32::from_le_bytes(t[8..].try_into()?);
-                    if ns >= 1_000_000_000 {
-                        bail!("invalid nanoseconds");
-                    }
-                    times.insert(fs::symlink_metadata(&p)?.ino(), (sec, ns as i64));
-                }
-                _ => bail!("portable receive cannot apply stream command {code}"),
-            }
-        }
-        fn finish(p: &Path, modes: &BTreeMap<u64, u32>, times: &BTreeMap<u64, (i64, i64)>) -> Result<()> {
-            let m = fs::symlink_metadata(p)?;
-            if m.is_dir() {
-                for e in fs::read_dir(p)? {
-                    finish(&e?.path(), modes, times)?;
-                }
-            }
-            if let Some(&(s, n)) = times.get(&m.ino()) {
-                crate::stream_fs::mtime(p, s, n)?;
-            }
-            if !m.file_type().is_symlink() {
-                if let Some(&mode) = modes.get(&m.ino()) {
-                    fs::set_permissions(p, fs::Permissions::from_mode(mode))?;
-                }
-            }
-            Ok(())
-        }
-        finish(&root, &modes, &times)?;
-        crate::storage::mark_received(&root, expected.uuid, 0)?;
-        // An immutable directory cannot be renamed on macOS. Publish inside the locked store,
-        // then seal before returning success; remove the tree if sealing fails.
-        let target = dir.join(expected.name);
-        let mode = fs::symlink_metadata(&root)?.mode() & 0o7777;
-        fs::set_permissions(&root, fs::Permissions::from_mode(mode | 0o200))?;
-        crate::stream_fs::publish(&root, &target)?;
-        let seal = (|| -> Result<()> {
-            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
-            crate::storage::set_readonly(&target)
+            finish(&root, &modes, &times)?;
+            let target = dir.join(expected.name);
+            let captured = crate::fs::freeze_path_owned(&root, &target, crate::fs::CapturePurpose::State)?;
+            captured.received_identity(expected.uuid, 0)
         })();
-        if let Err(e) = seal {
-            let _ = crate::storage::delete_tree(&target);
-            return Err(e);
+        match replay {
+            Ok(owner) => match working.discard() {
+                Ok(()) => {
+                    owner.release();
+                    Ok(())
+                }
+                Err(error) => Err(owner.abort(error)),
+            },
+            Err(error) => Err(working.abort(error)),
         }
-        Ok(())
     })();
-    let cleanup = crate::storage::delete_tree(&staging);
-    result.and(cleanup)
+    match result {
+        Ok(()) => staging_owner.discard(),
+        Err(error) => Err(staging_owner.abort(error)),
+    }
 }
 
 #[cfg(test)]
@@ -667,27 +532,113 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     struct Sandbox(std::path::PathBuf);
     impl Sandbox {
+        fn plain() -> Result<Self> {
+            let root = std::env::temp_dir().join(format!("stream-plan-{}", crate::ids::new_id()));
+            fs::create_dir(&root)?;
+            Ok(Self(root))
+        }
         fn new() -> Self {
             let key = if cfg!(feature = "overlayfs") { "LAYR_OVERLAYFS_TEST_ROOT" } else { "LAYR_APFS_TEST_ROOT" };
             let p = std::path::PathBuf::from(std::env::var_os(key).expect("backend test root"))
                 .join(format!("stream-test-{}", crate::ids::new_id()));
             fs::create_dir(&p).unwrap();
             #[cfg(feature = "overlayfs")]
-            crate::storage::recover(&p).unwrap();
+            crate::overlayfs::recover(&p).unwrap();
             Self(p)
         }
     }
     impl Drop for Sandbox {
         fn drop(&mut self) {
-            let _ = crate::storage::delete_tree(&self.0);
+            let _ = crate::fs::remove(&self.0);
         }
     }
+    #[test]
+    fn incremental_plan_preserves_namespace_attribute_removals_and_ancestor_times() -> Result<()> {
+        let sandbox = Sandbox::plain()?;
+        let parent = sandbox.0.join("before");
+        let child = sandbox.0.join("after");
+        fs::create_dir_all(parent.join("dir/replace/nested"))?;
+        fs::create_dir_all(child.join("dir"))?;
+        fs::write(parent.join("dir/replace/nested/file"), b"old")?;
+        fs::write(child.join("dir/replace"), b"replacement")?;
+        fs::write(parent.join("kept"), b"same")?;
+        fs::write(child.join("kept"), b"same")?;
+        crate::stream_fs::attribute(&parent.join("kept"), c"user.layr.gone", Some(b"old"))?;
+        let plan = plan(&parent, &child)?.expect("ordinary files support an incremental plan");
+        assert_eq!(
+            plan.remove,
+            vec![("dir/replace/nested/file".into(), false), ("dir/replace/nested".into(), true), ("dir/replace".into(), true)]
+        );
+        assert_eq!(plan.create, vec!["dir/replace"]);
+        assert!(plan.meta.contains(&("kept".into(), vec![b"user.layr.gone".to_vec()])));
+        assert!(plan.meta.iter().any(|(path, _)| path.is_empty()));
+        assert!(plan.meta.iter().any(|(path, _)| path == "dir"));
+        Ok(())
+    }
+    #[test]
+    fn incremental_plan_requests_full_inode_map_for_touched_hard_links() -> Result<()> {
+        let sandbox = Sandbox::plain()?;
+        let parent = sandbox.0.join("before");
+        let child = sandbox.0.join("after");
+        fs::create_dir(&parent)?;
+        fs::create_dir(&child)?;
+        fs::write(child.join("one"), b"linked")?;
+        fs::hard_link(child.join("one"), child.join("two"))?;
+        assert!(plan(&parent, &child)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_plan_keeps_join_split_and_regroup_evidence_when_bytes_and_attributes_match() -> Result<()> {
+        let sandbox = Sandbox::plain()?;
+        let cases = [
+            ("join", vec![vec!["a"], vec!["b"]], vec![vec!["a", "b"]]),
+            ("split", vec![vec!["a", "b"]], vec![vec!["a"], vec!["b"]]),
+            ("regroup", vec![vec!["a", "b"], vec!["c", "d"]], vec![vec!["a", "c"], vec!["b", "d"]]),
+        ];
+        for (case, old, new) in cases {
+            let parent = sandbox.0.join(format!("{case}-before"));
+            let child = sandbox.0.join(format!("{case}-after"));
+            for (root, groups) in [(&parent, &old), (&child, &new)] {
+                fs::create_dir(root)?;
+                for group in groups {
+                    let first = root.join(group[0]);
+                    fs::write(&first, b"identical")?;
+                    for alias in &group[1..] {
+                        fs::hard_link(&first, root.join(alias))?;
+                    }
+                    File::open(first)?.set_times(
+                        std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1234567)),
+                    )?;
+                }
+            }
+            let before = crate::source::Source::native(&parent);
+            let after = crate::source::Source::native(&child);
+            let names = old.iter().flatten().copied().collect::<Vec<_>>();
+            for name in &names {
+                assert_eq!(
+                    crate::fs::metadata(&before, name)?.attributes,
+                    crate::fs::metadata(&after, name)?.attributes,
+                    "{case}: {name}"
+                );
+            }
+            let changes = crate::changes::state_changes(&before, &after)?;
+            assert_eq!(
+                changes.iter().map(|change| change.path().as_str()).collect::<std::collections::BTreeSet<_>>(),
+                names.into_iter().collect(),
+                "{case}"
+            );
+            assert!(plan(&parent, &child)?.is_none(), "{case} must request a complete inode map");
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
     fn transport_preserves_content_and_rejects_damage() -> Result<()> {
         let s = Sandbox::new();
         let src = s.0.join("state");
-        crate::storage::create_subvolume(&src)?;
+        crate::fs::create(&src)?;
         fs::create_dir(src.join("dir"))?;
         fs::write(src.join("dir/f"), b"content")?;
         fs::hard_link(src.join("dir/f"), src.join("hard"))?;
@@ -695,13 +646,13 @@ mod tests {
         fs::write(src.join("sparse"), vec![0; 200_000])?;
         crate::stream_fs::attribute(&src.join("dir/f"), c"user.layr.test", Some(b"metadata"))?;
         fs::set_permissions(src.join("dir/f"), fs::Permissions::from_mode(0o444))?;
-        crate::storage::set_readonly(&src)?;
-        let id = crate::storage::subvol_info(&src)?.uuid;
+        crate::fs::set_readonly(&src)?;
+        let id = crate::fs::host().namespace.info(&src)?.uuid;
         let mut bytes = Vec::new();
         send(&src, None, &mut bytes)?;
         let dir = s.0.join("received");
         fs::create_dir(&dir)?;
-        let e = crate::recv::Expect { name: "state", uuid: &id, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &id, parent: &|_| None, clones: &[] };
         receive(&mut &bytes[..], &dir, &e)?;
         let dst = dir.join("state");
         assert_eq!(fs::read(dst.join("dir/f"))?, b"content");
@@ -727,7 +678,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let s = Sandbox::new();
         let parent = s.0.join("parent");
-        crate::storage::create_subvolume(&parent)?;
+        crate::fs::create(&parent)?;
         for i in 0..200 {
             fs::create_dir_all(parent.join(format!("d{}", i % 5)))?;
             fs::write(parent.join(format!("d{}/f{i}", i % 5)), format!("{i}\n").repeat(500))?;
@@ -736,9 +687,9 @@ mod tests {
         fs::write(parent.join("gone/inner/x"), b"x")?;
         std::os::unix::fs::symlink("d0/f0", parent.join("link"))?;
         fs::write(parent.join("swap"), b"file")?;
-        crate::storage::set_readonly(&parent)?;
+        crate::fs::set_readonly(&parent)?;
         let child = s.0.join("child");
-        crate::storage::snapshot(&parent, &child, false)?;
+        crate::fs::snapshot(&parent, &child, false)?;
         fs::write(child.join("d1/f1"), b"changed")?;
         fs::remove_file(child.join("d2/f2"))?;
         fs::create_dir(child.join("new"))?;
@@ -750,9 +701,9 @@ mod tests {
         std::os::unix::fs::symlink("d0/f5", child.join("link"))?;
         fs::remove_file(child.join("swap"))?;
         fs::create_dir(child.join("swap"))?;
-        crate::storage::set_readonly(&child)?;
-        let parent_id = crate::storage::subvol_info(&parent)?.uuid;
-        let id = crate::storage::subvol_info(&child)?.uuid;
+        crate::fs::set_readonly(&child)?;
+        let parent_id = crate::fs::host().namespace.info(&parent)?.uuid;
+        let id = crate::fs::host().namespace.info(&child)?.uuid;
         let (mut full, mut diff) = (Vec::new(), Vec::new());
         send(&child, None, &mut full)?;
         send(&child, Some((&parent, &parent_id)), &mut diff)?;
@@ -760,7 +711,7 @@ mod tests {
         let dir = s.0.join("received");
         fs::create_dir(&dir)?;
         let find = |u: &str| (u == parent_id).then(|| parent.clone());
-        let e = crate::recv::Expect { name: "child", uuid: &id, parent: &find, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "child", uuid: &id, parent: &find, clones: &[] };
         receive(&mut &diff[..], &dir, &e)?;
         let got = dir.join("child");
         let tree = |root: &Path| -> Result<BTreeMap<String, (u32, Vec<u8>)>> {
@@ -790,16 +741,16 @@ mod tests {
     fn transfer_refuses_acl_instead_of_losing_access_rules() -> Result<()> {
         let s = Sandbox::new();
         let root = s.0.join("state");
-        crate::storage::create_subvolume(&root)?;
+        crate::fs::create(&root)?;
         fs::write(root.join("file"), b"private")?;
         let result =
             std::process::Command::new("/bin/chmod").args(["+a", "everyone deny read"]).arg(root.join("file")).status()?;
         assert!(result.success());
         assert!(crate::stream_fs::has_acl(&root.join("file"))?);
-        crate::storage::set_readonly(&root)?;
+        crate::fs::set_readonly(&root)?;
         let error = send(&root, None, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("access control lists"));
-        crate::storage::set_writable(&root)?;
+        crate::fs::set_writable(&root)?;
         crate::sys::apfs_clear_acl(&root.join("file"))?;
         assert!(!crate::stream_fs::has_acl(&root.join("file"))?);
         Ok(())
@@ -810,10 +761,10 @@ mod tests {
     fn receive_uses_only_an_authorized_external_clone() -> Result<()> {
         let s = Sandbox::new();
         let source = s.0.join("source");
-        crate::storage::create_subvolume(&source)?;
+        crate::fs::create(&source)?;
         fs::write(source.join("file"), b"source data")?;
-        crate::storage::set_readonly(&source)?;
-        let source_id = crate::storage::subvol_info(&source)?.uuid;
+        crate::fs::set_readonly(&source)?;
+        let source_id = crate::fs::host().namespace.info(&source)?.uuid;
         let source_uuid = uuid::Uuid::parse_str(&source_id)?;
         let id = uuid::Uuid::now_v7();
         let text = id.to_string();
@@ -821,7 +772,7 @@ mod tests {
         fs::create_dir(&dir)?;
         let mut bytes = b"btrfs-stream\0\x01\0\0\0".to_vec();
         command(&mut bytes, 1, &[(15, b"state"), (1, id.as_bytes()), (2, &1u64.to_le_bytes())])?;
-        command(&mut bytes, 3, &[(15, b"file")])?;
+        command(&mut bytes, 3, &[(15, b"file"), (3, &1u64.to_le_bytes())])?;
         command(
             &mut bytes,
             16,
@@ -836,11 +787,11 @@ mod tests {
             ],
         )?;
         command(&mut bytes, 21, &[])?;
-        let e = crate::recv::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
         assert!(receive(&mut &bytes[..], &dir, &e).is_err());
         assert_eq!(fs::read_dir(&dir)?.count(), 0);
         let clones = [(source_id, None, source)];
-        let e = crate::recv::Expect { clones: &clones, ..e };
+        let e = crate::receive_stream::Expect { clones: &clones, ..e };
         receive(&mut &bytes[..], &dir, &e)?;
         assert_eq!(fs::read(dir.join("state/file"))?, b"source data");
         Ok(())
@@ -857,14 +808,14 @@ mod tests {
         fs::write(outside.join("keep"), b"keep")?;
         let id = uuid::Uuid::now_v7();
         let text = id.to_string();
-        let e = crate::recv::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
+        let e = crate::receive_stream::Expect { name: "state", uuid: &text, parent: &|_| None, clones: &[] };
         for (code, attrs) in [
-            (3, vec![(15, b"link/new".as_slice())]),
+            (3, vec![(15, b"link/new".as_slice()), (3, b"\x01\0\0\0\0\0\0\0".as_slice())]),
             (15, vec![(15, b"link/keep".as_slice()), (18, b"\0\0\0\0\0\0\0\0".as_slice()), (19, b"bad".as_slice())]),
         ] {
             let mut bytes = b"btrfs-stream\0\x01\0\0\0".to_vec();
             command(&mut bytes, 1, &[(15, b"state"), (1, id.as_bytes()), (2, &1u64.to_le_bytes())])?;
-            command(&mut bytes, 8, &[(15, b"link"), (17, outside.as_os_str().as_bytes())])?;
+            command(&mut bytes, 8, &[(15, b"link"), (3, &1u64.to_le_bytes()), (17, outside.as_os_str().as_bytes())])?;
             command(&mut bytes, code, &attrs)?;
             command(&mut bytes, 21, &[])?;
             assert!(receive(&mut &bytes[..], &dir, &e).is_err());

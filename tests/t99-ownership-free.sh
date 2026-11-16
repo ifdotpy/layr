@@ -18,9 +18,10 @@ newproj() {
 q() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute(sys.argv[2]).fetchone()[0])' "$DB" "$1"; }
 exec_sql() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(sys.argv[2]); c.commit()' "$DB" "$1"; }
 line_id() { q "select id from lines where name='$1' and deleted=0"; }
-# A state has its storage when its tree or its thin layer is on disk.
-on_disk() { [ -e "$P/states/$1" ] || [ -e "$P/deltas/$1" ]; }
-present_of_id() { q "select count(*) from states where line='$1' and present=1"; }
+# A state can keep its storage as native trees or as objects.
+on_disk() { state_available "$P" "$1"; }
+present_of_id() { q "select count(*) from states where line='$1' and deleted=0 and (present=1 or json_extract(rec,'$.tree') is not null)"; }
+local_states() { q "select count(*) from states where deleted=0 and (present=1 or json_extract(rec,'$.tree') is not null)"; }
 first_auto() { q "select id from states where kind='auto' and line='$(line_id "$1")' order by time, id limit 1"; }
 newest_auto() { q "select id from states where kind='auto' and line='$(line_id "$1")' order by time desc, id desc limit 1"; }
 queue() { q "select count(*) from free_queue"; }
@@ -141,16 +142,16 @@ for i in 1 2 3; do echo "lk $i" > lk.txt; l save -q; done
 wid=$(line_id w)
 cd $M/main || exit 1
 l line delete -D --discard w >/dev/null
-pre=$(q "select count(*) from states where present=1")
+pre=$(local_states)
 exec_sql "update states set present=1, deleted=0 where present=0 and deleted=1 and kind='auto' and line='$wid'"
-leaked=$(( $(q "select count(*) from states where present=1") - pre ))
+leaked=$(( $(local_states) - pre ))
 ok "the forced leaks are present states" test "$leaked" -gt 0
 echo "after" >> notes.txt; l save -qam "after the leaks" >/dev/null 2>&1
-eq "a normal save frees no leak" "$(( pre + leaked ))" "$(( $(q "select count(*) from states where present=1") - 1 ))"
+eq "a normal save frees no leak" "$(( pre + leaked ))" "$(( $(local_states) - 1 ))"
 has "gc reports the leaked states" "leaks:" "$(l gc 2>&1 || true)"
-after_save=$(q "select count(*) from states where present=1")
+after_save=$(local_states)
 l gc --repair >/dev/null 2>&1
-eq "gc --repair frees the leaked states" "$(( after_save - leaked ))" "$(q "select count(*) from states where present=1")"
+eq "gc --repair frees the leaked states" "$(( after_save - leaked ))" "$(local_states)"
 eq "fsck finds no problem after the leaks are freed" "0 problem(s)" "$(l fsck | tail -1)"
 
 finish

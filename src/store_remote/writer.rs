@@ -198,7 +198,7 @@ pub(super) fn initialize(store: &Store, ctx: &crate::ctx::Ctx, output: &Path) ->
     if path.starts_with(&local_root) {
         bail!("the paper key file must be outside the local store and line folders");
     }
-    if let super::backend::Backend::File(root, _, _) = &store.backend {
+    if let super::backend::Backend::File(root, _) = &store.backend {
         let remote_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         if path.starts_with(remote_root) {
             bail!("the paper key file must be outside the remote store");
@@ -435,8 +435,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 size += lines[end].len() + 1;
                 end += 1;
             }
-            let first = oplog::parse_line(&lines[start], None)?.record.seq;
-            let last = oplog::parse_line(&lines[end - 1], None)?.record.seq;
+            let first = oplog::parse_line(&lines[start])?.record.seq;
+            let last = oplog::parse_line(&lines[end - 1])?.record.seq;
             let mut bytes = lines[start..end].join("\n").into_bytes();
             bytes.push(b'\n');
             // Publish ordered, bounded segments. A retry resumes after the last complete segment.
@@ -785,7 +785,7 @@ pub fn format_gap(root: &Path) -> Result<Option<&'static str>> {
             entries += 1;
             let meta = std::fs::symlink_metadata(&path)?;
             if meta.is_dir() {
-                if crate::storage::is_subvolume(&path) {
+                if crate::fs::host().namespace.managed(&path) {
                     return Ok(Some("a nested subvolume"));
                 }
                 pending.push(path.clone());
@@ -841,7 +841,7 @@ fn walk_state(root: &Path, visit: &mut dyn FnMut(&str, &fsutil::Meta) -> Result<
             let relative = path.strip_prefix(root)?.to_str().context("state path is not UTF-8")?;
             let metadata = std::fs::symlink_metadata(&path)?;
             let meta = fsutil::meta_of(&metadata);
-            if meta.is_dir() && crate::storage::is_subvolume(&path) {
+            if meta.is_dir() && crate::fs::host().namespace.managed(&path) {
                 continue;
             }
             if visit(relative, &meta)? && meta.is_dir() {
@@ -875,7 +875,8 @@ fn upload_state_journal(
     } else {
         attempt
     };
-    let delta_root = base_root.filter(|base| crate::storage::is_subvolume(base) && crate::storage::is_subvolume(root));
+    let delta_root =
+        base_root.filter(|base| crate::fs::host().namespace.managed(base) && crate::fs::host().namespace.managed(root));
     let mut files =
         if delta_root.is_some() { base.map(|(_, p)| p.tree.files.clone()).unwrap_or_default() } else { BTreeMap::new() };
     let mut times =
@@ -910,14 +911,14 @@ fn upload_state_journal(
     }
     if let Some(changes) = &changed {
         for change in changes {
-            if let Some(old) = &change.old_path {
+            if let Some(old) = change.old_path() {
                 files.remove(old);
                 times.remove(old);
                 chunks.remove(old);
             }
-            files.remove(&change.path);
-            times.remove(&change.path);
-            chunks.remove(&change.path);
+            files.remove(change.path());
+            times.remove(change.path());
+            chunks.remove(change.path());
         }
     }
     // A delta keeps the entries of the base. A framed entry of the base in a layer that goes up as chunks (a cache
@@ -1015,8 +1016,8 @@ fn upload_state_journal(
     };
     if let Some(changes) = &changed {
         for change in changes {
-            if let Some(meta) = &change.new {
-                visit(&change.path, meta)?;
+            if let Some(meta) = change.new() {
+                visit(change.path(), meta)?;
             }
         }
         for path in &framed {
@@ -1127,11 +1128,11 @@ fn seed_chunks(chunk_hashes: &mut BTreeMap<String, Vec<String>>, tree: &Tree) {
 fn btrfs_identity(root: &Path, signed_uuid: &str) -> Option<format::BtrfsIdentity> {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
-        let (uuid, received_transid) = crate::storage::clone_identity(root).ok()?;
+        let (uuid, received_transid) = crate::fs::host().transfer.clone_identity(root).ok()?;
         if uuid != signed_uuid {
             return None;
         }
-        let transid = received_transid.or_else(|| crate::storage::send_clone_identity(root).ok().map(|(_, t)| t))?;
+        let transid = received_transid.or_else(|| crate::fs::host().transfer.send_identity(root).ok().map(|(_, t)| t))?;
         return Some(format::BtrfsIdentity { uuid, transid });
     }
     #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
@@ -1214,6 +1215,7 @@ mod tests {
             cwd: root.to_path_buf(),
             env: HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         }
     }
@@ -1269,7 +1271,7 @@ mod tests {
     }
     #[test]
     fn live_refs_keep_auto_states_and_auxiliary_states_obey_the_cache_option() {
-        use crate::model::{Record, StateRec};
+        use crate::model::StateRec;
         let root = std::env::temp_dir().join(crate::ids::new_id());
         std::fs::create_dir_all(&root).unwrap();
         let ctx = context(&root);
@@ -1281,15 +1283,16 @@ mod tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
         let project = crate::store::Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: dir.clone(),
             id: store.project.clone(),
             db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
-        project.append(record, &ctx.actor()).unwrap();
+        project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let mut source = None;
         let mut cache = String::new();
         for kind in ["commit", "auto", "derived", "cache"] {
@@ -1302,9 +1305,9 @@ mod tests {
                 "parents":if kind=="auto" {source.clone().into_iter().collect::<Vec<_>>()}else{vec![]},
                 "time":crate::ids::now_ms()}))
             .unwrap();
-            let mut record = Record::new("state");
+            let mut record = crate::model::DraftRecord::new("state");
             record.states.push(state);
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "commit" {
                 source = Some(id);
                 continue;
@@ -1319,9 +1322,9 @@ mod tests {
                     "derived"
                 }
             );
-            let mut record = Record::new("ref.set");
+            let mut record = crate::model::DraftRecord::new("ref.set");
             record.data = serde_json::json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id}}});
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             if kind == "cache" {
                 cache = id;
             }
@@ -1340,12 +1343,13 @@ mod tests {
     }
 
     fn branch_fixture<'a>(ctx: &'a Ctx, store: &Store) -> Repo<'a> {
-        use crate::model::{Record, StateRec};
+        use crate::model::StateRec;
         let dir = ctx.store.project_dir("p").unwrap();
         let existing = dir.join("meta/db/layr.sqlite").exists();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         std::fs::create_dir_all(dir.join("states")).unwrap();
         let project = crate::store::Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "p".into(),
             dir: dir.clone(),
@@ -1353,9 +1357,9 @@ mod tests {
             db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
         };
         if !existing {
-            let mut record = Record::new("project");
+            let mut record = crate::model::DraftRecord::new("project");
             record.data = serde_json::json!({"id":store.project,"name":"p","config":{}});
-            project.append(record, &ctx.actor()).unwrap();
+            project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             let mut parents = Vec::<String>::new();
             let mut first = None;
             for n in 0..4 {
@@ -1377,9 +1381,9 @@ mod tests {
                     "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
                     "parents":parents,"time":crate::ids::now_ms()}))
                 .unwrap();
-                let mut record = Record::new("state");
+                let mut record = crate::model::DraftRecord::new("state");
                 record.states.push(state);
-                project.append(record, &ctx.actor()).unwrap();
+                project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
                 if n == 0 {
                     first = Some(id.clone());
                 }
@@ -2082,7 +2086,7 @@ mod tests {
             .configure(&ctx, &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })
             .unwrap();
         let descriptor = store.descriptor().unwrap();
-        let mut record = crate::model::Record::new("machine");
+        let mut record = crate::model::Record::untrusted_preview("machine");
         record.id = crate::ids::new_id();
         record.seq = 1;
         record.machine = store.machine.clone();
@@ -2139,7 +2143,7 @@ mod tests {
     #[test]
     #[ignore = "portable-state fixture invoked by t23-store-portable-peer"]
     fn emit_portable_v2_fixture() {
-        use crate::model::{LineChange, LineState, Record, StateRec};
+        use crate::model::{LineChange, LineState, StateRec};
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         // The fixture writer runs only from t23, which sets its folders.
@@ -2169,22 +2173,23 @@ mod tests {
         let line_id = crate::ids::new_id();
         let state:StateRec=serde_json::from_value(serde_json::json!({"id":state_id,"kind":"commit","parents":[],"line":line_id,
             "subvol":crate::ids::new_id(),"author":{"name":"Fixture","email":"fixture@example.test"},"message":"portable source","time":1})).unwrap();
-        let mut first = Record::new("machine");
+        let mut first = crate::model::Record::untrusted_preview("machine");
         first.data = serde_json::json!({"name":"portable","public_key":hex::encode(store.key.verifying_key().to_bytes())});
-        let mut project = Record::new("project");
+        let mut project = crate::model::Record::untrusted_preview("project");
         project.data = serde_json::json!({"id":store.project,"name":"project","config":{}});
-        let mut commit = Record::new("commit");
+        let mut commit = crate::model::Record::untrusted_preview("commit");
         commit.states.push(state);
         commit.lines.insert(
             line_id,
             LineChange {
-                before: None,
-                after: Some(LineState {
-                    name: "main".into(),
-                    head: state_id.clone(),
-                    owner: ctx.caller.uid,
-                    machine: store.machine.clone(),
-                }),
+                transition: crate::model::LineTransition::Create {
+                    after: LineState {
+                        name: "main".into(),
+                        head: state_id.clone(),
+                        owner: ctx.caller.uid,
+                        machine: store.machine.clone(),
+                    },
+                },
                 working_before: None,
                 working_after: None,
             },

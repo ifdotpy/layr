@@ -4,8 +4,12 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
+<<<<<<< head
 use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::Repo;
+=======
+use crate::model::{Line, LineChange, StateKind};
+>>>>>>> fs-legacy-facades
 use crate::revs;
 use anyhow::{Context, Result};
 
@@ -39,7 +43,7 @@ pub fn line(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return line_move(ctx, rest);
     }
     if sub == "show" {
-        return crate::views::show(ctx, rest);
+        return crate::cmd::view_ops::show(ctx, rest);
     }
     if sub == "target" {
         return Err(exit(
@@ -150,7 +154,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name),
         ));
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let from = repo.working(&l);
     if !from.is_dir() {
         return Err(exit(1, format!("error: line '{}' has no working folder on this machine", l.name)));
@@ -189,8 +193,8 @@ pub(crate) fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<St
     st.drop_paths(&repo.quiet_paths(l)?);
     let mut out = std::collections::BTreeSet::new();
     for c in st.staged.iter().chain(st.unstaged.iter()) {
-        out.insert(c.path.clone());
-        if let Some(o) = &c.old_path {
+        out.insert(c.path().clone());
+        if let Some(o) = c.old_path() {
             out.insert(o.clone());
         }
     }
@@ -254,6 +258,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .flag("--discard")
         .flag("--show-current")
         .flag("--path")
+        .value("--id")
         .value("--owner")
         .value("--count")
         .value("--view")
@@ -294,6 +299,10 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     {
         return Err(exit(128, "usage: layr line new <prefix> [<rev>] --count <N>"));
     }
+    let exact_id = a.get("--id").map(layr_types::LineId::parse).transpose()?;
+    if exact_id.is_some() && (sub != "delete" || !a.pos.is_empty()) {
+        return Err(exit(2, "usage: layr line delete --id <line-id> [-D] [--discard] [--json]"));
+    }
     let h = here(ctx)?;
     let repo = &h.repo;
     let current = h.line.clone();
@@ -304,6 +313,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         return Ok(0);
     }
     if a.has("-d") || a.has("-D") {
+<<<<<<< head
         if a.pos.is_empty() {
             return Err(exit(128, format!("fatal: line name required\n{DELETE_USAGE}")));
         }
@@ -317,6 +327,37 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         for name in &a.pos {
             let l = repo.line(name)?;
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+=======
+        if a.pos.is_empty() && exact_id.is_none() {
+            return Err(exit(128, "fatal: line name or --id required"));
+        }
+        let discard = a.has("--discard") || a.has("-f");
+        let selectors = if let Some(id) = exact_id { vec![id.to_string()] } else { a.pos.clone() };
+        for selector in &selectors {
+            let (l, target) = {
+                let _lock = repo.p.lock_maintenance()?;
+                let l = match exact_id {
+                    Some(id) => crate::lineops::live_line(repo, id)?,
+                    None => repo.line(selector)?,
+                };
+                repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+                let target = crate::lineops::DeleteTarget::capture(repo, &l)?;
+                (l, target)
+            };
+            // Test only: replace the resolved identity or folder before locked validation.
+            if let Some(dir) = std::env::var_os("LAYR_TEST_LINE_DELETE_BARRIER") {
+                let dir = std::path::PathBuf::from(dir);
+                std::fs::write(dir.join("ready"), b"")?;
+                let start = std::time::Instant::now();
+                while !dir.join("release").exists() {
+                    if start.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("line delete test barrier timed out");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            let name = &l.name;
+>>>>>>> fs-legacy-facades
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
@@ -352,8 +393,17 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
             if let Some(v) = view {
+<<<<<<< head
                 crate::views::delete(ctx, repo, &l, &v, check_merged)?;
                 outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+=======
+                crate::cmd::view_ops::delete(ctx, repo, &l, &v, &target)?;
+                if a.has("--json") {
+                    outln!(ctx, "{}", line_json(repo, &l));
+                } else {
+                    outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+                }
+>>>>>>> fs-legacy-facades
                 continue;
             }
             // The working state is prepared before the lock; under it the record and the renames only
@@ -363,22 +413,38 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // CI line) has no working state to keep: the record alone deletes it.
             #[cfg(target_os = "linux")]
             crate::views::ensure_no_pending_move(repo, &l)?;
+<<<<<<< head
             let made = repo.working(&l).exists();
             let (_lock, l, last) = if !made {
                 let lock = repo.p.lock()?;
                 let fresh = repo.line(&l.id)?;
                 check_merged(&fresh)?;
                 (lock, fresh, None)
+=======
+            let made = target.has_folder();
+            let (_lock, last) = if !made {
+                let lock = repo.p.lock_maintenance()?;
+                let fresh = target.validate(repo)?;
+                repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                (lock, None)
+>>>>>>> fs-legacy-facades
             } else {
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
-                    let mut prepared = repo.prepare_final_state(&l)?;
+                    let current = {
+                        let _lock = repo.p.lock_maintenance()?;
+                        let current = target.validate(repo)?;
+                        repo.authorize_line(ctx, &current, crate::repo::LineOp::Manage)?;
+                        current
+                    };
+                    let prepared = repo.prepare_final_state(ctx, &current)?;
                     // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
                     // test can write into the folder before the lock.
                     if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
+<<<<<<< head
                     let lock = match deletion_barrier().and_then(|()| repo.p.lock()) {
                         Ok(lock) => lock,
                         Err(e) => {
@@ -428,8 +494,31 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                                     ids::short(&fresh.head)
                                 ),
                             ))
+=======
+                    let lock = repo.p.lock_maintenance()?;
+                    let fresh = target.validate(repo)?;
+                    repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                    // Automatic states leave overlay files out: uncommitted changes of them would be lost.
+                    if !discard && repo.is_stacked(&fresh)? && repo.working(&fresh).exists() {
+                        let private = repo.private_paths(&fresh)?;
+                        let (st, _scan, _it, _idx) = repo.status(&fresh)?;
+                        let changed = st.staged.iter().chain(st.unstaged.iter())
+                            .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()]).flatten()
+                            .any(|p| private.contains(&p));
+                        if changed || !repo.pending_moves(&fresh).is_empty() {
+                            return Err(exit(1, format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard")));
                         }
                     }
+                    if fresh.head != current.head {
+                        if attempt < 3 {
+                            drop(lock);
+                            continue;
+>>>>>>> fs-legacy-facades
+                        }
+                        return Err(exit(1, format!("line {name} moved during the command; run it again")));
+                    }
+                    let last = prepared.working_state(&lock, ctx, &fresh, "before line delete")?;
+                    break (lock, last);
                 }
             };
             // The final state stays in the `deleted` ring. As a thin layer it keeps the states
@@ -441,8 +530,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     crate::free::keyframe_later(id);
                 }
             }
-            delete_recorded(ctx, repo, &l, last, made)?;
-            outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+            let l = target.validate(repo)?;
+            let deleted = line_json(repo, &l);
+            delete_recorded(&_lock, ctx, repo, &l, last, made)?;
+            if a.has("--json") {
+                outln!(ctx, "{}", deleted);
+            } else {
+                outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+            }
         }
         return Ok(0);
     }
@@ -461,7 +556,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             ));
         }
         repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if repo.p.db.line_by_name(&new)?.is_some() {
             return Err(exit(128, format!("fatal: a line named '{new}' already exists")));
         }
@@ -482,22 +577,21 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         let folder_before = repo.p.keep_folder(&l.id, &l.name, &new)?;
         let mut after = repo.line_state(&l, &l.head);
         after.name = new.clone();
-        let mut rec = Record::new("line.rename");
+        let mut rec = crate::model::DraftRecord::new("line.rename");
         rec.lines.insert(
             l.id.clone(),
-            LineChange {
-                before: Some(repo.line_state(&l, &l.head)),
-                after: Some(after),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&l, &l.head), after: after }, working_before: None, working_after: None },
         );
         rec.data = serde_json::json!({"from": old, "to": new});
-        if let Err(e) = repo.commit_record(ctx, rec) {
-            if let Err(b) = repo.p.restore_folder(&l.id, folder_before.as_deref()) {
-                return Err(e.context(format!("the folder record of line {old} could not go back: {b:#}")));
+        if let Err(e) = repo.commit_record(&_lock, ctx, rec) {
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                if let Err(b) = repo.p.restore_folder(&l.id, folder_before.as_deref()) {
+                    return Err(
+                        anyhow::Error::from(e).context(format!("the folder record of line {old} could not go back: {b:#}"))
+                    );
+                }
             }
-            return Err(e);
+            return Err(e.into());
         }
         // The line has the same name on every overlay. A failure here is no loss: the overlay finds
         // the line by its id, and its next write gives it the new name.
@@ -514,7 +608,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         // save, a fetch or a follow): the start is the state at the time of the command.
         let resolve_start = || -> Result<String> {
             Ok(match a.pos.get(1) {
-                Some(r) => revs::resolve(repo, current.as_ref(), r)?,
+                Some(r) => revs::resolve_state(repo, current.as_ref(), r)?,
                 None => match &current {
                     Some(c) => repo.p.db.line_by_id(&c.id)?.map_or_else(|| c.head.clone(), |l| l.head),
                     None => match repo.p.db.line_by_name("main")? {
@@ -649,14 +743,14 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         if let Some(ms) = std::env::var("LAYR_TEST_LINE_NEW_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        let lock = match repo.p.lock() {
+        let lock = match repo.p.lock_maintenance() {
             Ok(l) => l,
             Err(e) => {
                 repo.discard_prepared_lines(prepared);
                 return Err(e);
             }
         };
-        let lines = repo.commit_prepared_lines(ctx, prepared)?;
+        let lines = repo.commit_prepared_lines(&lock, ctx, prepared)?;
         drop(lock);
         // The caches of the new lines name the place of their build: relocate them at the place of the line. The
         // relocation runs as the line owner, who cannot enter the store's work folder before the move.
@@ -753,6 +847,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
 /// has one, `made`), stage, bases and caches. The caller holds the project lock. `last` is the state
 /// of the working folder that the record keeps.
 pub(crate) fn delete_recorded(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &Ctx,
     repo: &crate::repo::Repo,
     l: &crate::model::Line,
@@ -760,6 +855,7 @@ pub(crate) fn delete_recorded(
     made: bool,
 ) -> Result<()> {
     // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
+<<<<<<< head
     let staged = staged_state(ctx, repo, l)?;
     // An OverlayFS folder is a mount. Unmount it before the record: an unmount error then keeps
     // the line, and its folder is mounted again by the next command.
@@ -767,14 +863,17 @@ pub(crate) fn delete_recorded(
     if made {
         crate::storage::release_tree(&repo.working(l))?;
     }
+=======
+    let staged = staged_state(locked, ctx, repo, l)?;
+>>>>>>> fs-legacy-facades
     // Record first, then delete the folder: the content is in the saved state.
-    let mut rec = Record::new("line.delete");
+    let mut rec = crate::model::DraftRecord::new("line.delete");
     rec.lines.insert(
         l.id.clone(),
-        LineChange { before: Some(repo.line_state(l, &l.head)), after: None, working_before: last.clone(), working_after: None },
+        LineChange { transition: crate::model::LineTransition::Delete { before: Some(repo.line_state(l, &l.head)) }, working_before: last.clone(), working_after: None },
     );
     rec.data = serde_json::json!({"name": l.name, "final_state": last, "staged_state": staged});
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(locked, ctx, rec)?;
     if made {
         crate::fsutil::git_writable(&repo.working(l), true);
         // Into the trash, emptied after the store lock: a folder with build output takes
@@ -812,7 +911,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !repo.working(&l).exists() {
         crate::store_remote::fetch_caches_on_demand(ctx, repo, &l.head, Some(&l), false);
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let w = repo.working(&l);
     if w.exists() {
         return Err(exit(1, format!("line '{name}' already has a working folder here: {}", w.display())));
@@ -828,7 +927,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     let start = match a.get("--state") {
-        Some(r) => revs::resolve(repo, Some(&l), r)?,
+        Some(r) => revs::resolve_state(repo, Some(&l), r)?,
         None if a.has("--head") => l.head.clone(),
         None => repo
             .p
@@ -848,15 +947,10 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         eprintln!("warning: caches of line '{name}' not taken: {e:#}");
     }
     crate::gitbridge::sync_store_access(repo)?;
-    let mut rec = Record::new("line.adopt");
+    let mut rec = crate::model::DraftRecord::new("line.adopt");
     rec.lines.insert(
         l.id.clone(),
-        LineChange {
-            before: Some(repo.line_state(&l, &l.head)),
-            after: Some(repo.line_state(&moved, &l.head)),
-            working_before: None,
-            working_after: Some(start.clone()),
-        },
+        LineChange { transition: crate::model::LineTransition::Move { before: repo.line_state(&l, &l.head), after: repo.line_state(&moved, &l.head) }, working_before: None, working_after: Some(start.clone()) },
     );
     let shown = repo.readable_layers(&moved)?;
     rec.data = serde_json::json!({
@@ -864,7 +958,7 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "from_state": start,
         "folder_view": repo.public_view_data(&l.id, &shown)?,
     });
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(&_lock, ctx, rec)?;
     outln!(ctx, "Line {} now has a working folder here: {} (content of {})", l.name, w.display(), ids::short(&start));
     Ok(0)
 }
@@ -883,12 +977,12 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let line = h.line.clone();
     if a.has("-d") {
         repo.require(ctx, "tag")?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         for t in &a.pos {
             let id = repo.p.db.tag(t)?.ok_or_else(|| exit(1, format!("error: tag '{t}' not found.")))?;
-            let mut rec = Record::new("tag.delete");
+            let mut rec = crate::model::DraftRecord::new("tag.delete");
             rec.data = serde_json::json!({"name": t, "state": id});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             outln!(ctx, "Deleted tag '{t}' (was {})", ids::short(&id));
         }
         return Ok(0);
@@ -912,34 +1006,39 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::check_name("tag", name)?;
     // Tags are names of the whole project and keep their states from gc: the admin sets them.
     repo.require(ctx, "tag")?;
-    let id = revs::resolve(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("head"))?;
-    let _lock = repo.p.lock()?;
+    let id = revs::resolve_state(repo, line.as_ref(), a.pos.get(1).map(|s| s.as_str()).unwrap_or("head"))?;
+    let _lock = repo.p.lock_maintenance()?;
     if repo.p.db.tag(name)?.is_some() && !a.has("-f") {
         return Err(exit(128, format!("fatal: tag '{name}' already exists")));
     }
-    let mut rec = Record::new("tag");
+    let mut rec = crate::model::DraftRecord::new("tag");
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(&_lock, ctx, rec)?;
     Ok(0)
 }
 
 /// The index of a line as an automatic state, when it differs from the head (None otherwise).
-fn staged_state(ctx: &Ctx, repo: &crate::repo::Repo, l: &crate::model::Line) -> Result<Option<String>> {
+fn staged_state(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &crate::repo::Repo,
+    l: &crate::model::Line,
+) -> Result<Option<String>> {
     if repo.current_stage(l)?.is_none() {
         return Ok(None);
     }
     let (index, _temp) = repo.index_view(l)?;
     let head = repo.head_src(l)?;
-    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(&c.path)) {
+    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(c.path())) {
         return Ok(None);
     }
     let mut keep = Vec::new();
     let tree = repo.complete(index, &mut keep)?;
     let st = repo.new_state(ctx, &tree, StateKind::Auto, vec![l.head.clone()], "staged before line delete", Some(l))?;
-    let mut rec = Record::new("save");
+    let mut rec = crate::model::DraftRecord::new("save");
     rec.states.push(st.clone());
     rec.data = serde_json::json!({"line": l.id});
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(locked, ctx, rec)?;
     Ok(Some(st.id))
 }
 

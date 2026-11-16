@@ -6,6 +6,10 @@ server (`docs/api.md` in ifdotpy/layr-cloud) and the V1 client use it. A change 
 here changes the format: the test vectors (section 12) and the unit tests that pin them change too.
 
 Snapshot storage is v1. Object storage is v2.
+New projects enable `objects.enabled` before their first save on every backend (`init`, including
+`--from`, and `git clone`); `clone` enables it after importing the source records, even if the
+source used v1. Existing projects keep their recorded setting.
+`init --no-objects` is available for legacy storage and migration tests.
 `layr migrate` moves a project from v1 to v2 (section 13, user guide `docs/migrate.md`).
 Experimental object configs marked `v:1` upgrade automatically; object encodings and IDs stay unchanged.
 After migration, source states remain usable without native state snapshots.
@@ -151,6 +155,15 @@ record = 0x00 delta:zigzag-varint     a file or a symbolic link
 - To send a state, walk the tables from its root table (`Store::times_ids`): the root id alone does
   not reach them.
 
+A nested btrfs subvolume leaves an empty placeholder in its parent's snapshot. Its inode (2,
+`BTRFS_EMPTY_SUBVOL_DIR_OBJECTID`) has times invented by the kernel on each instantiation. The
+btrfs driver identifies it as a placeholder using the filesystem and subvolume boundary. The
+shared writer records zero for its folder time, and the shared comparison excludes its time when
+either side is a placeholder.
+Zero is padding in the existing table format, not a marker: an ordinary folder at the Unix epoch
+still has its time checked. Names, types, modes, attributes and contents are checked as usual.
+APFS and OverlayFS do not produce these placeholders.
+
 The local per-folder format uses version 2. Cloud V1 uses its original flat version 1 table. On transfer, Layr converts between the two. A local version 1 state is checked against both older forms and converted. If both forms match but describe different times, Layr refuses the state.
 
 A checkout with a times table sets every modification time: the entries of a folder first, then
@@ -291,6 +304,19 @@ Two steps, as Git does with loose objects and `git gc`:
    hot blobs outside the hot set turn cold, the first repack trains the store dictionary, then every
    loose object goes into packs (blocks of about 4 MiB, level 19).
 
+The service also prunes and repacks each object-backed project (including overlays) every
+`objects.maintenance-interval` seconds, default **60**; `0` disables automatic maintenance.
+Each prune, cold-conversion and packing phase handles at most **4,096 files and 1 GiB of input**
+(one oversized file is allowed for progress). Reachability still walks all kept roots. Busy project
+or maintenance locks are skipped and retried on the next tick. Open object-store handles also
+protect imports and temporary Cloud objects through publication and consumption: pruning skips
+stores in use, then allows readers/writers to resume before compression. Compression runs without
+the project lock. New cold encodings are packed in the following periodic batch. `layr gc` uses
+the same planner without batch limits and packs new cold encodings immediately; `gc -n` reports
+state records, objects and hot blobs to remove, hot blobs to turn cold, and existing loose objects
+to pack, with their source bytes. Compressed
+output sizes depend on the encoder and are not predicted.
+
 ## 11. Large folders (next step)
 
 A tree lists every entry of its folder, so a change in a folder of 100,000 entries writes a tree of
@@ -392,7 +418,7 @@ layr objects checkout <tree or rev> <folder>
   writes into the caller's folder (`tests/t201-objects-service.sh`).
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
-Garbage collection: `layr gc` prunes the store before the repack (`Store::prune`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
+Garbage collection: `layr gc` prunes the store before the repack (`Store::plan_maintenance`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
 objects that no state names.
 
 ### Migration

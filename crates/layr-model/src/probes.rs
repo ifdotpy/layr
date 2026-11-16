@@ -154,8 +154,8 @@ impl Context {
         self.sources.get(subject).map(String::as_str).unwrap_or("source unavailable")
     }
     fn definitions(&self, project: &Project, subject: &Subject) -> BTreeMap<String, Probe> {
-        if self.source(&subject.id) == "available" {
-            return self.definitions.get(&subject.id).cloned().unwrap_or_default();
+        if self.source(subject.id()) == "available" {
+            return self.definitions.get(subject.id()).cloned().unwrap_or_default();
         }
         let mut definitions = BTreeMap::new();
         for record in active_checks(project, subject).into_values() {
@@ -191,10 +191,10 @@ pub(crate) fn stored(
     definition: &Probe,
     context: &Context,
 ) -> Result<Option<RunResult>> {
-    if project.check_exit(&subject.id, &definition.run, None).is_none() {
+    if project.check_exit(subject.id(), &definition.run, None).is_none() {
         return Ok(None);
     }
-    let reference = format!("derived/probe-v1/{name}/{}", subject.id);
+    let reference = format!("derived/probe-v1/{name}/{}", subject.id());
     let root = project.ref_list(&reference, context.now).into_iter().find(|r| r.name == reference);
     let active = active_checks(project, subject);
     let mut latest = None;
@@ -210,7 +210,7 @@ pub(crate) fn stored(
         let Some(state) = project.state(&r.output_state) else { continue };
         if state.kind != StateKind::Derived
             || state.context.as_deref() != Some(&format!("probe-v1/{name}"))
-            || state.derived_from.as_deref() != Some(&subject.id)
+            || state.derived_from.as_deref() != Some(subject.id())
             || !context.outputs.contains_key(&r.output_state)
         {
             continue;
@@ -265,10 +265,10 @@ pub fn diff(project: &Project, base: &Subject, head: &Subject, context: &Context
         probes.push(row);
     }
     Ok(Behavior {
-        base: base.id.clone(),
-        head: head.id.clone(),
-        base_source: context.source(&base.id).into(),
-        head_source: context.source(&head.id).into(),
+        base: base.id().to_owned(),
+        head: head.id().to_owned(),
+        base_source: context.source(base.id()).into(),
+        head_source: context.source(head.id()).into(),
         base_views: vec![],
         head_views: vec![],
         probes,
@@ -408,11 +408,11 @@ mod tests {
     }
     #[test]
     fn absence_does_not_claim_a_probe_ran() {
-        let project = Project::from_records("p", vec![], "").unwrap();
+        let project = Project::preview_records("p", vec![], "").unwrap();
         let mut context = Context::default();
-        context.sources.insert("s".into(), "available".into());
-        context.definitions.insert("s".into(), BTreeMap::from([("test".into(), definition(Kind::Files))]));
-        let subject = Subject { kind: "state".into(), id: "s".into() };
+        context.sources.insert("01a12290-0000-7000-8000-000000000001".into(), "available".into());
+        context.definitions.insert("01a12290-0000-7000-8000-000000000001".into(), BTreeMap::from([("test".into(), definition(Kind::Files))]));
+        let subject = Subject::state("01a12290-0000-7000-8000-000000000001").unwrap();
         let behavior = diff(&project, &subject, &subject, &context).unwrap();
         assert_eq!(behavior.probes[0], json!({"probe":"test","status":"not run","base_run":false,"head_run":false}));
     }
@@ -420,7 +420,7 @@ mod tests {
     fn collected_source_definitions_follow_attestation_id_order() {
         let mut records = Vec::new();
         for (seq, id, argv) in [(1, "z", "last-by-id"), (2, "a", "last-by-time")] {
-            let mut record = crate::Record::new("attest");
+            let mut record = crate::Record::untrusted_preview("attest");
             record.id = id.into();
             record.seq = seq;
             record.time = seq as i64;
@@ -428,11 +428,11 @@ mod tests {
             record.project = "project".into();
             let mut probe = definition(Kind::Files);
             probe.run = vec![argv.into()];
-            record.data = json!({"attestation":{"format":1,"attestation_id":id,"subject":{"kind":"state","id":"subject"},"kind":"check","payload_digest":"00","signer":"machine","time":seq},"check":{"probe":"test","definition":probe}});
+            record.data = json!({"attestation":{"format":1,"attestation_id":id,"subject":{"kind":"state","id":"01a12290-0000-7000-8000-000000000002"},"kind":"check","payload_digest":"00","signer":"machine","time":seq},"check":{"probe":"test","definition":probe}});
             records.push(record);
         }
-        let project = Project::from_records("project", records, "machine").unwrap();
-        let subject = Subject { kind: "state".into(), id: "subject".into() };
+        let project = Project::preview_records("project", records, "machine").unwrap();
+        let subject = Subject::state("01a12290-0000-7000-8000-000000000002").unwrap();
         let definitions = Context::default().definitions(&project, &subject);
         assert_eq!(definitions["test"].run, ["last-by-id"]);
     }

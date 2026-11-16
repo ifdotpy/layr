@@ -165,7 +165,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     if cfg!(target_os = "macos") && key == Some(LOCAL_KEY) && enabled {
         bail!("privileged automatic checks are unavailable on macOS");
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut settings = local_settings(repo)?;
     if key == Some(RUNNER_KEY) {
         settings.runner = enabled;
@@ -236,7 +236,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let required = required_checks(a.get("--required-checks"), state.as_deref(), true)?;
     let only = only_checks(a.get("--only"))?;
     let slot = run_slot(a.get("--slot"))?;
@@ -284,7 +284,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
 fn pending(ctx: &Ctx, a: &Parsed) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+    let state = a.get("--state").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let have = a.get("--platform").map_or_else(platform, str::to_owned);
     if !PLATFORMS.iter().any(|p| p.contains('-') && *p == have) {
         bail!(
@@ -446,7 +446,7 @@ fn required_checks(value: Option<&str>, state: Option<&str>, passing: bool) -> R
 }
 
 fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: bool) -> Result<Plan> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, main_states) = creator_policy(&repo.p.id, records)?;
     let changes = names("checks.changes", &setting(&policy, "checks.changes", json!([]))?)?;
     let lines = setting(&policy, "checks.lines", json!({}))?;
@@ -501,7 +501,7 @@ fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: boo
     if !watched_lines.is_empty() {
         for record in repo.p.db.records(usize::MAX >> 1)? {
             for (id, movement) in record.lines {
-                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after) {
+                if let (Some((line, names)), Some(after)) = (watched_lines.get(&id), movement.after()) {
                     for name in names {
                         jobs.insert((after.head.clone(), name.clone()));
                     }
@@ -593,7 +593,7 @@ fn attested_result(
     if repo.p.db.check_exit(state, argv, if passing { Some(0) } else { None })?.is_none() {
         return Ok(false);
     }
-    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = Subject::state(state)?;
     Ok(crate::probes::active_checks(repo, &subject)?
         .into_values()
         .any(|(_, r)| matches_check(&r.data["check"], argv, privileged, want, passing)))
@@ -601,14 +601,14 @@ fn attested_result(
 
 /// A queue gate uses the creator's privilege policy and requires a passing executor result.
 pub(crate) fn passing_required(repo: &Repo, state: &str, name: &str, argv: &[String], want: Option<&str>) -> Result<bool> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     let privileged = names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?;
     attested_result(repo, state, argv, privileged.iter().any(|check| check == name), want, true)
 }
 
 pub(crate) fn creator_project(repo: &Repo) -> Result<layr_model::Project> {
-    let records = repo.p.effective_records()?;
+    let records = repo.p.authorized_records()?;
     let (policy, _) = creator_policy(&repo.p.id, records)?;
     Ok(policy)
 }
@@ -646,7 +646,7 @@ fn needs(repo: &Repo, state: &str, name: &str, after: &Value, commands: &BTreeMa
     let Some(list) = after.get(name).and_then(Value::as_array) else {
         return Ok(Needs::Ready);
     };
-    let subject = Subject { kind: "state".into(), id: state.to_owned() };
+    let subject = Subject::state(state)?;
     let results: Vec<Value> =
         crate::probes::active_checks(repo, &subject)?.into_values().map(|(_, r)| r.data["check"].clone()).collect();
     for need in list.iter().filter_map(Value::as_str) {
@@ -695,9 +695,7 @@ fn scan(
         timeout: setting(&policy, "checks.timeout", json!(900))?.as_u64().context("invalid checks.timeout")?,
         memory: setting(&policy, "checks.memory", json!(4_u64 << 30))?.as_u64().context("invalid checks.memory")?,
         // RLIMIT_NPROC counts threads on Linux: Chromium, Node and vite of a web check run more than 256.
-        processes: setting(&policy, "checks.processes", json!(4096))?
-            .as_u64()
-            .context("invalid checks.processes")?,
+        processes: setting(&policy, "checks.processes", json!(4096))?.as_u64().context("invalid checks.processes")?,
         log_bytes: setting(&policy, "checks.log-bytes", json!(1 << 20))?.as_u64().context("invalid checks.log-bytes")? as usize,
     };
     let local = local_settings(repo)?;
@@ -780,10 +778,9 @@ fn scan(
                 bail!("automatic checks require Linux");
             };
             let work = repo.p.work_dir().join(crate::store::temp_name());
-            crate::storage::create_subvolume(&work)?;
-            let cleanup = crate::repo::Temp { path: work.clone() };
+            let cleanup = crate::repo::Temp::empty(work.clone())?;
             std::fs::write(work.join("check.log"), &log)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut output =
                 repo.new_state(ctx, &work, StateKind::Derived, vec![state.clone()], &format!("check {name} log"), None)?;
             output.derived_from = Some(state.clone());
@@ -801,7 +798,7 @@ fn scan(
                 before: None,
                 after: Some(RefState { name: log_ref, target: output.id, expires_at: None }),
             })?;
-            repo.commit_record(ctx, record)?;
+            repo.commit_record(&_lock, ctx, record)?;
             drop(cleanup);
             Ok(result)
         })?;
@@ -810,15 +807,19 @@ fn scan(
     Ok(Scan { checks: results, pending, pending_privileged })
 }
 
-fn creator_policy(project: &str, records: Vec<crate::model::Record>) -> Result<(layr_model::Project, BTreeSet<String>)> {
-    let creator = layr_model::project_perspective(project, &records)
+fn creator_policy(
+    project: &str,
+    records: Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>,
+) -> Result<(layr_model::Project, BTreeSet<String>)> {
+    let creator = layr_model::project_perspective(project, records.iter().map(|r| r.record()))
         .context("automatic checks refuse to run without an unambiguous verified project creator")?;
-    let model = layr_model::Project::from_records(project, records.clone(), &creator)?;
+    let model = layr_model::Project::from_authorized_records(project, records.clone(), &creator)?;
     let mut states = BTreeSet::new();
     for record in &records {
+        let record = record.record();
         if model.admins.contains(&record.machine) {
             for movement in record.lines.values() {
-                if let Some(after) = &movement.after {
+                if let Some(after) = movement.after() {
                     if after.name == "main" {
                         states.insert(after.head.clone());
                     }
@@ -877,7 +878,7 @@ fn execute(
         // Filesystem suites start service clients under test users. They must
         // traverse this credential-free source copy to reach their own fixtures.
         std::fs::DirBuilder::new().mode(0o711).create(&path)?;
-        Some(crate::repo::Temp { path })
+        Some(crate::repo::Temp::existing(path)?)
     } else {
         None
     };
@@ -969,7 +970,7 @@ fn execute(
             .args(["/work", "--chdir", "/work", "--"])
             .args(argv)
             .current_dir("/");
-        crate::privs::command_as(&mut command, ctx.caller.uid, &[])?;
+        crate::privs::command_as_caller(&mut command, ctx, &[])?;
     }
     let result = run_check(command, limits)?;
     // A privileged copy is a plain folder of root: only a sandboxed check gives its caches back.
@@ -1083,10 +1084,10 @@ pub(crate) fn save_back_caches(
         if !path.is_dir() {
             continue;
         }
-        if !crate::storage::is_subvolume(&path) {
+        if !crate::fs::host().namespace.managed(&path) {
             crate::repo::convert_cache(dir, &folder, ctx.caller.uid, gid)?;
         }
-        if crate::storage::is_subvolume(&path) {
+        if crate::fs::host().namespace.managed(&path) {
             folders.push(folder);
         }
     }
@@ -1097,18 +1098,18 @@ pub(crate) fn save_back_caches(
     // The source times of this copy go with its build output (docs/cache-overlays.md, section 20). The
     // `.layr-times` that came with the cache names the sources of an older build: a line that takes this
     // cache would give a changed source an older time than the new build output, and the tool would skip it.
-    crate::source_times::record(dir, &folders)?;
-    let _lock = repo.p.lock()?;
+    crate::source_times::record(dir, &folders, (ctx.caller.uid, gid))?;
+    let _lock = repo.p.lock_maintenance()?;
     let checks_line = match repo.p.db.line_by_name(&name)? {
         Some(l) => l,
-        None => repo.create_line(ctx, &name, state, ctx.caller.uid)?,
+        None => repo.create_line(&_lock, ctx, &name, state, ctx.caller.uid)?,
     };
     // Checks run newest state first: the cache of an older head saved last would replace (and free) the
     // cache that a newer head gave back, and `line new` from that head would start cold.
     if let Some(newer) = newer_cache_given_back(repo, &checks_line, state, &folders)? {
         bail!("the newer head {} gave its caches back already", crate::ids::short(&newer));
     }
-    let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
+    let saved = repo.save_cache_overlays_in(&_lock, ctx, &checks_line, dir, &folders, true, state)?;
     Ok((name, saved))
 }
 
@@ -1191,8 +1192,7 @@ fn execute(
     // work folder, so a warm cache folder is cloned and not copied.
     let tmp = std::path::Path::new("/private/var/tmp");
     let base = if std::fs::metadata(dir)?.dev() == std::fs::metadata(tmp)?.dev() { tmp.to_path_buf() } else { repo.p.work_dir() };
-    let private = crate::repo::Temp { path: base.join(format!("layr-check-{}", crate::ids::new_id())) };
-    std::fs::DirBuilder::new().mode(0o700).create(&private.path)?;
+    let private = crate::repo::Temp::directory(base.join(format!("layr-check-{}", crate::ids::new_id())), 0o700)?;
     let same_volume = std::fs::metadata(dir)?.dev() == std::fs::metadata(&private.path)?.dev();
     let status = std::process::Command::new("/bin/cp")
         .args([if same_volume { "-cR" } else { "-R" }, "--"])
@@ -1211,10 +1211,10 @@ fn execute(
     let link = std::path::Path::new("/tmp").join(format!("lct-{:016x}", rand::random::<u64>()));
     std::os::unix::fs::symlink(&scratch, &link)?;
     let _link = TempLink(link);
-    let seed = std::path::PathBuf::from(crate::privs::user(ctx.caller.uid)?.home).join("Library/Application Support/Layr/checks");
+    let seed = ctx.caller.home.join("Library/Application Support/Layr/checks");
     let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
     command.args(["-p", &macos_profile(&dir, &seed)?, "--"]).args(argv).current_dir(&dir);
-    crate::privs::command_as(&mut command, ctx.caller.uid, &[
+    crate::privs::command_as_caller(&mut command, ctx, &[
         ("HOME".into(), home.display().to_string()),
         ("TMPDIR".into(), _link.0.display().to_string()),
         ("LAYR_CHECK_TMPDIR".into(), _link.0.display().to_string()),
@@ -1301,7 +1301,7 @@ mod macos_tests {
         use std::os::unix::net::UnixListener;
         let root = std::path::Path::new("/private/var/tmp").join(format!("lsc-{:016x}", rand::random::<u64>()));
         std::fs::create_dir(&root)?;
-        let cleanup = crate::repo::Temp { path: root.clone() };
+        let cleanup = crate::repo::Temp::existing(root.clone())?;
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let profile = macos_profile(&work, &work)?;
@@ -1349,7 +1349,7 @@ mod macos_tests {
         let name = crate::ids::display(&crate::ids::new_id());
         let root = std::env::temp_dir().join(format!("ls-{}", &name[..16]));
         std::fs::create_dir(&root)?;
-        let cleanup = crate::repo::Temp { path: root.clone() };
+        let cleanup = crate::repo::Temp::existing(root.clone())?;
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let work = std::fs::canonicalize(work)?;
@@ -1513,14 +1513,46 @@ mod policy_tests {
         );
     }
 
-    fn record(machine: &str, op: &str, data: Value) -> crate::model::Record {
-        let mut record = crate::model::Record::new(op);
+    const PROJECT: &str = "01a12290-0000-7000-8000-000000000001";
+
+    fn record(
+        machine: &str,
+        op: &str,
+        mut data: Value,
+    ) -> layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope> {
+        let n = match machine {
+            "owner" => 1,
+            "runner" => 2,
+            _ => 3,
+        };
+        let machine = format!("01a12290-0000-7000-8001-{n:012}");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
+        if op == "project" {
+            data["id"] = json!(PROJECT);
+        }
+        let mut record = crate::model::Record::untrusted_preview(op);
         record.id = crate::ids::new_id();
-        record.project = "project".into();
-        record.machine = machine.into();
+        record.project = PROJECT.into();
+        record.machine = machine.clone();
         record.seq = 1;
         record.data = data;
-        record
+        let lines = vec![crate::oplog::sign_line(&record, &key).unwrap()];
+        let keys = BTreeMap::from([(machine.clone(), key.verifying_key())]);
+        let rules = Default::default();
+        layr_model::record::authorize_local_lines(
+            PROJECT,
+            &lines,
+            &keys,
+            layr_model::record::LocalAuthority {
+                machine: layr_types::MachineId::parse(&machine).unwrap(),
+                trust_writers: &keys,
+                limits: &rules,
+                overlay: None,
+            },
+            0,
+        )
+        .unwrap()
+        .remove(0)
     }
 
     #[test]
@@ -1539,13 +1571,13 @@ mod policy_tests {
                 "check.unit":"echo local", "checks.changes":["local"], "protect":{}
             }}),
         );
-        let (policy, _) = creator_policy("project", vec![creator.clone(), runner.clone()])?;
+        let (policy, _) = creator_policy(PROJECT, vec![creator.clone(), runner.clone()])?;
         assert_eq!(policy.setting("check.unit"), Some(&json!("echo creator")));
         assert_eq!(policy.setting("checks.changes"), Some(&json!(["unit"])));
         assert!(policy.access_policy(0, false).rule_for("main").is_some());
-        assert!(creator_policy("project", vec![runner]).is_err());
+        assert!(creator_policy(PROJECT, vec![runner]).is_err());
         let conflicting = record("other", "project", json!({"id":"project","config":{}}));
-        assert!(creator_policy("project", vec![creator, conflicting]).is_err());
+        assert!(creator_policy(PROJECT, vec![creator, conflicting]).is_err());
         Ok(())
     }
 }

@@ -1,11 +1,13 @@
 //! The caller of a command: identity, environment, working folder and output.
 
 use crate::model::{Actor, Author};
+use crate::privs::FsIdentity;
 use crate::store::Store;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct Caller {
@@ -13,22 +15,29 @@ pub struct Caller {
     pub gid: u32,
     pub user: String,
     pub home: PathBuf,
+    /// Lazy memberships shared by every context derived from this request.
+    fs_identity: Arc<OnceLock<Result<Arc<FsIdentity>, String>>>,
 }
 
 impl Caller {
     pub fn from_uid(uid: u32) -> Caller {
         match crate::sys::user_by_uid(uid) {
-            Some(u) => Caller { uid, gid: u.gid, user: u.name, home: PathBuf::from(u.home) },
-            None => Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/") },
+            Some(u) => Caller { uid, gid: u.gid, user: u.name, home: PathBuf::from(u.home), fs_identity: Default::default() },
+            None => {
+                Caller { uid, gid: uid, user: format!("uid{uid}"), home: PathBuf::from("/"), fs_identity: Default::default() }
+            }
         }
     }
     pub fn is_root(&self) -> bool {
         self.uid == 0
     }
-    /// The identity that configured commands (merge drivers and checks) run as for this
-    /// caller: the caller itself, never another user. None for root.
-    pub fn driver_ids(&self) -> Option<(u32, u32)> {
-        (!self.is_root()).then_some((self.uid, self.gid))
+    /// The request's identity for filesystem access and configured commands, including root.
+    pub fn fs_identity(&self) -> Result<Arc<FsIdentity>> {
+        self.fs_identity
+            .get_or_init(|| FsIdentity::resolve(self.uid, self.gid).map(Arc::new).map_err(|e| format!("{e:#}")))
+            .as_ref()
+            .cloned()
+            .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -40,6 +49,8 @@ pub struct Ctx {
     pub out: std::cell::RefCell<Box<dyn Write>>,
     /// Resolved on first use and kept for every state this command creates.
     pub author: std::cell::OnceCell<Author>,
+    /// Captures prepared by this command retain their original driver and cleanup authority.
+    pub captures: crate::fs::CaptureSession,
 }
 
 /// Where the command runs: a project, a line and the folder below the line root.
@@ -72,7 +83,7 @@ impl Ctx {
         // Git reads the caller's home, but not global configuration inside a check sandbox.
         let env =
             [("HOME".into(), self.caller.home.to_string_lossy().into_owned()), ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())];
-        crate::privs::command_as(&mut command, self.caller.uid, &env).ok()?;
+        crate::privs::command_as_caller(&mut command, self, &env).ok()?;
         #[cfg(test)]
         GIT_CONFIG_READS.with(|reads| reads.set(reads.get() + 1));
         let out = command.output().ok()?;
@@ -139,9 +150,8 @@ impl Ctx {
 
     fn loc_moved(&self, path: &Path) -> Option<Loc> {
         let (e, sub) = crate::linepaths::find(&self.store, path)?;
-        let dir = self.store.project_dir(&e.project).ok()?;
-        let db = crate::db::Db::open(&crate::store::db_file(&dir)).ok()?;
-        let line = db.line_by_id(&e.line).ok()??;
+        let project = crate::store::Project::open_partial(&self.store, &e.project).ok()?;
+        let line = project.db.line_by_id(&e.line).ok()??;
         Some(Loc { project: e.project, line: Some(line.name), sub })
     }
 
@@ -162,7 +172,7 @@ impl Ctx {
                 // A folder that `line rename` kept belongs to the renamed line, not to its old name.
                 let dir = projects.join(&project);
                 let line = crate::linepaths::kept_folder_line_in(&dir.join("meta"), &comps[2])
-                    .and_then(|id| crate::db::Db::open(&crate::store::db_file(&dir)).ok()?.line_by_id(&id).ok()?)
+                    .and_then(|id| crate::store::Project::open_partial(&self.store, &project).ok()?.db.line_by_id(&id).ok()?)
                     .map_or_else(|| comps[2].clone(), |l| l.name);
                 return Some(Loc { project, line: Some(line), sub: comps[3..].join("/") });
             }
@@ -242,6 +252,7 @@ mod author_tests {
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
             author: Default::default(),
+            captures: Default::default(),
         };
         Ok((root, ctx))
     }

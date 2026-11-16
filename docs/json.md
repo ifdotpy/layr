@@ -63,6 +63,11 @@ To add a schema:
 refuses a schema with another keyword. `json-schema.py check <schema> <file> --def <name>` checks
 the file against one definition of the schema, for example `--def entry` for `queue add --json`.
 
+Queue entries optionally include `expected_head` and, on a target head mismatch, `failure`
+with `expected` and `found` state IDs. `reason` remains a human-readable string. These additive
+fields keep schema version 1. They also travel inside the existing signed operation records,
+without a new store format (see [remote format](remote-format.md)). Older entries omit them.
+
 ## Known limits
 
 - In `change show --json`, an item of `checks` is the result of a check. For a check

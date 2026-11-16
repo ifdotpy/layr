@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "layr-api"
 version.workspace = true

@@ -15,6 +15,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use zerocopy::FromZeros;
 
 const CHECK_OPEN_FILES_COUNT: u64 = 1024;
@@ -366,11 +367,17 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
 
 // ----- btrfs ioctls -----
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SNAP_CREATE_V2: libc::c_ulong = 0x5000_9417;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_CREATE_V2: libc::c_ulong = 0x5000_9418;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const SUBVOL_SETFLAGS: libc::c_ulong = 0x4008_941a;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const GET_SUBVOL_INFO: libc::c_ulong = 0x81f8_943c;
 #[cfg(target_os = "linux")]
 const BTRFS_FS_INFO: libc::c_ulong = 0x8400_941f;
@@ -423,7 +430,9 @@ const _: () = {
     assert!(std::mem::size_of::<SendArgs>() == 72);
     assert!(std::mem::offset_of!(SendArgs, version) == 40);
 };
+#[cfg(target_os = "linux")]
 const FICLONERANGE: libc::c_ulong = 0x4020_940d;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub const SUBVOL_RDONLY: u64 = 1 << 1;
 
 /// The UAPI `btrfs_ioctl_search_key`, in native byte order.
@@ -515,6 +524,7 @@ impl TreeSearch {
 }
 
 #[repr(C)]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 struct VolArgsV2 {
     fd: i64,
     transid: u64,
@@ -525,6 +535,7 @@ struct VolArgsV2 {
 
 #[repr(C)]
 #[derive(Clone, Copy, FromZeros)]
+#[cfg(target_os = "linux")]
 struct Timespec {
     sec: u64,
     nsec: u32,
@@ -532,6 +543,7 @@ struct Timespec {
 
 #[repr(C)]
 #[derive(FromZeros)]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 struct SubvolInfoArgs {
     treeid: u64,
     name: [u8; 256],
@@ -554,6 +566,7 @@ struct SubvolInfoArgs {
 }
 
 #[repr(C)]
+#[cfg(target_os = "linux")]
 struct CloneRange {
     src_fd: i64,
     src_offset: u64,
@@ -561,13 +574,18 @@ struct CloneRange {
     dest_offset: u64,
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn vol_args(fd: i64, flags: u64, name: &str) -> Result<Box<VolArgsV2>> {
-    let b = name.as_bytes();
-    if b.is_empty() || b.len() >= 4040 || b.contains(&0) || b.contains(&b'/') {
+    vol_args_bytes(fd, flags, name.as_bytes())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+fn vol_args_bytes(fd: i64, flags: u64, name: &[u8]) -> Result<Box<VolArgsV2>> {
+    if name.is_empty() || name.len() >= 4040 || name.contains(&0) || name.contains(&b'/') {
         return Err(anyhow!("bad subvolume name {name:?}"));
     }
     let mut a = Box::new(VolArgsV2 { fd, transid: 0, flags, unused: [0; 4], name: [0; 4040] });
-    a.name[..b.len()].copy_from_slice(b);
+    a.name[..name.len()].copy_from_slice(name);
     Ok(a)
 }
 
@@ -598,23 +616,27 @@ pub fn casefold(path: &std::path::Path) -> bool {
 }
 
 /// Create the subvolume `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_create(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
     ioctl_ptr(dir, SUBVOL_CREATE_V2, &mut *a).with_context(|| format!("create subvolume {name}"))
 }
 
 /// Snapshot the subvolume `src` as `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_snapshot(src: BorrowedFd, dir: BorrowedFd, name: &str, readonly: bool) -> Result<()> {
     let mut a = vol_args(src.as_raw_fd() as i64, if readonly { SUBVOL_RDONLY } else { 0 }, name)?;
     ioctl_ptr(dir, SNAP_CREATE_V2, &mut *a).with_context(|| format!("snapshot to {name}"))
 }
 
 /// Destroy the subvolume `name` in the folder `dir`.
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_destroy(dir: BorrowedFd, name: &str) -> Result<()> {
     let mut a = vol_args(0, 0, name)?;
     ioctl_ptr(dir, SNAP_DESTROY_V2, &mut *a).with_context(|| format!("delete subvolume {name}"))
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_flags(fd: BorrowedFd) -> io::Result<u64> {
     let mut flags: u64 = 0;
     ioctl_ptr(fd, SUBVOL_GETFLAGS, &mut flags)?;
@@ -630,6 +652,7 @@ pub fn filesystem_uuid(fd: BorrowedFd) -> io::Result<[u8; 16]> {
 
 #[cfg(target_os = "linux")]
 /// Set the flags of a subvolume (`SUBVOL_RDONLY` makes it read-only).
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
     let mut f: u64 = flags;
     ioctl_ptr(fd, SUBVOL_SETFLAGS, &mut f)
@@ -637,6 +660,7 @@ pub fn subvol_set_flags(fd: BorrowedFd, flags: u64) -> io::Result<()> {
 
 /// Set the identity of a verified file restore, as btrfs receive does before sealing it.
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_set_received(fd: BorrowedFd, uuid: [u8; 16], transid: u64) -> io::Result<()> {
     let zero_time = Timespec { sec: 0, nsec: 0 };
     let mut args = ReceivedSubvolArgs {
@@ -672,6 +696,7 @@ pub fn subvol_id(fd: BorrowedFd) -> io::Result<u64> {
     Ok(a.treeid)
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub struct RawSubvolInfo {
     pub tree_id: u64,
     pub generation: u64,
@@ -682,6 +707,7 @@ pub struct RawSubvolInfo {
     pub stransid: u64,
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
     let mut a = Box::new(SubvolInfoArgs::new_zeroed());
     ioctl_ptr(fd, GET_SUBVOL_INFO, &mut *a)?;
@@ -698,6 +724,7 @@ pub fn subvol_info(fd: BorrowedFd) -> io::Result<RawSubvolInfo> {
 
 /// Produce a version 1 metadata stream through an open pipe.
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::Result<()> {
     const BTRFS_SEND_NO_FILE_DATA: u64 = 1;
     // Version zero selects the original protocol.
@@ -714,6 +741,7 @@ pub fn send_no_data(src: BorrowedFd, out: BorrowedFd, parent_root: u64) -> io::R
 }
 
 /// Reflink a byte range from `src` into `dst`.
+#[cfg(target_os = "linux")]
 pub fn clone_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst_off: u64) -> io::Result<()> {
     let mut a = CloneRange { src_fd: src.as_fd().as_raw_fd() as i64, src_offset: src_off, src_length: len, dest_offset: dst_off };
     ioctl_ptr(dst.as_fd(), FICLONERANGE, &mut a)
@@ -832,7 +860,6 @@ pub fn fork() -> io::Result<Fork> {
     match unsafe { libc::fork() } {
         -1 => Err(io::Error::last_os_error()),
         0 => {
-            crate::pools::mark_worker();
             // A request process stops on SIGTERM; only the service waits for its requests.
             set_terminate_action(libc::SIG_DFL)?;
             Ok(Fork::Child)
@@ -1595,7 +1622,11 @@ pub fn apfs_bulk_read(dir: std::os::fd::BorrowedFd<'_>, buf: &mut Vec<u8>) -> io
 
 // Retry when an attribute grows between the size query and read.
 #[cfg(any(target_os = "macos", feature = "overlayfs"))]
-fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>) -> io::Result<Vec<u8>> {
+fn read_xattr_buffer(
+    initial_bytes: usize,
+    mut read: impl FnMut(&mut [u8]) -> rustix::io::Result<usize>,
+    mut query: impl FnMut() -> rustix::io::Result<usize>,
+) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     resize_lookup_buffer(&mut buffer, initial_bytes, XATTR_MAX_BYTES, "xattr bytes")?;
     loop {
@@ -1605,7 +1636,7 @@ fn read_xattr_buffer(initial_bytes: usize, mut read: impl FnMut(&mut [u8]) -> ru
                 return Ok(buffer);
             }
             Err(rustix::io::Errno::RANGE) => {
-                let size = read(&mut [])?;
+                let size = query()?;
                 if buffer.len() == XATTR_MAX_BYTES || size > XATTR_MAX_BYTES {
                     return Err(io::Error::other(format!("xattr bytes exceed the limit of {XATTR_MAX_BYTES}")));
                 }
@@ -1627,7 +1658,11 @@ pub fn apfs_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>)
         rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
         return Ok(Vec::new());
     }
-    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
+    read_xattr_buffer(
+        XATTR_INITIAL_VALUE_BYTES,
+        |buffer| rustix::fs::lgetxattr(path, name, buffer),
+        || rustix::fs::lgetxattr_query(path, name),
+    )
 }
 /// Set (`readonly`) or clear the immutable flag of the entry itself. Clearing also removes the
 /// seal entry of its ACL (`apfs_seal_entry`): a copy of a sealed entry can carry either seal, and
@@ -1709,6 +1744,7 @@ unsafe extern "C" {
     fn acl_set_qualifier(entry: *mut libc::c_void, qualifier: *const libc::c_void) -> libc::c_int;
     fn acl_get_permset_mask_np(entry: *mut libc::c_void, mask: *mut u64) -> libc::c_int;
     fn acl_set_permset_mask_np(entry: *mut libc::c_void, mask: u64) -> libc::c_int;
+    fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
     fn acl_to_text(acl: *mut libc::c_void, len: *mut libc::ssize_t) -> *mut libc::c_char;
     fn acl_get_flagset_np(obj: *mut libc::c_void, flagset: *mut *mut libc::c_void) -> libc::c_int;
     fn acl_set_flagset_np(obj: *mut libc::c_void, flagset: *mut libc::c_void) -> libc::c_int;
@@ -1824,6 +1860,23 @@ impl Acl {
         Ok(())
     }
 
+    fn user_text(mut self) -> io::Result<Option<Vec<u8>>> {
+        self.remove_seal()?;
+        if self.is_empty() {
+            return Ok(None);
+        }
+        let mut len: libc::ssize_t = 0;
+        // SAFETY: this ACL is live, text is copied before libc frees its allocation.
+        unsafe {
+            let text = acl_to_text(self.0, &mut len);
+            if text.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let output = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
+            acl_free(text.cast());
+            Ok(Some(output))
+        }
+    }
     fn new() -> io::Result<Acl> {
         // SAFETY: acl_init allocates an empty ACL that the wrapper frees.
         let acl = unsafe { acl_init(1) };
@@ -2005,12 +2058,6 @@ pub fn apfs_publish(src: &std::path::Path, dst: &std::path::Path) -> io::Result<
     Ok(rustix::fs::renameat_with(rustix::fs::CWD, src, rustix::fs::CWD, dst, rustix::fs::RenameFlags::NOREPLACE)?)
 }
 
-/// Exchange two entries in one step.
-#[cfg(target_os = "macos")]
-pub fn apfs_swap(a: &std::path::Path, b: &std::path::Path) -> io::Result<()> {
-    Ok(rustix::fs::renameat_with(rustix::fs::CWD, a, rustix::fs::CWD, b, rustix::fs::RenameFlags::EXCHANGE)?)
-}
-
 #[cfg(target_os = "macos")]
 pub fn apfs_copy_metadata(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
     let (src, dst) = (cpath(src)?, cpath(dst)?);
@@ -2046,7 +2093,11 @@ pub fn apfs_copy_acl_fd(src: std::os::fd::BorrowedFd<'_>, dst: std::os::fd::Borr
 }
 
 #[cfg(target_os = "macos")]
-pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::BorrowedFd<'_>, name: &str) -> io::Result<()> {
+pub fn apfs_clone_at(
+    src: std::os::fd::BorrowedFd<'_>,
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: impl rustix::path::Arg,
+) -> io::Result<()> {
     Ok(rustix::fs::fclonefileat(
         src,
         dir,
@@ -2056,13 +2107,19 @@ pub fn apfs_clone_at(src: std::os::fd::BorrowedFd<'_>, dir: std::os::fd::Borrowe
 }
 #[cfg(target_os = "macos")]
 pub fn apfs_unseal_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    apfs_immutable_fd(fd, false)?;
+    unseal_entry_fd(fd.as_raw_fd())
+}
+/// std/rustix expose no macOS file-flag setter. Keep the existing fchflags call behind an FD.
+#[cfg(target_os = "macos")]
+pub fn apfs_immutable_fd(fd: std::os::fd::BorrowedFd<'_>, readonly: bool) -> io::Result<()> {
     let st = rustix::fs::fstat(fd)?;
+    let flags = if readonly { st.st_flags | libc::UF_IMMUTABLE } else { st.st_flags & !libc::UF_IMMUTABLE };
     // SAFETY: fd remains open and fchflags takes only integer flags.
-    if st.st_flags & libc::UF_IMMUTABLE != 0 && unsafe { libc::fchflags(fd.as_raw_fd(), st.st_flags & !libc::UF_IMMUTABLE) } != 0
-    {
+    if flags != st.st_flags && unsafe { libc::fchflags(fd.as_raw_fd(), flags) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    unseal_entry_fd(fd.as_raw_fd())
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2074,7 +2131,11 @@ pub fn apfs_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>
 /// `read_value` refuses stays empty. Reading a value costs a system call of its own.
 #[cfg(target_os = "macos")]
 pub fn apfs_xattrs_where(path: &std::path::Path, read_value: impl Fn(&[u8]) -> bool) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
+    let names = read_xattr_buffer(
+        XATTR_INITIAL_NAMES_BYTES,
+        |buffer| rustix::fs::llistxattr(path, buffer),
+        || rustix::fs::llistxattr_query(path),
+    )?;
     names
         .split(|b| *b == 0)
         .filter(|name| !name.is_empty())
@@ -2185,24 +2246,34 @@ pub fn apfs_acl_text(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
         // A volume without ACLs, or another error: the libc read below decides.
         _ => {}
     }
-    let Some(mut acl) = Acl::of_path(&path)? else {
-        return Ok(None);
-    };
-    acl.remove_seal()?;
-    if acl.is_empty() {
-        return Ok(None);
-    }
-    let mut len: libc::ssize_t = 0;
-    // SAFETY: the ACL is live; the text is owned by libc, copied, and freed once.
-    unsafe {
-        let text = acl_to_text(acl.0, &mut len);
-        if text.is_null() {
-            return Err(io::Error::last_os_error());
+    Acl::of_path(&path)?.map(Acl::user_text).transpose().map(Option::flatten)
+}
+
+/// Descriptor-based user ACL observations. std/rustix expose no macOS ACL API.
+#[cfg(target_os = "macos")]
+pub fn apfs_acl_text_fd(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<Option<Vec<u8>>> {
+    use std::os::fd::AsRawFd;
+    Acl::of_fd(fd.as_raw_fd())?.map(Acl::user_text).transpose().map(Option::flatten)
+}
+
+/// Restore the ACL carried by a reader. Keep parsing and native ACL ownership in this module.
+#[cfg(target_os = "macos")]
+pub fn apfs_set_acl_text_fd(fd: std::os::fd::BorrowedFd<'_>, text: Option<&[u8]>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let acl = match text {
+        None => Acl::new()?,
+        Some(text) => {
+            let text = std::ffi::CString::new(text).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            // std/rustix have no macOS ACL parser. SAFETY: text is a live C string;
+            // the returned ACL is owned and freed by Acl, including on errors.
+            let pointer = unsafe { acl_from_text(text.as_ptr()) };
+            if pointer.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Acl(pointer)
         }
-        let out = std::ffi::CStr::from_ptr(text).to_bytes().to_vec();
-        acl_free(text.cast());
-        Ok(Some(out))
-    }
+    };
+    acl.set_fd(fd.as_raw_fd())
 }
 
 #[cfg(target_os = "macos")]
@@ -2321,7 +2392,11 @@ pub fn overlay_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8
         rustix::fs::lsetxattr(path, name, value, rustix::fs::XattrFlags::empty())?;
         return Ok(Vec::new());
     }
-    read_xattr_buffer(XATTR_INITIAL_VALUE_BYTES, |buffer| rustix::fs::lgetxattr(path, name, buffer))
+    read_xattr_buffer(
+        XATTR_INITIAL_VALUE_BYTES,
+        |buffer| rustix::fs::lgetxattr(path, name, buffer),
+        || rustix::fs::lgetxattr_query(path, name),
+    )
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Result<()> {
@@ -2329,7 +2404,11 @@ pub fn overlay_remove_attribute(path: &std::path::Path, name: &CStr) -> io::Resu
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_xattrs(path: &std::path::Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let names = read_xattr_buffer(XATTR_INITIAL_NAMES_BYTES, |buffer| rustix::fs::llistxattr(path, buffer))?;
+    let names = read_xattr_buffer(
+        XATTR_INITIAL_NAMES_BYTES,
+        |buffer| rustix::fs::llistxattr(path, buffer),
+        || rustix::fs::llistxattr_query(path),
+    )?;
     names
         .split(|b| *b == 0)
         .filter(|name| !name.is_empty())
@@ -2615,47 +2694,49 @@ mod metadata_tests {
     };
 
     #[test]
-    fn attribute_growth_race_retries() {
-        let mut calls = 0;
-        let value = read_xattr_buffer(1, |buffer| {
-            calls += 1;
-            if buffer.is_empty() {
-                return Ok(2);
-            }
-            if buffer.len() < 128 {
-                return Err(rustix::io::Errno::RANGE);
-            }
-            buffer[..128].fill(7);
-            Ok(128)
-        })
-        .unwrap();
-        assert_eq!(value, vec![7; 128]);
-        assert_eq!(calls, 5);
+    fn attribute_growth_queries_size_and_retries_races() {
+        let large = XATTR_MAX_BYTES / 2;
+        for (queried, actual, reads) in [(2, 128, 3), (large, large, 2)] {
+            let mut calls = 0;
+            let value = read_xattr_buffer(
+                1,
+                |buffer| {
+                    calls += 1;
+                    if buffer.len() < actual {
+                        return Err(rustix::io::Errno::RANGE);
+                    }
+                    buffer[..actual].fill(7);
+                    Ok(actual)
+                },
+                || Ok(queried),
+            )
+            .unwrap();
+            assert_eq!(value, vec![7; actual]);
+            assert_eq!(calls, reads);
+        }
     }
 
     #[test]
     fn attribute_growth_stops_at_the_size_limit() {
         let mut calls = 0;
-        let error = read_xattr_buffer(1, |buffer| {
-            calls += 1;
-            if buffer.is_empty() {
-                Ok(0)
-            } else {
+        let error = read_xattr_buffer(
+            1,
+            |_| {
+                calls += 1;
                 Err(rustix::io::Errno::RANGE)
-            }
-        })
+            },
+            || Ok(0),
+        )
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
-        assert!(calls < 64);
+        assert!(calls < 32);
         let error = read_xattr_buffer(
             1,
             |buffer| {
-                if buffer.is_empty() {
-                    Ok(XATTR_MAX_BYTES + 1)
-                } else {
-                    Err(rustix::io::Errno::RANGE)
-                }
+                assert_eq!(buffer.len(), 1);
+                Err(rustix::io::Errno::RANGE)
             },
+            || Ok(XATTR_MAX_BYTES + 1),
         )
         .unwrap_err();
         assert!(error.to_string().contains("xattr bytes exceed the limit"));
@@ -2711,4 +2792,46 @@ mod limit_tests {
         assert_eq!(rustix::process::getrlimit(rustix::process::Resource::Nofile), before);
         Ok(())
     }
+}
+
+/// Observe a Linux file only while the kernel excludes writable opens and mappings.
+/// std and rustix do not expose F_SETLEASE/F_GETLEASE/F_SETSIG. Keep this small
+/// exception here; leases are never persisted or retained across file observations.
+#[cfg(target_os = "linux")]
+pub(crate) fn leased_metadata(path: &std::path::Path) -> io::Result<Option<std::fs::Metadata>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    // A lease on an overlay inode does not exclude mappings of its backing inode.
+    // The driver must resolve that backing file first, or leave it unverifiable.
+    if rustix::fs::fstatfs(&file)?.f_type == 0x794c_7630 {
+        return Ok(None);
+    }
+    // SAFETY: sigaction only reads the current disposition into initialized storage.
+    // F_SETSIG selects a normally ignored notification BEFORE acquiring the lease.
+    // Never install a handler or change the process's signal disposition.
+    // F_SETSIG is part of Linux fcntl.h but is missing from libc 0.2.183.
+    const F_SETSIG: libc::c_int = 10;
+    // SAFETY: the disposition pointer is null and action is writable initialized storage.
+    let configured = unsafe {
+        let mut action = std::mem::zeroed::<libc::sigaction>();
+        libc::sigaction(libc::SIGURG, std::ptr::null(), &mut action) == 0
+            && matches!(action.sa_sigaction, libc::SIG_DFL | libc::SIG_IGN)
+            && libc::fcntl(file.as_raw_fd(), F_SETSIG, libc::SIGURG) == 0
+    };
+    if !configured {
+        return Ok(None);
+    }
+    // SAFETY: fcntl takes the descriptor and integer lease type; the file owns the
+    // lease and closing it releases it on every path, including metadata errors.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLEASE, libc::F_RDLCK) } != 0 {
+        return Ok(None);
+    }
+    let metadata = file.metadata()?;
+    // A writer may have requested a break after acquisition. Its bytes cannot be
+    // trusted if the lease is breaking; correctness never depends on the signal.
+    // SAFETY: F_GETLEASE takes no additional argument and does not mutate memory.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLEASE) } != libc::F_RDLCK {
+        return Ok(None);
+    }
+    Ok(Some(metadata))
 }

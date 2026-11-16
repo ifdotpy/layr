@@ -21,7 +21,7 @@ fn fixture() -> (Vec<String>, layr_model::Project, SigningKey) {
     let key = SigningKey::from_bytes(&[7; 32]);
     let mut records = Vec::new();
     for n in 1..=4 {
-        let mut r = Record::new(if n == 1 { "machine" } else { "commit" });
+        let mut r = Record::untrusted_preview(if n == 1 { "machine" } else { "commit" });
         r.id = id(300 + n);
         r.project = PROJECT.into();
         r.machine = MACHINE.into();
@@ -38,6 +38,7 @@ fn fixture() -> (Vec<String>, layr_model::Project, SigningKey) {
                 .unwrap(),
             );
         }
+        if n == 2 { r.op = "project".into(); r.data = json!({"id":PROJECT,"name":"indexed"}); }
         records.push(r);
     }
     let lines = records
@@ -47,7 +48,7 @@ fn fixture() -> (Vec<String>, layr_model::Project, SigningKey) {
             format!(r#"{{"r":{raw},"s":"{}"}}"#, keys::sign_bytes(raw.as_bytes(), &key))
         })
         .collect::<Vec<_>>();
-    let project = Model::from_verified_lines(lines.iter().map(String::as_str), "").unwrap().projects.remove(PROJECT).unwrap();
+    let project = Model::preview_lines(lines.iter().map(String::as_str), "").unwrap().projects.remove(PROJECT).unwrap();
     (lines, project, key)
 }
 
@@ -65,7 +66,7 @@ fn bad_head_watermark_unknown_signer_and_missing_record_use_full_verified_load()
     };
     let load = |snapshot: &Index, signer: &SigningKey| {
         let bytes = snapshot.seal(&recipient, signer).unwrap();
-        model_index::load_or_full(open(&identity, &bytes, &snapshot.name(), PROJECT, &trusted), PROJECT, &lines).unwrap()
+        model_index::load_or_full(open(&identity, &bytes, &snapshot.name(), PROJECT, &trusted), PROJECT, &lines, &trusted, i64::MAX).unwrap()
     };
     assert!(load(&good, &key).used_index);
     let mut wrong_head = good.clone();
@@ -92,7 +93,7 @@ fn bad_head_watermark_unknown_signer_and_missing_record_use_full_verified_load()
     assert!(!wrong_sig.used_index);
     let mut prefix_missing = lines.clone();
     prefix_missing.remove(1);
-    assert!(model_index::reconcile(&good, &prefix_missing).is_err());
+    assert!(model_index::reconcile(&good, &prefix_missing, &trusted, i64::MAX).is_err());
     Ok(())
 }
 
@@ -182,7 +183,7 @@ fn open_changes_share_latest_version_and_main_ancestry_rule() -> Result<()> {
     assert!(project.open_changes().is_empty());
     let mut records = project.op_log(None, usize::MAX);
     let add = |records: &mut Vec<Record>, n: usize, parents: Vec<String>, feature: bool, change: usize| {
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = id(300 + n);
         r.project = PROJECT.into();
         r.machine = MACHINE.into();
@@ -203,13 +204,13 @@ fn open_changes_share_latest_version_and_main_ancestry_rule() -> Result<()> {
         records.push(r);
     };
     add(&mut records, 5, vec![id(4)], true, 105);
-    let p = layr_model::Project::from_records(PROJECT, records.clone(), "")?;
+    let p = layr_model::Project::preview_records(PROJECT, records.clone(), "")?;
     assert_eq!(p.open_changes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id(5)]);
     add(&mut records, 6, vec![id(4), id(5)], false, 106);
-    assert!(layr_model::Project::from_records(PROJECT, records.clone(), "")?.open_changes().is_empty());
+    assert!(layr_model::Project::preview_records(PROJECT, records.clone(), "")?.open_changes().is_empty());
     add(&mut records, 7, vec![id(4)], true, 105);
     assert_eq!(
-        layr_model::Project::from_records(PROJECT, records, "")?.open_changes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        layr_model::Project::preview_records(PROJECT, records, "")?.open_changes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
         vec![id(7)]
     );
     Ok(())
@@ -223,7 +224,7 @@ fn heads_keep_all_undeleted_refs_even_when_expired() -> Result<()> {
         (6, "env/deleted", json!({"name":"env/deleted","target":id(2)})),
         (7, "env/deleted", serde_json::Value::Null),
     ] {
-        let mut record = Record::new("ref.set");
+        let mut record = Record::untrusted_preview("ref.set");
         record.id = id(300 + seq);
         record.machine = MACHINE.into();
         record.project = PROJECT.into();
@@ -233,7 +234,7 @@ fn heads_keep_all_undeleted_refs_even_when_expired() -> Result<()> {
         let body = serde_json::to_string(&record)?;
         lines.push(format!(r#"{{"r":{body},"s":"{}"}}"#, keys::sign_bytes(body.as_bytes(), &key)));
     }
-    let model = Model::from_verified_lines(lines.iter().map(String::as_str), "")?;
+    let model = Model::preview_lines(lines.iter().map(String::as_str), "")?;
     let p = &model.projects[PROJECT];
     assert!(p.ref_list("", i64::MIN).is_empty());
     let snapshot = model_index::heads(p, model_index::watermark(&lines)?, 1)?;

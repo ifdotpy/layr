@@ -187,7 +187,8 @@ fn test_binary_size(root: &Path, name: &str) -> Option<u64> {
     let stem = name.replace('-', "_");
     profile_dirs(root)
         .iter()
-        .filter_map(|p| std::fs::read_dir(p.join("deps")).ok())
+        .flat_map(|p| layr_cache::cargo::layout::Layout::output_dirs(p))
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flatten()
         .flatten()
         .filter(|e| {
@@ -296,14 +297,9 @@ fn tool_checks(f: &mut Vec<Finding>) {
 fn rerun_paths(target_dir: &Path, want: impl Fn(&str) -> bool) -> (Vec<(String, String)>, bool) {
     let mut hits = Vec::new();
     let mut seen = false;
-    let Ok(rd) = std::fs::read_dir(target_dir.join("build")) else { return (hits, seen) };
-    let mut dirs: Vec<_> = rd.flatten().collect();
-    dirs.sort_by_key(|e| e.file_name());
-    for e in dirs {
-        let Ok(text) = std::fs::read_to_string(e.path().join("output")) else { continue };
+    for (package, path) in layr_cache::cargo::layout::Layout::build_script_outputs(target_dir) {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
         seen = true;
-        let name = e.file_name().to_string_lossy().into_owned();
-        let package = name.rsplit_once('-').map_or(name.as_str(), |(p, _)| p).to_string();
         for line in text.lines() {
             let Some(v) = line.strip_prefix("cargo:rerun-if-changed=").or_else(|| line.strip_prefix("cargo::rerun-if-changed="))
             else {
@@ -733,6 +729,20 @@ mod tests {
                 ("layr-version".to_string(), "../../.git/refs/heads/main".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn cargo_unit_directory_reports_build_script_inputs_and_test_size() {
+        let root = std::env::temp_dir().join(format!("layr-doctor-new-layout-{}", std::process::id()));
+        let profile = root.join("target/debug");
+        let unit = profile.join("build/my-package/0123456789abcdef");
+        std::fs::create_dir_all(unit.join("run")).unwrap();
+        std::fs::create_dir_all(unit.join("out")).unwrap();
+        std::fs::write(unit.join("run/stdout"), "cargo:rerun-if-changed=../../.git/HEAD\n").unwrap();
+        std::fs::write(unit.join("out/my_test-0123456789abcdef"), vec![0; 123]).unwrap();
+        assert_eq!(dot_git_rerun_paths(&profile), (vec![("my-package".into(), "../../.git/HEAD".into())], true));
+        assert_eq!(test_binary_size(&root, "my-test"), Some(123));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

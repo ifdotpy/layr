@@ -1,0 +1,16 @@
+[package]
+name = "layr-fs-plain"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+layr-fs-unix = { path = "../unix" }
+layr-fs-core = { path = "../core" }
+layr-fs-common = { path = "../common" }
+rustix = { version = "1.1.6", features = ["fs", "process"] }

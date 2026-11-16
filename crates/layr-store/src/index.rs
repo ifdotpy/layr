@@ -194,7 +194,7 @@ pub fn open(identity: &str, object: &[u8], name: &str, project: &str, trusted: &
     struct Signer {
         machine: String,
     }
-    let raw = record::parse_line(std::str::from_utf8(&plain)?, None)?;
+    let raw = record::parse_line(std::str::from_utf8(&plain)?)?;
     let signer: Signer = serde_json::from_str(raw.get())?;
     let key = trusted.get(&signer.machine).context("index signer is not trusted")?;
     let raw = record::verify_line(&plain, key)?;

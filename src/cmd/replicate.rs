@@ -10,13 +10,14 @@
 //!    (commits, imports and stashes; automatic states with `--auto`), and with `--caches` the
 //!    cache snapshots of the states.
 
+pub(crate) use crate::machine_trust::trust;
+
 use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::StateKind;
 use crate::repo::Repo;
-use crate::storage as btrfs;
 use crate::store::{Project, Trust};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -204,8 +205,10 @@ fn recv_records<R: Read, W: Write>(w: &mut Wire<R, W>) -> Result<Vec<String>> {
 fn clone_identities(p: &Project) -> Result<BTreeMap<String, (String, Option<u64>)>> {
     let mut out = BTreeMap::new();
     for id in present(p)?.iter().rev().take(MAX_CLONE_SOURCES * 4) {
-        if let Ok(identity) = btrfs::clone_identity(&p.state_path(id)) {
-            if identity.1.is_none() && !btrfs::supports_local_clone_receive() {
+        if let Ok(identity) = crate::fs::host().transfer.clone_identity(&p.state_path(id)) {
+            if identity.1.is_none()
+                && matches!(crate::fs::host().transfer.offer().clone_lookup, crate::fs::CloneLookup::ReceivedOnly)
+            {
                 continue;
             }
             if p.db.state(id)?.is_some_and(|s| s.subvol == identity.0) {
@@ -243,37 +246,6 @@ fn missing_lines(p: &Project, peer: &BTreeMap<String, u64>) -> Result<Vec<String
 }
 
 /// Check and store records from the peer.
-fn take_lines(p: &Project, lines: &[String], trust: Trust) -> Result<usize> {
-    p.import_lines(lines, trust)
-}
-
-/// Record that this project trusts a machine's records (its id and key), with `limits` (`expires_at`, `role`,
-/// `overlays`, docs/ci-trust.md) when given.
-pub fn trust(ctx: &Ctx, p: &Project, machine: &str, key: &str, limits: Option<&Value>) -> Result<bool> {
-    if machine == p.store.machine.id {
-        return Ok(false);
-    }
-    if let Some(k) = p.db.trusted(machine)? {
-        if k != key {
-            bail!("machine {} is trusted with another key", &ids::display(machine)[..8]);
-        }
-        // A trust with limits narrows a trusted machine (the narrowest limits win, docs/ci-trust.md), for example
-        // a full merge machine that becomes a merge machine. A second trust without limits changes nothing.
-        if limits.is_none() {
-            return Ok(false);
-        }
-    }
-    let mut rec = crate::model::Record::new("machine.trust");
-    rec.data = json!({"machine": machine, "public_key": key});
-    if let Some(Value::Object(limits)) = limits {
-        for (k, v) in limits {
-            rec.data[k] = v.clone();
-        }
-    }
-    p.append(rec, &ctx.actor())?;
-    Ok(true)
-}
-
 fn own_key(p: &Project) -> String {
     hex::encode(p.store.machine.key.verifying_key().to_bytes())
 }
@@ -292,11 +264,9 @@ fn deletion_states(rec: &crate::model::Record) -> BTreeSet<String> {
 }
 
 fn undo_dependencies(p: &Project) -> Result<BTreeSet<String>> {
-    let mut stmt = p.db.conn.prepare("SELECT raw FROM records WHERE op='line.delete'")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut required = BTreeSet::new();
-    for raw in rows {
-        required.extend(deletion_states(&crate::oplog::parse_line(&raw?, None)?.record));
+    for record in p.db.records_with_op("line.delete")? {
+        required.extend(deletion_states(&record));
     }
     Ok(required)
 }
@@ -389,10 +359,12 @@ fn send_states<R: Read, W: Write>(
                 .take(MAX_CLONE_SOURCES * 4)
                 .filter(|source| {
                     repo.p.db.state(source).ok().flatten().is_some_and(|state| {
-                        btrfs::send_clone_identity(&repo.p.state_path(source)).ok().is_some_and(|(uuid, transid)| {
-                            uuid == state.subvol
-                                && identities.get(*source).is_some_and(|(u, t)| *u == uuid && t.is_none_or(|t| t == transid))
-                        })
+                        crate::fs::host().transfer.send_identity(&repo.p.state_path(source)).ok().is_some_and(
+                            |(uuid, transid)| {
+                                uuid == state.subvol
+                                    && identities.get(*source).is_some_and(|(u, t)| *u == uuid && t.is_none_or(|t| t == transid))
+                            },
+                        )
                     })
                 })
                 .take(MAX_CLONE_SOURCES)
@@ -407,10 +379,12 @@ fn send_states<R: Read, W: Write>(
         // A thin parent gets a view (`state_root`), as the child does.
         let pp = parent.as_ref().and_then(|p| repo.state_root(p).ok()).filter(|path| {
             let subvol = parent.as_ref().and_then(|p| repo.p.db.state(p).ok().flatten()).map(|s| s.subvol);
-            btrfs::send_clone_identity(path).ok().is_some_and(|(uuid, _)| Some(uuid) == subvol)
+            crate::fs::host().transfer.send_identity(path).ok().is_some_and(|(uuid, _)| Some(uuid) == subvol)
         });
         let sources: Vec<_> = clones.iter().map(|id| repo.p.state_path(id)).collect();
-        let child = btrfs::send_optimized(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
+        let child = crate::fs::host()
+            .transfer
+            .send(pp.as_deref(), &repo.state_root(id)?, &sources, features.compressed)?
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -422,7 +396,7 @@ fn send_states<R: Read, W: Write>(
         w.transfer.states_sent += 1;
         w.transfer.state_ids_sent.push(id.clone());
         have.insert(id.clone());
-        if let Ok((uuid, transid)) = btrfs::send_clone_identity(&repo.p.state_path(id)) {
+        if let Ok((uuid, transid)) = crate::fs::host().transfer.send_identity(&repo.p.state_path(id)) {
             identities.insert(id.clone(), (uuid, Some(transid)));
         }
     }
@@ -461,7 +435,7 @@ fn receive_one<R: Read, W: Write>(
 }
 
 fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) -> Result<usize> {
-    let _lock = p.lock()?;
+    let _lock = p.lock_maintenance()?;
     let mut n = 0;
     loop {
         let v = w.recv_json()?;
@@ -490,16 +464,18 @@ fn recv_states<R: Read, W: Write>(w: &mut Wire<R, W>, p: &Project, allow: bool) 
                 let mut clones = Vec::new();
                 for source in ids {
                     let state = p.db.state(&source)?.ok_or_else(|| anyhow!("unknown clone source"))?;
-                    let identity = btrfs::clone_identity(&p.state_path(&source))?;
+                    let identity = crate::fs::host().transfer.clone_identity(&p.state_path(&source))?;
                     if identity.0 != state.subvol {
                         bail!("clone source does not match its signed state");
                     }
                     clones.push((identity.0, identity.1, p.state_path(&source)));
                 }
                 receive_one(w, p, &id, &rec.subvol, true, &clones).and_then(|_| {
-                    if let Err(e) = p.db.set_present(&id, true) {
-                        let _ = p.delete_state(&id);
-                        return Err(e);
+                    if let Err(e) = p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true)) {
+                        if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                            let _ = p.delete_state(&id);
+                        }
+                        return Err(e.into());
                     }
                     n += 1;
                     w.transfer.states_received += 1;
@@ -538,9 +514,9 @@ pub fn exchange(
     let repo = &h.repo;
     let mut c = Command::new(&command[0]);
     c.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped());
-    crate::privs::command_as(
+    crate::privs::command_as_caller(
         &mut c,
-        ctx.caller.uid,
+        ctx,
         &crate::privs::pick_env(ctx, &["SSH_AUTH_SOCK", "PATH", "LAYR_ROOT", "LAYR_SOCKET"]),
     )?;
     let mut child = c.spawn().context("start the peer command")?;
@@ -553,7 +529,7 @@ pub fn exchange(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(usize, usize, usize, usize, u64, Vec<String>)> {
         let mine = present(&repo.p)?;
-        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine}))?;
+        w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "include_auto": auto, "include_caches": caches, "direction": direction, "compressed_send_v2": crate::fs::host().transfer.offer().compressed, "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project": repo.p.name, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": mine}))?;
         let hello = w.recv_json()?;
         if direction != "sync" && hello["direction_v1"] != true {
             bail!("the peer does not support one-way exchange; update it or use layr sync <remote>");
@@ -574,13 +550,13 @@ pub fn exchange(
         // The admin chose this peer: its records are taken, and after they passed the checks its
         // machine is trusted from now on.
         let got_records = {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             if direction == "push" && !lines.is_empty() {
                 bail!("the peer sent records during push");
             }
-            let n = take_lines(&repo.p, &lines, Trust::Peer(&peer.0, &peer.1))?;
+            let n = _lock.import_lines(&lines, Trust::Peer(&peer.0, &peer.1))?;
             if direction != "push" && !peer.0.is_empty() && repo.p.db.machine_key(&peer.0)?.as_deref() == Some(peer.1.as_str()) {
-                trust(ctx, &repo.p, &peer.0, &peer.1, None)?;
+                trust(&_lock, ctx, &repo.p, &peer.0, &peer.1, None)?;
             }
             n
         };
@@ -717,7 +693,7 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let mut repo = Repo { p, ctx: Some(ctx) };
     let peer_seqs: BTreeMap<String, u64> = serde_json::from_value(hello["seqs"].clone())?;
-    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": btrfs::supports_compressed_receive(), "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
+    w.json(&json!({"op": "hello", "direction_v1": true, "overlay_sync_v1": true, "compressed_send_v2": crate::fs::host().transfer.offer().compressed, "clone_sources_v1": true, "clone_identities_v1": clone_identities(&repo.p)?, "project_id": repo.p.id, "machine": repo.p.store.machine.id, "public_key": own_key(&repo.p), "seqs": seqs(&repo.p)?, "present": present(&repo.p)?}))?;
     let lines = recv_records(&mut w)?;
     if direction == "fetch" && !lines.is_empty() {
         bail!("the client sent records during fetch");
@@ -727,9 +703,11 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     {
         // A new replica trusts the machines of the project it copies; an existing one only takes
         // records of machines it trusts.
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let bootstrap = !exists;
-        let taken = take_lines(&repo.p, &lines, if bootstrap { Trust::All } else { Trust::Known }).and_then(|n| {
+        let imported = _lock.import_lines(&lines, if bootstrap { Trust::All } else { Trust::Known });
+        drop(_lock);
+        let taken = imported.and_then(|n| {
             if repo.p.id.is_empty() {
                 repo.p.reload_id()?;
             }
@@ -741,15 +719,15 @@ pub fn serve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         });
         if let Err(e) = taken {
             if bootstrap {
-                drop(_lock);
                 let _ = std::fs::remove_dir_all(&repo.p.dir);
             }
             let _ = w.json(&json!({"op": "error", "message": e.to_string()}));
             return Err(e);
         }
         if bootstrap {
+            let _lock = repo.p.lock_maintenance()?;
             for (m, k) in repo.p.machine_keys_of(&lines) {
-                trust(ctx, &repo.p, &m, &k, None)?;
+                trust(&_lock, ctx, &repo.p, &m, &k, None)?;
             }
         }
     }
@@ -919,31 +897,33 @@ fn exchange_overlays<R: Read, W: Write>(
                 }
                 w.json(&json!({"op":"overlay.hello","seqs":seqs(&project)?,"present":present(&project)?,
                     "clone_identities_v1":clone_identities(&project)?,
-                    "compressed_send_v2":btrfs::supports_compressed_receive(),"clone_sources_v1":true}))?;
+                    "compressed_send_v2":crate::fs::host().transfer.offer().compressed,"clone_sources_v1":true}))?;
                 let parent_transfer = std::mem::take(&mut w.transfer);
                 let lines = recv_records(w)?;
                 let trusted = crate::store_remote::overlays::trusted_keys(repo)?;
                 for line in &lines {
-                    let signed = crate::oplog::parse_line(line, None)?;
+                    let signed = crate::oplog::parse_line(line)?;
                     let key =
                         trusted.get(&signed.record.machine).context("overlay record signer is not trusted by the parent")?;
-                    crate::oplog::parse_line(line, Some(key))?;
+                    crate::oplog::verify_line(line, key)?;
                     if signed.record.project != id {
                         bail!("overlay record belongs to another project");
                     }
                 }
-                let _lock = project.lock()?;
+                let _lock = project.lock_maintenance()?;
                 let bootstrap = project.id.is_empty();
                 // Parent trust is checked above, before the overlay's first project record exists.
-                project.import_lines(&lines, Trust::All)?;
+                _lock.import_lines(&lines, Trust::All)?;
+                drop(_lock);
                 if bootstrap {
                     project.reload_id()?;
                 }
                 if project.id != id {
                     bail!("overlay project id differs");
                 }
+                let _lock = project.lock_maintenance()?;
                 for (machine, key) in &trusted {
-                    trust(ctx, &project, machine, &hex::encode(key.to_bytes()), None)?;
+                    trust(&_lock, ctx, &project, machine, &hex::encode(key.to_bytes()), None)?;
                 }
                 drop(_lock);
                 w.json(&json!({"op":"overlay.ready"}))?;
@@ -969,14 +949,14 @@ mod tests {
     #[ignore = "requires a root Btrfs fixture and a built peer binary"]
     fn auxiliary_states_cross_the_peer_protocol() {
         use crate::ctx::Caller;
-        use crate::model::Record;
+
         // Only a root Btrfs fixture sets this folder.
         let Some(base) = std::env::var_os("LAYR_TEST_AUX_ROOT").map(std::path::PathBuf::from) else {
             return;
         };
         let binary = std::env::var("LAYR_TEST_BINARY").expect("LAYR_TEST_BINARY");
         let source = base.join("source");
-        btrfs::create_subvolume(&source).unwrap();
+        crate::fs::create(&source).unwrap();
         std::fs::write(source.join("payload"), "auxiliary payload").unwrap();
         let ctx = Ctx {
             store: crate::store::Store::open(&base.join("a")).unwrap(),
@@ -984,21 +964,22 @@ mod tests {
             cwd: base.clone(),
             env: std::collections::HashMap::from([("LAYR_PROJECT".into(), "p".into())]),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(base.join("report.json")).unwrap())),
         };
         let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), json!({})).unwrap(), ctx: None };
         let mut ids = Vec::new();
         for (kind, name) in [(StateKind::Cache, "caches/peer"), (StateKind::Derived, "derived/peer")] {
-            let _lock = repo.p.lock().unwrap();
+            let _lock = repo.p.lock_maintenance().unwrap();
             let mut state = repo.new_state(&ctx, &source, kind, vec![], "peer fixture", None).unwrap();
             state.context = Some("peer-fixture-v1".into());
             let id = state.id.clone();
-            let mut rec = Record::new("fixture");
+            let mut rec = crate::model::DraftRecord::new("fixture");
             rec.states.push(state);
-            repo.commit_record(&ctx, rec).unwrap();
-            let mut rec = Record::new("ref.set");
+            repo.commit_record(&_lock, &ctx, rec).unwrap();
+            let mut rec = crate::model::DraftRecord::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":id,"expires_at":null}}});
-            repo.commit_record(&ctx, rec).unwrap();
+            repo.commit_record(&_lock, &ctx, rec).unwrap();
             ids.push(id);
         }
         drop(repo);
@@ -1021,7 +1002,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(peer_state(&ids[0]).join("payload")).unwrap(), "auxiliary payload");
         // Fetch must use the same policy, and the server must traverse auxiliary states.
         for id in &ids {
-            btrfs::delete_tree(&ctx.store.project_dir("p").unwrap().join("states").join(id)).unwrap();
+            crate::fs::remove(&ctx.store.project_dir("p").unwrap().join("states").join(id)).unwrap();
         }
         exchange(&ctx, &command, "fetch", false, false, true, false).unwrap();
         assert!(!ctx.store.project_dir("p").unwrap().join("states").join(&ids[0]).exists());
@@ -1032,13 +1013,14 @@ mod tests {
 
     #[test]
     fn live_refs_include_auto_ancestry_and_gate_only_cache_states() {
-        use crate::model::{Author, Record};
+        use crate::model::Author;
         let dir = std::env::temp_dir().join(format!("layr-peer-refs-{}", ids::new_id()));
         let store = crate::store::Store::open(&dir).unwrap();
         let project_dir = store.project_dir("p").unwrap();
         std::fs::create_dir_all(project_dir.join("meta/db")).unwrap();
         std::fs::create_dir(project_dir.join("states")).unwrap();
         let p = Project {
+            lease: Default::default(),
             store: &store,
             name: "p".into(),
             dir: project_dir.clone(),
@@ -1046,30 +1028,30 @@ mod tests {
             db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite")).unwrap(),
         };
         let actor = crate::model::Actor { uid: 0, name: "root".into(), session: None };
-        let mut rec = Record::new("project");
+        let mut rec = crate::model::DraftRecord::new("project");
         rec.data = json!({"id":p.id,"name":"p","config":{}});
-        p.append(rec, &actor).unwrap();
+        p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         let mut all: Vec<String> = Vec::new();
         for (index, kind) in
             [StateKind::Auto, StateKind::Auto, StateKind::Auto, StateKind::Cache, StateKind::Derived].into_iter().enumerate()
         {
             let id = ids::new_id();
             let parents = if index == 1 { vec![all[0].clone()] } else { vec![] };
-            let mut rec = Record::new("fixture");
+            let mut rec = crate::model::DraftRecord::new("fixture");
             rec.states.push(
                 serde_json::from_value(json!({"id":id,"kind":kind,"parents":parents,
                 "subvol":"","author":Author::default(),"time":index as i64,"context":"peer-fixture-v1"}))
                 .unwrap(),
             );
-            p.append(rec, &actor).unwrap();
+            p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
             all.push(id);
         }
         for (name, index, expires_at) in
             [("pins/auto", 1, None), ("pins/expired", 2, Some(1)), ("caches/test", 3, None), ("derived/test", 4, None)]
         {
-            let mut rec = Record::new("ref.set");
+            let mut rec = crate::model::DraftRecord::new("ref.set");
             rec.data = json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":all[index],"expires_at":expires_at}}});
-            p.append(rec, &actor).unwrap();
+            p.lock_maintenance().unwrap().append(rec, &actor).unwrap();
         }
         let required = required_states(&p).unwrap();
         assert!(required.contains(&all[0]) && required.contains(&all[1]));
@@ -1088,10 +1070,14 @@ mod tests {
 
     #[test]
     fn deleted_line_snapshots_are_undo_dependencies() {
-        let mut rec = crate::model::Record::new("line.delete");
+        let mut rec = crate::model::Record::untrusted_preview("line.delete");
         rec.lines.insert(
             "line".into(),
-            crate::model::LineChange { before: None, after: None, working_before: Some("working".into()), working_after: None },
+            crate::model::LineChange {
+                transition: crate::model::LineTransition::Delete { before: None },
+                working_before: Some("working".into()),
+                working_after: None,
+            },
         );
         rec.data = json!({"final_state": "working"});
         assert_eq!(deletion_states(&rec), BTreeSet::from(["working".into()]));

@@ -88,19 +88,19 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let bad = match a.get("--bad") {
-        Some(rev) => crate::revs::resolve(repo, h.line.as_ref(), rev)?,
+        Some(rev) => crate::revs::resolve_state(repo, h.line.as_ref(), rev)?,
         None if !positions.is_empty() => positions.last().unwrap().clone(),
         None => {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let line = repo.line(&h.line()?.id)?;
             repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
-            repo.save(ctx, &line, "bisect bad (working content)", false, true)?
+            repo.save(&_lock, ctx, &line, "bisect bad (working content)", false, true)?
                 .context("the line has no working folder; use --bad")?
                 .id
         }
     };
     let good = match a.get("--good") {
-        Some(rev) => crate::revs::resolve(repo, h.line.as_ref(), rev)?,
+        Some(rev) => crate::revs::resolve_state(repo, h.line.as_ref(), rev)?,
         None => {
             let history = if positions.is_empty() {
                 repo.first_parent_chain(&h.line()?.head)?
@@ -163,8 +163,8 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let origins: Vec<String> = repo.p.db.attestations(&first.id, Some("origin"))?.into_iter().map(|a| a.payload_digest).collect();
     let result = serde_json::json!({"good":good,"bad":bad,"first_bad":first.id,"argv":a.paths,"state":first.id,"message":first.message,"kind":crate::db::kind_str(first.kind),"origin":origins,"steps":steps});
     {
-        let _lock = repo.p.lock()?;
-        let mut rec = crate::model::Record::new("bisect.run");
+        let _lock = repo.p.lock_maintenance()?;
+        let mut rec = crate::model::DraftRecord::new("bisect.run");
         // The finding is evidence about the first bad state: a `bisect` attestation of it, whose
         // payload is the result. `layr attestations <state> --kind bisect` lists it.
         let finding = super::attest::record(repo, &first.id, "bisect", &serde_json::to_vec(&result)?)?;
@@ -173,7 +173,7 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Some(line) = &h.line {
             rec.data["line"] = serde_json::json!(line.id);
         }
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
     }
     if json {
         outln!(ctx, "{}", result);

@@ -279,8 +279,8 @@ mod tests {
     }
     /// Fold the records in the given order and in the reverse order: both must agree.
     fn both_orders(records: Vec<Record>) -> Project {
-        let one = Project::from_records("project", records.clone(), "a").unwrap();
-        let other = Project::from_records("project", records.into_iter().rev().collect::<Vec<_>>(), "b").unwrap();
+        let one = Project::preview_records("project", records.clone(), "a").unwrap();
+        let other = Project::preview_records("project", records.into_iter().rev().collect::<Vec<_>>(), "b").unwrap();
         assert_eq!(one.change_views(), other.change_views(), "arrival order or perspective changed the views");
         assert_eq!(one.numbering(), other.numbering());
         one
@@ -339,12 +339,7 @@ mod tests {
         let mut main = commit("a", 2, "c1");
         main.lines.insert(
             "line".into(),
-            LineChange {
-                before: None,
-                after: Some(LineState { name: "main".into(), head: "s-c1".into(), owner: 10, machine: "a".into() }),
-                working_before: None,
-                working_after: None,
-            },
+            LineChange { transition: crate::LineTransition::Create { after: LineState { name: "main".into(), head: "s-c1".into(), owner: 10, machine: "a".into() } }, working_before: None, working_after: None },
         );
         let p = both_orders(vec![creator(), main, at("b", 1, 9, CLOSE_OP, json!({"change_id":"c1"}))]);
         let view = p.change_view("c1").unwrap();

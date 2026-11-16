@@ -522,6 +522,7 @@ fn context(root: &Path) -> Ctx {
         cwd: root.to_path_buf(),
         env: HashMap::new(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
     }
 }
@@ -561,17 +562,18 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
     std::fs::create_dir_all(dir.join("meta/db")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project = crate::store::Project {
+        lease: Default::default(),
         store: &ctx.store,
         name: "p".into(),
         dir: dir.clone(),
         id: PROJECT.into(),
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
-    let mut record = Record::new("project");
+    let mut record = crate::model::DraftRecord::new("project");
     // These are plain fixture folders, not read-only native snapshots. Record their v2 objects
     // before publication so API transport tests do not require a privileged Btrfs send.
     record.data = serde_json::json!({"id":PROJECT,"name":"p","config":{"objects.enabled":true}});
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
     let mut states = Vec::new();
     for n in 0..3 {
         let id = crate::ids::new_id();
@@ -587,9 +589,9 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "parents":states.last().cloned().into_iter().collect::<Vec<_>>(),"time":crate::ids::now_ms()}))
         .unwrap();
-        let mut record = Record::new("state");
+        let mut record = crate::model::DraftRecord::new("state");
         record.states.push(state);
-        let saved = project.append(record, &ctx.actor()).unwrap();
+        let saved = project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         assert!(saved.states[0].tree.is_some() && saved.states[0].times.is_some(), "the API fixture uses v2 objects");
         states.push(id);
     }
@@ -606,9 +608,9 @@ fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String
         "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
         "parents":[parent],"time":crate::ids::now_ms()}))
     .unwrap();
-    let mut record = Record::new("state");
+    let mut record = crate::model::DraftRecord::new("state");
     record.states.push(state);
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
     id
 }
 
@@ -623,13 +625,17 @@ fn move_named_line(project: &crate::store::Project, ctx: &Ctx, line: &str, name:
         owner: ctx.caller.uid,
         machine: ctx.store.machine.id.clone(),
     };
-    let mut record = Record::new(if before.is_some() { "save" } else { "line.create" });
+    let mut record = crate::model::DraftRecord::new(if before.is_some() { "save" } else { "line.create" });
     record.lines.insert(
         line.into(),
-        LineChange { before: before.map(state), after: Some(state(head)), working_before: None, working_after: None },
+        LineChange {
+            transition: crate::model::LineTransition::from_endpoints(before.map(state), Some(state(head))),
+            working_before: None,
+            working_after: None,
+        },
     );
     record.data = serde_json::json!({"name":name});
-    project.append(record, &ctx.actor()).unwrap();
+    project.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
 }
 
 fn push(store: &Store, ctx: &Ctx, repo: &Repo) -> anyhow::Result<super::Report> {
@@ -818,39 +824,15 @@ fn a_first_api_cache_fetch_selects_after_importing_metadata() {
         let store = api_store(&root, &ctx, &fake);
         let (repo, parent_states, _) = project(&ctx);
         let opts = if exact_state {
-            Options {
-                caches_of_state: Some(parent_states[2].clone()),
-                heads: true,
-                ..Default::default()
-            }
+            Options { caches_of_state: Some(parent_states[2].clone()), heads: true, ..Default::default() }
         } else if form == 2 {
             // `fetch --line main`: the same caches as `--caches-of main`.
-            Options {
-                lines: vec!["main".into()],
-                heads: true,
-                ..Default::default()
-            }
+            Options { lines: vec!["main".into()], heads: true, ..Default::default() }
         } else {
-            Options {
-                caches_of: vec!["main".into()],
-                heads: true,
-                ..Default::default()
-            }
+            Options { caches_of: vec!["main".into()], heads: true, ..Default::default() }
         };
-        check_first_cache_fetch(
-            &root,
-            &ctx,
-            &repo,
-            &store,
-            "cache.target",
-            &opts,
-            selected.then_some(parent_states[2].as_str()),
-        );
-        assert_eq!(
-            fake.count("GET /api/v1/projects/p/objects/") > 0,
-            selected,
-            "only a selected cache downloads an object pack"
-        );
+        check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, selected.then_some(parent_states[2].as_str()));
+        assert_eq!(fake.count("GET /api/v1/projects/p/objects/") > 0, selected, "only a selected cache downloads an object pack");
         crate::free::finish(&ctx);
         drop(repo);
         delete_cache_fixture(&root);
@@ -900,54 +882,42 @@ fn check_first_cache_fetch(
     opts: &Options,
     cache_of: Option<&str>,
 ) {
-    let mut declaration = Record::new("overlay.create");
+    let mut declaration = crate::model::DraftRecord::new("overlay.create");
     declaration.data = serde_json::json!({"name":name,"config":{
             format!("overlay.{name}"):{"owner":ctx.caller.uid,"root":"target","mode":"follow"},
             format!("overlay.{name}.history"):1,
             format!("overlay.{name}.trust"):"protected"}});
-    repo.p.append(declaration, &ctx.actor()).unwrap();
+    repo.p.lock_maintenance().unwrap().append(declaration, &ctx.actor()).unwrap();
     let dir = ctx.store.project_dir(&format!("p%{name}")).unwrap();
     std::fs::create_dir_all(dir.join("meta/db")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project_id = crate::ids::new_id();
     let cache = crate::store::Project {
+        lease: Default::default(),
         store: &ctx.store,
         name: format!("p%{name}"),
         dir: dir.clone(),
         id: project_id.clone(),
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
-    let mut creation = Record::new("project");
-    creation.data =
-        serde_json::json!({"id":project_id,"name":name,"config":{"objects.enabled":true}});
-    cache.append(creation, &ctx.actor()).unwrap();
+    let mut creation = crate::model::DraftRecord::new("project");
+    creation.data = serde_json::json!({"id":project_id,"name":name,"config":{"objects.enabled":true}});
+    cache.lock_maintenance().unwrap().append(creation, &ctx.actor()).unwrap();
     let state = crate::ids::new_id();
     std::fs::create_dir(cache.state_path(&state)).unwrap();
-    std::fs::write(
-        cache.state_path(&state).join("unrelated"),
-        random_bytes(300000),
-    )
-    .unwrap();
-    let mut saved = Record::new("commit");
+    std::fs::write(cache.state_path(&state).join("unrelated"), random_bytes(300000)).unwrap();
+    let mut saved = crate::model::DraftRecord::new("commit");
     saved.states.push(serde_json::from_value(serde_json::json!({"id":state,"kind":"commit",
             "subvol":crate::ids::new_id(),"author":{"name":"Test","email":"test@example.test"},
             "cache_of":cache_of.map(str::to_owned).unwrap_or_else(crate::ids::new_id),"cache_by":ctx.caller.uid,"time":crate::ids::now_ms()})).unwrap());
-    cache.append(saved, &ctx.actor()).unwrap();
+    cache.lock_maintenance().unwrap().append(saved, &ctx.actor()).unwrap();
     // The cache is on an overlay line of another line: the overlay line `main` would be main's own cache line.
     move_named_line(&cache, &ctx, &crate::ids::new_id(), "other", None, &state);
     let mut layer = api_store_with(root, ctx, store.backend.api().unwrap().clone());
     layer.backend = layer.backend.scoped(&format!("overlays/{name}")).unwrap();
     layer.project = project_id;
     layer.dir = root.join(format!("layer-remote-{name}"));
-    push(
-        &layer,
-        &ctx,
-        &Repo {
-            p: cache,
-            ctx: None,
-        },
-    )
-    .unwrap();
+    push(&layer, &ctx, &Repo { p: cache, ctx: None }).unwrap();
     std::fs::rename(&dir, root.join(format!("original-{name}"))).unwrap();
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
@@ -957,46 +927,25 @@ fn check_first_cache_fetch(
         assert!(repo.overlay_repo(name).map_or(true, |r| r.p.db.state(&state).unwrap().is_none()));
         return;
     }
-    assert!(
-        report
-            .omitted
-            .iter()
-            .all(|item| item.contains("not for --line")),
-        "cache fetch errors: {:?}",
-        report.omitted
-    );
+    assert!(report.omitted.iter().all(|item| item.contains("not for --line")), "cache fetch errors: {:?}", report.omitted);
     let copied = repo.overlay_repo(name).unwrap();
-    assert!(
-        copied.p.db.state(&state).unwrap().is_some(),
-        "the metadata is imported"
-    );
-    assert_eq!(
-        report.states,
-        usize::from(selected),
-        "only selected cache bodies arrive: {:?}",
-        report.omitted
-    );
+    assert!(copied.p.db.state(&state).unwrap().is_some(), "the metadata is imported");
+    assert_eq!(report.states, usize::from(selected), "only selected cache bodies arrive: {:?}", report.omitted);
     assert_eq!(copied.p.has_state(&state), selected);
     if selected {
         assert_eq!(
             std::fs::read(copied.p.state_path(&state).join("unrelated")).unwrap(),
-            std::fs::read(
-                root.join(format!("original-{name}/states"))
-                    .join(&state)
-                    .join("unrelated")
-            )
-            .unwrap()
+            std::fs::read(root.join(format!("original-{name}/states")).join(&state).join("unrelated")).unwrap()
         );
     }
 }
-
 
 fn delete_cache_fixture(root: &Path) {
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     fn open_subvolumes(path: &Path) {
         // The fixture owns these snapshots. Ordinary Btrfs deletion needs them writable.
-        if crate::storage::is_subvolume(path) {
-            crate::storage::set_writable(path).unwrap();
+        if crate::fs::host().namespace.managed(path) {
+            crate::fs::set_writable(path).unwrap();
         }
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
@@ -1011,7 +960,7 @@ fn delete_cache_fixture(root: &Path) {
     #[cfg(all(target_os = "linux", feature = "overlayfs"))]
     let _ = std::fs::remove_dir_all(root);
     #[cfg(not(all(target_os = "linux", feature = "overlayfs")))]
-    crate::storage::delete_tree(root).unwrap();
+    crate::fs::remove(root).unwrap();
 }
 
 #[test]
@@ -1126,7 +1075,7 @@ fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekey
     let machine = "01a12290-0000-7000-8000-0000000000c1";
     let other = "01a12290-0000-7000-8000-0000000000c2";
     let sign = |seq: u64, op: &str, data: serde_json::Value| {
-        let mut record = Record::new(op);
+        let mut record = Record::untrusted_preview(op);
         record.id = format!("01a12290-0000-7000-8000-{:012x}", 0xd00 + seq);
         record.machine = machine.into();
         record.project = PROJECT.into();
@@ -1141,11 +1090,16 @@ fn records_that_a_server_serves_come_in_without_widening_local_trust_and_a_rekey
         sign(3, "machine.trust", serde_json::json!({"machine":other,"public_key":hex::encode(third.verifying_key().to_bytes())})),
     ];
     // `Trust::Known` refuses this batch; `Trust::Server` takes it.
-    assert!(repo.p.import_lines(&lines, crate::store::Trust::Known).is_err());
-    assert_eq!(repo.p.import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
+    assert!(repo.p.lock_maintenance().unwrap().import_lines(&lines, crate::store::Trust::Known).is_err());
+    assert_eq!(repo.p.lock_maintenance().unwrap().import_lines(&lines, crate::store::Trust::Server).unwrap(), 3);
     assert!(repo.p.db.record_line(machine, 3).unwrap().is_some(), "every record is stored");
     assert_eq!(repo.p.db.trusted(machine).unwrap(), None, "the server's writer is not trusted here");
     assert_eq!(repo.p.db.trusted(other).unwrap(), None, "its trust record has no effect");
+    let authorized = repo.p.authorized_records().unwrap();
+    assert!(!authorized.iter().any(|r| r.record().machine == machine && r.record().op == "machine.trust"));
+    assert!(authorized.iter().any(|r| r.record().machine == machine && r.record().op == "tag"));
+    let model = layr_model::Project::from_authorized_records(PROJECT, authorized, &ctx.store.machine.id).unwrap();
+    assert!(!model.trusted.contains_key(other), "server-only keys grant no trust in the checked model");
     // The writer key is pinned per remote on first sight; another key for the same machine is refused.
     let dir = root.join("remote");
     let id = machine.to_string();
@@ -1247,9 +1201,9 @@ fn real_gateway_object_round_trip() {
     ctx.env.insert("LAYR_GATEWAY_TOKEN_FILE".into(), source_token.to_string_lossy().into_owned());
     let mut store = api_store_with(&root, &ctx, api.clone());
     let (mut repo, states, line) = project(&ctx);
-    let mut config = Record::new("config");
+    let mut config = crate::model::DraftRecord::new("config");
     config.data = serde_json::json!({"config":{"access":{format!("user:{}", ctx.caller.uid):"admin"}}});
-    repo.p.append(config, &ctx.actor()).unwrap();
+    repo.p.lock_maintenance().unwrap().append(config, &ctx.actor()).unwrap();
     let report = store.push(&ctx, &mut repo, &Options::default()).expect("push through the real gateway");
     assert_eq!(report.states, 3);
     let refs = api.refs("", "lines/").unwrap();
@@ -1274,6 +1228,7 @@ fn real_gateway_object_round_trip() {
     std::fs::create_dir_all(dir.join("meta/work")).unwrap();
     std::fs::create_dir_all(dir.join("states")).unwrap();
     let project = crate::store::Project {
+        lease: Default::default(),
         store: &receiver_ctx.store,
         name: "p".into(),
         dir: dir.clone(),
@@ -1295,12 +1250,19 @@ fn real_gateway_object_round_trip() {
     // First cache copies select after importing metadata on the actual Gateway too.
     for (n, (exact_state, selected)) in [(false, false), (true, false), (false, true), (true, true)].into_iter().enumerate() {
         let opts = if exact_state {
-            Options {caches_of_state:Some(states[2].clone()),heads:true,..Default::default()}
+            Options { caches_of_state: Some(states[2].clone()), heads: true, ..Default::default() }
         } else {
-            Options {caches_of:vec!["main".into()],heads:true,..Default::default()}
+            Options { caches_of: vec!["main".into()], heads: true, ..Default::default() }
         };
-        check_first_cache_fetch(&root, &ctx, &repo, &store, &format!("cache.selection{n}"), &opts,
-            selected.then_some(states[2].as_str()));
+        check_first_cache_fetch(
+            &root,
+            &ctx,
+            &repo,
+            &store,
+            &format!("cache.selection{n}"),
+            &opts,
+            selected.then_some(states[2].as_str()),
+        );
     }
     crate::free::finish(&ctx);
     crate::free::finish(&receiver_ctx);
@@ -1444,17 +1406,15 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
     };
     run_focused(&["clone", &focused_remote, "p", "--heads", "--only-line", "main"]);
     if let Some(script) = std::env::var_os("LAYR_INTEROP_CI_SCRIPT") {
-        let output = std::process::Command::new(
-            std::env::var_os("LAYR_INTEROP_CI_PYTHON").unwrap_or_else(|| "python3".into()),
-        )
-        .arg(script)
-        .env("LAYR_CI_INTEROP_ROOT", focused_root.join("local"))
-        .env("LAYR_CI_INTEROP_URL", &focused_remote)
-        .env("LAYR_CI_INTEROP_TOKEN_FILE", &focused_token_file)
-        .env("LAYR_CI_INTEROP_CA_FILE", &ca_file)
-        .env("LAYR_CI_INTEROP_BIN", &binary)
-        .output()
-        .unwrap();
+        let output = std::process::Command::new(std::env::var_os("LAYR_INTEROP_CI_PYTHON").unwrap_or_else(|| "python3".into()))
+            .arg(script)
+            .env("LAYR_CI_INTEROP_ROOT", focused_root.join("local"))
+            .env("LAYR_CI_INTEROP_URL", &focused_remote)
+            .env("LAYR_CI_INTEROP_TOKEN_FILE", &focused_token_file)
+            .env("LAYR_CI_INTEROP_CA_FILE", &ca_file)
+            .env("LAYR_CI_INTEROP_BIN", &binary)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "CI store interoperability failed: {}{}",
@@ -1816,8 +1776,11 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
         (main.id, main.head)
     };
     let focused_api = Api::for_test(origin, "cli-queue", Some(token));
-    assert!(focused_api.refs("", "lines/").unwrap().iter().any(|r|
-        r.name == format!("lines/{main_id}") && r.target.as_deref() == Some(&main_head)));
+    assert!(focused_api
+        .refs("", "lines/")
+        .unwrap()
+        .iter()
+        .any(|r| r.name == format!("lines/{main_id}") && r.target.as_deref() == Some(&main_head)));
     // The creator names the merge machine and gives it the merge role (docs/ci-trust.md), not full trust.
     run(&["--project", "p", "config", "queue.merge-machine", &focused_ctx.store.machine.id]);
     {
@@ -1828,14 +1791,25 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
     run_focused(&["--project", "p", "fetch", "origin", "--heads", "--only-line", "main"]);
     run_focused(&["--project", "p", "--line", "main", "ref", "set", "release/v9.9.9", "main"]);
     run_focused(&["--project", "p", "--line", "main", "push", "origin"]);
-    let untrusted = focused(&["--project", "p", "--line", "main", "release", "verify-main", "release/v9.9.9", "--expect", "main"]);
+    let untrusted =
+        focused(&["--project", "p", "--line", "main", "release", "verify-main", "release/v9.9.9", "--expect", "main"]);
     assert!(!untrusted.status.success(), "an untrusted merge machine's release ref was accepted");
-    assert!(String::from_utf8_lossy(&untrusted.stderr).contains("release ref does not exist on the remote"),
-        "unexpected refusal: {}", String::from_utf8_lossy(&untrusted.stderr));
+    assert!(
+        String::from_utf8_lossy(&untrusted.stderr).contains("release ref does not exist on the remote"),
+        "unexpected refusal: {}",
+        String::from_utf8_lossy(&untrusted.stderr)
+    );
     {
         let mut repo = Repo::open(&ctx, "p").unwrap();
-        crate::cmd::replicate::trust(&ctx, &repo.p, &focused_ctx.store.machine.id,
-            &hex::encode(focused_ctx.store.machine.key.verifying_key().to_bytes()), Some(&serde_json::json!({"role": "merge"}))).unwrap();
+        crate::machine_trust::trust(
+            &repo.p.lock_maintenance().unwrap(),
+            &ctx,
+            &repo.p,
+            &focused_ctx.store.machine.id,
+            &hex::encode(focused_ctx.store.machine.key.verifying_key().to_bytes()),
+            Some(&serde_json::json!({"role": "merge"})),
+        )
+        .unwrap();
         focused_store.push(&ctx, &mut repo, &Options::default()).unwrap();
     }
     run_focused(&["--project", "p", "fetch", "origin", "--heads", "--only-line", "main"]);
@@ -2192,9 +2166,9 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
                 access
             }),
         ] {
-            let mut config = Record::new("config");
+            let mut config = crate::model::DraftRecord::new("config");
             config.data = serde_json::json!({"config": {key: value}});
-            repo.commit_record(&merger_ctx, config).unwrap();
+            repo.commit_record(&repo.p.lock_maintenance().unwrap(), &merger_ctx, config).unwrap();
         }
     }
     let run_job = |args: &[&str]| {

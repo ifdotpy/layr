@@ -1,20 +1,29 @@
 //! Purpose-specific hashing. Persisted and protocol hashes must never change algorithms.
 
 /// BLAKE3 for disposable local verification and versioned cache keys.
+#[cfg(feature = "fast-crypto")]
 pub use blake3::Hasher as FastCryptographic;
 /// SHA-1 as used by Git. This retains the existing sha1 implementation, without collision detection.
+#[cfg(feature = "git")]
 pub use sha1::Sha1 as GitCompatible;
 /// RustCrypto streaming and one-shot interface for the two compatibility hashers.
+#[cfg(feature = "sha256")]
 pub use sha2::Digest;
 /// Stable SHA-256 for persisted content, protocol digests, and HMAC.
+#[cfg(feature = "sha256")]
 pub use sha2::Sha256 as ContentAddress;
 /// Rapidhash for transient, non-adversarial in-memory keys only; never use for security or persistence.
+#[cfg(feature = "maps-rapid")]
 pub type FastNonCryptographic = rapidhash::v3::RapidStreamHasherV3<'static>;
 
 /// Fast deterministic map hashing for trusted local keys, never peer-controlled inputs.
+#[cfg(feature = "maps-fx")]
 pub use rustc_hash::FxHasher as FastMapHasher;
+#[cfg(feature = "maps-fx")]
 pub type FastBuildHasher = std::hash::BuildHasherDefault<FastMapHasher>;
+#[cfg(feature = "maps-fx")]
 pub type FastMap<K, V> = std::collections::HashMap<K, V, FastBuildHasher>;
+#[cfg(feature = "maps-fx")]
 pub type FastSet<K> = std::collections::HashSet<K, FastBuildHasher>;
 
 /// Generic streaming and one-shot interface, statically dispatched and inlined.
@@ -32,6 +41,7 @@ pub trait PurposeHasher: Sized {
 }
 
 /// Start a Git blob hash with the Git object header for a known byte length.
+#[cfg(feature = "git")]
 pub fn git_blob_hasher(len: u64) -> GitCompatible {
     let mut hash = <GitCompatible as Digest>::new();
     Digest::update(&mut hash, format!("blob {len}\0").as_bytes());
@@ -39,12 +49,14 @@ pub fn git_blob_hasher(len: u64) -> GitCompatible {
 }
 
 /// Compute the Git blob object ID of a byte slice.
+#[cfg(feature = "git")]
 pub fn git_blob_id(bytes: &[u8]) -> [u8; 20] {
     let mut hash = git_blob_hasher(bytes.len() as u64);
     Digest::update(&mut hash, bytes);
     hash.finalize().into()
 }
 
+#[cfg(feature = "sha256")]
 macro_rules! digest_hasher {
     ($ty:ty, $size:expr) => {
         impl PurposeHasher for $ty {
@@ -64,8 +76,11 @@ macro_rules! digest_hasher {
         }
     };
 }
+#[cfg(feature = "git")]
 digest_hasher!(GitCompatible, 20);
+#[cfg(feature = "sha256")]
 digest_hasher!(ContentAddress, 32);
+#[cfg(feature = "fast-crypto")]
 impl PurposeHasher for FastCryptographic {
     type Output = [u8; 32];
     #[inline]
@@ -85,6 +100,7 @@ impl PurposeHasher for FastCryptographic {
         *blake3::hash(bytes).as_bytes()
     }
 }
+#[cfg(feature = "maps-rapid")]
 impl PurposeHasher for FastNonCryptographic {
     type Output = [u8; 8];
     #[inline]
@@ -105,9 +121,10 @@ impl PurposeHasher for FastNonCryptographic {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "git", feature = "sha256", feature = "fast-crypto", feature = "maps-rapid")))]
 mod tests {
     use super::*;
+    #[cfg(feature = "git")]
     #[test]
     fn stable_golden_digests() {
         assert_eq!(
@@ -155,6 +172,7 @@ mod tests {
             assert_eq!(h.finish(), expected, "irregular size {size}");
         }
     }
+    #[cfg(feature = "git")]
     #[test]
     fn git_blob_golden() {
         assert_eq!(
@@ -167,9 +185,13 @@ mod tests {
     }
     #[test]
     fn streaming_matches() {
+        #[cfg(feature = "git")]
         streaming::<GitCompatible>();
+        #[cfg(feature = "sha256")]
         streaming::<ContentAddress>();
+        #[cfg(feature = "fast-crypto")]
         streaming::<FastCryptographic>();
+        #[cfg(feature = "maps-rapid")]
         streaming::<FastNonCryptographic>();
     }
 }

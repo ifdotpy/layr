@@ -300,7 +300,7 @@ fn check_tree(
     old: Option<&Snap>,
     new: &Snap,
     rev: &str,
-    changes: Option<&[crate::changes::Change]>,
+    changes: Option<&[crate::changes::EntryChange]>,
 ) -> Result<()> {
     if repo.p.is_overlay() {
         return Ok(());
@@ -321,7 +321,7 @@ fn check_indexed(
     key: &[u8],
     hashes: &Index,
     approvals: &BTreeSet<(String, String)>,
-    changes: Option<&[crate::changes::Change]>,
+    changes: Option<&[crate::changes::EntryChange]>,
 ) -> Result<()> {
     let files = match old {
         Some(old) => match changes {
@@ -368,7 +368,7 @@ pub fn check_changes(
     old: &Snap,
     new: &Snap,
     rev: &str,
-    changes: &[crate::changes::Change],
+    changes: &[crate::changes::EntryChange],
 ) -> Result<()> {
     check_tree(ctx, repo, Some(old), new, rev, Some(changes))
 }
@@ -419,7 +419,7 @@ pub fn check_history(ctx: &Ctx, repo: &Repo, state: &str) -> Result<()> {
     check_states(ctx, repo, new.iter().map(String::as_str))
 }
 
-pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<crate::model::Record> {
+pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<crate::model::DraftRecord> {
     if !repo.is_admin(ctx) {
         bail!("declassification requires the admin role");
     }
@@ -435,7 +435,7 @@ pub fn declassify(ctx: &Ctx, repo: &Repo, scope: &str, state: &str) -> Result<cr
         bail!("declassify id is unknown or ambiguous; repeat the refused operation");
     }
     let payload = serde_json::json!({"declassify":{"path":path,"hmac":found[0]}});
-    let mut rec = crate::cmd::attest::record(repo, state, "approval", &serde_json::to_vec(&payload)?)?;
+    let mut rec = crate::attestation::record(repo, state, "approval", &serde_json::to_vec(&payload)?)?;
     rec.data["declassify"] = payload["declassify"].clone();
     Ok(rec)
 }

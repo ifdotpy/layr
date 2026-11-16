@@ -20,8 +20,8 @@ newproj() {
 q() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute(sys.argv[2]).fetchone()[0])' "$DB" "$1"; }
 exec_sql() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(sys.argv[2]); c.commit()' "$DB" "$1"; }
 line_id() { q "select id from lines where name='$1' and deleted=0"; }
-# A state has its storage when its tree or its thin layer is on disk.
-on_disk() { [ -e "$P/states/$1" ] || [ -e "$P/deltas/$1" ]; }
+# A state can keep its storage as native trees or as objects.
+on_disk() { state_available "$P" "$1"; }
 # Undo owners whose line is deleted and whose delete record is outside the deleted ring.
 stale_undo() {
     q "select count(*) from owners o join lines l on l.id=substr(o.holder,1,instr(o.holder,'|')-1)

@@ -1,5 +1,7 @@
 //! Named remotes and the Git bridge.
 
+pub use crate::remote_config::{kind, remote_url, Kind};
+
 pub mod git {
 
     use crate::args::{parse, Spec};
@@ -8,7 +10,7 @@ pub mod git {
     use crate::ctx::Ctx;
     use crate::gitbridge;
     use crate::ids;
-    use crate::model::Record;
+
     use crate::repo::Repo;
     use crate::revs;
     use anyhow::Result;
@@ -51,20 +53,20 @@ pub mod git {
                 if sub == "add" && repo.p.config_value(&format!("remote.{n}.url"))?.is_some() {
                     return Err(exit(3, format!("error: remote {n} already exists.")));
                 }
-                let _lock = repo.p.lock()?;
-                set_config(ctx, repo, &format!("remote.{n}.url"), serde_json::json!(u))?;
+                let _lock = repo.p.lock_maintenance()?;
+                set_config(&_lock, ctx, repo, &format!("remote.{n}.url"), serde_json::json!(u))?;
                 gitbridge::init_store(repo)?;
                 Ok(0)
             }
             "remove" | "rm" => {
                 let n = args.get(1).ok_or_else(|| exit(128, "usage: layr git remote remove <name>"))?;
                 repo.require(ctx, "remote")?;
-                let _lock = repo.p.lock()?;
-                set_config(ctx, repo, &format!("remote.{n}.url"), serde_json::Value::Null)?;
+                let _lock = repo.p.lock_maintenance()?;
+                set_config(&_lock, ctx, repo, &format!("remote.{n}.url"), serde_json::Value::Null)?;
                 gitbridge::drop_remote_refs(repo, n)?;
-                let mut rec = Record::new("remote.remove");
+                let mut rec = crate::model::DraftRecord::new("remote.remove");
                 rec.data = serde_json::json!({"remote": n});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
                 Ok(0)
             }
             "get-url" => {
@@ -213,9 +215,9 @@ pub mod git {
         }
         if a.has("--rebase") {
             // Replay the exact fetched state after checking the review expectation.
-            let target = revs::resolve(&h.repo, Some(&line), &rev)?;
+            let target = revs::resolve_state(&h.repo, Some(&line), &rev)?;
             if let Some(expected) = a.get("--expect") {
-                let expected = revs::resolve(&h.repo, Some(&line), expected)?;
+                let expected = revs::resolve_state(&h.repo, Some(&line), expected)?;
                 if expected != target {
                     return Err(exit(
                         1,
@@ -278,15 +280,15 @@ pub mod git {
                 ),
             ));
         }
-        let (commit, made) = gitbridge::export_history(repo, &state.id)?;
+        let (commit, made) = gitbridge::export_history(repo, &repo.source_id(&state.id)?)?;
         if !made.is_empty() || repo.p.db.git_commit_of(&state.id)?.is_none() {
             // An export without a remote: the record keeps the commits of the states, as a push does.
             let commits: serde_json::Map<String, serde_json::Value> =
                 made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
-            let mut rec = Record::new("export");
+            let mut rec = crate::model::DraftRecord::new("export");
             rec.data = serde_json::json!({"export": ids::new_id(), "state": state.id, "remote": GIT_SYNC_REMOTE, "branch": line.name, "commit": commit, "commits": commits, "status": "local"});
-            let _lock = repo.p.lock()?;
-            repo.commit_record(ctx, rec)?;
+            let _lock = repo.p.lock_maintenance()?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         if crate::views::of(repo, &line).is_none() && !repo.working(&line).join(".git").is_dir() {
             return Err(exit(
@@ -356,7 +358,7 @@ pub mod git {
             }
             _ => rev.clone(),
         };
-        let state_id = revs::resolve(repo, line.as_ref(), &source)?;
+        let state_id = revs::resolve_state(repo, line.as_ref(), &source)?;
         // A line started on unpushed states of another line would publish that line's work too.
         let owner = match repo.p.db.line_by_name(&source)? {
             Some(l) => Some(repo.localize(l)?),
@@ -447,10 +449,10 @@ pub mod git {
         // ("prepared", then "pushed") keep a push whose answer was lost recoverable.
         if let Some((eid, c)) = &prepared {
             if gitbridge::ls_remote(ctx, repo, &url, &branch)?.as_deref() == Some(c.as_str()) {
-                let _lock = repo.p.lock()?;
-                let mut rec = Record::new("export");
+                let _lock = repo.p.lock_maintenance()?;
+                let mut rec = crate::model::DraftRecord::new("export");
                 rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "status": "pushed", "verified": "remote ref"});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
                 outln!(ctx, "Already pushed before: {remote}/{branch} is {} (state {})", &c[..10], ids::short(&state_id));
                 return Ok(0);
             }
@@ -469,16 +471,16 @@ pub mod git {
                     let (c, parent) = gitbridge::make_commit(repo, &state, a.get("-m"))?;
                     (c, parent, Vec::new())
                 } else {
-                    let (c, made) = gitbridge::export_history(repo, &state_id)?;
+                    let (c, made) = gitbridge::export_history(repo, &repo.source_id(&state_id)?)?;
                     (c, None, made)
                 };
                 let commits: serde_json::Map<String, serde_json::Value> =
                     made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
                 let eid = ids::new_id();
-                let _lock = repo.p.lock()?;
-                let mut rec = Record::new("export");
+                let _lock = repo.p.lock_maintenance()?;
+                let mut rec = crate::model::DraftRecord::new("export");
                 rec.data = serde_json::json!({"export": eid, "state": state_id, "remote": remote, "branch": branch, "commit": c, "parent": parent, "squash": a.has("--squash"), "commits": commits, "status": "prepared"});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
                 (eid, c)
             }
         };
@@ -489,10 +491,10 @@ pub mod git {
         let before = gitbridge::ls_remote(ctx, repo, &url, &branch).ok().flatten();
         gitbridge::push(ctx, repo, &url, &commit, &branch, a.has("-f") || a.has("--force-with-lease"))?;
         {
-            let _lock = repo.p.lock()?;
-            let mut rec = Record::new("export");
+            let _lock = repo.p.lock_maintenance()?;
+            let mut rec = crate::model::DraftRecord::new("export");
             rec.data = serde_json::json!({"export": export_id, "state": state_id, "remote": remote, "branch": branch, "commit": commit, "status": "pushed"});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         let _ = gitbridge::git_out(&gitbridge::store(repo), &["update-ref", &format!("refs/remotes/{remote}/{branch}"), &commit]);
         if let Some(l) = &line {
@@ -556,55 +558,9 @@ use super::admin::set_config;
 use super::{exit, here, mergecmd, replicate};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::oci;
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Kind {
-    Peer { host: String, project: String },
-    Store,
-    Registry,
-}
-
-pub fn kind(url: &str) -> Result<Kind> {
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| exit(128, "use layr git remote for Git URLs"))?;
-    if rest.is_empty() || url.chars().any(char::is_control) {
-        bail!("invalid remote URL");
-    }
-    match scheme {
-        "ssh" => {
-            let (host, project) = rest.split_once('/').ok_or_else(|| exit(128, "use ssh://<host>/<project>"))?;
-            if host.is_empty()
-                || host.starts_with('-')
-                || host.chars().any(|c| !c.is_ascii_alphanumeric() && !".@_-:[]".contains(c))
-            {
-                bail!("invalid peer host");
-            }
-            crate::store::check_name("project", project)?;
-            Ok(Kind::Peer { host: host.into(), project: project.into() })
-        }
-        "file" if rest.starts_with('/') => Ok(Kind::Store),
-        "s3" if !rest.starts_with('/') && !rest.contains(['?', '#', '@', ':']) => Ok(Kind::Store),
-        "layr+https" => {
-            crate::store_remote::validate_gateway_url(url)?;
-            Ok(Kind::Store)
-        }
-        "oci" if !rest.starts_with('/') && rest.contains('/') => Ok(Kind::Registry),
-        _ => bail!("unsupported remote URL; use ssh://, file:///, s3://, layr+https:// or oci://"),
-    }
-}
-
-pub fn remote_url(repo: &Repo, name: &str) -> Result<String> {
-    if let Some(url) = repo.p.config_value(&format!("cloud.remote.{name}.url"))?.and_then(|v| v.as_str().map(str::to_owned)) {
-        return Ok(url);
-    }
-    if repo.p.config_value(&format!("remote.{name}.url"))?.is_some() {
-        return Err(exit(128, format!("{name} is a Git remote; use layr git <fetch|pull|push> {name}")));
-    }
-    Err(exit(128, format!("remote '{name}' is not configured; use layr remote add {name} <url>")))
-}
 
 pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|s| matches!(s.as_str(), "-v" | "--verbose")) {
@@ -718,7 +674,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             crate::store::check_name("remote", name)?;
             repo.require(ctx, "remote")?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let key = format!("cloud.remote.{name}.url");
             if repo.p.config_value(&key)?.is_some() {
                 return Err(exit(3, format!("remote {name} already exists")));
@@ -754,8 +710,8 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     }
                     configured => {
                         let configured = configured?;
-                        store.save_pin(ctx, repo, name)?;
-                        set_config(ctx, repo, &format!("cloud.remote.{name}.mode"), json!(store.store_mode()?.name()))?;
+                        store.save_pin(&_lock, ctx, repo, name)?;
+                        set_config(&_lock, ctx, repo, &format!("cloud.remote.{name}.mode"), json!(store.store_mode()?.name()))?;
                         configured.recovery_key_file
                     }
                 }
@@ -765,7 +721,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 None
             };
-            set_config(ctx, repo, &key, json!(url))?;
+            set_config(&_lock, ctx, repo, &key, json!(url))?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"name": name, "url": url, "recovery_key_file": recovery_key_file}));
             } else if let Some(path) = recovery_key_file {
@@ -774,11 +730,11 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "remove" if a.pos.len() == 2 => {
             repo.require(ctx, "remote")?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             remote_url(repo, &a.pos[1])?;
-            set_config(ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
-            set_config(ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
-            set_config(ctx, repo, &format!("cloud.remote.{}.mode", a.pos[1]), serde_json::Value::Null)?;
+            set_config(&_lock, ctx, repo, &format!("cloud.remote.{}.url", a.pos[1]), serde_json::Value::Null)?;
+            set_config(&_lock, ctx, repo, &format!("cloud.remote.{}.store", a.pos[1]), serde_json::Value::Null)?;
+            set_config(&_lock, ctx, repo, &format!("cloud.remote.{}.mode", a.pos[1]), serde_json::Value::Null)?;
             if a.has("--json") {
                 outln!(ctx, "{}", json!({"removed": a.pos[1]}));
             }
@@ -844,9 +800,9 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let recipient = a.get("--recipient").context("trust-store requires --recipient <age1…>")?;
             let url = remote_url(repo, name)?;
             if kind(&url)? != Kind::Store { bail!("trust-store requires a store remote"); }
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut store = store_remote::open_named(&a.pos[1], repo)?;
-            store.trust_store(ctx, repo, name, recipient)?;
+            store.trust_store(&_lock, ctx, repo, name, recipient)?;
             if a.has("--json") { outln!(ctx, "{}", json!({"name":name,"recipient":recipient})); }
             else { outln!(ctx, "trusted store recipient {recipient}"); }
         }
@@ -873,15 +829,15 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let mut store = store_remote::open_named(&a.pos[1], repo)?;
                     store.configure(ctx, &store_remote::ConfigureOptions::default())?;
                     {
-                        let _lock = repo.p.lock()?;
-                        store.save_pin(ctx, repo, &a.pos[1])?;
-                        replicate::trust(ctx, &repo.p, &full, &key, limits.as_ref())?;
+                        let _lock = repo.p.lock_maintenance()?;
+                        store.save_pin(&_lock, ctx, repo, &a.pos[1])?;
+                        replicate::trust(&_lock, ctx, &repo.p, &full, &key, limits.as_ref())?;
                     }
                     store.trust(repo, &full, Some(&key))?;
                 }
                 Kind::Peer { .. } => {
-                    let _lock = repo.p.lock()?;
-                    replicate::trust(ctx, &repo.p, &full, &key, limits.as_ref())?;
+                    let _lock = repo.p.lock_maintenance()?;
+                    replicate::trust(&_lock, ctx, &repo.p, &full, &key, limits.as_ref())?;
                 }
                 Kind::Registry => unreachable!(),
             }
@@ -918,10 +874,10 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Err(exit(128, format!("machine {} is not trusted", crate::ids::short(&full))));
             }
             {
-                let _lock = repo.p.lock()?;
-                let mut record = crate::model::Record::new("machine.untrust");
+                let _lock = repo.p.lock_maintenance()?;
+                let mut record = crate::model::DraftRecord::new("machine.untrust");
                 record.data = json!({"machine": full});
-                repo.p.append(record, &ctx.actor())?;
+                _lock.append(record, &ctx.actor())?;
             }
             let mut store = store_remote::open_named(name, repo)?;
             let mode = store_remote::epochs::project_mode(repo)?;
@@ -1072,7 +1028,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     if a.has("--index") && (op != "push" || remote_kind != Kind::Store) {
         bail!("--index requires layr push to a store remote");
     }
-    if (a.get("--line").is_some() || a.get("--overlay").is_some()) && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store) {
+    if (a.get("--line").is_some() || a.get("--overlay").is_some())
+        && (!matches!(op, "fetch" | "push") || remote_kind != Kind::Store)
+    {
         bail!("--line and --overlay require layr fetch or layr push with a store remote");
     }
     if let Some(line) = a.get("--only-line") {
@@ -1167,8 +1125,8 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
             store.configure(ctx, &store_remote::ConfigureOptions::default())?;
             {
-                let _lock = h.repo.p.lock()?;
-                store.save_pin(ctx, &h.repo, &a.pos[0])?;
+                let _lock = h.repo.p.lock_maintenance()?;
+                store.save_pin(&_lock, ctx, &h.repo, &a.pos[0])?;
             }
             let report =
                 if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
@@ -1228,9 +1186,9 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
             }
             let rev = a.pos.get(1).map(String::as_str).unwrap_or("head");
             return if a.has("--json") {
-                oci::push_json(ctx, &url, rev, a.get("--runnable"))
+                super::oci::push(ctx, &url, rev, a.get("--runnable"), true)
             } else {
-                oci::push(ctx, &url, rev, a.get("--runnable"))
+                super::oci::push(ctx, &url, rev, a.get("--runnable"), false)
             };
         }
     }
@@ -1240,14 +1198,7 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
     // Reopen after fetch so localization uses the freshly received records.
     let h = here(ctx)?;
     let line = h.line()?;
-    let mut heads = h
-        .repo
-        .p
-        .db
-        .conn
-        .prepare("SELECT head FROM line_heads WHERE line=?1 AND machine<>?2 ORDER BY time DESC, machine DESC LIMIT 1")?;
-    let target: Option<String> =
-        heads.query_map(rusqlite::params![line.id, h.repo.p.store.machine.id], |r| r.get(0))?.next().transpose()?;
+    let target = h.repo.p.db.foreign_line_head(&line.id, &h.repo.p.store.machine.id)?;
     let target = target.ok_or_else(|| exit(1, "no head of the current line from another machine"))?;
     let flags = parse(&Spec::new().flag("--ff-only").value("--expect").flag("-q"), &args_for_merge(&a))?;
     if !a.has("--json") {
@@ -1294,11 +1245,12 @@ fn refuse_cache_flags(a: &crate::args::Parsed, op: &str) -> Result<()> {
         None
     };
     match replacement {
-        Some((flag, instead)) => Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}"))),
+        Some((flag, instead)) => {
+            Err(exit(2, format!("layr {op} {flag} was removed: a cache is an ordinary overlay. Use {instead}")))
+        }
         None => Ok(()),
     }
 }
-
 
 fn print_store_report(ctx: &Ctx, report: &store_remote::Report, op: &str, json_output: bool, quiet: bool) -> Result<()> {
     if json_output {
@@ -1437,25 +1389,26 @@ pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
         let report = store.clone_into(ctx, &mut repo, &opts)?;
         store_remote::backend::trace_requests();
-        let _lock = repo.p.lock()?;
-        set_config(ctx, &repo, "cloud.remote.origin.url", json!(url))?;
-        store.save_pin(ctx, &repo, "origin")?;
-        set_config(ctx, &repo, "cloud.remote.origin.mode", json!(store.store_mode()?.name()))?;
+        let _lock = repo.p.lock_maintenance()?;
+        crate::objstore::enable(&_lock, ctx, &repo)?;
+        set_config(&_lock, ctx, &repo, "cloud.remote.origin.url", json!(url))?;
+        store.save_pin(&_lock, ctx, &repo, "origin")?;
+        set_config(&_lock, ctx, &repo, "cloud.remote.origin.mode", json!(store.store_mode()?.name()))?;
         if store.is_public_reader() {
-            set_config(ctx, &repo, "cloud.remote.origin.public", json!(true))?;
+            set_config(&_lock, ctx, &repo, "cloud.remote.origin.public", json!(true))?;
         }
         // This new copy belongs to the cloning OS user. Its local policy never
         // selects automatic check commands, which use the verified creator.
         let mut access = repo.policy().access_json();
         access[format!("user:{}", ctx.caller.uid)] = json!("admin");
-        set_config(ctx, &repo, "access", access)?;
+        set_config(&_lock, ctx, &repo, "access", access)?;
         print_store_report(ctx, &report, "clone", a.has("--json"), a.has("-q"))?;
         Ok(if report.missing_lines.is_empty() { 0 } else { 2 })
     })();
     if result.is_err() {
         let dir = repo.p.dir.clone();
         drop(repo);
-        let _ = crate::storage::delete_tree(&dir);
+        let _ = crate::fs::remove(&dir);
     }
     result
 }

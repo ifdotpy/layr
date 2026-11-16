@@ -10,13 +10,29 @@ pub use layr_store::s3::Object;
 
 #[derive(Clone)]
 pub enum Backend {
-    File(PathBuf, u32, u32),
+    File(PathBuf, FileIdentity),
     S3(super::s3::S3),
     Gateway(super::gateway::Gateway),
     /// Layr Cloud API v1 (Public and Private projects).
     Api(super::api::Api),
     Prefix(Box<Backend>, String),
     Epoch(Box<EpochBackend>),
+}
+
+/// File backends start with the process's rights; request backends use the resolved caller.
+#[derive(Clone)]
+pub enum FileIdentity {
+    Process,
+    Caller(std::sync::Arc<crate::privs::FsIdentity>),
+}
+
+impl FileIdentity {
+    fn run<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        match self {
+            Self::Process => f(),
+            Self::Caller(identity) => crate::privs::as_user_fs(identity, f),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -137,7 +153,7 @@ impl Backend {
             Self::Gateway(g) => Ok(g.release_stream(key)?.map(|r| Box::new(r) as Box<dyn Read>)),
             Self::Api(a) if super::format::release_file(key) => a.release_stream(key),
             Self::Api(a) => Ok(a.get(key)?.map(|b| Box::new(std::io::Cursor::new(b)) as Box<dyn Read>)),
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
                     Ok(file) => {
@@ -168,7 +184,7 @@ impl Backend {
                 source.read_to_end(&mut body)?;
                 a.put_new(key, body)
             }
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
                 let parent = path.parent().context("object parent")?;
@@ -207,13 +223,13 @@ impl Backend {
         }
     }
     pub fn file(root: PathBuf) -> Self {
-        Self::File(root, rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw())
+        Self::File(root, FileIdentity::Process)
     }
-    pub fn as_caller(&mut self, ctx: &crate::ctx::Ctx) {
-        if let Self::File(_, uid, gid) = self {
-            *uid = ctx.caller.uid;
-            *gid = ctx.caller.gid;
+    pub fn as_caller(&mut self, ctx: &crate::ctx::Ctx) -> Result<()> {
+        if let Self::File(_, identity) = self {
+            *identity = FileIdentity::Caller(ctx.caller.fs_identity()?);
         }
+        Ok(())
     }
 
     pub fn open(url: &str) -> Result<Self> {
@@ -337,7 +353,7 @@ impl Backend {
             Self::S3(s) => s.get(key),
             Self::Gateway(g) => g.get(key),
             Self::Api(a) => a.get(key),
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 let path = crate::fsutil::safe_join(root, key)?;
                 let mut f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
                     Ok(f) => f,
@@ -369,7 +385,7 @@ impl Backend {
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
             Self::Api(a) => a.put_new(key, body),
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
                 let parent = path.parent().expect("object parent");
@@ -463,7 +479,7 @@ impl Backend {
             Self::S3(s) => s.list(prefix),
             Self::Gateway(g) => g.list(prefix),
             Self::Api(a) => a.list(prefix),
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 let mut out = Vec::new();
                 if root.exists() {
                     // A state prefix must not enumerate every sibling state directory.
@@ -489,7 +505,7 @@ impl Backend {
     /// Nothing lists them, so only this finds them. Deletes them unless `dry`; returns their keys.
     pub fn stale_temporaries(&self, cutoff: i64, dry: bool) -> Result<Vec<String>> {
         let mut out = match self {
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 let mut out = Vec::new();
                 if root.exists() {
                     sweep_temporaries(root, root, cutoff, dry, &mut out)?;
@@ -534,7 +550,7 @@ impl Backend {
             Self::Api(_) => {
                 bail!("Layr Cloud deletes objects itself (server-side garbage collection): {key}")
             }
-            Self::File(root, uid, gid) => crate::privs::as_user_fs(*uid, *gid, || {
+            Self::File(root, identity) => identity.run(|| {
                 let path = crate::fsutil::safe_join(root, key)?;
                 match fs::remove_file(path) {
                     Ok(()) => Ok(()),

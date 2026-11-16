@@ -1,0 +1,3 @@
+offline = true
+cache = true
+exclude = ['^https?://cloud\\.layr\\.ws', '^https?://[^/]*(auth|login)']

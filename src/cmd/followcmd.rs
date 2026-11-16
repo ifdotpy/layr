@@ -4,7 +4,7 @@ use super::admin::set_config;
 use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::follow::{self, Last};
+use crate::cmd::follow_engine::{self as follow, Last};
 use crate::gitbridge;
 use crate::model::Line;
 use crate::repo::{LineOp, Repo};
@@ -35,8 +35,8 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
             return Err(usage());
         }
         repo.authorize_line(ctx, &line, LineOp::Merge { expect: true, hint: None })?;
-        let _lock = repo.p.lock()?;
-        set_config(ctx, repo, &follow::config_key(&line.id), serde_json::Value::Null)?;
+        let _lock = repo.p.lock_maintenance()?;
+        set_config(&_lock, ctx, repo, &follow::config_key(&line.id), serde_json::Value::Null)?;
         outln!(ctx, "Not following on line {}", line.name);
         return Ok(0);
     }
@@ -70,8 +70,8 @@ pub fn follow(ctx: &Ctx, args: &[String]) -> Result<i32> {
         gitbridge::remote_url(repo, remote)?;
     }
     {
-        let _lock = repo.p.lock()?;
-        set_config(ctx, repo, &follow::config_key(&line.id), serde_json::Value::String(target.clone()))?;
+        let _lock = repo.p.lock_maintenance()?;
+        set_config(&_lock, ctx, repo, &follow::config_key(&line.id), serde_json::Value::String(target.clone()))?;
     }
     finish(ctx, repo, &line)
 }

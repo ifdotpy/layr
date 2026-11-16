@@ -154,8 +154,7 @@ echo retained > retained.txt
 l add retained.txt
 l save -qm retained
 retained=$(l rev-parse head)
-# APFS keeps a thin state under deltas/, so both folders are searched.
-retained_dir=$(ls -d "$A/states/"*"-${retained:0:12}" "$A/deltas/"*"-${retained:0:12}" 2>/dev/null | head -1)
+retained_id=$(l log --json -n 1 | python3 -I -c 'import json,sys; print(json.loads(next(sys.stdin))["id"])')
 cd "$A/lines/main"
 l sync peer --command -- "${transport[@]}"
 ls "$BR/projects/x/states" | sort > "$T/before-states"
@@ -170,8 +169,8 @@ l config undo.ops 0
 l config retention.auto 0
 l gc --repair >/dev/null
 # The deleted line's final state stays while the undo.deleted ring holds it (docs/ownership.md).
-ok "local gc keeps the deleted line's final state in the undo.deleted ring" test -e "$retained_dir"
-ok "local gc leaves the other snapshot" test -d "$BR/projects/x/states/$(basename "$retained_dir")" -o -d "$BR/projects/x/deltas/$(basename "$retained_dir")"
+ok "local gc keeps the deleted line's final state in the undo.deleted ring" state_available "$A" "$retained_id"
+ok "local gc leaves the other snapshot" state_available "$BR/projects/x" "$retained_id"
 # Send the signed gc record. B must keep its own bytes and ignore the foreign deletion flag.
 l sync peer --command -- "${transport[@]}"
 eq "the peer still reads the state after the foreign gc record" retained "$(B show "$retained:retained.txt")"

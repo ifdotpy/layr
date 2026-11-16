@@ -189,12 +189,11 @@ impl Tree {
 
     /// Remove an entry; a folder with its content (nested subvolumes are destroyed).
     pub fn remove(&self, rel: &str) -> Result<()> {
-        #[cfg(feature = "overlayfs")]
-        if crate::storage::contains_managed_tree(&self.path.join(rel)) {
+        if crate::fs::host().managed_entries.as_ref().is_some_and(|entries| (entries.contains)(&self.path.join(rel))) {
             if self.parent(rel).is_err() {
                 return Ok(());
             }
-            return crate::storage::delete_tree(&self.path.join(rel));
+            return crate::fs::remove(&self.path.join(rel));
         }
         // A parent that is missing, a file or a link: nothing of that name is in the tree.
         let (d, n) = match self.parent(rel) {
@@ -229,78 +228,17 @@ impl Tree {
         Ok(File::from(fd))
     }
 
-    /// Clone a new APFS file without a byte copy. Existing entries stay untouched.
-    #[cfg(target_os = "macos")]
+    /// Optional descriptor cloning creates a new file without replacing an existing entry.
     pub fn clone_new_file(&self, src: &File, rel: &str) -> Result<Option<File>> {
-        let (dir, name) = self.parent(rel)?;
-        if lstat_at(&dir, name).is_some() {
-            return Ok(None);
-        }
-        match crate::sys::apfs_clone_at(src.as_fd(), dir.as_fd(), name) {
-            Ok(()) => {}
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-        let fd = rustix::fs::openat(&dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
-        crate::sys::apfs_unseal_fd(fd.as_fd())?;
-        let mode = rustix::fs::fstat(&fd)?.st_mode;
-        rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode | 0o200))?;
-        let fd = rustix::fs::openat(&dir, name, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
-        Ok(Some(File::from(fd)))
+        let Some(clone) = crate::fs::host().file_copies.clone_new else { return Ok(None) };
+        let (directory, name) = self.parent(rel)?;
+        clone(src, &File::from(directory), std::ffi::OsStr::new(name))
     }
-
-    /// Replace a private index file with a clone. Working files must keep their inode.
-    /// Hard-linked or flagged destinations use the existing copy path.
-    #[cfg(target_os = "macos")]
-    pub fn replace_index_file(&self, src: &File, rel: &str, finish: impl FnOnce(&File) -> Result<()>) -> Result<bool> {
-        use std::os::macos::fs::MetadataExt as _;
-        use std::os::unix::fs::MetadataExt;
-        let (dir, name) = self.parent(rel)?;
-        let old = match rustix::fs::openat(
-            &dir,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        ) {
-            Ok(fd) => File::from(fd),
-            Err(_) => return Ok(false),
-        };
-        let meta = old.metadata()?;
-        if !meta.is_file() || meta.nlink() != 1 || meta.st_flags() != 0 {
-            return Ok(false);
-        }
-        let temp = format!(".layr-copy-{}", crate::ids::new_id());
-        match crate::sys::apfs_clone_at(src.as_fd(), dir.as_fd(), &temp) {
-            Ok(()) => {}
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) => return Ok(false),
-            Err(e) => return Err(e.into()),
-        }
-        let result = (|| -> Result<bool> {
-            let fd = rustix::fs::openat(&dir, temp.as_str(), OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
-            crate::sys::apfs_unseal_fd(fd.as_fd())?;
-            let mode = rustix::fs::fstat(&fd)?.st_mode;
-            rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode | 0o200))?;
-            let prepared = File::from(rustix::fs::openat(
-                &dir,
-                temp.as_str(),
-                OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?);
-            // Keep destination attributes, ACL and origin identity, just as an in-place
-            // copy does. COPYFILE_METADATA replaces attributes without copying data.
-            crate::sys::apfs_copy_metadata_fd(old.as_fd(), prepared.as_fd())?;
-            finish(&prepared)?;
-            let current = rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
-            if current.st_ino != meta.ino() || current.st_dev as u64 != meta.dev() || current.st_nlink != 1 {
-                bail!("index destination changed during copy: {rel}");
-            }
-            rustix::fs::renameat(&dir, temp.as_str(), &dir, name)?;
-            Ok(true)
-        })();
-        if result.is_err() {
-            let _ = rustix::fs::unlinkat(&dir, temp.as_str(), AtFlags::empty());
-        }
-        result
+    /// Private index replacement may use an atomic native clone; working files keep their inode.
+    pub fn replace_index_file(&self, src: &File, rel: &str, mut finish: impl FnMut(&File) -> Result<()>) -> Result<bool> {
+        let Some(replace) = crate::fs::host().file_copies.replace_private else { return Ok(false) };
+        let (directory, name) = self.parent(rel)?;
+        replace(src, &File::from(directory), std::ffi::OsStr::new(name), &mut finish)
     }
 
     /// Publish a new file at `rel` by rename: `fill` writes a temporary file next to it, and
@@ -401,11 +339,10 @@ impl Tree {
     }
 
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
-        #[cfg(feature = "overlayfs")]
-        if crate::storage::contains_managed_tree(&self.path.join(from)) {
+        if crate::fs::host().managed_entries.as_ref().is_some_and(|entries| (entries.contains)(&self.path.join(from))) {
             self.mkdirs_for(to, None)?;
             let _ = (self.parent(from)?, self.parent(to)?);
-            return crate::storage::rename_tree(&self.path.join(from), &self.path.join(to));
+            return crate::fs::move_tree(&self.path.join(from), &self.path.join(to));
         }
         let (df, nf) = self.parent(from)?;
         self.mkdirs_for(to, None)?;
@@ -416,6 +353,7 @@ impl Tree {
 
     /// Some macOS releases require write access on a directory that is renamed.
     /// Restore its mode through the open descriptor, including when the rename fails.
+    #[cfg(test)]
     pub fn rename_directory(&self, from: &str, to: &str) -> Result<()> {
         self.rename_directory_checked(from, to, &self.directory_record(from)?)
     }
@@ -507,14 +445,13 @@ impl Tree {
             }
             Ok(())
         };
-        #[cfg(feature = "overlayfs")]
-        let renamed = if crate::storage::contains_managed_tree(&self.path.join(from)) {
-            crate::storage::rename_plain_tree(&self.path.join(from), &self.path.join(to), rename)
-        } else {
-            rename()
+        let mut rename = rename;
+        let renamed = match &crate::fs::host().managed_entries {
+            Some(entries) if (entries.contains)(&self.path.join(from)) => {
+                (entries.rename_plain)(&self.path.join(from), &self.path.join(to), &mut rename)
+            }
+            _ => rename(),
         };
-        #[cfg(not(feature = "overlayfs"))]
-        let renamed = rename();
         #[cfg(test)]
         let injected_error = renamed.is_ok() && std::env::var("LAYR_TEST_CACHE_FAULT").as_deref() == Ok("restore-error");
         #[cfg(not(test))]
@@ -643,28 +580,8 @@ impl Tree {
     }
 
     pub fn create_subvolume(&self, rel: &str) -> Result<()> {
-        #[cfg(feature = "overlayfs")]
-        {
-            let _ = self.parent(rel)?;
-            return crate::storage::create_subvolume(&self.path.join(rel));
-        }
-        #[cfg(not(feature = "overlayfs"))]
-        let (d, n) = self.parent(rel)?;
-        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        {
-            crate::sys::subvol_create(d.as_fd(), n)
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = (d, n);
-            crate::storage::create_subvolume(&self.path.join(rel))
-        }
-    }
-
-    /// Destroy every subvolume nested in the tree (before the tree root is deleted).
-    pub fn destroy_nested(&self) -> Result<()> {
-        let d = openat2(&self.root, "", OFlags::RDONLY | OFlags::DIRECTORY)?;
-        destroy_nested_in(&d)
+        let (directory, name) = self.parent(rel)?;
+        (crate::fs::host().create_entry)(&directory, name, &self.path.join(rel))
     }
 }
 
@@ -733,69 +650,33 @@ fn list_fd(dir: &OwnedFd) -> Result<Vec<String>> {
     Ok(v)
 }
 
-fn is_subvol_root(st: &rustix::fs::Stat, parent_dev: rustix::fs::Dev) -> bool {
-    cfg!(all(target_os = "linux", not(feature = "overlayfs"))) && st.st_ino == 256 && st.st_dev != parent_dev
+pub(crate) fn remove_at(directory: &OwnedFd, name: &str) -> Result<()> {
+    (crate::fs::host().remove_entry)(directory, name)
 }
 
-/// Remove `name` in the folder `dir`, recursively, never following links.
-fn remove_at(dir: &OwnedFd, name: &str) -> Result<()> {
-    let st = match lstat_at(dir, name) {
-        Some(st) => st,
-        None => return Ok(()),
-    };
-    if !is_dir(&st) {
-        rustix::fs::unlinkat(dir, name, AtFlags::empty())?;
+/// Descriptor-based directory removal for filesystems without nested subvolume ioctls.
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
+pub(crate) fn remove_plain_at(directory: &OwnedFd, name: &str) -> Result<()> {
+    let Some(stat) = lstat_at(directory, name) else { return Ok(()) };
+    if !is_dir(&stat) {
+        rustix::fs::unlinkat(directory, name, AtFlags::empty())?;
         return Ok(());
     }
-    let pst = rustix::fs::fstat(dir)?;
-    let sub =
-        rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
-    if is_subvol_root(&st, pst.st_dev) {
-        // O(1) unless it holds nested subvolumes itself.
-        match crate::sys::subvol_destroy(dir.as_fd(), name) {
-            Ok(()) => return Ok(()),
-            Err(e) if crate::storage::is_not_empty(&e) => {
-                destroy_nested_in(&sub)?;
-                drop(sub);
-                return crate::sys::subvol_destroy(dir.as_fd(), name);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // A copied cache can contain read-only directories. Deletion needs owner write access.
-    let mode = rustix::fs::fstat(&sub)?.st_mode;
+    let child = rustix::fs::openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mode = rustix::fs::fstat(&child)?.st_mode;
     if mode & 0o200 == 0 {
-        rustix::fs::fchmod(&sub, Mode::from_raw_mode((mode & 0o7777) | 0o200))?;
+        rustix::fs::fchmod(&child, Mode::from_raw_mode((mode & 0o7777) | 0o200))?;
     }
-    for child in list_fd(&sub)? {
-        remove_at(&sub, &child)?;
+    for name in list_fd(&child)? {
+        remove_plain_at(&child, &name)?;
     }
-    drop(sub);
-    rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?;
-    Ok(())
-}
-
-fn destroy_nested_in(dir: &OwnedFd) -> Result<()> {
-    let pst = rustix::fs::fstat(dir)?;
-    for child in list_fd(dir)? {
-        let st = match lstat_at(dir, &child) {
-            Some(st) => st,
-            None => continue,
-        };
-        if !is_dir(&st) {
-            continue;
-        }
-        if is_subvol_root(&st, pst.st_dev) {
-            remove_at(dir, &child)?;
-        } else if let Ok(sub) = rustix::fs::openat(
-            dir,
-            child.as_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            destroy_nested_in(&sub)?;
-        }
-    }
+    drop(child);
+    rustix::fs::unlinkat(directory, name, AtFlags::REMOVEDIR)?;
     Ok(())
 }
 

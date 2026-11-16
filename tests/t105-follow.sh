@@ -101,6 +101,8 @@ dashed() {
     u="${d:20:12}${d:12:8}${d:0:12}"
     printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
 }
+# This missing-source fixture removes native storage; its new states must use v1.
+l config objects.enabled false >/dev/null
 for n in good gone; do
     l line new $n main >/dev/null
     cd $P/$n
@@ -139,6 +141,7 @@ for d in "$P_ROOT/states/$(dashed "$gone_head")" "$P_ROOT/deltas/$(dashed "$gone
     [ -e "$d" ] && btrfs property set -ts "$d" ro false 2>/dev/null && btrfs subvolume delete "$d" >/dev/null 2>&1
 done
 no "the state of gone is gone from the disk" test -e "$P_ROOT/states/$(dashed "$gone_head")" -o -e "$P_ROOT/deltas/$(dashed "$gone_head")"
+l config objects.enabled true >/dev/null
 cd $U; git pull -q origin main; echo good > good.txt; echo gone > gone.txt; echo more > more.txt; git add good.txt gone.txt more.txt
 git commit -qm "squash good and gone"; git push -q origin main
 cd $P/main

@@ -245,14 +245,14 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         }
         for c in &s.conflicts {
             layr_store::paths::check_rel(&c.path)?;
-            for x in [&c.base, &c.ours, &c.theirs].into_iter().flatten() {
+            for x in c.sides().into_iter().flatten() {
                 uuid("conflict state", x)?;
             }
         }
     }
     for (id, ch) in &r.lines {
         uuid("line", id)?;
-        for st in [&ch.before, &ch.after].into_iter().flatten() {
+        for st in [ch.before(), ch.after()].into_iter().flatten() {
             if !is_name(&st.name) {
                 bail!("record {}: bad line name {:?}", r.seq, st.name);
             }
@@ -276,6 +276,10 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
             }
             uuid("queued state", &entry.state)?;
             uuid("queue target line", &entry.target_line)?;
+            if let Some(failure) = &entry.failure {
+                uuid("expected queue head", &failure.expected)?;
+                uuid("actual queue head", &failure.found)?;
+            }
             if let Some(id) = &entry.change_id {
                 uuid("queue change", id)?;
             }
@@ -484,9 +488,8 @@ pub fn validate(r: &Record) -> anyhow::Result<()> {
         if a.attestation_id != r.id {
             bail!("attestation id must match its signed record");
         }
-        match a.subject.kind.as_str() {
-            "state" => uuid("subject", &a.subject.id)?,
-            "view" if is_view_id(&a.subject.id) => {}
+        match &a.subject {
+            Subject::State(_) | Subject::View(_) => {},
             _ => bail!("unsupported attestation subject"),
         }
         if let Some(id) = &a.change_id {
@@ -590,7 +593,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn rec() -> Record {
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = "01a12290-0000-7000-8000-000000000001".into();
         r.machine = "01a12290-0000-7000-8000-000000000002".into();
         r.seq = 2;
@@ -639,7 +642,7 @@ mod tests {
         let back: StateRec = serde_json::from_str(&json).unwrap();
         assert_eq!(back.parts, st.parts);
         assert!(back.caches.is_empty(), "parts are not caches (the `layers` key)");
-        let mut r = Record::new("commit");
+        let mut r = Record::untrusted_preview("commit");
         r.id = id.into();
         r.machine = id.into();
         r.states = vec![st.clone()];
@@ -648,7 +651,7 @@ mod tests {
         assert!(validate(&r).is_err(), "an overlay is a name");
         r.states[0].parts = BTreeMap::from([("notes".to_string(), "../x".to_string())]);
         assert!(validate(&r).is_err(), "a part is an id");
-        let mut m = Record::new(STATE_PARTS_OP);
+        let mut m = Record::untrusted_preview(STATE_PARTS_OP);
         m.id = id.into();
         m.machine = id.into();
         m.data = serde_json::json!({"states": {id: {"notes": part}}});
@@ -724,17 +727,12 @@ mod tests {
         let mut r = rec();
         r.lines.insert(
             "01a12290-0000-7000-8000-000000000004".into(),
-            LineChange {
-                before: None,
-                after: Some(LineState {
+            LineChange { transition: crate::LineTransition::Create { after: LineState {
                     name: "../main".into(),
                     head: "01a12290-0000-7000-8000-000000000003".into(),
                     owner: 0,
                     machine: "01a12290-0000-7000-8000-000000000002".into(),
-                }),
-                working_before: None,
-                working_after: None,
-            },
+                } }, working_before: None, working_after: None },
         );
         assert!(validate(&r).is_err());
         let mut r = rec();
@@ -801,7 +799,7 @@ mod tests {
         let a = Attestation {
             format: 1,
             attestation_id: r.id.clone(),
-            subject: Subject { kind: "state".into(), id: "01a12290-0000-7000-8000-000000000003".into() },
+            subject: Subject::state("01a12290-0000-7000-8000-000000000003").unwrap(),
             change_id: None,
             kind: "approval".into(),
             payload_digest: "0".repeat(64),
@@ -825,7 +823,7 @@ mod tests {
         assert!(validate(&r).is_err());
         r.op = "attest".into();
         r.data = serde_json::json!({"attestation":Attestation {
-            format:1, attestation_id:r.id.clone(), subject:Subject{kind:"view".into(),id:view.id().unwrap()},
+            format:1, attestation_id:r.id.clone(), subject:Subject::view(&view.id().unwrap()).unwrap(),
             change_id:None,kind:"check".into(),payload_digest:"0".repeat(64),payload_ref:None,
             signer:r.machine.clone(),time:r.time,
         }});

@@ -13,7 +13,7 @@ dashed() {
     printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
 }
 sample $T/src
-l init o --from $T/src -q >/dev/null
+l init o --no-objects --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/o
 DB=$P/meta/db/layr.sqlite
 cd $P/lines/main || exit 1

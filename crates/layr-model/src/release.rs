@@ -111,7 +111,7 @@ mod tests {
         format!("01a12290-0000-7000-8000-{n:012x}")
     }
     fn record(n: u64, op: &str, data: serde_json::Value) -> Record {
-        let mut r = Record::new(op);
+        let mut r = Record::untrusted_preview(op);
         r.id = id(n);
         r.machine = id(100);
         r.project = id(200);
@@ -146,7 +146,7 @@ mod tests {
             record(2, "release.files", json!(files(10))),
             record(3, "release.files", json!(files(11))),
         ];
-        let read = |records: Vec<Record>| Project::from_records(&id(200), records, &id(100)).unwrap();
+        let read = |records: Vec<Record>| Project::preview_records(&id(200), records, &id(100)).unwrap();
         let p = read(records.clone());
         assert_eq!(p.release_files("release/1.2.0", 20).unwrap(), files(11).files);
         assert_eq!(p.release_objects(20).unwrap().0.len(), 2);
@@ -180,6 +180,6 @@ mod tests {
         assert!(f.validate().is_err());
         let mut f = files(10);
         f.reference = "env/prod".into();
-        assert!(Project::from_records(&id(200), vec![record(1, "release.files", json!(f))], &id(100)).is_err());
+        assert!(Project::preview_records(&id(200), vec![record(1, "release.files", json!(f))], &id(100)).is_err());
     }
 }

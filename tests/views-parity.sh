@@ -70,6 +70,8 @@ cd "$base"
 "$LAYR" line show virtual --none
 "$LAYR" --project "$project" --line virtual status --porcelain > "$work/hidden-status"
 grep -q file "$work/hidden-status"
+"$LAYR" --project "$project" --line virtual save --json > "$work/hidden-save.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["saved"]' "$work/hidden-save.json"
 "$LAYR" --project "$project" --line virtual save -m 'Save while hidden'
 [ "$("$LAYR" show virtual:file)" = unsaved ]
 "$LAYR" line show virtual --virtual

@@ -1,0 +1,65 @@
+{
+  "layr": {
+    "clippy::unwrap_used": 2823,
+    "clippy::expect_used": 112,
+    "clippy::panic": 13,
+    "clippy::cast_possible_truncation": 123,
+    "clippy::cast_sign_loss": 27,
+    "clippy::cast_possible_wrap": 66,
+    "clippy::fn_params_excessive_bools": 4,
+    "clippy::struct_excessive_bools": 10,
+    "clippy::manual_let_else": 123
+  },
+  "layr-api": {
+    "clippy::unwrap_used": 7
+  },
+  "layr-cache": {
+    "clippy::unwrap_used": 329,
+    "clippy::expect_used": 3,
+    "clippy::panic": 25,
+    "clippy::cast_possible_truncation": 4
+  },
+  "layr-hashers": {
+    "clippy::cast_possible_truncation": 3,
+    "clippy::cast_sign_loss": 1
+  },
+  "layr-model": {
+    "clippy::unwrap_used": 300,
+    "clippy::expect_used": 4,
+    "clippy::panic": 9,
+    "clippy::cast_possible_truncation": 14,
+    "clippy::cast_sign_loss": 2,
+    "clippy::cast_possible_wrap": 13
+  },
+  "layr-objects": {
+    "clippy::expect_used": 60,
+    "clippy::cast_possible_truncation": 20,
+    "clippy::unwrap_used": 474,
+    "clippy::panic": 1,
+    "clippy::cast_sign_loss": 1
+  },
+  "layr-retest": {
+    "clippy::unwrap_used": 328,
+    "clippy::expect_used": 2,
+    "clippy::panic": 1,
+    "clippy::cast_possible_truncation": 6,
+    "clippy::struct_excessive_bools": 2
+  },
+  "layr-store": {
+    "clippy::unwrap_used": 343,
+    "clippy::expect_used": 24,
+    "clippy::panic": 3,
+    "clippy::cast_possible_truncation": 12,
+    "clippy::cast_possible_wrap": 2
+  },
+  "layr-object-format": {
+    "clippy::cast_sign_loss": 4,
+    "clippy::cast_possible_wrap": 8,
+    "clippy::expect_used": 4,
+    "clippy::cast_possible_truncation": 18,
+    "clippy::unwrap_used": 11
+  },
+  "layr-types": {
+    "clippy::expect_used": 2
+  }
+}

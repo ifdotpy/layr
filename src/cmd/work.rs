@@ -3,12 +3,12 @@
 
 use super::{exit, here, matches, Here};
 use crate::args::{parse, Spec};
-use crate::changes::{self, Change};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
 use crate::diff;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Conflict, Line, Record, StateKind};
+use crate::model::{Conflict, ConflictDetails, ConflictKind, Line, StateKind};
 use crate::radar::Overlap;
 use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
@@ -16,22 +16,22 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-fn xy(c: &Change) -> char {
-    match (&c.old, &c.new) {
-        (None, Some(_)) => 'A',
-        (Some(_), None) => 'D',
-        _ if c.old_path.is_some() => 'R',
-        (Some(o), Some(n)) if o.ftype != n.ftype => 'T',
-        _ => 'M',
+fn xy(c: &EntryChange) -> char {
+    match c {
+        EntryChange::Add { .. } => 'A',
+        EntryChange::Remove { .. } => 'D',
+        EntryChange::Rename { .. } => 'R',
+        EntryChange::ReplaceType { .. } => 'T',
+        EntryChange::Modify { .. } => 'M',
     }
 }
 
-fn conflict_code(kind: &str) -> &'static str {
-    match kind {
-        "add/add" => "AA",
-        "modify/delete" => "UD",
-        "delete/modify" => "DU",
-        "rename/delete" => "AU",
+fn conflict_code(details: &ConflictDetails) -> &'static str {
+    match details {
+        ConflictDetails::Known { kind: ConflictKind::AddAdd, .. } => "AA",
+        ConflictDetails::Known { kind: ConflictKind::ModifyDelete, .. } => "UD",
+        ConflictDetails::Known { kind: ConflictKind::DeleteModify, .. } => "DU",
+        ConflictDetails::Known { kind: ConflictKind::RenameDelete, .. } => "AU",
         _ => "UU",
     }
 }
@@ -39,7 +39,6 @@ fn conflict_code(kind: &str) -> &'static str {
 /// The status that `layr status` shows: the comparison of the working folder, minus the files of
 /// quiet overlays. `filtered` is true for a view that shows only the caller's layers.
 fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Status> {
-    #[cfg(target_os = "macos")]
     let mut st = {
         let _t = crate::trace::span("status compare");
         if filtered {
@@ -51,15 +50,13 @@ fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Stat
             match h.repo.status_report(line) {
                 Ok(st) => st,
                 Err(_) => {
-                    let _lock = h.repo.p.lock()?;
+                    let _lock = h.repo.p.lock_maintenance()?;
                     let line = h.repo.line(&line.id)?;
                     h.repo.status_report(&line)?
                 }
             }
         }
     };
-    #[cfg(not(target_os = "macos"))]
-    let mut st = if filtered { h.repo.snapshot_status(ctx, line)? } else { h.repo.status(line)?.0 };
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
     let quiet = {
         let _t = crate::trace::span("status quiet paths");
@@ -88,14 +85,14 @@ struct StatusOptions {
 
 #[derive(serde::Serialize)]
 struct StatusChange<'a> {
-    old_path: &'a Option<String>,
+    old_path: Option<&'a str>,
     path: &'a str,
     status: char,
 }
 
-impl<'a> From<&'a Change> for StatusChange<'a> {
-    fn from(c: &'a Change) -> Self {
-        Self { path: &c.path, old_path: &c.old_path, status: xy(c) }
+impl<'a> From<&'a EntryChange> for StatusChange<'a> {
+    fn from(c: &'a EntryChange) -> Self {
+        Self { path: c.path(), old_path: c.old_path().map(String::as_str), status: xy(c) }
     }
 }
 
@@ -103,7 +100,7 @@ impl<'a> From<&'a Change> for StatusChange<'a> {
 struct StatusConflict<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     base: Option<&'a str>,
-    kind: &'a str,
+    kind: std::borrow::Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ours: Option<&'a str>,
     path: &'a str,
@@ -113,7 +110,8 @@ struct StatusConflict<'a> {
 
 impl<'a> From<&'a Conflict> for StatusConflict<'a> {
     fn from(c: &'a Conflict) -> Self {
-        Self { base: c.base.as_deref(), kind: &c.kind, ours: c.ours.as_deref(), path: &c.path, theirs: c.theirs.as_deref() }
+        let [base, ours, theirs] = c.sides();
+        Self { base, kind: c.kind(), ours, path: &c.path, theirs }
     }
 }
 
@@ -154,8 +152,8 @@ impl<'a> StatusJson<'a> {
             line: &line.name,
             line_id: &line.id,
             head: &line.head,
-            staged: st.staged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
-            unstaged: st.unstaged.iter().filter(|c| matches(specs, &c.path)).map(StatusChange::from).collect(),
+            staged: st.staged.iter().filter(|c| matches(specs, c.path())).map(StatusChange::from).collect(),
+            unstaged: st.unstaged.iter().filter(|c| matches(specs, c.path())).map(StatusChange::from).collect(),
             untracked: st.untracked.iter().filter(|p| matches(specs, p)).collect(),
             // Ignore classification is shared with the other status entries. Keep it intact;
             // the opt-out avoids constructing and serializing its output list.
@@ -234,23 +232,23 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let mut rows: BTreeMap<String, (char, char, Option<String>)> = BTreeMap::new();
         for c in &st.staged {
-            if !matches(&specs, &c.path) {
+            if !matches(&specs, c.path()) {
                 continue;
             }
-            rows.insert(c.path.clone(), (xy(c), ' ', c.old_path.clone()));
+            rows.insert(c.path().clone(), (xy(c), ' ', c.old_path().cloned()));
         }
         for c in &st.unstaged {
-            if !matches(&specs, &c.path) {
+            if !matches(&specs, c.path()) {
                 continue;
             }
-            let e = rows.entry(c.path.clone()).or_insert((' ', ' ', None));
+            let e = rows.entry(c.path().clone()).or_insert((' ', ' ', None));
             e.1 = xy(c);
         }
         for c in &st.conflicts {
             if !matches(&specs, &c.path) {
                 continue;
             }
-            let code = conflict_code(&c.kind);
+            let code = conflict_code(&c.details);
             let b = code.as_bytes();
             rows.insert(c.path.clone(), (b[0] as char, b[1] as char, None));
         }
@@ -319,21 +317,22 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !head.conflicts.is_empty() && !st.conflicts.is_empty() {
         outln!(ctx, "You have unmerged paths.\n  (fix conflicts and run \"layr save -m <message>\")\n");
     }
-    let staged: Vec<&Change> = st.staged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
-    let unstaged: Vec<&Change> =
-        st.unstaged.iter().filter(|c| matches(&specs, &c.path) && !conflicted.contains(&c.path)).collect();
+    let staged: Vec<&EntryChange> =
+        st.staged.iter().filter(|c| matches(&specs, c.path()) && !conflicted.contains(c.path())).collect();
+    let unstaged: Vec<&EntryChange> =
+        st.unstaged.iter().filter(|c| matches(&specs, c.path()) && !conflicted.contains(c.path())).collect();
     let untracked: Vec<String> = if untracked_mode == "no" {
         vec![]
     } else {
         untracked_list(&st, &untracked_mode).into_iter().filter(|u| matches(&specs, u.trim_end_matches('/'))).collect()
     };
-    let label = |c: &Change| -> String {
+    let label = |c: &EntryChange| -> String {
         match xy(c) {
-            'A' => format!("new file:   {}", h.rel(&c.path)),
-            'D' => format!("deleted:    {}", h.rel(&c.path)),
-            'R' => format!("renamed:    {} -> {}", h.rel(c.old_path.as_deref().unwrap_or("")), h.rel(&c.path)),
-            'T' => format!("typechange: {}", h.rel(&c.path)),
-            _ => format!("modified:   {}", h.rel(&c.path)),
+            'A' => format!("new file:   {}", h.rel(c.path())),
+            'D' => format!("deleted:    {}", h.rel(c.path())),
+            'R' => format!("renamed:    {} -> {}", h.rel(c.old_path().map(String::as_str).unwrap_or("")), h.rel(c.path())),
+            'T' => format!("typechange: {}", h.rel(c.path())),
+            _ => format!("modified:   {}", h.rel(c.path())),
         }
     };
     if !staged.is_empty() {
@@ -355,14 +354,14 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         outln!(ctx, "Unmerged paths:\n  (fix the files, then \"layr add <file>...\" and \"layr save -m <message>\")");
         for c in &st.conflicts {
             if matches(&specs, &c.path) {
-                let what = match c.kind.as_str() {
-                    "content" => "both modified:",
-                    "add/add" => "both added:   ",
-                    "modify/delete" => "deleted by them:",
-                    "delete/modify" => "deleted by us:",
+                let what = match &c.details {
+                    ConflictDetails::Known { kind: ConflictKind::Content, .. } => "both modified:",
+                    ConflictDetails::Known { kind: ConflictKind::AddAdd, .. } => "both added:   ",
+                    ConflictDetails::Known { kind: ConflictKind::ModifyDelete, .. } => "deleted by them:",
+                    ConflictDetails::Known { kind: ConflictKind::DeleteModify, .. } => "deleted by us:",
                     _ => "conflict:     ",
                 };
-                outln!(ctx, "\t{what}   {} ({})", h.rel(&c.path), c.kind);
+                outln!(ctx, "\t{what}   {} ({})", h.rel(&c.path), c.kind());
             }
         }
         outln!(ctx);
@@ -418,27 +417,28 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// The locks of a command that keeps the project lock for all of its records (`begin_change`).
-/// The line lock is taken first.
-pub struct ChangeLocks(pub crate::store::LineLock, pub crate::store::Lock);
-
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands
 /// whose records are written under the project lock they hold: stash, clean, rm and mv.
-pub fn begin_change(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<(ChangeLocks, Option<String>)> {
+pub fn begin_change<'p>(ctx: &Ctx, repo: &'p Repo<'p>, line: &Line) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
     begin(ctx, repo, line, crate::repo::LineOp::Direct)
 }
 
 /// `begin_change` for another kind of change.
-pub fn begin(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(ChangeLocks, Option<String>)> {
+pub fn begin<'p>(
+    ctx: &Ctx,
+    repo: &'p Repo<'p>,
+    line: &Line,
+    op: crate::repo::LineOp,
+) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
     // The copy of changed files goes before the project lock; under it the save takes it by a rename.
-    repo.prepare_save(&line)?;
-    let lock = repo.p.lock()?;
-    let w = repo.working_state(ctx, &line, "before a layr command")?;
-    Ok((ChangeLocks(line_lock, lock), w))
+    let prepared = repo.prepare_save(ctx, &line)?;
+    let lock = line_lock.into_locked(&repo.p)?;
+    let w = prepared.working_state(&lock, ctx, &line, "before a layr command")?;
+    Ok((lock, w))
 }
 
 /// `begin` for a command that writes the working folder or moves the head of the line. It holds the
@@ -449,15 +449,18 @@ pub fn begin_line(
     repo: &Repo,
     line: &Line,
     op: crate::repo::LineOp,
-) -> Result<(crate::store::LineLock, Option<String>)> {
+) -> Result<(crate::store::LineLeaseSet, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
-    repo.prepare_save(&line)?;
+    let prepared = if repo.uses_native_hints(&line)? { None } else { Some(repo.prepare_save(ctx, &line)?) };
     let w = {
-        let _commit = repo.p.lock()?;
-        repo.working_state(ctx, &line, "before a layr command")?
+        let _commit = line_lock.lock(&repo.p)?;
+        match prepared {
+            Some(prepared) => prepared.working_state(&_commit, ctx, &line, "before a layr command")?,
+            None => repo.working_state(&_commit, ctx, &line, "before a layr command")?,
+        }
     };
     Ok((line_lock, w))
 }
@@ -468,17 +471,20 @@ pub fn begin_line(
 /// the inode and btrfs reports the move.
 pub fn stage_paths(repo: &Repo, line: &Line, scan: &Path, paths: &BTreeSet<String>) -> Result<()> {
     let stage = repo.ensure_stage(line)?;
-    #[cfg(target_os = "macos")]
-    if crate::thin::is_thin(&stage) {
-        // A file with several names keeps them only in a complete index.
-        if !crate::thin::any_linked(&repo.working(line), paths)
-            && !paths.iter().any(|p| fsutil::lmeta(scan, p).is_some_and(|m| m.is_dir()))
-        {
-            let (index, _) = repo.index_source(line)?;
-            return crate::thin::stage_entries(&index, scan, paths, repo.own(line));
+    let index = repo.stage_tree(line, &stage)?;
+    if let Some(layered) = index.layered_storage() {
+        let working = Snap::native(&repo.working(line));
+        let linked = paths
+            .iter()
+            .map(|path| layr_fs_core::TreeRead::metadata(&working, &layr_fs_core::RelDir::from_bytes(path.as_bytes())?))
+            .collect::<layr_fs_core::Result<Vec<_>>>()?
+            .iter()
+            .flatten()
+            .any(|entry| entry.link.is_some_and(|link| link.count > 1));
+        if !linked && !paths.iter().any(|path| fsutil::lmeta(scan, path).is_some_and(|metadata| metadata.is_dir())) {
+            return layered.stage_entries(scan, paths, repo.own(line));
         }
-        let stage = repo.ensure_full_stage(line)?;
-        return stage_into(repo, line, &stage, scan, paths);
+        return stage_into(repo, line, &repo.ensure_full_stage(line)?, scan, paths);
     }
     stage_into(repo, line, &stage, scan, paths)
 }
@@ -492,14 +498,14 @@ fn stage_into(repo: &Repo, line: &Line, stage: &Path, scan: &Path, paths: &BTree
         if fsutil::lmeta(scan, p).is_none() {
             if let Some(m) = fsutil::lmeta(&stage, p) {
                 if m.is_file() || m.ftype == fsutil::FType::Symlink {
-                    gone.insert(crate::storage::file_identity(&stage.join(p))?, p.clone());
+                    gone.insert(crate::fs::host().namespace.file_identity(&stage.join(p))?, p.clone());
                 }
             }
         }
     }
     for p in paths {
         if let (Some(_), None) = (fsutil::lmeta(scan, p), fsutil::lmeta(&stage, p)) {
-            if let Some(from) = gone.remove(&crate::storage::file_identity(&scan.join(p))?) {
+            if let Some(from) = gone.remove(&crate::fs::host().namespace.file_identity(&scan.join(p))?) {
                 let t = crate::tree::Tree::open(&stage)?;
                 t.mkdirs_for(p, own)?;
                 t.rename(&from, p)?;
@@ -564,8 +570,7 @@ fn include_linked_tracked(
                 continue;
             }
             if metadata.is_dir() {
-                #[cfg(feature = "overlayfs")]
-                if crate::storage::is_subvolume(&entry.path()) {
+                if crate::fs::host().namespace.managed(&entry.path()) {
                     continue;
                 }
                 dirs.push(rel);
@@ -607,8 +612,8 @@ fn select_add(
 ) -> Result<(BTreeSet<String>, Vec<String>)> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for c in &st.unstaged {
-        if matches(specs, &c.path) {
-            paths.insert(c.path.clone());
+        if matches(specs, c.path()) {
+            paths.insert(c.path().clone());
         }
     }
     if !a.has("-u") {
@@ -653,7 +658,6 @@ fn select_add(
 
 /// The paths that `add` with these pathspecs can touch, with the ignore files that decide
 /// their state: every parent folder's. `None` (the whole tree) when a spec names the root.
-#[cfg(target_os = "macos")]
 fn add_scan_limit(specs: &[String]) -> Option<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     for s in specs {
@@ -717,9 +721,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The status and the copy of the named paths read the whole working folder: seconds in a
     // large line. They run before the store lock; under it the copy is used when the head and
     // the staging content did not change, else the read runs again under the lock.
-    #[cfg(target_os = "macos")]
     let limit = add_scan_limit(&specs);
-    #[cfg(target_os = "macos")]
     let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
         let quiet = h.repo.quiet_paths(line)?;
         let work = h.repo.working(line);
@@ -731,31 +733,27 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let read = || {
             let st = h.repo.status_for_add(line, &work, &index, limit.as_ref())?;
             let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
-            let scan = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
-            crate::storage::create_subvolume(&scan.path)?;
-            crate::storage::copy_selected(&work, &scan.path, &paths)?;
+            crate::fs::observations::note_read(&work, &paths);
+            let scan = crate::repo::Temp::selected(
+                &Snap::native(&work),
+                &paths.iter().cloned().collect::<Vec<_>>(),
+                h.repo.p.scan_dir().join(crate::store::temp_name()),
+            )?;
             Ok((scan, paths, ignored))
         };
-        match &limit {
-            Some(l) => crate::storage::stable_read_paths(&roots, l, read),
-            None => crate::storage::stable_read(&roots, read),
-        }
+        crate::fs::observations::validated_read(&roots, limit.as_ref(), read)
     };
-    #[cfg(target_os = "macos")]
     let early = {
         let token = h.repo.index_token(&line)?;
         read(&line)?.map(|r| (token, r))
     };
-    let _lock = h.repo.p.lock()?;
+    let _lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
     let quiet = h.repo.quiet_paths(&line)?;
-    #[cfg(target_os = "macos")]
     let prepared = match early {
         Some((token, r)) if token == h.repo.index_token(&line)? => Some(r),
         _ => read(&line)?,
     };
-    #[cfg(not(target_os = "macos"))]
-    let prepared: Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)> = None;
     let (scan, paths, ignored_named) = match prepared {
         Some(v) => v,
         None => {
@@ -810,28 +808,13 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (_lock, _w) = begin_change(ctx, &h.repo, &line)?;
     let line = h.repo.line(&line.id)?;
     let w = h.repo.working(&line);
-    // A thin index takes the removals as one change of its top layer; no complete index.
-    #[cfg(target_os = "macos")]
-    let thin = {
-        let st = h.repo.ensure_stage(&line)?;
-        if crate::thin::is_thin(&st) {
-            Some(h.repo.index_source(&line)?.0)
-        } else {
-            None
-        }
-    };
-    #[cfg(not(target_os = "macos"))]
-    let thin: Option<Snap> = None;
-    let full = if thin.is_none() { Some(h.repo.ensure_full_stage(&line)?) } else { None };
-    let index: &dyn fsutil::Src = match (&thin, &full) {
-        (Some(t), _) => t,
-        (None, Some(f)) => f,
-        (None, None) => unreachable!("one index exists"),
-    };
+    let stage = h.repo.ensure_stage(&line)?;
+    let index = h.repo.stage_tree(&line, &stage)?;
+    let layered = index.layered_storage();
     // Check every path first, then change the index, then the working folder.
     let mut plan: Vec<(String, Vec<String>)> = Vec::new();
     for s in &specs {
-        match fsutil::lmeta(index, s) {
+        match fsutil::lmeta(&index, s) {
             None => return Err(exit(128, format!("fatal: pathspec '{}' did not match any files", h.rel(s)))),
             Some(m) if m.is_dir() && !a.has("-r") => {
                 return Err(exit(128, format!("fatal: not removing '{}' recursively without -r", h.rel(s))))
@@ -841,8 +824,8 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut files = Vec::new();
         if a.has("-n") {
             files.push(s.clone());
-        } else if fsutil::lmeta(index, s).map(|m| m.is_dir()).unwrap_or(false) {
-            fsutil::walk(index, s, &mut |rel, m| {
+        } else if fsutil::lmeta(&index, s).map(|m| m.is_dir()).unwrap_or(false) {
+            fsutil::walk(&index, s, &mut |rel, m| {
                 if !m.is_dir() {
                     files.push(rel.to_string());
                 }
@@ -860,9 +843,9 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let mut lost = Vec::new();
         for (_, files) in &plan {
             for f in files {
-                if fsutil::lmeta(index, f).is_some()
-                    && !fsutil::same_entry(index, f, &head, f, None)?
-                    && !fsutil::same_entry(index, f, &w, f, None)?
+                if fsutil::lmeta(&index, f).is_some()
+                    && !fsutil::same_entry(&index, f, &head, f, None)?
+                    && !fsutil::same_entry(&index, f, &w, f, None)?
                 {
                     lost.push(h.rel(f));
                 }
@@ -881,20 +864,14 @@ pub fn rm(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("-n") {
         removed.extend(plan.into_iter().flat_map(|(_, files)| files));
     } else {
-        match (&thin, &full) {
-            #[cfg(target_os = "macos")]
-            (Some(t), _) => {
-                let none = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
-                std::fs::create_dir_all(&none.path)?;
-                let paths: BTreeSet<String> = plan.iter().map(|(s, _)| s.clone()).collect();
-                crate::thin::stage_entries(t, &none.path, &paths, h.repo.own(&line))?;
+        if let Some(layered) = layered {
+            let none = crate::repo::Temp::directory(h.repo.p.scan_dir().join(crate::store::temp_name()), 0o700)?;
+            let paths = plan.iter().map(|(path, _)| path.clone()).collect();
+            layered.stage_entries(&none.path, &paths, h.repo.own(&line))?;
+        } else {
+            for (path, _) in &plan {
+                fsutil::remove_entry(&stage, path)?;
             }
-            (_, Some(f)) => {
-                for (s, _) in &plan {
-                    fsutil::remove_entry(f, s)?;
-                }
-            }
-            _ => {}
         }
         for (s, files) in plan {
             if !a.has("--cached") {
@@ -961,12 +938,9 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
         tree.mkdirs_for(t, h.repo.own(&line))?;
         tree.rename(s, t)?;
     }
-    // Stage both sides of each move. On APFS with a thin index, a private copy of the moved
-    // entries is enough, and the index removes the old folder itself.
-    #[cfg(target_os = "macos")]
-    let thin = crate::thin::is_thin(&h.repo.ensure_stage(&line)?);
-    #[cfg(not(target_os = "macos"))]
-    let thin = false;
+    // A sparse index needs only the moved entries; complete indexes retain native captures.
+    let stage = h.repo.ensure_stage(&line)?;
+    let sparse = h.repo.stage_tree(&line, &stage)?.layered_storage().is_some();
     let mut paths = BTreeSet::new();
     for (s, t) in &moves {
         paths.insert(s.clone());
@@ -978,12 +952,12 @@ pub fn mv(ctx: &Ctx, args: &[String]) -> Result<i32> {
             })?;
         }
     }
-    let scan = if thin {
-        let copy = crate::repo::Temp { path: h.repo.p.scan_dir().join(crate::store::temp_name()) };
-        crate::storage::create_subvolume(&copy.path)?;
-        #[cfg(target_os = "macos")]
-        crate::storage::copy_selected(&w, &copy.path, &paths)?;
-        copy
+    let scan = if sparse {
+        crate::repo::Temp::selected(
+            &Snap::native(&w),
+            &paths.iter().cloned().collect::<Vec<_>>(),
+            h.repo.p.scan_dir().join(crate::store::temp_name()),
+        )?
     } else {
         let scan = h.repo.scan(&line)?;
         for (s, _) in &moves {
@@ -1136,7 +1110,11 @@ fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32
         ("GIT_CEILING_DIRECTORIES".to_string(), dir.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned()),
         ("GIT_DIR".to_string(), "/nonexistent-layr".to_string()),
     ]);
-    crate::privs::command_as(&mut c, uid, &env)?;
+    if uid == ctx.caller.uid {
+        crate::privs::command_as_caller(&mut c, ctx, &env)?;
+    } else {
+        crate::privs::command_as(&mut c, uid, &env)?;
+    }
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut ch = c.spawn()?;
     ch.stdin.take().unwrap().write_all(patch)?;
@@ -1151,18 +1129,8 @@ fn run_git_apply(ctx: &Ctx, dir: &Path, patch: &[u8], flags: &[String], uid: u32
 /// the save left out. The warning runs after the store lock is released.
 pub fn commit(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = commit_state(ctx, args);
-    // Copies of build-output folders made before the lock that no part took (nothing to save, or
-    // an error) go to the trash.
-    #[cfg(target_os = "macos")]
-    {
-        let left = crate::storage::take_prepared();
-        if !left.is_empty() {
-            if let Ok(h) = here(ctx) {
-                for p in left {
-                    let _ = h.repo.p.trash(&p);
-                }
-            }
-        }
+    if let Err(error) = ctx.captures.discard() {
+        eprintln!("warning: {error:#}");
     }
     let code = code?;
     if code == 0 {
@@ -1197,10 +1165,10 @@ pub(crate) fn named_checks(
     head_root: &crate::repo::Snap,
     new_root: &crate::repo::Snap,
     line: &Line,
-    all_changes: &[Change],
+    all_changes: &[EntryChange],
     opts: NamedOpts,
-) -> Result<Option<(Vec<Change>, Vec<crate::model::Conflict>)>> {
-    let staged: Vec<Change> = all_changes.iter().filter(|c| !skip_path(&c.path)).cloned().collect();
+) -> Result<Option<(Vec<EntryChange>, Vec<crate::model::Conflict>)>> {
+    let staged: Vec<EntryChange> = all_changes.iter().filter(|c| !skip_path(c.path())).cloned().collect();
     if staged.is_empty() && !opts.allow_empty && !opts.amend {
         return Ok(None);
     }
@@ -1209,11 +1177,11 @@ pub(crate) fn named_checks(
         let _t = crate::trace::span("conflict markers");
         let mut marked = Vec::new();
         for c in &staged {
-            if !c.new.as_ref().is_some_and(|m| m.is_file() && m.size <= fsutil::MAX_TEXT) {
+            if !c.new().is_some_and(|m| m.is_file() && m.size <= fsutil::MAX_TEXT) {
                 continue;
             }
-            if crate::repo::has_markers(&fsutil::read_file(new_root, &c.path)?) {
-                marked.push(c.path.clone());
+            if crate::repo::has_markers(&fsutil::read_file(new_root, c.path())?) {
+                marked.push(c.path().clone());
             }
         }
         if !marked.is_empty() {
@@ -1226,7 +1194,7 @@ pub(crate) fn named_checks(
     // Content conflicts stay listed while the committed file has markers; the commit clears the other kinds.
     let mut cleared = Vec::new();
     for c in &head.conflicts {
-        if (c.kind == "content" || c.kind == "add/add") && conflict_open(new_root, c)? {
+        if (c.uses_markers()) && conflict_open(new_root, c)? {
             state.conflicts.push(c.clone());
         } else {
             cleared.push(c.clone());
@@ -1238,23 +1206,19 @@ pub(crate) fn named_checks(
     Ok(Some((staged, cleared)))
 }
 
-/// The part of a named save that runs before the project lock on APFS: the clone of the index, the
-/// state that describes it, and the changes against the head.
-#[cfg(target_os = "macos")]
+/// The immutable index and its comparison are prepared before the project lock.
 struct NamedPrepared<'p, 's> {
     head_id: String,
     head_root: crate::repo::Snap,
-    pending: Option<crate::apfs_commit::PendingCommit<'p, 's>>,
+    publication: crate::source::publication::IndexPublication<'p, 's>,
     state: crate::model::StateRec,
-    new_root: crate::repo::Snap,
-    all_changes: Vec<Change>,
     /// The staged changes and the conflicts that the save clears; None: nothing to save.
-    checks: Option<(Vec<Change>, Vec<crate::model::Conflict>)>,
+    checks: Option<(Vec<EntryChange>, Vec<crate::model::Conflict>)>,
+    left_out: Option<crate::repo::LeftOutComparison>,
 }
 
 /// Clone the index of `line` and compare the clone with the head. Call with the line lock held and
-/// without the project lock. A failure drops the clone (`PendingCommit`) and changes nothing.
-#[cfg(target_os = "macos")]
+/// without the project lock. A failure changes no record.
 fn prepare_named_save<'p, 's>(
     ctx: &Ctx,
     repo: &'p Repo<'s>,
@@ -1266,38 +1230,46 @@ fn prepare_named_save<'p, 's>(
     let amend = opts.amend;
     let head_root = repo.state_src(&line.head)?;
     let parents = if amend { head.parents.clone() } else { vec![line.head.clone()] };
-    let stage = repo.current_stage(line)?;
-    let pending = match &stage {
-        Some(_) => Some(crate::apfs_commit::PendingCommit::prepare(&repo.p, &line.id)?),
-        None => None,
-    };
-    if pending.is_some() {
-        crate::store::failpoint("pending-cloned");
-        crate::store::test_pause();
-    }
-    let mut state = match &pending {
-        Some(pc) => repo.state_record(ctx, pc.id.clone(), StateKind::Commit, parents, message, Some(line), pc.subvol.clone()),
-        None => repo.same_state(ctx, &line.head, StateKind::Commit, parents, message, Some(line))?,
-    };
+    let publication = crate::source::publication::IndexPublication::prepare(repo, line, &head_root)?;
+    let mut state = repo.state_record(
+        ctx,
+        publication.id().to_owned(),
+        StateKind::Commit,
+        parents,
+        message,
+        Some(line),
+        publication.subvol().to_owned(),
+    );
+    state.running = publication.consistency()?.running();
     if amend {
         state.change_id = head.change_id.clone();
     }
-    let new_root = match &pending {
-        // A thin clone is a layer over the head, as the stage was (`stage_tree`).
-        Some(pc) if pc.thin => crate::thin::Layered::over(&pc.tree, repo.head_src(line)?)?,
-        Some(pc) => crate::repo::snap(&pc.tree),
-        None => repo.state_src(&state.id)?,
-    };
+    let new_root = publication.source()?;
     // An attribute-only change that `add` staged is a change of the state.
-    let all_changes = crate::storage::with_stored_compare(|| changes::file_changes(&head_root, &new_root))?;
-    let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &all_changes, opts)?;
-    // The clone is durable before the project lock: under the lock only the rename and the record.
-    #[cfg(target_os = "macos")]
-    if let (Some(pc), Some(_)) = (&pending, &checks) {
-        pc.sync_tree()?;
-        crate::store::failpoint("pending-synced");
+    let compared = crate::objstore::compare(&head_root, new_root.clone())?;
+    let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &compared.files, opts)?;
+    if checks.is_some() {
+        publication.synchronize()?;
     }
-    Ok(NamedPrepared { head_id: line.head.clone(), head_root, pending, state, new_root, all_changes, checks })
+    compared.record(&repo.p, &mut state)?;
+    // Failure to list a live working folder must never reject the staged save.
+    // The post-publication warning retains its ordinary snapshot fallback.
+    let left_out = (|| -> Result<_> {
+        let index = if let (Some(tree), Some(times)) = (&state.tree, &state.times) {
+            let refs = layr_objects::StateRef { tree: layr_objects::Id::parse(tree)?, times: layr_objects::Id::parse(times)? };
+            let tree = crate::object_tree::ObjectTree::new(
+                crate::objstore::open(&repo.p)?,
+                refs,
+                &repo.p.meta_dir().join("object-reads"),
+            )?;
+            crate::repo::Snap::Objects(tree)
+        } else {
+            new_root.clone()
+        };
+        repo.prepare_left_out(line, &index)
+    })()
+    .ok();
+    Ok(NamedPrepared { head_id: line.head.clone(), head_root, publication, state, checks, left_out })
 }
 
 fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1358,7 +1330,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if ["--amend", "--allow-empty", "--author", "-s", "--allow-conflict-markers"].iter().any(|f| a.has(f)) {
             return Err(exit(2, "a virtual line takes only 'layr save -m <message>' for now (docs/views.md)"));
         }
-        return crate::views::save(ctx, &h, &line, &v, &message, a.has("-q"), json);
+        return crate::cmd::view_ops::save(ctx, &h, &line, &v, &message, a.has("-q"), json);
     }
     #[cfg(target_os = "linux")]
     let virtual_save = {
@@ -1383,9 +1355,8 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _line_lock = h.repo.line_lock(&line)?;
     // -a stages the changed tracked files like `add -u`, which reads the working folder before
     // the store lock (a status of a large line took tens of seconds under it).
-    #[cfg(target_os = "macos")]
-    if a.has("-a") && !stacked {
-        add(ctx, &["-u".to_string()])?;
+    if (a.has("-a") || virtual_save) && !stacked {
+        add(ctx, &[if virtual_save { "-A" } else { "-u" }.to_string()])?;
     }
     // Cache folders become layers, and their copies are made, before the lock (rule 90).
     if !stacked {
@@ -1403,7 +1374,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !st2.unstaged.is_empty() {
             outln!(ctx, "Changes not staged for a state:");
             for c in &st2.unstaged {
-                outln!(ctx, "\tmodified:   {}", h.rel(&c.path));
+                outln!(ctx, "\tmodified:   {}", h.rel(c.path()));
             }
             outln!(ctx, "\nno changes added to a state (use \"layr add\" and/or \"layr save -a -m <message>\")");
         } else if !st2.untracked.is_empty() {
@@ -1413,19 +1384,19 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Ok(1)
     };
-    // `save -m` on APFS: the index is cloned and the new tree compared before the project lock
-    // (issue #194). The line lock, taken above, keeps the stage and the head unchanged to the record.
-    #[cfg(target_os = "macos")]
+    // Freeze and compare the index before the project lock. The line lease keeps
+    // the stage and the head unchanged until publication.
     let mut prepared =
         if stacked { None } else { Some(prepare_named_save(ctx, &h.repo, &line, &head, &message, named_opts(&a))?) };
-    #[cfg(target_os = "macos")]
     if prepared.as_ref().is_some_and(|np| np.checks.is_none()) {
-        prepared = None;
         return nothing(&h, &line);
     }
-    let lock = h.repo.p.lock()?;
+    {
+        let _ready = crate::trace::span("prepared named save ready");
+    }
+    crate::store::test_pause();
+    let lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
-    #[cfg(target_os = "macos")]
     if let Some(np) = &prepared {
         if line.head != np.head_id {
             return Err(exit(
@@ -1441,18 +1412,6 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     crate::gitbridge::check_git_head(&h.repo, &line)?;
     crate::repo::recover_cache_replacements(&h.repo.working(&line))?;
-    if (a.has("-a") || virtual_save) && !stacked && !cfg!(target_os = "macos") {
-        let (st, scan, _it, index) = h.repo.status_light(&line)?;
-        let mut paths: BTreeSet<String> = st.unstaged.iter().map(|c| c.path.clone()).collect();
-        if virtual_save {
-            paths.extend(st.untracked.iter().cloned());
-        }
-        #[cfg(target_os = "linux")]
-        include_linked_tracked(&scan.path, &index, &mut paths, &h.repo.quiet_paths(&line)?)?;
-        if !paths.is_empty() {
-            stage_paths(&h.repo, &line, &scan.path, &paths)?;
-        }
-    }
     let author = a
         .get("--author")
         .and_then(|au| au.split_once('<').map(|(n, e)| (n.trim().to_string(), e.trim_end_matches('>').trim().to_string())));
@@ -1464,6 +1423,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             Output::Text
         };
+<<<<<<< head
         return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, to, nothing);
     }
     // The new state is a snapshot of the staging line (or the head when nothing is staged);
@@ -1510,13 +1470,20 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return nothing(&h, &line);
             }
         };
+=======
+        return commit_stacked(&lock, ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
+    }
+    let NamedPrepared { head_root, mut state, mut publication, checks, left_out, .. } =
+        prepared.take().ok_or_else(|| anyhow::anyhow!("named save was not prepared"))?;
+    let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("named save has no checks"))?;
+>>>>>>> fs-legacy-facades
     if let Some((n, e)) = author {
         state.author.name = n;
         state.author.email = e;
     }
     // The part of each build-output overlay (docs/overlays.md, section 1a, slice 6): a folder that
     // changed gets a new part saved with this state; the state names the parts.
-    for (overlay, part) in h.repo.save_named_cache_parts(ctx, &line, &state.id) {
+    for (overlay, part) in h.repo.save_named_cache_parts(&lock, ctx, &line, &state.id) {
         state.parts.entry(overlay).or_insert(part);
     }
     // `named_checks` checked the conflicts and the secrets of this content.
@@ -1530,22 +1497,19 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
             target_head: line.head.clone(),
         })?;
     }
-    #[cfg(target_os = "macos")]
-    if let Some(pc) = pending.as_mut() {
-        let _t = crate::trace::span("publish clone");
-        if !pc.publish()? {
-            return Err(exit(
-                1,
-                format!("error: the staging content of line {} changed during the save; run it again", line.name),
-            ));
-        }
+    if !publication.publish()? {
+        return Err(exit(1, format!("error: the staging content of line {} changed during the save; run it again", line.name)));
     }
     crate::store::failpoint("pending-renamed");
     crate::store::failpoint("before-record");
+    publication.record_attempted();
     let rec = {
         let _t = crate::trace::span("move head");
-        h.repo.move_head(ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
+        h.repo.move_head(&lock, ctx, "commit", &line, &state.id, vec![state.clone()], None, data)
     };
+    if let Err(error) = &rec {
+        publication.publication_failed(error);
+    }
     rec?;
     // The history limit of each overlay counts the parts of the new head: a part of the old head
     // that no state keeps now goes.
@@ -1562,15 +1526,17 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The output reads the trees: it runs after the project lock is released. The journal of the
     // pending save goes after it too: the record is the commit, and the recovery of another
     // command leaves the journal of a live process alone (and finishes it after a crash).
-    drop(lock);
-    #[cfg(target_os = "macos")]
-    if let Some(pc) = pending.take() {
-        let _t = crate::trace::span("finish save");
-        pc.finish()?;
+    let mut saved_line = line.clone();
+    saved_line.head = state.id.clone();
+    if let Some(left_out) = left_out {
+        if let Err(e) = h.repo.cache_left_out(&saved_line, left_out) {
+            eprintln!("warning: cannot retain the files this save left out: {e:#}");
+        }
     }
+    drop(lock);
+    publication.finish()?;
+    let new_root = h.repo.state_src(&state.id)?;
     if json {
-        #[cfg(target_os = "macos")]
-        let new_root = h.repo.state_src(&state.id)?;
         let staged = changes::with_renames(&head_root, &new_root, staged);
         let mut out = saved_json(&line, &state, &diff::file_diffs(&head_root, &new_root, &staged)?);
         out["amend"] = serde_json::json!(a.has("--amend"));
@@ -1579,12 +1545,10 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let root = if parents_empty(&state) { " (root-state)" } else { "" };
         outln!(ctx, "[{}{} {}] {}", line.name, root, ids::short(&state.id), message.lines().next().unwrap_or(""));
         // `publish` moved the clone into the state folder: read the saved state.
-        #[cfg(target_os = "macos")]
-        let new_root = h.repo.state_src(&state.id)?;
         let staged = changes::with_renames(&head_root, &new_root, staged);
         print_summary(ctx, &head_root, &new_root, &staged)?;
         for c in &cleared {
-            outln!(ctx, " resolved conflict: {} ({})", c.path, c.kind);
+            outln!(ctx, " resolved conflict: {} ({})", c.path, c.kind());
         }
         if !state.conflicts.is_empty() {
             outln!(ctx, "warning: {} file(s) still have conflict markers; see 'layr status'", state.conflicts.len());
@@ -1610,7 +1574,7 @@ fn warn_left_out(ctx: &Ctx) -> Result<()> {
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
     let untracked: Vec<String> = untracked_list(&st, "normal").iter().map(|p| h.rel(p)).collect();
     let mut modified: Vec<String> =
-        st.unstaged.iter().filter(|c| !conflicted.contains(&c.path)).map(|c| h.rel(&c.path)).collect();
+        st.unstaged.iter().filter(|c| !conflicted.contains(c.path())).map(|c| h.rel(c.path())).collect();
     modified.sort();
     for msg in [left_out_line("untracked", &untracked), left_out_line("modified, not added", &modified)].into_iter().flatten() {
         eprintln!("{msg}");
@@ -1632,7 +1596,7 @@ fn left_out_line(kind: &str, paths: &[String]) -> Option<String> {
 }
 
 /// The summary of a commit: the short statistics and the created, deleted and moved files.
-fn print_summary(ctx: &Ctx, old: &Snap, new: &Snap, list: &[Change]) -> Result<()> {
+fn print_summary(ctx: &Ctx, old: &Snap, new: &Snap, list: &[EntryChange]) -> Result<()> {
     print_fds(ctx, &diff::file_diffs(old, new, list)?);
     Ok(())
 }
@@ -1653,6 +1617,7 @@ fn print_fds(ctx: &Ctx, fds: &[diff::FileDiff]) {
 /// changed layer (docs/overlays.md, section 3.2).
 #[allow(clippy::too_many_arguments)]
 fn commit_stacked(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &Ctx,
     h: &Here,
     line: &Line,
@@ -1682,9 +1647,9 @@ fn commit_stacked(
         let (st, scan, _it, _index) = repo.status(line)?;
         let mut paths: BTreeSet<String> = BTreeSet::new();
         if all {
-            paths.extend(st.unstaged.iter().map(|c| c.path.clone()));
+            paths.extend(st.unstaged.iter().map(|c| c.path().clone()));
         }
-        paths.extend(st.unstaged.iter().filter(|c| quiet_files.contains(&c.path)).map(|c| c.path.clone()));
+        paths.extend(st.unstaged.iter().filter(|c| quiet_files.contains(c.path())).map(|c| c.path().clone()));
         paths.extend(pending.keys().cloned());
         let work = repo.temp_work(&src)?;
         stage_into(repo, line, &work.path, &scan.path, &paths)?;
@@ -1693,11 +1658,19 @@ fn commit_stacked(
         repo.temp_snapshot(&src, true)?
     };
     let summary = out != Output::Quiet;
+<<<<<<< head
     let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary, to)?
     {
         Some(d) => d,
         None => return nothing(h, line),
     };
+=======
+    let done =
+        match crate::overlay::commit_layers(locked, ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
+            Some(d) => d,
+            None => return nothing(h, line),
+        };
+>>>>>>> fs-legacy-facades
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
     // The patches of the view that wait for a merge with the parent merge now (docs/overlays.md section 1):
@@ -1833,24 +1806,24 @@ fn restore_paths(
     let own = repo.own(line);
     let mut done = Vec::new();
     for c in changes::without_moves(changes::file_changes(target_view, source)?) {
-        if skip_path(&c.path) || !matches(specs, &c.path) {
+        if skip_path(c.path()) || !matches(specs, c.path()) {
             continue;
         }
-        if c.new.is_none() {
+        if c.new().is_none() {
             if let Some(k) = known {
-                if fsutil::lmeta(k, &c.path).is_none() {
+                if fsutil::lmeta(k, c.path()).is_none() {
                     continue;
                 }
             }
-            fsutil::remove_entry(target, &c.path)?;
+            fsutil::remove_entry(target, c.path())?;
         } else {
             if to_work {
-                fsutil::copy_work_entry(source, &c.path, target, &c.path, own)?;
+                fsutil::copy_work_entry(source, c.path(), target, c.path(), own)?;
             } else {
-                fsutil::copy_entry(source, &c.path, target, &c.path, own)?;
+                fsutil::copy_entry(source, c.path(), target, c.path(), own)?;
             }
         }
-        done.push(c.path.clone());
+        done.push(c.path().clone());
     }
     Ok(done)
 }
@@ -1917,7 +1890,8 @@ pub fn restore_impl(
             if !matches(&specs, &c.path) {
                 continue;
             }
-            let sid = if ours { c.ours.clone() } else { c.theirs.clone() };
+            let [_, our_state, their_state] = c.sides();
+            let sid = if ours { our_state } else { their_state };
             let sid = match sid {
                 Some(s) => s,
                 None => continue,
@@ -1933,16 +1907,18 @@ pub fn restore_impl(
         if n == 0 {
             return Err(exit(1, "error: no conflict matches the given paths"));
         }
-        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
-            put_back(repo, &line, w.as_deref());
-            return Err(e);
+        if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                put_back(repo, &line, w.as_deref());
+            }
+            return Err(e.into());
         }
         return Ok(0);
     }
     let (index, _it) = repo.index_view(&line)?;
     let head_root = repo.head_src(&line)?;
     let src_id = match source {
-        Some(r) => Some(revs::resolve(repo, Some(&line), r)?),
+        Some(r) => Some(revs::resolve_state(repo, Some(&line), r)?),
         None => None,
     };
     // In a line with overlays a source state comes with the line's overlays in place.
@@ -1985,10 +1961,11 @@ pub fn restore_impl(
         matched |= !d.is_empty();
     }
     if worktree {
-        #[cfg(target_os = "macos")]
-        let scan = repo.scan_matching(&line, specs)?;
-        #[cfg(not(target_os = "macos"))]
-        let scan = repo.scan(&line)?;
+        let scan = if crate::fs::prefers_captured_comparison(&repo.working(&line)) {
+            repo.scan(&line)?
+        } else {
+            repo.scan_matching(&line, specs)?
+        };
         let wdir = repo.working(&line);
         let d = restore_paths(repo, &line, &src_root, &scan.path, &wdir, specs, Some(&index))?;
         matched |= !d.is_empty();
@@ -2023,28 +2000,46 @@ pub fn restore_impl(
         }
     }
     if worktree {
-        if let Err(e) = record_working_checked(ctx, repo, &line, "restore", w.clone()) {
-            put_back(repo, &line, w.as_deref());
-            return Err(e);
+        if let Err(e) = record_working_checked(&_line_lock, ctx, repo, &line, "restore", w.clone()) {
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                put_back(repo, &line, w.as_deref());
+            }
+            return Err(e.into());
         }
     }
     Ok(0)
 }
 
 /// Record a change of the working content only (for undo). The caller holds the project lock.
-pub fn record_working(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+pub fn record_working(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: &str,
+    working_before: Option<String>,
+) -> Result<()> {
     let (rec, _) = working_record(ctx, repo, line, op, working_before)?;
-    repo.commit_record(ctx, rec)?;
+    repo.commit_record(locked, ctx, rec)?;
     Ok(())
 }
 
 /// `record_working` for a command that holds the line lock only (restore): the snapshot of the
 /// folder is made first, and the record takes the project lock alone.
-pub fn record_working_checked(ctx: &Ctx, repo: &Repo, line: &Line, op: &str, working_before: Option<String>) -> Result<()> {
+pub fn record_working_checked(
+    leases: &crate::store::LineLeaseSet,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    op: &str,
+    working_before: Option<String>,
+) -> crate::db::PublishResult<()> {
     let (rec, states) = working_record(ctx, repo, line, op, working_before)?;
     let head = line.head.clone();
-    repo.commit_line(line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
-        crate::repo::discard_unrecorded(repo, &states);
+    repo.commit_line(leases, line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(|error| {
+        if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+            crate::repo::discard_unrecorded(repo, &states);
+        }
     })
 }
 
@@ -2055,16 +2050,18 @@ fn working_record(
     line: &Line,
     op: &str,
     working_before: Option<String>,
-) -> Result<(Record, Vec<crate::model::StateRec>)> {
-    let mut rec = Record::new(op);
+) -> Result<(crate::model::DraftRecord, Vec<crate::model::StateRec>)> {
+    let mut rec = crate::model::DraftRecord::new(op);
     let working_after = repo.after_state(ctx, line, op, &mut rec)?;
     rec.lines.insert(
         line.id.clone(),
         crate::model::LineChange {
-            before: Some(repo.line_state(line, &line.head)),
-            after: Some(repo.line_state(line, &line.head)),
-            working_before,
-            working_after,
+            transition: crate::model::LineTransition::Move {
+                before: repo.line_state(line, &line.head),
+                after: repo.line_state(line, &line.head),
+            },
+            working_before: working_before,
+            working_after: working_after,
         },
     );
     let states = rec.states.clone();
@@ -2074,7 +2071,6 @@ fn working_record(
 /// `reset --hard <state>` when the tree of the state is the tree of the head and the working
 /// folder matches the head (APFS): only the head moves, no file is touched. Returns false, with
 /// nothing changed, in every other case.
-#[cfg(target_os = "macos")]
 fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<bool> {
     let _t = crate::trace::span("reset same tree");
     let _line_lock = repo.line_lock(line)?;
@@ -2087,16 +2083,18 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     let head = repo.head_src(&line)?;
     let tree = repo.state_src(target)?;
     // Equal trees: no entry differs (the root folder is not state content).
-    if changes::candidates(&head, &tree)?.iter().any(|x| !x.path.is_empty() && !skip_path(&x.path)) {
+    if changes::candidates(&head, &tree)?.iter().any(|x| !x.path().is_empty() && !skip_path(x.path())) {
         return Ok(false);
     }
     // The working folder matches the head: a local change needs the full reset. The walk for
     // overlay folders (`cache_paths`) runs only when the working folder has a change.
-    let local = changes::file_changes(&head, &w)?;
+    let Some(local) = crate::fs::observations::validated_read(&[&w], None, || changes::file_changes(&head, &w))? else {
+        return Ok(false);
+    };
     if !local.is_empty() {
         let regen = repo.cache_paths(&w)?;
         let keep = |p: &str| !skip_path(p) && !regen.iter().any(|r| p == r || p.starts_with(&format!("{r}/")));
-        if local.iter().any(|x| keep(&x.path) || x.old_path.as_deref().is_some_and(keep)) {
+        if local.iter().any(|x| keep(x.path()) || x.old_path().map(String::as_str).is_some_and(keep)) {
             return Ok(false);
         }
     }
@@ -2105,7 +2103,7 @@ fn reset_same_tree(ctx: &Ctx, repo: &Repo, line: &Line, target: &str) -> Result<
     drop(_c);
     let head = line.head.clone();
     let rec = repo.head_record(ctx, "reset", &line, target, vec![], None, serde_json::json!({"mode": "hard"}))?;
-    repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ()))?;
+    repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ()))?;
     repo.after_head_moved(&line, target);
     Ok(true)
 }
@@ -2132,7 +2130,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let mut paths = a.paths.clone();
     if !a.dashdash && pos.len() > 1 {
         paths = pos.split_off(1);
-    } else if !a.dashdash && pos.len() == 1 && revs::resolve(&h.repo, Some(&line), &pos[0]).is_err() {
+    } else if !a.dashdash && pos.len() == 1 && revs::resolve_state(&h.repo, Some(&line), &pos[0]).is_err() {
         paths = pos.clone();
         pos.clear();
     }
@@ -2141,9 +2139,8 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let src = pos.first().map(|s| s.as_str()).unwrap_or("head");
         return restore_impl(ctx, &h, &line, &specs, true, false, Some(src), false, false, false, false);
     }
-    let target = revs::resolve(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    let target = revs::resolve_state(&h.repo, Some(&line), pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     // APFS: an equal tree with a clean working folder moves only the head (`reset_same_tree`).
-    #[cfg(target_os = "macos")]
     if a.has("--hard") && !a.has("--soft") && h.repo.layers(&line)?.is_empty() && reset_same_tree(ctx, &h.repo, &line, &target)? {
         if !a.has("-q") {
             let s = h.repo.state(&target)?;
@@ -2156,14 +2153,11 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _line_lock = h.repo.line_lock(&line)?;
     // APFS: the copy of the working folder and the tree of the target go before the project lock
     // (minutes under it in a large project). The working folder is never under the project lock.
-    #[cfg(target_os = "macos")]
     let prepared = if a.has("--hard") && h.repo.layers(&line)?.is_empty() {
         hard_reset_changes(&h.repo, &line, &h.repo.state_root(&target)?).ok()
     } else {
         None
     };
-    #[cfg(not(target_os = "macos"))]
-    let prepared: Option<(Temp, Vec<Change>)> = None;
     let (_, w) = begin_line(ctx, &h.repo, &line, reset_op(&line, &target))?;
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
@@ -2192,7 +2186,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The working folder is written under the line lock. The stage changes follow the commit.
     let wrote = match mode {
         "hard" => {
-            if !repo.reset_snapshot(ctx, &line, &target)? {
+            {
                 let (_scan, list) = match prepared {
                     Some(p) => p,
                     None => hard_reset_changes(repo, &line, &target_root)?,
@@ -2201,10 +2195,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 let own = repo.own(&line);
                 let gone: Vec<&str> = list
                     .iter()
-                    .filter(|c| c.new.is_none() && fsutil::lmeta(&index, &c.path).is_some())
-                    .map(|c| c.path.as_str())
+                    .filter(|c| c.new().is_none() && fsutil::lmeta(&index, c.path()).is_some())
+                    .map(|c| c.path().as_str())
                     .collect();
-                let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+                let write: Vec<&str> = list.iter().filter(|c| c.new().is_some()).map(|c| c.path().as_str()).collect();
                 fsutil::replace_work_entries(&target_root, &wdir, &gone, &write, own)?;
             }
             true
@@ -2226,17 +2220,21 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         data["overlays"] = serde_json::json!(changed);
     }
     let rec = repo.head_record(ctx, "reset", &line, &target, vec![], w.clone(), data);
-    let committed = rec.and_then(|rec| {
+    let committed = rec.map_err(crate::db::PublishError::from).and_then(|rec| {
         let states = rec.states.clone();
-        repo.commit_line(&line, &head, |_| repo.commit_record(ctx, rec).map(|_| ())).inspect_err(|_| {
-            crate::repo::discard_unrecorded(repo, &states);
-        })
+        repo.commit_line(&_line_lock, &line, &head, |locked, _| repo.commit_record(locked, ctx, rec).map(|_| ())).inspect_err(
+            |error| {
+                if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+                    crate::repo::discard_unrecorded(repo, &states);
+                }
+            },
+        )
     });
     if let Err(e) = committed {
-        if wrote {
+        if wrote && matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
             put_back(repo, &line, w.as_deref());
         }
-        return Err(e);
+        return Err(e.into());
     }
     // The line on each overlay follows: it shows the parts of the target from now on.
     if layers != current {
@@ -2254,7 +2252,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let mut l2 = line.clone();
             l2.head = target.clone();
             let stage = repo.p.stage_path(&line.id);
-            crate::storage::snapshot(&keep.path, &stage, false)?;
+            crate::fs::snapshot(&keep.path, &stage, false)?;
             repo.mark_stage(&l2)?;
         }
         _ => repo.drop_stage(&line)?,
@@ -2273,7 +2271,7 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if !st.unstaged.is_empty() {
             outln!(ctx, "Unstaged changes after reset:");
             for c in st.unstaged.iter().take(20) {
-                outln!(ctx, "{}\t{}", if c.new.is_none() { 'D' } else { 'M' }, c.path);
+                outln!(ctx, "{}\t{}", if c.new().is_none() { 'D' } else { 'M' }, c.path());
             }
             if st.unstaged.len() > 20 {
                 outln!(ctx, "... and {} more", st.unstaged.len() - 20);
@@ -2296,11 +2294,11 @@ pub(crate) fn put_back(repo: &Repo, line: &Line, w: Option<&str>) {
 
 /// The changes from the working folder to `target_root` that `reset --hard` applies: every
 /// tracked path; untracked and ignored files stay. The scan stays alive with the list.
-fn hard_reset_changes(repo: &Repo, line: &Line, target_root: &std::path::Path) -> Result<(Temp, Vec<Change>)> {
+fn hard_reset_changes(repo: &Repo, line: &Line, target_root: &std::path::Path) -> Result<(Temp, Vec<EntryChange>)> {
     let scan = repo.scan(line)?;
     let list = changes::without_moves(changes::file_changes(&scan.path, target_root)?)
         .into_iter()
-        .filter(|c| !skip_path(&c.path))
+        .filter(|c| !skip_path(c.path()))
         .collect();
     Ok((scan, list))
 }
@@ -2335,12 +2333,12 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    h.repo.prepare_status(&line)?;
+    let prepared = h.repo.prepare_status(&line)?;
     let r = (|| -> Result<i32> {
         // Clean changes only the working folder: a protected line allows it.
         let (_lock, w) = begin(ctx, &h.repo, &line, crate::repo::LineOp::Working)?;
         let line = h.repo.line(&line.id)?;
-        let (st, scan, _it, index) = h.repo.locked_status(&line)?;
+        let (st, scan, _it, index) = h.repo.locked_status(&_lock, &line, Some(prepared))?;
         let targets = targets(&st, &scan.path, &index);
         let wdir = h.repo.working(&line);
         for t in &targets {
@@ -2355,7 +2353,7 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         if !targets.is_empty() {
-            record_working(ctx, &h.repo, &line, "clean", w)?;
+            record_working(&_lock, ctx, &h.repo, &line, "clean", w)?;
         }
         Ok(0)
     })();
@@ -2461,14 +2459,16 @@ mod status_tests {
         let line = line();
         let st = Status {
             conflicts: vec![
-                Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None },
-                Conflict {
-                    path: "other.txt".into(),
-                    kind: "content".into(),
-                    base: Some("base".into()),
-                    ours: Some("ours".into()),
-                    theirs: Some("theirs".into()),
-                },
+                Conflict::new("shared.txt", crate::model::ConflictKind::Content, crate::model::ConflictSides::Unrecorded),
+                Conflict::new(
+                    "other.txt",
+                    crate::model::ConflictKind::Content,
+                    crate::model::ConflictSides::Recorded {
+                        base: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000001").unwrap(),
+                        ours: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000002").unwrap(),
+                        theirs: layr_types::StateId::parse("01a12290-0000-7000-8000-000000000003").unwrap(),
+                    },
+                ),
             ],
             ..Status::default()
         };
@@ -2477,7 +2477,7 @@ mod status_tests {
         let output = StatusJson::new(&line, &st, &[], &overlaps, &options);
         assert_eq!(
             serde_json::to_string(&output).unwrap(),
-            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"base","kind":"content","ours":"ours","path":"other.txt","theirs":"theirs"}],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
+            r#"{"conflicts":[{"kind":"content","path":"shared.txt"},{"base":"01a12290-0000-7000-8000-000000000001","kind":"content","ours":"01a12290-0000-7000-8000-000000000002","path":"other.txt","theirs":"01a12290-0000-7000-8000-000000000003"}],"head":"state","ignored":[],"line":"topic","line_id":"id","overlaps":[{"changed_at":0,"line":"other","owner":0,"path":"shared.txt"}],"staged":[],"unstaged":[],"untracked":[]}"#
         );
     }
 
@@ -2492,7 +2492,11 @@ mod status_tests {
         let st = Status {
             ignored: vec!["debug.log".into()],
             untracked: vec!["new.txt".into()],
-            conflicts: vec![Conflict { path: "shared.txt".into(), kind: "content".into(), base: None, ours: None, theirs: None }],
+            conflicts: vec![Conflict::new(
+                "shared.txt",
+                crate::model::ConflictKind::Content,
+                crate::model::ConflictSides::Unrecorded,
+            )],
             ..Status::default()
         };
         let overlaps = [Overlap { path: "shared.txt".into(), line: "other".into(), owner: 0, changed_at: 0 }];
@@ -2523,5 +2527,40 @@ mod status_tests {
             serde_json::to_string(&output).unwrap(),
             r#"{"conflicts":[],"head":"state","ignored":[],"line":"topic","line_id":"id","staged":[],"unstaged":[],"untracked":["new.txt"]}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod patch_identity_tests {
+    use super::*;
+
+    #[test]
+    fn patch_validation_and_application_resolve_the_caller_once() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-patch-identity-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        let result = (|| -> Result<()> {
+            let work = root.join("work");
+            std::fs::create_dir(&work)?;
+            std::fs::write(work.join("file"), b"old\n")?;
+            let ctx = Ctx {
+                store: crate::store::Store::open(&root.join("store"))?,
+                caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+                cwd: work.clone(),
+                env: Default::default(),
+                out: std::cell::RefCell::new(Box::new(std::io::sink())),
+                author: Default::default(),
+                captures: Default::default(),
+            };
+            let patch = b"diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+            let before = crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get());
+            run_git_apply(&ctx, &work, patch, &["--check".into()], ctx.caller.uid)?;
+            assert_eq!(std::fs::read(work.join("file"))?, b"old\n");
+            run_git_apply(&ctx, &work, patch, &[], ctx.caller.uid)?;
+            assert_eq!(std::fs::read(work.join("file"))?, b"new\n");
+            assert_eq!(crate::privs::IDENTITY_LOOKUPS.with(|lookups| lookups.get()) - before, 1);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 }

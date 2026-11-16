@@ -27,12 +27,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-const MAGIC: &[u8; 4] = b"LOB1";
-const WHOLE: u8 = b'z';
-const DELTA: u8 = b'd';
-const CHUNKED: u8 = b'c';
-/// A whole small blob compressed with the store dictionary: dict-id:32, then the frame.
-const WHOLE_DICT: u8 = b'y';
+mod maintenance;
+pub use maintenance::{MaintenanceLimit, MaintenancePlan};
+
+use layr_object_format::loose::{self, Header, CHUNKED, DELTA, MAGIC, WHOLE, WHOLE_DICT};
 /// Project storage v1 uses snapshots; v2 uses content-addressed objects.
 pub const FORMAT_VERSION: u64 = 2;
 
@@ -141,7 +139,7 @@ pub struct EvictReport {
     pub bytes: u64,
 }
 
-/// What `Store::prune` removed: state records, loose objects and hot blobs, and their bytes.
+/// What a maintenance plan removes: state records, loose objects and hot blobs, and their bytes.
 #[derive(Debug, Default)]
 pub struct PruneReport {
     pub states: u64,
@@ -249,6 +247,9 @@ pub type CloneHook = fn(std::os::fd::BorrowedFd<'_>) -> io::Result<()>;
 
 pub struct Store {
     root: PathBuf,
+    // Shared for this handle's lifetime: imports and their temporary wire objects remain
+    // protected until their consumer finishes. Pruning opens an exclusive lease instead.
+    prune_lease: File,
     keying: Keying,
     pub options: Options,
     pub added: Added,
@@ -296,8 +297,7 @@ impl Store {
             Ok(text) if text == legacy => upgrade_config(root, &want)?,
             Ok(text) => ensure!(text == want, "the object store at {} has another format: {}", root.display(), text.trim()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(root.join("tmp"))
-                    .with_context(|| format!("cannot make {}", root.join("tmp").display()))?;
+                fs::create_dir_all(root.join("tmp")).with_context(|| format!("cannot make {}", root.join("tmp").display()))?;
                 let tmp = root.join("tmp").join(format!("config-{}", std::process::id()));
                 fs::write(&tmp, &want)?;
                 if let Err(e) = fs::hard_link(&tmp, &config) {
@@ -316,21 +316,35 @@ impl Store {
             fs::create_dir_all(root.join(dir)).with_context(|| format!("cannot make {}", root.join(dir).display()))?;
         }
         remove_orphans(&root.join("tmp"));
-        Self::load(root, keying)
+        let lease = Self::prune_lease(root)?;
+        rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared)?;
+        Self::load(root, keying, lease)
     }
 
     /// Open an existing store without initialization, cleanup, or a config upgrade.
     pub fn open_existing(root: &Path, keying: Keying) -> Result<Store> {
+        let lease = Self::prune_lease(root)?;
+        rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared)?;
+        Self::open_leased(root, keying, lease)
+    }
+
+    fn open_leased(root: &Path, keying: Keying, lease: File) -> Result<Store> {
         let config = fs::read_to_string(root.join("config.json"))?;
         let current = format!("{{\"ids\":\"{}\",\"v\":{FORMAT_VERSION}}}\n", keying.name());
         let legacy = format!("{{\"ids\":\"{}\",\"v\":1}}\n", keying.name());
-        ensure!(config == current || config == legacy, "the object store at {} has another format: {}", root.display(), config.trim());
-        Self::load(root, keying)
+        ensure!(
+            config == current || config == legacy,
+            "the object store at {} has another format: {}",
+            root.display(),
+            config.trim()
+        );
+        Self::load(root, keying, lease)
     }
 
-    fn load(root: &Path, keying: Keying) -> Result<Store> {
+    fn load(root: &Path, keying: Keying, prune_lease: File) -> Result<Store> {
         let store = Store {
             root: root.to_path_buf(),
+            prune_lease,
             keying,
             options: Options::default(),
             added: Added::default(),
@@ -356,6 +370,24 @@ impl Store {
     fn fan(&self, area: &str, id: &Id) -> PathBuf {
         let hex = id.hex();
         self.root.join(area).join(&hex[..2]).join(&hex[2..])
+    }
+
+    /// Open a hot blob atomically with respect to cooling. Once opened, its descriptor
+    /// remains usable after unlink; a vanished path means the verified cold form is ready.
+    pub fn open_hot(&self, id: &Id) -> io::Result<Option<File>> {
+        if let Some(dir) = std::env::var_os("LAYR_TEST_HOT_OPEN_BARRIER") {
+            let dir = PathBuf::from(dir);
+            fs::write(dir.join("ready"), b"")?;
+            let start = std::time::Instant::now();
+            while !dir.join("release").exists() && start.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        match File::open(self.fan("blobs", id)) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// The whole file of a hot blob, if the store has one.
@@ -443,11 +475,13 @@ impl Store {
     fn payload(&self, id: &Id) -> Result<Payload> {
         match fs::read(self.object_path(id)) {
             Ok(data) => {
-                ensure!(data.len() >= 6 && &data[..4] == MAGIC, "object {id} has no valid header");
-                let kind = Kind::from_byte(data[4])?;
-                return Ok(match data[5] {
-                    WHOLE => Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? },
-                    WHOLE_DICT => {
+                let header = Header::decode(&data).with_context(|| format!("object {id} has no valid header"))?;
+                let kind = header.kind;
+                return Ok(match header.form {
+                    loose::Form::Whole => {
+                        Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? }
+                    }
+                    loose::Form::Dictionary => {
                         ensure!(data.len() > 6 + 32, "object {id} is cut short");
                         let dict_id = Id(data[6..38].try_into().expect("32 bytes"));
                         let dict = self.dict_bytes(&dict_id)?;
@@ -459,9 +493,8 @@ impl Store {
                         ensure!(size <= DICT_FILE_MAX as u64, "object {id} is too large for a dictionary frame");
                         Payload { kind, form: pack::RAW, bytes: crate::zstdx::decompress(frame, Some(&dict), size as usize)? }
                     }
-                    DELTA => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
-                    CHUNKED => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
-                    other => bail!("object {id} has unknown form {other:#x}"),
+                    loose::Form::Delta => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
+                    loose::Form::Chunked => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
                 });
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -516,8 +549,7 @@ impl Store {
         let tmp = self.temp();
         let written = (|| -> Result<u64> {
             let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o444).open(&tmp)?;
-            f.write_all(MAGIC)?;
-            f.write_all(&[kind.byte(), form])?;
+            f.write_all(&Header { kind, form: loose::Form::from_byte(form)? }.encode())?;
             let mut n = 6;
             for part in body {
                 f.write_all(part)?;
@@ -569,7 +601,7 @@ impl Store {
     }
 
     pub fn get_times(&self, id: &Id) -> Result<crate::times::Times> {
-        crate::times::Times::decode(&self.times_bytes(id)?)
+        Ok(crate::times::Times::decode(&self.times_bytes(id)?)?)
     }
 
     #[cfg(test)]
@@ -597,23 +629,30 @@ impl Store {
         let p = self.payload(id)?;
         ensure!(p.kind == Kind::Tree && p.form == pack::RAW, "object {id} is not a tree");
         ensure!(self.keying.id(Kind::Tree, &p.bytes) == *id, "tree {id} does not match its id");
-        Tree::decode(&p.bytes)
+        Ok(Tree::decode(&p.bytes)?)
     }
 
     /// The id of the file at `path`, read once.
     pub fn hash_file(&self, path: &Path) -> Result<(Id, u64)> {
         let mut f = File::open(path)?;
         let len = f.metadata()?.len();
-        let mut h = self.keying.hasher(Kind::Blob, len);
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
+        Ok((self.hash_open_file(&mut f, len).with_context(|| path.display().to_string())?, len))
+    }
+
+    /// Hash an already-open file with the length observed on that descriptor.
+    pub fn hash_open_file(&self, f: &mut File, len: u64) -> Result<Id> {
+        self.hash_reader(f, len)
+    }
+
+    /// Hash a core reader with the object's existing keying and reusable scratch.
+    pub fn hash_reader(&self, f: &mut impl std::io::Read, len: u64) -> Result<Id> {
+        thread_local! {
+            static BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        Ok((h.finish().with_context(|| path.display().to_string())?, len))
+        BUFFER.with_borrow_mut(|buffer| {
+            let buf = fsx::file_buffer(buffer, len);
+            Ok(self.keying.hash_reader(Kind::Blob, len, f, buf)?)
+        })
     }
 
     /// Store the file at `path` and return its id. `previous` is the blob of the same path in the
@@ -637,6 +676,28 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Stream a representation-independent file through the existing object publication path.
+    pub fn put_reader_with(
+        &self,
+        reader: &mut dyn std::io::Read,
+        temperature: Temperature,
+        bases: &[Id],
+        judge: bool,
+    ) -> Result<(Id, u64)> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let temporary = self.temp();
+        let result = (|| {
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+            std::io::copy(reader, &mut file)?;
+            drop(file);
+            self.put_file_with(&temporary, temperature, bases, judge)
+        })();
+        let cleanup = fs::remove_file(&temporary);
+        let result = result?;
+        cleanup?;
+        Ok(result)
     }
 
     /// A hot write: clone (or copy) the file into `tmp/`, hash the copy, and publish it. The id is
@@ -911,8 +972,12 @@ impl Store {
 
     fn read_blob_unchecked(&self, id: &Id, depth: u32, hot: bool) -> Result<Vec<u8>> {
         ensure!(depth <= 255, "delta chain of {id} is too long");
-        if let Some(p) = self.hot_path(id).filter(|_| hot) {
-            return Ok(fs::read(p)?);
+        if hot {
+            if let Some(mut file) = self.open_hot(id)? {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                return Ok(bytes);
+            }
         }
         let Payload { kind, form, bytes: body } = self.payload(id)?;
         ensure!(kind == Kind::Blob, "object {id} is a {}, not a blob", kind.name());
@@ -944,158 +1009,6 @@ impl Store {
         }
     }
 
-    /// Turn the hot blobs that no tree of `keep` names into cold objects (a zstd frame, or chunks
-    /// for a large one) and remove their files. A hot file goes only after its cold form reads
-    /// back to the same id.
-    pub fn evict_hot(&self, keep: &[Id]) -> Result<EvictReport> {
-        use rayon::prelude::*;
-        let mut hot = HashSet::new();
-        let mut seen = HashSet::new();
-        let mut stack: Vec<Id> = keep.to_vec();
-        while let Some(t) = stack.pop() {
-            if !seen.insert(t) {
-                continue;
-            }
-            for e in self.get_tree(&t)?.entries {
-                match e.node {
-                    crate::tree::Node::Dir { tree } => stack.push(tree),
-                    crate::tree::Node::File { blob, .. } => {
-                        hot.insert(blob);
-                    }
-                    crate::tree::Node::Symlink { .. } => {}
-                }
-            }
-        }
-        let mut files = Vec::new();
-        for dir in fan_folders(&self.root.join("blobs"))? {
-            let fan = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            for entry in fs::read_dir(&dir)? {
-                let entry = entry?;
-                if let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) {
-                    if !hot.contains(&id) {
-                        files.push((id, entry.path()));
-                    }
-                }
-            }
-        }
-        let done = files
-            .par_iter()
-            .map(|(id, path)| -> Result<u64> {
-                let len = fs::metadata(path)?.len();
-                if !self.has_object(id) {
-                    if len >= self.options.chunk_min_file {
-                        let (got, _) = self.put_chunked_file(path)?;
-                        ensure!(got == *id, "hot blob {id} does not match its id");
-                    } else {
-                        let data = fs::read(path)?;
-                        ensure!(self.keying.id(Kind::Blob, &data) == *id, "hot blob {id} does not match its id");
-                        let (form, prefix, frame) = self.whole_frame(&data)?;
-                        self.write_object(id, Kind::Blob, form, &[&prefix, &frame])?;
-                    }
-                }
-                let cold = self.read_blob_unchecked(id, 0, false)?;
-                ensure!(self.keying.id(Kind::Blob, &cold) == *id, "the cold form of {id} does not match its id");
-                fs::remove_file(path)?;
-                Ok(len)
-            })
-            .collect::<Result<Vec<u64>>>()?;
-        Ok(EvictReport { blobs: done.len() as u64, bytes: done.iter().sum() })
-    }
-
-    /// Remove what no state of `keep` reaches (docs/objects.md, "Garbage collection"): the state records of other
-    /// states, then the loose objects and hot blobs that the kept trees, times tables, delta bases and chunk lists do
-    /// not reach. Objects in packs stay (a later repack that rewrites packs can drop them). Run it before `pack`, so
-    /// unreachable loose objects never go into a pack.
-    pub fn prune(&self, keep: &std::collections::BTreeSet<String>) -> Result<PruneReport> {
-        let mut report = PruneReport::default();
-        let mut roots = Vec::new();
-        let states = self.root.join("states");
-        for entry in fs::read_dir(&states)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if keep.contains(&name) {
-                if let Some(r) = self.state_ref(&name)? {
-                    roots.push(r);
-                }
-            } else {
-                report.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-                fs::remove_file(entry.path())?;
-                report.states += 1;
-            }
-        }
-        // The logical objects of the kept states, then what their stored forms need.
-        let mut reach: HashSet<Id> = HashSet::new();
-        for r in &roots {
-            for (id, _) in crate::transfer::reachable(self, &r.tree)? {
-                reach.insert(id);
-            }
-            for id in crate::transfer::reachable_times(self, &r.times)? {
-                reach.insert(id);
-            }
-        }
-        let mut work: Vec<Id> = reach.iter().copied().collect();
-        while let Some(id) = work.pop() {
-            if self.fan("blobs", &id).exists() {
-                continue;
-            }
-            let Ok(p) = self.payload(&id) else { continue };
-            if p.kind != Kind::Blob {
-                continue;
-            }
-            let mut next = Vec::new();
-            match p.form {
-                pack::RAW => {}
-                pack::CHUNKED => {
-                    let mut r = Reader::new(&p.bytes);
-                    for _ in 0..r.varint()? {
-                        next.push(r.id()?);
-                        r.varint()?;
-                    }
-                }
-                _ if p.bytes.len() > 33 => next.push(Id(p.bytes[1..33].try_into().expect("32 bytes"))),
-                _ => {}
-            }
-            for n in next {
-                if reach.insert(n) {
-                    work.push(n);
-                }
-            }
-        }
-        for (folder, hot) in [("objects", false), ("blobs", true)] {
-            let dir = self.root.join(folder);
-            if !dir.is_dir() {
-                continue;
-            }
-            for fan in fan_folders(&dir)? {
-                let prefix = fan.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                for entry in fs::read_dir(&fan)? {
-                    let entry = entry?;
-                    let Ok(id) = Id::parse(&format!("{prefix}{}", entry.file_name().to_string_lossy())) else { continue };
-                    if reach.contains(&id) {
-                        continue;
-                    }
-                    report.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    let path = entry.path();
-                    if fs::remove_file(&path).is_err() {
-                        // A hot blob may carry the immutable flag of the state it was cloned from.
-                        if let Some(hook) = self.clone_hook {
-                            if let Ok(f) = fs::File::open(&path) {
-                                let _ = hook(std::os::fd::AsFd::as_fd(&f));
-                            }
-                        }
-                        fs::remove_file(&path)?;
-                    }
-                    if hot {
-                        report.blobs += 1;
-                    } else {
-                        report.objects += 1;
-                    }
-                }
-            }
-        }
-        Ok(report)
-    }
-
     /// Record the tree and the times table of an imported state:
     /// `{"times":"<id>","tree":"<id>"}` (docs/objects.md, "States").
     pub fn set_state(&self, state: &str, r: &StateRef) -> Result<()> {
@@ -1118,7 +1031,7 @@ impl Store {
         let field = |name: &str| -> Result<Id> {
             let key = format!("\"{name}\":\"");
             let at = text.find(&key).ok_or_else(|| anyhow::anyhow!("state {state} has no {name}"))? + key.len();
-            Id::parse(text.get(at..at + 64).unwrap_or(""))
+            Ok(Id::parse(text.get(at..at + 64).unwrap_or(""))?)
         };
         let mut r = StateRef { tree: field("tree")?, times: field("times")? };
         ensure!(text == format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree), "state {state} is not canonical");
@@ -1206,6 +1119,10 @@ impl Store {
     /// complete on disk (its data checked against its id, its index written) before any loose
     /// file of it goes, so a crash leaves at most a loose copy too many.
     pub fn pack(&self) -> Result<PackReport> {
+        self.pack_selected(None)
+    }
+
+    fn pack_selected(&self, selected: Option<&MaintenancePlan>) -> Result<PackReport> {
         use rayon::prelude::*;
         let set = self.reload_packs()?;
         let mut report = PackReport::default();
@@ -1215,6 +1132,9 @@ impl Store {
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
                 let Ok(id) = Id::parse(&format!("{fan}{}", entry.file_name().to_string_lossy())) else { continue };
+                if selected.is_some_and(|plan| !plan.pack.contains(&id)) {
+                    continue;
+                }
                 if set.find(&id, &self.last_pack)?.is_some() {
                     fs::remove_file(entry.path())?;
                     report.removed += 1;
@@ -1224,7 +1144,10 @@ impl Store {
             }
         }
         report.loose_bytes = loose.values().sum();
-        let order = self.pack_order(&loose)?;
+        let order = match selected {
+            Some(plan) => self.pack_order_roots(&loose, &plan.roots)?,
+            None => self.pack_order(&loose)?,
+        };
         if self.options.train_dict {
             self.train_dict(&order)?;
         }
@@ -1317,13 +1240,21 @@ impl Store {
             .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
             .collect::<Result<_>>()?;
         states.sort();
+        let mut roots = Vec::new();
+        for state in states {
+            if let Some(root) = self.state_ref(&state)? {
+                roots.push(root);
+            }
+        }
+        self.pack_order_roots(loose, &roots)
+    }
+
+    fn pack_order_roots(&self, loose: &HashMap<Id, u64>, roots: &[StateRef]) -> Result<Vec<Id>> {
         let mut seen = HashSet::new();
         let (mut trees, mut others) = (Vec::new(), Vec::new());
-        for state in states {
-            if let Some(r) = self.state_ref(&state)? {
-                self.order_tree(&r.tree, loose, &mut seen, &mut trees, &mut others)?;
-                self.order_times(&r.times, loose, &mut seen, &mut trees)?;
-            }
+        for r in roots {
+            self.order_tree(&r.tree, loose, &mut seen, &mut trees, &mut others)?;
+            self.order_times(&r.times, loose, &mut seen, &mut trees)?;
         }
         let mut rest: Vec<Id> = loose.keys().filter(|id| !seen.contains(*id)).copied().collect();
         rest.sort();
@@ -1470,13 +1401,14 @@ impl Store {
             }
             let mut head = [0u8; 6];
             let n = read_up_to(&mut File::open(&path)?, &mut head)?;
-            ensure!(n == 6 && &head[..4] == MAGIC, "{} has no valid header", path.display());
-            let (count, bytes) = match (Kind::from_byte(head[4])?, head[5]) {
+            ensure!(n == 6, "{} has no valid header", path.display());
+            let header = Header::decode(&head).with_context(|| format!("{} has no valid header", path.display()))?;
+            let (count, bytes) = match (header.kind, header.form) {
                 (Kind::Tree, _) => (&mut s.trees, &mut s.tree_bytes),
                 (Kind::Chunk, _) => (&mut s.chunks, &mut s.chunk_bytes),
-                (Kind::Blob, WHOLE | WHOLE_DICT) => (&mut s.whole_blobs, &mut s.whole_bytes),
-                (Kind::Blob, DELTA) => (&mut s.delta_blobs, &mut s.delta_bytes),
-                (Kind::Blob, _) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
+                (Kind::Blob, loose::Form::Whole | loose::Form::Dictionary) => (&mut s.whole_blobs, &mut s.whole_bytes),
+                (Kind::Blob, loose::Form::Delta) => (&mut s.delta_blobs, &mut s.delta_bytes),
+                (Kind::Blob, loose::Form::Chunked) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
                 (Kind::Times, _) => (&mut s.times, &mut s.times_bytes),
                 (Kind::Opaque, _) => bail!("{} is an opaque object, which is never loose", path.display()),
             };
@@ -1554,6 +1486,42 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn hash_file_ids_are_fixed_for_plain_and_keyed_stores() -> anyhow::Result<()> {
+        let dir = scratch("hash-file-ids");
+        let path = dir.join("file");
+        // Independently computed SHA-256 / HMAC-SHA256 of "blob <len>\0" and i * 31 mod 256.
+        let cases: [(u64, &str, &str); 3] = [
+            (
+                0,
+                "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813",
+                "36b663e28418866e8cb27f0d85472e4686f62fdf37f8d0f2988a3f9ea1fc3386",
+            ),
+            (
+                4096,
+                "eab24b561322be2a89ec804dc57ad63eb85754869b0ddd9dd4df3c552cf95560",
+                "79cc741001db4095ae995c97a39fd3bcab2df17de81b62e9920f885d0250d4a2",
+            ),
+            (
+                (1 << 20) + 17,
+                "d424c32a92d46dce1dad6e7c9dcca49b816f9df4f265ea10d7ee00a3810d9f3b",
+                "cca6ed13a5d0e351047d1bc6d716d694dd9e02c2b208f4007402f406eb0f3775",
+            ),
+        ];
+        for (name, keying, column) in [("plain", Keying::Plain, 0), ("keyed", Keying::Keyed([42; 32]), 1)] {
+            let store = Store::open(&dir.join(name), keying)?;
+            // Read large then small files too: stale scratch bytes must never enter the hash.
+            for &(len, plain, keyed) in cases.iter().chain(cases.iter().rev()) {
+                let bytes: Vec<u8> = (0..len).map(|i| (i * 31).to_le_bytes()[0]).collect();
+                fs::write(&path, &bytes)?;
+                let (id, size) = store.hash_file(&path)?;
+                assert_eq!(size, len);
+                assert_eq!(id.hex(), [plain, keyed][column], "{name}, {len} bytes");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn prune_keeps_what_kept_states_reach_and_drops_the_rest() {
         let dir = scratch("prune");
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
@@ -1576,14 +1544,19 @@ mod tests {
         let b = write("b", &[("gone", b"only in b"), ("big", &big2)], Some(a.tree));
         let gone = Keying::Plain.id(Kind::Blob, b"only in b");
         assert!(store.has(&gone));
-        let report = store.prune(&["a".to_string()].into()).unwrap();
+        let prune = || {
+            let plan = store.plan_maintenance(&["a".to_string()].into(), &[], MaintenanceLimit::UNLIMITED).unwrap();
+            store.prune_planned(&plan).unwrap();
+            plan.prune
+        };
+        let report = prune();
         assert_eq!(report.states, 1, "the record of b goes");
         assert!(store.state_ref("b").unwrap().is_none());
         assert!(!store.has(&gone), "a blob that only b reaches goes");
         assert!(!store.has(&b.tree), "the tree of b goes");
         assert_eq!(store.read_blob(&Keying::Plain.id(Kind::Blob, b"kept bytes")).unwrap(), b"kept bytes");
         assert_eq!(store.read_blob(&Keying::Plain.id(Kind::Blob, &big)).unwrap(), big, "a's blobs still read");
-        let again = store.prune(&["a".to_string()].into()).unwrap();
+        let again = prune();
         assert_eq!((again.states, again.objects, again.blobs), (0, 0, 0), "a second prune finds nothing");
     }
 
@@ -1656,8 +1629,7 @@ mod tests {
             assert!(Store::open(&root, Keying::Plain).is_err());
             assert_eq!(fs::read_to_string(root.join("config.json")).unwrap(), config);
             assert_eq!(fs::read(&orphan).unwrap(), b"preserve me");
-            let mut entries: Vec<_> = fs::read_dir(&root).unwrap()
-                .map(|entry| entry.unwrap().file_name()).collect();
+            let mut entries: Vec<_> = fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().file_name()).collect();
             entries.sort();
             assert_eq!(entries, vec![std::ffi::OsString::from("config.json"), std::ffi::OsString::from("tmp")]);
         }

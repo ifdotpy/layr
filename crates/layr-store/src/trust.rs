@@ -233,7 +233,7 @@ fn merge_queue_result(data: &Value, payload: &Payload, current: Option<(&str, &d
     if entry["status"] != "pending" || entry["id"].as_str() != Some(id) {
         return Some("a merge machine ends only a pending entry");
     }
-    let fixed = ["id", "into", "target_line", "state", "change_id", "added_by", "time", "title"];
+    let fixed = ["id", "into", "target_line", "state", "change_id", "added_by", "time", "title", "expected_head"];
     if fixed.iter().any(|key| after.get(key) != entry.get(key)) {
         return Some("a queue result keeps the entry's fields");
     }
@@ -774,6 +774,23 @@ mod tests {
                 owner: Some(owner),
                 machine: Some(machine),
             }],
+        }
+    }
+
+    #[test]
+    fn a_queue_result_preserves_the_signed_head_expectation() {
+        let merge = Terms::of_trust(&json!({"role": "merge"})).unwrap();
+        for status in ["done", "failed"] {
+            let payload = if status == "done" { line_move("main-id", "main", 501, "home", "m") } else { Payload::default() };
+            let mut data = result(status);
+            assert!(merge.refusal(5, "queue.result", &data, None, &payload).is_none(), "legacy entry");
+            data["queue_change"]["before"]["expected_head"] = json!("original");
+            data["queue_change"]["after"]["expected_head"] = json!("original");
+            assert!(merge.refusal(5, "queue.result", &data, None, &payload).is_none(), "unchanged expectation");
+            data["queue_change"]["after"]["expected_head"] = json!("replacement");
+            assert!(merge.refusal(5, "queue.result", &data, None, &payload).is_some(), "replaced expectation");
+            data["queue_change"]["after"].as_object_mut().unwrap().remove("expected_head");
+            assert!(merge.refusal(5, "queue.result", &data, None, &payload).is_some(), "removed expectation");
         }
     }
 

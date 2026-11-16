@@ -7,12 +7,12 @@
 //! read the upper folder and the head; they never scan the merged tree.
 //!
 //! The kind of view is local to this machine: `meta/vlines/<line id>/view.json`, never a record.
-use crate::changes::{self, Change};
-use crate::cmd::{exit, here, Here};
+use crate::changes::{self, EntryChange};
 use crate::ctx::Ctx;
+use crate::errors::{error, Kind as ErrorKind};
 use crate::fsutil::{self, Meta};
 use crate::ids;
-use crate::model::{Line, LineChange, Record, StateKind, StateRec};
+use crate::model::{Line, LineChange, StateKind, StateRec};
 use crate::repo::{skip_path, Repo, Status};
 use crate::store::Project;
 use crate::thin::{self, Layered};
@@ -29,7 +29,8 @@ const CONF: &str = "layrfs-view.conf";
 const FS_TYPE: &str = "layrfs";
 /// Folders that macOS services make at the root of a mount. LayrFS refuses them; older upper
 /// folders may hold them. They are no content of the line.
-const SYSTEM_ROOT_NAMES: &[&str] = &[".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100"];
+pub(crate) const SYSTEM_ROOT_NAMES: &[&str] =
+    &[".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100"];
 
 /// The local record of a virtual line.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -50,9 +51,9 @@ pub fn enabled(ctx: &Ctx) -> bool {
     ctx.env(ENV) == Some("1")
 }
 
-fn require_enabled(ctx: &Ctx) -> Result<()> {
+pub(crate) fn require_enabled(ctx: &Ctx) -> Result<()> {
     if !enabled(ctx) {
-        return Err(exit(2, format!("virtual lines are experimental: set {ENV}=1 (docs/views.md)")));
+        return Err(error(ErrorKind::Unsupported, format!("virtual lines are experimental: set {ENV}=1 (docs/views.md)")));
     }
     Ok(())
 }
@@ -61,7 +62,7 @@ fn views_dir(meta: &Path) -> PathBuf {
     meta.join("vlines")
 }
 
-fn dir(p: &Project, line_id: &str) -> PathBuf {
+pub(crate) fn dir(p: &Project, line_id: &str) -> PathBuf {
     views_dir(&p.meta_dir()).join(line_id)
 }
 
@@ -90,7 +91,7 @@ pub fn protected_states(p: &Project) -> BTreeSet<String> {
     all_in(&p.meta_dir()).into_iter().map(|v| v.base).collect()
 }
 
-fn write_view(p: &Project, v: &View) -> Result<()> {
+pub(crate) fn write_view(p: &Project, v: &View) -> Result<()> {
     fsutil::atomic_write(&dir(p, &v.line).join("view.json"), &serde_json::to_vec_pretty(v)?, 0o600)
 }
 
@@ -98,7 +99,7 @@ pub fn is_mounted(path: &Path) -> bool {
     crate::sys::fs_type_name(path).map(|t| t == FS_TYPE).unwrap_or(false)
 }
 
-fn mount(vdir: &Path, at: &Path) -> Result<()> {
+pub(crate) fn mount(vdir: &Path, at: &Path) -> Result<()> {
     let _t = crate::trace::span("view mount");
     let out = Command::new("/sbin/mount")
         .args(["-F", "-t", FS_TYPE, "-o", "nobrowse"])
@@ -116,7 +117,7 @@ fn mount(vdir: &Path, at: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unmount(at: &Path) -> Result<()> {
+pub(crate) fn unmount(at: &Path) -> Result<()> {
     let _t = crate::trace::span("view unmount");
     let out = Command::new("/sbin/umount").arg(at).output().context("run umount")?;
     if !out.status.success() && is_mounted(at) {
@@ -140,7 +141,7 @@ fn write_conf(vdir: &Path, lower: &Path, ctx: &Ctx) -> Result<()> {
 }
 
 /// Serialize mount lifecycle changes with commands that need a working mount.
-fn lifecycle_lock(repo: &Repo, line: &Line) -> Result<crate::store::LineLock> {
+pub(crate) fn lifecycle_lock(repo: &Repo, line: &Line) -> Result<crate::store::LineLeaseSet> {
     repo.p.line_lock(&format!("view-{}", line.id), &line.name)
 }
 
@@ -241,18 +242,22 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
         return Err(e);
     }
     let recorded = (|| -> Result<()> {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if repo.p.db.line_by_name(name)?.is_some() {
             bail!("a line named '{name}' already exists");
         }
         repo.source_state(start)?;
-        let mut rec = Record::new("line.create");
+        let mut rec = crate::model::DraftRecord::new("line.create");
         rec.data = serde_json::json!({"name": name, "start": start});
         rec.lines.insert(
             line.id.clone(),
-            LineChange { before: None, after: Some(repo.line_state(&line, start)), working_before: None, working_after: None },
+            LineChange {
+                transition: crate::model::LineTransition::Create { after: repo.line_state(&line, start) },
+                working_before: None,
+                working_after: None,
+            },
         );
-        repo.p.append(rec, &ctx.actor())?;
+        _lock.append(rec, &ctx.actor())?;
         write_view(
             &repo.p,
             &View { line: line.id.clone(), name: name.to_string(), base: start.to_string(), lower, mounted: true },
@@ -269,7 +274,7 @@ pub fn create(ctx: &Ctx, repo: &Repo, name: &str, start: &str, owner: u32) -> Re
 
 /// Removes the quarantine mark that the sandbox of the LayrFS extension puts on the files it
 /// makes. The mount hides it; a saved state must not keep it.
-fn strip_quarantine(up: &Path, paths: &BTreeSet<String>) {
+pub(crate) fn strip_quarantine(up: &Path, paths: &BTreeSet<String>) {
     const Q: &std::ffi::CStr = c"com.apple.quarantine";
     for p in paths {
         let path = up.join(p);
@@ -288,10 +293,10 @@ pub struct Trees {
     pub head: Layered,
 }
 
-fn trees(repo: &Repo, line: &Line, v: &View) -> Result<Trees> {
+pub(crate) fn trees(repo: &Repo, line: &Line, v: &View) -> Result<Trees> {
     let up = upper(&repo.p, &line.id);
     let merged = Layered::over(&up, Layered::complete(&v.lower))?;
-    Ok(Trees { upper: up, merged, head: repo.state_src(&line.head)? })
+    Ok(Trees { upper: up, merged, head: repo.state_src(&line.head)?.into_layered() })
 }
 
 fn system_path(p: &str) -> bool {
@@ -323,7 +328,7 @@ fn candidates(t: &Trees, v: &View, rules: &crate::ignore_rules::Rules) -> Result
     })?;
     let lower = Layered::complete(&v.lower);
     let mut removed: BTreeSet<String> = thin::removed_of(&t.upper)?;
-    for l in &head.layers[..head.layers.len() - 1] {
+    for l in &head.layers()[..head.layers().len() - 1] {
         fsutil::walk(l.root.as_path(), "", &mut |rel, _| {
             set.insert(rel.to_string());
             Ok(true)
@@ -340,16 +345,16 @@ fn candidates(t: &Trees, v: &View, rules: &crate::ignore_rules::Rules) -> Result
 }
 
 /// The confirmed file changes of the merged view against the head, without ignored new files.
-fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
-    let rules = crate::ignore_rules::Rules::of(&t.merged);
+pub(crate) fn file_changes(t: &Trees, v: &View) -> Result<Vec<EntryChange>> {
+    let rules = crate::ignore_rules::Rules::of(&crate::source::Source::from(t.merged.clone()));
     let list = match candidates(t, v, &rules)? {
         Some(set) => {
             strip_quarantine(&t.upper, &set);
-            let raw: Vec<Change> = set
+            let raw: Vec<EntryChange> = set
                 .into_iter()
                 .filter_map(|p| {
                     let (old, new) = (fsutil::lmeta(&t.head, &p), fsutil::lmeta(&t.merged, &p));
-                    (old.is_some() || new.is_some()).then_some(Change { path: p, old_path: None, old, new, ranges: None })
+                    EntryChange::observed(p, old, new, crate::compare::DataEvidence::Unknown)
                 })
                 .collect();
             changes::file_changes_of(&t.head, &t.merged, raw)?
@@ -374,8 +379,8 @@ fn file_changes(t: &Trees, v: &View) -> Result<Vec<Change>> {
     };
     Ok(list
         .into_iter()
-        .filter(|c| !skip_path(&c.path) && !system_path(&c.path))
-        .filter(|c| c.old.is_some() || !rules.ignored(&c.path, false))
+        .filter(|c| !skip_path(c.path()) && !system_path(c.path()))
+        .filter(|c| c.old().is_some() || !rules.ignored(c.path(), false))
         .collect())
 }
 
@@ -408,12 +413,13 @@ pub fn working_snapshot(
     parents: Vec<String>,
     message: &str,
     base: &str,
+    id: String,
 ) -> Result<StateRec> {
     let mut prior = line.clone();
     prior.head = base.to_string();
     let t = trees(repo, &prior, v)?;
     let list = file_changes(&t, v)?;
-    let mut state = write_state(ctx, repo, &prior, &t, &list, StateKind::Auto, message)?;
+    let mut state = write_state_as(ctx, repo, &prior, &t, &list, StateKind::Auto, message, id)?;
     state.parents = parents;
     Ok(state)
 }
@@ -424,10 +430,10 @@ pub fn diff_input(
     line: &Line,
     v: &View,
     _keep: &mut Vec<crate::repo::Temp>,
-) -> Result<(Layered, Layered, Vec<Change>)> {
+) -> Result<(crate::repo::Snap, crate::repo::Snap, Vec<EntryChange>)> {
     let t = trees(repo, line, v)?;
     let list = file_changes(&t, v)?;
-    Ok((t.head, t.merged, list))
+    Ok((t.head.into(), t.merged.into(), list))
 }
 
 fn topmost(paths: BTreeSet<String>) -> BTreeSet<String> {
@@ -443,27 +449,41 @@ fn topmost(paths: BTreeSet<String>) -> BTreeSet<String> {
 
 /// A new state of the merged view: a thin layer over the head with the changed entries of the
 /// upper folder. None when nothing changed. The record is the caller's.
-fn write_state(
+pub(crate) fn write_state(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
     t: &Trees,
-    list: &[Change],
+    list: &[EntryChange],
     kind: StateKind,
     message: &str,
+) -> Result<StateRec> {
+    write_state_as(ctx, repo, line, t, list, kind, message, ids::new_id())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_state_as(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    t: &Trees,
+    list: &[EntryChange],
+    kind: StateKind,
+    message: &str,
+    id: String,
 ) -> Result<StateRec> {
     let _s = crate::trace::span("view write state");
     let is_dir = |m: &Option<Meta>| m.as_ref().is_some_and(|m| m.is_dir());
     let mut d = thin::Diff::default();
     let mut gone = BTreeSet::new();
     for c in list {
-        if c.new.is_some() {
-            d.write.insert(c.path.clone());
+        if c.new().is_some() {
+            d.write.insert(c.path().clone());
         }
-        if c.old.is_some() && (c.new.is_none() || c.old.as_ref().map(|m| m.ftype) != c.new.as_ref().map(|m| m.ftype)) {
-            gone.insert(c.path.clone());
+        if c.old().is_some() && (c.new().is_none() || c.old().map(|m| m.ftype) != c.new().map(|m| m.ftype)) {
+            gone.insert(c.path().clone());
         }
-        if let Some(o) = &c.old_path {
+        if let Some(o) = c.old_path() {
             gone.insert(o.clone());
         }
     }
@@ -474,7 +494,7 @@ fn write_state(
             gone.insert(r);
         }
     }
-    let rules = crate::ignore_rules::Rules::of(&t.merged);
+    let rules = crate::ignore_rules::Rules::of(&crate::source::Source::from(t.merged.clone()));
     fsutil::walk(t.upper.as_path(), "", &mut |rel, m| {
         if !m.is_dir() || skip_path(rel) || system_path(rel) || rules.ignored(rel, true) {
             return Ok(false);
@@ -486,7 +506,6 @@ fn write_state(
     })?;
     // A path below a removed folder of the head that comes back is written; the folder is new.
     d.removed = topmost(gone);
-    let id = ids::new_id();
     let dst = repo.p.delta_path(&id);
     // A reverted entry can live only in the lower tree. Hard links also need a complete
     // snapshot so their identity survives. Ordinary edits still write only the upper layer.
@@ -518,11 +537,11 @@ fn write_state(
                 Ok(true)
             })?;
             for rel in excluded {
-                crate::storage::delete_tree(&path.join(rel))?;
+                crate::fs::remove(&path.join(rel))?;
             }
-            crate::storage::write_info(
+            crate::apfs::write_info(
                 &path,
-                &crate::storage::SubvolInfo {
+                &crate::apfs::SubvolInfo {
                     uuid: ids::new_id(),
                     received_uuid: None,
                     parent_uuid: None,
@@ -530,7 +549,7 @@ fn write_state(
                     base: None,
                 },
             )?;
-            crate::storage::seal(&path, true, false)
+            crate::apfs::seal(&path, true, false)
         })();
         if let Err(error) = made {
             let _ = repo.p.delete_state(&id);
@@ -539,7 +558,7 @@ fn write_state(
     }
     let described = (|| -> Result<StateRec> {
         if !complete {
-            repo.p.db.record_base(&id, &line.head)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, &line.head))?;
         }
         repo.describe_state(ctx, id.clone(), kind, vec![line.head.clone()], message, Some(line))
     })();
@@ -549,61 +568,16 @@ fn write_state(
     described
 }
 
-/// `layr save -m <message>` of a virtual line: every change of the view becomes the new head.
-pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bool, json: bool) -> Result<i32> {
-    let repo = &h.repo;
-    repo.authorize_line(ctx, line, crate::repo::LineOp::Direct)?;
-    let _line_lock = repo.line_lock(line)?;
-    let line = repo.line(&line.id)?;
-    let t = trees(repo, &line, v)?;
-    let list = file_changes(&t, v)?;
-    if list.is_empty() {
-        if json {
-            outln!(ctx, "{}", crate::cmd::work::nothing_json(&line));
-        } else {
-            outln!(ctx, "On line {}\nnothing to save, working tree clean", line.name);
-        }
-        return Ok(1);
-    }
-    let head = repo.state(&line.head)?;
-    let mut st = write_state(ctx, repo, &line, &t, &list, StateKind::Commit, message)?;
-    let checked = crate::cmd::work::named_checks(ctx, repo, &head, &mut st, &t.head, &t.merged, &line, &list, Default::default());
-    if let Err(error) = checked {
-        repo.discard_states(std::slice::from_ref(&st));
-        return Err(error);
-    }
-    let moved = repo.commit_line(&line, &line.head, |now| {
-        repo.move_head(ctx, "commit", now, &st.id, vec![st.clone()], None, serde_json::json!({"line": line.id}))
-    });
-    if let Err(e) = moved {
-        repo.discard_states(std::slice::from_ref(&st));
-        return Err(e);
-    }
-    if json {
-        let new_root = repo.state_src(&st.id)?;
-        let fds = crate::diff::file_diffs(&t.head, &new_root, &changes::with_renames(&t.head, &new_root, list))?;
-        let mut out = crate::cmd::work::saved_json(&line, &st, &fds);
-        out["amend"] = serde_json::json!(false);
-        outln!(ctx, "{out}");
-    } else if !quiet {
-        outln!(ctx, "[{} {}] {}", line.name, ids::short(&st.id), message.lines().next().unwrap_or(""));
-        let new_root = repo.state_src(&st.id)?;
-        for c in changes::with_renames(&t.head, &new_root, list) {
-            let code = match (&c.old, &c.new, &c.old_path) {
-                (_, _, Some(o)) => format!("rename {o} =>"),
-                (None, _, _) => "create".into(),
-                (_, None, _) => "delete".into(),
-                _ => "modify".into(),
-            };
-            outln!(ctx, " {code} {}", c.path);
-        }
-    }
-    Ok(0)
-}
-
 /// Save the working content without moving the named head. The caller holds the project
 /// lock, as for a folder line. Compare against the last automatic state to avoid duplicates.
-pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str) -> Result<Option<StateRec>> {
+pub fn save_working(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+    v: &View,
+    message: &str,
+) -> Result<Option<StateRec>> {
     let prev = repo.save_base(line)?;
     let mut previous = line.clone();
     previous.head = prev;
@@ -613,12 +587,13 @@ pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str
     }
     let t = trees(repo, line, v)?;
     let list = file_changes(&t, v)?;
-    crate::secrets::check_changes(ctx, repo, &t.head, &t.merged, &line.head, &list)?;
+    crate::secrets::check_changes(ctx, repo, &t.head.clone().into(), &t.merged.clone().into(), &line.head, &list)?;
     let st = write_state(ctx, repo, line, &t, &list, StateKind::Auto, message)?;
-    let mut rec = Record::new("save");
+    let mut rec = crate::model::DraftRecord::new("save");
     rec.data = serde_json::json!({"line": line.id, "head": line.head,
         "working_before": repo.recorded_working(line)?, "working_after": st.id});
     rec.states.push(st.clone());
+<<<<<<< head
     if let Err(error) = repo.commit_record(ctx, rec) {
         repo.discard_states(std::slice::from_ref(&st));
         return Err(error);
@@ -649,8 +624,15 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, check: impl FnOnce(&Li
                 repo.discard_states(std::slice::from_ref(st));
             }
             return Err(e);
+=======
+    if let Err(error) = repo.commit_record(locked, ctx, rec) {
+        if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+            repo.discard_states(std::slice::from_ref(&st));
+>>>>>>> fs-legacy-facades
         }
+        return Err(error.into());
     }
+<<<<<<< head
     let checked = (|| -> Result<_> {
         crate::cmd::branch::deletion_barrier()?;
         let lock = repo.p.lock()?;
@@ -682,6 +664,9 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, check: impl FnOnce(&Li
     crate::cmd::branch::delete_recorded(ctx, repo, &fresh, last_id, at.exists())?;
     repo.p.trash(&dir(&repo.p, &fresh.id))?;
     Ok(())
+=======
+    Ok(Some(st))
+>>>>>>> fs-legacy-facades
 }
 
 /// Refuse a command that does not support virtual lines yet, when it runs on one.
@@ -715,8 +700,8 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
     let Some(name) = loc.line else { return Ok(()) };
     let Ok(pdir) = ctx.store.project_dir(&loc.project) else { return Ok(()) };
     if all_in(&pdir.join("meta")).iter().any(|v| v.name == name) {
-        return Err(exit(
-            1,
+        return Err(error(
+            ErrorKind::Failed,
             format!(
                 "layr {cmd} does not support virtual lines yet ({ENV}); convert the line first: layr line show {name} --folder"
             ),
@@ -728,106 +713,6 @@ pub fn guard(ctx: &Ctx, cmd: &str) -> Result<()> {
 /// The view of `line` when it is virtual, for commands that branch on it.
 pub fn of(repo: &Repo, line: &Line) -> Option<View> {
     of_line(&repo.p, &line.id)
-}
-
-/// `layr line show <line> --folder [<path>] | --none | --virtual`.
-pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = crate::args::Spec::new().flag("--folder").flag("--none").flag("--virtual");
-    let a = crate::args::parse(&spec, args)?;
-    let modes = ["--folder", "--none", "--virtual"].iter().filter(|m| a.has(m)).count();
-    if a.pos.is_empty() || a.pos.len() > 2 || modes != 1 || (a.pos.len() == 2 && !a.has("--folder")) {
-        return Err(exit(2, "usage: layr line show <line> --folder [<path>] | --none | --virtual"));
-    }
-    require_enabled(ctx)?;
-    let h = here(ctx)?;
-    let repo = &h.repo;
-    let l = repo.line(&a.pos[0])?;
-    repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
-    let Some(mut v) = of_line(&repo.p, &l.id) else {
-        return Err(exit(1, format!("line {} has a folder; only virtual lines change their view for now", l.name)));
-    };
-    if h.line.as_ref().is_some_and(|c| c.id == l.id) || ctx.cwd.starts_with(repo.working(&l)) {
-        return Err(exit(1, "run this command outside the line's folder: its mount changes"));
-    }
-    let _lifecycle = lifecycle_lock(repo, &l)?;
-    let _line_lock = repo.line_lock(&l)?;
-    let l = repo.line(&l.id)?;
-    let at = repo.working(&l);
-    if a.has("--none") {
-        if is_mounted(&at) {
-            unmount(&at)?;
-        }
-        let _ = std::fs::remove_dir(&at);
-        v.mounted = false;
-        write_view(&repo.p, &v)?;
-        outln!(ctx, "Line {} has no folder now; its changes stay in {}", l.name, upper(&repo.p, &l.id).display());
-        return Ok(0);
-    }
-    if a.has("--virtual") {
-        if !is_mounted(&at) {
-            if at.symlink_metadata().is_err() {
-                std::fs::create_dir(&at)?;
-                std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700))?;
-            }
-            mount(&dir(&repo.p, &l.id), &at)?;
-        }
-        v.mounted = true;
-        write_view(&repo.p, &v)?;
-        outln!(ctx, "Line {} is virtual at {}", l.name, at.display());
-        return Ok(0);
-    }
-    // --folder: a native folder with the merged content, then the view goes.
-    let target = match a.pos.get(1) {
-        Some(p) => {
-            let p = ctx.cwd.join(p);
-            if p.symlink_metadata().is_ok() {
-                bail!("{} already exists", p.display());
-            }
-            Some(p)
-        }
-        None => None,
-    };
-    let t = trees(repo, &l, &v)?;
-    strip_quarantine(&t.upper, &{
-        let mut all = BTreeSet::new();
-        fsutil::walk(t.upper.as_path(), "", &mut |rel, _| {
-            all.insert(rel.to_string());
-            Ok(true)
-        })?;
-        all
-    });
-    let tmp = repo.p.work_dir().join(crate::store::temp_name());
-    std::fs::create_dir_all(repo.p.work_dir())?;
-    let made = (|| -> Result<()> {
-        t.merged.materialize(&tmp, false)?;
-        for name in SYSTEM_ROOT_NAMES {
-            let p = tmp.join(name);
-            if p.symlink_metadata().is_ok() {
-                crate::storage::delete_tree(&p)?;
-            }
-        }
-        repo.prepare_at(&l, &l.head, &tmp, &[])
-    })();
-    if let Err(e) = made {
-        let _ = crate::storage::delete_tree(&tmp);
-        return Err(e);
-    }
-    if is_mounted(&at) {
-        if let Err(e) = unmount(&at) {
-            let _ = crate::storage::delete_tree(&tmp);
-            return Err(e);
-        }
-    }
-    let _ = std::fs::remove_dir(&at);
-    let dst = target.clone().unwrap_or_else(|| at.clone());
-    crate::fsutil::rename_tree(&tmp, &dst)?;
-    if let Some(p) = &target {
-        let _lock = repo.p.lock()?;
-        repo.p.set_moved_path(&l.id, Some(p))?;
-    }
-    repo.p.trash(&dir(&repo.p, &l.id))?;
-    outln!(ctx, "Line {} has a folder at {}", l.name, dst.display());
-    Ok(0)
 }
 
 #[cfg(test)]
@@ -842,12 +727,21 @@ mod tests {
         std::fs::create_dir_all(lower.join("added"))?;
         std::fs::create_dir_all(upper.join("added"))?;
         let store = layr_objects::Store::open(&tmp.join("objects"), layr_objects::Keying::Plain)?;
-        let written = layr_objects::write_tree(&store, &lower, &layr_objects::WriteOptions {
-            temperature: layr_objects::Temperature::Hot, previous: None, exclude: Vec::new(), similar: false,
-        })?;
-        let head = crate::object_tree::ObjectTree::new(store, layr_objects::StateRef {
-            tree: written.tree.unwrap(), times: written.times.unwrap(),
-        }, &tmp.join("reads"))?;
+        let written = layr_objects::write_tree(
+            &store,
+            &lower,
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        let head = crate::object_tree::ObjectTree::new(
+            store,
+            layr_objects::StateRef { tree: written.tree.unwrap(), times: written.times.unwrap() },
+            &tmp.join("reads"),
+        )?;
         crate::sys::apfs_attribute(&upper.join("added"), c"com.apple.quarantine", Some(b"0086;00000000;LayrFS;"))?;
         let trees = Trees {
             upper: upper.clone(),
@@ -860,7 +754,7 @@ mod tests {
         crate::sys::apfs_attribute(&upper.join("added"), c"com.apple.quarantine", Some(b"0086;00000000;OtherAgent;"))?;
         let real_changes = file_changes(&trees, &view)?;
         assert_eq!(real_changes.len(), 1);
-        assert_eq!(real_changes[0].path, "added");
+        assert_eq!(real_changes[0].path(), "added");
         drop(trees);
         std::fs::remove_dir_all(tmp)?;
         Ok(())

@@ -12,7 +12,7 @@ trap 'kill $DPID 2>/dev/null; cleanup' EXIT
 for i in $(seq 1 50); do [ -S $LAYR_SOCKET ] && break; sleep 0.1; done
 as() { local u=$1; shift; runuser -u $u -- env LAYR_SOCKET=$LAYR_SOCKET PATH=/usr/bin:/bin "$@"; }
 sample $T/src
-l init s --from $T/src --owner layr-admin -q >/dev/null
+l init s --no-objects --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main || exit 1
 # The large-file merge below tests ordinary binary conflict recording.
@@ -24,7 +24,7 @@ S1=$(basename $(state_dir s head~1))
 
 # 3. A stream cannot take its parent from another project.
 mkdir -p $T/vsrc; echo TOPSECRET > $T/vsrc/key.txt
-l init v --from $T/vsrc -q >/dev/null
+l init v --no-objects --from $T/vsrc -q >/dev/null
 V=$(state_dir v head)
 btrfs -q subvolume snapshot $V $LAYR_ROOT/x-work; echo x > $LAYR_ROOT/x-work/x.txt
 mkdir $LAYR_ROOT/x-ro; btrfs -q subvolume snapshot -r $LAYR_ROOT/x-work $LAYR_ROOT/x-ro/X

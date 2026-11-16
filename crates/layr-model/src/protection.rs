@@ -233,7 +233,7 @@ impl Project {
             });
         };
         if machine != self.machine {
-            return Project::from_records(&self.id, self.records.clone(), &machine)?
+            return Project::preview_records(&self.id, self.records.clone(), &machine)?
                 .merge_status_for_machine(state, target, context);
         }
         self.merge_status_for_machine(state, target, context)

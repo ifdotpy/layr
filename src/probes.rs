@@ -89,15 +89,15 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
                 repo.saved_view(id)?
             } else if let Some(id) = rev.strip_prefix("attestations/") {
                 let a = repo.p.db.attestation(id)?.context("unknown probe attestation")?;
-                if a.subject.kind == "view" {
-                    repo.saved_view(&a.subject.id)?
-                } else if repo.p.db.state_flags(&a.subject.id)?.map(|(_, deleted)| deleted).unwrap_or(false) {
-                    crate::overlay::View::new(a.subject.id, vec![])
+                if matches!(&a.subject, crate::model::Subject::View(_)) {
+                    repo.saved_view(a.subject.id())?
+                } else if repo.p.db.state_flags(a.subject.id())?.map(|(_, deleted)| deleted).unwrap_or(false) {
+                    crate::overlay::View::new(a.subject.id().to_owned(), vec![])
                 } else {
                     return Err(error);
                 }
             } else {
-                let state = crate::revs::resolve(repo, line, rev)?;
+                let state = crate::revs::resolve_state(repo, line, rev)?;
                 if !repo.p.db.state_flags(&state)?.map(|(_, deleted)| deleted).unwrap_or(false) {
                     return Err(error);
                 }
@@ -106,11 +106,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<Input> {
         }
     };
     repo.source_state(&view.shared)?;
-    let subject = if view.layers.is_empty() {
-        Subject { kind: "state".into(), id: view.shared.clone() }
-    } else {
-        Subject { kind: "view".into(), id: view.id()? }
-    };
+    let subject = if view.layers.is_empty() { Subject::state(&view.shared)? } else { Subject::view(&view.id()?)? };
     Ok(Input { subject, state: view.shared, layers: view.layers })
 }
 fn readers_cover(project: &crate::access::Policy, overlay: &crate::access::Policy) -> bool {
@@ -204,7 +200,7 @@ fn check_exit(repo: &Repo, subject: &str, argv: &[String]) -> Result<Option<i64>
 pub(crate) fn active_checks(repo: &Repo, subject: &Subject) -> Result<BTreeMap<String, (crate::model::Attestation, Record)>> {
     let mut active = BTreeMap::new();
     // Attestation order and signer/actor checks match Core's revocation rule.
-    for a in repo.p.db.attestations(&subject.id, None)? {
+    for a in repo.p.db.attestations(subject.id(), None)? {
         let Some(rec) = repo.p.db.record(&a.attestation_id)? else { continue };
         if a.kind == "check" && &a.subject == subject {
             if layr_model::validation::check_digest_ok(&rec.data) {
@@ -286,11 +282,11 @@ fn comparison_definitions(repo: &Repo, input: &Input) -> Result<BTreeMap<String,
 }
 
 fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Option<RunResult>> {
-    if check_exit(repo, &input.subject.id, &probe.run)?.is_none() {
+    if check_exit(repo, input.subject.id(), &probe.run)?.is_none() {
         return Ok(None);
     }
     let active = active_checks(repo, &input.subject)?;
-    let root = repo.p.db.ref_value(&reference(name, &input.subject.id), crate::ids::now_ms())?;
+    let root = repo.p.db.ref_value(&reference(name, input.subject.id()), crate::ids::now_ms())?;
     let mut latest = None;
     for (_, rec) in active.values() {
         let c = &rec.data["check"];
@@ -307,7 +303,7 @@ fn stored(repo: &Repo, input: &Input, name: &str, probe: &Probe) -> Result<Optio
         };
         if state.kind != StateKind::Derived
             || state.context.as_deref() != Some(&format!("probe-v1/{name}"))
-            || state.derived_from.as_deref() != Some(&input.subject.id)
+            || state.derived_from.as_deref() != Some(input.subject.id())
             || repo.state_root(&r.output_state).is_err()
         {
             continue;
@@ -322,8 +318,8 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
     repo.require(ctx, "try")?;
     shared_outputs(repo, &input.layers)?;
     if !input.layers.is_empty() {
-        let _lock = repo.p.lock()?;
-        repo.save_view(ctx, &input.view())?;
+        let _lock = repo.p.lock_maintenance()?;
+        repo.save_view(&_lock, ctx, &input.view())?;
     }
     let definitions = comparison_definitions(repo, input)?;
     if definitions.is_empty() && source_status(repo, input) != "available" {
@@ -346,7 +342,7 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
         let lock_dir = repo.p.meta_dir().join("probe-locks").join(&name);
         std::fs::create_dir_all(&lock_dir)?;
         let execution_lock =
-            std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(lock_dir.join(&input.subject.id))?;
+            std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(lock_dir.join(input.subject.id()))?;
         rustix::fs::flock(&execution_lock, rustix::fs::FlockOperation::LockExclusive)?;
         if let Some(r) = stored(repo, input, &name, &probe)? {
             results.push(r);
@@ -355,24 +351,26 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
         if source_status(repo, input) != "available" {
             bail!("{}; probe '{name}' has no retained result", source_status(repo, input));
         }
-        let result = crate::cmd::admin::with_try_copy(ctx, repo, &input.state, &input.layers, false, false, |dir| {
+        let result = crate::try_run::with_try_copy(ctx, repo, &input.state, &input.layers, false, false, |dir| {
             if source_status(repo, input) != "available" {
                 bail!("{}", source_status(repo, input));
             }
-            let env =
-                if input.subject.kind == "view" { vec![("LAYR_TRY_VIEW".into(), input.subject.id.clone())] } else { vec![] };
-            let code = crate::cmd::admin::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
+            let env = if matches!(&input.subject, crate::model::Subject::View(_)) {
+                vec![("LAYR_TRY_VIEW".into(), input.subject.id().to_owned())]
+            } else {
+                vec![]
+            };
+            let code = crate::try_run::try_command(ctx, repo, &input.state, &probe.run, dir, &env, true)?;
             // Freeze outputs before root reads them; the command may have left a child process.
             let snapshot = repo.temp_snapshot(dir, true)?;
             let work = repo.p.work_dir().join(crate::store::temp_name());
-            crate::storage::create_subvolume(&work)?;
-            let cleanup = Temp { path: work.clone() };
+            let cleanup = Temp::empty(work.clone())?;
             collect(&Tree::open(&snapshot.path)?, &Tree::open(&work)?, &probe.outputs, code != 0)?;
             validate_outputs(&work, &probe)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut state =
                 repo.new_state(ctx, &work, StateKind::Derived, vec![input.state.clone()], &format!("probe {name}"), None)?;
-            state.derived_from = Some(input.subject.id.clone());
+            state.derived_from = Some(input.subject.id().to_owned());
             state.context = Some(format!("probe-v1/{name}"));
             let result = RunResult {
                 probe: name.clone(),
@@ -387,20 +385,20 @@ pub fn run(ctx: &Ctx, repo: &Repo, input: &Input, selected: Option<&str>) -> Res
             check["definition"] = serde_json::to_value(&probe)?;
             check["probes"] = manifest.clone();
             let payload = serde_json::to_vec(&check)?;
-            let mut rec = if input.subject.kind == "view" {
-                crate::cmd::attest::record_view(repo, &input.view(), "check", &payload)?
+            let mut rec = if matches!(&input.subject, crate::model::Subject::View(_)) {
+                crate::attestation::record_view(repo, &input.view(), "check", &payload)?
             } else {
-                crate::cmd::attest::record(repo, &input.state, "check", &payload)?
+                crate::attestation::record(repo, &input.state, "check", &payload)?
             };
             rec.states.push(state.clone());
             rec.data["check"] = check;
-            let key = reference(&name, &input.subject.id);
+            let key = reference(&name, input.subject.id());
             rec.data["ref_change"] = serde_json::to_value(RefChange {
                 name: key.clone(),
                 before: repo.p.db.ref_value(&key, crate::ids::now_ms())?,
                 after: Some(RefState { name: key, target: state.id, expires_at: None }),
             })?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             drop(cleanup);
             Ok(result)
         })?;
@@ -568,8 +566,8 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
         probes.push(row);
     }
     Ok(Behavior {
-        base: base.subject.id.clone(),
-        head: head.subject.id.clone(),
+        base: base.subject.id().to_owned(),
+        head: head.subject.id().to_owned(),
         base_source: source_status(repo, base).into(),
         head_source: source_status(repo, head).into(),
         base_views: vec![],
@@ -754,9 +752,9 @@ pub fn queue_enabled(repo: &Repo) -> Result<bool> {
 pub fn queue_run(ctx: &Ctx, repo: &Repo, base: &str, head: &str) -> Result<Value> {
     // These are exact shared states, even if a line name equals the state id.
     let input =
-        |state: &str| Input { subject: Subject { kind: "state".into(), id: state.into() }, state: state.into(), layers: vec![] };
-    let base = input(base);
-    let head = input(head);
+        |state: &str| -> Result<Input> { Ok(Input { subject: Subject::state(state)?, state: state.into(), layers: vec![] }) };
+    let base = input(base)?;
+    let head = input(head)?;
     let old = definitions(repo, &base)?;
     let new = definitions(repo, &head)?;
     let mut errors: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -873,7 +871,9 @@ pub fn change_behavior(repo: &Repo, state: &crate::model::StateRec) -> Result<Be
         _ => bail!("the line upstream must be a line name"),
     };
     let target = repo.line(target)?;
-    let base = repo.merge_base(&target.head, &state.id)?.context("change and target have no common ancestor")?;
+    let base = repo
+        .merge_base(&repo.source_id(&target.head)?, &repo.source_id(&state.id)?)?
+        .context("change and target have no common ancestor")?;
     let base = resolve(repo, None, &base)?;
     let head = resolve(repo, None, &state.id)?;
     let mut behavior = diff(repo, &base, &head)?;
@@ -898,7 +898,7 @@ fn view_results(repo: &Repo, shared: &str) -> Result<Vec<String>> {
         let Ok(layers) = serde_json::from_value::<Vec<crate::overlay::Layer>>(record.data["view"]["layers"].clone()) else {
             continue;
         };
-        let input = Input { subject: Subject { kind: "view".into(), id: id.into() }, state: shared.into(), layers };
+        let input = Input { subject: Subject::view(id)?, state: shared.into(), layers };
         for (_, check) in active_checks(repo, &input.subject)?.into_values() {
             let Some(name) = check.data["check"]["probe"].as_str() else { continue };
             let Ok(probe) = serde_json::from_value::<Probe>(check.data["check"]["definition"].clone()) else { continue };

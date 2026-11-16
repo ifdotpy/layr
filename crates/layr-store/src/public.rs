@@ -150,6 +150,25 @@ pub fn release_writers_checked(project: &str, lines: &[String]) -> Result<Writer
     Ok(writers)
 }
 
+/// Resolve project-scoped signer keys and limits from signature proofs. Bind
+/// each proof to the announced machine key before allowing it to influence trust.
+pub fn project_signers<'a>(
+    project: &str,
+    records: impl IntoIterator<Item = &'a record::VerifiedRecord>,
+) -> Result<(BTreeMap<String, VerifyingKey>, crate::trust::Rules)> {
+    let records: Vec<_> = records.into_iter().collect();
+    let lines: Vec<_> = records.iter().map(|r| r.line().to_string()).collect();
+    let (keys, trusted, limited) = resolve(project, &lines, false)?;
+    for record in records {
+        let value: serde_json::Value = serde_json::from_str(record.get())?;
+        let machine = value["machine"].as_str().context("record has no machine")?;
+        if keys.get(machine) != Some(record.key()) {
+            bail!("record signature key differs from its machine announcement");
+        }
+    }
+    Ok((keys.into_iter().filter(|(machine, _)| trusted.contains(machine)).collect(), limited))
+}
+
 fn writers(project: &str, lines: &[String], verify: bool) -> Result<BTreeMap<String, VerifyingKey>> {
     let (keys, trusted, limited) = resolve(project, lines, verify)?;
     Ok(keys.into_iter().filter(|(machine, _)| trusted.contains(machine) && !limited.contains_key(machine)).collect())
@@ -162,14 +181,14 @@ fn resolve(project: &str, lines: &[String], verify: bool) -> Result<Resolved> {
     let mut keys = BTreeMap::new();
     let mut creator = None;
     for line in lines {
-        let raw = record::parse_line(line, None)?;
+        let raw = record::parse_line(line)?;
         let value: serde_json::Value = serde_json::from_str(raw.get())?;
         if value["project"].as_str() != Some(project) {
             bail!("public writer records belong to another project");
         }
         if value["op"] == "machine" && value["seq"] == 1 {
             let machine = value["machine"].as_str().context("machine record has no id")?;
-            let key = record::machine_key(raw)?;
+            let key = record::machine_key(raw.raw())?;
             if keys.insert(machine.to_string(), key).is_some() {
                 bail!("duplicate writer machine record");
             }
@@ -180,7 +199,7 @@ fn resolve(project: &str, lines: &[String], verify: bool) -> Result<Resolved> {
         let machine = value["machine"].as_str().context("record has no machine")?;
         let key = keys.get(machine).context("writer has no machine record")?;
         if verify {
-            record::verify_line(line.as_bytes(), key)?;
+            let _verified = record::verify_line(line.as_bytes(), key)?;
         }
         if value["op"] == "project" {
             if value["data"]["id"].as_str() != Some(project) || creator.replace(machine.to_string()).is_some() {

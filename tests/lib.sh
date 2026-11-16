@@ -251,6 +251,20 @@ finish() {
     [ "$FAIL" -eq 0 ]
 }
 
+# state_available <project folder> <state UUID>: storage can be native or object-backed.
+# Freed object mappings may remain until pruning; they do not make a freed state readable.
+state_available() {
+    python3 -I - "$1" "$2" <<'PY'
+import pathlib, sqlite3, sys
+project, state = pathlib.Path(sys.argv[1]), sys.argv[2]
+with sqlite3.connect(project / 'meta/db/layr.sqlite') as db:
+    row = db.execute('SELECT deleted FROM states WHERE id=?', (state,)).fetchone()
+paths = [project / 'states' / state, project / 'deltas' / state,
+         project / 'meta/objects/states' / state]
+sys.exit(0 if row and not row[0] and any(path.exists() for path in paths) else 1)
+PY
+}
+
 # A small project folder.
 case_sensitive() { # true when the test folder tells README and readme apart
     touch "$T/.CaseProbe"
