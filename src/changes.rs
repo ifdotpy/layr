@@ -216,10 +216,10 @@ pub fn file_changes_of(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)
     list.into_iter().filter_map(|c| file_change(parent, child, c).transpose()).collect()
 }
 
-/// Stop at the first confirmed change outside the skipped paths.
+/// Stop at the first confirmed change outside the skipped paths, including either move endpoint.
 pub fn any_file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), skip: impl Fn(&str) -> bool) -> Result<bool> {
     for c in candidates_equal(parent, child)? {
-        if !skip(&c.path) && file_change(parent, child, c)?.is_some() {
+        if (!skip(&c.path) || c.old_path.as_deref().is_some_and(|p| !skip(p))) && file_change(parent, child, c)?.is_some() {
             return Ok(true);
         }
     }
@@ -507,6 +507,10 @@ mod tests {
         let parent = crate::repo::Snap::Objects(tree.clone());
         assert!(!any_file_change(&parent, &child, |path| path == "z")?);
         assert!(!child.1.lock().unwrap().iter().any(|p| p == "z"), "skipped paths are never compared");
+        std::fs::write(native.join("z"), b"other")?;
+        assert!(!any_file_change(&parent, &child, |path| path == "z")?);
+        assert!(!child.1.lock().unwrap().iter().any(|p| p == "z"), "unrelated changed files are never compared");
+        std::fs::write(native.join("z"), b"later")?;
         assert!(!any_file_change(&parent, &child, |_| false)?);
         assert!(child.1.lock().unwrap().iter().any(|p| p == "z"), "unchanged candidates need comparison");
         child.1.lock().unwrap().clear();
