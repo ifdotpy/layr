@@ -77,7 +77,7 @@ for hello in (False, True):
     other = dict(current, format=current["format"] + 1, version="future-version", build="future-build")
     code, error = request(other, hello)
     assert code == 128, error
-    for text in ("format 2", "format 1", "future-version", "future-build", current["version"], current["build"]):
+    for text in (f"format {current['format'] + 1}", f"format {current['format']}", "future-version", "future-build", current["version"], current["build"]):
         assert text in error, (text, error)
     assert not (store / "projects/must-not-exist").exists()
     code, error = request(None, hello)

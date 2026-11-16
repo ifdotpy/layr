@@ -135,7 +135,7 @@ ok 'both clean changes are present' test -f a.txt -a -f b.txt
 
 # Overlay-only conflicts exercise the path where the shared head is already up to date.
 l protect main --remove >/dev/null
-l overlay create notes --mode follow -q || exit 1
+l overlay create notes -q || exit 1
 printf 'base overlay\n' > overlay.txt
 l overlay move notes overlay.txt >/dev/null
 l save -qam overlay-base || exit 1
@@ -178,16 +178,19 @@ refuses 'divergent overlay merge from a conflicted source' overlay-right "$confl
 l restore src/main.rs
 l line new -q missing-overlay main || exit 1
 cd ../missing-overlay
-l overlay create incoming --mode follow -q || exit 1
+# The tree of overlays (docs/overlays.md section 1): `incoming` is above the overlay that the folder shows, so the
+# move makes it the view. A save writes the overlay of the view, so the change of main is a save with --to main.
+l overlay create incoming --parent notes -q || exit 1
 printf 'incoming\n' > incoming.txt
 l overlay move incoming incoming.txt >/dev/null
+l save -qm incoming-part || exit 1
 printf 'incoming shared\n' > notes.txt
-l save -qam incoming || exit 1
+l add notes.txt && l save -qm incoming --to main || exit 1
 incoming=$(l rev-parse head)
 cd "$M"
 l protect main --remove >/dev/null
 printf 'target shared\n' > notes.txt
-l save -qam target-shared || exit 1
+l save -qam target-shared --to main || exit 1
 # Keep a real staging tree, with no staged delta, across the conflict refusal.
 l add notes.txt || exit 1
 l protect main >/dev/null
@@ -195,11 +198,15 @@ refuses 'conflict after planning a missing overlay line' missing-overlay "$incom
 cd ../missing-overlay
 no 'resolve the missing-overlay change in its source' l merge main
 printf 'resolved incoming\n' > notes.txt
-l add notes.txt && l save -qm incoming-resolved || exit 1
+l add notes.txt && l save -qm incoming-resolved --to main || exit 1
 incoming=$(l rev-parse head)
 cd "$M"
 ok 'a clean merge creates the deferred overlay line' l merge missing-overlay --expect "$incoming" -q
-eq 'the new overlay is visible after the accepted merge' incoming "$(cat incoming.txt)"
+# The view of a line does not change in a merge (owner decision 2026-11-15): the line keeps the merged part, and
+# its folder shows it after `overlay use`.
+no 'the folder of main does not show the new overlay' test -e incoming.txt
+ok 'overlay use shows the merged part' l overlay use incoming -q
+eq 'the new overlay is visible after overlay use' incoming "$(cat incoming.txt)"
 eq 'the shared resolution is visible too' 'resolved incoming' "$(cat notes.txt)"
 
 finish
