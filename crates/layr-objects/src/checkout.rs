@@ -229,9 +229,8 @@ impl Run<'_> {
     }
 
     fn file(&self, blob: &Id, size: u64, path: &Path) -> Result<()> {
-        if let Some(src) = self.store.hot_path(blob) {
-            // The store file opens with the store's rights; the new file is made by the writer.
-            let source = fs::File::open(&src)?;
+        if let Some(source) = self.store.open_hot(blob)? {
+            // The descriptor survives cooling; the new file is made by the writer.
             let len = source.metadata()?.len();
             if len != size {
                 bail!("blob {blob} has {len} bytes, the tree says {size}");

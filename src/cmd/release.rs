@@ -35,7 +35,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
             bail!("verify-main takes a release ref and --expect <state>");
         }
         let expected =
-            crate::revs::resolve(&h.repo, h.line.as_ref(), a.get("--expect").context("verify-main requires --expect")?)?;
+            crate::revs::resolve_state(&h.repo, h.line.as_ref(), a.get("--expect").context("verify-main requires --expect")?)?;
         store.verify_release_main(ctx, &h.repo, name, &expected)?;
         return Ok(0);
     }
@@ -44,7 +44,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("-o") || a.has("--public") {
                 bail!("attach needs private access and does not take -o");
             }
-            let expected = a.get("--expect").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+            let expected = a.get("--expect").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
             store
                 .attach_release(
                     ctx,
@@ -61,7 +61,7 @@ pub fn release(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("-o") || a.has("--public") || a.has("--public-files") || a.has("--name") {
                 bail!("publish-public requires private access and takes no file options");
             }
-            let expected = a.get("--expect").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
+            let expected = a.get("--expect").map(|rev| crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)).transpose()?;
             store.publish_release(ctx, &h.repo, name, expected.as_deref())?
         }
         "files" | "get" if a.pos.len() <= if command == "files" { 2 } else { 3 } => {

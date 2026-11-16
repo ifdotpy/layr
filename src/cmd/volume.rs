@@ -46,12 +46,12 @@ pub fn volume(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// subvolume) on Linux, ext4 or XFS for the OverlayFS build.
 fn backend(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
-    if !crate::storage::is_supported(path) {
+    if !crate::fs::host().namespace.supported(path) {
         bail!("{} is not on APFS; a volume of this build needs APFS", path.display());
     }
     #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
     {
-        if !crate::storage::is_supported(path) {
+        if !crate::fs::host().namespace.supported(path) {
             bail!("{} is not on btrfs; a volume of this build needs btrfs", path.display());
         }
         crate::rootcheck::check_store(path, &[])?;

@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn numbers_follow_signed_key_records_and_reasons_are_not_invented() {
-        let mut first = Record::new("overlay.key");
+        let mut first = Record::untrusted_preview("overlay.key");
         first.time = 100;
         first.machine = "manager".into();
         first.data = json!({"epoch":"z-first","recipient":"key material"});
@@ -38,7 +38,7 @@ mod tests {
         let mut refresh = second.clone();
         refresh.time = 300;
         refresh.data = json!({"epoch":"a-second"});
-        let records = [refresh, Record::new("project"), second, Record::new("config"), first];
+        let records = [refresh, Record::untrusted_preview("project"), second, Record::untrusted_preview("config"), first];
         assert_eq!(
             epochs(&records),
             vec![
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn equal_times_use_canonical_machine_then_sequence_order() {
         let key = |machine: &str, seq: u64, epoch: &str| {
-            let mut record = Record::new("overlay.key");
+            let mut record = Record::untrusted_preview("overlay.key");
             record.time = 100;
             record.machine = machine.into();
             record.seq = seq;

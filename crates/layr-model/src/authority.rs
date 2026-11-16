@@ -7,8 +7,14 @@ use layr_hashers::{ContentAddress, Digest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn parse(line: &str, key: Option<&VerifyingKey>) -> Result<Record> {
-    Ok(serde_json::from_str(layr_store::record::parse_line(line, key)?.get())?)
+fn parse(line: &str) -> Result<Record> {
+    let signed = layr_store::record::parse_line(line)?;
+    Ok(serde_json::from_str(signed.get())?)
+}
+
+fn verify(line: &str, key: &VerifyingKey) -> Result<Record> {
+    let verified = layr_store::record::verify_line(line.as_bytes(), key)?;
+    Ok(serde_json::from_str(verified.get())?)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,9 +53,9 @@ impl Authority {
     /// Verify every signature and refuse unproved manager changes and unauthorized key records.
     pub fn validate(&self, lines: &[String], overlay: &str, keys: &BTreeMap<String, VerifyingKey>) -> Result<()> {
         for line in lines {
-            let record = parse(line, None)?;
+            let record = parse(line)?;
             let key = keys.get(&record.machine).with_context(|| format!("overlay signer {} is not trusted", record.machine))?;
-            let record = parse(line, Some(key))?;
+            let record = verify(line, key)?;
             crate::validation::validate(&record)?;
             if record.project != overlay {
                 bail!("overlay record belongs to another project");
@@ -83,10 +89,10 @@ pub fn protected(record: &Record) -> bool {
 pub fn from_lines(parent: &str, lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<BTreeMap<String, Authority>> {
     let mut records = Vec::new();
     for line in lines {
-        let record = parse(line, None)?;
+        let record = parse(line)?;
         if record.op == "overlay.create" || record.op == "overlay.authority" {
             let key = keys.get(&record.machine).context("overlay authority signer is not trusted")?;
-            parse(line, Some(key))?;
+            verify(line, key)?;
             if record.project != parent {
                 bail!("overlay authority record belongs to another parent project");
             }
@@ -110,9 +116,9 @@ fn fold(parent: &str, mut records: Vec<Record>, keys: &BTreeMap<String, Verifyin
             }
             let id = record.data["config"][format!("overlay.{name}")]["id"].as_str().map(str::to_owned);
             let creator = if let Some(origin) = record.data["hidden_origin"].as_str() {
-                let origin_record = parse(origin, None)?;
+                let origin_record = parse(origin)?;
                 let key = keys.get(&origin_record.machine).context("overlay origin signer is not trusted")?;
-                let origin_record = parse(origin, Some(key))?;
+                let origin_record = verify(origin, key)?;
                 crate::validation::validate(&origin_record)?;
                 if origin_record.op != "overlay.create"
                     || Some(&origin_record.project) != id.as_ref()
@@ -138,9 +144,9 @@ fn fold(parent: &str, mut records: Vec<Record>, keys: &BTreeMap<String, Verifyin
             );
         } else {
             let signed = record.data["authority"].as_str().context("overlay authority proof is missing")?;
-            let change = parse(signed, None)?;
+            let change = parse(signed)?;
             let key = keys.get(&change.machine).context("overlay manager signer is not trusted")?;
-            let change = parse(signed, Some(key))?;
+            let change = verify(signed, key)?;
             crate::validation::validate(&change)?;
             if change.op != "overlay.managers" {
                 bail!("invalid overlay authority proof");
@@ -201,9 +207,9 @@ pub fn from_overlay_lines(
     let mut name = None;
     let mut creator = None;
     for line in lines {
-        let record = parse(line, None)?;
+        let record = parse(line)?;
         let key = keys.get(&record.machine).context("hidden overlay signer is not trusted")?;
-        let mut record = parse(line, Some(key))?;
+        let mut record = verify(line, key)?;
         crate::validation::validate(&record)?;
         if record.project != overlay {
             bail!("hidden overlay record belongs to another project");
@@ -250,7 +256,7 @@ pub fn from_overlay_lines(
 pub fn retained(authority: &Authority, lines: &[String]) -> Result<BTreeMap<String, String>> {
     let mut retained = authority.retained.clone();
     for line in lines {
-        let record = parse(line, None)?;
+        let record = parse(line)?;
         if protected(&record) {
             if !authority.permits(&record, line) {
                 bail!("overlay record signer {} is not a key manager", record.machine);
@@ -276,7 +282,7 @@ mod tests {
     }
 
     fn record(op: &str, project: &str, machine: &str, data: serde_json::Value, seq: u64) -> Record {
-        let mut r = Record::new(op);
+        let mut r = Record::untrusted_preview(op);
         r.id = id();
         r.project = project.into();
         r.machine = machine.into();
@@ -401,7 +407,7 @@ mod tests {
         let removal = record("overlay.readers", &overlay, &owner, serde_json::json!({"config":{"access":{"user:0":"admin"}}}), 2);
         let forged = record("overlay.key", &overlay, &reader, serde_json::json!({}), 3);
         let forged_line = sign(&forged, &reader_key).unwrap();
-        layr_store::record::verify_line(forged_line.as_bytes(), &reader_key.verifying_key()).unwrap();
+        let _verified = layr_store::record::verify_line(forged_line.as_bytes(), &reader_key.verifying_key()).unwrap();
         assert!(!authority.permits(&forged, &forged_line));
         assert!(authority
             .validate(&[sign(&removal, &owner_key).unwrap(), forged_line], &overlay, &keys)

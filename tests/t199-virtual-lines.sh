@@ -202,7 +202,11 @@ ok "no view is left" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"
 # Delete a virtual line with unsaved work: the work goes into its final state.
 ok "a second virtual line" l line new v2 --view virtual
 echo unsaved > "$P/lines/v2/unsaved.txt"
-ok "line delete -D of a virtual line" l line delete -D --discard v2
+virtual_id=$(l line list --json | python3 -c 'import json,sys; print(next(x["id"] for x in json.load(sys.stdin) if x["name"] == "v2"))')
+has "the identity deletion target is mounted" "$P/lines/v2 (layrfs" "$(mount)"
+out=$(l line delete --id "$virtual_id" -D --discard --json); rc=$?
+eq "line delete --id of a mounted virtual line" 0 "$rc"
+eq "virtual deletion JSON identifies the deleted line" "$virtual_id" "$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 no "the mount is gone" bash -c "mount | grep -q '$P/lines/v2 (layrfs'"
 ok "the line folder is gone" test ! -e "$P/lines/v2"
 ok "the view folder is gone" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"

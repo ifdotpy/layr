@@ -20,7 +20,7 @@
 //! and its derived rows. After a crash only a snapshot without a record can exist; `layr fsck`
 //! deletes it. Records leave the database as JSONL lines (replication, remote copies, export).
 
-use crate::db::Db;
+use crate::db::{CommitResolution, Db, OpenedDb, PublishResult, RebuildAction, RebuildTxn};
 use crate::ids;
 use crate::model::{Actor, Record};
 use crate::oplog;
@@ -152,8 +152,9 @@ impl Store {
             bail!("this store requires a layr build with the overlayfs feature");
         }
         crate::linepaths::register(root);
-        #[cfg(feature = "overlayfs")]
-        crate::storage::recover(root)?;
+        if let Some(registry) = &crate::fs::host().registry {
+            (registry.recover)(root)?;
+        }
         let machine_lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -188,10 +189,9 @@ impl Store {
         // Every volume folder must hold the identity file of this store (checked when used).
         let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
         // A volume with its own OverlayFS registry (a project moved there) is recovered too.
-        #[cfg(feature = "overlayfs")]
-        for volume in store.layout()?.ready_volume_paths() {
-            if volume.join(".layr-overlayfs").is_dir() {
-                crate::storage::recover(&volume)?;
+        if let Some(registry) = &crate::fs::host().registry {
+            for volume in store.layout()?.ready_volume_paths() {
+                (registry.recover_existing)(&volume)?;
             }
         }
         // A `project move` that stopped midway is finished or rolled back before the command runs.
@@ -282,7 +282,23 @@ pub enum Trust<'a> {
 /// The record operations that change which machines a project trusts.
 const TRUST_OPS: &[&str] = &["machine.trust", "machine.untrust", "trust.delegate"];
 
+/// An open project is a read handle; only a locked token can publish records.
+///
+/// ```compile_fail,E0599
+/// use layr::Project;
+/// fn publish_unlocked(project: &Project<'_>) {
+///     project.append(todo!(), todo!());
+/// }
+/// ```
+///
+/// ```
+/// use layr::Project;
+/// fn acquire(project: &Project<'_>) {
+///     let _ = project.lock_maintenance();
+/// }
+/// ```
 pub struct Project<'a> {
+    pub(crate) lease: ProjectLease,
     pub store: &'a Store,
     pub name: String,
     pub dir: PathBuf,
@@ -290,7 +306,7 @@ pub struct Project<'a> {
     pub db: Db,
 }
 
-pub struct Lock {
+pub(crate) struct Lock {
     f: Option<fs::File>,
     /// When the lock was taken, how long the command waited for it, and the log of slow holds.
     since: std::time::Instant,
@@ -300,14 +316,98 @@ pub struct Lock {
     project: String,
     /// The meta folder of the project whose lock this is (`Project::holds_lock`).
     meta: PathBuf,
+    _lines: Vec<std::rc::Rc<LineLock>>,
+}
+
+/// A handle never keeps its own flock alive. Nested helpers can retain an existing lease,
+/// and the final token releases the flock. The weak reference is local to this exact handle.
+#[derive(Default)]
+pub(crate) struct ProjectLease(std::cell::RefCell<std::rc::Weak<Lock>>);
+
+/// Exclusive access to this project. Publication is available only through this token.
+#[must_use]
+pub struct LockedProject<'p> {
+    project: &'p Project<'p>,
+    _lock: std::rc::Rc<Lock>,
+}
+
+impl LockedProject<'_> {
+    pub(crate) fn catalog(&self) -> &Db {
+        &self.project.db
+    }
+
+    pub(crate) fn check(&self, project: &Project) -> Result<()> {
+        anyhow::ensure!(std::ptr::eq(self.project, project), "lock belongs to another project handle");
+        Ok(())
+    }
+}
+
+/// Sorted, distinct line leases, acquired before the project lock.
+#[must_use]
+pub struct LineLeaseSet {
+    meta: PathBuf,
+    _locks: Vec<std::rc::Rc<LineLock>>,
+}
+
+impl LineLeaseSet {
+    fn check(&self, project: &Project) -> Result<()> {
+        anyhow::ensure!(self.meta == project.meta_dir(), "line leases belong to another project");
+        Ok(())
+    }
+
+    pub(crate) fn require_line(&self, project: &Project, id: &str) -> Result<()> {
+        self.check(project)?;
+        anyhow::ensure!(self._locks.iter().any(|lease| lease.key.1 == id), "line {id} has no held lease");
+        Ok(())
+    }
+
+    pub fn lock<'p>(&'p self, project: &'p Project<'p>) -> Result<LockedProject<'p>> {
+        self.check(project)?;
+        project.lock_with_lines(self._locks.clone())
+    }
+
+    pub fn into_locked<'p>(self, project: &'p Project<'p>) -> Result<LockedProject<'p>> {
+        self.check(project)?;
+        project.lock_with_lines(self._locks)
+    }
+
+    pub fn try_lock<'p>(&'p self, project: &'p Project<'p>) -> Result<LockAttempt<LockedProject<'p>>> {
+        self.check(project)?;
+        project.try_lock_with_lines(self._locks.clone())
+    }
+}
+
+/// Auxiliary leases precede the working-line lease for the same line. Different lines
+/// always follow line-id order, including across overlapping nested requests.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LeaseKind {
+    View,
+    Cache,
+    Line,
+}
+
+fn lease_order(id: &str) -> (&str, LeaseKind) {
+    if let Some(line) = id.strip_prefix("view-") {
+        (line, LeaseKind::View)
+    } else if let Some(line) = id.strip_suffix("-cache") {
+        (line, LeaseKind::Cache)
+    } else {
+        (id, LeaseKind::Line)
+    }
+}
+
+/// The outcome of a non-blocking lock attempt.
+#[must_use]
+pub enum LockAttempt<T> {
+    Acquired(T),
+    Busy,
 }
 
 /// The store locks this process holds. The trash is emptied when the last one goes.
 static HELD_LOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// The meta folders of the projects whose lock this process holds. A second lock file
-/// descriptor in this process would wait for the first, so code that may run under the lock
-/// checks `Project::holds_lock` first.
+/// The meta folders of the projects whose lock this process holds. The runtime line-before-project check also
+/// catches attempts through a separately opened handle. Publication uses typed leases.
 static HELD_PROJECTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// A wait for or a hold of the store lock this long goes to `meta/lock-slow.log`: one lock
@@ -505,10 +605,10 @@ impl Drop for Lock {
 /// writes its working folder, holds it for the whole command. It is taken before the project lock,
 /// never under it (a waiter would hold the project lock while a line holder waits for it), and two
 /// lines of one command are taken in id order. Other lines do not wait for it.
-pub struct LineLock {
+struct LineLock {
     f: Option<fs::File>,
-    /// Meta folder and line id: the key of `HELD_LINES`. None for a nested take in the same process.
-    key: Option<(PathBuf, String)>,
+    /// Meta folder and line id, removed when the final physical lease is released.
+    key: (PathBuf, String),
     since: std::time::Instant,
     waited: std::time::Duration,
     log: PathBuf,
@@ -516,20 +616,17 @@ pub struct LineLock {
     line: String,
 }
 
-/// The line locks this process holds. A second descriptor for one of them would wait for the first.
-static HELD_LINES: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+thread_local! {
+    static LINE_LEASES: std::cell::RefCell<std::collections::BTreeMap<(PathBuf, String), std::rc::Weak<LineLock>>> = Default::default();
+}
 
 impl Drop for LineLock {
     fn drop(&mut self) {
         let held = self.since.elapsed();
         drop(self.f.take());
-        if let Some(key) = self.key.take() {
-            if let Ok(mut held) = HELD_LINES.lock() {
-                if let Some(i) = held.iter().position(|k| *k == key) {
-                    held.remove(i);
-                }
-            }
-        }
+        LINE_LEASES.with(|leases| {
+            leases.borrow_mut().remove(&self.key);
+        });
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  line lock held: {}", held.as_secs_f64() * 1000.0, self.line);
         }
@@ -560,32 +657,6 @@ impl Drop for LineLock {
 /// The trash folders (one per volume) of the project locks this process holds. The last lock
 /// empties them.
 static LOCK_TRASH: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// Delete a temporary tree. Under a store lock on APFS it only moves to the trash, which the
-/// last lock empties: a copy of a working folder took seconds to delete, and every other
-/// command of the project waited for it.
-pub fn discard_tree(path: &Path) {
-    #[cfg(target_os = "macos")]
-    if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-        // The trash of the volume that holds `path`: the one whose volume folder is its longest prefix.
-        let dir = LOCK_TRASH.lock().ok().and_then(|dirs| {
-            dirs.iter()
-                .filter(|d| d.parent().is_some_and(|volume| path.starts_with(volume)))
-                .max_by_key(|d| d.components().count())
-                .cloned()
-        });
-        if let (Some(dir), Some(name)) = (dir, path.file_name()) {
-            if fs::symlink_metadata(path).is_err() {
-                return;
-            }
-            let to = dir.join(format!("{}.{}", name.to_string_lossy(), crate::ids::new_id()));
-            if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
-                return;
-            }
-        }
-    }
-    let _ = crate::storage::delete_tree(path);
-}
 
 /// The time one command spends on emptying the trash after its last lock.
 const TRASH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
@@ -692,7 +763,7 @@ pub fn empty_trash_process(dir: &Path) -> anyhow::Result<()> {
 pub fn empty_all(dir: &Path) -> Result<Vec<String>, crate::pools::PoolError> {
     loop {
         let (deleted, failed) = empty_trash(dir, None)?;
-        if deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
+        if !failed.is_empty() || deleted == 0 || fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true) {
             if let Some(store) = dir.parent() {
                 let _ = fs::write(store.join("trash.errors"), failed.iter().map(|line| format!("{line}\n")).collect::<String>());
             }
@@ -712,7 +783,7 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(u
     let (mut deleted, mut failed) = (0, Vec::new());
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
-            if late() || !empty_tree(&e.path(), &late, &mut deleted, &mut failed)? {
+            if late() || !empty_tree(&e.path(), &mut deleted, &mut failed)? {
                 break;
             }
         }
@@ -722,36 +793,18 @@ pub fn empty_trash(dir: &Path, budget: Option<std::time::Duration>) -> Result<(u
 
 /// Delete `path`, and what is in it first. Counts each tree deleted and records each failure;
 /// false when the budget ended before `path` was gone.
-fn empty_tree(
-    path: &Path,
-    late: &(dyn Fn() -> bool + Sync),
-    deleted: &mut usize,
-    failed: &mut Vec<String>,
-) -> Result<bool, crate::pools::PoolError> {
-    #[cfg(not(target_os = "macos"))]
-    let _ = late;
-    #[cfg(target_os = "macos")]
-    if let Ok(m) = fs::symlink_metadata(path) {
-        if m.is_dir() {
-            // Open the folder (it can be sealed), delete its entries, then the folder.
-            use std::os::unix::fs::PermissionsExt;
-            let _ = crate::sys::apfs_immutable(path, false);
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode((m.permissions().mode() & 0o7777) | 0o700));
-            if let Ok(rd) = fs::read_dir(path) {
-                let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-                if !empty_entries(&entries, late, deleted, failed)? {
-                    return Ok(false);
-                }
-            }
-        }
-    }
+fn empty_tree(path: &Path, deleted: &mut usize, failed: &mut Vec<String>) -> Result<bool, crate::pools::PoolError> {
     if fs::symlink_metadata(path).is_err() {
         return Ok(true);
     }
-    match crate::storage::delete_tree(path) {
+    match crate::fs::remove(path) {
         Ok(()) => *deleted += 1,
         // Another emptier deleted it, or an entry of it, at the same time: that is no failure. A path that is still
         // here goes in the next pass.
+        Err(error) if error.downcast_ref::<crate::fs::Cleanup>().is_some() => {
+            failed.push(format!("{}: {error:#}", path.display()));
+            return Ok(false);
+        }
         Err(_) if fs::symlink_metadata(path).is_err() => *deleted += 1,
         Err(e)
             if e.chain()
@@ -759,53 +812,6 @@ fn empty_tree(
         Err(e) => failed.push(format!("{}: {e:#}", path.display())),
     }
     Ok(true)
-}
-
-/// A folder with at least this many entries is emptied in parallel.
-#[cfg(target_os = "macos")]
-const TRASH_PARALLEL_FROM: usize = 64;
-// APFS deletes a file in system time of the calling thread: four threads delete a build folder in
-// half the time of one (40,363 files: 4.7 s to 2.4 s).
-
-/// `empty_tree` of each of `entries`. False when the budget ended first.
-#[cfg(target_os = "macos")]
-fn empty_entries(
-    entries: &[PathBuf],
-    late: &(dyn Fn() -> bool + Sync),
-    deleted: &mut usize,
-    failed: &mut Vec<String>,
-) -> Result<bool, crate::pools::PoolError> {
-    if entries.len() < TRASH_PARALLEL_FROM {
-        for e in entries {
-            if late() || !empty_tree(e, late, deleted, failed)? {
-                return Ok(false);
-            }
-        }
-        return Ok(true);
-    }
-    let results = crate::pools::run(
-        crate::pools::Priority::Background,
-        crate::pools::Width::Items(std::num::NonZeroUsize::new(entries.len()).unwrap()),
-        || {
-            use rayon::prelude::*;
-            entries
-                .par_iter()
-                .map(|e| {
-                    let (mut deleted, mut failed) = (0, Vec::new());
-                    let done = if late() { false } else { empty_tree(e, late, &mut deleted, &mut failed)? };
-                    Ok((deleted, failed, done))
-                })
-                .collect::<Vec<Result<_, crate::pools::PoolError>>>()
-        },
-    )?;
-    let mut done = true;
-    for result in results {
-        let (count, errors, complete) = result?;
-        *deleted += count;
-        failed.extend(errors);
-        done &= complete;
-    }
-    Ok(done)
 }
 
 impl<'a> Project<'a> {
@@ -858,67 +864,22 @@ impl<'a> Project<'a> {
     /// the last lock. A tree that cannot move, and any tree on the other file systems (whose
     /// snapshots delete at once), is deleted in place.
     pub fn trash(&self, path: &Path) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let _t = crate::trace::span(format!("trash {}", path.display()));
-            if fs::symlink_metadata(path).is_err() {
-                return Ok(());
-            }
+        let _t = crate::trace::span(format!("trash {}", path.display()));
+        if !crate::fs::host().namespace.managed_or_present(path)? {
+            return Ok(());
+        }
+        if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             let dir = self.trash_dir()?;
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
             let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-            match fs::create_dir_all(&dir).map_err(anyhow::Error::from).and_then(|_| crate::storage::move_tree(path, &to)) {
-                Ok(()) => {
-                    // A long command holds the lock for hours (a migration): the trash would wait for its end and
-                    // fill the disk. Start the emptier now and then; it takes the trash lock, not the project lock.
-                    if trash_kick_due(&LAST_TRASH_KICK_MS, crate::ids::now_ms().max(0) as u64) {
-                        spawn_trash_emptier(&dir);
-                    }
-                    return Ok(());
+            if fs::create_dir_all(&dir).is_ok() && crate::fs::move_tree(path, &to).is_ok() {
+                if trash_kick_due(&LAST_TRASH_KICK_MS, crate::ids::now_ms().max(0) as u64) {
+                    spawn_trash_emptier(&dir);
                 }
-                Err(e) => {
-                    let _t = crate::trace::span(format!("delete in place ({e:#}) {}", path.display()));
-                }
-            }
-        }
-        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-        {
-            let _t = crate::trace::span(format!("trash {}", path.display()));
-            if fs::symlink_metadata(path).is_err() {
                 return Ok(());
             }
-            // A subvolume with known nested subvolumes is destroyed at once, with no search.
-            if crate::storage::is_subvolume(path) && crate::storage::destroy_known(path, &self.nested_hints())? {
-                return Ok(());
-            }
-            // What needs a search or a file by file delete waits for the end of the last lock.
-            if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                let dir = self.trash_dir()?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
-                if fs::create_dir_all(&dir).is_ok() && crate::storage::move_tree(path, &to).is_ok() {
-                    return Ok(());
-                }
-            }
         }
-        crate::storage::delete_tree(path)
-    }
-    /// The paths of nested subvolumes (caches) that a working folder of a line can hold: the
-    /// machine setting and the folders of the cache overlays.
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    fn nested_hints(&self) -> Vec<String> {
-        let mut hints = self.config_strings("regenerable");
-        // The folders of the cache overlays (`overlay.<name>.folder`).
-        let mut names: Vec<String> = Vec::new();
-        for entry in fs::read_dir(self.dir.join("meta/overlays")).into_iter().flatten().flatten() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        for name in names {
-            if let Ok(Some(v)) = self.db.overlay_config(&format!("overlay.{name}.folder")) {
-                hints.extend(v.as_str().map(str::to_owned));
-            }
-        }
-        hints
+        crate::fs::remove(path)
     }
     /// Delete the trees of a state. On APFS a state that another thin state uses as its base
     /// stays until that state goes (`thin::delete_state`); this returns false then.
@@ -927,7 +888,7 @@ impl<'a> Project<'a> {
         return crate::thin::delete_state(self, id);
         #[cfg(not(target_os = "macos"))]
         {
-            crate::storage::delete_tree(&self.state_path(id))?;
+            crate::fs::remove(&self.state_path(id))?;
             Ok(true)
         }
     }
@@ -1023,7 +984,7 @@ impl<'a> Project<'a> {
     ) -> Result<Project<'a>> {
         let added = store.place_project(name, volume)?;
         let result = Self::create_folder(store, name, actor, config);
-        if result.is_err() && added {
+        if result.is_err() && added && !store.project_dir(name)?.exists() {
             store.unplace_project(name);
         }
         result
@@ -1034,7 +995,7 @@ impl<'a> Project<'a> {
     fn create_folder(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
         let volume_root = store.volume_root(name)?;
-        if !crate::storage::is_supported(&volume_root) {
+        if !crate::fs::host().namespace.supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
@@ -1053,7 +1014,7 @@ impl<'a> Project<'a> {
             }
             Err(e) => return Err(e.into()),
         }
-        let made = (|| -> Result<Project<'a>> {
+        let made = (|| -> PublishResult<Project<'a>> {
             mkdir_mode(&dir, 0o755)?;
             mkdir_mode(&dir.join("states"), 0o700)?;
             mkdir_mode(&dir.join("deltas"), 0o700)?;
@@ -1062,21 +1023,23 @@ impl<'a> Project<'a> {
             for d in ["stage", "scan", "work"] {
                 mkdir_mode(&dir.join("meta").join(d), 0o700)?;
             }
-            crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
+            crate::fs::create(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
             let id = ids::new_id();
             let db = Db::open(&db_file(&dir))?;
-            let p = Project { store, name: name.to_string(), dir: dir.clone(), id: id.clone(), db };
-            let mut rec = Record::new("project");
+            let p = Project { lease: Default::default(), store, name: name.to_string(), dir: dir.clone(), id: id.clone(), db };
+            let mut rec = crate::model::DraftRecord::new("project");
             rec.data = serde_json::json!({"name": name, "id": id, "config": config});
-            p.append(rec, actor)?;
+            p.lock_maintenance()?.append(rec, actor)?;
             Ok(p)
         })();
         match made {
             Ok(p) => Ok(p),
             Err(e) => {
-                let _ = crate::storage::delete_tree(&dir);
-                Err(e)
+                if matches!(e, CommitResolution::NotCommitted(_)) {
+                    let _ = crate::fs::remove(&dir);
+                }
+                Err(e.into())
             }
         }
     }
@@ -1110,7 +1073,7 @@ impl<'a> Project<'a> {
             bail!("project '{name}' already exists");
         }
         let volume_root = store.volume_root(name)?;
-        if !crate::storage::is_supported(&volume_root) {
+        if !crate::fs::host().namespace.supported(&volume_root) {
             #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
             bail!("{} is not on btrfs", volume_root.display());
             #[cfg(target_os = "macos")]
@@ -1127,24 +1090,24 @@ impl<'a> Project<'a> {
             mkdir_mode(&dir.join("meta").join(d), 0o700)?;
         }
         if !dir.join("meta").join("db").exists() {
-            crate::storage::create_subvolume(&dir.join("meta").join("db"))?;
+            crate::fs::create(&dir.join("meta").join("db"))?;
             std::fs::set_permissions(dir.join("meta").join("db"), fs::Permissions::from_mode(0o700))?;
         }
         let db = Db::open(&db_file(&dir))?;
-        Ok(Project { store, name: name.to_string(), dir, id: String::new(), db })
+        Ok(Project { lease: Default::default(), store, name: name.to_string(), dir, id: String::new(), db })
     }
 
     /// Open a project that may not have its records yet.
     pub fn open_partial(store: &'a Store, name: &str) -> Result<Project<'a>> {
         let dir = store.project_dir(name)?;
-        let db = Db::open(&db_file(&dir))?;
-        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        p.finish_schema_upgrade()?;
+        let mut p = Self::open_catalog(store, name, dir, Wait::Block)?
+            .ok_or_else(|| anyhow!("blocking project open unexpectedly busy"))?;
         p.id = p.project_id().unwrap_or_default();
         Ok(p)
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
+<<<<<<< head
         Ok(Self::open_wait(store, name, Some(Wait::Block))?.expect("blocking project open"))
     }
 
@@ -1154,6 +1117,9 @@ impl<'a> Project<'a> {
     /// `save` (2026-11-15). The database serves the committed records while a commit runs.
     pub fn open_records(store: &'a Store, name: &str) -> Result<Project<'a>> {
         Ok(Self::open_wait(store, name, None)?.expect("project open without commit recovery"))
+=======
+        Self::open_wait(store, name, Wait::Block)?.ok_or_else(|| anyhow!("blocking project open unexpectedly busy"))
+>>>>>>> fs-legacy-facades
     }
 
     /// Defer maintenance when a live APFS commit needs recovery under the lock.
@@ -1161,10 +1127,14 @@ impl<'a> Project<'a> {
         Self::open_wait(store, name, Some(Wait::Try))
     }
 
+<<<<<<< head
     /// `wait`: how to take the lock for the recovery of a pending APFS commit; None leaves it to the next open.
     fn open_wait(store: &'a Store, name: &str, wait: Option<Wait>) -> Result<Option<Project<'a>>> {
         #[cfg(not(target_os = "macos"))]
         let _ = wait;
+=======
+    fn open_wait(store: &'a Store, name: &str, wait: Wait) -> Result<Option<Project<'a>>> {
+>>>>>>> fs-legacy-facades
         #[cfg(test)]
         PROJECT_OPEN_COUNT.with(|count| count.set(count.get() + 1));
         let _t = crate::trace::span(format!("open project {name}"));
@@ -1176,15 +1146,12 @@ impl<'a> Project<'a> {
         if !db_file(&dir).is_file() {
             bail!("project '{name}' not found");
         }
-        let db = {
+        let Some(mut p) = ({
             let _t = crate::trace::span("project database open");
-            Db::open(&db_file(&dir))?
+            Self::open_catalog(store, name, dir, wait)?
+        }) else {
+            return Ok(None);
         };
-        let mut p = Project { store, name: name.to_string(), dir, id: String::new(), db };
-        {
-            let _t = crate::trace::span("project schema upgrade");
-            p.finish_schema_upgrade()?;
-        }
         {
             let _t = crate::trace::span("project rollback validation");
             crate::rootcheck::check_project(&p)?;
@@ -1197,11 +1164,17 @@ impl<'a> Project<'a> {
         #[cfg(target_os = "macos")]
         {
             let _t = crate::trace::span("project commit recovery");
+<<<<<<< head
             if let Some(wait) = wait {
                 if crate::apfs_commit::pending(&p)? {
                     // Wait for a live commit, or recover the index after an interrupted one.
                     let Some(_lock) = p.lock_wait(wait)? else { return Ok(None) };
                 }
+=======
+            if crate::apfs_commit::pending(&p)? {
+                // Wait for a live commit, or recover the index after an interrupted one.
+                let Some(_lock) = p.lock_wait(wait, Vec::new())? else { return Ok(None) };
+>>>>>>> fs-legacy-facades
             }
         }
         p.remove_dead_temporaries();
@@ -1233,28 +1206,37 @@ impl<'a> Project<'a> {
     }
 
     fn project_id(&self) -> Result<String> {
-        let id: Option<String> = self
-            .db
-            .conn
-            .query_row("SELECT json_extract(raw, '$.r.data.id') FROM records WHERE op='project' ORDER BY time LIMIT 1", [], |r| {
-                r.get(0)
+        self.db.project_id()?.ok_or_else(|| anyhow!("project record missing"))
+    }
+
+    pub fn line_leases(&self, lines: impl IntoIterator<Item = (String, String)>) -> Result<LineLeaseSet> {
+        let mut lines: Vec<_> = lines.into_iter().collect();
+        lines.sort_by(|a, b| lease_order(&a.0).cmp(&lease_order(&b.0)));
+        lines.dedup_by(|a, b| a.0 == b.0);
+        let locks = lines
+            .iter()
+            .map(|(id, name)| {
+                self.line_lock_wait(id, name, Wait::Block)?.ok_or_else(|| anyhow!("blocking line lock unexpectedly busy"))
             })
-            .ok();
-        id.ok_or_else(|| anyhow!("project record missing"))
+            .collect::<Result<_>>()?;
+        Ok(LineLeaseSet { meta: self.meta_dir(), _locks: locks })
     }
 
     /// The lock of one line for a whole command (`LineLock`). Taking it under the project lock of
     /// this process is refused: that order can deadlock with a command that holds the line lock.
-    /// A second take of the same line in this process gives a guard that holds nothing.
-    pub fn line_lock(&self, id: &str, name: &str) -> Result<LineLock> {
-        Ok(self.line_lock_wait(id, name, Wait::Block)?.expect("blocking line lock"))
+    /// A nested take retains the same physical lease until its final holder releases it.
+    pub fn line_lock(&self, id: &str, name: &str) -> Result<LineLeaseSet> {
+        self.line_leases([(id.to_string(), name.to_string())])
     }
 
-    pub fn try_line_lock(&self, id: &str, name: &str) -> Result<Option<LineLock>> {
-        self.line_lock_wait(id, name, Wait::Try)
+    pub fn try_line_lock(&self, id: &str, name: &str) -> Result<LockAttempt<LineLeaseSet>> {
+        Ok(match self.line_lock_wait(id, name, Wait::Try)? {
+            Some(lock) => LockAttempt::Acquired(LineLeaseSet { meta: self.meta_dir(), _locks: vec![lock] }),
+            None => LockAttempt::Busy,
+        })
     }
 
-    fn line_lock_wait(&self, id: &str, name: &str, wait: Wait) -> Result<Option<LineLock>> {
+    fn line_lock_wait(&self, id: &str, name: &str, wait: Wait) -> Result<Option<std::rc::Rc<LineLock>>> {
         anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid line id '{id}'");
         let meta = self.meta_dir();
         if HELD_PROJECTS.lock().map(|held| held.contains(&meta)).unwrap_or(false) {
@@ -1262,16 +1244,15 @@ impl<'a> Project<'a> {
         }
         let log = meta.join("lock-slow.log");
         let key = (meta.clone(), id.to_string());
-        if HELD_LINES.lock().map(|held| held.contains(&key)).unwrap_or(false) {
-            return Ok(Some(LineLock {
-                f: None,
-                key: None,
-                since: std::time::Instant::now(),
-                waited: Default::default(),
-                log,
-                line: name.to_string(),
-            }));
+        if let Some(held) = LINE_LEASES.with(|leases| leases.borrow().get(&key).and_then(std::rc::Weak::upgrade)) {
+            return Ok(Some(held));
         }
+        let ordered = LINE_LEASES.with(|leases| {
+            leases.borrow().iter().all(|((held_meta, held_id), lease)| {
+                held_meta != &meta || lease.strong_count() == 0 || lease_order(held_id) <= lease_order(id)
+            })
+        });
+        anyhow::ensure!(ordered, "line '{name}' locked below an already-held line id (line locks must be sorted)");
         let dir = meta.join("line-locks");
         fs::create_dir_all(&dir)?;
         let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join(id))?;
@@ -1279,83 +1260,59 @@ impl<'a> Project<'a> {
         if !wait.acquire(&f, None)? {
             return Ok(None);
         }
-        if let Ok(mut held) = HELD_LINES.lock() {
-            held.push(key.clone());
-        }
         if std::env::var_os("LAYR_TRACE").is_some() {
             eprintln!("trace {:>8.1} ms  line lock taken: {name}", asked.elapsed().as_secs_f64() * 1000.0);
         }
-        let guard = LineLock {
-            f: Some(f),
-            key: Some(key),
-            since: std::time::Instant::now(),
-            waited: asked.elapsed(),
-            log,
-            line: name.to_string(),
-        };
+        let guard =
+            LineLock { f: Some(f), key, since: std::time::Instant::now(), waited: asked.elapsed(), log, line: name.to_string() };
         // Tests hold a line lock for a while (LAYR_TEST_LINE_LOCK_MS), to check that other lines and
         // other commands of the line wait only as the design says. The hold time includes the sleep.
         if let Some(ms) = std::env::var("LAYR_TEST_LINE_LOCK_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
+        let guard = std::rc::Rc::new(guard);
+        LINE_LEASES.with(|leases| leases.borrow_mut().insert((meta, id.to_string()), std::rc::Rc::downgrade(&guard)));
         Ok(Some(guard))
     }
 
-    pub fn lock(&self) -> Result<Lock> {
-        Ok(self.lock_wait(Wait::Block)?.expect("blocking project lock"))
+    /// Borrow the live lease of this handle, or acquire one for a standalone helper.
+    pub fn lock_or_borrow(&self) -> Result<LockedProject<'_>> {
+        if let Some(lock) = self.lease.0.borrow().upgrade() {
+            return Ok(LockedProject { project: self, _lock: lock });
+        }
+        self.lock_maintenance()
     }
 
-    pub fn try_lock(&self) -> Result<Option<Lock>> {
-        self.lock_wait(Wait::Try)
+    /// Acquire a project-only lease for maintenance, replication, or initial creation.
+    /// Working-line commands acquire their line leases first.
+    pub fn lock_maintenance(&self) -> Result<LockedProject<'_>> {
+        self.lock_with_lines(Vec::new())
     }
 
-    fn lock_wait(&self, wait: Wait) -> Result<Option<Lock>> {
-        // Resolved before the lock is taken: a failure here must not leave a count behind.
-        let trash = self.trash_dir()?;
-        let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.meta_dir().join("lock"))?;
-        let asked = std::time::Instant::now();
-        if !wait.acquire(&f, Some(&self.meta_dir()))? {
-            return Ok(None);
-        }
-        write_lock_holder(&self.meta_dir());
-        // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
-        if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        // `project move` may have taken the folder away while this call waited for the lock. The
-        // lock then belongs to the old folder: refuse, the caller runs the command again.
-        {
-            use std::os::unix::fs::MetadataExt;
-            let here = fs::symlink_metadata(self.meta_dir().join("lock")).ok();
-            let locked = f.metadata().ok();
-            let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
-            if !same {
-                bail!("project '{}' moved or was deleted while this command waited; run the command again", self.name);
-            }
-        }
-        HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut held) = HELD_PROJECTS.lock() {
-            held.push(self.meta_dir());
-        }
-        if std::env::var_os("LAYR_TRACE").is_some() {
-            eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, self.name);
-        }
-        if let Ok(mut dirs) = LOCK_TRASH.lock() {
-            if !dirs.contains(&trash) {
-                dirs.push(trash);
-            }
-        }
-        let lock = Lock {
-            f: Some(f),
-            since: {
-                crate::trace::reset();
-                std::time::Instant::now()
-            },
-            waited: asked.elapsed(),
-            log: self.meta_dir().join("lock-slow.log"),
-            project: self.name.clone(),
-            meta: self.meta_dir(),
-        };
+    fn lock_with_lines(&self, lines: Vec<std::rc::Rc<LineLock>>) -> Result<LockedProject<'_>> {
+        let lock = self.lock_wait(Wait::Block, lines)?.ok_or_else(|| anyhow!("blocking project lock unexpectedly busy"))?;
+        Ok(self.locked_token(lock))
+    }
+
+    fn locked_token(&self, lock: Lock) -> LockedProject<'_> {
+        let lock = std::rc::Rc::new(lock);
+        *self.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lock);
+        LockedProject { project: self, _lock: lock }
+    }
+
+    pub fn try_lock(&self) -> Result<LockAttempt<LockedProject<'_>>> {
+        self.try_lock_with_lines(Vec::new())
+    }
+
+    fn try_lock_with_lines(&self, lines: Vec<std::rc::Rc<LineLock>>) -> Result<LockAttempt<LockedProject<'_>>> {
+        Ok(match self.lock_wait(Wait::Try, lines)? {
+            Some(lock) => LockAttempt::Acquired(self.locked_token(lock)),
+            None => LockAttempt::Busy,
+        })
+    }
+
+    fn lock_wait(&self, wait: Wait, lines: Vec<std::rc::Rc<LineLock>>) -> Result<Option<Lock>> {
+        let Some(lock) = lock_catalog(self.store, &self.name, &self.meta_dir(), wait, lines)? else { return Ok(None) };
         #[cfg(target_os = "macos")]
         crate::apfs_commit::recover(self)?;
         Ok(Some(lock))
@@ -1365,54 +1322,52 @@ impl<'a> Project<'a> {
         move |id: &str| self.has_state(id)
     }
 
-    /// A schema upgrade left the derived tables old: they come back from the records. Another
-    /// process may have rebuilt them already.
-    fn finish_schema_upgrade(&mut self) -> Result<()> {
-        if self.db.stale {
-            self.rebuild_derived(true)?;
-            self.db.stale = false;
+    /// Rebuild a stale catalog before constructing a project that can answer normal queries.
+    fn open_catalog(store: &'a Store, name: &str, dir: PathBuf, wait: Wait) -> Result<Option<Project<'a>>> {
+        let make =
+            |db| Project { lease: Default::default(), store, name: name.to_string(), dir: dir.clone(), id: String::new(), db };
+        match Db::inspect(&db_file(&dir))? {
+            OpenedDb::Current(db) => Ok(Some(make(db))),
+            OpenedDb::Stale(stale) => {
+                // A parent may need its own migration. Resolve it before the overlay lease,
+                // using the same wait policy so maintenance yields without holding either writer.
+                let parent = if let Some((parent, _)) = name.split_once('%') {
+                    let parent_dir = store.project_dir(parent)?;
+                    if db_file(&parent_dir).is_file() {
+                        let Some(parent) = Self::open_catalog(store, parent, parent_dir, wait)? else { return Ok(None) };
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let Some(lease) = lock_catalog(store, name, &dir.join("meta"), wait, Vec::new())? else { return Ok(None) };
+                let lease = std::rc::Rc::new(lease);
+                let (project, committed) = stale.rebuild(&lease, |db, tx, action| {
+                    let p = make(db);
+                    *p.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lease);
+                    if action == RebuildAction::Replay {
+                        let terms = match &parent {
+                            Some(parent) => parent.trust_terms(&[])?,
+                            None if p.is_overlay() => Default::default(),
+                            None => p.trust_terms(&[])?,
+                        };
+                        p.lock_or_borrow()?.replay_derived(tx, &terms)?;
+                    }
+                    Ok(p)
+                })?;
+                crate::free::release_effects(committed.effects);
+                if let Some(error) = committed.reported_error {
+                    return Err(error);
+                }
+                Ok(Some(project))
+            }
         }
-        Ok(())
     }
 
-    /// Rebuild the derived tables from the records.
-    pub fn rebuild_index(&self) -> Result<()> {
-        self.rebuild_derived(false).map(|_| ())
-    }
-
-    /// One rebuild transaction (`Db::rebuild`): replay every record, then mark the states that
-    /// have no local folder as absent.
-    fn rebuild_derived(&self, only_older: bool) -> Result<bool> {
-        let present = self.state_present();
-        // The layer bases are not in the records: they come from disk, read before the rebuild.
-        let bases = self.layer_bases_on_disk()?;
-        let terms = self.trust_terms(&[])?;
-        self.db.rebuild(only_older, |db| {
-            for line in db.all_lines()? {
-                let s = oplog::parse_line(&line, None)?;
-                if self.refusal_in_order(&terms, &s.record)?.is_some() {
-                    continue;
-                }
-                db.derive(&s.record, &present, &self.store.machine.id)?;
-            }
-            for (id, deleted) in db.present_states()? {
-                if deleted || !self.has_state(&id) {
-                    db.set_present(&id, false)?;
-                }
-            }
-            db.fill_bases(&bases)?;
-            Ok(())
-        })
-    }
-
-    /// The differences between the `bases` table and the layers on disk, one line each. Empty
-    /// when they agree. `gc --repair` makes the table match the disk.
-    pub fn layer_bases_differences(&self) -> Result<Vec<String>> {
-        Ok(self.layer_bases_check()?.1)
-    }
-
-    /// The layers on disk and the differences from the table (see `layer_bases_differences`). The
-    /// layers are read once: `gc` repairs the table with the same map.
+    /// The layers on disk and differences from their base rows. Read once so `gc` repairs
+    /// the table using the same map.
     pub fn layer_bases_check(&self) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>)> {
         let disk = self.layer_bases_on_disk()?;
         let rows = self.db.bases_rows()?;
@@ -1447,250 +1402,7 @@ impl<'a> Project<'a> {
         }
     }
 
-    /// Write a record: sign it and store it with its derived rows in one transaction.
-    /// The caller holds the project lock and has created all snapshots the record names.
-    pub fn append(&self, rec: Record, actor: &Actor) -> Result<Record> {
-        Ok(self.append_batch(vec![rec], actor)?.remove(0))
-    }
-
-    /// Sign and derive every record in one FULL transaction, with contiguous sequence numbers.
-    /// Snapshots must already exist and the caller must hold the project lock.
-    pub(crate) fn append_batch(&self, mut records: Vec<Record>, actor: &Actor) -> Result<Vec<Record>> {
-        let _t = crate::trace::span("record batch");
-        crate::objstore::record_states(self, &mut records)?;
-        let Some(first) = records.first() else { return Ok(records) };
-        let m = &self.store.machine;
-        let present = self.state_present();
-        let project = if first.op == "project" { first.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
-        if project.is_empty() {
-            bail!("project id unknown: the project has no records yet");
-        }
-        self.db.with_tx(|| {
-            let mut seq = self.db.last_seq(&m.id)?;
-            if seq == 0 {
-                // The first record of this machine publishes its key.
-                let mut mr = Record::new("machine");
-                mr.id = ids::new_id();
-                mr.machine = m.id.clone();
-                mr.seq = 1;
-                mr.time = ids::now_ms();
-                mr.project = project.clone();
-                mr.actor = actor.clone();
-                mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
-                let line = oplog::sign_line(&mr, &m.key)?;
-                self.db.insert_record(&mr, &line)?;
-                self.db.derive_rows(&mr, &present, &m.id)?;
-                seq = 1;
-            }
-            for rec in &mut records {
-                rec.id = ids::new_id();
-                rec.machine = m.id.clone();
-                rec.seq = seq + 1;
-                rec.time = ids::now_ms();
-                rec.project = project.clone();
-                rec.actor = actor.clone();
-                if let Some(a) = rec.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
-                    a.insert("attestation_id".into(), serde_json::json!(rec.id));
-                    if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
-                        a.insert("signer".into(), serde_json::json!(m.id));
-                    }
-                    a.insert("time".into(), serde_json::json!(rec.time));
-                }
-                crate::model::validate(rec)?;
-                let line = oplog::sign_line(rec, &m.key)?;
-                self.db.insert_record(rec, &line)?;
-                self.db.derive_rows(rec, &present, &m.id)?;
-                // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
-                #[cfg(target_os = "macos")]
-                for state in &rec.states {
-                    if let Some(base) = crate::thin::layer_base(self, &state.id)? {
-                        self.db.record_base(&state.id, &base)?;
-                    }
-                }
-                seq = rec.seq;
-            }
-            Ok(())
-        })?;
-        for rec in &records {
-            Db::publish_effects(rec);
-        }
-        Ok(records)
-    }
-
-    /// Records of other machines (replication, restore): check each machine's chain (its key
-    /// from its first record, contiguous sequence numbers, signatures) and the project id, then
-    /// store them with their derived rows in one transaction. Returns the number of new records.
-    ///
-    /// Only records of trusted machines are taken (see `Trust`).
-    pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
-        crate::overlay_managers::validate_import(self, lines, matches!(trust, Trust::Server))?;
-        use std::collections::{BTreeMap, BTreeSet};
-        let mut parsed: Vec<oplog::Signed> = Vec::new();
-        for l in lines {
-            parsed.push(oplog::parse_line(l, None)?);
-        }
-        let project = if self.id.is_empty() {
-            parsed
-                .iter()
-                .find(|s| s.record.op == "project")
-                .and_then(|s| s.record.data["id"].as_str().map(|x| x.to_string()))
-                .unwrap_or_default()
-        } else {
-            self.id.clone()
-        };
-        for s in &parsed {
-            crate::model::validate(&s.record)?;
-            if !project.is_empty() && s.record.project != project {
-                bail!(
-                    "record {} of machine {} belongs to another project ({})",
-                    s.record.seq,
-                    s.record.machine,
-                    s.record.project
-                );
-            }
-        }
-        let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
-        for s in parsed {
-            by.entry(s.record.machine.clone()).or_default().push(s);
-        }
-        let present = self.state_present();
-        let mut fresh: Vec<oplog::Signed> = Vec::new();
-        let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        for (machine, recs) in by.iter_mut() {
-            recs.sort_by_key(|s| s.record.seq);
-            let mut last = self.db.last_seq(machine)?;
-            let key = if last > 0 {
-                let first = self.db.record_line(machine, 1)?.ok_or_else(|| anyhow!("no records"))?;
-                oplog::machine_key(&oplog::parse_line(&first, None)?.record)?
-            } else {
-                let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
-                if f.record.op != "machine" || f.record.seq != 1 {
-                    bail!("records of machine {machine} do not start with its key");
-                }
-                oplog::machine_key(&f.record)?
-            };
-            // Records that claim this machine must carry this machine's key.
-            if machine == &self.store.machine.id && key != self.store.machine.key.verifying_key() {
-                bail!("records claim this machine's id with another key");
-            }
-            keys.insert(machine.clone(), hex::encode(key.to_bytes()));
-            for s in recs.iter() {
-                if s.record.seq <= last {
-                    // A record we have: the copy must be the same bytes (else a changed or a
-                    // forked history).
-                    let stored = self.db.record_line(machine, s.record.seq)?;
-                    if stored.as_deref() != Some(s.line.as_str()) {
-                        bail!(
-                            "record {} of machine {machine} differs from the stored record (changed or forked history)",
-                            s.record.seq
-                        );
-                    }
-                    continue;
-                }
-                if s.record.seq != last + 1 {
-                    bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
-                }
-                oplog::parse_line(&s.line, Some(&key))
-                    .with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
-                for st in &s.record.states {
-                    if self.db.state(&st.id)?.is_some() || fresh.iter().any(|f| f.record.states.iter().any(|x| x.id == st.id)) {
-                        bail!("record {} of machine {machine} reuses state id {}", s.record.seq, st.id);
-                    }
-                }
-                last = s.record.seq;
-                fresh.push(oplog::Signed { record: s.record.clone(), line: s.line.clone() });
-            }
-        }
-        // Limited machines (docs/ci-trust.md): their records outside their terms are stored but have no effect, and
-        // they vouch for nobody.
-        let terms = self.trust_terms(&fresh.iter().map(|s| &s.record).collect::<Vec<_>>())?;
-        // Trust: known machines, then machines vouched for by trusted ones in this batch.
-        // Under `Trust::Server`, the machines whose trust records count: trusted here before this batch.
-        let mut locally_trusted: BTreeSet<String> = BTreeSet::from([self.store.machine.id.clone()]);
-        for m in keys.keys() {
-            if self.db.trusted(m)?.is_some_and(|k| Some(&k) == keys.get(m)) {
-                locally_trusted.insert(m.clone());
-            }
-        }
-        if !matches!(trust, Trust::All | Trust::Server) {
-            let mut trusted: BTreeSet<String> = BTreeSet::new();
-            for m in keys.keys() {
-                if let Some(k) = self.db.trusted(m)? {
-                    if Some(&k) == keys.get(m) {
-                        trusted.insert(m.clone());
-                    }
-                }
-            }
-            if let Trust::Peer(m, k) = trust {
-                if keys.get(m).map(|x| x == k).unwrap_or(false) {
-                    trusted.insert(m.to_string());
-                }
-            }
-            trusted.insert(self.store.machine.id.clone());
-            loop {
-                let before = trusted.len();
-                for s in &fresh {
-                    if s.record.op == "machine.trust"
-                        && trusted.contains(&s.record.machine)
-                        && !terms.contains_key(&s.record.machine)
-                        && terms.trust_counts(&s.record.machine, s.record.time, &s.record.data)
-                    {
-                        let (m, k) =
-                            (s.record.data["machine"].as_str().unwrap_or(""), s.record.data["public_key"].as_str().unwrap_or(""));
-                        if keys.get(m).map(|x| x == k).unwrap_or(false) {
-                            trusted.insert(m.to_string());
-                        }
-                    }
-                }
-                if trusted.len() == before {
-                    break;
-                }
-            }
-            let untrusted: Vec<String> = keys.keys().filter(|m| !trusted.contains(*m)).cloned().collect();
-            if !untrusted.is_empty() {
-                let list: Vec<String> = untrusted
-                    .iter()
-                    .map(|m| format!("{} (key {})", &crate::ids::display(m)[..8], keys.get(m).map(|k| k.as_str()).unwrap_or("")))
-                    .collect();
-                bail!(
-                    "records of untrusted machine(s): {}. If you trust them, run: layr remote trust <remote> <id>",
-                    list.join(", ")
-                );
-            }
-        }
-        fresh.sort_by(|a, b| {
-            (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq))
-        });
-        let n = fresh.len();
-        let local = self.store.machine.id.clone();
-        self.db.with_tx(|| {
-            for s in &fresh {
-                if self.db.insert_record(&s.record, &s.line)? {
-                    let server_trust = matches!(trust, Trust::Server)
-                        && TRUST_OPS.contains(&s.record.op.as_str())
-                        && !locally_trusted.contains(&s.record.machine);
-                    let refused = if server_trust {
-                        Some("a trust change by a machine this project does not trust")
-                    } else {
-                        self.refusal_in_order(&terms, &s.record)?
-                    };
-                    if let Some(why) = refused {
-                        if std::env::var_os("LAYR_TRACE").is_some() {
-                            let (seq, machine, op) = (s.record.seq, crate::ids::short(&s.record.machine), &s.record.op);
-                            eprintln!("trace record {seq} of machine {machine} ({op}) has no effect: {why}");
-                        }
-                        continue;
-                    }
-                    self.db.derive(&s.record, &present, &local)?;
-                }
-            }
-            Ok(())
-        })?;
-        Ok(n)
-    }
-
-    /// The trust rules (`layr_store::trust::rules`: limited machines and brokers), from the trust records of this
-    /// project, or for an overlay, of its project. `more` are records of an import that are not stored yet.
+    /// The trust rules of this project, or its parent for an overlay. `more` are incoming records not stored yet.
     pub fn trust_terms(&self, more: &[&Record]) -> Result<layr_store::trust::Rules> {
         let parent;
         let db = match self.name.split_once('%') {
@@ -1699,8 +1411,8 @@ impl<'a> Project<'a> {
                 if !path.is_file() {
                     return Ok(Default::default());
                 }
-                parent = Db::open(&path)?;
-                &parent
+                parent = Project::open_partial(self.store, project)?;
+                &parent.db
             }
             None => &self.db,
         };
@@ -1751,15 +1463,15 @@ impl<'a> Project<'a> {
         let mut lines = Vec::new();
         for (id, change) in &record.lines {
             let own = match self.db.line_machine(id)? {
-                None => change.before.is_none(),
+                None => matches!(change.transition, crate::model::LineTransition::Create { .. }),
                 Some(machine) => machine == record.machine,
             };
-            let name = change.after.as_ref().map(|after| after.name.as_str());
-            let renamed = change.before.as_ref().is_some_and(|before| Some(before.name.as_str()) != name);
-            let after = change.after.as_ref();
+            let name = change.after().map(|after| after.name.as_str());
+            let renamed = change.before().is_some_and(|before| Some(before.name.as_str()) != name);
+            let after = change.after();
             lines.push(layr_store::trust::LineMove {
                 id,
-                new: change.before.is_none(),
+                new: matches!(change.transition, crate::model::LineTransition::Create { .. }),
                 name,
                 own,
                 renamed,
@@ -1778,7 +1490,7 @@ impl<'a> Project<'a> {
     }
 
     /// The owners that the records with an effect give (`Db::recomputed_owners`).
-    pub fn recomputed_owners(&self) -> Result<Vec<crate::owners::Row>> {
+    pub fn recomputed_owners(&self) -> Result<Vec<crate::db::owners::Row>> {
         let terms = self.trust_terms(&[])?;
         self.db.recomputed_owners(&self.store.machine.id, &|record| Ok(self.refusal(&terms, record)?.is_none()))
     }
@@ -1792,7 +1504,7 @@ impl<'a> Project<'a> {
         }
         let mut out = String::new();
         for line in all.lines() {
-            if self.refusal(&terms, &oplog::parse_line(line, None)?.record)?.is_none() {
+            if self.refusal(&terms, &oplog::parse_line(line)?.record)?.is_none() {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -1806,7 +1518,7 @@ impl<'a> Project<'a> {
         let terms = self.trust_terms(&[])?;
         let mut out = Vec::new();
         for line in self.db.all_lines()? {
-            let record = oplog::parse_line(&line, None)?.record;
+            let record = oplog::parse_line(&line)?.record;
             if terms.is_empty() || self.refusal(&terms, &record)?.is_none() {
                 out.push(record);
             }
@@ -1814,11 +1526,50 @@ impl<'a> Project<'a> {
         Ok(out)
     }
 
+    pub fn authorized_records(&self) -> Result<Vec<layr_model::record::AuthorizedRecord<layr_model::record::ProjectScope>>> {
+        let mut keys = std::collections::BTreeMap::new();
+        for (machine, key) in self.db.trusted_keys()? {
+            let bytes: [u8; 32] = hex::decode(key)?.try_into().map_err(|_| anyhow!("invalid trusted machine key"))?;
+            keys.insert(machine, ed25519_dalek::VerifyingKey::from_bytes(&bytes)?);
+        }
+        let trust_writers = keys.clone();
+        // Committed catalog chains were admitted by import_lines (including explicit
+        // Trust::All/Server imports). Pin their first announcement, then recheck the
+        // signature before reconstructing local authorization after a restart.
+        for machine in self.db.record_machines()? {
+            if let Some(line) = self.db.record_line(&machine, 1)? {
+                let record = oplog::parse_line(&line)?.record;
+                if record.op == "machine" {
+                    let key = oplog::machine_key(&record)?;
+                    if let Some(known) = keys.insert(machine, key) {
+                        if known != key {
+                            bail!("catalog machine key differs from trusted key");
+                        }
+                    }
+                }
+            }
+        }
+        keys.insert(self.store.machine.id.clone(), self.store.machine.key.verifying_key());
+        let terms = self.trust_terms(&[])?;
+        layr_model::record::authorize_local_lines(
+            &self.id,
+            &self.db.all_lines()?,
+            &keys,
+            layr_model::record::LocalAuthority {
+                machine: layr_types::MachineId::parse(&self.store.machine.id)?,
+                trust_writers: &trust_writers,
+                limits: &terms,
+                overlay: self.name.split_once('%').map(|(_, overlay)| overlay),
+            },
+            ids::now_ms(),
+        )
+    }
+
     /// Machines whose records this project has but does not trust yet, with their keys.
     pub fn machine_keys_of(&self, lines: &[String]) -> Vec<(String, String)> {
         let mut v = Vec::new();
         for l in lines {
-            if let Ok(s) = oplog::parse_line(l, None) {
+            if let Ok(s) = oplog::parse_line(l) {
                 if s.record.op == "machine" {
                     if let Some(k) = s.record.data["public_key"].as_str() {
                         v.push((s.record.machine.clone(), k.to_string()));
@@ -1846,14 +1597,14 @@ impl<'a> Project<'a> {
         let mut out = Vec::new();
         for m in self.db.record_machines()? {
             let lines = self.db.lines_after(&m, 0)?;
-            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?, None)?;
+            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?)?;
             if first.record.op != "machine" {
                 bail!("machine {m}: the first record is not its key");
             }
             let key = oplog::machine_key(&first.record)?;
             let mut seq = 0;
             for l in &lines {
-                let s = oplog::parse_line(l, Some(&key)).with_context(|| format!("machine {m}"))?;
+                let s = oplog::verify_line(l, &key).with_context(|| format!("machine {m}"))?;
                 if s.record.seq != seq + 1 {
                     bail!("machine {m}: sequence gap at {}", s.record.seq);
                 }
@@ -1906,21 +1657,144 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stale_overlay_maintenance_yields_before_waiting_for_its_stale_parent() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-stale-overlay-{}", ids::new_id()));
+        let root = base.join("store");
+        let store = Store::open(&root)?;
+        let actor = crate::model::Actor { uid: 1000, name: "test".into(), session: None };
+        for name in ["p", "p%layer"] {
+            let dir = store.project_dir(name)?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: name.into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: Db::open(&db_file(&dir))?,
+            };
+            let mut record = crate::model::DraftRecord::new("project");
+            record.data = serde_json::json!({"id": p.id, "name": name, "config": {}});
+            p.lock_maintenance()?.append(record, &actor)?;
+        }
+        // Overlay publication reads the parent's object setting, so downgrade both catalogs
+        // only after all setup publications have finished.
+        for name in ["p", "p%layer"] {
+            rusqlite::Connection::open(db_file(&store.project_dir(name)?))?.pragma_update(None, "user_version", 9)?;
+        }
+        let parent_dir = store.project_dir("p")?;
+        let overlay_dir = store.project_dir("p%layer")?;
+        let held = fs::OpenOptions::new().write(true).open(parent_dir.join("meta/lock"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        let worker_overlay = overlay_dir.clone();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let store = Store::open(&worker_root)?;
+            let result = Project::open_catalog(&store, "p%layer", worker_overlay, Wait::Try).map(|p| p.is_none());
+            send.send(result)?;
+            Ok(())
+        });
+        // This bounds a deadlock regression, not filesystem performance. Always release the
+        // parent and join the worker before asserting, so a failure leaves no blocked thread.
+        let outcome = receive.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap()?;
+        assert!(outcome.context("maintenance waited for the parent's migration lease")??);
+        assert!(matches!(Db::inspect(&db_file(&parent_dir))?, OpenedDb::Stale(_)));
+        assert!(matches!(Db::inspect(&db_file(&overlay_dir))?, OpenedDb::Stale(_)));
+        assert!(!overlay_dir.join("meta").join(LOCK_HOLDER).exists());
+        let overlay = Project::open_partial(&store, "p%layer")?;
+        assert!(!overlay.id.is_empty());
+        assert!(Db::open(&db_file(&parent_dir)).is_ok(), "the normal open upgrades the parent before the overlay");
+        drop(overlay);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_catalog_migration_respects_leases_and_rechecks_the_schema() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-stale-catalog-{}", ids::new_id()));
+        let store = Store::open(&base.join("store"))?;
+        let dir = store.project_dir("p")?;
+        fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: Db::open(&db_file(&dir))?,
+        };
+        let actor = crate::model::Actor { uid: 1000, name: "test".into(), session: None };
+        let mut record = crate::model::DraftRecord::new("project");
+        record.data = serde_json::json!({"id": p.id, "name": "p", "config": {"description": "replayed"}});
+        p.lock_maintenance()?.append(record, &actor)?;
+        p.db.test_connection().pragma_update(None, "user_version", 9)?;
+        assert!(Db::open(&db_file(&dir)).is_err(), "normal opens cannot return a stale query handle");
+        let OpenedDb::Stale(stale) = Db::inspect(&db_file(&dir))? else { anyhow::bail!("expected a stale catalog") };
+        let held = fs::OpenOptions::new().write(true).open(p.meta_dir().join("lock"))?;
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
+        assert!(
+            Project::open_catalog(&store, "p", dir.clone(), Wait::Try)?.is_none(),
+            "maintenance yields to the existing writer"
+        );
+        drop(held);
+        let upgraded = Project::open_partial(&store, "p")?;
+        assert_eq!(upgraded.id, p.id);
+        assert_eq!(upgraded.config_value("description")?, Some(serde_json::json!("replayed")));
+        assert!(!upgraded.holds_lock(), "opening releases the migration flock");
+        let lease = lock_catalog(&store, "p", &p.meta_dir(), Wait::Block, Vec::new())?.unwrap();
+        let (db, committed) = stale.rebuild(&lease, |db, _, action| {
+            assert!(action == RebuildAction::AlreadyCurrent, "the lock recheck observes the other opener's rebuild");
+            Ok(db)
+        })?;
+        assert!(committed.reported_error.is_none());
+        assert_eq!(db.project_id()?, Some(p.id.clone()));
+        drop(lease);
+        p.db.test_connection().pragma_update(None, "user_version", 9)?;
+        let OpenedDb::Stale(stale) = Db::inspect(&db_file(&dir))? else { anyhow::bail!("expected a stale catalog") };
+        let other_meta = store.project_dir("other")?.join("meta");
+        fs::create_dir_all(&other_meta)?;
+        let other_lease = lock_catalog(&store, "other", &other_meta, Wait::Block, Vec::new())?.unwrap();
+        let error = stale.rebuild::<()>(&other_lease, |_, _, _| anyhow::bail!("an unrelated lease must never reach replay"));
+        assert!(matches!(error, Err(CommitResolution::NotCommitted(_))));
+        assert!(matches!(Db::inspect(&db_file(&dir))?, OpenedDb::Stale(_)));
+        drop(other_lease);
+        drop(upgraded);
+        drop(p);
+        drop(db);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
     fn try_locks_keep_bookkeeping_and_line_order() -> Result<()> {
         let base = std::env::temp_dir().join(format!("layr-try-locks-{}", ids::new_id()));
         let store = Store::open(&base.join("store"))?;
         let dir = store.project_dir("p")?;
         fs::create_dir_all(dir.join("meta/db"))?;
-        let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: ids::new_id(), db: Db::open(&db_file(&dir))? };
-        let line = p.try_line_lock("line", "main")?.expect("free line");
-        assert!(line.f.is_some());
-        let nested = p.try_line_lock("line", "main")?.expect("nested line");
-        assert!(nested.f.is_none());
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: Db::open(&db_file(&dir))?,
+        };
+        let LockAttempt::Acquired(line) = p.try_line_lock("line", "main")? else { anyhow::bail!("line lock unexpectedly busy") };
+        assert!(line._locks[0].f.is_some());
+        let LockAttempt::Acquired(nested) = p.try_line_lock("line", "main")? else {
+            anyhow::bail!("nested line lock unexpectedly busy")
+        };
+        assert!(std::rc::Rc::ptr_eq(&line._locks[0], &nested._locks[0]));
         drop(nested);
-        let lock = p.try_lock()?.expect("free project");
+        let LockAttempt::Acquired(lock) = line.try_lock(&p)? else { anyhow::bail!("project lock unexpectedly busy") };
         assert!(p.holds_lock());
         assert!(p.meta_dir().join(LOCK_HOLDER).is_file());
-        assert!(p.try_lock()?.is_none(), "a second file description cannot lock the project");
+        assert!(matches!(p.try_lock()?, LockAttempt::Busy), "a second file description cannot lock the project");
         assert!(p.try_line_lock("other", "other").is_err(), "line locks come first");
         drop(lock);
         assert!(!p.holds_lock());
@@ -1928,10 +1802,69 @@ mod tests {
         drop(line);
         let held = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/line"))?;
         rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
-        assert!(p.try_line_lock("line", "main")?.is_none());
+        assert!(matches!(p.try_line_lock("line", "main")?, LockAttempt::Busy));
         drop(held);
-        assert!(p.try_line_lock("line", "main")?.is_some());
+        assert!(matches!(p.try_line_lock("line", "main")?, LockAttempt::Acquired(_)));
         assert!(p.try_line_lock("../bad", "bad").is_err());
+        drop(p);
+        drop(store);
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn leases_are_sorted_and_nested_tokens_retain_the_actual_flocks() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-typed-leases-{}", ids::new_id()));
+        let store = Store::open(&base.join("store"))?;
+        let dir = store.project_dir("p")?;
+        fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: Db::open(&db_file(&dir))?,
+        };
+        let lines = p.line_leases([("z".into(), "z".into()), ("a".into(), "a".into()), ("z".into(), "z".into())])?;
+        let ids: Vec<_> = lines._locks.iter().map(|l| l.key.1.as_str()).collect();
+        assert_eq!(ids, ["a", "z"]);
+        assert!(p.line_leases([("a".into(), "a".into()), ("z".into(), "z".into())]).is_ok());
+        assert!(p.line_leases([("0".into(), "lower".into()), ("z".into(), "z".into())]).is_err());
+        assert!(!p.meta_dir().join("line-locks/0").exists(), "an out-of-order request acquires nothing");
+        let locked = lines.lock(&p)?;
+        let nested = p.lock_or_borrow()?;
+        assert!(std::rc::Rc::ptr_eq(&locked._lock, &nested._lock));
+        let other = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: p.id.clone(),
+            db: Db::open(&db_file(&dir))?,
+        };
+        assert!(nested.check(&other).is_err());
+        drop(locked);
+        drop(lines);
+        let line = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/a"))?;
+        assert!(rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err());
+        assert!(matches!(p.try_lock()?, LockAttempt::Busy));
+        drop(nested);
+        rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        drop(line);
+        let upper = p.line_leases([("z".into(), "z".into())])?;
+        assert!(p.line_leases([("a".into(), "lower".into()), ("z".into(), "z".into())]).is_err());
+        let lower = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/a"))?;
+        rustix::fs::flock(&lower, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        drop(lower);
+        drop(upper);
+        let phases =
+            p.line_leases([("q".into(), "q".into()), ("q-cache".into(), "cache".into()), ("view-q".into(), "view".into())])?;
+        assert_eq!(phases._locks.iter().map(|l| l.key.1.as_str()).collect::<Vec<_>>(), ["view-q", "q-cache", "q"]);
+        let owned = phases.into_locked(&p)?;
+        assert_eq!(owned._lock._lines.len(), 3);
+        drop(owned);
+        drop(other);
         drop(p);
         drop(store);
         fs::remove_dir_all(base)?;
@@ -1979,18 +1912,25 @@ mod tests {
             fs::create_dir_all(dir.join("meta/db"))?;
             fs::create_dir(dir.join("states"))?;
             let id = ids::new_id();
-            let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: id.clone(), db: Db::open(&db_file(&dir))? };
-            let mut project = Record::new("project");
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: id.clone(),
+                db: Db::open(&db_file(&dir))?,
+            };
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
-            p.append(project, &actor)?;
+            p.lock_maintenance().unwrap().append(project, &actor)?;
             let job_key = SigningKey::from_bytes(&[9u8; 32]);
             let (job, public_key) = (ids::new_id(), hex::encode(job_key.verifying_key().to_bytes()));
-            let mut trust = Record::new("machine.trust");
+            let mut trust = crate::model::DraftRecord::new("machine.trust");
             trust.data = serde_json::json!({"machine": job, "public_key": public_key, "expires_at": ids::now_ms() + 3_600_000,
                 "role": "writer"});
-            p.append(trust, &actor)?;
+            p.lock_maintenance().unwrap().append(trust, &actor)?;
             let signed = |seq: u64, op: &str, extra: serde_json::Value| -> Result<String> {
-                let mut rec = Record::new(op);
+                let mut rec = Record::untrusted_preview(op);
                 (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), job.clone(), seq, ids::now_ms());
                 (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), extra["data"].clone());
                 if let Some(states) = extra.get("states") {
@@ -2012,13 +1952,13 @@ mod tests {
                 signed(2, "config", forged)?,
                 signed(3, "config", serde_json::json!({"data": {"config": {"core.y": "2"}}}))?,
             ];
-            p.import_lines(&lines, Trust::All)?;
+            p.lock_maintenance().unwrap().import_lines(&lines, Trust::All)?;
             for when in ["on import", "after a rebuild"] {
                 assert!(p.db.state(&source)?.is_none(), "{when}: the writer's source state is not taken");
                 assert!(p.db.line_by_name("main")?.is_none(), "{when}: the writer's line is not taken");
                 assert!(p.db.config(&format!("core.x@{job}"))?.is_none(), "{when}: nor its settings");
                 assert!(p.db.config(&format!("core.y@{job}"))?.is_some(), "{when}: a plain config record counts");
-                p.rebuild_index()?;
+                p.lock_maintenance()?.rebuild_index()?;
             }
             Ok(())
         })();
@@ -2039,23 +1979,30 @@ mod tests {
             fs::create_dir_all(dir.join("meta/db"))?;
             fs::create_dir(dir.join("states"))?;
             let id = ids::new_id();
-            let p = Project { store: &store, name: "p".into(), dir: dir.clone(), id: id.clone(), db: Db::open(&db_file(&dir))? };
-            let mut project = Record::new("project");
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: id.clone(),
+                db: Db::open(&db_file(&dir))?,
+            };
+            let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
-            p.append(project, &actor)?;
+            p.lock_maintenance().unwrap().append(project, &actor)?;
             let machine = |seed: u8, role: &str| -> Result<(SigningKey, String)> {
                 let key = SigningKey::from_bytes(&[seed; 32]);
                 let machine = ids::new_id();
-                let mut trust = Record::new("machine.trust");
+                let mut trust = crate::model::DraftRecord::new("machine.trust");
                 trust.data = serde_json::json!({"machine": machine, "public_key": hex::encode(key.verifying_key().to_bytes()),
                     "role": role});
-                p.append(trust, &actor)?;
+                p.lock_maintenance().unwrap().append(trust, &actor)?;
                 Ok((key, machine))
             };
             let (merge_key, merge) = machine(11, "merge")?;
             let (writer_key, writer) = machine(12, "writer")?;
             let signed = |key: &SigningKey, machine: &str, seq: u64, op: &str, data: serde_json::Value| -> Result<String> {
-                let mut rec = Record::new(op);
+                let mut rec = Record::untrusted_preview(op);
                 (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), machine.to_string(), seq, ids::now_ms());
                 (rec.project, rec.actor, rec.data) = (p.id.clone(), actor.clone(), data);
                 if op == "machine" {
@@ -2064,12 +2011,12 @@ mod tests {
                 oplog::sign_line(&rec, key)
             };
             let numbering = || -> Result<layr_model::changes::Numbering> {
-                Ok(layr_model::Project::from_records(&p.id, p.effective_records()?, &p.store.machine.id)?.numbering().clone())
+                Ok(layr_model::Project::preview_records(&p.id, p.effective_records()?, &p.store.machine.id)?.numbering().clone())
             };
-            let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+            let mut handoff = crate::model::DraftRecord::new(layr_model::changes::HANDOFF_OP);
             handoff.data = serde_json::json!({"machine": merge, "next": 1});
-            p.append(handoff, &actor)?;
-            p.import_lines(
+            p.lock_maintenance().unwrap().append(handoff, &actor)?;
+            p.lock_maintenance().unwrap().import_lines(
                 &[
                     signed(&merge_key, &merge, 1, "machine", serde_json::json!({}))?,
                     signed(&merge_key, &merge, 2, layr_model::changes::NUMBER_OP, serde_json::json!({"numbers": {"c1": 1}}))?,
@@ -2091,9 +2038,9 @@ mod tests {
             assert_eq!(n.authority.as_deref(), Some(merge.as_str()), "its handoff does not count");
             // The creator takes the role back from the merge machine, then gives it to the cache writer.
             for to in [&p.store.machine.id, &writer] {
-                let mut handoff = Record::new(layr_model::changes::HANDOFF_OP);
+                let mut handoff = crate::model::DraftRecord::new(layr_model::changes::HANDOFF_OP);
                 handoff.data = serde_json::json!({"machine": to, "next": 2});
-                p.append(handoff, &actor)?;
+                p.lock_maintenance().unwrap().append(handoff, &actor)?;
                 assert_eq!(numbering()?.authority.as_deref(), Some(to.as_str()), "a handoff of the creator counts");
             }
             assert_eq!(numbering()?.number("c2"), None, "a cache writer's number does not count");
@@ -2248,5 +2195,372 @@ impl layr_store::trust::Current for DbCurrent<'_> {
 
     fn now(&self) -> i64 {
         crate::ids::now_ms()
+    }
+}
+
+impl<'p> std::ops::Deref for LockedProject<'p> {
+    type Target = Project<'p>;
+    fn deref(&self) -> &Self::Target {
+        self.project
+    }
+}
+
+fn lock_catalog(store: &Store, name: &str, meta: &Path, wait: Wait, lines: Vec<std::rc::Rc<LineLock>>) -> Result<Option<Lock>> {
+    if matches!(wait, Wait::Block) && HELD_PROJECTS.lock().map(|held| held.iter().any(|path| path == meta)).unwrap_or(false) {
+        bail!("project '{name}' is already locked in this process; borrow the held token");
+    }
+    // Resolved before the lock is taken: a failure here must not leave a count behind.
+    let layout = store.layout()?;
+    let trash = layout.trash_of(&layout.volume_of(name))?;
+    let f = fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join("lock"))?;
+    let asked = std::time::Instant::now();
+    if !wait.acquire(&f, Some(meta))? {
+        return Ok(None);
+    }
+    write_lock_holder(meta);
+    // Test only (tests/t121-lock-holder.sh): `LAYR_TEST_LOCK_HOLD_MS` keeps the lock this long.
+    if let Some(ms) = std::env::var("LAYR_TEST_LOCK_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+    // `project move` may have taken the folder away while this call waited for the lock. The
+    // lock then belongs to the old folder: refuse, the caller runs the command again.
+    {
+        use std::os::unix::fs::MetadataExt;
+        let here = fs::symlink_metadata(meta.join("lock")).ok();
+        let locked = f.metadata().ok();
+        let same = here.zip(locked).is_some_and(|(a, b)| a.ino() == b.ino() && a.dev() == b.dev());
+        if !same {
+            bail!("project '{}' moved or was deleted while this command waited; run the command again", name);
+        }
+    }
+    HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut held) = HELD_PROJECTS.lock() {
+        held.push(meta.to_path_buf());
+    }
+    if std::env::var_os("LAYR_TRACE").is_some() {
+        eprintln!("trace {:>8.1} ms  store lock taken: {}", asked.elapsed().as_secs_f64() * 1000.0, name);
+    }
+    if let Ok(mut dirs) = LOCK_TRASH.lock() {
+        if !dirs.contains(&trash) {
+            dirs.push(trash);
+        }
+    }
+    let lock = Lock {
+        f: Some(f),
+        since: {
+            crate::trace::reset();
+            std::time::Instant::now()
+        },
+        waited: asked.elapsed(),
+        log: meta.join("lock-slow.log"),
+        project: name.to_string(),
+        meta: meta.to_path_buf(),
+        _lines: lines,
+    };
+    Ok(Some(lock))
+}
+
+impl Lock {
+    pub(crate) fn check_catalog(&self, catalog: Option<&str>) -> Result<()> {
+        let catalog = catalog.ok_or_else(|| anyhow!("a migration requires a persistent catalog"))?;
+        let path = Path::new(catalog);
+        anyhow::ensure!(
+            path == self.meta.join("layr.sqlite") || path == self.meta.join("db/layr.sqlite"),
+            "catalog lease belongs to another project"
+        );
+        Ok(())
+    }
+}
+
+impl LockedProject<'_> {
+    pub fn write<T>(&self, change: impl FnOnce(&crate::db::WriteTxn<'_>) -> Result<T>) -> PublishResult<T> {
+        let tx = self.begin_write()?;
+        let value = change(&tx)?;
+        Self::finish_write(tx)?;
+        Ok(value)
+    }
+
+    fn finish_write(tx: crate::db::WriteTxn<'_>) -> PublishResult<()> {
+        let committed = tx.finish().into_result()?;
+        crate::free::release_effects(committed.effects);
+        match committed.reported_error {
+            Some(error) => Err(CommitResolution::Committed(error)),
+            None => Ok(()),
+        }
+    }
+
+    /// Rebuild the derived tables from the records.
+    pub fn rebuild_index(&self) -> Result<()> {
+        let terms = self.trust_terms(&[])?;
+        let tx = self.begin_rebuild()?;
+        tx.rebuild(|tx| self.replay_derived(tx, &terms))?;
+        let committed = tx.finish().into_result()?;
+        crate::free::release_effects(committed.effects);
+        if let Some(error) = committed.reported_error {
+            return Err(error);
+        }
+        self.db.remove_upgrade_copies();
+        Ok(())
+    }
+
+    fn replay_derived(&self, tx: &RebuildTxn<'_>, terms: &layr_store::trust::Rules) -> Result<()> {
+        let present = self.state_present();
+        let bases = self.layer_bases_on_disk()?;
+        for raw in tx.all_lines()? {
+            let signed = oplog::parse_line(&raw)?;
+            if self.refusal_in_order(terms, &signed.record)?.is_none() {
+                tx.derive(&signed.record, &present, &self.store.machine.id)?;
+            }
+        }
+        for (id, deleted) in tx.present_states()? {
+            if deleted || !self.has_state(&id) {
+                tx.set_present(&id, false)?;
+            }
+        }
+        tx.fill_bases(&bases)
+    }
+
+    /// Write a record: sign it and store it with its derived rows in one transaction.
+    /// The caller holds the project lock and has created all snapshots the record names.
+    pub fn append(&self, mut rec: crate::model::DraftRecord, actor: &Actor) -> PublishResult<Record> {
+        let mut records = self.append_batch(std::slice::from_mut(&mut rec), actor)?;
+        records.pop().ok_or_else(|| anyhow!("record batch returned no record").into())
+    }
+
+    /// Sign and derive every record in one FULL transaction, with contiguous sequence numbers.
+    /// Snapshots must already exist and the caller must hold the project lock.
+    pub(crate) fn append_batch(&self, records: &mut [crate::model::DraftRecord], actor: &Actor) -> PublishResult<Vec<Record>> {
+        let _t = crate::trace::span("record batch");
+        crate::objstore::record_states(self, records)?;
+        let Some(first) = records.first() else { return Ok(Vec::new()) };
+        let m = &self.store.machine;
+        let present = self.state_present();
+        let project = if first.op == "project" { first.data["id"].as_str().unwrap_or("").to_string() } else { self.id.clone() };
+        if project.is_empty() {
+            return Err(anyhow!("project id unknown: the project has no records yet").into());
+        }
+        let mut published = Vec::new();
+        let identity = |seq, time| -> Result<crate::model::RecordIdentity> {
+            Ok(crate::model::RecordIdentity {
+                id: layr_types::RecordId::parse(&ids::new_id())?,
+                machine: layr_types::MachineId::parse(&m.id)?,
+                project: layr_types::ProjectId::parse(&project)?,
+                seq: std::num::NonZeroU64::new(seq).context("record sequence must be positive")?,
+                time,
+                actor: actor.clone(),
+            })
+        };
+        let tx = self.begin_write()?;
+        {
+            let mut seq = self.db.last_seq(&m.id)?;
+            if seq == 0 {
+                // The first record of this machine publishes its key.
+                let mut mr = crate::model::DraftRecord::new("machine");
+                mr.data = serde_json::json!({"name": m.name, "public_key": hex::encode(m.key.verifying_key().to_bytes())});
+                let signed = mr.sign(identity(1, ids::now_ms())?, &m.key)?;
+                let mr: Record = serde_json::from_str(signed.get())?;
+                tx.insert_record(&mr, signed.line())?;
+                tx.derive(&mr, &present, &m.id)?;
+                seq = 1;
+            }
+            for draft in records {
+                let identity = identity(seq.checked_add(1).context("record sequence overflow")?, ids::now_ms())?;
+                if let Some(a) = draft.data.get_mut("attestation").and_then(|v| v.as_object_mut()) {
+                    a.insert("attestation_id".into(), serde_json::json!(identity.id.to_string()));
+                    if a.get("signer").and_then(|v| v.as_str()).is_none_or(|s| !s.starts_with("person:")) {
+                        a.insert("signer".into(), serde_json::json!(m.id));
+                    }
+                    a.insert("time".into(), serde_json::json!(identity.time));
+                }
+                let signed = draft.clone().sign(identity, &m.key)?;
+                let record: Record = serde_json::from_str(signed.get())?;
+                let rec = &record;
+                tx.insert_record(rec, signed.line())?;
+                tx.derive(rec, &present, &m.id)?;
+                // A state whose thin layer is on disk: its base row, in this transaction (thin.rs).
+                #[cfg(target_os = "macos")]
+                for state in &rec.states {
+                    if let Some(base) = crate::thin::layer_base(self, &state.id)? {
+                        tx.record_base(&state.id, &base)?;
+                    }
+                }
+                seq = rec.seq;
+                published.push(record);
+            }
+        }
+        Self::finish_write(tx)?;
+        Ok(published)
+    }
+
+    /// Records of other machines (replication, restore): check each machine's chain (its key
+    /// from its first record, contiguous sequence numbers, signatures) and the project id, then
+    /// store them with their derived rows in one transaction. Returns the number of new records.
+    ///
+    /// Only records of trusted machines are taken (see `Trust`).
+    pub fn import_lines(&self, lines: &[String], trust: Trust) -> Result<usize> {
+        crate::overlay_managers::validate_import(self, lines, matches!(trust, Trust::Server))?;
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut parsed: Vec<oplog::Signed> = Vec::new();
+        for l in lines {
+            parsed.push(oplog::parse_line(l)?);
+        }
+        let project = if self.id.is_empty() {
+            parsed
+                .iter()
+                .find(|s| s.record.op == "project")
+                .and_then(|s| s.record.data["id"].as_str().map(|x| x.to_string()))
+                .unwrap_or_default()
+        } else {
+            self.id.clone()
+        };
+        for s in &parsed {
+            crate::model::validate(&s.record)?;
+            if !project.is_empty() && s.record.project != project {
+                bail!(
+                    "record {} of machine {} belongs to another project ({})",
+                    s.record.seq,
+                    s.record.machine,
+                    s.record.project
+                );
+            }
+        }
+        let mut by: BTreeMap<String, Vec<oplog::Signed>> = BTreeMap::new();
+        for s in parsed {
+            by.entry(s.record.machine.clone()).or_default().push(s);
+        }
+        let present = self.state_present();
+        let mut fresh: Vec<oplog::Signed> = Vec::new();
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (machine, recs) in by.iter_mut() {
+            recs.sort_by_key(|s| s.record.seq);
+            let mut last = self.db.last_seq(machine)?;
+            let key = if last > 0 {
+                let first = self.db.record_line(machine, 1)?.ok_or_else(|| anyhow!("no records"))?;
+                oplog::machine_key(&oplog::parse_line(&first)?.record)?
+            } else {
+                let f = recs.first().ok_or_else(|| anyhow!("no records"))?;
+                if f.record.op != "machine" || f.record.seq != 1 {
+                    bail!("records of machine {machine} do not start with its key");
+                }
+                oplog::machine_key(&f.record)?
+            };
+            // Records that claim this machine must carry this machine's key.
+            if machine == &self.store.machine.id && key != self.store.machine.key.verifying_key() {
+                bail!("records claim this machine's id with another key");
+            }
+            keys.insert(machine.clone(), hex::encode(key.to_bytes()));
+            for s in recs.iter() {
+                if s.record.seq <= last {
+                    // A record we have: the copy must be the same bytes (else a changed or a
+                    // forked history).
+                    let stored = self.db.record_line(machine, s.record.seq)?;
+                    if stored.as_deref() != Some(s.line.as_str()) {
+                        bail!(
+                            "record {} of machine {machine} differs from the stored record (changed or forked history)",
+                            s.record.seq
+                        );
+                    }
+                    continue;
+                }
+                if s.record.seq != last + 1 {
+                    bail!("gap in the records of machine {machine}: have {last}, got {}", s.record.seq);
+                }
+                oplog::verify_line(&s.line, &key).with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
+                for st in &s.record.states {
+                    if self.db.state(&st.id)?.is_some() || fresh.iter().any(|f| f.record.states.iter().any(|x| x.id == st.id)) {
+                        bail!("record {} of machine {machine} reuses state id {}", s.record.seq, st.id);
+                    }
+                }
+                last = s.record.seq;
+                fresh.push(oplog::Signed { record: s.record.clone(), line: s.line.clone() });
+            }
+        }
+        // Limited machines (docs/ci-trust.md): their records outside their terms are stored but have no effect, and
+        // they vouch for nobody.
+        let terms = self.trust_terms(&fresh.iter().map(|s| &s.record).collect::<Vec<_>>())?;
+        // Trust: known machines, then machines vouched for by trusted ones in this batch.
+        // Under `Trust::Server`, the machines whose trust records count: trusted here before this batch.
+        let mut locally_trusted: BTreeSet<String> = BTreeSet::from([self.store.machine.id.clone()]);
+        for m in keys.keys() {
+            if self.db.trusted(m)?.is_some_and(|k| Some(&k) == keys.get(m)) {
+                locally_trusted.insert(m.clone());
+            }
+        }
+        if !matches!(trust, Trust::All | Trust::Server) {
+            let mut trusted: BTreeSet<String> = BTreeSet::new();
+            for m in keys.keys() {
+                if let Some(k) = self.db.trusted(m)? {
+                    if Some(&k) == keys.get(m) {
+                        trusted.insert(m.clone());
+                    }
+                }
+            }
+            if let Trust::Peer(m, k) = trust {
+                if keys.get(m).map(|x| x == k).unwrap_or(false) {
+                    trusted.insert(m.to_string());
+                }
+            }
+            trusted.insert(self.store.machine.id.clone());
+            loop {
+                let before = trusted.len();
+                for s in &fresh {
+                    if s.record.op == "machine.trust"
+                        && trusted.contains(&s.record.machine)
+                        && !terms.contains_key(&s.record.machine)
+                        && terms.trust_counts(&s.record.machine, s.record.time, &s.record.data)
+                    {
+                        let (m, k) =
+                            (s.record.data["machine"].as_str().unwrap_or(""), s.record.data["public_key"].as_str().unwrap_or(""));
+                        if keys.get(m).map(|x| x == k).unwrap_or(false) {
+                            trusted.insert(m.to_string());
+                        }
+                    }
+                }
+                if trusted.len() == before {
+                    break;
+                }
+            }
+            let untrusted: Vec<String> = keys.keys().filter(|m| !trusted.contains(*m)).cloned().collect();
+            if !untrusted.is_empty() {
+                let list: Vec<String> = untrusted
+                    .iter()
+                    .map(|m| format!("{} (key {})", &crate::ids::display(m)[..8], keys.get(m).map(|k| k.as_str()).unwrap_or("")))
+                    .collect();
+                bail!(
+                    "records of untrusted machine(s): {}. If you trust them, run: layr remote trust <remote> <id>",
+                    list.join(", ")
+                );
+            }
+        }
+        fresh.sort_by(|a, b| {
+            (a.record.time, &a.record.machine, a.record.seq).cmp(&(b.record.time, &b.record.machine, b.record.seq))
+        });
+        let n = fresh.len();
+        let local = self.store.machine.id.clone();
+        let tx = self.begin_write()?;
+        {
+            for s in &fresh {
+                if tx.insert_record(&s.record, &s.line)? {
+                    let server_trust = matches!(trust, Trust::Server)
+                        && TRUST_OPS.contains(&s.record.op.as_str())
+                        && !locally_trusted.contains(&s.record.machine);
+                    let refused = if server_trust {
+                        Some("a trust change by a machine this project does not trust")
+                    } else {
+                        self.refusal_in_order(&terms, &s.record)?
+                    };
+                    if let Some(why) = refused {
+                        if std::env::var_os("LAYR_TRACE").is_some() {
+                            let (seq, machine, op) = (s.record.seq, crate::ids::short(&s.record.machine), &s.record.op);
+                            eprintln!("trace record {seq} of machine {machine} ({op}) has no effect: {why}");
+                        }
+                        continue;
+                    }
+                    tx.derive(&s.record, &present, &local)?;
+                }
+            }
+        }
+        Self::finish_write(tx)?;
+        Ok(n)
     }
 }

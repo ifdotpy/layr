@@ -16,7 +16,7 @@ const LINE: &str = "01a12290-0000-7000-8000-000000000003";
 const STATE: &str = "01a12290-0000-7000-8000-000000000004";
 
 fn line(seq: usize, key: &SigningKey) -> String {
-    let mut r = Record::new(match seq {
+    let mut r = Record::untrusted_preview(match seq {
         1 => "machine",
         2 => "project",
         _ => "note",
@@ -74,7 +74,7 @@ fn main() -> Result<()> {
                 segment.clear();
             }
         }
-        let model = Model::from_verified_lines(initial.iter().map(String::as_str), "")?;
+        let model = Model::preview_lines(initial.iter().map(String::as_str), "")?;
         let mark = BTreeMap::from([(MACHINE.into(), index::Watermark { seq: count as u64, hash: index::line_hash(&last) })]);
         let mut heads = model_index::heads(&model.projects[PROJECT], mark, 1)?;
         heads.counts.records = count as u64;
@@ -88,11 +88,11 @@ fn main() -> Result<()> {
             for segment in &segments {
                 let plain = String::from_utf8(keys::decrypt(&identity, segment)?)?;
                 for line in plain.lines() {
-                    record::verify_line(line.as_bytes(), &key.verifying_key())?;
+                    let _verified = record::verify_line(line.as_bytes(), &key.verifying_key())?;
                     verified.push(line.to_string());
                 }
             }
-            let full = Model::from_verified_lines(verified.iter().map(String::as_str), "")?;
+            let full = Model::preview_lines(verified.iter().map(String::as_str), "")?;
             let actual = model_index::heads(&full.projects[PROJECT], heads.watermark.clone(), 1)?;
             ensure!(actual == heads, "snapshot differs from full verified first page");
             black_box(&actual);

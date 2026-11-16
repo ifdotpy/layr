@@ -11,7 +11,7 @@ use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::gitbridge;
 use crate::ids;
-use crate::model::{Line, Record};
+use crate::model::Line;
 use crate::repo::Repo;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -89,10 +89,10 @@ pub fn overlay_remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
             } else {
                 serde_json::Value::Null
             };
-            let _lock = orepo.p.lock()?;
-            let mut rec = Record::new("config");
+            let _lock = orepo.p.lock_maintenance()?;
+            let mut rec = crate::model::DraftRecord::new("config");
             rec.data = serde_json::json!({"config": {format!("overlay.{overlay}.git.{name}"): value}});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&_lock, ctx, rec)?;
             Ok(0)
         }
         _ => Err(exit(128, USAGE)),
@@ -193,19 +193,19 @@ fn overlay_head(repo: &Repo, line: &Line, name: &str) -> Result<Option<String>> 
 /// Export the history of an overlay state to its git store and push it to `url` `branch`.
 fn push_overlay_git(ctx: &Ctx, repo: &Repo, name: &str, remote: &OverlayRemote, state: &str, branch: &str) -> Result<String> {
     let orepo = repo.overlay_repo(name)?;
-    let _lock = orepo.p.lock()?;
+    let _lock = orepo.p.lock_maintenance()?;
     gitbridge::init_store(&orepo)?;
-    let (commit, made) = gitbridge::export_history(&orepo, state)?;
+    let (commit, made) = gitbridge::export_history(&orepo, &orepo.source_id(state)?)?;
     let commits: serde_json::Map<String, serde_json::Value> =
         made.into_iter().map(|(s, c)| (s, serde_json::Value::String(c))).collect();
     let eid = ids::new_id();
-    let mut rec = Record::new("export");
+    let mut rec = crate::model::DraftRecord::new("export");
     rec.data = serde_json::json!({"export": eid, "state": state, "remote": remote.name, "branch": branch, "commit": commit, "commits": commits, "status": "prepared"});
-    orepo.commit_record(ctx, rec)?;
+    orepo.commit_record(&_lock, ctx, rec)?;
     gitbridge::push(ctx, &orepo, &remote.url, &commit, branch, false)?;
-    let mut rec = Record::new("export");
+    let mut rec = crate::model::DraftRecord::new("export");
     rec.data = serde_json::json!({"export": eid, "state": state, "remote": remote.name, "branch": branch, "commit": commit, "status": "pushed"});
-    orepo.commit_record(ctx, rec)?;
+    orepo.commit_record(&_lock, ctx, rec)?;
     Ok(commit)
 }
 
@@ -378,6 +378,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 cwd: ctx.cwd.clone(),
                 env: ctx.env.clone(),
                 author: Default::default(),
+                captures: Default::default(),
                 out: std::cell::RefCell::new(if json {
                     Box::new(capture.clone())
                 } else if quiet {
@@ -409,6 +410,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     cwd: ctx.cwd.clone(),
                     env: ctx.env.clone(),
                     author: Default::default(),
+                    captures: Default::default(),
                     out: std::cell::RefCell::new(Box::new(std::io::sink())),
                 };
                 match super::remote::git::push(&sub, &[name.clone(), l.clone(), "-q".to_string()]) {

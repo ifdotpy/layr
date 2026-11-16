@@ -76,7 +76,7 @@ ok "a rolled back line refuses line list" test "$rc" -ne 0
 has "line list shows the rollback message" "rolled back by a system snapshot" "$out"
 
 # A state folder that a rollback emptied stops its project too.
-l init r --from $T/src -q >/dev/null
+l init r --no-objects --from $T/src -q >/dev/null
 R=$M/own/projects/r
 ok "a normal project passes status" sh -c "cd $R/lines/main && $LAYR status >/dev/null"
 S=$(ls $R/states | head -1)

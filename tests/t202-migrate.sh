@@ -69,7 +69,7 @@ else
     python3 -I -c 'import os,sys; os.setxattr(sys.argv[1], "user.layr-test", b"value")' $T/src/bin/run.sh 2>/dev/null || true
 fi
 HAS_XATTR=$(xattr_of $T/src/bin/run.sh)
-l init p --from $T/src -q >/dev/null
+l init p --no-objects --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
 first=$(l rev-parse head)

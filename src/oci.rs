@@ -16,16 +16,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// Transport boundary used by the generic remote dispatcher.
-pub fn push(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
-    crate::cmd::oci::push(ctx, url, rev, runnable, false)
-}
-
-/// JSON output variant for a remote command with --json.
-pub fn push_json(ctx: &crate::ctx::Ctx, url: &str, rev: &str, runnable: Option<&str>) -> Result<i32> {
-    crate::cmd::oci::push(ctx, url, rev, runnable, true)
-}
-
 pub const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 pub const LAYER: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -344,13 +334,13 @@ fn select(all: &[Entry], paths: &[String]) -> Result<Vec<Entry>> {
     }
     let specs: Vec<String> = paths.iter().map(|p| if p == "." { "".into() } else { p.clone() }).collect();
     for p in &specs {
-        if !p.is_empty() && !all.iter().any(|e| crate::cmd::matches(std::slice::from_ref(p), &e.path)) {
+        if !p.is_empty() && !all.iter().any(|e| crate::pathspec::matches(std::slice::from_ref(p), &e.path)) {
             bail!("runnable layer path '{p}' matches no snapshot entries");
         }
     }
     let mut keep = BTreeSet::new();
     for e in all {
-        if crate::cmd::matches(&specs, &e.path) {
+        if crate::pathspec::matches(&specs, &e.path) {
             keep.insert(e.path.clone());
             let mut p = Path::new(&e.path).parent();
             while let Some(parent) = p.filter(|p| !p.as_os_str().is_empty()) {
@@ -535,16 +525,18 @@ pub struct Export {
 
 /// Only this boundary translates a revision into an exportable shared snapshot.
 pub fn export(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &crate::ctx::Ctx,
     repo: &Repo,
     rev: &str,
     line: Option<&crate::model::Line>,
     name: Option<&str>,
 ) -> Result<Export> {
+    locked.check(&repo.p)?;
     if repo.p.is_overlay() {
         bail!("OCI export refuses private overlays");
     }
-    let id = crate::revs::resolve(repo, line, rev)?;
+    let id = crate::revs::resolve_state(repo, line, rev)?;
     let state = repo.state(&id)?;
     let named_line = repo.p.db.line_by_name(rev)?;
     if let Some(l) = named_line.as_ref().or_else(|| line.filter(|l| l.head == id)) {
@@ -588,7 +580,7 @@ pub fn export(
         None => (None, None),
     };
     for layer in img.layers.iter().chain(chart.iter().flat_map(|c| c.layers.iter())) {
-        register_layer(ctx, repo, &cache, &id, layer)?;
+        register_layer(locked, ctx, repo, &cache, &id, layer)?;
     }
     let restrictions = restriction_key(repo, &id)?;
     let e = Export { image: img, chart, chart_version, cache, state: id, runnable: name, restrictions };
@@ -597,8 +589,16 @@ pub fn export(
 }
 
 /// The Core ref is the cache root. A local locator only avoids a database lookup for blob reads.
-fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &str, layer: &Descriptor) -> Result<()> {
-    use crate::model::{Record, RefChange, RefState, StateKind};
+fn register_layer(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &crate::ctx::Ctx,
+    repo: &Repo,
+    cache: &Cache,
+    source: &str,
+    layer: &Descriptor,
+) -> Result<()> {
+    locked.check(&repo.p)?;
+    use crate::model::{RefChange, RefState, StateKind};
     let key = digest_hex(&layer.digest)?;
     let name = format!("derived/oci-layer-v1/{key}");
     let before = repo.p.db.ref_value(&name, crate::ids::now_ms())?;
@@ -617,8 +617,7 @@ fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &st
     } else {
         let src = cache.blob_path(&layer.digest)?;
         let work = repo.p.work_dir().join(crate::store::temp_name());
-        crate::storage::create_subvolume(&work)?;
-        let cleanup = crate::repo::Temp { path: work.clone() };
+        let cleanup = crate::repo::Temp::empty(work.clone())?;
         fsutil::copy_entry(
             src.parent().context("layer path has no parent")?,
             src.file_name().and_then(|s| s.to_str()).context("invalid layer filename")?,
@@ -630,10 +629,10 @@ fn register_layer(ctx: &crate::ctx::Ctx, repo: &Repo, cache: &Cache, source: &st
         let mut state = repo.new_state(ctx, &work, StateKind::Derived, vec![source.into()], "OCI layer", None)?;
         state.context = Some("oci-layer-v1".into());
         let id = state.id.clone();
-        let mut rec = Record::new("derive");
+        let mut rec = crate::model::DraftRecord::new("derive");
         rec.states.push(state);
         rec.data = json!({"ref_change": RefChange { name: name.clone(), before, after: Some(RefState { name, target: id.clone(), expires_at: None }) }});
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(locked, ctx, rec)?;
         drop(cleanup);
         id
     };
@@ -727,7 +726,7 @@ fn chart(root: &Path, folder: &str, name: &str, image: &str, cache: &Cache, forb
 /// Single resolver hook. Core extends revs::resolve for refs, changes and exact views.
 pub fn resolve_tag(repo: &Repo, tag: &str) -> Result<String> {
     let rev = tag_revision(tag)?;
-    crate::revs::resolve(repo, None, &rev)
+    crate::revs::resolve_state(repo, None, &rev)
 }
 
 pub fn tag_revision(tag: &str) -> Result<String> {

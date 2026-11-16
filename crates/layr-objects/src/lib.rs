@@ -421,21 +421,50 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_time_change_keeps_its_files_and_updates_times() {
-        let dir = scratch("directory-time");
+    fn injected_placeholder_times_are_normalized_in_full_and_incremental_writes() -> anyhow::Result<()> {
+        use anyhow::Context;
+        use write::Source;
+        struct ClassifiedFolder<'a>(&'a Path);
+        impl Source for ClassifiedFolder<'_> {
+            fn path(&self, relative: &[u8]) -> anyhow::Result<std::path::PathBuf> {
+                Ok(self.0.join(fsx::os(relative)))
+            }
+            fn names(&self, relative: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+                use std::os::unix::ffi::OsStrExt;
+                fs::read_dir(self.path(relative)?)?.map(|e| Ok(e?.file_name().as_bytes().to_vec())).collect()
+            }
+            fn entry_kind(&self, path: &Path, _: &fs::Metadata) -> anyhow::Result<fsx::EntryKind> {
+                Ok(if path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                    fsx::EntryKind::SubvolumePlaceholder
+                } else {
+                    fsx::EntryKind::Ordinary
+                })
+            }
+        }
+        let dir = scratch("placeholder-writes");
         let src = dir.join("src");
-        fs::create_dir_all(src.join("a/b")).unwrap();
-        fs::write(src.join("a/b/file"), "unchanged").unwrap();
-        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
-        let options = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
-        let first = write_tree(&store, &src, &options).unwrap();
-        let base = write::Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
-        times::set(&src.join("a/b"), 1_234_567_890).unwrap();
-        let incremental = write::write_changed_with_dirty(&store, &src, &base, &[], &[b"a/b".to_vec()], &options).unwrap();
-        let full = write_tree(&store, &src, &options).unwrap();
-        assert_eq!(incremental.tree, full.tree);
-        assert_eq!(incremental.times, full.times);
-        assert_eq!(incremental.files, 0, "time-only directories do not reread files");
+        let stub = src.join(".git");
+        fs::create_dir_all(&stub)?;
+        fs::write(src.join("file"), "unchanged")?;
+        let source = ClassifiedFolder(&src);
+        let store = Store::open(&dir.join("store"), Keying::Plain)?;
+        let options = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: vec![], similar: false };
+        let first = write::write_tree_from(&store, &source, &options)?;
+        let base = write::Base { tree: first.tree.context("missing tree")?, times: first.times.context("missing times")? };
+        let out = dir.join("out");
+        checkout_with(&store, &base.tree, Some(&base.times), &out)?;
+        assert_eq!(times::ns_of(&fs::symlink_metadata(out.join(".git"))?), 0);
+        times::set(&stub, 123_456_789)?;
+        let dirty = write::write_changed_with_dirty_from(&store, &source, &base, &[], &[b".git".to_vec()], &options)?;
+        let changed = write::write_changed_from(&store, &source, &base, &[b".git".to_vec()], &options)?;
+        let full = write::write_tree_from(&store, &source, &options)?;
+        for written in [dirty, changed, full] {
+            assert_eq!(written.tree, Some(base.tree));
+            assert_eq!(written.times, Some(base.times), "placeholder time drift must not enter the times table");
+        }
+        let root = write::write_tree_from(&store, &ClassifiedFolder(&stub), &options)?;
+        assert_eq!(store.get_times(&root.times.context("missing root times")?)?.own, 0, "a placeholder root also has no meaningful time");
+        Ok(())
     }
 
     #[test]

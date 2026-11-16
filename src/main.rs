@@ -17,63 +17,82 @@ mod stream_fs;
 #[cfg(all(feature = "overlayfs", not(target_os = "linux")))]
 compile_error!("the overlayfs feature requires Linux");
 mod args;
+mod attestation;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs_driver;
+mod byte_size;
 mod cache_overlay;
 mod changes;
 mod cmd;
+mod compare;
 mod db;
 mod dedup;
 mod diff;
 mod disk;
-mod follow;
+mod errors;
 mod free;
+#[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
+mod fs_candidates;
+#[cfg(test)]
+mod fs_contract_tests;
 mod fsutil;
 mod gitbridge;
 mod ids;
-mod owners;
 use layr_store::http;
+#[cfg(target_os = "macos")]
+mod apfs;
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+mod btrfs;
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod btrfs_scan;
+mod fs;
 mod ignore_rules;
 mod layrfs;
 mod lineops;
 mod linepaths;
+#[cfg(target_os = "linux")]
+mod linux_status;
+mod machine_trust;
 mod merge;
 mod model;
-mod objstore;
 mod object_tree;
-#[cfg(not(target_os = "macos"))]
-mod source;
+mod objstore;
 mod oci;
 mod oplog;
 mod overlay;
 mod overlay_managers;
+#[cfg(feature = "overlayfs")]
+mod overlayfs;
+mod pathspec;
 mod person;
 mod privs;
 mod probes;
+mod project_config;
 mod project_copy;
 mod project_move;
 mod radar;
+mod receive_stream;
 mod recv;
+mod remote_config;
 mod repo;
+mod retention;
 mod revs;
 mod rootcheck;
 mod runner;
 mod schemas;
 mod secrets;
 #[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 mod send_cache;
 mod service;
+mod source;
 mod source_times;
-#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-#[path = "btrfs.rs"]
-mod storage;
-#[cfg(feature = "overlayfs")]
-#[path = "overlayfs.rs"]
-mod storage;
-#[cfg(target_os = "macos")]
-#[path = "apfs.rs"]
-mod storage;
+mod status_cache;
 mod store;
+mod write_source;
+// The binary examples are checked against its real types without another permanent Cargo target.
+#[cfg(layr_doctest)]
+pub use store::Project;
 mod store_remote;
 mod store_remove;
 mod store_version;
@@ -84,7 +103,7 @@ mod sys;
 mod thin;
 mod trace;
 mod tree;
-mod usage;
+mod try_run;
 #[cfg(target_os = "macos")]
 mod views;
 #[cfg(target_os = "linux")]
@@ -117,7 +136,7 @@ fn main() {
         && std::env::var_os("LAYR_TEST_PERIODIC").is_some()
     {
         // Test only (tests/t255-periodic-yields.sh): one periodic pass for an isolated store.
-        crate::service::periodic_test(std::path::Path::new(&argv[1]));
+        crate::cmd::service_host::periodic_test(std::path::Path::new(&argv[1]));
         return;
     }
     if argv.first().map(String::as_str) == Some("__empty-trash") && argv.len() == 2 {
@@ -273,12 +292,12 @@ fn main() {
         }
     }
     // The commands that run in the caller's process (retest, person, mount) are counted here; the
-    // others where they run (`service::run_as`).
+    // others where they run (`cmd::service_host::run_as`).
     let started = std::time::Instant::now();
     let early = |argv: &[String], code: i32| {
         let agent = std::env::var_os("LAYR_SESSION").is_some();
         let ms = started.elapsed().as_millis() as u64;
-        usage::count(&store::default_root(), argv, rustix::process::getuid().as_raw(), agent, code, ms);
+        cmd::usage::count(&store::default_root(), argv, rustix::process::getuid().as_raw(), agent, code, ms);
         code
     };
     if argv.first().map(String::as_str) == Some("retest") {
@@ -319,7 +338,7 @@ fn main() {
         }
     }
     if argv.first().map(|s| s.as_str()) == Some("daemon") {
-        match service::daemon(&argv[1..]) {
+        match cmd::service_host::daemon(&argv[1..]) {
             Ok(c) => std::process::exit(c),
             Err(e) => {
                 eprintln!("fatal: {e:#}");
@@ -334,7 +353,7 @@ fn main() {
         let uid = rustix::process::getuid().as_raw();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let env: HashMap<String, String> = std::env::vars().collect();
-        service::run_as(argv, ctx::Caller::from_uid(uid), cwd, env, &store::default_root())
+        cmd::service_host::run_as(argv, ctx::Caller::from_uid(uid), cwd, env, &store::default_root())
     } else {
         match service::forward(&argv) {
             Ok(c) => c,
@@ -346,3 +365,6 @@ fn main() {
     };
     std::process::exit(code);
 }
+
+#[cfg(layr_doctest)]
+pub use db::{Current, Db, Stale};

@@ -3,6 +3,7 @@
 //! "Sweeping stale build output".
 
 use anyhow::{bail, Context, Result};
+use crate::cargo::layout::{Layout, Unit};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -98,7 +99,7 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
                     .filter_map(Value::as_str);
                 for p in files {
                     let p = PathBuf::from(p);
-                    let profile = profile_of(target, &p)?;
+                    let profile = profile_of(target, &p, &plans)?;
                     let live = plans.entry(profile.clone()).or_default();
                     live.paths.insert(p.strip_prefix(&profile)?.to_path_buf());
                     match hash_of_output(&p) {
@@ -117,11 +118,11 @@ pub fn plan(target: &Path, messages: &[u8]) -> Result<Plans> {
             }
             Some("build-script-executed") => {
                 let Some(out) = v["out_dir"].as_str().map(PathBuf::from) else { continue };
-                let profile = profile_of(target, &out)?;
+                let profile = profile_of(target, &out, &plans)?;
                 let live = plans.entry(profile.clone()).or_default();
-                live.paths.insert(out.strip_prefix(&profile)?.to_path_buf());
-                // `build/<package>-<hash>/out`: the hash is in the name of the folder of the out dir.
-                live.hashes.extend(out.parent().and_then(file_name).and_then(unit_hash).map(String::from));
+                let rel = out.strip_prefix(&profile)?;
+                live.paths.insert(rel.to_path_buf());
+                if let Some(unit) = Layout::path_unit(&rel.to_string_lossy()) { live.hashes.insert(unit.hash); }
             }
             _ => {}
         }
@@ -182,13 +183,14 @@ struct Pending {
 }
 
 /// The profile folder of an output path under `target`: the first folder that holds `.fingerprint`.
-fn profile_of(target: &Path, p: &Path) -> Result<PathBuf> {
+fn profile_of(target: &Path, p: &Path, plans: &Plans) -> Result<PathBuf> {
     let rel = p.strip_prefix(target).with_context(|| format!("output outside the target folder: {}", p.display()))?;
+    if let Some(profile) = plans.keys().find(|profile| p.starts_with(profile)) { return Ok(profile.clone()); }
     let n = rel.components().count();
     let mut dir = target.to_path_buf();
     for c in rel.components().take(n.saturating_sub(1)) {
         dir.push(c);
-        if dir.join(".fingerprint").is_dir() {
+        if Layout::has_units(&dir) {
             return Ok(dir);
         }
     }
@@ -226,6 +228,14 @@ fn outputs(profile: &Path) -> Vec<Output> {
             }
         }
     }
+    for unit in Layout::units(profile).into_iter().filter(|u| u.layout == Layout::UnitDirectories) {
+        for e in read_dir(&unit.outputs) {
+            let name = name_of(&e);
+            if let Ok(m) = e.metadata() {
+                if m.is_file() { v.push(Output { name, hash: unit.hash.clone(), len: m.len(), mtime: (m.mtime(), m.mtime_nsec()) }); }
+            }
+        }
+    }
     v
 }
 
@@ -240,18 +250,12 @@ fn unit_base(name: &str) -> Option<&str> {
 fn marked(profile: &Path, kind: &str, name: &str) -> Vec<(String, SystemTime)> {
     let marker = format!("{kind}-{name}");
     let mut out = Vec::new();
-    for e in read_dir(&profile.join(".fingerprint")) {
-        let dir = e.path();
-        let name = name_of(&e);
-        let Some(hash) = unit_hash(&name) else { continue };
+    for unit in Layout::units(profile) {
+        let dir = unit.fingerprint;
         let Ok(m) = dir.join(&marker).metadata() else { continue };
-        if !m.is_file() {
-            continue;
-        }
+        if !m.is_file() { continue }
         let t = dir.join("invoked.timestamp").metadata().and_then(|m| m.modified()).or_else(|_| m.modified());
-        if let Ok(t) = t {
-            out.push((hash.to_string(), t));
-        }
+        if let Ok(t) = t { out.push((unit.hash, t)); }
     }
     out
 }
@@ -293,15 +297,16 @@ fn is_live_owner(owner: &Owner, live: &Live) -> bool {
 
 /// The object files that stay: of each live owner, the files of its newest build (by modification time).
 /// Each build writes a new set of object files for the same owner, and cargo never removes the old set.
-fn kept_objects(profile: &Path, live: &Live) -> BTreeSet<PathBuf> {
+fn kept_objects(profile: &Path, live: &Live, units: &[Unit]) -> BTreeSet<PathBuf> {
     let mut objects: Vec<(PathBuf, Owner, String, SystemTime)> = Vec::new();
-    for folder in OUTPUT_FOLDERS {
-        for e in read_dir(&profile.join(folder)) {
+    let mut dirs: Vec<(PathBuf, Option<String>)> = OUTPUT_FOLDERS.iter().map(|f| (profile.join(f), None)).collect();
+    dirs.extend(units.iter().filter(|u| u.layout == Layout::UnitDirectories && live.hashes.contains(&u.hash)).map(|u| (u.outputs.clone(), Some(u.hash.clone()))));
+    for (dir, unit_hash) in dirs {
+        for e in read_dir(&dir) {
             let name = name_of(&e);
             let Some((owner, build)) = object_group(&name) else { continue };
-            if !is_live_owner(&owner, live) {
-                continue;
-            }
+            let owner = unit_hash.as_ref().map_or(owner, |h| Owner::Unit(h.clone()));
+            if !is_live_owner(&owner, live) { continue }
             let Ok(t) = e.metadata().and_then(|m| m.modified()) else { continue };
             objects.push((e.path(), owner, build.to_string(), t));
         }
@@ -337,14 +342,23 @@ fn doomed(profile: &Path, live: &Live) -> Vec<PathBuf> {
         }
         out.push(path);
     }
+    let units = Layout::units(profile);
     for folder in UNIT_FOLDERS {
         for e in read_dir(&profile.join(folder)) {
-            if !unit_hash(&name_of(&e)).is_some_and(|h| live.hashes.contains(h)) {
-                out.push(e.path());
+            let path = e.path();
+            if folder == "build" && is_dir(&path) {
+                let nested: Vec<_> = units.iter().filter(|u| u.layout == Layout::UnitDirectories && u.directory.parent() == Some(path.as_path())).collect();
+                if !nested.is_empty() || unit_hash(&name_of(&e)).is_none() {
+                    for unit in nested {
+                        if !live.hashes.contains(&unit.hash) { out.push(unit.directory.clone()); }
+                    }
+                    continue;
+                }
             }
+            if !unit_hash(&name_of(&e)).is_some_and(|h| live.hashes.contains(h)) { out.push(path); }
         }
     }
-    let objects = kept_objects(profile, live);
+    let objects = kept_objects(profile, live, &units);
     let mut kept: Vec<PathBuf> = Vec::new();
     for folder in OUTPUT_FOLDERS {
         for e in read_dir(&profile.join(folder)) {
@@ -365,12 +379,18 @@ fn doomed(profile: &Path, live: &Live) -> Vec<PathBuf> {
             }
         }
     }
+    for unit in units.iter().filter(|u| u.layout == Layout::UnitDirectories && live.hashes.contains(&u.hash)) {
+        for path in files_under(&unit.outputs) {
+            let is_object = file_name(&path).and_then(object_group).is_some();
+            if is_object && !objects.contains(&path) { out.push(path); } else { kept.push(path); }
+        }
+    }
     let inodes: BTreeSet<(u64, u64)> = kept.iter().filter_map(|p| ino(p)).collect();
     // A folder that no kept output links to is kept only for a live test binary, bin or example of its crate, and then
     // only the newest of them, and only when no linked folder of that crate is a test binary, bin or example.
     // Without this, an unlinked folder of each build (a unit built without debug info) would stay.
-    let exes = live_exe_crates(profile, live);
-    let invoked = invocations(profile);
+    let exes = live_exe_crates(profile, live, &units);
+    let invoked = invocations(&units);
     let folders: Vec<(PathBuf, bool)> = read_dir(&profile.join(INCREMENTAL))
         .iter()
         .map(|e| {
@@ -432,13 +452,11 @@ fn prune_folder(path: PathBuf, out: &mut Vec<PathBuf>) {
 /// Every unit of the profile folder: its crate (as its incremental folder names it, `lib_a`), its hash, and its
 /// `invoked.timestamp`. Cargo writes that file when it starts a unit's compiler, and rustc starts the unit's
 /// incremental session just after, on its own clock.
-fn invocations(profile: &Path) -> Vec<(String, String, SystemTime)> {
+fn invocations(units: &[Unit]) -> Vec<(String, String, SystemTime)> {
     let mut out = Vec::new();
-    for e in read_dir(&profile.join(".fingerprint")) {
-        let name = name_of(&e);
-        let (Some(hash), Some(base)) = (unit_hash(&name), unit_base(&name)) else { continue };
-        if let Ok(t) = e.path().join("invoked.timestamp").metadata().and_then(|m| m.modified()) {
-            out.push((base.replace('-', "_"), hash.to_string(), t));
+    for unit in units {
+        if let Ok(t) = unit.fingerprint.join("invoked.timestamp").metadata().and_then(|m| m.modified()) {
+            out.push((unit.name.replace('-', "_"), unit.hash.clone(), t));
         }
     }
     out
@@ -476,7 +494,7 @@ fn is_library_folder(folder: &Path) -> bool {
 
 /// Crate names of the live test binaries, bins and examples: `deps/<name>-<hash>` or `examples/<name>-<hash>` with no
 /// extension and a live hash. The crate name of a hashed file uses `_`, like its incremental folder.
-fn live_exe_crates(profile: &Path, live: &Live) -> BTreeSet<String> {
+fn live_exe_crates(profile: &Path, live: &Live, units: &[Unit]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for folder in OUTPUT_FOLDERS {
         for e in read_dir(&profile.join(folder)) {
@@ -486,6 +504,15 @@ fn live_exe_crates(profile: &Path, live: &Live) -> BTreeSet<String> {
             }
             if let Some((c, _)) = name.rsplit_once('-') {
                 out.insert(c.replace('-', "_"));
+            }
+        }
+    }
+    for unit in units.iter().filter(|u| u.layout == Layout::UnitDirectories && live.hashes.contains(&u.hash)) {
+        for e in read_dir(&unit.outputs) {
+            let name = name_of(&e);
+            if !name.contains('.') {
+                let crate_name = if unit_hash(&name).is_some() { name.rsplit_once('-').map_or(name.as_str(), |(c, _)| c) } else { &name };
+                out.insert(crate_name.replace('-', "_"));
             }
         }
     }
@@ -591,6 +618,7 @@ fn name_of(e: &std::fs::DirEntry) -> String {
 }
 
 fn read_dir(p: &Path) -> Vec<std::fs::DirEntry> {
+    if !is_dir(p) { return Vec::new() }
     std::fs::read_dir(p).into_iter().flatten().flatten().collect()
 }
 
@@ -672,6 +700,26 @@ mod tests {
         };
         let freed = 90;
         (debug, live, freed)
+    }
+
+    #[test]
+    fn new_layout_removes_old_objects_of_live_unit() {
+        let profile = tempdir("unit-objects").join("debug");
+        let unit = profile.join(format!("build/foo/{H1}"));
+        let old = unit.join(format!("out/foo-{H1}.a.old.rcgu.o"));
+        let new = unit.join(format!("out/foo-{H1}.a.new.rcgu.o"));
+        touch(&old, 10);
+        touch(&new, 10);
+        at(&old, 100);
+        at(&new, 200);
+        touch(&unit.join("fingerprint/lib-foo"), 1);
+        let artifact = unit.join(format!("out/libfoo-{H1}.rlib"));
+        touch(&artifact, 10);
+        let live = Live { hashes: BTreeSet::from([H1.into()]), paths: BTreeSet::from([artifact.strip_prefix(&profile).unwrap().to_path_buf()]), crates: BTreeSet::new() };
+        sweep(&profile, &live, false);
+        assert!(!old.exists());
+        assert!(new.exists() && artifact.exists());
+        let _ = std::fs::remove_dir_all(profile.parent().unwrap());
     }
 
     #[test]
@@ -942,7 +990,7 @@ mod tests {
         touch(&debug.join(format!("incremental/dy-aaaa/{}/dep-graph.bin", session(100))), 1);
         touch(&debug.join(format!("incremental/dy-bbbb/{}/dep-graph.bin", session(200))), 1);
         let live = Live { hashes: BTreeSet::from([live_hash.to_string()]), ..Default::default() };
-        let invoked = invocations(&debug);
+        let invoked = invocations(&Layout::units(&debug));
         assert!(session_of_live_unit(&debug.join("incremental/dy-aaaa"), &invoked, &live));
         assert!(!session_of_live_unit(&debug.join("incremental/dy-bbbb"), &invoked, &live));
         std::fs::remove_dir_all(&t).unwrap();

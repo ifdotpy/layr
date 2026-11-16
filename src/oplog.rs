@@ -4,7 +4,9 @@
 
 use crate::model::Record;
 use anyhow::Result;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+#[cfg(test)]
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::VerifyingKey;
 
 pub struct Signed {
     pub record: Record,
@@ -12,17 +14,24 @@ pub struct Signed {
     pub line: String,
 }
 
+#[cfg(test)]
 pub fn sign_line(rec: &Record, key: &SigningKey) -> Result<String> {
     let body = serde_json::to_string(rec)?;
     let s = layr_store::keys::sign_bytes(body.as_bytes(), key);
     Ok(format!("{{\"r\":{body},\"s\":\"{s}\"}}"))
 }
 
-/// Parse one stored line. With `key`, also check the signature.
-pub fn parse_line(line: &str, key: Option<&VerifyingKey>) -> Result<Signed> {
-    let body = layr_store::record::parse_line(line, key)?;
+/// Parse one stored line without granting signature or authority proof.
+pub fn parse_line(line: &str) -> Result<Signed> {
+    let body = layr_store::record::parse_line(line)?;
     let record: Record = serde_json::from_str(body.get())?;
     Ok(Signed { record, line: line.to_string() })
+}
+
+/// Verify the exact stored bytes before decoding the untrusted wire DTO.
+pub fn verify_line(line: &str, key: &VerifyingKey) -> Result<Signed> {
+    let body = layr_store::record::verify_line(line.as_bytes(), key)?;
+    Ok(Signed { record: serde_json::from_str(body.get())?, line: body.line().into() })
 }
 
 /// The public key that a machine publishes in its first record (`op: "machine"`).
@@ -47,15 +56,15 @@ mod tests {
             ),
             ("rebase.step", json!({"version":{"kind":"replay","target_head":"main-head"}})),
         ] {
-            let mut record = Record::new(op);
+            let mut record = Record::untrusted_preview(op);
             record.data = payload;
             let line = sign_line(&record, &key).unwrap();
-            let parsed = parse_line(&line, Some(&key.verifying_key())).unwrap();
+            let parsed = verify_line(&line, &key.verifying_key()).unwrap();
             assert_eq!(parsed.record.data, record.data);
             let raw: serde_json::Value = serde_json::from_str(&line).unwrap();
             let mut changed = raw.clone();
             changed["r"]["data"]["result"] = json!("changed");
-            assert!(parse_line(&serde_json::to_string(&changed).unwrap(), Some(&key.verifying_key())).is_err());
+            assert!(verify_line(&serde_json::to_string(&changed).unwrap(), &key.verifying_key()).is_err());
         }
     }
 }

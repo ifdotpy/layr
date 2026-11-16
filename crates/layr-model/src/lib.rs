@@ -7,13 +7,14 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod record;
 pub mod changes;
 pub mod diff;
 pub mod history;
 pub mod index;
 pub mod interdiff;
 pub mod main_head;
-pub mod merge_authority;
+mod merge_authority;
 pub mod operations;
 pub mod overlays;
 pub mod policy;
@@ -22,6 +23,7 @@ pub mod protection;
 pub mod release;
 pub mod review;
 pub mod screenshots;
+mod transitions;
 pub mod types;
 pub mod validation;
 
@@ -66,9 +68,8 @@ pub struct Model {
 }
 
 impl Model {
-    /// Fold authenticated JSON Lines (`{"r":record,"s":signature}`), in any arrival order.
-    /// The caller must verify each signature and authorize its signer first.
-    pub fn from_verified_lines<'a>(lines: impl IntoIterator<Item = &'a str>, machine: &str) -> Result<Self> {
+    /// Inspect untrusted JSON Lines. This preview supplies no authentication or authority.
+    pub fn preview_lines<'a>(lines: impl IntoIterator<Item = &'a str>, machine: &str) -> Result<Self> {
         #[derive(Deserialize)]
         struct Envelope {
             r: Record,
@@ -79,7 +80,27 @@ impl Model {
             validation::validate(&record)?;
             records.push(record);
         }
-        Self::from_records(records, machine)
+        Self::preview_records(records, machine)
+    }
+
+    /// Fold only records carrying project authorization, never caller-promised text.
+    ///
+    /// ```compile_fail
+    /// layr_model::Model::from_verified_lines([r#"{"r":{},"s":""}"#], "");
+    /// ```
+    pub fn from_verified_lines(
+        records: impl IntoIterator<Item = record::AuthorizedRecord<record::ProjectScope>>,
+        machine: &str,
+    ) -> Result<Self> {
+        let mut grouped = BTreeMap::<String, Vec<_>>::new();
+        for record in records {
+            grouped.entry(record.scope().project().to_string()).or_default().push(record);
+        }
+        let mut projects = BTreeMap::new();
+        for (project, records) in grouped {
+            projects.insert(project.clone(), Project::from_authorized_records(&project, records, machine)?);
+        }
+        Ok(Self { projects })
     }
 
     /// Readable overlay projects are discovered only from their own records.
@@ -264,19 +285,19 @@ impl Model {
         order[..pos].iter().rev().find(|c| info(c).is_some_and(|(h, _, folder)| !folder && (hidden || !h))).cloned()
     }
 
-    /// Fold verified records, including any readable overlay projects.
-    pub fn from_records(records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
+    /// Fold untrusted record DTOs for a preview, including readable overlay projects.
+    pub fn preview_records(records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
         let mut grouped: BTreeMap<String, Vec<Record>> = BTreeMap::new();
         for record in records {
             // The machine announcement has no project in old logs. It belongs to the supplied
-            // project stream. `Project::from_records` handles that case without guessing here.
+            // project stream. `Project::preview_records` handles that case without guessing here.
             grouped.entry(record.project.clone()).or_default().push(record);
         }
         let announcements = grouped.remove("").unwrap_or_default();
         let mut projects = BTreeMap::new();
         for (id, mut records) in grouped {
             records.extend(announcements.iter().cloned());
-            projects.insert(id.clone(), Project::from_records(&id, records, machine)?);
+            projects.insert(id.clone(), Project::preview_records(&id, records, machine)?);
         }
         Ok(Self { projects })
     }
@@ -333,6 +354,19 @@ fn order(r: &Record) -> (i64, &str, u64) {
 }
 
 impl Project {
+    pub fn from_authorized_records(
+        id: &str,
+        records: impl IntoIterator<Item = record::AuthorizedRecord<record::ProjectScope>>,
+        machine: &str,
+    ) -> Result<Self> {
+        let mut checked = Vec::new();
+        for record in records {
+            if record.scope().project().to_string() != id { bail!("record belongs to another project"); }
+            checked.push(record.into_record());
+        }
+        Self::preview_records(id, checked, machine)
+    }
+
     /// Access mode and epochs are folded only from authenticated project records.
     pub fn access_mode(&self) -> layr_store::epochs::Mode {
         self.records
@@ -353,7 +387,7 @@ impl Project {
     /// Build one project from verified records. `machine` selects the CLI policy perspective.
     /// Empty `machine` selects a store view with no preferred local machine.
     /// Exact duplicate records are accepted. Conflicting identities or sequences fail.
-    pub fn from_records(id: &str, records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
+    pub fn preview_records(id: &str, records: impl IntoIterator<Item = Record>, machine: &str) -> Result<Self> {
         let mut unique = BTreeMap::<String, Record>::new();
         let mut sequences = BTreeMap::new();
         for record in records {
@@ -448,7 +482,7 @@ impl Project {
                 heads: BTreeMap::new(),
                 deleted: true,
             });
-            if let Some(after) = &change.after {
+            if let Some(after) = change.after() {
                 if self.states.get(&after.head).is_some_and(|s| s.state.kind.auxiliary()) {
                     bail!("line head cannot be a cache or derived state");
                 }
@@ -457,7 +491,7 @@ impl Project {
             if foreign && self.admins.contains(&heads.line.machine) {
                 continue;
             }
-            if let Some(after) = &change.after {
+            if let Some(after) = change.after() {
                 heads.line = Line {
                     id: id.clone(),
                     name: after.name.clone(),
@@ -491,10 +525,10 @@ impl Project {
         let a = if let Some(v) = d.get("attestation") {
             Some(serde_json::from_value::<Attestation>(v.clone())?)
         } else if matches!(r.op.as_str(), "approve" | "approve.withdraw" | "check") {
-            d["state"].as_str().map(|state| Attestation {
+            d["state"].as_str().map(|state| -> Result<Attestation> { Ok(Attestation {
                 format: 1,
                 attestation_id: r.id.clone(),
-                subject: Subject { kind: "state".into(), id: state.into() },
+                subject: Subject::state(state)?,
                 change_id: self.states.get(state).and_then(|s| s.state.change_id.clone()),
                 kind: match r.op.as_str() {
                     "approve" => "approval",
@@ -506,7 +540,7 @@ impl Project {
                 payload_ref: None,
                 signer: r.machine.clone(),
                 time: r.time,
-            })
+            }) }).transpose()?
         } else {
             None
         };
@@ -795,7 +829,7 @@ impl Project {
     pub fn attestations(&self, subject: &str, kind: Option<&str>) -> Vec<Attestation> {
         self.attestations
             .iter()
-            .filter(|(_, a)| a.subject.id == subject && kind.is_none_or(|k| k == a.kind))
+            .filter(|(_, a)| a.subject.id() == subject && kind.is_none_or(|k| k == a.kind))
             .map(|(_, a)| a.clone())
             .collect()
     }
@@ -806,7 +840,7 @@ impl Project {
         };
         let owner = &self.records[*index];
         self.attestations.iter().any(|(i, r)| {
-            if *i <= *index || r.kind != "revoke" || r.subject.id != a.subject.id {
+            if *i <= *index || r.kind != "revoke" || r.subject != a.subject {
                 return false;
             }
             let rec = &self.records[*i];
@@ -998,8 +1032,8 @@ impl Project {
         let base = self.merge_base(&target.head, &state.id).context("change and target have no common ancestor")?;
         let mut behavior = probes::diff(
             self,
-            &Subject { kind: "state".into(), id: base.clone() },
-            &Subject { kind: "state".into(), id: state.id.clone() },
+            &Subject::state(&base)?,
+            &Subject::state(&state.id)?,
             context,
         )?;
         if !behavior.probes.iter().any(|p| p["base_run"] == true || p["base"].is_object()) {
@@ -1017,7 +1051,7 @@ impl Project {
                 continue;
             }
             let Some(id) = rec.data["view_id"].as_str() else { continue };
-            let subject = Subject { kind: "view".into(), id: id.into() };
+            let subject = Subject::view(id)?;
             for result in self.probe_results(id) {
                 let Some(name) = result["probe"].as_str() else { continue };
                 let Ok(definition) = serde_json::from_value::<probes::Probe>(result["definition"].clone()) else { continue };
@@ -1037,7 +1071,7 @@ impl Project {
         let mut by_actor = BTreeMap::<(String, u32), i64>::new();
         for (index, a) in &self.attestations {
             let record = &self.records[*index];
-            if a.subject.id != subject
+            if a.subject.id() != subject
                 || a.kind != "approval"
                 || self.is_revoked(&a.attestation_id)
                 || record.data.get("declassify").is_some()
@@ -1072,7 +1106,7 @@ impl Project {
             .iter()
             .filter(|(index, a)| {
                 self.person_record_pinned(&self.records[*index])
-                    && a.subject.id == subject
+                    && a.subject.id() == subject
                     && a.signer == format!("person:{login}")
                     && a.kind == "approval"
                     && !self.is_revoked(&a.attestation_id)
@@ -1088,7 +1122,7 @@ impl Project {
             let Some(login) = a.signer.strip_prefix("person:") else {
                 continue;
             };
-            if a.subject.id == subject
+            if a.subject.id() == subject
                 && a.kind == "approval"
                 && !self.is_revoked(&a.attestation_id)
                 && self.person_record_pinned(&self.records[*index])

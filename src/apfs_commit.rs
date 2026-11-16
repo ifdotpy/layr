@@ -1,6 +1,6 @@
 //! Move a private APFS index into a state without copying it. The project lock is required.
 //! The durable journal protects the only staged copy until the record transaction commits.
-use crate::{fsutil, ids, model, storage, store::Project};
+use crate::{fsutil, ids, model, store::Project};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -80,7 +80,7 @@ fn target(p: &Project, j: &Journal) -> PathBuf {
 
 fn verify_tree(path: &Path, j: &Journal) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
-    if !m.is_dir() || m.dev() != j.device || m.ino() != j.inode || storage::subvol_info(path)?.uuid != j.subvol {
+    if !m.is_dir() || m.dev() != j.device || m.ino() != j.inode || crate::apfs::native_info(path)?.uuid != j.subvol {
         bail!("APFS index state tree changed: {}", path.display());
     }
     Ok(())
@@ -145,7 +145,7 @@ fn recover_legacy(p: &Project) -> Result<()> {
             bail!("APFS index state record does not match its journal");
         }
         verify_tree(&state, &j)?;
-        if !storage::subvol_info(&state)?.readonly {
+        if !crate::apfs::native_info(&state)?.readonly {
             bail!("saved APFS index is not immutable");
         }
         remove_if_present(&stage.with_extension("base"))?;
@@ -155,13 +155,13 @@ fn recover_legacy(p: &Project) -> Result<()> {
             (true, false) => verify_tree(&stage, &j)?,
             (false, true) => {
                 verify_tree(&state, &j)?;
-                storage::set_writable(&state)?;
+                crate::apfs::unseal_tree(&state)?;
                 move_tree(&state, &stage, j.mode)?;
             }
             _ => bail!("cannot recover APFS index state: expected exactly one copy of the index"),
         }
         // This also handles interruption while sealing or restoring the index.
-        storage::set_writable(&stage)?;
+        crate::apfs::unseal_tree(&stage)?;
         fs::set_permissions(&stage, fs::Permissions::from_mode(j.mode))?;
         File::open(&stage)?.sync_all()?;
         sync_parent(&stage)?;
@@ -255,7 +255,7 @@ fn is_tree(path: &Path, subvol: &str, device: u64, inode: u64) -> Result<bool> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    Ok(m.is_dir() && m.dev() == device && m.ino() == inode && storage::subvol_info(path)?.uuid == subvol)
+    Ok(m.is_dir() && m.dev() == device && m.ino() == inode && crate::apfs::native_info(path)?.uuid == subvol)
 }
 
 /// Copy the ACLs of the entries of `stage` to the same entries of `tree`. A copy of a tree keeps
@@ -313,7 +313,7 @@ pub struct PendingCommit<'p, 's> {
     journal: PendingJournal,
     /// The clone is still in the pending folder (not published).
     in_pending: bool,
-    active: bool,
+    cleanup: crate::repo::PublicationCleanup,
 }
 
 impl<'p, 's> PendingCommit<'p, 's> {
@@ -327,7 +327,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
         }
         let stage = project.stage_path(line);
         let sm = fs::symlink_metadata(&stage)?;
-        let sinfo = storage::subvol_info(&stage)?;
+        let sinfo = crate::apfs::native_info(&stage)?;
         if !sm.is_dir() || sinfo.readonly {
             bail!("APFS index must be a writable tree");
         }
@@ -368,19 +368,19 @@ impl<'p, 's> PendingCommit<'p, 's> {
             thin,
             journal: journal.clone(),
             in_pending: true,
-            active: true,
+            cleanup: crate::repo::PublicationCleanup::Rollback,
         };
         // A failure from here on removes the folder (Drop). The copy is made writable so its ACLs
         // can be set, and it is sealed read-only below.
-        storage::snapshot(&stage, &tree, false)?;
+        crate::fs::snapshot(&stage, &tree, false)?;
         copy_acls(&stage, &tree)?;
-        let mut tinfo = storage::subvol_info(&tree)?;
+        let mut tinfo = crate::apfs::native_info(&tree)?;
         if thin {
             tinfo.base = sinfo.base.clone();
-            storage::write_info(&tree, &tinfo)?;
+            crate::apfs::write_info(&tree, &tinfo)?;
         }
-        storage::set_readonly(&tree)?;
-        let tinfo = storage::subvol_info(&tree)?;
+        crate::apfs::seal_tree(&tree)?;
+        let tinfo = crate::apfs::native_info(&tree)?;
         let tm = fs::symlink_metadata(&tree)?;
         journal.tree_subvol = tinfo.uuid.clone();
         journal.tree_device = tm.dev();
@@ -437,8 +437,12 @@ impl<'p, 's> PendingCommit<'p, 's> {
         Ok(true)
     }
 
-    /// After the record and the drop of the stage, under the project lock: remove the journal, and
-    /// then the pending folder. Requires the record.
+    /// Retain the journal and clone when publication needs recovery or already committed.
+    pub fn publication_failed(&mut self, error: &crate::db::PublishError) {
+        self.cleanup = crate::repo::PublicationCleanup::from_failure(error);
+    }
+
+    /// Remove the journal and pending folder after the record and the drop of the stage.
     pub fn finish(mut self) -> Result<()> {
         if self.project.db.state(&self.id)?.is_none() {
             bail!("pending save state has no saved record");
@@ -446,7 +450,7 @@ impl<'p, 's> PendingCommit<'p, 's> {
         let dir = pending_dir(self.project, &self.id);
         remove_if_present(&dir.join(PENDING_JOURNAL))?;
         sync_parent(&dir.join(PENDING_JOURNAL))?;
-        self.active = false;
+        self.cleanup = crate::repo::PublicationCleanup::Keep;
         match fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -461,7 +465,7 @@ impl Drop for PendingCommit<'_, '_> {
     fn drop(&mut self) {
         // Not published: the clone goes and the stage stays. Published: the record decides at the
         // next lock (recovery), so the journal and the state stay.
-        if self.active && self.in_pending {
+        if self.cleanup == crate::repo::PublicationCleanup::Rollback && self.in_pending {
             let dir = pending_dir(self.project, &self.id);
             if let Err(e) = self.project.trash(&dir) {
                 eprintln!("warning: pending save folder stays until the next command: {e:#}");
@@ -478,9 +482,9 @@ fn recover_pending(p: &Project, dir: &Path, j: &PendingJournal) -> Result<()> {
         // Committed: the clone becomes the state, and the stage it was cloned from is dropped.
         if exists(&tree)? {
             crate::thin::ensure_parent(&state)?;
-            storage::set_writable(&tree)?;
+            crate::apfs::unseal_tree(&tree)?;
             move_tree(&tree, &state, j.mode)?;
-            storage::set_readonly(&state)?;
+            crate::apfs::seal_tree(&state)?;
             sync_parent(&state)?;
         }
         if !is_tree(&state, &j.tree_subvol, j.tree_device, j.tree_inode)? {
@@ -488,7 +492,7 @@ fn recover_pending(p: &Project, dir: &Path, j: &PendingJournal) -> Result<()> {
         }
         let stage = p.stage_path(&j.line);
         if is_tree(&stage, &j.stage_subvol, j.stage_device, j.stage_inode)? {
-            storage::delete_tree(&stage)?;
+            crate::fs::remove(&stage)?;
         }
         remove_if_present(&stage.with_extension("base"))?;
     } else {
@@ -510,7 +514,7 @@ fn recover_pending(p: &Project, dir: &Path, j: &PendingJournal) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Actor, Author, Record, StateKind, StateRec};
+    use crate::model::{Actor, Author, StateKind, StateRec};
     use crate::store::Store;
 
     struct Sandbox(PathBuf);
@@ -524,7 +528,7 @@ mod tests {
     }
     impl Drop for Sandbox {
         fn drop(&mut self) {
-            let _ = storage::delete_tree(&self.0);
+            let _ = crate::fs::remove(&self.0);
         }
     }
     fn actor() -> Actor {
@@ -532,7 +536,7 @@ mod tests {
     }
     fn stage(p: &Project, line: &str) -> Result<u64> {
         let path = p.stage_path(line);
-        storage::create_subvolume(&path)?;
+        crate::fs::create(&path)?;
         fs::write(path.join("file"), b"staged bytes")?;
         fs::hard_link(path.join("file"), path.join("alias"))?;
         std::os::unix::fs::symlink("file", path.join("link"))?;
@@ -555,8 +559,8 @@ mod tests {
         fsutil::atomic_write(&path, &serde_json::to_vec(&j).unwrap(), 0o600).unwrap();
     }
     /// The record of a save, as `commit_state` writes it (the record of `move_head` is not needed).
-    fn recorded(p: &Project, pending: &PendingCommit, line: &str) -> Result<()> {
-        let mut r = Record::new("commit");
+    fn recorded(locked: &crate::store::LockedProject<'_>, pending: &PendingCommit, line: &str) -> Result<()> {
+        let mut r = crate::model::DraftRecord::new("commit");
         r.states.push(StateRec {
             id: pending.id.clone(),
             kind: StateKind::Commit,
@@ -581,7 +585,7 @@ mod tests {
             cache_key_parts: Default::default(),
             parts: Default::default(),
         });
-        p.append(r, &actor())?;
+        locked.append(r, &actor())?;
         Ok(())
     }
 
@@ -591,18 +595,18 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let line = ids::new_id();
         let inode = stage(&p, &line)?;
-        let old_info = storage::subvol_info(&p.stage_path(&line))?;
+        let old_info = crate::apfs::native_info(&p.stage_path(&line))?;
         let pc = PendingCommit::prepare(&p, &line)?;
         // The stage is untouched by the clone.
         assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), inode);
-        assert_eq!(storage::subvol_info(&p.stage_path(&line))?.uuid, old_info.uuid);
+        assert_eq!(crate::apfs::native_info(&p.stage_path(&line))?.uuid, old_info.uuid);
         assert_eq!(fs::read(p.stage_path(&line).join("file"))?, b"staged bytes");
         // The clone is a read-only tree with the same content and its own identity.
         assert_ne!(fs::metadata(&pc.tree)?.ino(), inode);
-        assert!(storage::subvol_info(&pc.tree)?.readonly);
+        assert!(crate::apfs::native_info(&pc.tree)?.readonly);
         assert_eq!(fs::read(pc.tree.join("file"))?, b"staged bytes");
         assert_eq!(fs::metadata(pc.tree.join("file"))?.ino(), fs::metadata(pc.tree.join("alias"))?.ino());
         assert!(pc.tree.join("file").exists());
@@ -613,7 +617,10 @@ mod tests {
             crate::sys::apfs_data_identity(&stage_file)?.clone_id,
             crate::sys::apfs_data_identity(&pc.tree.join("file"))?.clone_id
         );
-        assert_eq!(storage::file_identity(&stage_file)?, storage::file_identity(&pc.tree.join("file"))?);
+        assert_eq!(
+            crate::fs::host().namespace.file_identity(&stage_file)?,
+            crate::fs::host().namespace.file_identity(&pc.tree.join("file"))?
+        );
         let dir = pending_dir(&p, &pc.id);
         drop(pc);
         assert!(!dir.exists());
@@ -633,7 +640,7 @@ mod tests {
         let stage_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage_inode = stage(&p, &line)?;
             let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
@@ -641,7 +648,7 @@ mod tests {
             assert!(pc.publish()?);
             let state = p.state_path(&id);
             assert_eq!(fs::metadata(&state)?.ino(), clone_inode);
-            assert!(storage::subvol_info(&state)?.readonly);
+            assert!(crate::apfs::native_info(&state)?.readonly);
             assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), stage_inode);
             die(&pending_dir(&p, &id));
             std::mem::forget(pc);
@@ -666,7 +673,7 @@ mod tests {
             let stage_inode;
             {
                 let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-                let _lock = p.lock()?;
+                let _lock = p.lock_maintenance()?;
                 stage_inode = stage(&p, &line)?;
                 let mut pc = PendingCommit::prepare(&p, &line)?;
                 if phase >= 1 {
@@ -685,7 +692,7 @@ mod tests {
             let p = Project::open(&store, "p")?;
             assert_eq!(fs::metadata(p.stage_path(&line))?.ino(), stage_inode);
             assert_eq!(fs::read(p.stage_path(&line).join("file"))?, b"staged bytes");
-            assert!(!storage::subvol_info(&p.stage_path(&line))?.readonly);
+            assert!(!crate::apfs::native_info(&p.stage_path(&line))?.readonly);
             assert!(!pending(&p)?);
             assert_eq!(fs::read_dir(p.states_dir())?.count(), 0);
         }
@@ -702,15 +709,15 @@ mod tests {
         let clone_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage(&p, &line)?;
             let mut pc = PendingCommit::prepare(&p, &line)?;
             id = pc.id.clone();
             clone_inode = fs::metadata(&pc.tree)?.ino();
             assert!(pc.publish()?);
-            recorded(&p, &pc, &line)?;
+            recorded(&_lock, &pc, &line)?;
             // The stage is dropped after the record; the crash comes before the journal is removed.
-            storage::delete_tree(&p.stage_path(&line))?;
+            crate::fs::remove(&p.stage_path(&line))?;
             die(&pending_dir(&p, &pc.id));
             std::mem::forget(pc);
         }
@@ -719,7 +726,7 @@ mod tests {
         assert!(!p.stage_path(&line).exists());
         assert!(!p.stage_path(&line).with_extension("base").exists());
         assert_eq!(fs::metadata(p.state_path(&id))?.ino(), clone_inode);
-        assert!(storage::subvol_info(&p.state_path(&id))?.readonly);
+        assert!(crate::apfs::native_info(&p.state_path(&id))?.readonly);
         assert_eq!(fs::read(p.state_path(&id).join("file"))?, b"staged bytes");
         assert!(!pending(&p)?);
         Ok(())
@@ -731,7 +738,7 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let line = ids::new_id();
         stage(&p, &line)?;
         let mut pc = PendingCommit::prepare(&p, &line)?;
@@ -741,7 +748,7 @@ mod tests {
         std::mem::forget(pc);
         let keep = p.work_dir().join("keep");
         move_tree(&state, &keep, 0o555)?;
-        storage::create_subvolume(&state)?;
+        crate::fs::create(&state)?;
         fs::write(state.join("other"), b"keep this")?;
         assert!(recover(&p).is_err());
         assert_eq!(fs::read(state.join("other"))?, b"keep this");
@@ -760,7 +767,7 @@ mod tests {
         let stage_inode;
         {
             let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-            let _lock = p.lock()?;
+            let _lock = p.lock_maintenance()?;
             stage_inode = stage(&p, &line)?;
             let pc = PendingCommit::prepare(&p, &line)?;
             let path = pending_dir(&p, &pc.id).join(PENDING_JOURNAL);
@@ -783,7 +790,7 @@ mod tests {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;
         let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
-        let _lock = p.lock()?;
+        let _lock = p.lock_maintenance()?;
         let root = pending_root(&p);
         fs::create_dir_all(&root)?;
         // A folder made by this process, before its journal exists (the window of `prepare`).

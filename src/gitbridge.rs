@@ -12,7 +12,7 @@ use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
-use crate::model::{Line, Record, StateKind, StateRec};
+use crate::model::{Line, StateKind, StateRec};
 use crate::repo::{skip_path, Repo};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -192,7 +192,7 @@ fn as_caller(ctx: &Ctx, c: &mut Command, git_dir: &Path) -> Result<()> {
     }
     env.push(("GIT_DIR".into(), git_dir.to_string_lossy().into_owned()));
     env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-    crate::privs::command_as(c, ctx.caller.uid, &env)
+    crate::privs::command_as_caller(c, ctx, &env)
 }
 
 pub fn remote_url(repo: &Repo, remote: &str) -> Result<String> {
@@ -785,7 +785,7 @@ impl std::error::Error for Moved {}
 /// The records of one import, planned with no project lock. `commit_import` writes them.
 pub struct ImportPlan {
     /// Each planned record with the Git commit it imports, parents first.
-    records: Vec<(String, Record)>,
+    records: Vec<(String, crate::model::DraftRecord)>,
     /// The Git commit that was asked for, its state, and the remote ref to move (if any).
     commit: String,
     tip: String,
@@ -795,8 +795,7 @@ pub struct ImportPlan {
 /// Import the entire reachable DAG, parents first. A retry reuses completed imports. Each commit
 /// becomes a state record without a tree; its tree is built from git when a command reads it
 /// (`build_tree`, through `Repo::check_state`).
-pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, author_uid: u32) -> Result<(String, bool)> {
-    let _ = author_uid; // Git author metadata is preserved; the record actor remains the caller.
+pub fn import_commit(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Result<(String, bool)> {
     import_with_repair(ctx, repo, commit, refname, None)
 }
 
@@ -925,7 +924,7 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
     let mut expected: Option<String> = guard.clone().flatten();
     let mut pending = records.into_iter();
     loop {
-        let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+        let locked = repo.p.lock_or_borrow()?;
         if guard.is_some() {
             let current = repo.p.db.remote_ref(&refname)?.map(|r| r.0);
             if current != expected {
@@ -941,7 +940,7 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
                 bail_moved(format!("commit {} of {refname} was imported by another command; run it again", &oid[..10]))?;
             }
             let st = rec.states.first().map(|s| s.id.clone()).unwrap_or_default();
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&locked, ctx, rec)?;
             expected = Some(st);
             written += 1;
         }
@@ -949,9 +948,9 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
             continue;
         }
         if guard.is_some() && expected.as_deref() != Some(tip.as_str()) {
-            let mut rec = Record::new("remote.ref");
+            let mut rec = crate::model::DraftRecord::new("remote.ref");
             rec.data = serde_json::json!({"ref": refname, "state": tip, "commit": commit});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&locked, ctx, rec)?;
         }
         return Ok((tip, fresh));
     }
@@ -973,7 +972,7 @@ fn import_record(
     parents: Vec<String>,
     objects: GitImport,
     changes: Changes,
-) -> Result<(String, Record)> {
+) -> Result<(String, crate::model::DraftRecord)> {
     // On a store volume that ignores case, README and Readme would become one file. The earlier
     // state passed this check: only the entries of changed folders can collide.
     fsutil::refuse_case_collisions(&repo.p.work_dir(), changes.names.iter().map(|n| n.as_str()))?;
@@ -981,7 +980,7 @@ fn import_record(
     let mut st = repo.state_record(ctx, ids::new_id(), StateKind::Import, parents, &msg, None, String::new());
     st.author = crate::model::Author { name, email, uid: 0, session: None };
     st.time = time.max(1);
-    let mut rec = Record::new("import");
+    let mut rec = crate::model::DraftRecord::new("import");
     let id = st.id.clone();
     rec.states.push(st);
     rec.data = serde_json::json!({"ref": refname, "commit": commit, "state": id, "git": objects});
@@ -1197,9 +1196,10 @@ fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, Stri
 /// ancestor with the changed paths (other file systems). Without such an ancestor it is the full
 /// tree of the commit. `source` is a folder with the content of the commit (`init --from`); its
 /// files are cloned where their bytes match the Git objects. The caller holds the project lock, or
-/// this function takes it.
-pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()> {
-    let _lock = (!repo.p.holds_lock()).then(|| repo.p.lock()).transpose()?;
+/// this function takes it. `own` normalizes a new private import before sealing it for the
+/// initial line; rebuilding an existing shared state keeps its recorded metadata.
+pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>, own: Option<(u32, u32)>) -> Result<()> {
+    let _lock = repo.p.lock_or_borrow()?;
     if repo.p.has_state(state) {
         return Ok(());
     }
@@ -1216,31 +1216,48 @@ pub fn build_tree(repo: &Repo, state: &str, source: Option<&Path>) -> Result<()>
     let base = nearest_built_import(repo, state)?;
     let (_, changes) = import_changes(&raw, base.as_ref().map(|(_, c)| c.as_str()), &mut cat)?;
     let work = repo.p.work_dir().join(crate::store::temp_name());
-    let made = (|| -> Result<()> {
-        match &base {
-            Some((b, _)) => {
-                if thin_build(repo, &mut cat, &changes, &work, b, source, state)? {
-                    return Ok(());
+    let prepared = match &base {
+        Some((base, _)) if own.is_none() => thin_build(repo, &mut cat, &changes, &work, base, source, state)?,
+        _ => None,
+    };
+    let captured = match prepared {
+        Some(captured) => captured,
+        None => {
+            let temporary = match &base {
+                Some((base, _)) => {
+                    crate::repo::Temp::source(&repo.state_src(base)?, work.clone(), crate::fs::Protection::Writable)?
                 }
-                repo.snapshot_state(b, &work, false)?;
-                let paths: Vec<String> =
-                    changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect();
-                materialize(&s, &commit, &work, Some(&paths), None, source)?;
-            }
-            None => {
-                crate::storage::create_subvolume(&work)?;
-                materialize(&s, &commit, &work, None, None, source)?;
+                None => crate::repo::Temp::empty(work.clone())?,
+            };
+            let prepared = (|| -> Result<_> {
+                let paths = base.as_ref().map(|_| {
+                    changes.write.iter().map(|w| w.0.clone()).chain(changes.removed.iter().cloned()).collect::<Vec<_>>()
+                });
+                materialize(&s, &commit, &work, paths.as_deref(), None, source)?;
+                if let Some((uid, gid)) = own {
+                    crate::repo::give_tree(&work, uid, gid)?;
+                }
+                crate::fs::freeze_path_owned(&work, &repo.p.state_path(state), crate::fs::CapturePurpose::State)
+            })();
+            match prepared {
+                Ok(captured) => {
+                    if let Err(error) = temporary.discard() {
+                        return Err(captured.abort(error));
+                    }
+                    captured
+                }
+                Err(error) => return Err(temporary.abort(error)),
             }
         }
-        crate::storage::snapshot(&work, &repo.p.state_path(state), true)
-    })();
-    let _ = crate::storage::delete_tree(&work);
-    if let Err(e) = made {
-        let _ = crate::storage::delete_tree(&repo.p.state_path(state));
-        let _ = crate::storage::delete_tree(&repo.p.delta_path(state));
-        return Err(e);
+    };
+    match repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true)) {
+        Ok(()) => captured.release(),
+        Err(crate::db::CommitResolution::NotCommitted(error)) => return Err(captured.abort(error)),
+        Err(error) => {
+            captured.release();
+            return Err(error.into());
+        }
     }
-    repo.p.db.set_present(state, true)?;
     if let Err(e) = keep_newest_built(&repo.p, state) {
         eprintln!("warning: older built Git trees stay: {e:#}");
     }
@@ -1293,7 +1310,7 @@ fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
     }
     for id in p.delete_states(&drop) {
         if !p.has_state(&id) {
-            p.db.set_present(&id, false)?;
+            p.lock_or_borrow()?.write(|tx| tx.set_present(&id, false))?;
         }
     }
     Ok(())
@@ -1302,7 +1319,6 @@ fn keep_newest_built(p: &crate::store::Project, state: &str) -> Result<()> {
 /// A thin layer of the changes over the state `base`, written from the changed files only, as the
 /// tree of `state`. False when the chain of `base` is long enough for a complete tree
 /// (`thin.chain`), so reads stay short, and for a project that keeps complete trees.
-#[cfg(target_os = "macos")]
 fn thin_build(
     repo: &Repo,
     cat: &mut CatFile,
@@ -1311,37 +1327,39 @@ fn thin_build(
     base: &str,
     source: Option<&Path>,
     state: &str,
-) -> Result<bool> {
-    let max = repo.p.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize;
-    let len = crate::thin::chain_len(&repo.p, base);
-    if repo.p.is_overlay() || len == 0 || len >= max {
-        return Ok(false);
-    }
-    std::fs::create_dir(work)?;
-    std::fs::set_permissions(work, std::fs::Permissions::from_mode(0o755))?;
-    let source = source.map(crate::tree::Tree::open).transpose()?;
-    for (path, mode, oid) in &changes.write {
-        if mode == "160000" {
-            fsutil::make_parents(work, &format!("{path}/x"), None)?;
-            continue;
-        }
-        let data = cat.object(oid, "blob")?;
-        place_blob(work, mode, path, &data, None, source.as_ref())?;
-    }
-    let d = crate::thin::Diff {
-        write: changes.write.iter().map(|w| w.0.clone()).collect(),
-        removed: changes.removed.clone(),
-        whole: Default::default(),
+) -> Result<Option<crate::fs::OwnedCapture>> {
+    let Some(storage) = repo.state_src(base)?.layered_storage().and_then(|storage| storage.for_import(&repo.p, base)) else {
+        return Ok(None);
     };
-    crate::thin::write_layer(work, &repo.p.delta_path(state), &d, base, false, None)?;
-    repo.p.db.record_base(state, base)?;
-    Ok(true)
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::too_many_arguments)]
-fn thin_build(_: &Repo, _: &mut CatFile, _: &Changes, _: &Path, _: &str, _: Option<&Path>, _: &str) -> Result<bool> {
-    Ok(false)
+    let temporary = crate::repo::Temp::directory(work.to_path_buf(), 0o755)?;
+    let prepared = (|| -> Result<_> {
+        let source = source.map(crate::tree::Tree::open).transpose()?;
+        for (path, mode, oid) in &changes.write {
+            if mode == "160000" {
+                fsutil::make_parents(work, &format!("{path}/x"), None)?;
+                continue;
+            }
+            let data = cat.object(oid, "blob")?;
+            place_blob(work, mode, path, &data, None, source.as_ref())?;
+        }
+        storage.write_import(
+            &repo.p,
+            work,
+            base,
+            state,
+            changes.write.iter().map(|w| w.0.clone()).collect(),
+            changes.removed.clone(),
+        )
+    })();
+    match prepared {
+        Ok(captured) => {
+            if let Err(error) = temporary.discard() {
+                return Err(captured.abort(error));
+            }
+            Ok(Some(captured))
+        }
+        Err(error) => Err(temporary.abort(error)),
+    }
 }
 
 /// Removes the given paths from an index before they are added again. A copied index keeps the
@@ -1352,33 +1370,42 @@ const FORGET_CHANGED: [&str; 4] = ["update-index", "--force-remove", "-z", "--st
 
 /// The folder that git reads `paths` of a state from: its complete tree, or on APFS a private
 /// copy of only those paths when the state is a thin layer.
-fn work_tree(repo: &Repo, src: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        if src.is_complete() {
-            return Ok(src.bottom().to_path_buf());
-        }
-        let t = crate::repo::Temp { path: repo.p.scan_dir().join(crate::store::temp_name()) };
-        crate::thin::extract(src, paths.iter().map(|p| p.as_str()), &t.path)?;
-        let p = t.path.clone();
-        keep.push(t);
-        Ok(p)
+fn work_tree(repo: &Repo, source: &crate::repo::Snap, paths: &[String], keep: &mut Vec<crate::repo::Temp>) -> Result<PathBuf> {
+    use crate::fsutil::Src;
+    if let Some(root) = source.folder() {
+        return Ok(root.to_path_buf());
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = paths;
-        repo.complete(src.clone(), keep)
-    }
+    let path = repo.p.scan_dir().join(crate::store::temp_name());
+    #[cfg(test)]
+    crate::repo::MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    let temporary = crate::repo::Temp::selected(source, paths, path)?;
+    let path = temporary.path.clone();
+    keep.push(temporary);
+    Ok(path)
 }
 
-/// True when the state is a thin layer: git reads only changed paths of it.
-fn is_thin(repo: &Repo, state: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    return repo.state_src(state).map(|s| !s.is_complete()).unwrap_or(false);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (repo, state);
-        false
+/// A checkout borrowed from one immutable source, owning any temporary trees until Git has
+/// finished both the index command and its refresh. It cannot survive or mutate its source.
+struct ExportCheckout<'source> {
+    source: &'source crate::repo::Snap,
+    root: PathBuf,
+    _keep: Vec<crate::repo::Temp>,
+}
+
+impl<'source> ExportCheckout<'source> {
+    fn new(repo: &Repo, source: &'source crate::repo::Snap, paths: Option<&[String]>) -> Result<Self> {
+        let _source = crate::trace::span("git export source materialization");
+        let mut keep = Vec::new();
+        let root = match paths {
+            None => repo.complete(source.clone(), &mut keep)?,
+            Some(paths) => work_tree(repo, source, paths, &mut keep)?,
+        };
+        Ok(Self { source, root, _keep: keep })
+    }
+
+    fn is_thin(&self) -> bool {
+        use crate::fsutil::Src;
+        self.source.folder().is_none()
     }
 }
 
@@ -1416,7 +1443,7 @@ pub fn build_index(repo: &Repo, state: &str, commit: &str, prev_state: Option<&s
             let prev_src = repo.state_src(ps)?;
             let mut paths = Vec::new();
             for c in changes::file_changes(&prev_src, &src)? {
-                for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+                for p in [Some(c.path().clone()), c.old_path().cloned()].into_iter().flatten() {
                     if !skip_path(&p) {
                         paths.push(p);
                     }
@@ -1510,8 +1537,12 @@ fn check_commit(repo: &Repo, commit: &str) -> Result<()> {
     Ok(())
 }
 fn check_reachable(repo: &Repo, commit: &str) -> Result<()> {
+    let _verify = crate::trace::span("git reachable-object verification");
     let s = store(repo);
-    let objects = git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?;
+    let objects = {
+        let _order = crate::trace::span("git reachable-object enumeration");
+        git_out(&s, &["rev-list", "--objects", "--no-object-names", commit])?
+    };
     let mut cat = CatFile::new(&s)?;
     for oid in objects.lines() {
         check_object(&s, &mut cat, oid, "")?;
@@ -1822,7 +1853,7 @@ pub fn state_of_history_commit(repo: &Repo, name: &str) -> Result<Option<String>
 /// Commits for a state and every ancestor state without one, parents first, each with the same
 /// parents as its state (a merge stays a merge). The same states give the same commits. Returns
 /// the commit of `state` and the new (state, commit) pairs.
-pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, String)>)> {
+pub fn export_history(repo: &Repo, state: &crate::repo::SourceStateId) -> Result<(String, Vec<(String, String)>)> {
     cache_retry(repo, || export_history_once(repo, state, true))
 }
 
@@ -1830,15 +1861,21 @@ pub fn export_history(repo: &Repo, state: &str) -> Result<(String, Vec<(String, 
 /// no record names yet: a history commit's parents have theirs, so the walk stops there. A line's
 /// `.git` folder needs only this; without the stop each save walks every earlier unpushed save.
 pub fn export_commit(repo: &Repo, state: &str) -> Result<String> {
-    cache_retry(repo, || export_history_once(repo, state, false)).map(|(c, _)| c)
+    let source = repo.source_id(state)?;
+    cache_retry(repo, || export_history_once(repo, &source, false)).map(|(c, _)| c)
 }
 
-fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(String, Vec<(String, String)>)> {
-    repo.source_state(state)?;
+fn export_history_once(
+    repo: &Repo,
+    state: &crate::repo::SourceStateId,
+    name_history: bool,
+) -> Result<(String, Vec<(String, String)>)> {
+    let _export = crate::trace::span("git export history");
+    let dag = crate::trace::span("git export DAG ordering");
     let mut known: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut stack: Vec<(String, bool)> = vec![(state.to_string(), false)];
+    let mut stack: Vec<(String, bool)> = vec![(state.as_str().to_string(), false)];
     let mut made = Vec::new();
     while let Some((s, parents_done)) = stack.pop() {
         if parents_done {
@@ -1848,6 +1885,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
         if !seen.insert(s.clone()) {
             continue;
         }
+        repo.source_state(&s)?;
         if let Some(c) = recorded_commit(repo, &s)? {
             known.insert(s, c);
             continue;
@@ -1872,6 +1910,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             stack.push((p.clone(), false));
         }
     }
+    drop(dag);
     if !order.is_empty() {
         let export = ExportContext::new(repo)?;
         for s in order {
@@ -1906,7 +1945,7 @@ fn export_history_once(repo: &Repo, state: &str, name_history: bool) -> Result<(
             made.push((s, c));
         }
     }
-    let tip = known.get(state).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state)))?;
+    let tip = known.get(state.as_str()).cloned().ok_or_else(|| anyhow!("no commit for state {}", ids::short(state.as_str())))?;
     Ok((tip, made))
 }
 
@@ -1992,6 +2031,120 @@ impl ExportContext {
     }
 }
 
+/// Fast-import owns pack encoding, compression and atomic pack publication. Keep the final
+/// commit in `ExportContext::commit`: fast-import must not reinterpret its identity or signing.
+/// The private branch is reset before `done`, so even a successful import publishes no ref.
+fn pack_tree(s: &Path, root: &Path, paths: &[String]) -> Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let _pack = crate::trace::span("git export pack stream");
+    let branch = format!("refs/layr/pack/{}", ids::new_id());
+    let mut child = base_cmd(s)
+        .args(["-c", "fastimport.unpackLimit=0", "fast-import", "--quiet", "--done"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stream = (|| -> Result<()> {
+        let mut input = std::io::BufWriter::new(child.stdin.take().context("Git import has no input")?);
+        writeln!(input, "commit {branch}\ncommitter Layr <layr@example.invalid> 0 +0000\ndata 0")?;
+        for path in paths {
+            let file = root.join(path);
+            let meta = std::fs::symlink_metadata(&file)?;
+            // update-index uses the owner execute bit, even when other execute bits differ.
+            let mode = if meta.file_type().is_symlink() {
+                0o120000
+            } else if meta.permissions().mode() & 0o100 != 0 {
+                0o100755
+            } else {
+                0o100644
+            };
+            // Git's C quoting is byte based (JSON's Unicode escapes are not accepted).
+            write!(input, "M {mode:o} inline \"")?;
+            for byte in path.bytes() {
+                match byte {
+                    b'"' | b'\\' => write!(input, "\\{}", char::from(byte))?,
+                    0x20..=0x7e => input.write_all(&[byte])?,
+                    _ => write!(input, "\\{byte:03o}")?,
+                }
+            }
+            writeln!(input, "\"")?;
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&file)?;
+                let data = target.as_os_str().as_bytes();
+                writeln!(input, "data {}", data.len())?;
+                input.write_all(data)?;
+            } else {
+                let fd = rustix::fs::open(
+                    &file,
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK,
+                    rustix::fs::Mode::empty(),
+                )?;
+                let mut file = std::fs::File::from(fd);
+                let meta = file.metadata()?;
+                if !meta.is_file() {
+                    bail!("{} is not a regular file", path);
+                }
+                let size = meta.len();
+                writeln!(input, "data {size}")?;
+                if std::io::copy(&mut Read::by_ref(&mut file).take(size), &mut input)? != size {
+                    bail!("{path} changed during Git export");
+                }
+            }
+            writeln!(input)?;
+        }
+        writeln!(input, "ls \"\"\n\nreset {branch}\n\ndone")?;
+        input.flush()?;
+        Ok(())
+    })();
+    if stream.is_err() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output()?;
+    stream?;
+    if !output.status.success() {
+        bail!("git fast-import failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let listing = std::str::from_utf8(&output.stdout)?;
+    let tree = listing
+        .strip_prefix("040000 tree ")
+        .and_then(|l| l.split_once('\t'))
+        .map(|(oid, _)| oid)
+        .context("Git import did not return its root tree")?;
+    Ok(tree.to_string())
+}
+
+/// Only initial exports use a pack. Later exports retain changed-path/index reuse. Git's
+/// index applies attributes and clean/EOL conversions; keep that path whenever they may apply.
+fn can_pack_tree(s: &Path, root: &Path, paths: &[u8]) -> Result<bool> {
+    if git_out(s, &["config", "--get", "core.autocrlf"]).is_ok_and(|v| v.trim() != "false") {
+        return Ok(false);
+    }
+    if git_out(s, &["config", "--bool", "core.filemode"]).is_ok_and(|v| v.trim() == "false")
+        || git_out(s, &["config", "--bool", "core.ignorecase"]).is_ok_and(|v| v.trim() == "true")
+    {
+        return Ok(false);
+    }
+    let mut child = base_cmd(s)
+        .env("GIT_WORK_TREE", root)
+        .args(["check-attr", "--all", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().context("Git attributes has no input")?;
+    // Attribute output may exceed a pipe: consume it while writing the path list.
+    let output = std::thread::scope(|scope| -> Result<_> {
+        let writer = scope.spawn(move || input.write_all(paths));
+        let output = child.wait_with_output()?;
+        writer.join().map_err(|_| anyhow!("Git attributes writer failed"))??;
+        Ok(output)
+    })?;
+    if !output.status.success() {
+        bail!("git check-attr failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(output.stdout.is_empty())
+}
+
 /// Write the commit of a state: the tree from the index of `base` (a state with its commit) plus
 /// the paths that changed since, the given parent commits, author and committer from the state.
 /// `refname` is set to the commit.
@@ -2004,13 +2157,13 @@ fn commit_tree(
     message: Option<&str>,
     refname: &str,
 ) -> Result<String> {
+    let _state = crate::trace::span("git export state");
     let s = &export.store;
     let src = repo.state_src(&state.id)?;
     let tmp_idx = std::env::temp_dir().join(format!("layr-index-{}", ids::new_id()));
-    let mut keep: Vec<crate::repo::Temp> = Vec::new();
     let res = (|| -> Result<String> {
         let mut paths: Vec<String> = Vec::new();
-        let mut full: Option<PathBuf> = None;
+        let mut full = None;
         // True when the index is a copy of the index of the base: its entries for unchanged
         // files have valid stat data, so no refresh of every tracked file is needed.
         let mut inherited = false;
@@ -2028,12 +2181,12 @@ fn commit_tree(
                 let aroot = repo.state_src(ast)?;
                 let rules = crate::ignore_rules::Rules::of(&src);
                 for c in changes::file_changes(&aroot, &src)? {
-                    for p in [Some(c.path.clone()), c.old_path.clone()].into_iter().flatten() {
+                    for p in [Some(c.path().clone()), c.old_path().cloned()].into_iter().flatten() {
                         if skip_path(&p) {
                             continue;
                         }
                         // Ignored paths are never exported, unless the ancestor tracked them.
-                        if c.old.is_none() && rules.ignored(&p, false) {
+                        if c.old().is_none() && rules.ignored(&p, false) {
                             continue;
                         }
                         paths.push(p);
@@ -2041,10 +2194,9 @@ fn commit_tree(
                 }
             }
             None => {
-                let root = repo.complete(src.clone(), &mut keep)?;
-                full = Some(root.clone());
-                let rules = crate::ignore_rules::Rules::new(&root);
-                fsutil::walk(&root, "", &mut |rel, m| {
+                let checkout = ExportCheckout::new(repo, &src, None)?;
+                let rules = crate::ignore_rules::Rules::new(&checkout.root);
+                fsutil::walk(&checkout.root, "", &mut |rel, m| {
                     if skip_path(rel) || rules.ignored(rel, m.is_dir()) {
                         return Ok(false);
                     }
@@ -2053,6 +2205,7 @@ fn commit_tree(
                     }
                     Ok(true)
                 })?;
+                full = Some(checkout);
             }
         }
         let mut input = Vec::new();
@@ -2060,33 +2213,51 @@ fn commit_tree(
             input.extend_from_slice(p.as_bytes());
             input.push(0);
         }
-        let root = match full {
-            Some(root) => root,
-            None => work_tree(repo, &src, &paths, &mut keep)?,
+        let checkout = match full {
+            Some(checkout) => checkout,
+            None => ExportCheckout::new(repo, &src, Some(&paths))?,
         };
         // Changed paths are hashed again: see FORGET_CHANGED.
         let _t = crate::trace::span(format!("git index update of {} changed paths", paths.len()));
-        for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
-            let mut c = base_cmd(s);
-            c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &root).args(args);
-            c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-            let mut ch = c.spawn()?;
-            ch.stdin.take().unwrap().write_all(&input)?;
-            let out = ch.wait_with_output()?;
+        let tree = if base.is_none() && can_pack_tree(s, &checkout.root, &input)? {
+            let tree = pack_tree(s, &checkout.root, &paths)?;
+            let _index = crate::trace::span("git export index command");
+            let out = base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["read-tree", &tree]).output()?;
             if !out.status.success() {
-                bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+                bail!("git read-tree failed: {}", String::from_utf8_lossy(&out.stderr));
             }
-        }
-        let tree = String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
-            .trim()
-            .to_string();
-        if tree.is_empty() {
-            bail!("git write-tree failed");
-        }
+            tree
+        } else {
+            let index_command = crate::trace::span("git export index command");
+            for args in [&FORGET_CHANGED[..], &["update-index", "--add", "--remove", "-z", "--stdin"]] {
+                let mut c = base_cmd(s);
+                c.env("GIT_INDEX_FILE", &tmp_idx).env("GIT_WORK_TREE", &checkout.root).args(args);
+                c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+                let mut ch = c.spawn()?;
+                ch.stdin.take().unwrap().write_all(&input)?;
+                let out = ch.wait_with_output()?;
+                if !out.status.success() {
+                    bail!("git update-index failed: {}", String::from_utf8_lossy(&out.stderr));
+                }
+            }
+            drop(index_command);
+            let tree_write = crate::trace::span("git export tree write");
+            let tree =
+                String::from_utf8_lossy(&base_cmd(s).env("GIT_INDEX_FILE", &tmp_idx).args(["write-tree"]).output()?.stdout)
+                    .trim()
+                    .to_string();
+            if tree.is_empty() {
+                bail!("git write-tree failed");
+            }
+            drop(tree_write);
+            tree
+        };
+        let commit_write = crate::trace::span("git export commit and ref write");
         let commit = export.commit(state, &tree, parents, message)?;
         git_out(s, &["update-ref", refname, &commit])?;
+        drop(commit_write);
         // Keep the index for the next export and for lines made from this state.
-        keep_index(repo, &state.id, &tmp_idx, inherited)?;
+        keep_index(repo, &state.id, &tmp_idx, inherited, &checkout)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
@@ -2096,7 +2267,8 @@ fn commit_tree(
 /// Keep `idx` as the index of `state` unless it has one. An index that is not a copy of an
 /// earlier index gets its stat data from one refresh. The file appears complete or not at
 /// all: other processes copy kept indexes without the project lock.
-fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
+fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool, checkout: &ExportCheckout<'_>) -> Result<()> {
+    let _retain = crate::trace::span("git export index retention");
     let dst = index_path(repo, state);
     if dst.exists() {
         return Ok(());
@@ -2108,7 +2280,7 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<(
     }
     r.context("keep the git index of the exported state")?;
     if !inherited {
-        let _ = refresh_index(repo, state);
+        let _ = refresh_index(repo, state, checkout);
     }
     Ok(())
 }
@@ -2154,18 +2326,18 @@ pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
     Ok(c)
 }
 
-fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
+fn refresh_index(repo: &Repo, state: &str, checkout: &ExportCheckout<'_>) -> Result<()> {
     // An index made from the previous index and the changed paths of a thin state has valid
     // stat data already; a refresh would need a complete tree.
-    if is_thin(repo, state) {
+    if checkout.is_thin() {
         return Ok(());
     }
     let _t = crate::trace::span("git index refresh");
     let s = store(repo);
-    let root = repo.state_root(state)?;
+    let _command = crate::trace::span("git index refresh command");
     base_cmd(&s)
         .env("GIT_INDEX_FILE", index_path(repo, state))
-        .env("GIT_WORK_TREE", &root)
+        .env("GIT_WORK_TREE", &checkout.root)
         .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false", "update-index", "-q", "--refresh"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2175,6 +2347,7 @@ fn refresh_index(repo: &Repo, state: &str) -> Result<()> {
 
 /// Push a prepared commit to `refs/heads/<branch>` of the remote, as the caller.
 pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force: bool) -> Result<()> {
+    let _push = crate::trace::span("git push prepared commit");
     if let Err(error) = check_reachable(repo, commit) {
         if !repair_cache(repo)? {
             return Err(error);
@@ -2204,7 +2377,10 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
         check_reachable(repo, commit)?;
     }
     let s = store(repo);
-    let before = ls_remote(ctx, repo, url, branch)?;
+    let before = {
+        let _remote = crate::trace::span("git push remote discovery");
+        ls_remote(ctx, repo, url, branch)?
+    };
     if !force {
         if let Some(remote) = &before {
             if remote != commit
@@ -2224,7 +2400,10 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     let spec = format!("{}{commit}:refs/heads/{branch}", if force { "+" } else { "" });
     c.arg(spec);
     as_caller(ctx, &mut c, &s)?;
-    let out = c.stdin(Stdio::null()).output().context("run git push")?;
+    let out = {
+        let _subprocess = crate::trace::span("git push subprocess");
+        c.stdin(Stdio::null()).output().context("run git push")?
+    };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("non-fast-forward") || err.contains("fetch first") || err.contains("rejected") {
@@ -2250,13 +2429,13 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     }
     let g = w.join(".git");
     if let Ok(m) = std::fs::symlink_metadata(&g) {
-        if m.is_dir() && !crate::storage::is_subvolume(&g) && std::fs::read_dir(&g)?.next().is_none() {
+        if m.is_dir() && !crate::fs::host().namespace.managed(&g) && std::fs::read_dir(&g)?.next().is_none() {
             std::fs::remove_dir(&g)?;
         } else {
             return Ok(());
         }
     }
-    crate::storage::create_subvolume(&g)?;
+    crate::fs::create(&g)?;
     let s = store(repo);
     for d in ["objects/info", "refs/heads", "refs/tags", "info"] {
         std::fs::create_dir_all(g.join(d))?;
@@ -2288,9 +2467,7 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         if idx.exists() {
             let src = std::fs::File::open(&idx)?;
             let dst = std::fs::File::create(g.join("index"))?;
-            if crate::storage::clone_file(&src, &dst).is_err() {
-                std::fs::copy(&idx, g.join("index"))?;
-            }
+            layr_fs_unix::copy_contents(&src, &dst)?;
         }
     }
     if let Some((_, c)) = &anc {
@@ -2435,9 +2612,7 @@ fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> R
             "index",
             &mut |f| {
                 let src = std::fs::File::open(&idx)?;
-                if crate::storage::clone_file(&src, f).is_err() {
-                    std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
-                }
+                layr_fs_unix::copy_contents(&src, f)?;
                 Ok(())
             },
             own,
@@ -2572,7 +2747,7 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
     let data: BTreeMap<String, Vec<u8>> = ids.iter().cloned().zip(blobs(repo, &ids)?).collect();
     let mut keep = Vec::new();
     for _ in 0..2 {
-        keep.push(crate::repo::Temp { path: scratch_folder(repo)? });
+        keep.push(crate::repo::Temp::empty(repo.p.scan_dir().join(crate::store::temp_name()))?);
     }
     for (path, o, n) in &changes {
         for (side, dst) in [(o, &keep[0].path), (n, &keep[1].path)] {
@@ -2587,23 +2762,7 @@ pub fn sparse_pair(repo: &Repo, old: Option<&str>, new: &str) -> Result<Pair> {
             place_blob(dst, &side.mode, path, bytes, None, None)?;
         }
     }
-    // `btrfs send` sends read-only subvolumes only.
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    for k in &keep {
-        crate::storage::set_readonly(&k.path)?;
-    }
     Ok(Pair { old: crate::repo::snap(&keep[0].path), new: crate::repo::snap(&keep[1].path), keep })
-}
-
-/// An empty folder for one side of a sparse pair. On btrfs it is a subvolume: a comparison of two
-/// trees sends them (`btrfs send`), and that needs subvolumes.
-fn scratch_folder(repo: &Repo) -> Result<PathBuf> {
-    let path = repo.p.scan_dir().join(crate::store::temp_name());
-    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
-    crate::storage::create_subvolume(&path)?;
-    #[cfg(not(all(target_os = "linux", not(feature = "overlayfs"))))]
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
 }
 
 /// One side of a raw diff record: the mode and the object id that git prints for it.
@@ -2834,11 +2993,13 @@ fn with_objects<T>(repo: &Repo, f: impl FnOnce(&mut CatFile) -> Result<T>) -> Re
     })
 }
 
-/// True when a read can take the state's changes: its tree is on disk, or it is an imported state
-/// whose commit is known (the record names it). Reads no git object; a missing object shows when the
-/// read happens.
+/// True when a read can take the state's changes: a native tree, retained portable objects,
+/// or an imported commit known by its record. Reads no Git blobs or portable file content;
+/// a missing blob shows when the read happens.
 pub fn readable(repo: &Repo, state: &str) -> Result<bool> {
-    Ok(repo.p.has_state(state) || imported_commit(repo, state)?.is_some())
+    Ok(repo.p.has_state(state)
+        || (!matches!(repo.p.db.state_flags(state)?, Some((_, true))) && crate::objstore::verified(&repo.p, state)?.is_some())
+        || imported_commit(repo, state)?.is_some())
 }
 
 /// Forgets the object reader (the store changed on disk: a damaged cache went aside).
@@ -2905,7 +3066,7 @@ impl GitFiles {
 pub struct Sides {
     pub old: GitFiles,
     pub new: GitFiles,
-    pub changes: Vec<crate::changes::Change>,
+    pub changes: Vec<crate::changes::EntryChange>,
 }
 
 /// Metadata of a changed file of a git side: the type and mode of its tree entry, and its size.
@@ -2964,7 +3125,11 @@ pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
             new_files.insert(d.path.clone(), data.clone());
             git_meta(mode, data.len())
         });
-        changes.push(crate::changes::Change { path: d.path.clone(), old_path: None, old: old_meta, new: new_meta, ranges: None });
+        if let Some(change) =
+            crate::changes::EntryChange::observed(d.path.clone(), old_meta, new_meta, crate::compare::DataEvidence::Unknown)
+        {
+            changes.push(change);
+        }
     }
     Ok(Sides { old: GitFiles { files: old_files }, new: GitFiles { files: new_files }, changes })
 }
@@ -2972,6 +3137,10 @@ pub(crate) fn sides_of(repo: &Repo, deltas: &[Delta]) -> Result<Sides> {
 #[cfg(test)]
 #[path = "gitbridge_history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "gitbridge_pack_tests.rs"]
+mod pack_tests;
 
 #[cfg(test)]
 mod export_tests {
@@ -3063,6 +3232,133 @@ mod export_tests {
             assert!(!ExportContext::load(root.clone()).signs(&state.author.email));
             Ok(())
         })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    #[ignore = "requires a filesystem test volume (btrfs, APFS or OverlayFS)"]
+    fn object_exports_materialize_once_per_state() -> Result<()> {
+        let base = std::env::var_os("LAYR_APFS_TEST_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!("layr-export-test-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            let store = crate::store::Store::open(&root.join("store"))?;
+            let dir = store.project_dir("export")?;
+            for path in ["meta/db", "meta/scan", "meta/work", "states"] {
+                std::fs::create_dir_all(dir.join(path))?;
+            }
+            let p = crate::store::Project {
+                lease: Default::default(),
+                store: &store,
+                name: "export".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+            };
+            let actor =
+                crate::model::Actor { uid: rustix::process::getuid().as_raw(), name: "Export Test".into(), session: None };
+            let mut project = crate::model::DraftRecord::new("project");
+            project.data = serde_json::json!({"name": "export", "id": p.id, "config": {}});
+            p.lock_maintenance()?.append(project, &actor)?;
+            let repo = Repo { p, ctx: None };
+            let objects = crate::objstore::open(&repo.p)?;
+            let source = root.join("source");
+            std::fs::create_dir(&source)?;
+            std::fs::write(source.join(".gitignore"), "*.log\n")?;
+            std::fs::write(source.join("ignored.log"), "ignored\n")?;
+            std::fs::write(source.join("run"), "#!/bin/sh\n")?;
+            std::fs::set_permissions(source.join("run"), std::fs::Permissions::from_mode(0o755))?;
+            std::os::unix::fs::symlink("text", source.join("link"))?;
+            let mut parents = Vec::<String>::new();
+            let mut commits = Vec::<String>::new();
+            for version in 0..3 {
+                let contents = format!("version {version}\n");
+                std::fs::write(source.join("text"), &contents)?;
+                // Equal size and mtime must still hash the changed path again.
+                layr_objects::times::set(&source.join("text"), 1_700_000_000_000_000_000)?;
+                let written = layr_objects::write_tree(
+                    &objects,
+                    &source,
+                    &layr_objects::WriteOptions {
+                        temperature: layr_objects::Temperature::Hot,
+                        previous: None,
+                        exclude: Vec::new(),
+                        similar: false,
+                    },
+                )?;
+                let id = ids::new_id();
+                let refs = layr_objects::StateRef { tree: written.tree.unwrap(), times: written.times.unwrap() };
+                objects.set_state(&id, &refs)?;
+                let state: StateRec = serde_json::from_value(serde_json::json!({
+                    "id": id, "kind": "commit", "subvol": "", "parents": parents,
+                    "time": 1700000000000i64 + version * 1000,
+                    "author": {"name": "Author", "email": "author@example.test"}, "message": contents,
+                    "tree": refs.tree.to_string(), "times": refs.times.to_string()
+                }))?;
+                let mut record = crate::model::DraftRecord::new("state");
+                record.states.push(state);
+                repo.p.lock_maintenance()?.append(record, &actor)?;
+                if version == 2 {
+                    // Missing ancestor indexes retain the read-tree/full-refresh fallback.
+                    std::fs::remove_file(index_path(&repo, &parents[0]))?;
+                }
+                crate::repo::MATERIALIZATIONS.with(|n| n.set(0));
+                let (commit, made) = export_history(&repo, &repo.source_id(&id)?)?;
+                assert_eq!(crate::repo::MATERIALIZATIONS.with(|n| n.get()), 1, "version {version}");
+                assert_eq!(made.last(), Some(&(id.clone(), commit.clone())));
+                assert!(!repo.p.state_path(&id).exists(), "export must not rebuild a second native state");
+                assert!(index_path(&repo, &id).exists());
+                if version == 0 {
+                    let counts = git_out(&super::store(&repo), &["count-objects", "-v"])?;
+                    assert!(counts.lines().any(|l| l == "packs: 1"), "initial export streams a pack");
+                    assert!(counts.lines().any(|l| l == "count: 1"), "only the final commit is loose: {counts}");
+                }
+                let git = repo.p.git_dir();
+                assert_eq!(git_out(&git, &["show", &format!("{commit}:text")])?, contents);
+                let listing = git_out(&git, &["ls-tree", &commit])?;
+                assert!(listing.contains("100755 blob") && listing.contains("120000 blob"));
+                assert!(!listing.contains("ignored.log"));
+                if let Some(parent) = commits.last() {
+                    assert_eq!(git_out(&git, &["rev-parse", &format!("{commit}^")])?.trim(), parent);
+                }
+                // A cached export neither checks out the source nor changes commit identity.
+                crate::repo::MATERIALIZATIONS.with(|n| n.set(0));
+                assert_eq!(export_commit(&repo, &id)?, commit);
+                assert_eq!(crate::repo::MATERIALIZATIONS.with(|n| n.get()), 0);
+                check_reachable(&repo, &commit)?;
+                parents = vec![id];
+                commits.push(commit);
+            }
+            // Corruption of a packed blob must still rebuild the complete derived cache.
+            forget_objects();
+            VERIFIED_OBJECTS.with(|v| v.borrow_mut().clear());
+            let packs = super::store(&repo).join("objects/pack");
+            let pack = std::fs::read_dir(&packs)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|e| e == "pack"))
+                .context("no export pack")?;
+            std::fs::set_permissions(&pack, std::fs::Permissions::from_mode(0o644))?;
+            std::fs::OpenOptions::new().write(true).open(&pack)?.set_len(12)?;
+            // As at the push boundary, tree lookup alone is insufficient: verify all blobs.
+            let repaired = cache_retry(&repo, || {
+                let commit = export_commit(&repo, &parents[0])?;
+                check_reachable(&repo, &commit)?;
+                Ok(commit)
+            })?;
+            assert_eq!(Some(&repaired), commits.last());
+            git_out(&super::store(&repo), &["fsck", "--full", "--no-reflogs", "--no-dangling"])?;
+            Ok(())
+        })();
+        // Unprivileged btrfs cannot drop read-only scan subvolumes. Unseal test-owned
+        // leftovers before removing the fixture (also works for sealed APFS trees).
+        let scans = root.join("store/projects/export/meta/scan");
+        for entry in std::fs::read_dir(scans)? {
+            let path = entry?.path();
+            crate::fs::set_writable(&path)?;
+            crate::fs::remove(&path)?;
+        }
         std::fs::remove_dir_all(root)?;
         result
     }

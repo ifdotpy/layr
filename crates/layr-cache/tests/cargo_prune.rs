@@ -90,17 +90,11 @@ fn removes_a_stale_unit_and_the_next_build_compiles_nothing() {
 
 /// The cargo hash of the unit of `target/debug` whose fingerprint lists the feature `extra` (`extra`) or none.
 fn unit_hash(target: &Path, extra: bool) -> String {
-    let fingerprints = target.join("debug/.fingerprint");
-    let unit = std::fs::read_dir(&fingerprints)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            let fingerprint: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(p.join("lib-prunews.json")).unwrap()).unwrap();
-            (fingerprint["features"] == "[\"extra\"]") == extra
-        })
-        .expect("the unit of the feature build");
-    unit.file_name().unwrap().to_string_lossy().rsplit_once('-').unwrap().1.to_string()
+    layr_cache::cargo::layout::Layout::units(&target.join("debug")).into_iter().find(|u| {
+        let data = std::fs::read(u.fingerprint.join("lib-prunews.json")).unwrap();
+        let fingerprint: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        (fingerprint["features"] == "[\"extra\"]") == extra
+    }).expect("the unit of the feature build").hash
 }
 
 #[test]
@@ -708,10 +702,9 @@ fn project_with_dep(base: &Path, sweep: &str) -> (PathBuf, PathBuf) {
 
 /// The `.fingerprint` folders of the crate `name` in `target/debug`.
 fn units_of(target: &Path, name: &str) -> BTreeSet<String> {
-    std::fs::read_dir(target.join("debug/.fingerprint"))
-        .unwrap()
-        .filter_map(|e| e.unwrap().file_name().into_string().ok())
-        .filter(|n| n.rsplit_once('-').is_some_and(|(p, _)| p == name))
+    layr_cache::cargo::layout::Layout::units(&target.join("debug")).into_iter()
+        .filter(|unit| unit.name == name)
+        .map(|unit| format!("{}-{}", unit.name, unit.hash))
         .collect()
 }
 
@@ -796,4 +789,23 @@ fn a_stale_workspace_dependency_keeps_the_other_dependencies_of_its_dependents()
     let stderr = cargo_in(&dir, &target, &["build", "--workspace", "-v"]);
     assert!(!stderr.contains("Compiling dep"), "{stderr}");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn sweep_keeps_incremental_for_unhashed_binary_named_differently_from_package() {
+    let dir = tmp("unhashed-binary");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname='package'\nversion='0.1.0'\nedition='2021'\n[[bin]]\nname='tool'\npath='src/main.rs'\n[profile.dev]\ndebug=0\n[workspace]\n[workspace.metadata.layr-retest]\nsweep=[[\"build\"]]\n").unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() { println!(\"hi\"); }\n").unwrap();
+    let target = dir.join("target");
+    cargo_in(&dir, &target, &["build"]);
+    let incremental = target.join("debug/incremental");
+    let folders = || -> BTreeSet<_> {
+        std::fs::read_dir(&incremental).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().starts_with("tool-")).collect()
+    };
+    let before = folders();
+    assert!(!before.is_empty());
+    assert!(matches!(prune(None, &target).unwrap().1, Outcome::Pruned { .. }));
+    assert_eq!(folders(), before);
+    let _ = std::fs::remove_dir_all(dir);
 }

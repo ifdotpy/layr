@@ -22,7 +22,7 @@ dashed() {
     u="${d:20:12}${d:12:8}${d:0:12}"
     printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
 }
-on_disk() { [ -e "$P/states/$(dashed "$1")" ] || [ -e "$P/deltas/$(dashed "$1")" ]; }
+on_disk() { state_available "$P" "$(dashed "$1")"; }
 wait_pin() { # the reader holds a pin: its rows are in the database
     for _ in $(seq 1 100); do [ "$(q "select count(*) from owners where kind='pin'")" -gt 0 ] && return 0; sleep 0.1; done
     return 1

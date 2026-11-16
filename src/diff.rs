@@ -1,6 +1,6 @@
 //! Diff output in git formats: patches, `--stat`, `--numstat`, `--name-status`, `--check`.
 
-use crate::changes::Change;
+use crate::changes::EntryChange;
 use crate::fsutil::{self, FType, Meta};
 use anyhow::Result;
 use similar::DiffOp;
@@ -33,16 +33,16 @@ pub fn side_of(root: &(impl Contents + ?Sized), path: &str, meta: &Meta) -> Resu
 pub fn file_diffs(
     old_root: &(impl Contents + ?Sized),
     new_root: &(impl Contents + ?Sized),
-    changes: &[Change],
+    changes: &[EntryChange],
 ) -> Result<Vec<FileDiff>> {
     let mut v = Vec::new();
     for c in changes {
-        let old = match &c.old {
+        let old = match c.old() {
             Some(m) if m.ftype != FType::Dir => Some(side_of(old_root, c.src(), m)?),
             _ => None,
         };
-        let new = match &c.new {
-            Some(m) if m.ftype != FType::Dir => Some(side_of(new_root, &c.path, m)?),
+        let new = match c.new() {
+            Some(m) if m.ftype != FType::Dir => Some(side_of(new_root, c.path(), m)?),
             _ => None,
         };
         if old.is_none() && new.is_none() {

@@ -8,7 +8,7 @@ use super::{exit, here, Here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
-use crate::model::{Record, StateKind, StateRec};
+use crate::model::{StateKind};
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_objects::{Id, StateRef, Store};
@@ -246,24 +246,16 @@ fn running_marker(repo: &Repo) -> PathBuf {
 
 /// Every state of the project with what the planner needs.
 fn candidates(repo: &Repo, store: Option<&Store>) -> Result<Vec<Candidate>> {
-    let mut st = repo.p.db.conn.prepare("SELECT rec, deleted FROM states")?;
-    let rows: Vec<(String, bool)> =
-        st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?.collect::<Result<_, _>>()?;
-    drop(st);
+    let rows = repo.p.db.state_rows()?;
     // A replay fills owners without freeing states, so `deleted` alone cannot
     // identify absent dead states. Keep both recorded and replayed owners:
     // a stale or incomplete owners table must not hide a live missing source.
     let mut owned: BTreeSet<String> = repo.p.db.owner_rows()?.into_iter().map(|r| r.0).collect();
     owned.extend(repo.p.recomputed_owners()?.into_iter().map(|r| r.0));
     // A state in the free queue whose storage is not removed yet: readers are refused (`pins_add`).
-    let queued: BTreeSet<String> = {
-        let mut q = repo.p.db.conn.prepare("SELECT state FROM free_queue")?;
-        let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
-        rows
-    };
+    let queued: BTreeSet<String> = repo.p.db.queued_frees()?.into_iter().collect();
     let mut out = Vec::with_capacity(rows.len());
-    for (raw, deleted) in rows {
-        let s: StateRec = serde_json::from_str(&raw)?;
+    for (s, deleted) in rows {
         let recorded = match (store, &s.tree, &s.times) {
             (Some(store), Some(tree), Some(times)) => store.has(&Id::parse(tree)?) && store.has(&Id::parse(times)?),
             _ => false,
@@ -356,7 +348,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("{} is an overlay: migrate its project; overlays keep their snapshots in this version", repo.p.name);
     }
     let leave_missing: BTreeSet<String> =
-        a.all("--leave-missing").iter().map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).collect::<Result<_>>()?;
+        a.all("--leave-missing").iter().map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).collect::<Result<_>>()?;
     let dry = a.has("-n");
     let marker = running_marker(repo);
     if marker.exists() && !a.has("--resume") && !dry {
@@ -390,10 +382,10 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         let _line_lock = repo.line_lock(&line)?;
         let line = repo.line(&line.id)?;
-        repo.prepare_save(&line)?;
-        let _lock = repo.p.lock()?;
+        let prepared = repo.prepare_save(ctx, &line)?;
+        let _lock = _line_lock.lock(&repo.p)?;
         let before = line.head.clone();
-        if let Some(st) = repo.working_state(ctx, &line, "before layr migrate")? {
+        if let Some(st) = prepared.working_state(&_lock, ctx, &line, "before layr migrate")? {
             if st != before {
                 outln!(ctx, "line {}: unsaved work saved as automatic state {}", line.name, ids::short(&st));
             }
@@ -432,7 +424,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 
     // 3. Under the project lock for the rest of the run: other commands wait until it ends.
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     std::fs::create_dir_all(table_dir(repo))?;
     std::fs::write(&marker, serde_json::json!({"pid": std::process::id(), "since_ms": ids::now_ms()}).to_string())?;
     // The plan again under the lock: a command may have saved since.
@@ -444,7 +436,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     for id in &omitted {
         outln!(ctx, "left unavailable by request: {id}; its record stays unchanged");
     }
-    let hot = super::objects::hot_states(&h)?;
+    let hot = crate::objstore::hot_states(&h.repo.p)?;
     let stop_after: Option<usize> = ctx.env("LAYR_TEST_MIGRATE_STOP_AFTER").and_then(|v| v.parse().ok());
     let started = Instant::now();
     let mut pending: Vec<String> = p.unrecorded.clone();
@@ -467,9 +459,9 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 }
                 map.insert(id.clone(), serde_json::json!({"times": r.times.hex(), "tree": r.tree.hex()}));
             }
-            let mut rec = Record::new(layr_model::validation::STATE_TREE_OP);
+            let mut rec = crate::model::DraftRecord::new(layr_model::validation::STATE_TREE_OP);
             rec.data = serde_json::json!({ "states": map });
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         pending.clear();
         Ok(())
@@ -628,7 +620,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
     );
     outln!(ctx, "object store: {} ({} bytes)", human(stat.total_bytes()), stat.total_bytes());
     outln!(ctx, "{} absent source state(s) have no owner; their records stay unchanged", p.unowned_missing);
-    super::admin::set_config(ctx, repo, crate::objstore::ENABLED, serde_json::json!(true))?;
+    crate::objstore::enable(&_lock, ctx, repo)?;
     delete_old(ctx, &h, a.has("--delete-old"), false)?;
     std::fs::remove_file(&marker)?;
     Ok(0)
@@ -727,7 +719,7 @@ fn dry_run(ctx: &Ctx, h: &Here, delete: bool, leave_missing: &BTreeSet<String>) 
     let store = if crate::objstore::exists(&repo.p) { Some(crate::objstore::open_existing(&repo.p)?) } else { None };
     let states = candidates(repo, store.as_ref())?;
     let mut p = plan(&states, &table.entries);
-    let hot = super::objects::hot_states(h)?;
+    let hot = crate::objstore::hot_states(&h.repo.p)?;
     let copies = crate::store_remote::store_copies(repo).unwrap_or_default();
     let (mut fetch, mut lost) = (0, Vec::new());
     let mut omitted = BTreeSet::new();

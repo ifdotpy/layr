@@ -46,7 +46,8 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
         _ => None,
     };
     let _pin = repo.pin(&[state.id.as_str()])?;
-    let root = repo.state_root(&state.id)?;
+    let snapshot = repo.state_src(&state.id)?;
+    let source = crate::objstore::SnapshotSource(&snapshot);
     let options = WriteOptions {
         temperature: Temperature::Cold,
         previous: base.as_ref().map(|(_, r)| r.tree),
@@ -56,17 +57,17 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
     let report = match base {
         Some((parent, r)) => {
             let _parent_pin = repo.pin(&[parent.as_str()])?;
-            let (paths, dirty) = crate::changes::object_candidates(&repo.state_src(&parent)?, &repo.state_src(&state.id)?)?;
-            layr_objects::write::write_changed_with_dirty(
+            let (paths, dirty) = crate::changes::object_candidates(&repo.state_src(&parent)?, &snapshot)?;
+            layr_objects::write::write_changed_with_dirty_from(
                 objects,
-                &root,
+                &source,
                 &layr_objects::write::Base { tree: r.tree, times: r.times },
                 &paths,
                 &dirty,
                 &options,
             )?
         }
-        None => layr_objects::write_tree(objects, &root, &options)?,
+        None => layr_objects::write::write_tree_from(objects, &source, &options)?,
     };
     let found = StateRef {
         tree: report.tree.context("a write gives a tree")?,
@@ -233,23 +234,27 @@ pub(super) fn fetch_states(store: &Store, repo: &Repo, states: Vec<StateRec>, re
     }
     for (state, r) in refs {
         if repo.p.has_state(&state.id) {
-            repo.p.db.set_present(&state.id, true)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.set_present(&state.id, true))?;
             continue;
         }
         let times = transfer::cloud_times_to_folder(&objects, &r.tree, &r.times)?;
         let local = StateRef { tree: r.tree, times };
         objects.set_state(&state.id, &local)?;
         let stage = repo.p.work_dir().join(crate::store::temp_name());
-        crate::storage::create_subvolume(&stage)?;
+        let temporary = crate::repo::Temp::empty(stage.clone())?;
         let result = (|| -> Result<u64> {
             let made = layr_objects::checkout_with(&objects, &local.tree, Some(&local.times), &stage)?;
             reader::publish_restored(repo, &state, &stage, 0)?;
             Ok(made.files)
         })();
-        if stage.exists() {
-            let _ = crate::storage::delete_tree(&stage);
-        }
-        report.files += result.with_context(|| format!("state {}", crate::ids::short(&state.id)))? as usize;
+        let made = match result {
+            Ok(made) => {
+                temporary.discard()?;
+                made
+            }
+            Err(error) => return Err(temporary.abort(error)),
+        };
+        report.files += Ok::<_, anyhow::Error>(made).with_context(|| format!("state {}", crate::ids::short(&state.id)))? as usize;
         report.states += 1;
         report.state_ids.push(state.id.clone());
     }

@@ -1,54 +1,23 @@
 //! Attestations are separate signed operation records, outside state identity.
 
+pub(crate) use crate::attestation::record;
+pub(crate) use crate::attestation::record_view;
+pub(crate) use crate::attestation::record_subject;
+pub(crate) use crate::attestation::check_passed;
+
 use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::ids;
-use crate::model::{Attestation, Record, Subject, ATTESTATION_KINDS};
+use crate::model::{Subject, ATTESTATION_KINDS};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
-use layr_hashers::{ContentAddress, Digest};
-
-/// The project appender stamps the signer, record id and time before it signs the record.
-pub fn record(repo: &Repo, state: &str, kind: &str, payload: &[u8]) -> Result<Record> {
-    record_subject(repo, Subject { kind: "state".into(), id: state.into() }, kind, payload)
-}
-
-pub fn record_view(repo: &Repo, view: &crate::overlay::View, kind: &str, payload: &[u8]) -> Result<Record> {
-    record_subject(repo, Subject { kind: "view".into(), id: view.id()? }, kind, payload)
-}
-
-/// Whether a check attestation of exactly `state` ran `command` (split as `check_argv` does) and
-/// exited 0. The protection of lines and refs reads required checks through this alone.
-pub(crate) fn check_passed(repo: &Repo, state: &str, command: &str) -> Result<bool> {
-    Ok(repo.p.db.check_exit(state, &layr_model::protection::check_argv(command), Some(0))?.is_some())
-}
-
-fn record_subject(repo: &Repo, subject: Subject, kind: &str, payload: &[u8]) -> Result<Record> {
-    if !ATTESTATION_KINDS.contains(&kind) {
-        bail!("unknown attestation kind '{kind}'");
-    }
-    let change_id = if subject.kind == "state" {
-        repo.state(&subject.id)?.change_id
-    } else {
-        repo.saved_view(&subject.id)?;
-        None
-    };
-    let mut rec = Record::new("attest");
-    rec.data = serde_json::json!({"attestation": Attestation {
-        format: 1, attestation_id: ids::new_id(), subject, change_id,
-        kind: kind.into(), payload_digest: hex::encode(ContentAddress::digest(payload)),
-        payload_ref: None, signer: String::new(), time: 0,
-    }});
-    Ok(rec)
-}
 
 fn subject(repo: &Repo, line: Option<&crate::model::Line>, rev: &str) -> Result<Subject> {
     if let Some(id) = rev.strip_prefix("views/") {
         repo.saved_view(id)?;
-        Ok(Subject { kind: "view".into(), id: id.into() })
+        Ok(Subject::view(id)?)
     } else {
-        Ok(Subject { kind: "state".into(), id: crate::revs::resolve(repo, line, rev)? })
+        Ok(Subject::state(&crate::revs::resolve_state(repo, line, rev)?)?)
     }
 }
 
@@ -69,27 +38,27 @@ pub fn attest(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(file) => super::work::read_caller_file(ctx, file, 8 << 20)?,
         None => Vec::new(),
     };
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let mut rec = record_subject(&h.repo, subject.clone(), kind, &payload)?;
     if kind == "revoke" {
         // A revoke takes the attestations of its own user; root speaks for every user of this machine
         // (a check runner's service user, for example).
         let uid = (!ctx.caller.is_root()).then_some(ctx.caller.uid);
-        let ids = h.repo.p.db.own_attestations(&subject.id, &h.repo.p.store.machine.id, uid, None)?;
+        let ids = h.repo.p.db.own_attestations(subject.id(), &h.repo.p.store.machine.id, uid, None)?;
         if ids.is_empty() {
             eprintln!(
                 "warning: no attestation of {} on this machine for {} to revoke",
                 if uid.is_some() { "this user" } else { "any user" },
-                crate::ids::short(&subject.id)
+                crate::ids::short(subject.id())
             );
         }
         rec.data["revokes"] = serde_json::json!(ids);
     }
-    let rec = h.repo.commit_record(ctx, rec)?;
+    let rec = h.repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", rec.data["attestation"]);
     } else {
-        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, subject.id);
+        outln!(ctx, "{}\t{}\t{}", rec.data["attestation"]["attestation_id"].as_str().unwrap_or(""), kind, subject.id());
     }
     Ok(0)
 }
@@ -106,7 +75,7 @@ pub fn attestations(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     let subject = subject(&h.repo, h.line.as_ref(), &a.pos[0])?;
-    let v = h.repo.p.db.attestations(&subject.id, a.get("--kind"))?;
+    let v = h.repo.p.db.attestations(subject.id(), a.get("--kind"))?;
     if a.has("--json") {
         outln!(ctx, "{}", serde_json::to_string(&v)?);
     } else {

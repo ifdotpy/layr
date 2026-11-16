@@ -17,6 +17,9 @@ pub struct ObjectTree {
     trees: Mutex<HashMap<Id, Arc<layr_objects::tree::Tree>>>,
     times: Mutex<HashMap<Id, Arc<layr_objects::times::Times>>>,
     links: BTreeMap<String, (String, u64, u64)>,
+    link_domain: layr_fs_core::LinkDomain,
+    #[cfg(test)]
+    pub(crate) link_comparisons: std::sync::atomic::AtomicUsize,
 }
 impl std::fmt::Debug for ObjectTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +64,9 @@ impl ObjectTree {
             refs,
             cache,
             links,
+            link_domain: layr_fs_core::LinkDomain::default(),
+            #[cfg(test)]
+            link_comparisons: Default::default(),
             materialized: Mutex::new(BTreeMap::new()),
             trees: Mutex::new(HashMap::from([(refs.tree, root)])),
             times: Mutex::new(HashMap::new()),
@@ -115,6 +121,18 @@ impl ObjectTree {
         }
         Ok(None)
     }
+    /// Cross-directory hard-link groups must match before any subtree can be pruned.
+    pub fn same_links(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        self.link_comparisons.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.links == other.links
+    }
+    /// Compare immutable directory entries and their tree/times IDs. The comparison caller
+    /// checks cross-directory hard-link compatibility once before pruning any directories.
+    pub fn same_subtree(&self, other: &Self, rel: &str) -> Result<bool> {
+        let (Some(a), Some(b)) = (self.entry(rel)?, other.entry(rel)?) else { return Ok(false) };
+        Ok(matches!(a.entry.node, Node::Dir { .. }) && a.entry == b.entry && a.folder_times == b.folder_times)
+    }
     pub fn meta(&self, rel: &str) -> Result<Option<Meta>> {
         Ok(self.entry(rel)?.map(|e| e.meta()))
     }
@@ -155,14 +173,6 @@ impl ObjectTree {
             }
         }
         Ok(())
-    }
-    pub fn entries(&self, rel: &str) -> Result<BTreeMap<String, Meta>> {
-        let mut out = BTreeMap::new();
-        self.walk(rel, &mut |p, m| {
-            out.insert(p.to_owned(), m.clone());
-            Ok(true)
-        })?;
-        Ok(out)
     }
     /// Decode one entry for a filesystem-only consumer. Never expand its children.
     pub fn path(&self, rel: &str) -> Result<PathBuf> {
@@ -270,41 +280,6 @@ impl Drop for ObjectTree {
 }
 use std::os::unix::fs::DirBuilderExt;
 
-#[cfg(target_os = "macos")]
-impl ObjectTree {
-    pub fn scan_entry(&self, rel: &str) -> Result<Option<crate::storage::ScanEntry>> {
-        Ok(self.entry(rel)?.map(|e| {
-            let meta = e.meta();
-            crate::storage::ScanEntry {
-                fingerprint: (
-                    u64::MAX,
-                    self.links.get(rel).map(|(_, inode, _)| *inode).unwrap_or(0),
-                    meta.mode,
-                    meta.size,
-                    meta.mtime,
-                    e.ns.rem_euclid(1_000_000_000),
-                    0,
-                    0,
-                ),
-                meta,
-                data: None,
-                nlink: self.links.get(rel).map(|(_, _, count)| *count).unwrap_or(1),
-                birth: (0, 0),
-                flags: 0,
-            }
-        }))
-    }
-    pub fn scan(&self) -> Result<BTreeMap<String, crate::storage::ScanEntry>> {
-        let mut map = BTreeMap::new();
-        map.insert(String::new(), self.scan_entry("")?.context("missing root")?);
-        self.walk("", &mut |p, _| {
-            map.insert(p.to_owned(), self.scan_entry(p)?.context("missing object entry")?);
-            Ok(true)
-        })?;
-        Ok(map)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,7 +352,12 @@ mod tests {
         assert!(Arc::ptr_eq(&tree.times(&tree.refs.times)?, &tree.times(&tree.refs.times)?));
         assert_eq!(tree.trees.lock().unwrap().len(), 2);
         assert_eq!(tree.times.lock().unwrap().len(), 2);
-        assert_eq!(tree.entries("")?.len(), expected.len());
+        let mut count = 0;
+        tree.walk("", &mut |_, _| {
+            count += 1;
+            Ok(true)
+        })?;
+        assert_eq!(count, expected.len());
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
         Ok(())
@@ -476,6 +456,44 @@ mod tests {
     }
 
     #[test]
+    fn core_reader_encoding_keeps_state_ids_without_exporting_object_entries() -> Result<()> {
+        let (tmp, tree) = fixture()?;
+        let copied = Store::open(&tmp.join("copy-core"), layr_objects::Keying::Plain)?;
+        let report = layr_objects::write::write_tree_from(
+            &copied,
+            &layr_objects::write::ReaderSource(tree.as_ref()),
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            },
+        )?;
+        assert_eq!(report.tree, Some(tree.refs.tree));
+        assert_eq!(report.times, Some(tree.refs.times));
+        assert!(tree.materialized.lock().unwrap().is_empty());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+    #[test]
+    fn core_reader_verifies_hot_blob_identity_before_returning_content() -> Result<()> {
+        let (tmp, tree) = fixture()?;
+        let entry = tree.entry("file")?.unwrap();
+        let Node::File { blob, size } = entry.entry.node else { panic!("fixture file missing") };
+        let hot = tree.store.hot_path(&blob).unwrap();
+        std::fs::write(hot, vec![b'x'; size as usize])?;
+        let error = match layr_fs_core::TreeRead::open_file(tree.as_ref(), &layr_fs_core::RelPath::new(b"file")?) {
+            Ok(_) => anyhow::bail!("corrupt hot blob was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("does not match its id"));
+        assert!(tree.materialized.lock().unwrap().is_empty());
+        drop(tree);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+    #[test]
     fn writing_an_object_source_keeps_tree_times_and_link_groups() -> Result<()> {
         let (tmp, tree) = fixture()?;
         #[cfg(target_os = "macos")]
@@ -495,6 +513,8 @@ mod tests {
         )?;
         assert_eq!(report.tree, Some(tree.refs.tree));
         assert_eq!(report.times, Some(tree.refs.times));
+        #[cfg(target_os = "macos")]
+        assert!(tree.materialized.lock().unwrap().is_empty());
         drop(source);
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
@@ -523,5 +543,58 @@ mod tests {
         drop(tree);
         std::fs::remove_dir_all(tmp)?;
         Ok(())
+    }
+}
+
+impl layr_fs_core::TreeRead for ObjectTree {
+    fn link_domain(&self) -> Option<&layr_fs_core::LinkDomain> {
+        Some(&self.link_domain)
+    }
+    fn metadata(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
+        use layr_fs_core::*;
+        let rel = std::str::from_utf8(path.as_bytes()).map_err(|_| FsError::Invalid("object adapter requires UTF-8"))?;
+        let Some(entry) = self.entry(rel).map_err(FsError::backend)? else { return Ok(None) };
+        let meta = entry.meta();
+        Ok(Some(EntryMetadata {
+            kind: meta.ftype,
+            size: meta.size,
+            link: self.links.get(rel).map(|(_, inode, count)| LinkIdentity { device: u64::MAX, inode: *inode, count: *count }),
+            attributes: EntryAttributes {
+                mode: meta.mode,
+                uid: rustix::process::geteuid().as_raw(),
+                gid: rustix::process::getegid().as_raw(),
+                modified_ns: entry.ns,
+                stored_time: Some(entry.ns),
+                xattrs: entry.entry.xattrs,
+                acl: None,
+            },
+        }))
+    }
+    fn entries(
+        &self,
+        dir: &layr_fs_core::RelDir,
+        visit: &mut dyn FnMut(&layr_fs_core::RelPath) -> layr_fs_core::Result<()>,
+    ) -> layr_fs_core::Result<()> {
+        use layr_fs_core::*;
+        let rel = std::str::from_utf8(dir.as_bytes()).map_err(|_| FsError::Invalid("object adapter requires UTF-8"))?;
+        let entry = self.entry(rel).map_err(FsError::backend)?.ok_or(FsError::Invalid("object folder absent"))?;
+        let Node::Dir { tree } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a directory")) };
+        for entry in &self.tree(&tree).map_err(FsError::backend)?.entries {
+            visit(&RelPath::new(entry.name.clone())?)?;
+        }
+        Ok(())
+    }
+    fn open_file(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Box<dyn layr_fs_core::ReadSeek + '_>> {
+        use layr_fs_core::*;
+        let rel = path.utf8()?;
+        let entry = self.entry(rel).map_err(FsError::backend)?.ok_or(FsError::Invalid("object file absent"))?;
+        let Node::File { blob, size } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a file")) };
+        Ok(Box::new(std::io::Cursor::new(self.file_bytes(&blob, size).map_err(FsError::backend)?)))
+    }
+    fn read_link(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Vec<u8>> {
+        use layr_fs_core::*;
+        let entry = self.entry(path.utf8()?).map_err(FsError::backend)?.ok_or(FsError::Invalid("object link absent"))?;
+        let Node::Symlink { target } = entry.entry.node else { return Err(FsError::Invalid("object entry is not a link")) };
+        Ok(target)
     }
 }

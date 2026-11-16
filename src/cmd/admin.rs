@@ -1,19 +1,23 @@
 //! save, undo, op log, try, gc, fsck, reindex, init, projects, config, cache.
 
+pub(crate) use crate::project_config::set_config;
+pub(crate) use crate::try_run::try_command;
+pub(crate) use crate::try_run::with_try_copy;
+
 use super::{exit, here};
 use crate::args::{parse, Spec};
+pub(crate) use crate::byte_size::human_size;
 use crate::changes;
 use crate::ctx::Ctx;
 use crate::fsutil;
 use crate::ids;
 use crate::model::{Line, LineChange, Record, StateKind};
 use crate::repo::{skip_path, Repo};
+pub(crate) use crate::retention::{drop_trees, overlay_named_states};
 use crate::revs;
-use crate::storage as btrfs;
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 pub(super) fn operation_name(op: &str) -> String {
     let (name, suffix) = op.split_once('.').unwrap_or((op, ""));
@@ -179,6 +183,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         }
         let mut prepared = None;
+        let mut automatic = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
@@ -198,7 +203,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 }
             };
         } else if !a.has("--force") {
-            repo.prepare_save(&l)?;
+            automatic = Some(repo.prepare_save(ctx, &l)?);
         }
         // Test barrier after cache preparation and before publication.
         if a.has("--caches") {
@@ -217,7 +222,11 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
         if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        let _lock = match repo.p.lock() {
+        let acquired = match &_line_lock {
+            Some(leases) => leases.lock(&repo.p),
+            None => repo.p.lock_maintenance(),
+        };
+        let _lock = match acquired {
             Ok(lock) => lock,
             Err(e) => {
                 repo.discard_prepared_caches(prepared);
@@ -277,9 +286,12 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 }
             }
             caches.retain(|p| !refused.contains(p));
-            Some(repo.caches_state(ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
+            Some(repo.caches_state(&_lock, ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
-            repo.save(ctx, &l, &msg, a.has("--running"), a.has("--force"))?
+            match automatic.take() {
+                Some(prepared) => prepared.publish(&_lock, ctx, &l, &msg, a.has("--running"))?,
+                None => repo.save(&_lock, ctx, &l, &msg, a.has("--running"), a.has("--force"))?,
+            }
         };
         if let Some(name) = a.get("--keep") {
             // An unchanged folder makes no state: the keep then holds the state equal to the folder.
@@ -287,7 +299,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 Some(s) => s.id.clone(),
                 None => repo.save_base(&l)?,
             };
-            repo.p.db.keep_set(&l.id, name, &kept)?;
+            repo.p.lock_or_borrow()?.write(|tx| tx.keep_set(&l.id, name, &kept))?;
         }
         let mut overlays = Vec::new();
         let saved = st.is_some();
@@ -298,7 +310,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                     let shared = repo.policy().rule_for(&l.name).is_some();
                     // The line's caches as cache overlays (docs/cache-overlays.md): new lines from
                     // this line take them, whatever state the line's name selects.
-                    for (p, name, id) in repo.save_cache_overlays(ctx, &l, &caches, shared, &s.id)? {
+                    for (p, name, id) in repo.save_cache_overlays(&_lock, ctx, &l, &caches, shared, &s.id)? {
                         if json {
                             overlays.push(serde_json::json!({"path": p, "overlay": name, "state": id, "short": ids::short(&id)}));
                         } else if !a.has("-q") {
@@ -378,15 +390,14 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     }
     // The source times that the caches saw go with them (docs/cache-overlays.md, section 20). A failure costs a build
     // only, so it is a warning.
-    if let Err(e) = crate::source_times::record(&w, &ready) {
+    if let Err(e) = crate::source_times::record(&w, &ready, (u, g)) {
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
     // The copy of each cache folder that the overlay save takes under the lock is made here, before it.
-    #[cfg(target_os = "macos")]
     for p in &ready {
         let cp = fsutil::safe_join(&w, p)?;
-        if btrfs::is_subvolume(&cp) {
-            btrfs::prepare_snapshot(&cp, &repo.p.work_dir(), true)?;
+        if crate::fs::host().namespace.managed(&cp) {
+            repo.prepare_capture(&cp)?;
         }
     }
     Ok(refused)
@@ -571,8 +582,8 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     // An operation with lines is undoable while its undo entry is in the undo.ops ring of its
     // lines (docs/ownership.md). Past the ring, its states may be freed: say so, do not guess.
-    let ord = crate::owners::record_ord(&r);
-    let entries = crate::owners::undo_entries(&r, &ord);
+    let ord = crate::db::owners::record_ord(&r);
+    let entries = crate::db::owners::undo_entries(&r, &ord);
     if !entries.is_empty() {
         let mut in_ring = false;
         for (holder, _) in &entries {
@@ -582,12 +593,12 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
             let past = if r.op == "line.delete" {
                 format!(
                     "the newest {} deleted lines (undo.deleted)",
-                    repo.p.config_u64("undo.deleted", crate::owners::UNDO_DELETED_DEFAULT as u64)
+                    repo.p.config_u64("undo.deleted", crate::db::owners::UNDO_DELETED_DEFAULT as u64)
                 )
             } else {
                 format!(
                     "the newest {} operations of its line (undo.ops)",
-                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                    repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
                 )
             };
             return Err(exit(1, format!("error: cannot undo: operation {} is past {past}", ids::short(&r.id))));
@@ -595,7 +606,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     }
     // The states that the undo reads stay on disk while it runs (every line's entry of the record).
     let named: Vec<String> =
-        crate::owners::undo_entries(&r, &crate::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
+        crate::db::owners::undo_entries(&r, &crate::db::owners::record_ord(&r)).into_iter().flat_map(|(_, v)| v).collect();
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     repo.hold(repo.pin(&named)?);
     if r.op == "save" {
@@ -605,10 +616,10 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // to change each of them. An operation without lines (tags, groups) needs the admin or the
     // user who made it.
     for (lid, ch) in &r.lines {
-        let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before.as_ref().map(|b| b.owner)).unwrap_or(0);
+        let owner = repo.p.db.line_by_id(lid)?.map(|l| l.owner).or(ch.before().map(|b| b.owner)).unwrap_or(0);
         let probe = Line {
             id: lid.clone(),
-            name: ch.before.as_ref().or(ch.after.as_ref()).map(|s| s.name.clone()).unwrap_or_default(),
+            name: ch.before().or(ch.after()).map(|s| s.name.clone()).unwrap_or_default(),
             head: String::new(),
             owner,
             machine: String::new(),
@@ -622,10 +633,7 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
     // Before the lock: the automatic state of each line's folder and the trees that the undo
     // reads (seconds to minutes each under the lock). Errors only lose the preparation; the
     // states are loaded again under the lock, where an error stops the undo.
-    for (lid, ch) in &r.lines {
-        if let Ok(Some(l)) = repo.p.db.line_by_id(lid) {
-            let _ = repo.prepare_save(&l);
-        }
+    for ch in r.lines.values() {
         for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
             let _ = repo.state_root(s);
         }
@@ -660,25 +668,30 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    repo.prepare_save(&line)?;
-    let wb = save_before_undo(ctx, repo, &line, false)?;
+    let wb = save_before_undo(&_line_lock, None, ctx, repo, &line)?;
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
         return Err(e);
     }
-    let mut rec = Record::new("undo");
+    let mut rec = crate::model::DraftRecord::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op, "keep_stage": true});
     let now = repo.line_state(&line, &line.head);
     rec.lines.insert(
         lid.clone(),
-        LineChange { before: Some(now.clone()), after: Some(now), working_before: wb.clone(), working_after: Some(before) },
+        LineChange {
+            transition: crate::model::LineTransition::Move { before: now.clone(), after: now },
+            working_before: wb.clone(),
+            working_after: Some(before),
+        },
     );
     let head0 = line.head.clone();
-    let done = match repo.commit_line(&line, &head0, |_| repo.commit_record(ctx, rec)) {
+    let done = match repo.commit_line(&_line_lock, &line, &head0, |locked, _| repo.commit_record(locked, ctx, rec)) {
         Ok(done) => done,
         Err(e) => {
-            super::work::put_back(repo, &line, wb.as_deref());
-            return Err(e);
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                super::work::put_back(repo, &line, wb.as_deref());
+            }
+            return Err(e.into());
         }
     };
     crate::gitbridge::sync_store_access(repo)?;
@@ -705,7 +718,7 @@ fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bo
     let cur = repo.scan(line)?;
     let later: BTreeSet<String> = changes::file_changes(&after_root, &cur.path)?
         .into_iter()
-        .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
+        .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
         .flatten()
         .collect();
     repo.apply_delta(&after_root, &before_root, &repo.working(line), repo.own(line), &later, force)?;
@@ -724,7 +737,7 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
         return false;
     }
     r.lines.iter().all(|(lid, ch)| {
-        let Some(before) = &ch.before else {
+        let Some(before) = ch.before() else {
             return false;
         };
         match repo.p.db.line_by_id(lid) {
@@ -738,29 +751,29 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
 
 /// The automatic save of a line before its undo. An in-place undo takes the project lock for the
 /// save alone (the copy of the folder is made before it); the caller holds no project lock then.
-fn save_before_undo(ctx: &Ctx, repo: &Repo, line: &Line, in_place: bool) -> Result<Option<String>> {
-    if !in_place {
-        return repo.working_state(ctx, line, "before undo");
+fn save_before_undo(
+    leases: &crate::store::LineLeaseSet,
+    locked: Option<&crate::store::LockedProject<'_>>,
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &Line,
+) -> Result<Option<String>> {
+    if let Some(locked) = locked {
+        return repo.working_state(locked, ctx, line, "before undo");
     }
-    repo.prepare_save(line)?;
-    let _commit = repo.p.lock()?;
-    repo.working_state(ctx, line, "before undo")
+    let prepared = repo.prepare_save(ctx, line)?;
+    let _commit = leases.lock(&repo.p)?;
+    prepared.working_state(&_commit, ctx, line, "before undo")
 }
 
 fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let in_place = undo_in_place(repo, r);
     // The lines of the undo, in id order, for their folders. An in-place undo takes the project lock
     // for its checks and its record only; any other undo keeps the project lock for all of it.
-    let mut ids: Vec<&String> = r.lines.keys().collect();
-    ids.sort();
-    let mut _line_locks = Vec::new();
-    for lid in ids {
-        if let Some(l) = repo.p.db.line_by_id(lid)? {
-            _line_locks.push(repo.line_lock(&l)?);
-        }
-    }
-    let _lock = if in_place { None } else { Some(repo.p.lock()?) };
-    let mut rec = Record::new("undo");
+    let lines = r.lines.keys().map(|id| repo.p.db.line_by_id(id)).collect::<Result<Vec<_>>>()?;
+    let leases = repo.p.line_leases(lines.into_iter().flatten().map(|l| (l.id, l.name)))?;
+    let _lock = if in_place { None } else { Some(leases.lock(&repo.p)?) };
+    let mut rec = crate::model::DraftRecord::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
     // An undo of an automatic save keeps the stage, and so does its undo.
     let keep_stage = r.data["keep_stage"].as_bool() == Some(true);
@@ -825,8 +838,11 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         };
         for l in &made {
             let o = repo.overlay_repo(&l.overlay)?;
-            let parent =
-                o.parents(&l.state)?.first().cloned().ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
+            let parent = o
+                .parents(&o.source_id(&l.state)?)?
+                .first()
+                .cloned()
+                .ok_or_else(|| exit(1, "error: the overlay state has no parent"))?;
             let info = repo.need_overlay(&l.overlay)?;
             let Some(ol) = crate::overlay::find_overlay_line(&o.p.db, &info, &line)? else { continue };
             if ol.head != l.state && !force {
@@ -872,7 +888,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             .map(|l| repo.p.db.line_by_name(&l.name).ok().flatten().map(|x| x.id == l.id).unwrap_or(false))
             .unwrap_or(false);
         let cur_state = if alive { cur_state } else { None };
-        if !force && cur_state.as_ref().map(|s| (&s.name, &s.head)) != ch.after.as_ref().map(|s| (&s.name, &s.head)) {
+        if !force && cur_state.as_ref().map(|s| (&s.name, &s.head)) != ch.after().map(|s| (&s.name, &s.head)) {
             return Err(exit(
                 1,
                 "error: the line changed after this operation; undo the later operations first (layr op log), or use --force",
@@ -883,9 +899,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let mut needed: Vec<String> = Vec::new();
     for ch in r.lines.values() {
         needed.extend(
-            [ch.before.as_ref().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()]
-                .into_iter()
-                .flatten(),
+            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten(),
         );
     }
     needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
@@ -895,7 +909,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
                 1,
                 format!(
                     "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
-                    repo.p.config_u64("undo.ops", crate::owners::UNDO_OPS_DEFAULT as u64)
+                    repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
                 ),
             )
         })?;
@@ -911,10 +925,10 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     let mut written: Vec<(Line, Option<String>)> = Vec::new();
     for (lid, ch, cur, alive, cur_state) in lines {
         let mut wb = None;
-        match (&ch.before, &cur) {
+        match (ch.before(), &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
-                wb = save_before_undo(ctx, repo, l, in_place)?;
+                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
                 written.push((l.clone(), wb.clone()));
                 // A name change keeps the folder where it is, as `line rename` does.
                 if b.name != l.name {
@@ -974,7 +988,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
-                wb = save_before_undo(ctx, repo, l, in_place)?;
+                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
                 repo.p.trash(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
@@ -983,8 +997,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         rec.lines.insert(
             lid.clone(),
             LineChange {
-                before: cur_state,
-                after: ch.before.clone(),
+                transition: crate::model::LineTransition::from_endpoints(cur_state, ch.before().cloned()),
                 working_before: wb,
                 working_after: ch.working_before.clone(),
             },
@@ -992,39 +1005,41 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     }
     for (name, ol, parent) in &overlay_back {
         let o = repo.overlay_repo(name)?;
-        let _l = o.p.lock()?;
-        crate::overlay::move_overlay_line(&o, ctx, "undo", ol, parent, Vec::new())?;
+        let _l = o.p.lock_maintenance()?;
+        crate::overlay::move_overlay_line(&_l, &o, ctx, "undo", ol, parent, Vec::new())?;
     }
     let done = if in_place {
         let states = rec.states.clone();
-        let result = (|| -> Result<Record> {
-            let _commit = repo.p.lock()?;
+        let result = (|| -> crate::db::PublishResult<Record> {
+            let _commit = leases.lock(&repo.p)?;
             // The heads that the checks saw must still be there: a command that does not take the
             // line lock (line delete, follow, fetch) may have moved one.
             for (lid, before) in &seen {
                 let now = repo.p.db.line_by_id(lid)?;
                 match (before, now) {
                     (Some((name, from)), Some(now)) if &now.head != from => {
-                        return Err(crate::repo::line_moved(name, from, &now.head));
+                        return Err(crate::repo::line_moved(name, from, &now.head).into());
                     }
-                    (Some((name, _)), None) => return Err(crate::repo::line_gone(name)),
+                    (Some((name, _)), None) => return Err(crate::repo::line_gone(name).into()),
                     _ => {}
                 }
             }
-            repo.commit_record(ctx, rec)
+            repo.commit_record(&_commit, ctx, rec)
         })();
         match result {
             Ok(done) => done,
             Err(e) => {
-                crate::repo::discard_unrecorded(repo, &states);
-                for (line, wb) in &written {
-                    super::work::put_back(repo, line, wb.as_deref());
+                if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                    crate::repo::discard_unrecorded(repo, &states);
+                    for (line, wb) in &written {
+                        super::work::put_back(repo, line, wb.as_deref());
+                    }
                 }
-                return Err(e);
+                return Err(e.into());
             }
         }
     } else {
-        repo.commit_record(ctx, rec)?
+        repo.commit_record(_lock.as_ref().ok_or_else(|| anyhow::anyhow!("missing undo lock"))?, ctx, rec)?
     };
     for line in &stage_drops {
         repo.drop_stage(line)?;
@@ -1060,14 +1075,14 @@ pub(crate) fn restore_working(repo: &Repo, line: &Line, state: &str) -> Result<(
     let list: Vec<_> = changes::file_changes(&scan.path, &target)?
         .into_iter()
         .filter(|c| {
-            !(skip_path(&c.path)
-                || private.contains(&c.path)
-                || c.old_path.as_ref().map(|o| private.contains(o)).unwrap_or(false))
+            !(skip_path(c.path()) || private.contains(c.path()) || c.old_path().map(|o| private.contains(o)).unwrap_or(false))
         })
         .collect();
-    let gone: Vec<&str> =
-        list.iter().flat_map(|c| c.old_path.as_deref().into_iter().chain(c.new.is_none().then_some(c.path.as_str()))).collect();
-    let write: Vec<&str> = list.iter().filter(|c| c.new.is_some()).map(|c| c.path.as_str()).collect();
+    let gone: Vec<&str> = list
+        .iter()
+        .flat_map(|c| c.old_path().map(String::as_str).into_iter().chain(c.new().is_none().then_some(c.path().as_str())))
+        .collect();
+    let write: Vec<&str> = list.iter().filter(|c| c.new().is_some()).map(|c| c.path().as_str()).collect();
     fsutil::replace_work_entries(&target, &w, &gone, &write, own)
 }
 
@@ -1085,8 +1100,8 @@ pub fn op(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let data = super::work::read_caller_file(ctx, args.get(1).map(|s| s.as_str()).unwrap_or("-"), 512 << 20)?;
         let lines: Vec<String> =
             String::from_utf8_lossy(&data).lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
-        let _lock = h.repo.p.lock()?;
-        let n = h.repo.p.import_lines(&lines, crate::store::Trust::Known)?;
+        let _lock = h.repo.p.lock_maintenance()?;
+        let n = _lock.import_lines(&lines, crate::store::Trust::Known)?;
         outln!(ctx, "imported {n} new record(s) of {}", lines.len());
         return Ok(0);
     }
@@ -1177,12 +1192,12 @@ pub fn try_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     };
     let view = {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let current = h.line.as_ref().map(|line| repo.line(&line.id)).transpose()?;
         let view = revs::resolve_view(repo, current.as_ref(), rev).map_err(|e| exit(128, format!("layr try: {e:#}")))?;
         repo.check_view_read(ctx, &view)?;
         if !view.layers.is_empty() {
-            repo.save_view(ctx, &view)?;
+            repo.save_view(&_lock, ctx, &view)?;
         }
         view
     };
@@ -1241,12 +1256,12 @@ pub fn run_check_view(
     quiet: bool,
 ) -> Result<i32> {
     {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         repo.require(ctx, "try")?;
         repo.check_view_collected(view)?;
         repo.check_view_read(ctx, view)?;
         if !view.layers.is_empty() {
-            repo.save_view(ctx, view)?;
+            repo.save_view(&_lock, ctx, view)?;
         }
     }
     run_check_in(ctx, repo, &view.shared, argv, command, &[], quiet, false, false, (!view.layers.is_empty()).then_some(view))
@@ -1279,14 +1294,14 @@ fn run_check_in(
             env.push(("LAYR_TRY_VIEW".into(), view.id()?));
         }
         let code = try_command(ctx, repo, state, argv, dir, &env, json)?;
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         let result = serde_json::json!({"command":command,"argv":argv,"exit":code,"seconds":started.elapsed().as_secs_f64()});
         let mut rec = match view {
             Some(view) => super::attest::record_view(repo, view, "check", &serde_json::to_vec(&result)?)?,
             None => super::attest::record(repo, state, "check", &serde_json::to_vec(&result)?)?,
         };
         rec.data["check"] = result;
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         if !quiet {
             eprintln!("layr: state {} exit {code}", ids::short(state));
         }
@@ -1294,85 +1309,13 @@ fn run_check_in(
     })
 }
 
-/// Create a private try copy, run the callback, then remove the copy unless requested otherwise.
-pub fn with_try_copy<T>(
-    ctx: &Ctx,
-    repo: &Repo,
-    state: &str,
-    layers: &[crate::overlay::Layer],
-    keep: bool,
-    caches: bool,
-    run: impl FnOnce(&Path) -> Result<T>,
-) -> Result<T> {
-    let name = format!(".try-{:016x}", rand::random::<u64>());
-    let dir = repo.p.line_path(&name);
-    let tmp_line = Line {
-        id: format!("try-{name}"),
-        name,
-        head: state.into(),
-        owner: ctx.caller.uid,
-        machine: repo.p.store.machine.id.clone(),
-    };
-    if layers.is_empty() {
-        repo.materialize(&tmp_line, state, &dir)?;
-    } else {
-        let view = crate::overlay::View::new(state.to_string(), layers.to_vec());
-        repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
-    }
-    if caches {
-        // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
-        // the records of a cache overlay, so the cache comes now from the store remote.
-        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
-        if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
-            let _ = btrfs::delete_tree(&dir);
-            return Err(e);
-        }
-    }
-    let result = run(&dir);
-    if keep {
-        eprintln!("layr try: kept {}", dir.display());
-    } else {
-        let _ = btrfs::delete_tree(&dir);
-    }
-    result
-}
-
-/// Use the try identity and environment rules for commands from an exact tree.
-pub fn try_command(
-    ctx: &Ctx,
-    repo: &Repo,
-    state: &str,
-    argv: &[String],
-    dir: &Path,
-    env: &[(String, String)],
-    json: bool,
-) -> Result<i32> {
-    if argv.is_empty() || argv[0].is_empty() {
-        anyhow::bail!("a command needs a nonempty argv");
-    }
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]).current_dir(dir);
-    if json {
-        command.stdout(std::process::Stdio::from(rustix::io::dup(std::io::stderr())?));
-    }
-    let mut env = env.to_vec();
-    env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
-    env.retain(|(k, _)| k != "LAYR_PROJECT");
-    env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
-    crate::privs::command_as(&mut command, ctx.caller.uid, &env)?;
-    let status = command
-        .status()
-        .map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
-    Ok(status.code().unwrap_or(128))
-}
-
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
-    pub missing: Vec<crate::owners::Row>,
-    pub extra: Vec<crate::owners::Row>,
+    pub missing: Vec<crate::db::owners::Row>,
+    pub extra: Vec<crate::db::owners::Row>,
     /// Undo owners of deleted lines outside the deleted ring (`owners::stale_undo_rows`).
-    pub stale: Vec<crate::owners::Row>,
+    pub stale: Vec<crate::db::owners::Row>,
     /// The present states that `gc --repair` frees: no row of the replay or a live pin names them.
     pub freed: Vec<String>,
 }
@@ -1393,9 +1336,9 @@ fn owners_check(repo: &Repo) -> Result<OwnersCheck> {
 
 /// The owner rows that a repair keeps: the replay (keeps included) plus the pins and tree
 /// reservations of live processes.
-fn kept_rows(repo: &Repo, want: &[crate::owners::Row]) -> Result<Vec<crate::owners::Row>> {
+fn kept_rows(repo: &Repo, want: &[crate::db::owners::Row]) -> Result<Vec<crate::db::owners::Row>> {
     let mut rows = want.to_vec();
-    let local = repo.p.db.owner_rows()?.into_iter().filter(|r| crate::owners::LOCAL_OWNERS.contains(&r.1.as_str()));
+    let local = repo.p.db.owner_rows()?.into_iter().filter(|r| crate::db::owners::LOCAL_OWNERS.contains(&r.1.as_str()));
     for (state, kind, holder) in local {
         if crate::free::holder_alive(&holder) {
             rows.push((state, kind, holder));
@@ -1412,17 +1355,14 @@ pub(crate) fn states_bytes(repo: &Repo, states: &[String]) -> u64 {
         .iter()
         .flat_map(|s| [repo.p.state_path(s), repo.p.delta_path(s)])
         .filter(|p| p.exists())
-        .filter_map(|p| crate::storage::space(&p).ok().map(|s| s.unique))
+        .filter_map(|p| crate::fs::host().accounting.space(&p).ok().map(|s| s.unique))
         .sum()
 }
 
 /// Run a read-only check in one read transaction (a snapshot in WAL mode). It takes no store
 /// lock: a lock would empty the trash at its end, which a check must not do.
 fn snapshot<T>(repo: &Repo, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    repo.p.db.conn.execute_batch("BEGIN")?;
-    let v = f();
-    let _ = repo.p.db.conn.execute_batch("COMMIT");
-    v
+    repo.p.db.with_read_snapshot(f)
 }
 
 /// `layr gc` (check): exit 1 when the table and the records differ, or a state has no owner.
@@ -1482,14 +1422,7 @@ fn evict_stored(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
     }
     let db = &repo.p.db;
     let named = overlay_named_states(repo)?;
-    let mut st = db.conn.prepare(
-        "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
-         AND EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id AND o.kind='store')
-         AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
-            AND o.kind IN ('head','auto','undo','deleted','park','overlay','pin','keep'))",
-    )?;
-    let rows: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-    drop(st);
+    let rows = db.stored_eviction_candidates()?;
     let copies = crate::store_remote::store_copies(repo)?;
     let mut evict = Vec::new();
     for id in rows {
@@ -1548,7 +1481,7 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
         }
         let Some(info) = repo.overlay_info(&name)? else { continue };
         let Ok(orepo) = repo.overlay_repo(&name) else { continue };
-        let _lock = orepo.p.lock()?;
+        let _lock = orepo.p.lock_maintenance()?;
         let held = crate::store_remote::cache_store_copies(repo, &orepo, &name, stores)?;
         if held.is_empty() {
             continue;
@@ -1562,15 +1495,7 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
                 }
             }
         }
-        let rows: Vec<String> = {
-            let mut st = orepo.p.db.conn.prepare(
-                "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
-                 AND NOT EXISTS (SELECT 1 FROM owners o WHERE o.state=s.id
-                    AND o.kind IN ('auto','park','pin','keep','deleted'))",
-            )?;
-            let rows = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            rows
-        };
+        let rows = orepo.p.db.cache_eviction_candidates()?;
         let mut evict = Vec::new();
         for id in rows {
             if live.contains(&id) || !held.contains(&id) || !kept.contains(&id) {
@@ -1587,72 +1512,6 @@ fn evict_caches(repo: &Repo, stores: &[crate::store_remote::CacheStore]) -> Resu
         bytes += b;
     }
     Ok((gone, bytes))
-}
-
-/// The project states that a cache overlay names through its heads and records: eviction and
-/// `layr migrate --delete-old` keep their trees.
-pub(crate) fn overlay_named_states(repo: &Repo) -> Result<BTreeSet<String>> {
-    let mut overlays = Vec::new();
-    for name in repo.overlay_names()? {
-        // An overlay of another platform that this machine never fetched has no project here and names no state.
-        if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.exists() {
-            continue;
-        }
-        overlays.push(repo.overlay_project(&name)?);
-    }
-    overlay_project_named_states(overlays)
-}
-
-/// Defer native retirement if an overlay needs recovery under a busy lock.
-pub(crate) fn overlay_named_states_maintenance(repo: &Repo) -> Result<Option<BTreeSet<String>>> {
-    repo.maintenance_overlay_projects()?.map(overlay_project_named_states).transpose()
-}
-
-fn overlay_project_named_states(overlays: Vec<Project<'_>>) -> Result<BTreeSet<String>> {
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for overlay in overlays {
-        for line in overlay.db.lines()? {
-            named.insert(line.head);
-        }
-        for raw in overlay.db.all_lines()? {
-            for token in raw.split(|c: char| !c.is_ascii_hexdigit()).filter(|t| t.len() == 32) {
-                named.insert(token.to_string());
-            }
-        }
-    }
-    Ok(named)
-}
-
-/// Remove the trees of states whose records stay (eviction, imports that git builds again) and
-/// mark them absent. The states are reserved first, in one transaction with the check for pins
-/// (`Db::reserve_trees`): a state that a reader pinned stays, and a reader that pins later is
-/// refused until the tree is gone. Reservations of a crashed command are finished first. Returns
-/// the states whose trees went.
-pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
-    let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
-        if !crate::free::holder_alive(&holder) {
-            left.entry(holder).or_default().push(state);
-        }
-    }
-    for (holder, states) in left {
-        let gone = absent_after_delete(repo, &states);
-        repo.p.db.release_trees(&states, &gone, &holder)?;
-    }
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let holder = crate::free::self_holder();
-    let reserved = repo.p.db.reserve_trees(ids, &holder)?;
-    let gone = absent_after_delete(repo, &reserved);
-    repo.p.db.release_trees(&reserved, &gone, &holder)?;
-    Ok(gone)
-}
-
-/// Delete the trees of `ids`; the states whose trees are gone after it (a state kept as the base
-/// of a thin layer stays).
-fn absent_after_delete(repo: &Repo, ids: &[String]) -> Vec<String> {
-    repo.p.delete_states(ids).into_iter().filter(|id| !repo.p.has_state(id)).collect()
 }
 
 /// The daily garbage report of a project (`service.rs`): what `layr gc` and `layr fsck --overlays` would find, in
@@ -1685,13 +1544,13 @@ pub fn garbage_report(repo: &Repo) -> Result<Option<String>> {
 pub fn repair_table(
     repo: &Repo,
     free: bool,
-    diff: Option<(Vec<crate::owners::Row>, Vec<crate::owners::Row>)>,
+    diff: Option<(Vec<crate::db::owners::Row>, Vec<crate::db::owners::Row>)>,
 ) -> Result<Vec<String>> {
     let (missing, extra) = match diff {
         Some(d) => d,
         None => repo.p.db.owners_diff(&repo.p.recomputed_owners()?)?,
     };
-    repo.p.db.apply_owners_diff(&missing, &extra)?;
+    repo.p.lock_or_borrow()?.write(|tx| tx.apply_owners_diff(&missing, &extra))?;
     for holder in repo.p.db.pin_holders()? {
         if !crate::free::holder_alive(&holder) {
             repo.p.db.release_holder(&holder)?;
@@ -1699,7 +1558,7 @@ pub fn repair_table(
     }
     let leaks = repo.p.db.leaked_states()?;
     if free {
-        repo.p.db.free_leaks(&leaks)?;
+        repo.p.lock_or_borrow()?.write(|tx| tx.free_leaks(&leaks))?;
     }
     Ok(leaks)
 }
@@ -1739,7 +1598,8 @@ fn repair_project(
     let mut attempts = 0;
     let evicted: Evicted;
     // The key epochs that the store remotes publish now, read before the lock (network).
-    let stores = if repo.p.gc_evicts() && !repo.p.is_overlay() { crate::store_remote::cache_stores(ctx, repo) } else { Vec::new() };
+    let stores =
+        if repo.p.gc_evicts() && !repo.p.is_overlay() { crate::store_remote::cache_stores(ctx, repo) } else { Vec::new() };
     let leaks = loop {
         attempts += 1;
         let (mark, diff) = {
@@ -1760,7 +1620,7 @@ fn repair_project(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
         if repo.p.db.records_mark()? != mark {
             if attempts < 3 {
                 continue;
@@ -1770,16 +1630,16 @@ fn repair_project(
         let leaks = repair_table(repo, free, Some(diff))?;
         evicted = evict_stored(repo, &stores)?;
         for expired in repo.p.db.expired_refs(ids::now_ms())? {
-            let mut rec = Record::new("ref.expire");
+            let mut rec = crate::model::DraftRecord::new("ref.expire");
             rec.data = serde_json::json!({"ref_change": crate::model::RefChange { name:expired.name.clone(),before:Some(expired),after:None }});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         // Old cache snapshots of states (build output; the states stay).
         let caches = trash_excess_caches(&repo.p)?;
         if !caches.is_empty() {
-            let mut rec = Record::new("gc");
+            let mut rec = crate::model::DraftRecord::new("gc");
             rec.data = serde_json::json!({"deleted": [], "caches": caches});
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
         }
         // Cache overlay lines of deleted lines (their states go below), and overlays with a
         // history limit (docs/cache-overlays.md).
@@ -1801,11 +1661,7 @@ fn repair_project(
             let mut done = crate::thin::upkeep_with(&repo.p, &heads, bases_read)?;
             // Final states of deleted lines that are still thin: their background keyframe
             // (`free::keyframe_later`) did not run.
-            let finals: Vec<String> = {
-                let mut q = repo.p.db.conn.prepare("SELECT DISTINCT state FROM owners WHERE kind='deleted'")?;
-                let rows = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-                rows
-            };
+            let finals = repo.p.db.deleted_owned_states()?;
             for id in finals.iter().filter(|id| repo.p.delta_path(id).is_dir()) {
                 crate::thin::make_keyframe(&repo.p, id)?;
                 done.keyframes += 1;
@@ -1846,8 +1702,9 @@ fn repair_project(
             eprintln!("warning: unnamed OCI blobs stay until the next gc: {e:#}");
         }
     }
-    #[cfg(target_os = "macos")]
-    crate::storage::prune_saved_scans(&repo.p.dir)?;
+    if let Some(prune) = crate::fs::host().prune_observations {
+        prune(&repo.p.dir)?;
+    }
     if !quiet {
         outln!(ctx, "freed {freed} state(s), {} leaked", leaks.len());
         if evicted.states + evicted.caches > 0 {
@@ -1928,7 +1785,7 @@ fn cache_garbage(repo: &Repo) -> Result<(usize, u64)> {
 
 /// `cache_garbage`, with a line for each kind to `say`.
 fn cache_garbage_with(repo: &Repo, say: &mut dyn FnMut(String)) -> Result<(usize, u64)> {
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let (mut states, mut bytes) = (0usize, 0u64);
     for name in repo.overlay_names()? {
         if !repo.limited_history(&name)? {
@@ -2004,6 +1861,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
                     eprintln!("warning: native copies of {name} not retired: {e:#}");
                 }
             }
+            super::objects::maintain_for_gc(ctx, &repo, dry, quiet)?;
             Ok(freed)
         });
         match result {
@@ -2021,7 +1879,7 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
 pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     crate::store::EMPTY_TRASH_FULLY.store(true, std::sync::atomic::Ordering::SeqCst);
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
-        return crate::store_remote::command(ctx, "gc", args);
+        return crate::cmd::store_maintenance::command(ctx, "gc", args);
     }
     let spec = Spec::new().flag("-n|--dry-run").flag("-q|--quiet").flag("--repair").flag("--dedup").flag("--all-projects");
     let a = parse(&spec, args)?;
@@ -2059,7 +1917,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // rows that differ from that read change, and only while the disk still agrees with it: the row
     // of a layer made since stays, a row is removed only while its layer is still not on disk.
     if a.has("--repair") && !a.has("-n") && !bases_diff.is_empty() {
-        let _lock = if h.repo.p.holds_lock() { None } else { Some(h.repo.p.lock()?) };
+        let _lock = h.repo.p.lock_or_borrow()?;
         let rows = h.repo.p.db.bases_rows()?;
         let set: BTreeMap<String, String> = disk_bases
             .iter()
@@ -2071,7 +1929,7 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .filter(|state| !disk_bases.contains_key(*state) && !h.repo.p.delta_path(state).is_dir())
             .cloned()
             .collect();
-        h.repo.p.db.fix_bases(&set, &gone)?;
+        h.repo.p.lock_or_borrow()?.write(|tx| tx.fix_bases(&set, &gone))?;
     }
     if !a.has("-q") || !bases_diff.is_empty() {
         let verb = if a.has("--repair") && !a.has("-n") { "repaired" } else { "differ" };
@@ -2081,11 +1939,8 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
-    // The experimental object store (docs/objects.md) repacks here, as `git gc` does; a project
-    // without one is not touched.
-    // First what no kept state reaches leaves each object store (the base and every overlay): a dropped part of an overlay
-    // with `history=last` gives its objects back here (docs/overlays.md section 1a, slice 7).
     if !a.has("-n") {
+<<<<<<< head
         // Retirement only frees space; an overlay that cannot open must not stop prune and repack.
         if let Err(e) = crate::objstore::retire_native(&h.repo) {
             eprintln!("warning: native copies not retired: {e:#}");
@@ -2123,7 +1978,11 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 seconds
             );
         }
+=======
+        crate::objstore::retire_native(&h.repo)?;
+>>>>>>> fs-legacy-facades
     }
+    super::objects::maintain_for_gc(ctx, &h.repo, a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.
     let shared = if a.has("--dedup") { Some(crate::dedup::run(&h.repo, a.has("-n"))?) } else { None };
     if !a.has("-q") {
@@ -2161,12 +2020,12 @@ fn leftovers(ctx: &Ctx, repo: &Repo, repair: bool, dry: bool, quiet: bool) -> Re
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state
 /// needs"). `parent`, `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record.
 /// `conflict` is kept too: a conflict needs the trees of its base, ours and theirs.
-use crate::owners::TREE_OWNERS;
+use crate::db::owners::TREE_OWNERS;
 
 /// `gc --repair`: frees the trees of imported states that no owner keeps, and that git can build
 /// again (`gitbridge::build_tree`). A dry run lists them and frees nothing.
 fn repair_built(repo: &Repo, dry: bool) -> Result<Vec<String>> {
-    let _lock = (!dry).then(|| repo.p.lock()).transpose()?;
+    let _lock = (!dry).then(|| repo.p.lock_maintenance()).transpose()?;
     let freed = drop_built_imports(repo, dry)?;
     if !dry && !freed.is_empty() {
         repo.prune_all_bases()?;
@@ -2236,7 +2095,7 @@ fn print_trash_errors(store: &crate::store::Store) {
 
 pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if args.iter().any(|v| v == "--remote" || v.starts_with("--remote=")) {
-        return crate::store_remote::command(ctx, "fsck", args);
+        return crate::cmd::store_maintenance::command(ctx, "fsck", args);
     }
     let args = &super::overlay_args("fsck", args, &[("--caches", "--overlays")])?;
     if args.iter().any(|v| v == "--caches") {
@@ -2247,9 +2106,9 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let repo = &h.repo;
     repo.require(ctx, "fsck")?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut problems = 0;
-    let ic: String = repo.p.db.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    let ic: String = repo.p.db.integrity_check()?;
     if ic != "ok" {
         problems += 1;
         outln!(ctx, "database: {ic}");
@@ -2293,10 +2152,11 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let name = e.file_name().to_string_lossy().into_owned();
         let id = name.split('@').next().unwrap_or(&name).to_string();
         match repo.p.db.state(&id)? {
+            None if crate::free::preparing_state(&repo.p, &id)? => continue,
             None => {
                 problems += 1;
                 if a.has("--repair") {
-                    btrfs::delete_tree(&e.path())?;
+                    crate::fs::remove(&e.path())?;
                     outln!(ctx, "deleted snapshot without record: {name}");
                 } else {
                     outln!(ctx, "snapshot without record (leftover of an interrupted save): {name} (use --repair)");
@@ -2305,9 +2165,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(_) => {}
         }
     }
-    let mut st = repo.p.db.conn.prepare("SELECT id FROM states WHERE present=1")?;
-    let ids_v: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-    drop(st);
+    let ids_v = repo.p.db.present_states()?.into_iter().map(|(id, _)| id);
     for id in ids_v {
         if !repo.p.has_state(&id) {
             problems += 1;
@@ -2315,7 +2173,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             let note = if deleted { " (of a deleted line)" } else { "" };
             outln!(ctx, "state {} is marked present but missing{note}", ids::short(&id));
             if a.has("--repair") {
-                repo.p.db.set_present(&id, false)?;
+                repo.p.lock_or_borrow()?.write(|tx| tx.set_present(&id, false))?;
             }
         }
     }
@@ -2362,10 +2220,10 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         }
         for e in std::fs::read_dir(o.p.states_dir())?.flatten() {
             let id = e.file_name().to_string_lossy().into_owned();
-            if o.p.db.state(&id)?.is_none() {
+            if o.p.db.state(&id)?.is_none() && !crate::free::preparing_state(&o.p, &id)? {
                 problems += 1;
                 if repair {
-                    btrfs::delete_tree(&e.path())?;
+                    crate::fs::remove(&e.path())?;
                     outln!(ctx, "overlay {name}: deleted snapshot without record: {id}");
                 } else {
                     outln!(ctx, "overlay {name}: snapshot without record: {id} (use --repair)");
@@ -2373,7 +2231,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
             }
         }
         for l in o.lines()? {
-            if !o.p.has_state(&l.head) {
+            if !o.p.has_state(&l.head) && crate::objstore::verified(&o.p, &l.head)?.is_none() {
                 // Remote sync imports cache records for every platform, but only the local
                 // platform's trees. An intentional absence is not damage; a present/deleted
                 // marker or a local-platform head still requires the normal error below.
@@ -2440,8 +2298,8 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
         let in_cache = |p: &str| caches.iter().any(|c| p == c || p.starts_with(&format!("{c}/")));
         let diff: Vec<String> = changes::file_changes(&base, &fresh.path)?
             .into_iter()
-            .filter(|c| !skip_path(&c.path) && !in_cache(&c.path))
-            .map(|c| c.path)
+            .filter(|c| !skip_path(c.path()) && !in_cache(c.path()))
+            .map(|c| c.path().clone())
             .collect();
         if !diff.is_empty() {
             problems += 1;
@@ -2457,12 +2315,12 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
 pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "fsck")?;
-    let _lock = h.repo.p.lock()?;
-    h.repo.p.rebuild_index()?;
+    let _lock = h.repo.p.lock_maintenance()?;
+    _lock.rebuild_index()?;
     // Layer bases exist on APFS only: elsewhere the table stays empty.
     #[cfg(target_os = "macos")]
-    h.repo.p.db.replace_bases(&crate::thin::bases(&h.repo.p)?)?;
-    let n: i64 = h.repo.p.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
+    h.repo.p.lock_or_borrow()?.write(|tx| tx.replace_bases(&crate::thin::bases(&h.repo.p)?))?;
+    let n = h.repo.p.db.records_count()?;
     outln!(ctx, "index rebuilt from {n} records");
     if !h.repo.p.is_overlay() {
         for name in h.repo.visible_overlay_names(ctx)? {
@@ -2470,9 +2328,9 @@ pub fn reindex(ctx: &Ctx, _args: &[String]) -> Result<i32> {
             let Ok(o) = h.repo.overlay_project(&name) else {
                 continue;
             };
-            let _l = o.lock()?;
-            o.rebuild_index()?;
-            let n: i64 = o.db.conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?;
+            let _l = o.lock_maintenance()?;
+            _l.rebuild_index()?;
+            let n = o.db.records_count()?;
             outln!(ctx, "overlay {name}: index rebuilt from {n} records");
         }
     }
@@ -2505,31 +2363,59 @@ fn copy_folder(
     fsutil::refuse_case_collisions(dst, entries.iter().map(|(rel, _)| rel.as_str()))?;
     // Names of one file stay names of one file: the first is copied, the others link to it.
     let mut first: std::collections::HashMap<(u64, u64), String> = Default::default();
-    for (rel, m) in &entries {
-        if m.is_dir() {
-            fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
-            continue;
-        }
-        let link = if m.is_file() {
-            use std::os::unix::fs::MetadataExt;
-            let lm = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(fsutil::safe_join(src, &rel)?)?))?;
-            (lm.nlink() > 1).then(|| (lm.dev(), lm.ino()))
-        } else {
-            None
-        };
-        match link.and_then(|k| first.get(&k).map(|f| (k, f.clone()))) {
-            Some((_, f)) => {
-                fsutil::make_parents(dst, &rel, None)?;
-                std::fs::hard_link(fsutil::safe_join(dst, &f)?, fsutil::safe_join(dst, &rel)?)?;
-            }
-            None => {
-                copy_from_caller(ctx, src, rel, dst)?;
-                if let Some(k) = link {
-                    first.insert(k, rel.clone());
+    // The store is closed to the caller. Open a bounded batch of source files under the
+    // caller's credentials, then write through those descriptors with the service's rights.
+    // This also keeps Darwin's process-wide effective-id changes on this one thread.
+    enum Source {
+        Directory,
+        File(std::fs::File),
+        Symlink(std::path::PathBuf),
+    }
+    for batch in entries.chunks(64) {
+        let sources = crate::privs::as_caller_fs(ctx, || {
+            batch
+                .iter()
+                .map(|(rel, m)| {
+                    if m.is_dir() {
+                        return Ok(Source::Directory);
+                    }
+                    let path = fsutil::safe_join(src, rel)?;
+                    let m = std::fs::symlink_metadata(&path)?;
+                    if m.file_type().is_symlink() {
+                        Ok(Source::Symlink(std::fs::read_link(&path)?))
+                    } else {
+                        fsutil::open_regular(&path).map(Source::File)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        for ((rel, _), source) in batch.iter().zip(sources) {
+            match source {
+                Source::Directory => {
+                    fsutil::make_parents(dst, &format!("{rel}/x"), None)?;
+                    continue;
+                }
+                Source::Symlink(target) => fsutil::put_symlink(dst, rel, &target)?,
+                Source::File(file) => {
+                    use std::os::unix::fs::MetadataExt;
+                    let m = file.metadata()?;
+                    let link = (m.nlink() > 1).then(|| (m.dev(), m.ino()));
+                    match link.and_then(|k| first.get(&k)) {
+                        Some(first) => {
+                            fsutil::make_parents(dst, rel, None)?;
+                            std::fs::hard_link(fsutil::safe_join(dst, first)?, fsutil::safe_join(dst, rel)?)?;
+                        }
+                        None => {
+                            fsutil::copy_open_file(&file, dst, rel)?;
+                            if let Some(k) = link {
+                                first.insert(k, rel.clone());
+                            }
+                        }
+                    }
                 }
             }
+            n += 1;
         }
-        n += 1;
     }
     // Set directory modes after their children, so a restrictive mode cannot block the copy.
     for (rel, m) in entries.iter().rev().filter(|(_, m)| m.is_dir()) {
@@ -2538,28 +2424,11 @@ fn copy_folder(
     Ok(n)
 }
 
-/// Copy one file or link of the caller's folder into the store: read with the caller's rights,
-/// write with ours. The daemon runs as root, and the store folders are closed to the caller.
-fn copy_from_caller(ctx: &Ctx, src: &std::path::Path, rel: &str, dst: &std::path::Path) -> Result<()> {
-    let path = fsutil::safe_join(src, rel)?;
-    let m = crate::privs::as_caller_fs(ctx, || Ok(std::fs::symlink_metadata(&path)?))?;
-    if m.file_type().is_symlink() {
-        let target = crate::privs::as_caller_fs(ctx, || Ok(std::fs::read_link(&path)?))?;
-        return fsutil::put_symlink(dst, rel, &target);
-    }
-    let file = crate::privs::as_caller_fs(ctx, || fsutil::open_regular(&path))?;
-    fsutil::copy_open_file(&file, dst, rel)
-}
-
 fn caller_git(ctx: &Ctx, dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
     let mut command = std::process::Command::new("git");
     command.arg("-c").arg("safe.directory=*").arg("-C").arg(dir).args(args);
     // The caller's choice of git configuration (the global file and its excludes) applies, as in their shell.
-    crate::privs::command_as(
-        &mut command,
-        ctx.caller.uid,
-        &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]),
-    )?;
+    crate::privs::command_as_caller(&mut command, ctx, &crate::privs::pick_env(ctx, &["GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME"]))?;
     Ok(command.output()?)
 }
 
@@ -2575,13 +2444,14 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--owner")
         .value("--volume")
         .flag("--include-ignored")
+        .flag("--no-objects")
         .value("-m|--message")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
     let name = a
         .pos
         .first()
-        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>], or layr init [<project>] --from-git <checkout>"))?;
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>] [--no-objects], or layr init [<project>] --from-git <checkout>"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -2595,6 +2465,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(_) => return Err(exit(128, "fatal: only root can create a project for another user")),
         None => ctx.caller.uid,
     };
+    let owner_ids = (owner, crate::ctx::Caller::from_uid(owner).gid);
     let actor = ctx.actor();
     // A missing source is an error, not an empty project. Checked before the project folder exists.
     if let Some(from) = a.get("--from") {
@@ -2615,19 +2486,21 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let dir = p.dir.clone();
     let repo = Repo { p, ctx: Some(ctx) };
     // The last step of every path: the line of the new state. Runs under the project lock.
-    let finish = |state: String| -> Result<(Line, String)> {
-        let l = repo.create_line(ctx, &line_name, &state, owner)?;
+    let finish = |locked: &crate::store::LockedProject<'_>, state: String| -> Result<(Line, String)> {
+        let l = repo.create_line(locked, ctx, &line_name, &state, owner)?;
         Ok((l, state))
     };
     let res = (|| -> Result<(Line, String)> {
-        let _lock = repo.p.lock()?;
+        let _lock = repo.p.lock_maintenance()?;
+        if !a.has("--no-objects") {
+            crate::objstore::enable(&_lock, ctx, &repo)?;
+        }
         let work = repo.p.work_dir().join(crate::store::temp_name());
-        btrfs::create_subvolume(&work)?;
-        let cleanup = crate::repo::Temp { path: work.clone() };
+        let mut cleanup = crate::repo::Temp::empty(work.clone())?;
         let mut parents = Vec::new();
         let mut msg = a.get("-m").unwrap_or("initial state").to_string();
         if let Some(url) = a.get("--git") {
-            set_config(ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
+            set_config(&_lock, ctx, &repo, "remote.origin.url", serde_json::json!(url))?;
             let refs = crate::gitbridge::fetch(ctx, &repo, "origin")?;
             let branch = a.get("-b").map(|s| s.to_string()).or_else(|| default_branch(&repo)).unwrap_or_else(|| "main".into());
             let state = refs
@@ -2635,11 +2508,11 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 .find(|(b, _)| b == &format!("origin/{branch}") || b.ends_with(&format!("/{branch}")))
                 .map(|x| x.1.clone());
             let state = state.ok_or_else(|| exit(128, format!("fatal: remote has no branch '{branch}'")))?;
-            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"), owner)?;
+            let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &state, &format!("origin/{branch}"))?;
             // The line starts at this commit: its tree is built now (the others are built on read).
-            crate::gitbridge::build_tree(&repo, &st, None)?;
+            crate::gitbridge::build_tree(&repo, &st, None, Some(owner_ids))?;
             drop(cleanup);
-            return finish(st);
+            return finish(&_lock, st);
         }
         if let Some(from) = a.get("--from") {
             let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
@@ -2651,9 +2524,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     .ok()
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .filter(|s| !s.is_empty());
-                set_config(ctx, &repo, "remote.local.url", serde_json::json!(src.to_string_lossy()))?;
+                set_config(&_lock, ctx, &repo, "remote.local.url", serde_json::json!(src.to_string_lossy()))?;
                 if let Some(u) = &url {
-                    set_config(ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
+                    set_config(&_lock, ctx, &repo, "remote.origin.url", serde_json::json!(u))?;
                 }
                 let refs = crate::gitbridge::fetch(ctx, &repo, "local")?;
                 let head = caller_git(ctx, &src, &["rev-parse", "HEAD"])?;
@@ -2676,17 +2549,16 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     // Copy as the caller, then freeze the bytes used by both the HEAD import
                     // and the folder content. A source edit cannot race the blob comparison.
                     let tmp = repo.p.work_dir().join(crate::store::temp_name());
-                    btrfs::create_subvolume(&tmp)?;
-                    let _t2 = crate::repo::Temp { path: tmp.clone() };
+                    let _t2 = crate::repo::Temp::empty(tmp.clone())?;
                     copy_folder(ctx, &src, &tmp, a.has("--include-ignored"), Some(&tracked))?;
                     let snap = repo.temp_snapshot(&tmp, true)?;
-                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"), owner)?;
+                    let (st, _) = crate::gitbridge::import_commit(ctx, &repo, &head, &format!("local/{branch}"))?;
                     // The line starts at the HEAD commit: its tree is built now, from the folder copy.
-                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path))?;
+                    crate::gitbridge::build_tree(&repo, &st, Some(&snap.path), Some(owner_ids))?;
                     parents.push(st.clone());
                     // The folder content on top (unsaved changes, if any).
-                    btrfs::delete_tree(&work)?;
-                    repo.snapshot_state(&st, &work, false)?;
+                    drop(cleanup);
+                    cleanup = crate::repo::Temp::source(&repo.state_src(&st)?, work.clone(), crate::fs::Protection::Writable)?;
                     let imported = repo.state_root(&st)?;
                     let diffs = changes::file_changes(&imported, &snap.path);
                     // Different file systems give no common lineage: compare by walking instead.
@@ -2732,7 +2604,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     changed |= !copies.is_empty() || !directories.is_empty() || !gone.is_empty();
                     if !changed {
                         drop(cleanup);
-                        return finish(st);
+                        return finish(&_lock, st);
                     }
                     msg = "unsaved changes of the imported folder".into();
                 } else {
@@ -2742,12 +2614,15 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 copy_folder(ctx, &src, &work, a.has("--include-ignored"), None)?;
             }
         }
+        // Normalize while the import is private, before its immutable layers are shared.
+        // The service writes as root, but later lines and stages belong to the intended owner.
+        crate::repo::give_tree(&work, owner_ids.0, owner_ids.1)?;
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
-        let mut rec = Record::new("commit");
+        let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st.clone());
-        repo.commit_record(ctx, rec)?;
+        repo.commit_record(&_lock, ctx, rec)?;
         drop(cleanup);
-        finish(st.id)
+        finish(&_lock, st.id)
     })();
     let (l, state) = match res {
         Ok(x) => x,
@@ -2755,7 +2630,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
             // Close the database first: an open file keeps its overlay mount busy (OverlayFS).
             drop(repo);
             // Remove the folder this call made, with its subvolumes. The error of the step is kept.
-            if let Err(c) = btrfs::delete_tree(&dir) {
+            if let Err(c) = crate::fs::remove(&dir) {
                 return Err(e.context(format!("cannot remove {}: {c:#}", dir.display())));
             }
             return Err(e);
@@ -2875,16 +2750,16 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let w = repo.working(&line);
     let tracking = crate::gitbridge::fetch_tracking(ctx, &repo, &src, "origin").unwrap_or_default();
     if !local.is_empty() {
-        set_config(ctx, &repo, "ignore.local", serde_json::json!(local))?;
+        set_config(&repo.p.lock_maintenance()?, ctx, &repo, "ignore.local", serde_json::json!(local))?;
         let exclude = w.join(crate::ignore_rules::LOCAL_EXCLUDE);
         if exclude.parent().is_some_and(|p| p.is_dir()) {
             std::fs::write(&exclude, local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
         }
     }
     // The folder of the `local` remote is the kept checkout.
-    set_config(ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
+    set_config(&repo.p.lock_maintenance()?, ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
     if !caches.is_empty() {
-        set_config(ctx, &repo, "regenerable", serde_json::json!(caches))?;
+        set_config(&repo.p.lock_maintenance()?, ctx, &repo, "regenerable", serde_json::json!(caches))?;
         for c in &caches {
             let dst = w.join(c);
             if let Some(parent) = dst.parent() {
@@ -3084,34 +2959,6 @@ fn default_branch(repo: &Repo) -> Option<String> {
     names.first().map(|s| s.to_string())
 }
 
-pub fn set_config(ctx: &Ctx, repo: &Repo, key: &str, value: serde_json::Value) -> Result<()> {
-    if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
-        return Err(exit(1, format!("{key} is on or off")));
-    }
-    if !repo.p.is_overlay() {
-        if let Some(rest) = key.strip_prefix("overlay.") {
-            let name = rest.split('.').next().unwrap_or("");
-            if let Some(info) = repo.overlay_info(name)? {
-                if rest == name || rest == format!("{name}.hidden") {
-                    return Err(exit(1, "overlay visibility changes only through overlay show-to-project"));
-                }
-                if info.hidden {
-                    let orepo = repo.overlay_repo(name)?;
-                    orepo.require(ctx, "access")?;
-                    let _lock = orepo.p.lock()?;
-                    return set_config(ctx, &orepo, key, value);
-                }
-            }
-        }
-    }
-    let mut rec = Record::new("config");
-    let mut m = serde_json::Map::new();
-    m.insert(key.to_string(), value);
-    rec.data = serde_json::json!({"config": m});
-    repo.commit_record(ctx, rec)?;
-    Ok(())
-}
-
 pub fn projects(ctx: &Ctx, _args: &[String]) -> Result<i32> {
     for n in ctx.store.project_names()? {
         match Repo::open(ctx, &n) {
@@ -3170,9 +3017,9 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if (key == "admin" || key == "lead") && !ctx.caller.is_root() {
         return Err(exit(1, format!("permission denied: only root changes '{key}'")));
     }
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     if let Some(k) = a.get("--unset") {
-        set_config(ctx, repo, k, serde_json::Value::Null)?;
+        set_config(&_lock, ctx, repo, k, serde_json::Value::Null)?;
         return Ok(0);
     }
     let (k, v) = (&a.pos[0], a.pos[1..].join(" "));
@@ -3202,7 +3049,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
             crate::store::check_name("line", name)?;
         }
     }
-    set_config(ctx, repo, k, val)?;
+    set_config(&_lock, ctx, repo, k, val)?;
     if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
@@ -3242,10 +3089,10 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 bail!("invalid person login");
             }
             layr_store::person::verifying_key(&rest[1])?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut pins = repo.p.config_value("person.keys")?.unwrap_or_else(|| serde_json::json!({}));
             pins[login] = serde_json::json!(rest[1]);
-            set_config(ctx, repo, "person.keys", pins)?;
+            set_config(&_lock, ctx, repo, "person.keys", pins)?;
             outln!(ctx, "pinned person {login}");
             Ok(0)
         }
@@ -3281,7 +3128,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "grant" | "revoke" | "deny" | "allow" => {
             repo.require(ctx, "access")?;
             let k = principal(rest.first())?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let pol = repo.policy();
             match sub {
                 "grant" => {
@@ -3294,21 +3141,21 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             // A role for a time adds to the principal's role and ends by itself.
                             let d = rest.get(i + 1).ok_or_else(|| exit(128, "usage: --until <30m|2h|1d>"))?;
                             pol.grants.insert(k, (role, ids::now_ms() + duration_ms(d)?));
-                            set_config(ctx, repo, "grants", pol.grants_json())?;
+                            set_config(&_lock, ctx, repo, "grants", pol.grants_json())?;
                         }
                         None => {
                             pol.access.insert(k, role);
-                            set_config(ctx, repo, "access", pol.access_json())?;
+                            set_config(&_lock, ctx, repo, "access", pol.access_json())?;
                         }
                     }
                 }
                 "revoke" => {
                     let mut pol = pol.clone();
                     if pol.grants.remove(&k).is_some() {
-                        set_config(ctx, repo, "grants", pol.grants_json())?;
+                        set_config(&_lock, ctx, repo, "grants", pol.grants_json())?;
                     }
                     pol.access.remove(&k);
-                    set_config(ctx, repo, "access", pol.access_json())?;
+                    set_config(&_lock, ctx, repo, "access", pol.access_json())?;
                 }
                 _ => {
                     let actions: Vec<String> = rest[1..].to_vec();
@@ -3335,7 +3182,7 @@ pub fn access(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     if e.is_empty() {
                         d.remove(&k);
                     }
-                    set_config(ctx, repo, "deny", serde_json::to_value(d)?)?;
+                    set_config(&_lock, ctx, repo, "deny", serde_json::to_value(d)?)?;
                 }
             }
             crate::gitbridge::sync_store_access(repo)?;
@@ -3389,10 +3236,10 @@ fn delegate(ctx: &Ctx, repo: &crate::repo::Repo, revoke: bool, rest: &[String]) 
         }
     }
     {
-        let _lock = repo.p.lock()?;
-        let mut record = Record::new("trust.delegate");
+        let _lock = repo.p.lock_maintenance()?;
+        let mut record = crate::model::DraftRecord::new("trust.delegate");
         record.data = data.clone();
-        repo.p.append(record, &ctx.actor())?;
+        _lock.append(record, &ctx.actor())?;
     }
     if a.has("--json") {
         outln!(ctx, "{data}");
@@ -3411,7 +3258,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let repo = &h.repo;
-    let state = revs::resolve(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
+    let state = revs::resolve_state(repo, h.line.as_ref(), a.pos.first().map(|s| s.as_str()).unwrap_or("head"))?;
     if a.pos.len() > 1 {
         bail!("usage: layr approve [--declassify <path>@<id>] <rev>");
     }
@@ -3419,7 +3266,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("--withdraw and --declassify cannot be combined");
     }
     let s = repo.state(&state)?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let withdraw = a.has("--withdraw");
     let mut rec = match a.get("--declassify") {
         Some(scope) => crate::secrets::declassify(ctx, repo, scope, &state)?,
@@ -3433,7 +3280,7 @@ pub fn approve(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some("approval")
         )?);
     }
-    let rec = repo.commit_record(ctx, rec)?;
+    let rec = repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", rec.data);
     } else if !a.has("-q") {
@@ -3546,7 +3393,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         bail!("ref protection does not accept --direct, --no-direct, --rewrite, --path, --owner or --keep-approvals");
     }
     repo.require(ctx, "access")?;
-    let _lock = repo.p.lock()?;
+    let _lock = repo.p.lock_maintenance()?;
     let mut all = repo.policy().protect;
     if a.has("--remove") {
         all.remove(&pattern);
@@ -3626,7 +3473,7 @@ pub fn protect(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         all.insert(pattern, r);
     }
-    set_config(ctx, repo, "protect", serde_json::to_value(all)?)?;
+    set_config(&_lock, ctx, repo, "protect", serde_json::to_value(all)?)?;
     Ok(0)
 }
 
@@ -3641,18 +3488,18 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     match args.first().map(|s| s.as_str()) {
         Some("changes") if args.len() >= 3 => {
-            let a = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[1])?)?;
-            let b = h.repo.state_src(&revs::resolve(&h.repo, h.line.as_ref(), &args[2])?)?;
+            let a = h.repo.state_src(&revs::resolve_state(&h.repo, h.line.as_ref(), &args[1])?)?;
+            let b = h.repo.state_src(&revs::resolve_state(&h.repo, h.line.as_ref(), &args[2])?)?;
             for c in changes::candidates(&a, &b)? {
-                let k = |m: &Option<fsutil::Meta>| m.as_ref().map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
+                let k = |m: Option<&fsutil::Meta>| m.map(|x| format!("{:?}", x.ftype)).unwrap_or("-".into());
                 outln!(
                     ctx,
                     "{}\t{}\t{}\t{}\t{:?}",
-                    c.old_path.clone().unwrap_or_default(),
-                    c.path,
-                    k(&c.old),
-                    k(&c.new),
-                    c.ranges
+                    c.old_path().cloned().unwrap_or_default(),
+                    c.path(),
+                    k(c.old()),
+                    k(c.new()),
+                    c.data()
                 );
             }
             Ok(0)
@@ -3677,23 +3524,6 @@ pub fn debug(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => Err(exit(128, "usage: layr debug changes <a> <b> | layr debug receive <name> <uuid> < stream")),
     }
 }
-
-/// A byte count for people: `812 MiB`.
-pub(crate) fn human_size(n: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i + 1 < units.len() {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", units[i])
-    }
-}
-
 
 /// A keep name: printable, without whitespace, at most 255 bytes (a tool's own refs fit).
 fn valid_keep_name(name: &str) -> Result<()> {
@@ -3736,10 +3566,10 @@ pub fn keep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if names.is_empty() && !a.has("--all") {
                 return Err(exit(2, "usage: layr keep drop <name>... | --all"));
             }
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let mut missing = Vec::new();
             for name in &names {
-                if !repo.p.db.keep_drop(&line.id, name)? {
+                if !repo.p.lock_or_borrow()?.write(|tx| tx.keep_drop(&line.id, name))? {
                     missing.push(name.as_str());
                 }
             }
@@ -3796,17 +3626,17 @@ mod op_log_tests {
         std::fs::write(project_dir.join("lines/main/fixture"), "op log fixture\n")?;
         let db = crate::db::Db::open(&crate::store::db_file(&project_dir))?;
         let uid = std::fs::metadata(&dir)?.uid();
-        let mut project = Record::new("project");
+        let mut project = Record::untrusted_preview("project");
         project.id = ids::new_id();
         project.machine = store.machine.id.clone();
         project.data = serde_json::json!({"id": ids::new_id()});
-        db.insert_record(&project, &serde_json::json!({"r": project, "s": ""}).to_string())?;
-        db.conn.execute(
+        db.test_insert_record(&project, &serde_json::json!({"r": project, "s": ""}).to_string())?;
+        db.test_connection().execute(
             "INSERT INTO lines(id,name,owner,machine,head,time) VALUES('wanted','main',?1,?2,'',0)",
             rusqlite::params![uid, store.machine.id],
         )?;
         for i in 1..=41 {
-            let mut rec = Record::new("save");
+            let mut rec = Record::untrusted_preview("save");
             rec.id = ids::new_id();
             rec.machine = store.machine.id.clone();
             rec.seq = i;
@@ -3816,7 +3646,7 @@ mod op_log_tests {
             if i == 1 {
                 raw["r"]["actor"] = serde_json::Value::Null;
             }
-            db.insert_record(&rec, &raw.to_string())?;
+            db.test_insert_record(&rec, &raw.to_string())?;
         }
         let output = dir.join("output");
         let mut ctx = Ctx {
@@ -3825,6 +3655,7 @@ mod op_log_tests {
             cwd: project_dir.join("lines/main"),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::fs::File::create(&output)?)),
         };
         for all in [false, true] {
@@ -3849,5 +3680,56 @@ mod op_log_tests {
         drop(db);
         std::fs::remove_dir_all(dir)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod caller_import_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn batches_preserve_hard_links_symlinks_modes_and_times() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-caller-import-{}", ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        let result = (|| -> Result<()> {
+            let src = root.join("source");
+            let dst = root.join("destination");
+            std::fs::create_dir_all(src.join("sub"))?;
+            std::fs::create_dir(&dst)?;
+            for i in 0..130 {
+                std::fs::write(src.join(format!("{i:03}")), format!("file {i}"))?;
+            }
+            std::fs::write(src.join("sub/private"), b"private")?;
+            std::fs::set_permissions(src.join("sub/private"), std::fs::Permissions::from_mode(0o600))?;
+            fsutil::set_mtime(&std::fs::File::open(src.join("000"))?, 1_000_000_000, 5)?;
+            std::fs::hard_link(src.join("000"), src.join("last-alias"))?;
+            std::os::unix::fs::symlink("sub/private", src.join("link"))?;
+            std::fs::create_dir(src.join(".git"))?;
+            std::fs::write(src.join(".git/config"), b"excluded")?;
+            let ctx = Ctx {
+                store: crate::store::Store::open(&root.join("store"))?,
+                caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+                cwd: src.clone(),
+                env: Default::default(),
+                author: Default::default(),
+                captures: Default::default(),
+                out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            };
+            assert_eq!(copy_folder(&ctx, &src, &dst, true, None)?, 133);
+            for i in 0..130 {
+                assert_eq!(std::fs::read_to_string(dst.join(format!("{i:03}")))?, format!("file {i}"));
+            }
+            assert_eq!(std::fs::metadata(dst.join("000"))?.ino(), std::fs::metadata(dst.join("last-alias"))?.ino());
+            assert_eq!(std::fs::read_link(dst.join("link"))?, std::path::Path::new("sub/private"));
+            assert_eq!(std::fs::read(dst.join("sub/private"))?, b"private");
+            assert_eq!(std::fs::metadata(dst.join("sub/private"))?.mode() & 0o777, 0o600);
+            let metadata = std::fs::metadata(dst.join("000"))?;
+            assert_eq!((metadata.mtime(), metadata.mtime_nsec()), (1_000_000_000, 5));
+            assert!(!dst.join(".git").exists());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        result
     }
 }

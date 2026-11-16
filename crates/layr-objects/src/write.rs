@@ -4,14 +4,15 @@
 use crate::fsx;
 use crate::id::Id;
 use crate::store::{Store, Temperature};
-use crate::times::{ns_of, Record, Times};
+use crate::times::{Record, Times};
 use crate::tree::{Entry, Node, Tree, MODE_BITS};
 use anyhow::{bail, Context, Result};
+use layr_fs_core::{evidence::FType, EntryAttributes, EntryMetadata, LinkIdentity, RelDir, RelPath, TreeRead};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -21,6 +22,95 @@ use std::sync::Mutex;
 pub trait Source: Sync {
     fn path(&self, relative: &[u8]) -> Result<PathBuf>;
     fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>>;
+    /// Classify resolved metadata without adding filesystem knowledge to the object writer.
+    fn entry_kind(&self, _path: &Path, _meta: &fs::Metadata) -> Result<fsx::EntryKind> {
+        Ok(fsx::EntryKind::Ordinary)
+    }
+    /// Portable observations let the existing writer consume sources without native paths.
+    fn metadata(&self, relative: &[u8]) -> Result<EntryMetadata> {
+        let path = self.path(relative)?;
+        let meta = fs::symlink_metadata(&path)?;
+        let kind = if meta.is_dir() {
+            FType::Dir
+        } else if meta.is_file() {
+            FType::File
+        } else if meta.file_type().is_symlink() {
+            FType::Symlink
+        } else {
+            FType::Special
+        };
+        let time = crate::times::ns_of(&meta);
+        Ok(EntryMetadata {
+            kind,
+            size: meta.len(),
+            link: meta.is_file().then_some(LinkIdentity { device: meta.dev(), inode: meta.ino(), count: meta.nlink() }),
+            attributes: EntryAttributes {
+                acl: None,
+                mode: meta.mode() & MODE_BITS,
+                uid: meta.uid(),
+                gid: meta.gid(),
+                modified_ns: time,
+                stored_time: self.entry_kind(&path, &meta)?.time(&meta),
+                xattrs: if relative.is_empty() { Vec::new() } else { fsx::xattrs(&path)? },
+            },
+        })
+    }
+    fn read_link(&self, relative: &[u8]) -> Result<Vec<u8>> {
+        Ok(fs::read_link(self.path(relative)?)?.as_os_str().as_bytes().to_vec())
+    }
+    fn store_file(
+        &self,
+        store: &Store,
+        relative: &[u8],
+        temperature: Temperature,
+        bases: &[Id],
+        judge: bool,
+    ) -> Result<(Id, u64)> {
+        store.put_file_with(&self.path(relative)?, temperature, bases, judge)
+    }
+}
+
+/// Bridge a filesystem reader into the production full and incremental object writer.
+pub struct ReaderSource<'a>(pub &'a dyn TreeRead);
+impl Source for ReaderSource<'_> {
+    fn path(&self, _: &[u8]) -> Result<PathBuf> {
+        bail!("reader has no native path")
+    }
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let mut names = Vec::new();
+        self.0.entries(&RelDir::from_bytes(relative)?, &mut |name| {
+            names.push(name.as_bytes().to_vec());
+            Ok(())
+        })?;
+        Ok(names)
+    }
+    fn metadata(&self, relative: &[u8]) -> Result<EntryMetadata> {
+        let mut metadata = self.0.metadata(&RelDir::from_bytes(relative)?)?.context("reader entry disappeared")?;
+        if metadata.attributes.acl.is_some() {
+            bail!("object format cannot preserve native ACLs");
+        }
+        for (name, _) in &metadata.attributes.xattrs {
+            if matches!(name.as_slice(), b"system.posix_acl_access" | b"system.posix_acl_default" | b"security.capability") {
+                bail!("object format cannot preserve ACL or capability attributes");
+            }
+        }
+        metadata.attributes.xattrs.retain(|(name, _)| fsx::keep_xattr(name));
+        Ok(metadata)
+    }
+    fn read_link(&self, relative: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.0.read_link(&RelPath::new(relative)?)?)
+    }
+    fn store_file(
+        &self,
+        store: &Store,
+        relative: &[u8],
+        temperature: Temperature,
+        bases: &[Id],
+        judge: bool,
+    ) -> Result<(Id, u64)> {
+        let mut reader = self.0.open_file(&RelPath::new(relative)?)?;
+        store.put_reader_with(&mut reader, temperature, bases, judge)
+    }
 }
 
 struct Folder<'a>(&'a Path);
@@ -118,8 +208,23 @@ impl Similar {
     }
 }
 
-#[derive(Debug, Default)]
+/// The writer actually used, including conservative incremental fallbacks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteMode {
+    Incremental { changed_paths: usize },
+    Full { reason: FullReason },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FullReason {
+    Requested,
+    NoCheckedDelta,
+    IncompleteHardLinks,
+}
+
+#[derive(Debug)]
 pub struct WriteReport {
+    pub mode: WriteMode,
     pub tree: Option<Id>,
     /// The times table of the folder (`crate::times`), in tree order.
     pub times: Option<Id>,
@@ -183,17 +288,6 @@ pub fn write_changed(
     write_changed_from(store, &Folder(root), base, changed, options)
 }
 
-pub fn write_changed_with_dirty(
-    store: &Store,
-    root: &Path,
-    base: &Base,
-    changed: &[Vec<u8>],
-    dirty_folders: &[Vec<u8>],
-    options: &WriteOptions,
-) -> Result<WriteReport> {
-    write_changed_with_dirty_from(store, &Folder(root), base, changed, dirty_folders, options)
-}
-
 pub fn write_changed_from(
     store: &Store,
     source: &dyn Source,
@@ -219,7 +313,9 @@ pub fn write_changed_with_dirty_from(
         |path: &[u8], changed: &[u8]| path == changed || (path.starts_with(changed) && path.get(changed.len()) == Some(&b'/'));
     let touched = |path: &Vec<u8>| changed.iter().any(|change| affects(path, change));
     if previous.links.iter().any(|group| group.iter().any(touched) && !group.iter().all(touched)) {
-        return write_tree_from(store, source, options);
+        let mut report = write_tree_from(store, source, options)?;
+        report.mode = WriteMode::Full { reason: FullReason::IncompleteHardLinks };
+        return Ok(report);
     }
     let mut plan = Plan { changed: HashSet::new(), dirty: HashSet::new() };
     for folder in dirty_folders {
@@ -251,7 +347,6 @@ struct Plan {
 }
 
 fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Option<(&Base, &Plan)>) -> Result<WriteReport> {
-    let root = source.path(b"")?;
     let walk = Walk {
         source,
         store,
@@ -266,36 +361,43 @@ fn write(store: &Store, source: &dyn Source, options: &WriteOptions, base: Optio
             _ => None,
         },
     };
-    let meta = fs::symlink_metadata(&root).with_context(|| root.display().to_string())?;
-    if !meta.is_dir() {
-        bail!("{} is not a folder", root.display());
+    let meta = source.metadata(b"")?;
+    if meta.kind != FType::Dir {
+        bail!("source root is not a folder");
     }
     let mut kept_groups = Vec::new();
     let (mut tree, below) = match base {
-        None => walk.folder(&root, b"", options.previous)?,
+        None => walk.folder(b"", options.previous)?,
         Some((base, plan)) => {
             let base_tree = store.get_tree(&base.tree)?;
             let base_times = store.get_times(&base.times)?;
             let touched =
                 |p: &Vec<u8>| plan.changed.iter().any(|c| p == c || (p.starts_with(c) && p.get(c.len()) == Some(&b'/')));
             kept_groups = base_tree.links.iter().filter(|g| !g.iter().any(touched)).cloned().collect();
-            walk.folder_changed(&root, b"", &base_tree, &base_times, plan)?
+            walk.folder_changed(b"", &base_tree, &base_times, plan)?
         }
     };
     let inodes = walk.inodes.into_inner().expect("no panic holds the lock");
     // An unseen alias can connect a changed file to an unchanged entry. Only complete
     // observed groups can replace the base groups without reading every file again.
     if base.is_some() && inodes.values().any(|group| group.paths.len() as u64 != group.count) {
-        return write_tree_from(store, source, options);
+        let mut report = write_tree_from(store, source, options)?;
+        report.mode = WriteMode::Full { reason: FullReason::IncompleteHardLinks };
+        return Ok(report);
     }
-    let mut groups: Vec<Vec<Vec<u8>>> = inodes.into_values().filter(|group| group.paths.len() > 1).map(|group| group.paths).collect();
+    let mut groups: Vec<Vec<Vec<u8>>> =
+        inodes.into_values().filter(|group| group.paths.len() > 1).map(|group| group.paths).collect();
     groups.extend(kept_groups);
     let report_groups = groups.len() as u64;
     tree.links = groups;
     tree.normalize();
     let id = store.put_tree(&tree)?;
-    let times = store.put_times(&Times { own: ns_of(&meta), records: below })?;
+    let times = store.put_times(&Times { own: meta.attributes.stored_time.unwrap_or(0), records: below })?;
     Ok(WriteReport {
+        mode: match base {
+            Some((_, plan)) => WriteMode::Incremental { changed_paths: plan.changed.len() },
+            None => WriteMode::Full { reason: FullReason::Requested },
+        },
         tree: Some(id),
         times: Some(times),
         files: walk.files.into_inner(),
@@ -317,11 +419,14 @@ fn list_names(source: &dyn Source, rel: &[u8], options: &WriteOptions) -> Result
 }
 
 /// Full writes need metadata for every entry. Incremental writes resolve only changed entries.
-fn list(source: &dyn Source, rel: &[u8], options: &WriteOptions) -> Result<Vec<(Vec<u8>, fs::Metadata)>> {
-    list_names(source, rel, options)?.into_iter().map(|name| {
-        let meta = fs::symlink_metadata(source.path(&join(rel, &name))?)?;
-        Ok((name, meta))
-    }).collect()
+fn list(source: &dyn Source, rel: &[u8], options: &WriteOptions) -> Result<Vec<(Vec<u8>, EntryMetadata)>> {
+    list_names(source, rel, options)?
+        .into_iter()
+        .map(|name| {
+            let meta = source.metadata(&join(rel, &name))?;
+            Ok((name, meta))
+        })
+        .collect()
 }
 
 fn join(prefix: &[u8], name: &[u8]) -> Vec<u8> {
@@ -335,7 +440,7 @@ fn join(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 impl Walk<'_> {
     /// A folder read again from `base`: entries that did not change keep their base entry and
     /// times record; folders on the way to a change are read the same way; the rest is new.
-    fn folder_changed(&self, dir: &Path, rel: &[u8], base: &Tree, times: &Times, plan: &Plan) -> Result<(Tree, Vec<Record>)> {
+    fn folder_changed(&self, rel: &[u8], base: &Tree, times: &Times, plan: &Plan) -> Result<(Tree, Vec<Record>)> {
         if base.entries.len() != times.records.len() {
             bail!("the base times do not match the base tree");
         }
@@ -357,35 +462,31 @@ impl Walk<'_> {
                         return Ok((entry.clone(), *record));
                     }
                 }
-                let path = self.source.path(&child)?;
-                let meta = fs::symlink_metadata(&path)?;
+                let meta = self.source.metadata(&child)?;
                 match base_at.get(name.as_slice()) {
                     Some(&(e, r))
                         if (!plan.changed.contains(&child) || plan.dirty.contains(&child))
-                            && meta.is_dir()
+                            && meta.kind == FType::Dir
                             && matches!(e.node, Node::Dir { .. }) =>
                     {
                         let (Node::Dir { tree }, Record::Folder(sub_times)) = (&e.node, r) else { unreachable!() };
-                        let (mut sub, below) = self.folder_changed(
-                            &path,
-                            &child,
-                            &self.store.get_tree(tree)?,
-                            &self.store.get_times(sub_times)?,
-                            plan,
-                        )?;
+                        let (mut sub, below) =
+                            self.folder_changed(&child, &self.store.get_tree(tree)?, &self.store.get_times(sub_times)?, plan)?;
                         sub.normalize();
-                        let xattrs = fsx::xattrs(&path)?;
-                        let record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
+                        let xattrs = meta.attributes.xattrs.clone();
+                        let record = Record::Folder(
+                            self.store.put_times(&Times { own: meta.attributes.stored_time.unwrap_or(0), records: below })?,
+                        );
                         self.dirs.fetch_add(1, Ordering::Relaxed);
                         let entry = Entry {
                             name,
-                            mode: meta.mode() & MODE_BITS,
+                            mode: meta.attributes.mode & MODE_BITS,
                             node: Node::Dir { tree: self.store.put_tree(&sub)? },
                             xattrs,
                         };
                         Ok((entry, record))
                     }
-                    _ => self.entry(dir, rel, name, meta, &before),
+                    _ => self.entry(rel, name, meta, &before),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -395,7 +496,7 @@ impl Walk<'_> {
 
     /// The tree of one folder, without hard link groups (the root gets them), and the times
     /// records of its entries, in the tree's order.
-    fn folder(&self, dir: &Path, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
+    fn folder(&self, rel: &[u8], previous: Option<Id>) -> Result<(Tree, Vec<Record>)> {
         let names = list(self.source, rel, self.options)?;
         let before: HashMap<Vec<u8>, Node> = match previous {
             Some(id) => self.store.get_tree(&id)?.entries.into_iter().map(|e| (e.name, e.node)).collect(),
@@ -403,69 +504,76 @@ impl Walk<'_> {
         };
         let done = names
             .into_par_iter()
-            .map(|(name, meta)| self.entry(dir, rel, name, meta, &before))
+            .map(|(name, meta)| self.entry(rel, name, meta, &before))
             .collect::<Result<Vec<(Entry, Record)>>>()?;
         let (entries, records) = done.into_iter().unzip();
         Ok((Tree { entries, links: Vec::new() }, records))
     }
 
-    fn entry(
-        &self,
-        _dir: &Path,
-        rel: &[u8],
-        name: Vec<u8>,
-        meta: fs::Metadata,
-        before: &HashMap<Vec<u8>, Node>,
-    ) -> Result<(Entry, Record)> {
-        let path = self.source.path(&join(rel, &name))?;
-        let ft = meta.file_type();
-        let xattrs = fsx::xattrs(&path).with_context(|| format!("cannot read the attributes of {}", path.display()))?;
-        let mode = meta.mode() & MODE_BITS;
+    fn entry(&self, rel: &[u8], name: Vec<u8>, meta: EntryMetadata, before: &HashMap<Vec<u8>, Node>) -> Result<(Entry, Record)> {
+        let xattrs = meta.attributes.xattrs.clone();
+        let mode = meta.attributes.mode & MODE_BITS;
         let child = join(rel, &name);
-        let mut record = Record::Time(ns_of(&meta));
-        let node = if ft.is_dir() {
+        // The times format requires one table per folder; zero pads a placeholder's absent time.
+        let time = meta.attributes.stored_time.unwrap_or(0);
+        let mut record = Record::Time(time);
+        let node = if meta.kind == FType::Dir {
             let previous = match before.get(&name) {
                 Some(Node::Dir { tree }) => Some(*tree),
                 _ => None,
             };
-            let (mut sub, below) = self.folder(&path, &child, previous)?;
-            record = Record::Folder(self.store.put_times(&Times { own: ns_of(&meta), records: below })?);
+            let (mut sub, below) = self.folder(&child, previous)?;
+            record = Record::Folder(self.store.put_times(&Times { own: time, records: below })?);
             sub.normalize();
             self.dirs.fetch_add(1, Ordering::Relaxed);
             Node::Dir { tree: self.store.put_tree(&sub)? }
-        } else if ft.is_file() {
+        } else if meta.kind == FType::File {
             let (bases, judge) = match (before.get(&name), &self.similar) {
                 (Some(Node::File { blob, .. }), _) => (vec![*blob], false),
-                (_, Some(similar)) => (similar.candidates(&name, meta.len()), true),
+                (_, Some(similar)) => (similar.candidates(&name, meta.size), true),
                 _ => (Vec::new(), false),
             };
-            let (blob, size) = self
-                .store
-                .put_file_with(&path, self.options.temperature, &bases, judge)
-                .with_context(|| format!("cannot store {}", path.display()))?;
-            if meta.nlink() > 1 {
-                let mut inodes = self.inodes.lock().expect("no panic holds the lock");
-                let group = inodes.entry((meta.dev(), meta.ino())).or_default();
-                group.count = group.count.max(meta.nlink());
+            let (blob, size) = self.source.store_file(self.store, &child, self.options.temperature, &bases, judge)?;
+            if let Some(link) = meta.link.filter(|link| link.count > 1) {
+                let mut inodes = self.inodes.lock().map_err(|_| anyhow::anyhow!("hard-link observation lock poisoned"))?;
+                let group = inodes.entry((link.device, link.inode)).or_default();
+                group.count = group.count.max(link.count);
                 group.paths.push(child);
             }
             self.files.fetch_add(1, Ordering::Relaxed);
             self.bytes.fetch_add(size, Ordering::Relaxed);
             Node::File { size, blob }
-        } else if ft.is_symlink() {
-            let target = fs::read_link(&path)?.as_os_str().as_bytes().to_vec();
+        } else if meta.kind == FType::Symlink {
+            let target = self.source.read_link(&child)?;
             self.symlinks.fetch_add(1, Ordering::Relaxed);
             return Ok((Entry { name, mode: 0, node: Node::Symlink { target }, xattrs }, record));
         } else {
-            let kind = if ft.is_fifo() {
-                "a FIFO"
-            } else if ft.is_socket() {
-                "a socket"
-            } else {
-                "a device"
-            };
-            bail!("{} is {kind}; a tree holds files, folders and symbolic links", path.display());
+            bail!("a tree holds files, folders and symbolic links");
         };
         Ok((Entry { name, mode, node, xattrs }, record))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{testutil::scratch, Keying};
+
+    #[test]
+    fn a_directory_time_change_keeps_its_files_and_updates_times() {
+        let dir = scratch("directory-time");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("a/b/file"), "unchanged").unwrap();
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let options = WriteOptions { temperature: Temperature::Cold, previous: None, exclude: vec![], similar: false };
+        let first = write_tree(&store, &src, &options).unwrap();
+        let base = Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        crate::times::set(&src.join("a/b"), 1_234_567_890).unwrap();
+        let incremental = write_changed_with_dirty_from(&store, &Folder(&src), &base, &[], &[b"a/b".to_vec()], &options).unwrap();
+        let full = write_tree(&store, &src, &options).unwrap();
+        assert_eq!(incremental.tree, full.tree);
+        assert_eq!(incremental.times, full.times);
+        assert_eq!(incremental.files, 0, "time-only directories do not reread files");
     }
 }

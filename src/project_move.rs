@@ -16,7 +16,7 @@
 use crate::project_copy::{self, CopyReport};
 use crate::store::{db_file, kick_trash, Project, Store};
 use crate::volumes::{self, Layout};
-use crate::{fsutil, ids, linepaths, storage};
+use crate::{fsutil, ids, linepaths};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -108,10 +108,7 @@ fn moved_folders(project_dir: &Path) -> Vec<PathBuf> {
 /// Move a folder to another place on its file system. Each backend moves a tree its own way:
 /// sealed trees on APFS, managed mounts on OverlayFS.
 fn move_folder(from: &Path, to: &Path) -> Result<()> {
-    #[cfg(feature = "overlayfs")]
-    return storage::rename_tree(from, to);
-    #[cfg(not(feature = "overlayfs"))]
-    storage::move_tree(from, to)
+    crate::fs::move_tree(from, to)
 }
 
 /// Remove a folder of a volume through that volume's trash (a rename on the same file system).
@@ -236,15 +233,11 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     // Line locks come first (`Project::line_lock` refuses one under the project lock): every line
     // in id order, the order that undo uses. No line command runs while the folder moves.
     let _t = crate::trace::begin(format!("project move {project}: line locks"));
-    let mut lines = handle.db.lines()?;
-    lines.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut line_locks = Vec::new();
-    for line in &lines {
-        line_locks.push(handle.line_lock(&line.id, &line.name)?);
-    }
+    let lines = handle.db.lines()?;
+    let line_locks = handle.line_leases(lines.iter().map(|line| (line.id.clone(), line.name.clone())))?;
     drop(_t);
     let _t = crate::trace::begin(format!("project move {project}: project lock"));
-    let _lock = handle.lock()?;
+    let _lock = line_locks.lock(&handle)?;
     drop(_t);
     let moved = handle.moved_paths();
     let mut watch = vec![src.clone()];
@@ -318,7 +311,7 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
         bail!("project '{project}' is moving to another volume; run any layr command to finish the move, then delete it");
     }
     let handle = Project::open(store, project)?;
-    let _lock = handle.lock()?;
+    let _lock = handle.lock_maintenance()?;
     let lines = handle.db.lines()?;
     if !lines.is_empty() {
         let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
@@ -334,7 +327,7 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
     drop(_lock);
     drop(handle);
     #[cfg(feature = "overlayfs")]
-    storage::delete_tree(&gone)?;
+    crate::fs::remove(&gone)?;
     #[cfg(not(feature = "overlayfs"))]
     let _ = gone;
     Ok(())

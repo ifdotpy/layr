@@ -444,12 +444,9 @@ fn sweep_live(root: &Path, target: &Path, commands: &[Vec<String>], env: &[(Stri
 
 /// The unit names (`<name>-<hash>`) of `hashes` in the profile folder `profile`, from its `.fingerprint` folder.
 fn unit_names(profile: &Path, hashes: &BTreeSet<String>) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(profile.join(".fingerprint"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| layr_cache::sweep::unit_hash(n).is_some_and(|h| hashes.contains(h)))
+    let mut names: Vec<String> = layr_cache::cargo::layout::Layout::units(profile).into_iter()
+        .filter(|unit| hashes.contains(&unit.hash))
+        .map(|unit| format!("{}-{}", unit.name, unit.hash))
         .collect();
     names.sort();
     names

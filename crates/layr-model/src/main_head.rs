@@ -30,7 +30,7 @@ pub fn select(project: &mut Project, records: &[Record], trusted: &BTreeMap<Stri
         .iter()
         .filter(|record| record.machine == machine && record.op != "line.adopt")
         .filter_map(|record| {
-            record.lines.get(&main.id).and_then(|change| change.after.as_ref()).map(|line| (record, line.head.clone()))
+            record.lines.get(&main.id).and_then(|change| change.after()).map(|line| (record, line.head.clone()))
         })
         .max_by(|(a, _), (b, _)| crate::order(a).cmp(&crate::order(b)))
     else {
@@ -49,7 +49,7 @@ pub fn select(project: &mut Project, records: &[Record], trusted: &BTreeMap<Stri
             && after["status"] == "done"
             && after["target_line"] == main.id
             && after["result"] == merged
-            && record.lines.get(&main.id).and_then(|change| change.after.as_ref()).is_some_and(|line| line.head == merged)
+            && record.lines.get(&main.id).and_then(|change| change.after()).is_some_and(|line| line.head == merged)
     });
     if !completed {
         bail!("merge machine main has no matching queue completion");
@@ -64,7 +64,7 @@ mod tests {
     use serde_json::json;
 
     fn fixture() -> (Project, Vec<Record>, BTreeMap<String, VerifyingKey>) {
-        let mut owner = Record::new("project");
+        let mut owner = Record::untrusted_preview("project");
         owner.id = "r1".into();
         owner.machine = "owner".into();
         owner.seq = 1;
@@ -75,7 +75,7 @@ mod tests {
             json!({"line":{"before":null,"after":{"name":"main","head":"s0","owner":1,"machine":"owner"}}}),
         )
         .unwrap();
-        let mut merged = Record::new("queue.result");
+        let mut merged = Record::untrusted_preview("queue.result");
         merged.id = "r2".into();
         merged.machine = "merger".into();
         merged.seq = 1;
@@ -84,7 +84,7 @@ mod tests {
         merged.lines = serde_json::from_value(json!({"line":{"before":{"name":"main","head":"s0","owner":1,"machine":"owner"},"after":{"name":"main","head":"s1","owner":1,"machine":"owner"}}})).unwrap();
         merged.data = json!({"queue_change":{"id":"q","before":null,"after":{"id":"q","into":"main","state":"s1","added_by":1,"time":2,"status":"done","target_line":"line","result":"s1"}}});
         let records = vec![owner, merged];
-        let project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let project = Project::preview_records("p", records.clone(), "owner").unwrap();
         let trusted = BTreeMap::from([("merger".into(), ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key())]);
         (project, records, trusted)
     }
@@ -101,9 +101,9 @@ mod tests {
         owner.states[0].id = "s2".into();
         owner.states[0].parents = vec!["s1".into()];
         owner.states[0].time = 3;
-        owner.lines.get_mut("line").unwrap().after.as_mut().unwrap().head = "s2".into();
+        (match &mut owner.lines.get_mut("line").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s2".into();
         records.push(owner);
-        let mut project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         select(&mut project, &records, &trusted).unwrap();
         assert_eq!(project.line_list()[0].head, "s2", "old merger head cannot roll main back");
 
@@ -115,14 +115,14 @@ mod tests {
         completed.states[0].parents = vec!["s2".into()];
         completed.states[0].time = 4;
         let change = completed.lines.get_mut("line").unwrap();
-        change.before.as_mut().unwrap().head = "s2".into();
-        change.after.as_mut().unwrap().head = "s3".into();
+        (match &mut change.transition { crate::LineTransition::Move { before, .. } | crate::LineTransition::Delete { before: Some(before) } => before, _ => panic!("fixture needs before") }).head = "s2".into();
+        (match &mut change.transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s3".into();
         completed.data["queue_change"]["id"] = json!("q2");
         completed.data["queue_change"]["after"]["id"] = json!("q2");
         completed.data["queue_change"]["after"]["state"] = json!("s3");
         completed.data["queue_change"]["after"]["result"] = json!("s3");
         records.push(completed);
-        let mut project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         assert_eq!(project.line_list()[0].head, "s2", "the local owner view remains separate");
         select(&mut project, &records, &trusted).unwrap();
         assert_eq!(project.line_list()[0].head, "s3");
@@ -152,7 +152,7 @@ mod tests {
 
         let (_, mut records, trusted) = fixture();
         records[1].states[0].parents.clear();
-        let mut project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         assert!(select(&mut project, &records, &trusted).is_err());
         assert_eq!(project.line_list()[0].head, "s0");
     }
@@ -166,9 +166,9 @@ mod tests {
         adoption.op = "line.adopt".into();
         adoption.states.clear();
         adoption.data = serde_json::json!({});
-        adoption.lines.get_mut("line").unwrap().after.as_mut().unwrap().head = "s0".into();
+        (match &mut adoption.lines.get_mut("line").unwrap().transition { crate::LineTransition::Move { after, .. } | crate::LineTransition::Create { after } => after, _ => panic!("fixture needs after") }).head = "s0".into();
         records.push(adoption);
-        let mut project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         assert_eq!(project.lines["line"].heads["merger"], "s0");
         select(&mut project, &records, &trusted).unwrap();
         assert_eq!(project.line_list()[0].head, "s1");
@@ -186,7 +186,7 @@ mod tests {
         reset.states.clear();
         reset.data = serde_json::json!({});
         records.push(reset);
-        let mut project = Project::from_records("p", records.clone(), "owner").unwrap();
+        let mut project = Project::preview_records("p", records.clone(), "owner").unwrap();
         select(&mut project, &records, &trusted).unwrap();
         assert_eq!(project.line_list()[0].head, "s1");
     }

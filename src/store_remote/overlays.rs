@@ -262,10 +262,7 @@ fn not_trusted_yet(
 pub(crate) fn trusted_keys(repo: &Repo) -> Result<BTreeMap<String, VerifyingKey>> {
     let mut keys = BTreeMap::new();
     keys.insert(repo.p.store.machine.id.clone(), repo.p.store.machine.key.verifying_key());
-    let mut query = repo.p.db.conn.prepare("SELECT machine,public_key FROM trusted")?;
-    let trusted = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    for entry in trusted {
-        let (machine, public) = entry?;
+    for (machine, public) in repo.p.db.trusted_keys()? {
         let bytes: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| anyhow::anyhow!("invalid trusted key"))?;
         keys.insert(machine, VerifyingKey::from_bytes(&bytes)?);
     }
@@ -273,9 +270,9 @@ pub(crate) fn trusted_keys(repo: &Repo) -> Result<BTreeMap<String, VerifyingKey>
 }
 
 fn parse(line: &str, parent: &str, recipient: &str, trusted: &BTreeMap<String, VerifyingKey>) -> Result<Published> {
-    let record = oplog::parse_line(line, None)?.record;
+    let record = oplog::parse_line(line)?.record;
     let signer = trusted.get(&record.machine).context("overlay key signer is not trusted")?;
-    let record = oplog::parse_line(line, Some(signer))?.record;
+    let record = oplog::verify_line(line, signer)?.record;
     crate::model::validate(&record)?;
     if record.op != "overlay.key" {
         bail!("published overlay key is not an overlay.key record");
@@ -596,7 +593,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             }
             _ => None,
         };
-        let lock = orepo.p.lock()?;
+        let lock = orepo.p.lock_maintenance()?;
         let hidden = repo.need_overlay(&name)?.hidden;
         if !authorities.contains_key(&name) {
             authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
@@ -651,9 +648,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 readers: readers.clone(),
                 revocation,
             };
-            let mut record = Record::new("overlay.key");
+            let mut record = crate::model::DraftRecord::new("overlay.key");
             record.data = serde_json::to_value(&key)?;
-            let record = orepo.p.append(record, &ctx.actor())?;
+            let record = lock.append(record, &ctx.actor())?;
             let line = orepo.p.db.record_line(&record.machine, record.seq)?.context("overlay key record missing")?;
             Published { key, record, line }
         } else {
@@ -663,9 +660,9 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 published.key.readers = readers.clone();
                 published.key.hidden = hidden;
                 published.key.access_mode = access_mode;
-                let mut record = Record::new("overlay.key");
+                let mut record = crate::model::DraftRecord::new("overlay.key");
                 record.data = serde_json::to_value(&published.key)?;
-                published.record = orepo.p.append(record, &ctx.actor())?;
+                published.record = lock.append(record, &ctx.actor())?;
                 published.line = orepo
                     .p
                     .db
@@ -927,7 +924,7 @@ fn previous_key(
 ) -> Result<Option<Published>> {
     let mut previous = remote.cloned();
     for line in orepo.p.effective_jsonl()?.lines() {
-        let rec = oplog::parse_line(line, None)?.record;
+        let rec = oplog::parse_line(line)?.record;
         if rec.op == "overlay.key" && rec.data["store"].as_str() == Some(recipient) {
             let next = parse(line, &repo.p.id, recipient, trusted)?;
             if previous.as_ref().is_none_or(|old| next.order() > old.order()) {
@@ -1041,7 +1038,7 @@ fn sweep_layer(repo: &Repo, name: &str, orepo: &Repo, scoped: &Store, dry_run: b
 /// Delete (with `dry_run`: only list) the dead cache states of each cache overlay of `repo` in the
 /// store `store`: the dead states of the current epoch of each overlay, and all cache states of its
 /// older epochs. The current epoch of an overlay that this machine cannot read is skipped.
-pub(super) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
+pub(crate) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<Vec<(String, super::sweep::Swept)>> {
     let descriptor = store.root_descriptor()?;
     let trusted = trusted_keys(repo)?;
     let mut objects = Vec::new();
@@ -1165,7 +1162,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             let lines: Vec<String> = records
                 .lines
                 .iter()
-                .filter(|line| oplog::parse_line(line, None).is_ok_and(|s| !waiting.contains(&s.record.machine)))
+                .filter(|line| oplog::parse_line(line).is_ok_and(|s| !waiting.contains(&s.record.machine)))
                 .cloned()
                 .collect();
             if !waiting.is_empty() {
@@ -1185,12 +1182,19 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             )?;
             // An epoch includes the complete log, so a new reader needs no older layer identity.
             if op.id.is_empty() {
-                op.import_lines(&lines, crate::store::Trust::All)?;
+                op.lock_maintenance()?.import_lines(&lines, crate::store::Trust::All)?;
                 op.reload_id()?;
             }
             let mut orepo = Repo { p: op, ctx: None };
             for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
-                crate::cmd::replicate::trust(ctx, &orepo.p, machine, &hex::encode(key.to_bytes()), None)?;
+                crate::machine_trust::trust(
+                    &orepo.p.lock_maintenance()?,
+                    ctx,
+                    &orepo.p,
+                    machine,
+                    &hex::encode(key.to_bytes()),
+                    None,
+                )?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
             let opts = &fetch_selection(repo, &name, opts)?;
@@ -1326,7 +1330,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
                 let body =
                     api.get_segment(&scope, &first.writer, first.first, first.last)?.context("overlay segment disappeared")?;
                 let line = String::from_utf8(body)?.lines().next().map(str::to_owned).context("empty overlay segment")?;
-                oplog::parse_line(&line, None)?.record.project
+                oplog::parse_line(&line)?.record.project
             } else {
                 op.id.clone()
             };
@@ -1441,7 +1445,7 @@ mod tests {
             .filter(|o| o.key.contains("/keys/"))
             .map(|o| {
                 let line = String::from_utf8(backend.get(&o.key).unwrap().unwrap()).unwrap();
-                oplog::parse_line(&line, None).unwrap().record
+                oplog::parse_line(&line).unwrap().record
             })
             .collect();
         published.sort_by(|a, b| (a.time, &a.machine, a.seq).cmp(&(b.time, &b.machine, b.seq)));
@@ -1496,7 +1500,7 @@ mod tests {
         let parent = crate::ids::new_id();
         let store = keys::recipient_of(&keys::generate_identity()).unwrap();
         let overlay = crate::ids::new_id();
-        let mut rec = Record::new("overlay.key");
+        let mut rec = Record::untrusted_preview("overlay.key");
         rec.id = crate::ids::new_id();
         rec.machine = machine.clone();
         rec.project = overlay.clone();

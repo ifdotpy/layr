@@ -207,7 +207,7 @@ fn page_outputs(
     let mut summary = json!({"id":project.id,"name":project.name.as_ref().context("project has no name record")?,"config":project.config,"overlays":overlays,
         "counts":{"lines":lines.len(),"states":project.states.len(),"changes":project.changes().len(),"refs":project.ref_list("",context.now).len(),"queue":project.queue_list(None).len(),"operations":records.len(),"attestations":records.iter().filter(|r|r.data.get("attestation").is_some() || matches!(r.op.as_str(),"approve"|"approve.withdraw"|"check")).count()}});
     if let Some(initial) =
-        records.iter().rev().flat_map(|r| r.lines.iter()).find(|(_, c)| c.before.is_none() && c.after.is_some())
+        records.iter().rev().flat_map(|r| r.lines.iter()).find(|(_, c)| c.before().is_none() && c.after().is_some())
     {
         if let Some(line) = lines.iter().find(|l| l.id == *initial.0) {
             summary["default_line"] = json!(line.name);
@@ -341,10 +341,10 @@ fn main() -> Result<()> {
     let mut overlay_project = String::new();
     for name in overlay_keys {
         let key_line = std::str::from_utf8(get(&objects, &name)?)?.trim_end_matches('\n');
-        let raw = record::parse_line(key_line, None)?;
+        let raw = record::parse_line(key_line)?;
         let key_record: Record = serde_json::from_str(raw.get())?;
         let key = public_keys.get(&key_record.machine).context("unknown overlay key signer")?;
-        record::parse_line(key_line, Some(key))?;
+        let _verified = record::verify_line(key_line.as_bytes(), key)?;
         ensure!(key_record.op == "overlay.key", "published key is not an overlay key");
         let data = &key_record.data;
         let overlay = data["overlay"].as_str().context("overlay key has no project")?;
@@ -359,7 +359,7 @@ fn main() -> Result<()> {
         let created = lines
             .iter()
             .map(|line| {
-                let raw = record::parse_line(line, None)?;
+                let raw = record::parse_line(line)?;
                 Ok(serde_json::from_str::<Record>(raw.get())?)
             })
             .collect::<Result<Vec<_>>>()?
@@ -392,7 +392,7 @@ fn main() -> Result<()> {
     }
 
     // Hidden records enter the model only through a reader slot.
-    let nonreader = Model::from_verified_lines(lines.iter().map(String::as_str), &machine)?;
+    let nonreader = Model::preview_lines(lines.iter().map(String::as_str), &machine)?;
     write(
         &args[2],
         "hidden-nonreader",
@@ -419,10 +419,10 @@ fn main() -> Result<()> {
             .collect();
         let identity = keys::open_slot(get(&scoped, "slots/paper.age")?, &paper)?;
         let manifest = String::from_utf8(keys::decrypt(&identity, get(&objects, object)?)?)?;
-        let raw = record::parse_line(&manifest, None)?;
+        let raw = record::parse_line(&manifest)?;
         let key_record: Record = serde_json::from_str(raw.get())?;
         let key = public_keys.get(&key_record.machine).context("unknown hidden manifest signer")?;
-        record::parse_line(&manifest, Some(key))?;
+        let _verified = record::verify_line(&manifest.as_bytes(), key)?;
         let data = &key_record.data;
         ensure!(
             data["hidden"] == true && data["parent"] == descriptor.project && data["store"] == descriptor.recipient,
@@ -439,7 +439,7 @@ fn main() -> Result<()> {
         lines.extend(own);
     }
     overlay_files.extend(hidden_files.clone());
-    let model = Model::from_verified_lines(lines.iter().map(String::as_str), &machine)?;
+    let model = Model::preview_lines(lines.iter().map(String::as_str), &machine)?;
     let project = model.projects.get(&descriptor.project).context("store project is absent from the model")?;
     ensure!(serde_json::to_value(project)? == parent_before, "hidden records changed the parent model");
     let hidden: Vec<_> = model
@@ -502,7 +502,6 @@ fn main() -> Result<()> {
     }
     let line = project.line_list().into_iter().find(|line| line.name == request.line).context("requested line is absent")?;
     ensure!(project.change_versions(&request.change).len() == 3, "fixture change must have three versions");
-    let subject = |id: String| Subject { kind: "state".into(), id };
     fs::create_dir_all(&args[2])?;
     write(&args[2], "lines", project.line_list())?;
     write(&args[2], "log", project.log(&[line.head.clone()], None, usize::MAX))?;
@@ -513,8 +512,8 @@ fn main() -> Result<()> {
     write(&args[2], "queue", project.queue_list_json(None)?)?;
     write(&args[2], "attestations", project.attestations(&request.attestation_state, None))?;
     write(&args[2], "operations", project.op_log(Some(&line.id), 30))?;
-    let probe_base = subject(request.probe_base);
-    let probe_head = subject(request.probe_head);
+    let probe_base = Subject::state(&request.probe_base)?;
+    let probe_head = Subject::state(&request.probe_head)?;
     write(&args[2], "probe-diff", probes::diff(project, &probe_base, &probe_head, &context)?)?;
     write(&args[2], "probe-same", probes::diff(project, &probe_head, &probe_head, &context)?)?;
     let mut merge_context = layr_model::protection::Context {

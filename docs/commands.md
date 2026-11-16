@@ -19,7 +19,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | views         | `view [<rev or line>] [--overlay <overlay>] [--folder <dir>] [--json]` (`--overlay` makes another view of the line or state, seen from that overlay: the path of the tree from `main`; `--folder` writes the files of the view to a new folder; see overlays.md section 1), `view save [<line>] [--json]`, `view show <id> [--json]` |
 | overlays      | `overlay create <name> [--parent <overlay>] [--readers <principals>] [--hidden] [--folder <path> [--history all\|last\|<N>] [--prune <adapter>]] [--platform <key>\|any]`, `overlay set <name> [--parent <overlay>] [<cache settings>]` (an overlay has a kind, `patches` or `cache`; `--mode`, `--quiet`, `--merge`, `--trust` and `--gc` were removed, exit 2; overlays.md section 1, "Kinds as built"), `overlay list [--json] [--size]`, `overlay show-to-project <name>`, `overlay readers`, `overlay use [<overlay>\|main\|--none]` (the view of the current working folder, seen from one overlay; overlays.md section 1), `overlay move [--purge] <name>|main <paths>`, `overlay repair <overlay>`, `overlay remove <cache overlay>` (removes a cache overlay from the project; see cache-overlays.md section 18), `overlay log\|show\|diff\|grep\|ls-files <name>`, `overlay migrate-parts [-n] [-q]` (gives the head of each line its parts; see overlays.md section 1a) |
 | refs          | `ref set <name> <rev> [--expect <rev\|none>] [--ttl <dur>]`, `ref list [<prefix>]`, `ref log <name>`, `ref delete <name> [--expect <rev>]` |
-| queue         | `queue add <rev> [--into <line>] [-m <conventional title>] [--json]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
+| queue         | `queue add <rev> [--into <line>] [--expect-head <state>] [-m <conventional title>] [--json]`, `queue list [--into <line>] [--json]`, `queue remove <entry>`, `queue run [--into <line>] [--push <remote>]` |
 | follow        | `follow <remote>/<branch>`, `follow --run`, `follow --tick`, `follow`, `follow --remove` ([layr follow](follow.md)) |
 | tests         | `retest run [--full] [--save] [--tool vitest\|jest\|pytest] [-- <nextest args>]`, `retest init [--yes]`, `retest doctor` (see `docs/retest.md`) |
 | probes        | `probe run <rev> [--probe <name>] [--json]`, `probe diff <base> <head> [--json]` |
@@ -31,6 +31,17 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 | store         | `store remove <path> [--force] [-q]` (deletes a whole store folder; see [Remove a store](#remove-a-store)), `store-version [--json]` ([store version](local-store-version.md)) |
 | JSON schemas  | `schema` (lists the schemas), `schema <name>` (prints one; see [JSON output](json.md)) |
+
+### Status validation
+
+`status` caches validated comparison results on every platform. A matching fingerprint
+includes device, inode, size, mode, ownership, link count, and nanosecond mtime/ctime,
+plus backend evidence when available. Files dated within the cache's clock tick are
+compared again. Changing the base, index, ignore rules, or Layr version invalidates the cache.
+Linux briefly takes a read lease while observing each regular file; writable opens and
+memory mappings, unsupported leases, and ambiguous OverlayFS backing files use the
+snapshot fallback. APFS supplies change counters and clone identities. Set
+`LAYR_NO_STATUS_CACHE=1` to force full comparisons.
 
 ### Command line
 
@@ -146,6 +157,12 @@ deleted files, and new files that are not ignored. `-D` does not change this. An
 the changes in a named state (`layr add`, then `layr save -m`), park them (`layr park`), or add
 `--discard` to delete the line with them. `-f` is `-D` and `--discard` together. A discarded line
 stays in the `deleted` ring, so `layr undo` brings it back with its changes.
+For automation, resolve the `id` from `line new --json` or `line list --json`, then use
+`line delete --id <line-id>` to delete exactly that identity, even after a rename. It refuses a
+missing or deleted id and a working folder whose path, device or inode changed after resolution;
+it never falls back to a line name. The checks and deletion hold the project lock. `--id` accepts
+one full UUID and cannot be combined with a name. `line delete --json` returns the deleted line
+object, including its `id`. Name-based deletion uses the same folder guard after resolving once.
 With `--count N`, names run from `<name>-1` through `<name>-N`. The main project's line records
 commit together in one durable transaction: failure records none of the batch and removes its
 published folders. If a commit reports an error after it succeeded, all recorded lines and their
@@ -323,7 +340,15 @@ trash. `gc -n --repair` prints what it would free. `fsck` runs the same check, a
 `gc --repair` also frees the trees of imported states that no line head, park entry, overlay, undo
 record or auto state needs, and that git builds again. The record stays; the next read builds the
 tree (`docs/ownership.md`, "States imported from Git"). `gc -n --repair` lists them. A plain `gc`
-only checks.
+only checks owners; the object maintenance below still runs.
+
+For projects with object stores, `gc` also prunes unreachable state records, loose objects and
+hot blobs, turns blobs outside the hot window cold, and packs existing loose objects (including
+overlay stores), including new cold encodings. `gc -n` uses the same plan and
+reports the counts and source bytes for each step, even when no native state can be freed.
+The service runs bounded batches every `objects.maintenance-interval` seconds (default `60`,
+`0` disables them), yields to busy locks and releases the project lock before compression.
+See [objects, section 10](objects.md#10-writes-and-repack) for the batch limits.
 
 `gc` also compares the `bases` table (the base of each thin layer) with the layers on disk, and prints
 each difference. `gc --repair` makes the table match the disk.
@@ -416,6 +441,7 @@ content are the same on every machine and in git. `layr rev-parse <rev>^{tree}` 
 <rev>:<path>` prints the id of one path in that commit, as `git rev-parse` does: a tree for a
 folder, a blob for a file, the root tree for `<rev>:`. `./` and `../` resolve against the current
 folder. A path that the exported commit does not have fails with exit 128.
+
 
 ## Remove a store
 

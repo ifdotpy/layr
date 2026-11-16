@@ -200,7 +200,13 @@ The default target is `line.<name>.upstream` when that setting exists, else `mai
 `queue run` processes pending entries in order. An entry becomes `done` or `failed`, with its result or reason.
 A failure does not stop later entries. A conflict leaves the target head and files unchanged.
 A target head change causes one retry. A second head change fails the entry.
-The public `merge --expect` syntax still pins the source. The queue also checks the target head under the merge lock.
+The public `merge --expect` syntax still pins the source.
+`queue add <rev> --into main --expect-head <state>` resolves and stores an exact target head in the
+signed entry. Under the target line lock, the runner fails the entry if that head differs, with
+`reason` naming both heads and `failure: {"expected": "<state>", "found": "<state>"}` in JSON.
+The runner repeats this check after releasing the lock for checks. A mismatch never merges or
+retries against a different head. Without `--expect-head`, including older entries, the retry
+behavior above stays the same. Use an updated runner to enforce the field; older runners ignore it.
 The queue uses the existing line rules, approvals, merge drivers, and checks.
 A passing check for the exact result state and equal `argv` is reused.
 Legacy records without `argv` are reused only for a single word without spaces. Other legacy results run again.

@@ -9,7 +9,7 @@ pub fn watermark(lines: &[String]) -> Result<BTreeMap<String, Watermark>> {
     let mut out = BTreeMap::<String, Watermark>::new();
     let mut seen = BTreeMap::new();
     for line in lines {
-        let record: Record = serde_json::from_str(layr_store::record::parse_line(line, None)?.get())?;
+        let record: Record = serde_json::from_str(layr_store::record::parse_line(line)?.get())?;
         let hash = line_hash(line);
         if let Some(old) = seen.insert((record.machine.clone(), record.seq), hash.clone()) {
             ensure!(old == hash, "conflicting index source record");
@@ -55,19 +55,24 @@ pub fn heads(project: &Project, watermark: BTreeMap<String, Watermark>, seq: u64
 
 /// Reconcile at the exact watermark, even when more recent records have arrived.
 /// Any mismatch invalidates the whole index. The caller then uses its full verified model.
-pub fn reconcile(index: &Index, verified_lines: &[String]) -> Result<Project> {
+pub fn reconcile(
+    index: &Index,
+    verified_lines: &[String],
+    keys: &BTreeMap<String, ed25519_dalek::VerifyingKey>,
+    now: i64,
+) -> Result<Project> {
     index.validate()?;
     let Data::Heads(snapshot) = &index.data else { bail!("expected heads snapshot") };
     let mut by_seq = BTreeMap::new();
     let mut prefix = Vec::new();
     for line in verified_lines {
-        let r: Record = serde_json::from_str(layr_store::record::parse_line(line, None)?.get())?;
+        let r: Record = serde_json::from_str(layr_store::record::parse_line(line)?.get())?;
         ensure!(r.project == index.project, "index source belongs to another project");
         if snapshot.watermark.get(&r.machine).is_some_and(|m| r.seq <= m.seq) {
             if let Some(old) = by_seq.insert((r.machine.clone(), r.seq), line.clone()) {
                 ensure!(old == *line, "conflicting watermark source");
             } else {
-                prefix.push(r);
+                prefix.push(line.clone());
             }
         }
     }
@@ -77,7 +82,8 @@ pub fn reconcile(index: &Index, verified_lines: &[String]) -> Result<Project> {
         let sequences: Vec<_> = by_seq.keys().filter(|(m, _)| m == machine).map(|(_, s)| *s).collect();
         ensure!(sequences.len() as u64 == mark.seq && sequences.first() == Some(&1), "index watermark has a gap");
     }
-    let project = Project::from_records(&index.project, prefix, "")?;
+    let authorized = crate::record::authorize_lines(&index.project, &prefix, keys, now)?;
+    let project = Project::from_authorized_records(&index.project, authorized, "")?;
     let expected = heads(&project, snapshot.watermark.clone(), snapshot.seq)?;
     ensure!(expected == *snapshot, "index snapshot differs from signed records");
     Ok(project)
@@ -91,15 +97,22 @@ pub struct Loaded {
 
 /// A native/browser reconciliation boundary: a bad cache never prevents a verified load.
 /// Supply the result of `layr_store::index::open`, including authentication failures.
-pub fn load_or_full(snapshot: Result<Index>, project: &str, verified_lines: &[String]) -> Result<Loaded> {
+pub fn load_or_full(
+    snapshot: Result<Index>,
+    project: &str,
+    verified_lines: &[String],
+    keys: &BTreeMap<String, ed25519_dalek::VerifyingKey>,
+    now: i64,
+) -> Result<Loaded> {
     let cached = snapshot.and_then(|snapshot| {
         ensure!(snapshot.project == project, "index project differs");
-        reconcile(&snapshot, verified_lines)
+        reconcile(&snapshot, verified_lines, keys, now)
     });
     match cached {
         Ok(project) => Ok(Loaded { project, used_index: true, note: None }),
         Err(error) => {
-            let model = crate::Model::from_verified_lines(verified_lines.iter().map(String::as_str), "")?;
+            let authorized = crate::record::authorize_lines(project, verified_lines, keys, now)?;
+            let model = crate::Model::from_verified_lines(authorized, "")?;
             let project = model.projects.get(project).context("project has no verified records")?.clone();
             Ok(Loaded { project, used_index: false, note: Some(format!("Index discarded: {error}")) })
         }

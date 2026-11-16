@@ -4,7 +4,7 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
-use crate::model::{QueueChange, QueueEntry, Record, RefChange, RefState};
+use crate::model::{QueueChange, QueueEntry, RefChange, RefState};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
 use std::fs::File;
@@ -138,8 +138,11 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
     {
         bail!("--checked-candidate needs all checked queue arguments");
     }
-    if (a.get("--expect-head").is_some() || a.get("--expect-state").is_some()) && command != "candidate" {
-        bail!("--expect-head and --expect-state are only for queue candidate");
+    if a.get("--expect-head").is_some() && !matches!(command, "add" | "candidate") {
+        bail!("--expect-head is only for queue add or queue candidate");
+    }
+    if a.get("--expect-state").is_some() && command != "candidate" {
+        bail!("--expect-state is only for queue candidate");
     }
     if a.has("--existing") && command != "candidate" {
         bail!("--existing is only for queue candidate");
@@ -150,14 +153,14 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.get("--candidate-machine").is_some_and(|machine| !crate::model::is_uuid(machine)) {
         bail!("--candidate-machine needs a full machine UUID");
     }
-    let usage = "usage: layr queue (add <rev> [-m <conventional title>] [--no-run-queue]|list|remove <entry>|candidate <entry> --expect-head <state> --expect-state <state> [--existing [--candidate-machine <uuid>]]|run [--push <remote>] [--checked-entry <id> --checked-head <state> --checked-state <state> [--checked-candidate <state>]]) [--into <line>] [--json]";
+    let usage = "usage: layr queue (add <rev> [--expect-head <state>] [-m <conventional title>] [--no-run-queue]|list|remove <entry>|candidate <entry> --expect-head <state> --expect-state <state> [--existing [--candidate-machine <uuid>]]|run [--push <remote>] [--checked-entry <id> --checked-head <state> --checked-state <state> [--checked-candidate <state>]]) [--into <line>] [--json]";
     match command {
         "candidate" if a.pos.len() == 2 => {
             repo.require(ctx, if a.has("--existing") { "try" } else { "merge" })?;
             let head = a.get("--expect-head").ok_or_else(|| anyhow::anyhow!("queue candidate needs --expect-head"))?;
             let state = a.get("--expect-state").ok_or_else(|| anyhow::anyhow!("queue candidate needs --expect-state"))?;
-            let head = crate::revs::resolve(repo, h.line.as_ref(), head)?;
-            let state = crate::revs::resolve(repo, h.line.as_ref(), state)?;
+            let head = crate::revs::resolve_state(repo, h.line.as_ref(), head)?;
+            let state = crate::revs::resolve_state(repo, h.line.as_ref(), state)?;
             let _queue_lock = require_lock(repo)?;
             let entry = find(repo, &a.pos[1])?;
             if entry.status != "pending" || entry.state != state {
@@ -190,7 +193,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 Ok(_) => bail!("queue candidate unexpectedly completed a merge"),
             };
             if let Some(conflict) = error.downcast_ref::<super::mergecmd::CandidateConflict>() {
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) || target(repo, &entry)?.head != head {
                     bail!("queue entry or target changed while preparing the candidate");
                 }
@@ -198,9 +201,9 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 after.status = "failed".into();
                 after.reason = Some(conflict.0.clone());
                 after.attempts = 1;
-                let mut rec = Record::new("queue.result");
+                let mut rec = crate::model::DraftRecord::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after.clone())}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
                 if a.has("--json") {
                     outln!(ctx, "{}", serde_json::json!({"entry":entry.id,"status":"failed","reason":conflict.0}));
                 } else {
@@ -226,7 +229,7 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "add" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
-            let state = crate::revs::resolve(repo, h.line.as_ref(), &a.pos[1])?;
+            let state = crate::revs::resolve_state(repo, h.line.as_ref(), &a.pos[1])?;
             let source = repo.source_state(&state)?;
             repo.state_src(&state)?;
             if let Some(change) = &source.change_id {
@@ -255,7 +258,16 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !repo.working(&line).exists() {
                 bail!("queue target line '{into}' has no local work folder");
             }
+            let expected_head = a
+                .get("--expect-head")
+                .map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev))
+                .transpose()?
+                .map(crate::model::HeadExpectation::try_from)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
             let entry = QueueEntry {
+                expected_head,
+                failure: None,
                 id: ids::new_id(),
                 into: line.name,
                 target_line: line.id,
@@ -271,10 +283,10 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 title,
             };
             {
-                let _lock = repo.p.lock()?;
-                let mut rec = Record::new("queue.add");
+                let _lock = repo.p.lock_maintenance()?;
+                let mut rec = crate::model::DraftRecord::new("queue.add");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:None,after:Some(entry.clone())},"ref_change":RefChange{name:hold(&entry),before:None,after:Some(RefState{name:hold(&entry),target:state,expires_at:None})}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
             }
             if !a.has("--no-run-queue") {
                 if let Err(error) = run_configured(ctx, repo, Some(&entry.target_line)) {
@@ -304,15 +316,15 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         "remove" if a.pos.len() == 2 => {
             repo.require(ctx, "merge")?;
             let _queue_lock = require_lock(repo)?;
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             let entry = find(repo, &a.pos[1])?;
             if entry.added_by != ctx.caller.uid {
                 repo.require(ctx, "line.manage")?;
             }
-            let mut rec = Record::new("queue.remove");
+            let mut rec = crate::model::DraftRecord::new("queue.remove");
             rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:None}});
             release_hold(repo, &entry, &mut rec.data)?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             if a.has("--json") {
                 outln!(ctx, "{}", serde_json::json!({"removed":entry.id}));
             } else {
@@ -322,10 +334,10 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         "run" if a.pos.len() == 1 => {
             let line = a.get("--into").map(|name| repo.line(name)).transpose()?;
-            let checked_head = guarded.1.map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
-            let checked_state = guarded.2.map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
+            let checked_head = guarded.1.map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
+            let checked_state = guarded.2.map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
             let checked_candidate =
-                a.get("--checked-candidate").map(|rev| crate::revs::resolve(repo, h.line.as_ref(), rev)).transpose()?;
+                a.get("--checked-candidate").map(|rev| crate::revs::resolve_state(repo, h.line.as_ref(), rev)).transpose()?;
             let guard = match guarded {
                 (Some(entry), Some(_), Some(_)) => Some(QueueGuard {
                     entry,
@@ -429,6 +441,7 @@ fn run_entries(
         cwd: ctx.cwd.clone(),
         env: ctx.env.clone(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     };
     let merge_repo = Repo::open(&merge_ctx, &repo.p.name)?;
@@ -446,7 +459,8 @@ fn run_entries(
             bail!("checked queue entry state changed");
         }
         let line = target(repo, &entry)?;
-        if guard.as_ref().is_some_and(|guard| line.head != guard.head) {
+        // Pinned entries reach the locked expectation check even when the checked runner's head is stale.
+        if entry.expected_head.is_none() && guard.as_ref().is_some_and(|guard| line.head != guard.head) {
             bail!("checked queue target head changed");
         }
         // A caller who cannot update this line cannot fail other users' entries.
@@ -457,18 +471,18 @@ fn run_entries(
             None => None,
         };
         if let Some(reason) = closed {
-            let _lock = repo.p.lock()?;
+            let _lock = repo.p.lock_maintenance()?;
             if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
                 bail!("queue entry '{}' changed", entry.id);
             }
             let mut after = entry.clone();
             after.status = "failed".into();
             after.reason = Some(reason);
-            let mut rec = Record::new("queue.result");
+            let mut rec = crate::model::DraftRecord::new("queue.result");
             rec.data =
                 serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
             release_hold(repo, &entry, &mut rec.data)?;
-            repo.commit_record(ctx, rec)?;
+            repo.commit_record(&_lock, ctx, rec)?;
             results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
             if guard.is_some() {
                 break;
@@ -479,20 +493,27 @@ fn run_entries(
         let outcome = loop {
             attempts += 1;
             let line = target(&merge_repo, &entry)?;
-            if guard.as_ref().is_some_and(|guard| line.head != guard.head) {
+            if entry.expected_head.is_none() && guard.as_ref().is_some_and(|guard| line.head != guard.head) {
                 bail!("checked queue target head changed");
             }
-            let (result, probes) = super::mergecmd::merge_queued(
+            let (mut result, probes) = super::mergecmd::merge_queued(
                 &merge_ctx,
                 &merge_repo,
                 &line,
                 &entry,
-                &line.head,
+                guard.as_ref().map(|guard| guard.head).unwrap_or(&line.head),
                 attempts,
                 guard.is_some(),
                 false,
                 guard.as_ref().and_then(|guard| guard.candidate),
             );
+            if let Some(moved) = result.as_ref().err().and_then(|error| error.downcast_ref::<super::mergecmd::TargetMoved>()) {
+                if let Some(expected) = &entry.expected_head {
+                    if let Err(mismatch) = expected.check(&moved.found) {
+                        result = Err(mismatch.into());
+                    }
+                }
+            }
             if attempts == 1
                 && guard.is_none()
                 && result.as_ref().err().is_some_and(|error| error.downcast_ref::<super::mergecmd::TargetMoved>().is_some())
@@ -529,22 +550,23 @@ fn run_entries(
                 }
             }
             result => {
-                let reason = match result {
-                    Err(error) => format!("{error:#}"),
-                    Ok(code) => format!("merge failed (exit {code})"),
+                let (reason, failure) = match result {
+                    Err(error) => (format!("{error:#}"), error.downcast_ref::<crate::model::HeadMismatch>().cloned()),
+                    Ok(code) => (format!("merge failed (exit {code})"), None),
                 };
-                let _lock = repo.p.lock()?;
+                let _lock = repo.p.lock_maintenance()?;
                 if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) {
                     bail!("queue entry '{}' changed", entry.id);
                 }
                 let mut after = entry.clone();
                 after.status = "failed".into();
                 after.reason = Some(reason);
+                after.failure = failure;
                 after.attempts = attempts;
                 after.probes = probes;
-                let mut rec = Record::new("queue.result");
+                let mut rec = crate::model::DraftRecord::new("queue.result");
                 rec.data = serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
-                repo.commit_record(ctx, rec)?;
+                repo.commit_record(&_lock, ctx, rec)?;
             }
         }
         results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
@@ -594,6 +616,7 @@ fn push_merged(ctx: &Ctx, repo: &Repo, entries: &[QueueEntry], remotes: &str) ->
             cwd: repo.working(&line),
             env: ctx.env.clone(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let code = if names.len() == 2 {
@@ -624,6 +647,7 @@ pub fn run_configured(ctx: &Ctx, repo: &Repo, only: Option<&str>) -> Result<()> 
             cwd: repo.working(&line),
             env: std::collections::HashMap::new(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let run_repo = Repo::open(&run_ctx, &repo.p.name)?;

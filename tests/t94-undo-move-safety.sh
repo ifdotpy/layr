@@ -13,7 +13,7 @@ export LAYR_ROOT=$FS/store; mkdir -p $LAYR_ROOT
 sample "$T/source"
 # One project per check: a broken state in one check must not hide the next check's result.
 new_project() { # new_project <name>: a project from the sample, with a file:// store remote
-    l init "$1" --from "$T/source" -q >/dev/null
+    l init "$1" --from "$T/source" "${@:2}" -q >/dev/null
     P=$LAYR_ROOT/projects/$1
     cd "$P/lines/main"
     l remote add archive "file://$T/archive-$1" --paper-key-out "$T/paper-$1" >/dev/null
@@ -50,7 +50,7 @@ tree_sum() { (cd "$1" && find . -path ./.git -prune -o -type f -print | sort | x
 
 # (a) Undo of an amend. The before state is a sibling of the head, so no later state keeps it and
 # the store remote is its only other copy. Undo must fetch it back, not report it as deleted.
-new_project amended
+new_project amended --no-objects
 echo one >> notes.txt; l save -a -m one -q
 echo two >> notes.txt; l save -a -m two -q
 two=$(l rev-parse head)

@@ -4,7 +4,7 @@
 set -e
 mkdir "$T/src"
 echo initial > "$T/src/f"
-l init perf --from "$T/src" -q
+l init perf --no-objects --from "$T/src" -q
 P=$LAYR_ROOT/projects/perf
 head_id() { l rev-parse head | python3 -c 'import sys, uuid; s=sys.stdin.read().strip(); print(uuid.UUID(hex=s[20:]+s[12:20]+s[:12]))'; }
 cd "$P/lines/main" || exit 1

@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-l init g --from $T/src -q >/dev/null
+l init g --no-objects --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/g/lines/main || exit 1
 l line new -q w >/dev/null
 cd $LAYR_ROOT/projects/g/lines/w || exit 1

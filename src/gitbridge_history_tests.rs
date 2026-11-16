@@ -49,18 +49,20 @@ impl Fixture {
             env: [("LAYR_PROJECT".into(), "history".into()), ("LAYR_ROOT".into(), root.join("store").display().to_string())]
                 .into(),
             author: Default::default(),
+            captures: Default::default(),
             out: RefCell::new(Box::new(output.clone())),
         };
         let p = Project {
+            lease: Default::default(),
             store: &ctx.store,
             name: "history".into(),
             dir: dir.clone(),
             id: ids::new_id(),
             db: crate::db::Db::open(&db_file(&dir))?,
         };
-        let mut record = Record::new("project");
+        let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"name": "history", "id": p.id, "config": {}});
-        p.append(record, &ctx.actor())?;
+        p.lock_maintenance().unwrap().append(record, &ctx.actor())?;
         let repo = Repo { p, ctx: Some(&ctx) };
         let git = repo.p.git_dir();
         let source = root.join("source");
@@ -111,7 +113,7 @@ impl Fixture {
             let raw = cat.object(oid, "commit")?;
             let (objects, changes) = import_changes(&raw, old, &mut cat)?;
             let (id, rec) = import_record(&ctx, &repo, oid, &raw, "origin/main", states.clone(), objects, changes)?;
-            repo.p.append(rec, &ctx.actor())?;
+            repo.p.lock_maintenance().unwrap().append(rec, &ctx.actor())?;
             states = vec![id];
         }
         let state = states.pop().unwrap();
@@ -147,7 +149,7 @@ impl Fixture {
         let deltas = deltas_of(&repo, Some(&self.parent), &self.commit)?;
         let sides = sides_of(&repo, &deltas)?;
         let specs = specs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let changes = sides.changes.into_iter().filter(|c| crate::cmd::matches(&specs, &c.path)).collect::<Vec<_>>();
+        let changes = sides.changes.into_iter().filter(|c| crate::pathspec::matches(&specs, c.path())).collect::<Vec<_>>();
         let diffs = crate::diff::file_diffs(&Entries::Git(sides.old), &Entries::Git(sides.new), &changes)?;
         // Match the command's default unified context.
         const CONTEXT_LINES: usize = 3;

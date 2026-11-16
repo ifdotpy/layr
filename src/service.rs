@@ -1,4 +1,4 @@
-//! The root service (`layr daemon`) and the client side of `layr` for other users.
+//! Service client and daemon-version negotiation. The command process host lives in `cmd::service_host`.
 //!
 //! A client sends its arguments, working folder and environment over a Unix socket, with its
 //! standard input, output and error and an open handle of its working folder as `SCM_RIGHTS`.
@@ -6,42 +6,19 @@
 //! caller's uid from `SO_PEERCRED`, runs the command with the caller's streams and returns the
 //! exit code. Commands check the caller against line owners and the project admin.
 
-use crate::ctx::{Caller, Ctx};
-use crate::store::Store;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+
+pub(crate) const REQUEST_TIMEOUT_SECONDS: u64 = 10;
 
 pub fn socket_path() -> PathBuf {
     std::env::var_os("LAYR_SOCKET").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(if cfg!(target_os = "macos") { "/var/run/layr/layr.sock" } else { "/run/layr/layr.sock" })
     })
-}
-
-const MAX_REQ_BYTES: usize = 4 << 20;
-const REQUEST_BUFFER_BYTES: usize = 64 << 10;
-const MAX_DESCRIPTORLESS_REQUEST_BYTES: usize = 32 << 10;
-const REQUEST_TIMEOUT_SECONDS: u64 = 10;
-const DEFAULT_MAX_REQUESTS: usize = 256;
-const DEFAULT_MAX_REQUESTS_PER_USER: usize = 32;
-
-/// Commands and the descriptorless hello/registry messages share a frame. Command fields
-/// remain optional here for those control messages and are required before command dispatch.
-#[derive(serde::Deserialize)]
-struct Request {
-    argv: Option<Vec<String>>,
-    // The directory descriptor is authoritative; older clients omitted this hint.
-    #[serde(rename = "cwd")]
-    _cwd: Option<PathBuf>,
-    env: Option<HashMap<String, String>>,
-    #[serde(default, deserialize_with = "deserialize_client_peer")]
-    version: Option<layr_api::Peer>,
-    #[serde(default)]
-    hello: bool,
-    registry: Option<serde_json::Value>,
 }
 
 /// Fields follow the sorted JSON object order used by the original Value encoding.
@@ -67,7 +44,7 @@ impl<'a> From<&'a layr_api::Peer> for CommandPeer<'a> {
     }
 }
 
-fn command_frame(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, peer: &layr_api::Peer) -> Result<Vec<u8>> {
+pub(crate) fn command_frame(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, peer: &layr_api::Peer) -> Result<Vec<u8>> {
     let mut data = vec![0; std::mem::size_of::<u32>()];
     serde_json::to_writer(&mut data, &CommandRequest { argv, cwd, env, version: peer.into() })?;
     let len = (data.len() - std::mem::size_of::<u32>()) as u32;
@@ -75,18 +52,9 @@ fn command_frame(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, pe
     Ok(data)
 }
 
-/// Keep a missing/invalid schema diagnostic on the caller's stderr through typed decoding.
-fn deserialize_client_peer<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<layr_api::Peer>, D::Error> {
-    <Option<layr_api::Peer> as serde::Deserialize>::deserialize(deserializer).map_err(|error| {
-        serde::de::Error::custom(format!(
-            "incompatible client negotiation (a valid database schema is required); upgrade both the CLI and the daemon: {error}"
-        ))
-    })
-}
 
-fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
+
+pub(crate) fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
     let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
     let mut control = SendAncillaryBuffer::new(&mut space);
@@ -104,7 +72,7 @@ fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<(
     Ok(())
 }
 
-fn recv_with_fds(sock: &UnixStream, buf: &mut [u8]) -> Result<(usize, Vec<OwnedFd>)> {
+pub(crate) fn recv_with_fds(sock: &UnixStream, buf: &mut [u8]) -> Result<(usize, Vec<OwnedFd>)> {
     use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
     let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(8))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
@@ -165,7 +133,7 @@ pub fn forward(argv: &[String]) -> Result<i32> {
 }
 
 /// Exchange versions on the same connection before a client sends a command or descriptors.
-fn negotiate(sock: &UnixStream) -> Result<()> {
+pub(crate) fn negotiate(sock: &UnixStream) -> Result<()> {
     // A busy daemon writes "B" and closes at once. macOS then refuses the timeout on the closed
     // socket, and the write fails too. The answer is still read; a closed socket never waits.
     let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS)));
@@ -256,7 +224,7 @@ pub fn hello(path: &Path) -> Hello {
 /// Why a client could not connect, and what to do. The service opens its socket to every local
 /// user (mode 0666 in a 0755 folder) and decides each request by the caller's uid; so a refused
 /// connection comes from the client's side or from a missing service, never from a role.
-fn connect_error(path: &Path, e: &std::io::Error) -> anyhow::Error {
+pub(crate) fn connect_error(path: &Path, e: &std::io::Error) -> anyhow::Error {
     let at = path.display();
     match e.raw_os_error() {
         // connect() itself refused by a system call filter (seccomp) or a sandbox profile: the
@@ -284,6 +252,7 @@ fn connect_error(path: &Path, e: &std::io::Error) -> anyhow::Error {
     }
 }
 
+<<<<<<< head
 #[cfg(target_os = "linux")]
 fn peer_uid(sock: &UnixStream) -> Result<(u32, u32, i32)> {
     let c = rustix::net::sockopt::socket_peercred(sock)?;
@@ -1433,3 +1402,5 @@ mod disk_full_tests {
         assert!(!disk_full(&anyhow::Error::new(other)));
     }
 }
+=======
+>>>>>>> fs-legacy-facades

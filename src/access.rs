@@ -8,6 +8,8 @@
 //!
 //! A principal is `user:<uid>`, `group:<gid>` or `*` (everyone).
 
+pub(crate) mod refs;
+
 use crate::store::Project;
 use std::collections::BTreeMap;
 
@@ -55,6 +57,12 @@ impl Who {
             groups.push(gid);
         }
         Who { uid, groups }
+    }
+
+    /// Reuse the request's memberships; keep the existing primary-group fallback on NSS failure.
+    pub fn caller(caller: &crate::ctx::Caller) -> Who {
+        let groups = caller.fs_identity().map(|identity| identity.groups().to_vec()).unwrap_or_else(|_| vec![caller.gid]);
+        Who { uid: caller.uid, groups }
     }
 
     fn keys(&self) -> Vec<String> {
@@ -340,21 +348,27 @@ mod tests {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         let store = crate::store::Store::open(&root).unwrap();
         let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
-        let mut record = crate::model::Record::new("project");
+        let mut record = crate::model::Record::untrusted_preview("project");
         record.machine = crate::ids::new_id();
         record.seq = 1;
         record.time = 1;
         record.data = serde_json::json!({"config":{"access":{"user:1001":"admin","user:1002":"reader"}}});
-        db.derive(&record, &|_| false, &store.machine.id).unwrap();
-        let mut project =
-            crate::store::Project { store: &store, name: "p%private".into(), dir: root.clone(), id: crate::ids::new_id(), db };
+        db.test_derive(&record, &|_| false, &store.machine.id).unwrap();
+        let mut project = crate::store::Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p%private".into(),
+            dir: root.clone(),
+            id: crate::ids::new_id(),
+            db,
+        };
         assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_ok());
         assert!(Policy::load(&project).check(&who(1003, &[]), "read").is_err());
         record.op = "config".into();
         record.seq = 2;
         record.time = 2;
         record.data = serde_json::json!({"config":{"access":{"user:1001":"admin"}}});
-        project.db.derive(&record, &|_| false, &store.machine.id).unwrap();
+        project.db.test_derive(&record, &|_| false, &store.machine.id).unwrap();
         assert!(Policy::load(&project).check(&who(1002, &[]), "read").is_err());
         project.name = "p".into();
         assert!(project.db.config("access").unwrap().is_none());

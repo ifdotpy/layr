@@ -5,7 +5,7 @@ use super::change::{find, validate_comment, version};
 use super::here;
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
-use crate::model::{Comment, Record};
+use crate::model::{Comment};
 use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_model::review::{self as rv, Reaction, ReviewRequest, ThreadStatus};
@@ -42,13 +42,13 @@ pub fn comment(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let id = find(&h.repo, change)?;
     let versions = h.repo.p.db.change_versions(&id)?;
     let state = match (a.get("--state"), a.get("--version")) {
         (Some(_), Some(_)) => bail!("--state and --version both name the version; give one"),
         (Some(rev), None) => {
-            let state = crate::revs::resolve(&h.repo, h.line.as_ref(), rev)?;
+            let state = crate::revs::resolve_state(&h.repo, h.line.as_ref(), rev)?;
             if !versions.iter().any(|v| v.id == state) {
                 bail!("state {} is no version of change {id}", crate::ids::short(&state));
             }
@@ -75,7 +75,7 @@ pub fn comment(ctx: &Ctx, args: &[String]) -> Result<i32> {
         text,
         reply_to: a.get("--reply-to").map(str::to_owned),
     };
-    write_comment(ctx, &h.repo, comment, line_end, a.has("--json"))
+    write_comment(&_lock, ctx, &h.repo, comment, line_end, a.has("--json"))
 }
 
 /// A line or a line range: `12` or `12-20`.
@@ -91,17 +91,24 @@ fn lines(value: &str) -> Result<(u32, Option<u32>)> {
     Ok((start, end.filter(|e| *e != start)))
 }
 
-fn write_comment(ctx: &Ctx, repo: &Repo, comment: Comment, line_end: Option<u32>, as_json: bool) -> Result<i32> {
+fn write_comment(
+    locked: &crate::store::LockedProject<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    comment: Comment,
+    line_end: Option<u32>,
+    as_json: bool,
+) -> Result<i32> {
     if line_end.is_some() && comment.path.is_none() {
         bail!("--line needs --file");
     }
     validate_comment(repo, &comment)?;
-    let mut rec = Record::new("comment");
+    let mut rec = crate::model::DraftRecord::new("comment");
     rec.data = json!({"comment":comment});
     if let Some(end) = line_end {
         rec.data["line_end"] = json!(end);
     }
-    let rec = repo.commit_record(ctx, rec)?;
+    let rec = repo.commit_record(locked, ctx, rec)?;
     if as_json {
         let mut out = rec.data["comment"].clone();
         if let Some(end) = rec.data.get("line_end") {
@@ -128,7 +135,7 @@ fn reply(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (target, text) = text_arg(&a, "usage: layr comment reply <comment> (-m <text> | <text>) [--json]")?;
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let model = h.repo.read_model()?;
     let to = model.find_comment(&target)?;
     let change = to["change_id"].as_str().context("comment has no change")?;
@@ -143,7 +150,7 @@ fn reply(ctx: &Ctx, args: &[String]) -> Result<i32> {
         text,
         reply_to: to["id"].as_str().map(String::from),
     };
-    write_comment(ctx, &h.repo, comment, None, a.has("--json"))
+    write_comment(&_lock, ctx, &h.repo, comment, None, a.has("--json"))
 }
 
 fn resolve(ctx: &Ctx, args: &[String], resolved: bool) -> Result<i32> {
@@ -153,7 +160,7 @@ fn resolve(ctx: &Ctx, args: &[String], resolved: bool) -> Result<i32> {
     };
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let model = h.repo.read_model()?;
     let comment = model.find_comment(target)?;
     let change = comment["change_id"].as_str().context("comment has no change")?.to_owned();
@@ -168,9 +175,9 @@ fn resolve(ctx: &Ctx, args: &[String], resolved: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let mut rec = Record::new(if resolved { rv::RESOLVE_OP } else { rv::UNRESOLVE_OP });
+    let mut rec = crate::model::DraftRecord::new(if resolved { rv::RESOLVE_OP } else { rv::UNRESOLVE_OP });
     rec.data = json!({"thread_status": ThreadStatus { change_id: change.clone(), thread: thread.clone(), resolved, prev }});
-    h.repo.commit_record(ctx, rec)?;
+    h.repo.commit_record(&_lock, ctx, rec)?;
     if a.has("--json") {
         outln!(ctx, "{}", json!({"thread":thread,"change_id":change,"resolved":resolved,"written":true}));
     } else {
@@ -190,7 +197,7 @@ pub fn react(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let model = h.repo.read_model()?;
     let comment = model.find_comment(target);
     let change = find(&h.repo, target);
@@ -207,9 +214,9 @@ pub fn react(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let writer = layr_model::Project::reaction_writer(ctx.caller.uid, &h.repo.p.store.machine.id);
     let written = model.has_reaction(&change, &writer, &target, name) != on;
     if written {
-        let mut rec = Record::new(if on { rv::REACT_OP } else { rv::UNREACT_OP });
+        let mut rec = crate::model::DraftRecord::new(if on { rv::REACT_OP } else { rv::UNREACT_OP });
         rec.data = json!({"reaction": Reaction { change_id: change.clone(), target: target.clone(), name: name.clone(), on }});
-        h.repo.commit_record(ctx, rec)?;
+        h.repo.commit_record(&_lock, ctx, rec)?;
     }
     if a.has("--json") {
         outln!(ctx, "{}", json!({"change_id":change,"target":target,"name":name,"on":on,"written":written}));
@@ -237,7 +244,7 @@ reviewer: person:<login>, user:<name or uid>, <user name>, or machine:<name or i
     };
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
-    let _lock = h.repo.p.lock()?;
+    let _lock = h.repo.p.lock_maintenance()?;
     let change = find(&h.repo, change)?;
     let mut model = h.repo.read_model()?;
     let reviewers = names.iter().map(|n| principal(&model, n)).collect::<Result<Vec<_>>>()?;
@@ -246,10 +253,10 @@ reviewer: person:<login>, user:<name or uid>, <user name>, or machine:<name or i
         let (now, prev) = model.review_request(&change, &reviewer);
         let written = now != active;
         if written {
-            let mut rec = Record::new(if active { rv::REQUEST_OP } else { rv::CANCEL_OP });
+            let mut rec = crate::model::DraftRecord::new(if active { rv::REQUEST_OP } else { rv::CANCEL_OP });
             rec.data =
                 json!({"review_request": ReviewRequest { change_id: change.clone(), reviewer: reviewer.clone(), active, prev }});
-            h.repo.commit_record(ctx, rec)?;
+            h.repo.commit_record(&_lock, ctx, rec)?;
             model = h.repo.read_model()?;
         }
         if !a.has("--json") {

@@ -2,73 +2,105 @@
 //! state ids and their prefixes, git commit ids, `park@{n}`, `head@{n}` (automatic states,
 //! newest first) and the suffixes `~n`, `^` and `^n`.
 
-use crate::model::{Line, StateKind};
-use crate::repo::Repo;
-use anyhow::{bail, Result};
+pub(crate) mod change;
+pub(crate) mod parked;
 
-pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
-    reject_old(rev)?;
-    let (base, suffix) = split_suffix(rev);
-    let (name, at) = match base.find("@{") {
-        Some(i) if base.ends_with('}') => (&base[..i], Some(&base[i + 2..base.len() - 1])),
-        _ => (base, None),
-    };
-    let mut id = if let Some(n) = at {
-        let n: usize = n.parse().map_err(|_| anyhow::anyhow!("bad revision {rev}"))?;
-        let history = repo.p.db.ref_log(name)?;
-        if !history.is_empty() {
-            let positions: Vec<_> = history.into_iter().filter_map(|ch| ch.after).collect();
-            positions
-                .get(n)
-                .map(|r| r.target.clone())
-                .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
-        } else if name == "park" {
-            let l = need_line(line, rev)?;
-            match crate::cmd::park::parked_lines(repo, l)?.get(n) {
-                Some(parked) => parked.head.clone(),
-                None => bail!("park@{{{n}}} does not exist"),
-            }
-        } else {
-            let l =
-                if name.is_empty() || name == "head" || name == "@" { need_line(line, rev)?.clone() } else { repo.line(name)? };
-            let v = repo.p.db.line_states(&l.id, StateKind::Auto)?;
-            match v.get(n) {
-                Some(s) => s.id.clone(),
-                None => bail!("{rev}: line '{}' has only {} automatic states", l.name, v.len()),
+use crate::errors::{error, Kind as ErrorKind};
+use crate::model::{Line, StateKind};
+use crate::repo::{Repo, ResolvedRevision};
+mod expression;
+use anyhow::{bail, Result};
+use expression::{AncestorStep, BaseSelector, RevisionExpr};
+
+pub fn resolve_state(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<String> {
+    Ok(resolve(repo, line, rev)?.into_state())
+}
+
+pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<ResolvedRevision> {
+    let expr = RevisionExpr::parse(rev)?;
+    let mut revision = match expr.base {
+        BaseSelector::Position { name, index: n } => {
+            let id = {
+                let history = repo.p.db.ref_log(name)?;
+                if !history.is_empty() {
+                    let positions: Vec<_> = history.into_iter().filter_map(|ch| ch.after).collect();
+                    positions
+                        .get(n)
+                        .map(|r| r.target.clone())
+                        .ok_or_else(|| anyhow::anyhow!("{rev}: ref has only {} positions", positions.len()))?
+                } else if name == "park" {
+                    let l = need_line(line, rev)?;
+                    match crate::revs::parked::parked_lines(repo, l)?.get(n) {
+                        Some(parked) => parked.head.clone(),
+                        None => bail!("park@{{{n}}} does not exist"),
+                    }
+                } else {
+                    let l = if name.is_empty() || name == "head" || name == "@" {
+                        need_line(line, rev)?.clone()
+                    } else {
+                        repo.line(name)?
+                    };
+                    let v = repo.p.db.line_states(&l.id, StateKind::Auto)?;
+                    match v.get(n) {
+                        Some(s) => s.id.clone(),
+                        None => bail!("{rev}: line '{}' has only {} automatic states", l.name, v.len()),
+                    }
+                }
+            };
+            repo.resolved_state(&id)?
+        }
+        BaseSelector::Head => repo.resolved_state(&need_line(line, "head")?.head)?,
+        BaseSelector::Park => {
+            let parked = crate::revs::parked::parked_lines(repo, need_line(line, "park")?)?;
+            repo.resolved_state(&parked.first().ok_or_else(|| anyhow::anyhow!("no park entries"))?.head)?
+        }
+        BaseSelector::Change { prefix, version, spelling } => {
+            let id = crate::revs::change::find(repo, prefix)?;
+            let states = repo.p.db.change_versions(&id)?;
+            let state = states
+                .get(version.unwrap_or(states.len().saturating_sub(1)))
+                .ok_or_else(|| anyhow::anyhow!("unknown change version '{spelling}'"))?;
+            repo.resolved_state(&state.id)?
+        }
+        BaseSelector::View(id) => ResolvedRevision::View(repo.saved_view(id.as_str())?),
+        BaseSelector::Attestation(id) => {
+            let attestation =
+                repo.p.db.attestation(&id.to_string())?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
+            match attestation.subject {
+                crate::model::Subject::View(id) => ResolvedRevision::View(repo.saved_view(id.as_str())?),
+                crate::model::Subject::State(id) => repo.resolved_state(id.as_str())?,
+                _ => bail!("unsupported attestation subject"),
             }
         }
-    } else {
-        base_state(repo, line, name)?
+        BaseSelector::Name(name) => repo.resolved_state(&base_state(repo, name)?)?,
     };
-    let mut rest = suffix;
-    while !rest.is_empty() {
-        let c = rest.as_bytes()[0];
-        let digits: String = rest[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
-        rest = &rest[1 + digits.len()..];
-        match c {
-            b'~' => {
-                let n: usize = if digits.is_empty() { 1 } else { digits.parse()? };
-                for _ in 0..n {
-                    id = match repo.parents(&id)?.first() {
-                        Some(p) => p.clone(),
-                        None => bail!("{rev}: state has no parent"),
-                    };
+    for step in &expr.ancestors {
+        match step {
+            AncestorStep::Identity | AncestorStep::FirstParent(0) => {}
+            AncestorStep::FirstParent(count) => {
+                let mut seen = std::collections::HashSet::new();
+                for _ in 0..*count {
+                    let source = revision.into_source(repo)?;
+                    if *count > 1 && !seen.insert(source) {
+                        bail!("bad revision {rev}");
+                    }
+                    let parent =
+                        repo.parents(&source)?.into_iter().next().ok_or_else(|| anyhow::anyhow!("{rev}: state has no parent"))?;
+                    revision = repo.resolved_state(&parent)?;
                 }
             }
-            b'^' => {
-                let n: usize = if digits.is_empty() { 1 } else { digits.parse()? };
-                if n == 0 {
-                    continue;
-                }
-                id = match repo.parents(&id)?.get(n - 1) {
-                    Some(p) => p.clone(),
-                    None => bail!("{rev}: state has no parent {n}"),
-                };
+            AncestorStep::Parent(index) => {
+                let source = revision.into_source(repo)?;
+                let parent = repo
+                    .parents(&source)?
+                    .into_iter()
+                    .nth(index.get() - 1)
+                    .ok_or_else(|| anyhow::anyhow!("{rev}: state has no parent {index}"))?;
+                revision = repo.resolved_state(&parent)?;
             }
-            _ => bail!("bad revision {rev}"),
         }
     }
-    Ok(id)
+    Ok(revision)
 }
 
 /// Resolve the complete stack for an exact view or line, and a layer-free view for a state.
@@ -78,17 +110,17 @@ pub fn resolve_view(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<crate
         repo.saved_view(id)?
     } else if let Some(id) = rev.strip_prefix("attestations/") {
         let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
-        if a.subject.kind == "view" {
-            repo.saved_view(&a.subject.id)?
+        if matches!(&a.subject, crate::model::Subject::View(_)) {
+            repo.saved_view(a.subject.id())?
         } else {
-            crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+            crate::overlay::View::new(resolve_state(repo, line, rev)?, Vec::new())
         }
     } else if matches!(rev, "" | "head" | "@") {
         repo.view_of(need_line(line, rev)?)?
     } else if let Some(line) = repo.p.db.line_by_name(rev)? {
         repo.view_of(&repo.localize(line)?)?
     } else {
-        crate::overlay::View::new(resolve(repo, line, rev)?, Vec::new())
+        crate::overlay::View::new(resolve_state(repo, line, rev)?, Vec::new())
     };
     repo.check_view_collected(&view)?;
     Ok(view)
@@ -99,10 +131,10 @@ pub fn reject_old(rev: &str) -> Result<()> {
     let rev = rev.trim_start_matches('^');
     let base = rev.split(['~', '^', ':']).next().unwrap_or(rev);
     if base == "HEAD" || base.starts_with("HEAD@{") {
-        return Err(crate::cmd::exit(2, "HEAD was removed. Use head."));
+        return Err(error(ErrorKind::Unsupported, "HEAD was removed. Use head."));
     }
     if base == "stash" || base.starts_with("stash@{") {
-        return Err(crate::cmd::exit(2, "stash revisions were removed. Use park@{n}."));
+        return Err(error(ErrorKind::Unsupported, "stash revisions were removed. Use park@{n}."));
     }
     Ok(())
 }
@@ -114,51 +146,7 @@ fn need_line<'a>(line: Option<&'a Line>, rev: &str) -> Result<&'a Line> {
     }
 }
 
-fn split_suffix(rev: &str) -> (&str, &str) {
-    // The suffix starts at the first '~' or '^' that is not inside "@{...}".
-    let b = rev.as_bytes();
-    let mut depth = 0;
-    for (i, c) in b.iter().enumerate() {
-        match c {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            b'~' | b'^' if depth == 0 => return (&rev[..i], &rev[i..]),
-            _ => {}
-        }
-    }
-    (rev, "")
-}
-
-fn base_state(repo: &Repo, line: Option<&Line>, name: &str) -> Result<String> {
-    if name.is_empty() || name == "head" || name == "@" {
-        return Ok(need_line(line, "head")?.head.clone());
-    }
-    if name == "park" {
-        let l = need_line(line, name)?;
-        return match crate::cmd::park::parked_lines(repo, l)?.first() {
-            Some(parked) => Ok(parked.head.clone()),
-            None => bail!("no park entries"),
-        };
-    }
-    if let Some(rest) = name.strip_prefix("changes/") {
-        let (id, version) = match rest.split_once('/') {
-            Some((id, v)) => (id, Some(crate::cmd::change::version(v)?)),
-            None => (rest, None),
-        };
-        let id = crate::cmd::change::find(repo, id)?;
-        let states = repo.p.db.change_versions(&id)?;
-        return states
-            .get(version.unwrap_or(states.len().saturating_sub(1)))
-            .map(|s| s.id.clone())
-            .ok_or_else(|| anyhow::anyhow!("unknown change version '{name}'"));
-    }
-    if let Some(id) = name.strip_prefix("views/") {
-        return Ok(repo.saved_view(id)?.shared);
-    }
-    if let Some(id) = name.strip_prefix("attestations/") {
-        let a = repo.p.db.attestation(id)?.ok_or_else(|| anyhow::anyhow!("unknown attestation '{id}'"))?;
-        return if a.subject.kind == "view" { Ok(repo.saved_view(&a.subject.id)?.shared) } else { Ok(a.subject.id) };
-    }
+fn base_state(repo: &Repo, name: &str) -> Result<String> {
     if let Some(r) = repo.p.db.ref_value(name, crate::ids::now_ms())? {
         return Ok(r.target);
     }

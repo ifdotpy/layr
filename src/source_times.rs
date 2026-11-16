@@ -14,7 +14,8 @@ use crate::fsutil;
 use crate::ignore_rules::Rules;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use std::os::unix::fs::MetadataExt;
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 /// The name of the file in a cache folder.
@@ -115,19 +116,30 @@ fn decode(text: &str) -> BTreeMap<String, Entry> {
 }
 
 /// Writes `.layr-times` for the tracked files of `w` into each cache folder `folders` (relative to `w`) that is a
-/// folder. Called before the snapshot of a cache save, outside the project lock.
-pub fn record(w: &Path, folders: &[String]) -> Result<()> {
-    let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(w, f)).collect::<Result<_>>()?;
+/// folder. The new file belongs to `own`, including when the service writes as root.
+/// Called before the snapshot of a cache save, outside the project lock.
+pub fn record(w: &Path, folders: &[String], own: (u32, u32)) -> Result<()> {
+    let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(w, f).map(|d| (f, d))).collect::<Result<_>>()?;
     // An empty folder holds no build output, so it needs no times (and stays empty).
     let holds = |d: &std::path::Path| std::fs::read_dir(d).is_ok_and(|mut r| r.any(|e| e.is_ok_and(|e| e.file_name() != FILE)));
-    let dirs: Vec<_> = dirs.into_iter().filter(|d| d.is_dir() && holds(d)).collect();
+    let dirs: Vec<_> = dirs.into_iter().filter(|(_, d)| d.is_dir() && holds(d)).collect();
     if dirs.is_empty() {
         return Ok(());
     }
     let _t = crate::trace::span("source times: record");
     let data = encode(&collect(w)?);
-    for d in dirs {
-        fsutil::atomic_write(&d.join(FILE), &data, 0o644)?;
+    let tree = crate::tree::Tree::open(w)?;
+    for (folder, _) in dirs {
+        // Set ownership on the unpublished inode. The cache is user-writable: neither
+        // a symlink nor a hard link at the old name may redirect this privileged write.
+        tree.replace_file_atomic(&format!("{folder}/{FILE}"), |mut file| {
+            file.write_all(&data)?;
+            rustix::fs::fchown(file, Some(rustix::fs::Uid::from_raw(own.0)), Some(rustix::fs::Gid::from_raw(own.1)))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+            file.sync_all()?;
+            Ok(())
+        })?;
+        tree.open_folder(folder)?.sync_all()?;
     }
     Ok(())
 }
@@ -220,6 +232,10 @@ pub fn apply(w: &Path, folders: &[String]) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(w: &Path, folders: &[String]) -> Result<()> {
+        super::record(w, folders, (rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw()))
+    }
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("layr-source-times-{name}-{}", std::process::id()));
@@ -347,6 +363,53 @@ mod tests {
         record(&w, &["target".to_string()]).unwrap();
         assert!(!w.join("target").join(FILE).exists());
         let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn recording_publishes_the_intended_owner_without_changing_link_targets() -> Result<()> {
+        let w = tmp("owner");
+        std::fs::write(w.join("target/out"), "built")?;
+        std::fs::write(w.join("outside"), "untouched")?;
+        let uid = rustix::process::geteuid().as_raw();
+        // A supplementary group makes the requested owner differ from the writer without root.
+        let gid = rustix::process::getgroups()?
+            .into_iter()
+            .find(|g| g.as_raw() != rustix::process::getegid().as_raw())
+            .unwrap_or(rustix::process::getegid())
+            .as_raw();
+        let manifest = w.join("target").join(FILE);
+        let outside = w.join("outside");
+        let before = std::fs::metadata(&outside)?;
+        for symlink in [true, false] {
+            if symlink {
+                std::os::unix::fs::symlink(&outside, &manifest)?;
+            } else {
+                std::fs::hard_link(&outside, &manifest)?;
+            }
+            super::record(&w, &["target".into()], (uid, gid))?;
+            let published = std::fs::symlink_metadata(&manifest)?;
+            assert!(published.is_file());
+            assert_eq!((published.uid(), published.gid(), published.mode() & 0o777), (uid, gid, 0o644));
+            assert!(std::fs::read_to_string(&manifest)?.starts_with("layr-times 1\n"));
+            let after = std::fs::metadata(&outside)?;
+            assert_eq!((after.uid(), after.gid(), after.mode()), (before.uid(), before.gid(), before.mode()));
+            assert_eq!(std::fs::read_to_string(&outside)?, "untouched");
+            assert_eq!(std::fs::read_dir(w.join("target"))?.count(), 2);
+            std::fs::remove_file(&manifest)?;
+        }
+        std::fs::remove_dir_all(w)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recording_refuses_a_cache_folder_symlink() -> Result<()> {
+        let w = tmp("cache-link");
+        std::fs::write(w.join("target/out"), "built")?;
+        std::os::unix::fs::symlink(w.join("target"), w.join("redirect"))?;
+        assert!(record(&w, &["redirect".into()]).is_err());
+        assert!(!w.join("target").join(FILE).exists());
+        std::fs::remove_dir_all(w)?;
+        Ok(())
     }
 
     #[test]

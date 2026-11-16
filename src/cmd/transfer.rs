@@ -9,7 +9,6 @@ use crate::ids;
 use crate::privs::as_caller_fs;
 use crate::repo::skip_path;
 use crate::revs;
-use crate::storage as btrfs;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -37,10 +36,10 @@ fn put_entry(ctx: &Ctx, src_root: &Path, rel: &str, dst_root: &Path) -> Result<(
     if m.is_dir() {
         return as_caller_fs(ctx, || fsutil::make_parents(dst_root, &format!("{rel}/x"), None));
     }
-    let mut s = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&src)?;
+    let s = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&src)?;
     use std::os::unix::fs::MetadataExt;
     let mode = m.mode() & 0o777;
-    let mut d = as_caller_fs(ctx, || {
+    let d = as_caller_fs(ctx, || {
         fsutil::make_parents(dst_root, rel, None)?;
         let d = fsutil::safe_join(dst_root, rel)?;
         if d.symlink_metadata().is_ok() {
@@ -48,9 +47,7 @@ fn put_entry(ctx: &Ctx, src_root: &Path, rel: &str, dst_root: &Path) -> Result<(
         }
         Ok(OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&d)?)
     })?;
-    if btrfs::clone_file(&s, &d).is_err() {
-        std::io::copy(&mut s, &mut d)?;
-    }
+    layr_fs_unix::copy_contents(&s, &d)?;
     d.set_permissions(std::fs::Permissions::from_mode(mode))?;
     fsutil::set_mtime(&d, m.mtime(), m.mtime_nsec())?;
     Ok(())
@@ -103,13 +100,13 @@ fn sync_folder(
         Some(f) => {
             let mut paths: BTreeSet<String> = stale.iter().cloned().collect();
             for c in changes::file_changes(f, to)? {
-                if skip_path(&c.path) {
+                if skip_path(c.path()) {
                     continue;
                 }
-                if let Some(o) = &c.old_path {
+                if let Some(o) = c.old_path() {
                     paths.insert(o.clone());
                 }
-                paths.insert(c.path.clone());
+                paths.insert(c.path().clone());
             }
             for p in paths {
                 if bad.contains(&p) {
@@ -145,13 +142,13 @@ fn sync_folder(
 /// The state to copy: a revision, or the working content saved as an automatic state.
 fn source_state(ctx: &Ctx, h: &super::Here, rev: Option<&str>) -> Result<String> {
     match rev {
-        Some(r) => revs::resolve(&h.repo, h.line.as_ref(), r),
+        Some(r) => revs::resolve_state(&h.repo, h.line.as_ref(), r),
         None => {
             let l = h.line()?;
             h.repo.authorize_line(ctx, l, crate::repo::LineOp::Save)?;
-            let _lock = h.repo.p.lock()?;
+            let _lock = h.repo.p.lock_maintenance()?;
             let l = h.repo.line(&l.id)?;
-            let s = h.repo.save(ctx, &l, "copy out", false, false)?;
+            let s = h.repo.save(&_lock, ctx, &l, "copy out", false, false)?;
             Ok(match s {
                 Some(s) => s.id,
                 None => h.repo.last_auto(&l)?.map(|s| s.id).unwrap_or(l.head.clone()),

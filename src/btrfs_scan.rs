@@ -8,7 +8,7 @@
 use crate::fsutil::{ExtentKey, Held};
 use crate::sys::{self, SearchKey, TreeSearch};
 use layr_hashers::{FastCryptographic, PurposeHasher};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, ErrorKind};
 use std::os::fd::AsFd;
@@ -104,7 +104,9 @@ struct SearchHeader {
 #[repr(C)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 struct InodeItem {
-    before_mode: [u8; 52],
+    generation: le::U64,
+    transid: le::U64,
+    before_mode: [u8; 36],
     mode: le::U32,
 }
 #[repr(C)]
@@ -614,4 +616,40 @@ mod tests {
         file_parts(40, &nested, &refs, &mut HashMap::new(), &mut out);
         assert_eq!(out, [1]);
     }
+}
+
+/// Optional per-inode evidence. TREE_SEARCH requires privileges on some kernels;
+/// callers then retain ordinary stat/lease validation without this acceleration.
+pub(crate) fn status_identities(root: &Path, inodes: Option<&BTreeSet<u64>>) -> io::Result<BTreeMap<u64, [u64; 2]>> {
+    let file = File::open(root)?;
+    let mut scanner = TreeSearch::new(SEARCH_BUFFER);
+    let mut out = BTreeMap::new();
+    let mut read = |key| {
+        search(&file, &mut scanner, key, |key, bytes| {
+            if key.kind == INODE_ITEM {
+                let inode: &InodeItem = parse(bytes)?;
+                out.insert(key.ino, [inode.generation.get(), inode.transid.get()]);
+            }
+            Ok(())
+        })
+    };
+    match inodes {
+        Some(inodes) => {
+            for &ino in inodes {
+                let mut key = query(0);
+                key.min_objectid = ino;
+                key.max_objectid = ino;
+                key.min_type = INODE_ITEM;
+                key.max_type = INODE_ITEM;
+                read(key)?;
+            }
+        }
+        None => {
+            let mut key = query(0);
+            key.min_type = INODE_ITEM;
+            key.max_type = INODE_ITEM;
+            read(key)?;
+        }
+    }
+    Ok(out)
 }

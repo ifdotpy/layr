@@ -48,7 +48,7 @@ pub(crate) fn records(
         let plain = String::from_utf8(keys::decrypt(identity, bytes)?)?;
         let mut expected = first;
         for line in plain.lines() {
-            let raw = record::parse_line(line, None)?;
+            let raw = record::parse_line(line)?;
             let rec: Record = serde_json::from_str(raw.get())?;
             ensure!(rec.machine == machine && rec.seq == expected && expected <= last, "invalid segment sequence");
             ensure!(rec.project == project, "record belongs to another project");
@@ -65,16 +65,16 @@ pub(crate) fn records(
     let mut public_keys = BTreeMap::new();
     for (machine, by_seq) in machines {
         let first = by_seq.get(&1).context("missing machine announcement")?;
-        let raw = record::parse_line(first, None)?;
+        let raw = record::parse_line(first)?;
         let rec: Record = serde_json::from_str(raw.get())?;
         ensure!(rec.op == "machine", "first record is not a machine announcement");
-        let key = record::machine_key(raw)?;
+        let key = record::machine_key(raw.raw())?;
         if let Some(trusted) = trusted {
             ensure!(trusted.get(&machine) == Some(&key), "overlay machine is not trusted");
         }
         for (index, (seq, line)) in by_seq.into_iter().enumerate() {
             ensure!(seq == index as u64 + 1, "record history has a gap");
-            record::parse_line(&line, Some(&key))?;
+            let _verified = record::verify_line(&line.as_bytes(), &key)?;
             verified.push(line);
         }
         public_keys.insert(machine, key);

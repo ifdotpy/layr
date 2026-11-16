@@ -7,22 +7,33 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 ignore = [
-    # age's `ssh` feature pulls in RSA decryption with a Marvin timing side channel.
-    # No fixed release exists; revisit when rsa 0.10 / age update ships.
-    { id = "RUSTSEC-2023-0071", reason = "RSA is required by age/ssh; no patched release is available" },
-    # age's i18n build-time translation configuration uses basic-toml via i18n-config.
-    { id = "RUSTSEC-2026-0374", reason = "Transitive through age -> i18n-embed-fl/i18n-embed-impl -> i18n-config; no replacement release" },
-    # age's i18n-embed-fl procedural macro depends on proc-macro-error2 at build time.
-    { id = "RUSTSEC-2026-0173", reason = "Transitive through age -> i18n-embed-fl; await upstream migration" },
-    # serde_yaml uses unsafe-libyaml at runtime; replacing the YAML parser is separate work.
-    { id = "RUSTSEC-2024-0449", reason = "Transitive through direct dependency serde_yaml; no maintained patch release" },
+  # age's `ssh` feature pulls in RSA decryption with a Marvin timing side channel.
+  # No fixed release exists; revisit when rsa 0.10 / age update ships.
+  { id = "RUSTSEC-2023-0071", reason = "RSA is required by age/ssh; no patched release is available" },
+  # age's i18n build-time translation configuration uses basic-toml via i18n-config.
+  { id = "RUSTSEC-2026-0374", reason = "Transitive through age -> i18n-embed-fl/i18n-embed-impl -> i18n-config; no replacement release" },
+  # age's i18n-embed-fl procedural macro depends on proc-macro-error2 at build time.
+  { id = "RUSTSEC-2026-0173", reason = "Transitive through age -> i18n-embed-fl; await upstream migration" },
+  # serde_yaml uses unsafe-libyaml at runtime; replacing the YAML parser is separate work.
+  { id = "RUSTSEC-2024-0449", reason = "Transitive through direct dependency serde_yaml; no maintained patch release" },
 ]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "CDLA-Permissive-2.0"]
+# octets uses BSD-2-Clause, a permissive license compatible with Layr's MIT license.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 # Unpublished workspace crates use local paths without registry versions.
 allow-wildcard-paths = true
@@ -30,10 +41,34 @@ allow-wildcard-paths = true
 deny = [{ name = "nix" }]
 # These old versions are required by upstream dependencies; keep new duplicates visible.
 skip = [
-    { name = "bech32", version = "=0.9.1" }, # age 0.11; layr-store uses 0.11.
-    { name = "rustc-hash", version = "=1.1.0" }, # fluent-bundle; layr-hashers uses 2.
-    { name = "toml", version = "=0.5.11" }, # find-crate (age i18n); Layr uses 0.8.
-    { name = "windows-sys", version = "=0.52.0" }, # ring; rustix/tokio use 0.61.
+  # Existing transitive duplicates; newly introduced versions remain denied.
+  { name = "base64", version = "=0.21.7" },
+  { name = "base64", version = "=0.22.1" },
+  { name = "block-buffer", version = "=0.10.4" },
+  { name = "chacha20", version = "=0.9.1" },
+  { name = "const-oid", version = "=0.9.6" },
+  { name = "cpufeatures", version = "=0.2.17" },
+  { name = "crypto-common", version = "=0.1.7" },
+  { name = "digest", version = "=0.10.7" },
+  { name = "getrandom", version = "=0.2.17" },
+  { name = "getrandom", version = "=0.3.4" },
+  { name = "miniz_oxide", version = "=0.8.9" },
+  { name = "r-efi", version = "=5.3.0" },
+  { name = "rand", version = "=0.8.8" },
+  { name = "rand", version = "=0.9.5" },
+  { name = "rand_chacha", version = "=0.3.1" },
+  { name = "rand_core", version = "=0.6.4" },
+  { name = "rand_core", version = "=0.9.5" },
+  { name = "sha2", version = "=0.10.9" },
+  { name = "syn", version = "=2.0.119" },
+  { name = "synstructure", version = "=0.13.2" },
+  { name = "thiserror", version = "=1.0.69" },
+  { name = "thiserror-impl", version = "=1.0.69" },
+  { name = "webpki-roots", version = "=0.26.11" },
+  { name = "bech32", version = "=0.9.1" },          # age 0.11; layr-store uses 0.11.
+  { name = "rustc-hash", version = "=1.1.0" },      # fluent-bundle; layr-hashers uses 2.
+  { name = "toml", version = "=0.5.11" },           # find-crate (age i18n); Layr uses 0.8.
+  { name = "windows-sys", version = "=0.52.0" },    # ring; rustix/tokio use 0.61.
 ]
 
 [sources]

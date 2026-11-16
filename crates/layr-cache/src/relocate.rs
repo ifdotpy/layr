@@ -9,6 +9,7 @@
 //! new place has with the same bytes is moved instead: its dep-info names the new place, and it stays fresh.
 
 use anyhow::{Context, Result};
+use crate::cargo::layout::Layout;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -19,22 +20,34 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
     for profile in profiles(target)? {
         let rel = profile.strip_prefix(target).context("a profile out of the target folder")?;
         let at_profile = at.join(rel);
-        let deps = profile.join("deps");
-        for entry in fs::read_dir(&deps).with_context(|| format!("read {}", deps.display()))? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".d")) else { continue };
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            // A dep-info file that cannot be read names nothing that cargo uses either.
-            let Ok(bytes) = fs::read(entry.path()) else { continue };
-            let text = String::from_utf8_lossy(&bytes);
-            let encoded: Vec<Vec<u8>> = unit_dep_files(&profile, stem)?.iter().filter_map(|f| fs::read(f).ok()).collect();
-            match place(&text, &encoded, stem, rel, &at_profile) {
-                Place::Here => {}
-                Place::Stale => stale += remove_fingerprint(&profile, stem)?,
-                Place::Moved { old, new } => move_unit(&profile, stem, &entry.path(), &text, &old, &new)?,
+        let units = Layout::units(&profile);
+        let mut dirs = std::collections::BTreeMap::new();
+        let mut fingerprints: std::collections::BTreeMap<&str, Vec<PathBuf>> = std::collections::BTreeMap::new();
+        for unit in &units {
+            fingerprints.entry(&unit.hash).or_default().push(unit.fingerprint.clone());
+            // Legacy outputs share one directory; new-layout output names can be unhashed.
+            dirs.entry(unit.outputs.clone()).or_insert_with(|| match unit.layout {
+                Layout::Legacy => None,
+                Layout::UnitDirectories => Some(unit.hash.clone()),
+            });
+        }
+        for (dir, owner) in dirs {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".d")) else { continue };
+                if !entry.file_type()?.is_file() { continue }
+                let hash = owner.as_deref().or_else(|| stem.rsplit_once('-').map(|(_, hash)| hash));
+                let Some(paths) = hash.and_then(|hash| fingerprints.get(hash)) else { continue };
+                let Ok(bytes) = fs::read(entry.path()) else { continue };
+                let text = String::from_utf8_lossy(&bytes);
+                let encoded: Vec<Vec<u8>> = unit_dep_files(paths)?.iter().filter_map(|f| fs::read(f).ok()).collect();
+                let artifact = entry.path();
+                let artifact = artifact.strip_prefix(&profile)?;
+                match place(&text, &encoded, artifact, rel, &at_profile) {
+                    Place::Here => {}
+                    Place::Stale => stale += remove_fingerprints(paths)?,
+                    Place::Moved { old, new } => move_unit(paths, &entry.path(), &text, &old, &new)?,
+                }
             }
         }
     }
@@ -47,7 +60,7 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
 pub fn foreign_registry(target: &Path) -> Option<PathBuf> {
     const MARK: &str = "/registry/src/";
     for profile in profiles(target).ok()? {
-        for entry in fs::read_dir(profile.join("deps")).ok()?.flatten() {
+        for entry in Layout::output_dirs(&profile).into_iter().flat_map(|dir| fs::read_dir(dir).into_iter().flatten().flatten()) {
             if !entry.file_name().to_str().is_some_and(|n| n.ends_with(".d")) {
                 continue;
             }
@@ -66,7 +79,7 @@ pub fn foreign_registry(target: &Path) -> Option<PathBuf> {
 /// The profile folders of `target`: the folders with a `deps` and a `.fingerprint` folder (`debug`, `release`, a
 /// custom profile), also below a target triple.
 fn profiles(target: &Path) -> Result<Vec<PathBuf>> {
-    let is_profile = |p: &Path| p.join("deps").is_dir() && p.join(".fingerprint").is_dir();
+    let is_profile = |p: &Path| Layout::has_units(p);
     let mut out = Vec::new();
     for entry in fs::read_dir(target).with_context(|| format!("read {}", target.display()))? {
         let entry = entry?;
@@ -104,10 +117,13 @@ enum Place {
 /// the one cargo checks. A compiled-in path (`env!`) of the old place makes the
 /// unit stale. A source of the old place out of the target folder moves with the unit when the new place has a file
 /// with the same bytes at the same path below its root: cargo then checks the new file, as for a relative source.
-fn place(text: &str, encoded: &[Vec<u8>], stem: &str, rel: &Path, at_profile: &Path) -> Place {
+fn place(text: &str, encoded: &[Vec<u8>], artifact: &Path, rel: &Path, at_profile: &Path) -> Place {
     // The first rule names the dep-info file itself, at the place of the build: `<profile>/deps/<stem>.d: ...`.
     let first = text.lines().next().unwrap_or("");
-    let Some(built) = first.find(&format!("/deps/{stem}.d:")).map(|i| Path::new(&first[..i])) else { return Place::Here };
+    let Some((rule, _)) = first.split_once(": ") else { return Place::Here };
+    let path = Path::new(rule);
+    if !path.ends_with(artifact) { return Place::Here }
+    let Some(built) = path.ancestors().nth(artifact.components().count()) else { return Place::Here };
     if built == at_profile {
         return Place::Here;
     }
@@ -154,14 +170,14 @@ fn place(text: &str, encoded: &[Vec<u8>], stem: &str, rel: &Path, at_profile: &P
     }
 }
 
-/// Moves the unit `stem` from the line root `old` to `new`: its text dep-info (`deps/<stem>.d`, at `d`) and the binary
-/// dep-info files of its fingerprint (`.fingerprint/<package>-<hash>/dep-*`) name the new root. Their times stay, so
+/// Moves the unit from the line root `old` to `new`: its text dep-info at `d` and the binary dep-info files
+/// in its fingerprints name the new root. Their times stay, so
 /// cargo's compare of the source times with them gives what it gave before.
-fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: &Path) -> Result<()> {
+fn move_unit(fingerprints: &[PathBuf], d: &Path, text: &str, old: &Path, new: &Path) -> Result<()> {
     let escape = |p: &Path| format!("{}/", p.display()).replace(' ', "\\ ");
     rewrite(d, text.replace(&escape(old), &escape(new)).into_bytes())?;
     let (old, new) = (old.as_os_str().as_encoded_bytes(), new.as_os_str().as_encoded_bytes());
-    for file in unit_dep_files(profile, stem)? {
+    for file in unit_dep_files(fingerprints)? {
         let bytes = fs::read(&file)?;
         let moved = rewrite_encoded(&bytes, old, new);
         if moved != bytes {
@@ -201,9 +217,9 @@ fn sources_below(target: &Path, root: &Path) -> Vec<(String, String)> {
     let root_bytes = root.as_os_str().as_encoded_bytes();
     let mut out: Vec<(String, String)> = Vec::new();
     for profile in profiles(target).unwrap_or_default() {
-        for unit in fs::read_dir(profile.join(".fingerprint")).into_iter().flatten().flatten() {
-            let Some(name) = unit.file_name().to_str().map(String::from) else { continue };
-            for file in fs::read_dir(unit.path()).into_iter().flatten().flatten() {
+        for unit in Layout::units(&profile) {
+            let name = format!("{}-{}", unit.name, unit.hash);
+            for file in fs::read_dir(unit.fingerprint).into_iter().flatten().flatten() {
                 if !file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
                     continue;
                 }
@@ -242,17 +258,18 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// The binary dep-info files of the unit `stem` (`<name>-<hash>`): `.fingerprint/<package>-<hash>/dep-*`.
-fn unit_dep_files(profile: &Path, stem: &str) -> Result<Vec<PathBuf>> {
-    let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(Vec::new()) };
-    let suffix = format!("-{hash}");
+/// The binary dep-info files in the unit's fingerprints.
+fn unit_dep_files(fingerprints: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    for unit in fs::read_dir(profile.join(".fingerprint"))?.flatten() {
-        if !unit.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)) || !unit.file_type()?.is_dir() {
-            continue;
-        }
-        for file in fs::read_dir(unit.path())?.flatten() {
-            if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
+    for fingerprint in fingerprints {
+        let files = match fs::read_dir(fingerprint) {
+            Ok(files) => files,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for file in files {
+            let file = file?;
+            if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) && file.file_type()?.is_file() {
                 out.push(file.path());
             }
         }
@@ -342,17 +359,13 @@ fn paths(list: &str) -> impl Iterator<Item = String> + '_ {
     out.into_iter()
 }
 
-/// Removes the fingerprint folder of the unit `stem` (`<name>-<hash>`): `.fingerprint/<package>-<hash>`. Returns 1
-/// when it removed one.
-fn remove_fingerprint(profile: &Path, stem: &str) -> Result<usize> {
-    let Some((_, hash)) = stem.rsplit_once('-') else { return Ok(0) };
-    let suffix = format!("-{hash}");
+/// Removes the unit's fingerprint folders and returns the number removed.
+fn remove_fingerprints(fingerprints: &[PathBuf]) -> Result<usize> {
     let mut removed = 0;
-    for entry in fs::read_dir(profile.join(".fingerprint"))? {
-        let entry = entry?;
-        if entry.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)) && entry.file_type()?.is_dir() {
-            fs::remove_dir_all(entry.path()).with_context(|| format!("remove {}", entry.path().display()))?;
-            removed = 1;
+    for fingerprint in fingerprints {
+        if fingerprint.is_dir() {
+            fs::remove_dir_all(fingerprint).with_context(|| format!("remove {}", fingerprint.display()))?;
+            removed += 1;
         }
     }
     Ok(removed)
@@ -390,6 +403,75 @@ mod tests {
 
     fn fresh(target: &Path, package: &str, hash: &str) -> bool {
         target.join("debug/.fingerprint").join(format!("{package}-{hash}")).is_dir()
+    }
+
+    #[test]
+    fn new_layout_stales_a_unit_with_an_old_compiled_path() {
+        let root = scratch("new-layout");
+        let target = root.join("new/target");
+        let unit = target.join("debug/build/foo/0123456789abcdef");
+        fs::create_dir_all(unit.join("out")).unwrap();
+        fs::create_dir_all(unit.join("fingerprint")).unwrap();
+        fs::write(unit.join("fingerprint/dep-lib-foo"), b"dep").unwrap();
+        fs::write(unit.join("out/foo-0123456789abcdef.d"),
+            "/old/target/debug/build/foo/0123456789abcdef/out/foo-0123456789abcdef.d: src/lib.rs\n# env-dep:CARGO_MANIFEST_DIR=/old\n").unwrap();
+        assert_eq!(relocate(&target, &target).unwrap(), 1);
+        assert!(!unit.join("fingerprint").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_and_package_names_can_match_layout_components() {
+        let root = scratch("profile-components");
+        let target = root.join("new/target");
+        for (profile, package, hash) in [("debug", "debug", "0123456789abcdef"), ("out", "foo", "fedcba9876543210"), ("build", "foo", "1111111111111111")] {
+            let unit = target.join(profile).join("build").join(package).join(hash);
+            fs::create_dir_all(unit.join("out")).unwrap();
+            fs::create_dir_all(unit.join("fingerprint")).unwrap();
+            fs::write(unit.join("fingerprint/dep-bin"), b"dep").unwrap();
+            fs::write(unit.join("out/foo.d"), format!("/old/target/{profile}/build/{package}/{hash}/out/foo.d: src/main.rs\n# env-dep:CARGO_MANIFEST_DIR=/old\n")).unwrap();
+        }
+        assert_eq!(relocate(&target, &target).unwrap(), 3);
+        for (profile, package, hash) in [("debug", "debug", "0123456789abcdef"), ("out", "foo", "fedcba9876543210"), ("build", "foo", "1111111111111111")] {
+            assert!(!target.join(profile).join("build").join(package).join(hash).join("fingerprint").exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unhashed_binary_and_build_script_are_made_stale() {
+        let root = scratch("unhashed");
+        let target = root.join("new/target");
+        for (stem, hash) in [("foo", "0123456789abcdef"), ("build_script_build", "fedcba9876543210")] {
+            let unit = target.join("debug/build/foo").join(hash);
+            fs::create_dir_all(unit.join("out")).unwrap();
+            fs::create_dir_all(unit.join("fingerprint")).unwrap();
+            fs::write(unit.join("fingerprint/dep-bin"), b"dep").unwrap();
+            fs::write(unit.join("out").join(format!("{stem}.d")), format!("/old/target/debug/build/foo/{hash}/out/{stem}.d: src/main.rs\n# env-dep:CARGO_MANIFEST_DIR=/old\n")).unwrap();
+        }
+        assert_eq!(relocate(&target, &target).unwrap(), 2);
+        for hash in ["0123456789abcdef", "fedcba9876543210"] {
+            assert!(!target.join("debug/build/foo").join(hash).join("fingerprint").exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn symlinked_package_cannot_relocate_external_units() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("external-symlink");
+        let target = root.join("target");
+        let external = root.join("external");
+        let unit = external.join("0123456789abcdef");
+        fs::create_dir_all(unit.join("out")).unwrap();
+        fs::create_dir_all(unit.join("fingerprint")).unwrap();
+        fs::write(unit.join("fingerprint/dep-bin"), b"dep").unwrap();
+        fs::write(unit.join("out/foo.d"), "/old/target/debug/build/foo/0123456789abcdef/out/foo.d: src/main.rs\n# env-dep:CARGO_MANIFEST_DIR=/old\n").unwrap();
+        fs::create_dir_all(target.join("debug/build")).unwrap();
+        symlink(&external, target.join("debug/build/foo")).unwrap();
+        assert_eq!(relocate(&target, &target).unwrap(), 0);
+        assert!(unit.join("fingerprint/dep-bin").is_file());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "layr-hashers"
 version = "0.1.0"
@@ -6,15 +9,23 @@ rust-version.workspace = true
 license = "MIT"
 publish = false
 
+[features]
+default = ["git", "sha256", "fast-crypto", "maps-rapid", "maps-fx"]
+git = ["dep:sha1", "sha256"]
+sha256 = ["dep:sha2"]
+fast-crypto = ["dep:blake3"]
+maps-rapid = ["dep:rapidhash"]
+maps-fx = ["dep:rustc-hash"]
+
 [dependencies]
-sha1 = "0.10"
-sha2 = "0.10"
-blake3 = "1"
-rapidhash = "4.5"
-rustc-hash = "2"
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+blake3 = { version = "1", optional = true }
+rapidhash = { version = "4.5", optional = true }
+rustc-hash = { version = "2", optional = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-sha2 = { version = "0.10", features = ["asm"] }
+sha2 = { version = "0.10", features = ["asm"], optional = true }
 
 [dev-dependencies]
 foldhash = "0.1"
@@ -23,7 +34,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [[bench]]
 name = "throughput"
 harness = false
+required-features = ["git", "fast-crypto", "maps-rapid"]
 
 [[bench]]
 name = "maps"
 harness = false
+required-features = ["maps-fx", "maps-rapid"]

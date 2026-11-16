@@ -2,70 +2,11 @@
 use crate::{times, tree, Id, Store};
 use anyhow::{bail, ensure, Context, Result};
 
-const VERSION: u8 = 1;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Entry {
-    ns: i64,
-    /// Number of descendants, or None for a file or symbolic link.
-    below: Option<usize>,
-}
-
-fn zigzag(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
-}
-fn unzigzag(v: u64) -> i64 {
-    ((v >> 1) as i64) ^ -((v & 1) as i64)
-}
-fn encode(entries: &[Entry]) -> Vec<u8> {
-    let mut out = vec![VERSION];
-    tree::varint_into(&mut out, entries.len() as u64);
-    let mut previous = 0i64;
-    for entry in entries {
-        tree::varint_into(&mut out, zigzag(entry.ns.wrapping_sub(previous)));
-        tree::varint_into(&mut out, entry.below.map_or(0, |n| n as u64 + 1));
-        previous = entry.ns;
-    }
-    out
-}
-fn decode(bytes: &[u8]) -> Result<Vec<Entry>> {
-    let mut reader = tree::Reader::new(bytes);
-    ensure!(reader.byte()? == VERSION, "unknown Cloud times format");
-    let count = usize::try_from(reader.varint()?)?;
-    ensure!(count > 0 && count <= bytes.len(), "invalid Cloud times count");
-    let mut entries = Vec::with_capacity(count);
-    let mut previous = 0i64;
-    let mut open: Vec<usize> = Vec::new();
-    for i in 0..count {
-        while open.last() == Some(&i) {
-            open.pop();
-        }
-        previous = previous.wrapping_add(unzigzag(reader.varint()?));
-        let span = usize::try_from(reader.varint()?)?;
-        let below = span.checked_sub(1);
-        if i == 0 {
-            ensure!(below == Some(count - 1), "invalid Cloud times root");
-        } else {
-            ensure!(!open.is_empty(), "Cloud time is outside the root");
-        }
-        if let Some(n) = below {
-            let end = i
-                .checked_add(1)
-                .and_then(|v| v.checked_add(n))
-                .filter(|end| *end <= count)
-                .context("Cloud times span is out of bounds")?;
-            ensure!(open.last().is_none_or(|parent| end <= *parent), "Cloud times span leaves its parent");
-            open.push(end);
-        }
-        entries.push(Entry { ns: previous, below });
-    }
-    ensure!(reader.done() && encode(&entries) == bytes, "noncanonical Cloud times");
-    Ok(entries)
-}
+use layr_object_format::cloud_times::{decode, encode, Entry};
 
 /// Check a flat Cloud V1 times table before it enters the local store.
 pub fn validate(bytes: &[u8]) -> Result<()> {
-    decode(bytes).map(|_| ())
+    Ok(layr_object_format::cloud_times::validate(bytes)?)
 }
 
 /// Encode a local tree and its per-folder times as one Cloud V1 times table.

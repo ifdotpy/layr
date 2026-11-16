@@ -18,7 +18,7 @@ dashed() {
     u="${d:20:12}${d:12:8}${d:0:12}"
     printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
 }
-on_disk() { [ -e "$P/states/$(dashed "$1")" ] || [ -e "$P/deltas/$(dashed "$1")" ]; }
+on_disk() { state_available "$P" "$(dashed "$1")"; }
 
 cd $M/main || exit 1
 l config undo.ops 0 >/dev/null
@@ -42,7 +42,7 @@ l ref set pins/s "$S" >/dev/null
 wait
 eq "the ref delete finishes" 0 "$(cat "$T/del.rc")"
 ok "a re-owned state keeps its storage after the free step" on_disk "$S"
-eq "the re-owned state is present again" 1 "$(q "select present from states where display='$S'")"
+eq "the re-owned state is present again" 1 "$(q "select deleted=0 and (present=1 or json_extract(rec,'$.tree') is not null) from states where display='$S'")"
 has "the re-owned state reads its content" "q" "$(l show "$S:notes.txt" | tail -1)"
 eq "the free queue is empty" 0 "$(q "select count(*) from free_queue")"
 finish

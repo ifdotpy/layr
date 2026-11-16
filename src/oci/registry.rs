@@ -54,6 +54,7 @@ pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener, Identity)>> {
     for (name, user) in names {
         match crate::sys::fork()? {
             crate::sys::Fork::Child => {
+                crate::pools::mark_worker();
                 std::process::exit(if crate::sys::drop_to_user(user.uid, user.gid).is_ok() { 0 } else { 1 })
             }
             crate::sys::Fork::Parent(pid) => {
@@ -74,7 +75,7 @@ pub fn listeners(root: &Path) -> Result<Vec<(String, TcpListener, Identity)>> {
 }
 
 /// Exec clears the daemon's memory and closes its descriptors before HTTP parsing starts.
-pub fn exec_http(stream: TcpStream, socket: &Path, listen: &str, user: Identity) -> Result<()> {
+pub fn exec_http(stream: TcpStream, socket: &Path, listen: &str, user: Identity) -> Result<!> {
     use std::os::unix::process::CommandExt;
     crate::sys::drop_to_user(user.uid, user.gid)?;
     let fd: std::os::fd::OwnedFd = stream.into();
@@ -176,6 +177,7 @@ fn context(root: &Path, uid: u32) -> Result<Ctx> {
         cwd: "/".into(),
         env: HashMap::new(),
         author: Default::default(),
+        captures: Default::default(),
         out: std::cell::RefCell::new(Box::new(std::io::sink())),
     })
 }
@@ -446,8 +448,8 @@ fn backend(root: &Path, peer: u32, query: Query) -> Result<Reply> {
                     Err(_) => return Ok(failure(404, "MANIFEST_UNKNOWN")),
                 };
                 let source_line = repo.p.db.line_by_name(&revision)?;
-                let _lock = repo.p.lock()?;
-                let e = match super::export(&ctx, &repo, &state, source_line.as_ref(), Some(&runnable)) {
+                let _lock = repo.p.lock_maintenance()?;
+                let e = match super::export(&_lock, &ctx, &repo, &state, source_line.as_ref(), Some(&runnable)) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("layr registry: export failed: {e:#}");

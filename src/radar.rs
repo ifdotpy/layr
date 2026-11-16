@@ -32,7 +32,7 @@ const COMPARE_DIR: &str = "overlap-compares";
 /// The folder under `meta/` that holds the saved compares of a line's head with its live folder.
 const LIVE_DIR: &str = "overlap-live";
 /// Format of the saved live compares. Bump it when `compare` changes its results.
-const LIVE_FORMAT: u32 = 1;
+const LIVE_FORMAT: u32 = 2;
 /// Threads that compare saved states at once.
 
 #[derive(Debug, Serialize)]
@@ -80,16 +80,17 @@ fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
     crate::fsutil::cache_write(file, &serde_json::to_vec(saved)?, 0o600)
 }
 
-/// A digest of every entry of a scan: the path, the metadata, the data identity and the birth.
-#[cfg(target_os = "macos")]
-fn scan_digest(live: &Path) -> Result<String> {
+/// Equality of verifiable observation evidence can reuse a previous comparison. Missing
+/// evidence, including mapped files, always requires another content read.
+fn scan_digest(live: &Path) -> Result<Option<String>> {
     use layr_hashers::{Digest, GitCompatible};
-    let scan = crate::storage::scan_shared(live, true)?;
-    let mut h = GitCompatible::new();
-    for (path, e) in scan.iter() {
-        h.update(format!("{path}|{:?}|{:?}|{:?}|{:?}\n", e.fingerprint, e.meta, e.data, e.birth).as_bytes());
+    let scan = crate::fs::observe_tree(live)?;
+    if scan.values().any(|entry| !entry.verifiable()) {
+        return Ok(None);
     }
-    Ok(hex::encode(h.finalize()))
+    let mut hash = GitCompatible::new();
+    hash.update(&serde_json::to_vec(&scan)?);
+    Ok(Some(hex::encode(hash.finalize())))
 }
 
 /// The real changes between two trees. Paths that `skip_path` or `rules` ignore are left out
@@ -101,16 +102,16 @@ pub(crate) fn compare(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized), r
     #[cfg(test)]
     let candidates = test_probe::candidates(base, child)?;
     for change in candidates {
-        let is_dir = change.new.as_ref().or(change.old.as_ref()).is_some_and(|m| m.is_dir());
-        if skip_path(&change.path) || rules.ignored(&change.path, is_dir) {
+        let is_dir = change.new().or(change.old()).is_some_and(|m| m.is_dir());
+        if skip_path(change.path()) || rules.ignored(change.path(), is_dir) {
             continue;
         }
         if !changes::really_changed(base, child, &change)? {
             continue;
         }
-        let time = change.new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
-        let (added, removed) = (change.old.is_none(), change.new.is_none());
-        out.push(Found { path: change.path, old_path: change.old_path, is_dir, time, added, removed });
+        let time = change.new().map(|m| m.mtime * 1000).unwrap_or(0);
+        let (added, removed) = (change.old().is_none(), change.new().is_none());
+        out.push(Found { path: change.path().clone(), old_path: change.old_path().cloned(), is_dir, time, added, removed });
     }
     Ok(out)
 }
@@ -133,7 +134,9 @@ pub(crate) fn recheck(
     }
     let time = new.as_ref().map(|m| m.mtime * 1000).unwrap_or(0);
     let (added, removed) = (old.is_none(), new.is_none());
-    let change = changes::Change { path: path.to_string(), old_path: None, old, new, ranges: None };
+    let Some(change) = changes::EntryChange::observed(path.to_string(), old, new, crate::compare::DataEvidence::Unknown) else {
+        return Ok(None);
+    };
     if !changes::really_changed(base, live, &change)? {
         return Ok(None);
     }
@@ -178,18 +181,19 @@ fn combine(
     let Some(merged) = merge_changes(saved, head_live, |path| recheck(base, live, rules, path))? else {
         return Ok(None);
     };
-    let lone: Vec<changes::Change> = merged
+    let lone: Vec<changes::EntryChange> = merged
         .iter()
         .filter(|f| !f.is_dir && (f.added || f.removed))
-        .map(|f| changes::Change {
-            path: f.path.clone(),
-            old_path: None,
-            old: if f.removed { fsutil::lmeta(base, &f.path) } else { None },
-            new: if f.added { fsutil::lmeta(live, &f.path) } else { None },
-            ranges: None,
+        .filter_map(|f| {
+            changes::EntryChange::observed(
+                f.path.clone(),
+                if f.removed { fsutil::lmeta(base, &f.path) } else { None },
+                if f.added { fsutil::lmeta(live, &f.path) } else { None },
+                crate::compare::DataEvidence::Unknown,
+            )
         })
         .collect();
-    if changes::with_renames(base, live, lone).iter().any(|c| c.old_path.is_some()) {
+    if changes::with_renames(base, live, lone).iter().any(|c| c.old_path().is_some()) {
         let _t = crate::trace::span("overlap combine paired rename fallback");
         return Ok(None);
     }
@@ -437,14 +441,13 @@ impl Repo<'_> {
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
     /// a copy would clone every file, cache folders included.
     fn radar_tree(&self, line: &Line) -> Result<(Option<crate::repo::Temp>, PathBuf)> {
-        #[cfg(target_os = "macos")]
-        return Ok((None, self.working(line)));
-        #[cfg(not(target_os = "macos"))]
-        {
-            let t = self.scan(line)?;
-            let path = t.path.clone();
-            Ok((Some(t), path))
+        let working = self.working(line);
+        if !crate::fs::prefers_captured_comparison(&working) {
+            return Ok((None, working));
         }
+        let captured = self.scan(line)?;
+        let path = captured.path.clone();
+        Ok((Some(captured), path))
     }
 
     /// Our head -> live folder compare: one per call, shared by all merge bases.
@@ -466,13 +469,7 @@ impl Repo<'_> {
     /// when the head and the scan of the folder (every path, its metadata and data identity) are
     /// the same. The compare reads only those, so the result is the same. Other platforms compare.
     fn live_compare(&self, line: &Line, head: &Snap, live: &Path, rules: &Rules) -> Result<Vec<Found>> {
-        #[cfg(target_os = "macos")]
-        let digest = {
-            let _t = crate::trace::span("overlap live digest");
-            Some(scan_digest(live)?)
-        };
-        #[cfg(not(target_os = "macos"))]
-        let digest: Option<String> = None;
+        let digest = scan_digest(live)?;
         let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
         if let Some(digest) = &digest {
             let saved = std::fs::read(&file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
@@ -485,7 +482,7 @@ impl Repo<'_> {
             let _t = crate::trace::span("overlap live compare");
             compare(head, live, rules)?
         };
-        if let Some(digest) = digest {
+        if let Some(digest) = digest.filter(|digest| scan_digest(live).ok().flatten().as_ref() == Some(digest)) {
             // A file that cannot be written only costs the next status a compare.
             let saved = SavedLive { format: LIVE_FORMAT, head: line.head.clone(), digest, found: found.clone() };
             let _ = write_live(&file, &saved);
@@ -536,10 +533,12 @@ impl Repo<'_> {
         let history = if lines.is_empty() { None } else { Some(self.history()?) };
         // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
         let step1 = crate::trace::span("overlap step 1");
+        let source = self.source_id(&line.head)?;
         for other in lines {
-            let found = match history.as_ref().and_then(|h| h.merge_base(&line.head, &other.head)) {
+            let other_source = self.source_id(&other.head)?;
+            let found = match history.as_ref().and_then(|h| h.merge_base(&source, &other_source)) {
                 Some(found) => found,
-                None => self.merge_base(&line.head, &other.head)?,
+                None => self.merge_base(&source, &other_source)?,
             };
             let Some(base) = found else { continue };
             let root = match self.state_src(&base) {
@@ -663,7 +662,7 @@ impl Repo<'_> {
             if repo.can_read(ctx).is_err() {
                 continue;
             }
-            let base = match repo.merge_base(&layer.state, &theirs.state)? {
+            let base = match repo.merge_base(&repo.source_id(&layer.state)?, &repo.source_id(&theirs.state)?)? {
                 Some(base) => base,
                 None => continue,
             };
@@ -729,7 +728,7 @@ mod test_probe {
         pub fallbacks: usize,
         pub cache_reads: usize,
         pub cache_writes: usize,
-        pub streams: VecDeque<Vec<changes::Change>>,
+        pub streams: VecDeque<Vec<changes::EntryChange>>,
     }
 
     thread_local! {
@@ -740,7 +739,7 @@ mod test_probe {
         PROBE.with(|p| f(&mut p.borrow_mut()));
     }
 
-    pub(super) fn candidates(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<changes::Change>> {
+    pub(super) fn candidates(base: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<changes::EntryChange>> {
         let mut stream = None;
         record(|p| {
             p.candidates += 1;
@@ -825,7 +824,7 @@ mod tests {
         }
     }
 
-    fn reset_probe(streams: Vec<Vec<changes::Change>>) {
+    fn reset_probe(streams: Vec<Vec<changes::EntryChange>>) {
         test_probe::record(|p| *p = test_probe::Probe { streams: streams.into(), ..Default::default() });
     }
 
@@ -841,20 +840,14 @@ mod tests {
         std::fs::write(live.join("new"), "rename content").unwrap();
         std::fs::write(live.join("private"), "hidden content").unwrap();
         let stream = vec![
-            changes::Change {
+            changes::EntryChange::Rename {
                 path: "new".into(),
-                old_path: Some("old".into()),
-                old: fsutil::lmeta(&head, "old"),
-                new: fsutil::lmeta(&live, "new"),
-                ranges: None,
+                old_path: "old".into(),
+                old: fsutil::lmeta(&head, "old").unwrap(),
+                new: fsutil::lmeta(&live, "new").unwrap(),
+                data: crate::compare::DataEvidence::Unknown,
             },
-            changes::Change {
-                path: "private".into(),
-                old_path: None,
-                old: None,
-                new: fsutil::lmeta(&live, "private"),
-                ranges: None,
-            },
+            changes::EntryChange::Add { path: "private".into(), new: fsutil::lmeta(&live, "private").unwrap() },
         ];
         let rules = Rules::new(&live);
         reset_probe(vec![stream.clone()]);

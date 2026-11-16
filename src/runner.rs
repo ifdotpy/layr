@@ -13,6 +13,7 @@
 //! resumes without losing work. The gateway gives one runner per project and platform a scan at a
 //! time, so two runners never run the same check at once.
 
+use crate::errors::{error, Kind as ErrorKind};
 use crate::ctx::Ctx;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -174,7 +175,7 @@ fn chosen_projects(value: Option<&str>) -> Result<Vec<String>> {
     projects.sort();
     projects.dedup();
     if projects.is_empty() {
-        return Err(crate::cmd::exit(128, JOIN_USAGE));
+        return Err(error(ErrorKind::Invalid, JOIN_USAGE));
     }
     for project in &projects {
         crate::store::check_name("project", project)?;
@@ -223,7 +224,7 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
         args,
     )?;
     let (Some(url), 1) = (a.pos.first(), a.pos.len()) else {
-        return Err(crate::cmd::exit(128, JOIN_USAGE));
+        return Err(error(ErrorKind::Invalid, JOIN_USAGE));
     };
     if ctx.caller.is_root() {
         bail!("join as the user who runs the checks, not as root");
@@ -231,13 +232,13 @@ pub fn join(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let code = match (a.get("--code"), a.get("--code-file")) {
         (Some(code), None) => code.to_string(),
         (None, Some(path)) => private_code_file(Path::new(path), ctx.caller.uid)?,
-        _ => return Err(crate::cmd::exit(128, JOIN_USAGE)),
+        _ => return Err(error(ErrorKind::Invalid, JOIN_USAGE)),
     };
     if code.is_empty() || code.len() > 256 {
         bail!("invalid join code");
     }
-    if crate::cmd::checks::platform() != PLATFORM {
-        bail!("a join code binds {PLATFORM}; this machine is {}", crate::cmd::checks::platform());
+    if crate::model::cache_platform() != PLATFORM {
+        bail!("a join code binds {PLATFORM}; this machine is {}", crate::model::cache_platform());
     }
     let url = gateway_url(url)?;
     let chosen = chosen_projects(a.get("--project"))?;
