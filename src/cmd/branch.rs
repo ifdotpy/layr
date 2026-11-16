@@ -5,8 +5,11 @@ use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
 use crate::model::{Line, LineChange, Record, StateKind};
+use crate::repo::Repo;
 use crate::revs;
-use anyhow::Result;
+use anyhow::{Context, Result};
+
+const DELETE_USAGE: &str = "usage: layr line delete <name>... [-D] [--discard | -f]\nChecks saves against the current line, or main when there is no current line.\nThe refusal names that destination; comparing a line with itself is refused.\n-D skips the merge check; --discard allows unsaved changes; -f does both.";
 
 fn owner_arg(ctx: &Ctx, v: Option<&str>) -> Result<u32> {
     match v {
@@ -195,6 +198,48 @@ pub(crate) fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<St
     Ok(out.into_iter().collect())
 }
 
+/// Read the destination again, including this machine's head, when checking a deletion.
+fn deletion_target(repo: &Repo, current: Option<&Line>) -> Result<Line> {
+    match current {
+        Some(line) => repo.line(&line.id),
+        None => repo
+            .line("main")
+            .context("cannot check mergedness without a current line: default deletion target 'main' is unavailable"),
+    }
+}
+
+fn check_deletion_merged(repo: &Repo, line: &Line, current: Option<&Line>) -> Result<()> {
+    // A line with no named saves has always been deletable without a destination.
+    if repo.p.db.line_states(&line.id, StateKind::Commit)?.is_empty() {
+        return Ok(());
+    }
+    let target = deletion_target(repo, current)?;
+    if target.id == line.id {
+        return Err(exit(
+            1,
+            format!("error: cannot delete line '{}': the deletion target '{}' is the same line", line.name, target.name),
+        ));
+    }
+    if !repo.is_ancestor(&line.head, &target.head)? {
+        return Err(exit(1, format!("error: the line '{}' is not fully merged into '{}'.\nIf you are sure you want to delete it, run 'layr line delete -D {}'.", line.name, target.name, line.name)));
+    }
+    Ok(())
+}
+
+/// Test barrier after final-state preparation and before the deletion lock (t256, t257).
+pub(crate) fn deletion_barrier() -> Result<()> {
+    if let Some(root) = std::env::var_os("LAYR_TEST_LINE_DELETE_BARRIER") {
+        let root = std::path::PathBuf::from(root);
+        std::fs::write(root.join("ready"), b"ready")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !root.join("release").exists() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "line delete test barrier timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    Ok(())
+}
+
 fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     let spec = Spec::new()
         .flag("-l|--list")
@@ -260,9 +305,15 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     }
     if a.has("-d") || a.has("-D") {
         if a.pos.is_empty() {
-            return Err(exit(128, "fatal: line name required"));
+            return Err(exit(128, format!("fatal: line name required\n{DELETE_USAGE}")));
         }
         let discard = a.has("--discard") || a.has("-f");
+        let check_merged = |line: &Line| -> Result<()> {
+            if a.has("-d") && !a.has("-f") {
+                check_deletion_merged(repo, line, current.as_ref())?;
+            }
+            Ok(())
+        };
         for name in &a.pos {
             let l = repo.line(name)?;
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
@@ -271,17 +322,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             #[cfg(target_os = "macos")]
             let view = crate::views::of(repo, &l);
-            if a.has("-d") && !a.has("-f") {
-                let into = current.as_ref().map(|c| c.head.clone());
-                let merged = match &into {
-                    Some(h2) => repo.is_ancestor(&l.head, h2)?,
-                    None => false,
-                };
-                let base_only = repo.p.db.line_states(&l.id, StateKind::Commit)?.is_empty();
-                if !merged && !base_only {
-                    return Err(exit(1, format!("error: the line '{name}' is not fully merged.\nIf you are sure you want to delete it, run 'layr line delete -D {name}'.")));
-                }
-            }
+            check_merged(&l)?;
             // Unsaved changes in the folder of the line need an explicit --discard (or -f): -D
             // allows only unmerged saves.
             if !discard && repo.working(&l).exists() {
@@ -311,7 +352,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
             if let Some(v) = view {
-                crate::views::delete(ctx, repo, &l, &v)?;
+                crate::views::delete(ctx, repo, &l, &v, check_merged)?;
                 outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
                 continue;
             }
@@ -326,6 +367,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             let (_lock, l, last) = if !made {
                 let lock = repo.p.lock()?;
                 let fresh = repo.line(&l.id)?;
+                check_merged(&fresh)?;
                 (lock, fresh, None)
             } else {
                 let mut attempt = 0;
@@ -337,7 +379,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
-                    let lock = match repo.p.lock() {
+                    let lock = match deletion_barrier().and_then(|()| repo.p.lock()) {
                         Ok(lock) => lock,
                         Err(e) => {
                             repo.discard_final_state(prepared);
@@ -366,6 +408,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                             }
                         }
                         let fresh = repo.line(&l.id)?;
+                        check_merged(&fresh)?;
                         let state = repo.record_final_state(ctx, &fresh, &mut prepared)?;
                         Ok((state, fresh))
                     })();
@@ -898,4 +941,97 @@ fn staged_state(ctx: &Ctx, repo: &crate::repo::Repo, l: &crate::model::Line) -> 
     rec.data = serde_json::json!({"line": l.id});
     repo.commit_record(ctx, rec)?;
     Ok(Some(st.id))
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use crate::model::{Author, LineState};
+    use crate::store::{Project, Store};
+    use serde_json::json;
+
+    // Only records and plain directories: no snapshots, mounts, service or Btrfs send.
+    #[test]
+    fn deletion_destinations_use_fresh_heads_and_preserve_base_only_lines() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-deletion-target-{}", ids::new_id()));
+        let store = Store::open(&dir)?;
+        let project_dir = store.project_dir("p")?;
+        std::fs::create_dir_all(project_dir.join("meta/db"))?;
+        let repo = Repo {
+            p: Project {
+                store: &store,
+                name: "p".into(),
+                dir: project_dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&project_dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        let machine = &store.machine.id;
+        let main_id = ids::new_id();
+        let topic_id = ids::new_id();
+        let empty_id = ids::new_id();
+        let base = ids::new_id();
+        let saved = ids::new_id();
+        let merged = ids::new_id();
+        let mut sequence = 0;
+        let mut apply = |mut rec: Record| -> Result<()> {
+            sequence += 1;
+            rec.seq = sequence;
+            rec.time = sequence as i64;
+            rec.machine = machine.clone();
+            repo.p.db.insert_record(&rec, &json!({"r": rec, "s": ""}).to_string())?;
+            repo.p.db.derive(&rec, &|_| true, machine)
+        };
+        let line_change = |name: &str, head: &str| LineChange {
+            before: None,
+            after: Some(LineState { name: name.into(), head: head.into(), owner: 1000, machine: machine.clone() }),
+            working_before: None,
+            working_after: None,
+        };
+        let mut rec = Record::new("fixture");
+        for (id, parents, line) in [
+            (&base, vec![], &main_id),
+            (&saved, vec![base.clone()], &topic_id),
+            (&merged, vec![base.clone(), saved.clone()], &main_id),
+        ] {
+            rec.states.push(serde_json::from_value(json!({
+                "id": id, "kind": StateKind::Commit, "parents": parents, "line": line,
+                "subvol": "", "author": Author::default(), "time": 0
+            }))?);
+        }
+        rec.lines.insert(main_id.clone(), line_change("main", &saved));
+        rec.lines.insert(topic_id.clone(), line_change("topic", &saved));
+        rec.lines.insert(empty_id, line_change("empty", &base));
+        apply(rec)?;
+        let topic = repo.line("topic")?;
+        let current = repo.line("main")?;
+        check_deletion_merged(&repo, &topic, None)?; // Equal heads after a fast-forward.
+        assert!(check_deletion_merged(&repo, &topic, Some(&topic)).unwrap_err().to_string().contains("same line"));
+        assert!(check_deletion_merged(&repo, &current, None).unwrap_err().to_string().contains("same line"));
+
+        let mut rec = Record::new("fixture");
+        rec.lines.insert(main_id.clone(), line_change("main", &base));
+        apply(rec)?;
+        // A stale current-line value must not authorize deletion after its head is rewound.
+        let err = check_deletion_merged(&repo, &topic, Some(&current)).unwrap_err().to_string();
+        assert!(err.contains("not fully merged into 'main'"), "{err}");
+        let mut rec = Record::new("fixture");
+        rec.lines.insert(main_id.clone(), line_change("main", &merged));
+        apply(rec)?;
+        check_deletion_merged(&repo, &topic, None)?; // Ordinary merge, second-parent ancestry.
+
+        let mut rec = Record::new("fixture");
+        rec.lines.insert(main_id, line_change("trunk", &merged));
+        apply(rec)?;
+        let err = format!("{:#}", check_deletion_merged(&repo, &topic, None).unwrap_err());
+        assert!(err.contains("default deletion target 'main' is unavailable"), "{err}");
+        assert!(err.contains("line 'main' not found"), "{err}");
+        check_deletion_merged(&repo, &topic, Some(&current))?; // Lookup uses stable identity after rename.
+        check_deletion_merged(&repo, &repo.line("empty")?, None)?;
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 }
