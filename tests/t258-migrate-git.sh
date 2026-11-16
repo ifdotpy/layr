@@ -30,7 +30,8 @@ history() { # history <dir>: a Git checkout with seven commits
 # The submodule is an empty folder in layr and absent from the archive.
 same_as_git() { # same_as_git <checkout> <git dir> <commit>
     local tmp; tmp=$(mktemp -d "$B/arch.XXXXXX")
-    git -C "$2" archive "$3" | tar -x -C "$tmp"
+    # git archive writes its modes through tar.umask (0002 by default), and tar as root keeps them; 0022 gives git's modes.
+    git -C "$2" -c tar.umask=0022 archive "$3" | tar -x -C "$tmp"
     python3 -I - "$1" "$tmp" <<'EOF'
 import os, stat, sys
 def walk(root):

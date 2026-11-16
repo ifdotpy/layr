@@ -60,16 +60,6 @@ pub struct Temp {
     pub path: PathBuf,
 }
 
-impl Temp {
-    /// Delete the folder now instead of discarding it: a command that holds the store lock for a long
-    /// time (a migration) moves every discarded folder into the trash, which empties only after the
-    /// last lock, so its copies would fill the disk (Attar L8, 2026-11-15).
-    pub fn delete_now(self) {
-        let path = std::mem::take(&mut std::mem::ManuallyDrop::new(self).path);
-        let _ = crate::storage::delete_tree(&path);
-    }
-}
-
 impl Drop for Temp {
     fn drop(&mut self) {
         let _t = crate::trace::named(|| format!("discard {}", self.path.display()));
@@ -2933,21 +2923,6 @@ impl History {
             common.iter().flat_map(|c| self.parents.get(*c).into_iter().flatten().map(String::as_str)).collect();
         let below: HashSet<&str> = self.ancestors(seeds)?.into_iter().collect();
         Some(common.into_iter().find(|c| !below.contains(c)).map(str::to_string))
-    }
-}
-
-#[cfg(test)]
-mod temp_tests {
-    use super::Temp;
-
-    /// `delete_now` removes the folder before it returns, whatever the trash would do with it.
-    #[test]
-    fn delete_now_removes_the_folder_at_once() {
-        let path = std::env::temp_dir().join(format!("layr-temp-delete-now-{}", std::process::id()));
-        std::fs::create_dir_all(path.join("a/b")).unwrap();
-        std::fs::write(path.join("a/b/file"), b"bytes").unwrap();
-        Temp { path: path.clone() }.delete_now();
-        assert!(std::fs::symlink_metadata(&path).is_err(), "the folder is gone at once");
     }
 }
 
