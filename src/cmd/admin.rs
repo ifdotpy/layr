@@ -2719,6 +2719,62 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             }
                         }
                     }
+                    // A tracked file that differs from its blob only by the line endings of Git's conversion (`eol=crlf`
+                    // in .gitattributes) is not an unsaved change: `git status` shows it clean. The state
+                    // keeps the blob bytes, so the line folder gets them too. Git decides which paths really changed.
+                    // Only bytes: a mode that differs (a group-writable file) stays a change of the folder.
+                    let same_mode = |p: &str| match (fsutil::lmeta(&imported, p), fsutil::lmeta(&snap.path, p)) {
+                        (Some(x), Some(y)) => x.mode == y.mode,
+                        _ => false,
+                    };
+                    let converted: Vec<String> =
+                        copies.iter().filter(|p| tracked.contains(*p) && same_mode(p)).cloned().collect();
+                    if !converted.is_empty() {
+                        // Every path that git itself calls changed, with no pathspec: `git diff` takes no pathspec file,
+                        // and thousands of paths on the command line would pass ARG_MAX. The checkout is clean (init
+                        // refuses another), so the list is short.
+                        let out = caller_git(ctx, &src, &["diff", "--name-only", "-z", "HEAD"])?;
+                        if !out.status.success() {
+                            bail!("cannot compare the checkout with HEAD: {}", String::from_utf8_lossy(&out.stderr).trim());
+                        }
+                        let real: BTreeSet<String> = out
+                            .stdout
+                            .split(|b| *b == 0)
+                            .filter(|p| !p.is_empty())
+                            .map(|p| String::from_utf8_lossy(p).into_owned())
+                            .collect();
+                        // Only line endings: the folder's bytes with CRLF turned into LF are the blob. Any other filter
+                        // (Git LFS keeps a pointer as the blob and the content on disk) stays a change of the folder,
+                        // so its content is saved, not replaced by the blob.
+                        let crlf_only = |p: &str| -> bool {
+                            let (Ok(blob), Ok(disk)) =
+                                (std::fs::read(imported.join(p)), std::fs::read(snap.path.join(p)))
+                            else {
+                                return false;
+                            };
+                            let mut lf = Vec::with_capacity(disk.len());
+                            let mut i = 0;
+                            while i < disk.len() {
+                                if disk[i] == b'\r' && disk.get(i + 1) == Some(&b'\n') {
+                                    i += 1;
+                                    continue;
+                                }
+                                lf.push(disk[i]);
+                                i += 1;
+                            }
+                            lf == blob
+                        };
+                        let normalized: BTreeSet<String> =
+                            converted.into_iter().filter(|p| !real.contains(p) && crlf_only(p)).collect();
+                        copies.retain(|p| !normalized.contains(p));
+                        // On stderr even with -q: `init --from-git` runs this step quietly, and the note must reach the user.
+                        if !normalized.is_empty() {
+                            eprintln!(
+                                "note: {} path(s) differ from their Git blobs only by line endings that .gitattributes converts: the line keeps the blob bytes",
+                                normalized.len()
+                            );
+                        }
+                    }
                     // This private tree has no user file handles to preserve. Remove replaced
                     // entries too, so APFS can clone the current bytes into new inodes.
                     let replaced_directories: Vec<&String> =
