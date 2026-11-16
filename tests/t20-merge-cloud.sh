@@ -10,6 +10,8 @@ printf 'middle derive=z\nfinal derive=a\n' > "$T/src/.layrattributes"
 l init cloud-merge --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/cloud-merge/lines
 cd "$P/main"
+# Driver failures and dependency cycles must be recorded on an ordinary target.
+l protect main --remove >/dev/null || exit 1
 l config derive.command.z 'cat input > middle; echo discarded > extra'
 l config derive.inputs.z input
 l config derive.command.a 'cat middle > final'

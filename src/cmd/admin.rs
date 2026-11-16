@@ -1986,7 +1986,10 @@ fn gc_all_projects(ctx: &Ctx, dry: bool, quiet: bool) -> Result<i32> {
             repo.require(ctx, "gc")?;
             let freed = repair_project(ctx, &repo, dry, true, false, None)?;
             if !dry {
-                crate::objstore::retire_native(&repo)?;
+                // Retirement only frees space; the free step of a later command retries it.
+                if let Err(e) = crate::objstore::retire_native(&repo) {
+                    eprintln!("warning: native copies of {name} not retired: {e:#}");
+                }
             }
             Ok(freed)
         });
@@ -2070,7 +2073,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // First what no kept state reaches leaves each object store (the base and every overlay): a dropped part of an overlay
     // with `history=last` gives its objects back here (docs/overlays.md section 1a, slice 7).
     if !a.has("-n") {
-        crate::objstore::retire_native(&h.repo)?;
+        // Retirement only frees space; an overlay that cannot open must not stop prune and repack.
+        if let Err(e) = crate::objstore::retire_native(&h.repo) {
+            eprintln!("warning: native copies not retired: {e:#}");
+        }
         let mut stores = vec![("base".to_string(), crate::objstore::prune(&h.repo.p))];
         for name in h.repo.overlay_names().unwrap_or_default() {
             if let Ok(op) = h.repo.overlay_project(&name) {

@@ -7,5 +7,7 @@ Requires=layr-runner-daemon.service
 Type=oneshot
 EnvironmentFile=-/etc/layr-runner.env
 Environment=LAYR_SOCKET=/run/layr-runner/layr.sock
-ExecStart=/usr/local/bin/layr --project %i fetch origin
-ExecStart=/usr/local/bin/layr --project %i push origin --index
+# Heads only: the runner checks the heads and queue states; history comes on first read. No site index:
+# Layr Cloud serves it, and `push --index` ran over 10 minutes on kukuka-wsl (2026-11-15).
+ExecStart=/usr/local/bin/layr --project %i fetch origin --heads
+ExecStart=/usr/local/bin/layr --project %i push origin

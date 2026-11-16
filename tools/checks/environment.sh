@@ -6,18 +6,24 @@ test -d "$seed/cargo" && test -d "$seed/rustup" || {
     echo 'Prepare the offline toolchain at /usr/local/share/layr-checks (docs/checks.md)' >&2
     exit 1
 }
-export CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$seed/rustup"
-mkdir -p "$CARGO_HOME"
+export RUSTUP_HOME="$seed/rustup"
 if [ "$(uname -s)" = Darwin ]; then
-    # The sandbox can read this prepared seed but cannot change it. Keep Cargo's
-    # locks in the private HOME without copying unrelated cached crate files.
-    ln -s "$seed/cargo/registry" "$CARGO_HOME/registry"
-    ln -s "$seed/cargo/bin" "$CARGO_HOME/bin"
+    # The seed itself, read-only in the sandbox: an offline Cargo with the crates unpacked writes nothing there.
+    # The private HOME has a new path in each check, and Cargo hashes the path of each registry crate into its
+    # fingerprint, so a registry below that HOME built all 362 registry units again in every check
+    # (docs/cache-overlays.md: one CARGO_HOME path on every machine).
+    export CARGO_HOME="$seed/cargo"
 else
+    export CARGO_HOME="$HOME/.cargo"
+    mkdir -p "$CARGO_HOME"
     cp -a --no-preserve=ownership "$seed/cargo/." "$CARGO_HOME/"
     chmod -R u+rwX "$CARGO_HOME"
 fi
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH" CARGO_NET_OFFLINE=true
+# Line tables only: panics and backtraces keep files and lines, and the test binaries are a fraction of
+# the size. With full debug info three suites in parallel kept a 3000-IOPS runner disk at its limit
+# with linker writes alone (rust-lld, 2026-11-13).
+export CARGO_PROFILE_DEV_DEBUG=line-tables-only
 if [ "$(uname -s)" = Linux ]; then
     # One rustc job per CPU, at most one per 2 GiB of memory; one shell test per CPU.
     cpus=$(nproc)

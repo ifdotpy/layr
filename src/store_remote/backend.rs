@@ -408,6 +408,23 @@ impl Backend {
         Ok(())
     }
 
+    /// The overlay key objects (`overlays/<id>/keys/...`), and for a backend without folder listings every object
+    /// of `overlays/`. A gateway lists the overlay folders, then the keys of each: the full listing holds every
+    /// chunk of every overlay, and it took a follow pass of project layr more than 10 minutes (2026-11-15).
+    pub fn overlay_key_objects(&self) -> Result<Vec<Object>> {
+        let folders = match self {
+            Self::Epoch(epoch) if !epoch_object("overlays/") => return epoch.root.overlay_key_objects(),
+            Self::Gateway(g) => g.overlay_folders()?,
+            _ => None,
+        };
+        let Some(folders) = folders else { return self.list("overlays/") };
+        let mut objects = Vec::new();
+        for folder in folders {
+            objects.extend(self.list(&format!("{folder}keys/"))?);
+        }
+        Ok(objects)
+    }
+
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
         if !prefix.is_empty() {
             check_key(prefix.trim_end_matches('/'))?;

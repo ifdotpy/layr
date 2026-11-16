@@ -15,8 +15,15 @@ printf 'start\n' > hot.txt
 WRITER=$!
 trap 'kill $WRITER 2>/dev/null' EXIT
 sleep 1
-out=$(l save 2>&1)
-rc=$?
+# On a busy host (check suites run at once) the writer can miss a whole copy round, and that copy then
+# settles (overlayfs-ext4, 2026-11-15). Each try is a new save; one that did not settle is enough.
+for try in 1 2 3 4 5; do
+    out=$(l save 2>&1)
+    rc=$?
+    [ "$rc" -eq 0 ] || break
+    printf '%s\n' "$out" | grep -q 'kept changing' && break
+    echo "the copy settled on try $try; saving again"
+done
 kill $WRITER 2>/dev/null; wait $WRITER 2>/dev/null
 eq "the save succeeds while the file changes" "0" "$rc"
 has "one line tells that the copy did not settle" "kept changing while it was copied" "$out"

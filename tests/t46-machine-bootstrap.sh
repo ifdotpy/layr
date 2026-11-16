@@ -45,7 +45,12 @@ def discovery(method,path):
  parsed=urllib.parse.urlsplit(path);query=urllib.parse.parse_qs(parsed.query)
  return method=='GET' and parsed.path=='/v1/p/project/objects' and query.get('prefix')==['keys/'] and set(query)<= {'prefix','limit','continuation'} and query.get('limit',['1000'])==['1000']
 def object_page(wanted,query):
- assert set(query)<= {'prefix','limit','continuation'} and query.get('limit',['1000'])==['1000']
+ assert set(query)<= {'prefix','limit','continuation','delimiter'} and query.get('limit',['1000'])==['1000']
+ keys=sorted(str(p.relative_to(root/'archive')) for p in (root/'archive').rglob('*') if p.is_file())
+ # A folder listing (delimiter=/): the folders one level below the prefix, as the gateway gives them.
+ if 'delimiter' in query:
+  assert query['delimiter']==['/'] and 'continuation' not in query
+  return {'objects':[],'prefixes':sorted({wanted+k[len(wanted):].split('/')[0]+'/' for k in keys if k.startswith(wanted) and '/' in k[len(wanted):]})}
  files=sorted([{'key':str(p.relative_to(root/'archive')),'modified':int(p.stat().st_mtime*1000)} for p in (root/'archive').rglob('*') if p.is_file() and str(p.relative_to(root/'archive')).startswith(wanted)],key=lambda row:row['key'])
  offset=int(query.get('continuation',['0'])[0]);assert offset>=0
  # One entry exercises continuation even on this small bootstrap fixture.
