@@ -6,7 +6,8 @@
 //! 2. `pnpm prune`: removes the packages that the lockfile no longer has, from `node_modules` and `.pnpm`.
 //!
 //! npm: `npm prune --offline`, the same copy and restore. A warm step (the follow pass) installs online with
-//! the scripts, as the project's own install does. npm never runs `npm ci`: it deletes the whole folder.
+//! the scripts, as the project's own install does. Only damage repair runs `npm ci`: it clears the folder,
+//! and core records the build location only after a successful repair, refusing conflicting provenance.
 
 use crate::{exec, skip, sweep};
 use anyhow::{Context, Result};

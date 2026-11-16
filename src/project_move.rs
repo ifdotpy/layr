@@ -274,6 +274,28 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         let copy = project_copy::copy_project(&src, &dst, |_| {})?;
         let _t = crate::trace::begin(format!("project move {project}: git objects of the copy"));
         rewrite_lines(&dst, &objects_of(&src), &objects_of(&dst))?;
+        // Validate the copy before the volume record exposes its working folders at new paths.
+        let repo = crate::repo::Repo {
+            p: Project {
+                store,
+                name: project.into(),
+                dir: dst.clone(),
+                id: handle.id.clone(),
+                db: crate::db::Db::open(&db_file(&dst))?,
+            },
+            ctx: None,
+        };
+        for line in &lines {
+            let working = repo.working(line);
+            if working.is_dir() {
+                // Absolute moved paths still name live folders outside the copy.
+                let access = match moved.get(&line.id) {
+                    Some(path) if path.is_absolute() => crate::cache_overlay::CacheAccess::Live,
+                    _ => crate::cache_overlay::CacheAccess::Prepared,
+                };
+                repo.validate_cache_locations(line, &working, &working, access)?;
+            }
+        }
         Ok(copy)
     })();
     let copy = match copied {

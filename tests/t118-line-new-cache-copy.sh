@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A new line takes a warm cache as one copy. Writes into that copy leave the source cache and the
 # parent line unchanged. On the non-OverlayFS builds the cache folder is taken once (APFS: one clone).
 . "$(dirname "$0")/lib.sh"
@@ -8,9 +9,10 @@ sample $T/src
 l init g --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/g/lines
 cd $P/main || exit 1
+l config cache.portable '["target"]'
 l config regenerable '["target"]'
 # Hard links, as cargo makes them in target/debug.
-rm -rf target; mkdir -p target/debug; echo v1 > target/debug/x; ln target/debug/x target/debug/x-link
+clear_cache_output target; mkdir -p target/debug; echo v1 > target/debug/x; ln target/debug/x target/debug/x-link
 l save --overlays --folder target -q >/dev/null 2>&1
 cache_id() { l overlay list | grep -o 'saved [0-9a-f]*'; }
 saved=$(cache_id)

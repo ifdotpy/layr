@@ -3,11 +3,12 @@
 # A cache state whose parent's tree is gone from the remote (a sweep deleted it before this machine knew of a state
 # built on it, or another machine's sweep did) goes up as a complete tree. Before, the push failed on the missing
 # object, or made a delta on a base that nobody can read.
+# This fixture explicitly shares disposable output across build locations.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1

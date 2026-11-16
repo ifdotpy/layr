@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # Caches are the contents of an overlay: a command copies them only when it asks for data of the overlay (owner
 # decision 2026-11-13, docs/remotes.md). A plain `layr fetch <remote>` and a plain `layr clone` take the records, the
 # lines and the base, and of a cache overlay only the records: no cache state comes, not even main's. A new line
@@ -11,7 +12,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

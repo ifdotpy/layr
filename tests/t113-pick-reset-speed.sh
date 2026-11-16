@@ -124,7 +124,7 @@ fi
 eq "the local edit stays in the file" "local" "$(cat other.txt)"
 eq "the picked edit is in the work folder" "changed" "$(cat notes.txt)"
 
-# A pick of a complete state saved with caches keeps the overlays and passes fsck.
+# A pick of a complete state keeps local caches and rejects output built at the source location.
 l line new -q attrs "$BASE"
 cd $M/attrs || exit 1
 printf 'node_modules regenerable\n' > .layrattributes
@@ -140,6 +140,7 @@ l save -qam cached-change >/dev/null
 CACHED=$(l rev-parse head)
 l line new -q cdst "$ATTRS"
 cd $M/cdst || exit 1
+echo destination-cache > node_modules/pkg.js
 echo other > other.txt
 l add other.txt >/dev/null && l save -qm other5 >/dev/null
 LAYR_TRACE=1 l pick -q "$CACHED" 2> $T/trace-cache.txt
@@ -147,7 +148,7 @@ if [ "$(uname -s)" = Darwin ]; then
     has "the cache case is a fast pick" "pick visits" "$(cat $T/trace-cache.txt)"
 fi
 ok "fsck passes after that pick" l fsck
-eq "the cache content stays" "cache" "$(cat node_modules/pkg.js)"
+eq "the destination cache content stays" "destination-cache" "$(cat node_modules/pkg.js)"
 has "the cache overlay is listed" "node_modules" "$(l overlay list)"
 eq "the picked edit is in the work folder" "changed-cache" "$(cat notes.txt)"
 finish

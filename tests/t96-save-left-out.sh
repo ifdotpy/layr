@@ -17,7 +17,7 @@ cd $P/w || exit 1
 err=$T/save-err.txt
 
 # The build output of the ignored cache folder, saved as a cache.
-rm -rf target; mkdir -p target; echo bin > target/out.bin; echo x > debug.log
+clear_cache_output target; mkdir -p target; echo bin > target/out.bin; echo x > debug.log
 l save --overlays -q >/dev/null
 
 # A clean save: a modified file, added and saved; nothing is left out.

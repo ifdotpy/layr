@@ -25,7 +25,7 @@ edition = "2021"
 sweep = [["build", "--locked"]]
 TOML
 printf 'target/\n' > "$T/src/.gitignore"
-printf 'target regenerable\n' > "$T/src/.layrattributes"
+printf 'target regenerable cache-portable\n' > "$T/src/.layrattributes"
 printf 'fn main() { println!("zero"); }\n' > "$T/src/src/main.rs"
 (cd "$T/src" && CARGO_NET_OFFLINE=true cargo generate-lockfile >/dev/null 2>&1) || exit 1
 l init p --from "$T/src" $owner_args -q >/dev/null || exit 1

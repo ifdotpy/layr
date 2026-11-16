@@ -1,18 +1,19 @@
 #!/bin/bash
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # The platform key of caches (docs/cache-overlays.md, section 6): a line takes a cache only when
 # the key files hash the same; a layr remote carries cache overlays to another store, where new
 # lines start warm. One user, so it runs on macOS and on Linux.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 echo v1 > $T/src/Cargo.lock
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
 l config cache.key-files '["Cargo.lock", "rust-toolchain.toml"]'
-rm -rf target; mkdir target; echo built-v1 > target/out
+clear_cache_output target; mkdir -p target; echo built-v1 > target/out
 l save --overlays -q
 has "the cache overlay has the key files" "Cargo.lock" "$(l config overlay.$TG.key-files)"
 

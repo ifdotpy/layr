@@ -1,4 +1,5 @@
 #!/bin/bash
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # .layrattributes: the folders that it makes regenerable (gitignore patterns) become caches on
 # save --overlays, if the ignore rules ignore them; a new line takes the nearest saved copy while
 # the attribute is still set; a folder whose files are in history never becomes a cache, also
@@ -20,7 +21,7 @@ S=$T/src
 rm -rf $S && mkdir -p $S/src $S/web
 echo code > $S/src/main.js && echo web > $S/web/app.js
 printf 'node_modules/\n.venv/\ndata/\n' > $S/.gitignore
-printf '# build output\nnode_modules regenerable\n.venv regenerable\nsrc regenerable\n' > $S/.layrattributes
+printf '# build output\nnode_modules regenerable cache-portable\nweb/node_modules regenerable cache-portable\n.venv regenerable cache-portable\nsrc regenerable\n' > $S/.layrattributes
 l init r --from $S --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/r/lines
 l --project r access grant layr-u1 writer
@@ -54,7 +55,7 @@ as layr-u1 $L --project r line new -q a2 main
 eq "a line from a later head starts warm" "1" "$(cat $P/a2/node_modules/pkg/index.js)"
 
 # 4. When .layrattributes unsets the attribute of a folder, a new line does not take it.
-as layr-admin sh -c "cd $P/main && printf '*/ regenerable\n.venv -regenerable\n' > .layrattributes && $L save -qam narrower"
+as layr-admin sh -c "cd $P/main && printf 'node_modules regenerable cache-portable\nweb/node_modules regenerable cache-portable\n.venv -regenerable\n' > .layrattributes && $L save -qam narrower"
 as layr-u1 $L --project r line new -q a3 main
 eq "the still named folder comes" "1" "$(cat $P/a3/node_modules/pkg/index.js)"
 no "a folder that is no longer named does not" test -e $P/a3/.venv/bin/python
@@ -66,7 +67,7 @@ V=$T/v
 rm -rf $V && mkdir -p $V/artifacts
 echo code > $V/a.txt && echo kept > $V/artifacts/kept.txt
 printf 'artifacts/\nout/\n' > $V/.gitignore
-printf 'artifacts regenerable\nout regenerable\n' > $V/.layrattributes
+printf 'artifacts regenerable\nout regenerable cache-portable\n' > $V/.layrattributes
 l init v --from $V --owner layr-admin --include-ignored -q >/dev/null
 l --project v access grant layr-u1 writer
 l --project v protect main --direct
@@ -75,7 +76,7 @@ in_v() { local u=$1 line=$2; shift 2; as $u env LAYR_PROJECT=v LAYR_LINE=$line $
 is_cache() { btrfs subvolume show "$1" >/dev/null 2>&1; }
 NOT="not a cache: has versioned files; remove them from history first"
 AGAIN="not a cache: has versioned files; a plain folder again"
-as layr-admin sh -c "cd $PV/main && mkdir out && echo bin > out/bin && echo new > artifacts/new.bin"
+as layr-admin sh -c "cd $PV/main && mkdir -p out && echo bin > out/bin && echo new > artifacts/new.bin"
 eq "save --overlays says why a folder is no cache" "artifacts: $NOT" "$(in_v layr-admin main save --overlays | grep '^artifacts')"
 ok "the other folder is a cache" is_cache $PV/main/out
 no "the folder with versioned files stays a plain folder" is_cache $PV/main/artifacts
@@ -112,7 +113,10 @@ eq "its files in the working content" "" "$(in_v layr-admin main status -s)"
 
 # 7. A folder that an earlier state saved as a cache, with versioned files since: a new line
 #    takes the files from its state, not the older cache.
-rm -rf $PV/main/out && mkdir $PV/main/out && echo keep > $PV/main/out/keep.txt && chown -R layr-admin: $PV/main/out
+cp "$PV/main/out/.layr-cache-location" "$T/out-location"
+rm -rf "$PV/main/out" && mkdir "$PV/main/out"
+cp "$T/out-location" "$PV/main/out/.layr-cache-location"
+echo keep > "$PV/main/out/keep.txt" && chown -R layr-admin: "$PV/main/out"
 as layr-admin sh -c "cd $PV/main && $L add -f out/keep.txt && $L save -qm 'keep out'"
 eq "the overlay of out says why" "$NOT" "$(in_v layr-admin main overlay list | grep "$(overlay out)" | cut -f6)"
 as layr-u1 $L --project v line new -q v2 main

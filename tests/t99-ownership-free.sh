@@ -106,13 +106,15 @@ l line new -q p >/dev/null
 cd $M/p || exit 1
 for i in 1 2 3; do echo "p $i" > p.txt; l save -q; done
 pinned=$(newest_auto p)
-(cd $M/p && "$LAYR" try "$pinned" -- sleep 4 >/dev/null 2>&1) &
-for _ in $(seq 1 60); do
+release=$T/pin-release
+(cd $M/p && "$LAYR" try "$pinned" -- sh -c "for _ in \$(seq 1 600); do [ -e '$release' ] && exit; sleep 0.1; done" >/dev/null 2>&1) &
+for _ in $(seq 1 600); do
     [ "$(q "select count(*) from owners where kind='pin' and state='$pinned'")" -gt 0 ] && break
     sleep 0.1
 done
 for i in 4 5 6; do echo "p $i" > p.txt; l save -q; done
 ok "a pinned state keeps its storage while the read runs" on_disk "$pinned"
+touch "$release"
 wait
 no "a pinned state goes when the read ends" on_disk "$pinned"
 eq "no pin is left after the read" 0 "$(q "select count(*) from owners where kind='pin'")"

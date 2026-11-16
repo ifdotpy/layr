@@ -806,7 +806,8 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 crate::storage::delete_tree(&p)?;
             }
         }
-        repo.prepare_at(&l, &l.head, &tmp, &[])
+        repo.prepare_at(&l, &l.head, &tmp, &[])?;
+        repo.validate_cache_locations(&l, &tmp, target.as_deref().unwrap_or(&at), crate::cache_overlay::CacheAccess::Prepared)
     })();
     if let Err(e) = made {
         let _ = crate::storage::delete_tree(&tmp);

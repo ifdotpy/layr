@@ -1,5 +1,9 @@
 # layr follow
 
+Cache selection follows the [build-location contract](cache-overlays.md#build-location-safety):
+a followed line keeps its own compatible output, while output from another location starts cold
+unless that cache explicitly opts into portable sharing.
+
 `layr follow` keeps a line at a remote branch. The daemon runs the same pass on a timer.
 
 ## Commands

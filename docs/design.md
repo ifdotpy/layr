@@ -189,6 +189,12 @@ command reads it.
 
 ## 5. Warm caches
 
+Build output is location-bound by default: the absolute workspace and target path must match.
+New lines and foreign cache merges start cold; same-location restoration stays warm. Legacy
+caches without provenance reset. Sharing across locations requires explicit per-cache portability,
+at the user's risk ([cache contract](cache-overlays.md#build-location-safety)).
+The shared-cache rules below apply only after that opt-in.
+
 Owner decision 2026-11-11: a cache is an ordinary overlay (an overlay), for example
 `target.macos-aarch64` with `folder=target`, `quiet`, `history=last`, `merge=union-theirs`,
 `platform=macos-aarch64` and `trust=protected` ([cache overlays](cache-overlays.md) section 2).

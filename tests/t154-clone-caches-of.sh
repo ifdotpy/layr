@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # `clone --line <line>` (docs/cache-overlays.md): a clone for one line downloads only the caches that a new line
 # from it takes, the newest cache of the line or of its nearest ancestor, and not the caches of every other line.
 # The newest cache of this platform counts: a newer one of another platform stays on the remote. A plain clone
@@ -9,7 +10,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

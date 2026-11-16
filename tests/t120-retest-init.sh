@@ -85,6 +85,7 @@ git add -A && git commit -qm base && git push -q origin main
 # The project, from the git remote (its main line is protected, as in a real project).
 ly init proj --git $R $OWNER_ARG -q >/dev/null 2>&1 || { echo "FATAL: layr init --git failed" >&2; exit 1; }
 P=$LAYR_ROOT/projects/proj/lines
+(cd "$P/main" && ly config cache.portable '["target", "side"]' >/dev/null)
 
 # In protected main before the merge, init changes no file and says how to bring the files in.
 before_main=$(cd $P/main && cat Cargo.toml .gitignore .layrattributes 2>/dev/null | cksum)
@@ -194,6 +195,7 @@ has "a line from a change after the cache save compiles crate a (the time of the
 (cd $P/main && ly line new two main $OWNER_ARG >/dev/null 2>&1)
 cd $P/two || exit 1
 printf 'side/\n' >> .gitignore && printf 'side regenerable\n' >> .layrattributes
+ly save --overlays --folder side -q >/dev/null 2>&1 || { fail "initialize the side cache before building"; exit 1; }
 mkdir -p side && echo built > side/out
 std $P/two >/dev/null
 (ly add .gitignore .layrattributes >/dev/null 2>&1 && ly save -m "a side cache" >/dev/null 2>&1) || fail "the save of the side cache rule failed"

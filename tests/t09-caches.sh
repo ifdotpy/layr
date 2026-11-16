@@ -8,6 +8,7 @@ l init g --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/g/lines
 cstate() { l overlay list | grep $TG | cut -f6; }
 cd $P/main
+l config cache.portable '["target"]'
 l config regenerable '["target"]'
 l line new -q w
 cd $P/w
@@ -18,7 +19,8 @@ eq "automatic states do not hold the cache content" "" "$(l show head@{0}:target
 eq "status ignores the cache" " M notes.txt" "$(l status -s)"
 l save -q --overlays
 eq "save --overlays makes the cache overlay" "cache" "$(cstate)"
-rm -rf target; mkdir target; echo rebuilt > target/out
+cp target/.layr-cache-location "$T/rebuild-provenance"
+rm -rf target; mkdir -p target; cp "$T/rebuild-provenance" target/.layr-cache-location; echo rebuilt > target/out
 has "a tool replaced the cache with a plain folder" "plain folder" "$(cstate)"
 l overlay repair $TG >/dev/null; l save -q
 eq "overlay repair makes it a cache again" "cache" "$(cstate)"
@@ -61,10 +63,10 @@ if [ "$peer_service" = 1 ]; then
     }
     trap peer_cleanup EXIT
 fi
-echo 'target regenerable' > .layrattributes; l add .layrattributes; l save -q -m "target is a cache"
+echo 'target regenerable cache-portable' > .layrattributes; l add .layrattributes; l save -q -m "target is a cache"
 head -c 1000000 /dev/urandom > target/warm.bin
 # The regenerable setting belongs to this machine: .layrattributes makes target a cache on the peer too.
-echo 'target regenerable' > .layrattributes
+echo 'target regenerable cache-portable' > .layrattributes
 l add .layrattributes; l save -q -m "target is a cache"
 l save -q --overlays
 # Caches go only to machines the project trusts (docs/cache-overlays.md).

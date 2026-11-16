@@ -15,7 +15,7 @@ l line new -q w >/dev/null
 cd $P/w || exit 1
 
 # The build output, then the save that makes it a cache.
-rm -rf target; mkdir -p target/debug; echo one > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo one > target/debug/x
 l save --overlays -q >/dev/null
 s1=$(l op log | grep -m1 ' save ' | awk '{print $7}')
 has "the save --overlays state exists" "tree" "$(l show "$s1:target" 2>&1)"

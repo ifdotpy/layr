@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-printf 'target regenerable\nbuild regenerable\n' > $T/src/.layrattributes
+printf 'target regenerable cache-portable\nbuild regenerable cache-portable\n' > $T/src/.layrattributes
 printf 'build/\n' >> $T/src/.gitignore
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

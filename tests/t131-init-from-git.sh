@@ -3,7 +3,7 @@
 # `layr init --from-git <checkout>`: a project from a Git checkout, in place. The line of the
 # current branch takes the checkout's path, its history comes from the folder (no network), the
 # branches of the checkout and of its origin resolve, ignored target and node_modules folders stay
-# as caches, and the checkout is kept beside. A dirty checkout and extra worktrees are refused.
+# as cold cache folders, and the checkout is kept beside. A dirty checkout and extra worktrees are refused.
 . "$(dirname "$0")/lib.sh"
 # The checkout must be on the store's file system and out of the store. lib.sh may mount the store folder
 # (btrfs), so the store moves one folder down, and the checkouts are beside it in B.
@@ -54,17 +54,21 @@ eq "the working folder is clean" "" "$(l status --short)"
 eq "origin is the checkout's origin" "$B/origin.git" "$(l git remote get-url origin)"
 eq "a branch of origin resolves" "$(git -C $B/origin.git rev-parse feat/remote)" "$(l rev-parse --git origin/feat/remote)"
 eq "an unpushed local branch resolves" "$(git -C $B/co.before-layr rev-parse wip)" "$(l rev-parse --git local/wip)"
-eq "the target cache is kept" built "$(cat rs/target/debug/x)"
-eq "the node_modules cache is kept" dep "$(cat web/node_modules/dep/index.js)"
+no "target output without provenance is reset" test -e rs/target/debug/x
+no "node_modules without provenance is reset" test -e web/node_modules/dep/index.js
+eq "the original unknown cache remains in the backup" built "$(cat "$B/co.before-layr/rs/target/debug/x")"
+mkdir -p rs/target/debug
+echo rebuilt > rs/target/debug/x
+l save --overlays -q
 before=$(l rev-parse head)
 no "a repeated import refuses the existing project" "$LAYR" init co --from-git "$B/co"
 eq "a repeated import keeps the line head" "$before" "$(l rev-parse head)"
-eq "a repeated import keeps the target cache" built "$(cat rs/target/debug/x)"
+eq "a repeated import keeps the local rebuild" rebuilt "$(cat rs/target/debug/x)"
 eq "a repeated import keeps the original Git history" "$(git -C "$B/origin.git" rev-parse main)" "$(git -C "$B/co.before-layr" rev-parse HEAD)"
 has "rs/target is a cache overlay" "folder=rs/target" "$(l overlay list 2>&1)"
 has "web/node_modules is a cache overlay" "folder=web/node_modules" "$(l overlay list 2>&1)"
 l line new -q next main >/dev/null
-eq "a new line starts warm" built "$(cat $LAYR_ROOT/projects/co/lines/next/rs/target/debug/x)"
+no "a new line starts cold at its own location" test -e "$LAYR_ROOT/projects/co/lines/next/rs/target/debug/x"
 
 # Git does not record group write bits. Preserve them in a child state of the imported HEAD.
 umask 002

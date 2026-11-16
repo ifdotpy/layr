@@ -3,11 +3,12 @@
 # A chunk pack whose data is gone while its index stays (a delete that removed the data and not the index): the
 # next push does not stop on it, the sweep deletes the index, and the chunks of a new cache go up again, so another
 # machine reads it.
+# This fixture explicitly shares disposable output across build locations.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1

@@ -15,7 +15,7 @@ R=$T/remote.git; U=$T/up
 git init -q --bare -b main $R
 git clone -q $R $U 2>/dev/null; cd $U
 mkdir -p src; echo base > src/a.txt; echo other > src/b.txt
-printf 'target/\n' > .gitignore; echo 'target regenerable' > .layrattributes
+printf 'target/\n' > .gitignore; echo 'target regenerable cache-portable' > .layrattributes
 git add -A; git commit -qm base; git push -q origin main
 
 l git clone $R gm -q >/dev/null
@@ -79,7 +79,7 @@ cd $P/main
 l line new feat main >/dev/null
 cd $P/feat
 echo feat > feat.txt; l add feat.txt; l save -m "feat work" -q
-rm -rf target; mkdir -p target/debug; echo bin-feat > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin-feat > target/debug/x
 l save --overlays -q
 l git push -q origin HEAD:refs/heads/feat >/dev/null 2>&1
 cd $U; git pull -q origin main; echo feat > feat.txt; git add feat.txt; git commit -qm "squash feat"; git push -q origin main
@@ -105,7 +105,7 @@ for n in good gone; do
     l line new $n main >/dev/null
     cd $P/$n
     echo $n > $n.txt; l add $n.txt; l save -m "$n work" -q
-    rm -rf target; mkdir -p target/debug; echo bin-$n > target/debug/x
+    clear_cache_output target; mkdir -p target/debug; echo bin-$n > target/debug/x
     l save --overlays -q
     l git push -q origin HEAD:refs/heads/$n >/dev/null 2>&1
     cd $P/main
@@ -177,7 +177,7 @@ l git remote add other "file://$R" >/dev/null 2>&1
 l line new viaother main >/dev/null
 cd $P/viaother
 echo viaother > viaother.txt; l add viaother.txt; l save -m "viaother work" -q
-rm -rf target; mkdir -p target/debug; echo bin-viaother > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin-viaother > target/debug/x
 l save --overlays -q
 l git push -q other HEAD:refs/heads/viaother >/dev/null 2>&1
 cd $U; git pull -q origin main; echo viaother > viaother.txt; git add viaother.txt; git commit -qm "squash viaother"; git push -q origin main

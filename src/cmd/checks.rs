@@ -866,7 +866,7 @@ fn execute(
     limits: &Limits,
     back: Option<&str>,
 ) -> Result<(i32, Vec<u8>, bool)> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
     use std::process::Command;
 
     let private = if privileged {
@@ -884,27 +884,11 @@ fn execute(
     let mut command;
     let home;
     if let Some(private) = &private {
-        // Freeze the copy before copying it as root, without following source symlinks.
-        let snapshot = repo.temp_snapshot(dir, true)?;
-        let status = Command::new("/bin/cp")
-            .args(["-a", "--no-preserve=ownership", "--reflink=auto", "--"])
-            .arg(snapshot.path.join("."))
-            .arg(&private.path)
-            .status()?;
-        if !status.success() {
-            bail!("cannot prepare private privileged check folder");
-        }
-        // cp -a also copies the source root's mode over the prepared folder.
-        // Restore traversal for the suite's unprivileged service clients.
-        std::fs::set_permissions(&private.path, std::fs::Permissions::from_mode(0o711))?;
-        copy_cache_folders(repo, dir, &private.path)?;
-        // In its mount namespace the check sees its copy at /work and its home at /home/check, as a sandboxed
-        // check does: the caches that a sandboxed check gives back (target/, the dependencies' sources below the
-        // home) fit without a rebuild. The two host folders are only mount points.
+        prepare_privileged_copy(ctx, repo, state, 0, dir, &private.path)?;
+        // Both check modes execute at /work; the host folders are only mount points.
         for point in ["/work", "/home/check"] {
             std::fs::DirBuilder::new().recursive(true).mode(0o755).create(point)?;
         }
-        relocate_copy(repo, 0, &private.path, std::path::Path::new("/work"))?;
         home = private.path.join(".check-home");
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         // Keep test mounts private so killing a timed-out suite releases its mounts too.
@@ -925,7 +909,7 @@ fn execute(
         )?;
     } else {
         // The check sees the copy at /work: its warm caches must not name the line they were built in.
-        relocate_copy(repo, ctx.caller.uid, dir, std::path::Path::new("/work"))?;
+        prepare_copy(ctx, repo, state, ctx.caller.uid, dir, std::path::Path::new("/work"))?;
         if !std::path::Path::new("/usr/bin/bwrap").is_file() {
             bail!("bubblewrap is required for automatic checks; install bubblewrap");
         }
@@ -975,10 +959,45 @@ fn execute(
     // A privileged copy is a plain folder of root: only a sandboxed check gives its caches back.
     if result.0 == 0 && private.is_none() {
         if let Some(line) = back {
-            save_back(ctx, repo, line, state, dir);
+            save_back(ctx, repo, line, state, dir, std::path::Path::new("/work"));
         }
     }
     Ok(result)
+}
+
+/// Freeze the source and copy its caches into the root-owned execution folder.
+#[cfg(target_os = "linux")]
+fn prepare_privileged_copy(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    uid: u32,
+    dir: &std::path::Path,
+    private: &std::path::Path,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    // Isolate the caller-owned tree beneath the daemon's private work directory before root
+    // preparation (including source-time restoration). Retained caller handles cannot change it.
+    let staging = repo.temp_work(dir)?;
+    // The root copy may live on a plain filesystem, where managed cache creation cannot run.
+    prepare_copy(ctx, repo, state, uid, &staging.path, std::path::Path::new("/work"))?;
+    // Freeze the prepared copy before copying it as root, without following source symlinks.
+    let snapshot = repo.temp_snapshot(&staging.path, true)?;
+    let status = Command::new("/bin/cp")
+        .args(["-a", "--no-preserve=ownership", "--reflink=auto", "--"])
+        .arg(snapshot.path.join("."))
+        .arg(private)
+        .status()?;
+    if !status.success() {
+        bail!("cannot prepare private privileged check folder");
+    }
+    // cp -a also copies the source root's mode over the prepared folder.
+    // Restore traversal for the suite's unprivileged service clients.
+    std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o711))?;
+    // Both copies execute at /work: preserve the validated marker, never restamp foreign output.
+    copy_cache_folders(repo, &staging.path, private)
 }
 
 /// The cache folders of the check copy `dir` into the root copy `private` of a privileged check. A snapshot leaves out
@@ -1021,8 +1040,8 @@ fn copy_cache_folders(repo: &Repo, dir: &std::path::Path, private: &std::path::P
 /// shared like the caches of a protected line. A pull request state never gives caches back. A failure here
 /// leaves the check result as it is.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) {
-    match save_back_caches(ctx, repo, line, state, dir) {
+fn save_back(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path, at: &std::path::Path) {
+    match save_back_caches_at(ctx, repo, line, state, dir, at) {
         Ok((_, saved)) if saved.is_empty() => {
             eprintln!("layr checks: caches of {state} not saved: the check left no cache folder")
         }
@@ -1056,16 +1075,25 @@ fn newer_cache_given_back(
     Ok(None)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type SavedCaches = (String, Vec<(String, String, String)>);
+
 /// `save_back` for any caller (`checks run`, `save --overlays --save-back`): the save-back line's name and the saved
 /// caches (folder, overlay, cache state). Empty when `dir` has no cache folder.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn save_back_caches(
+pub(crate) fn save_back_caches(ctx: &Ctx, repo: &Repo, line: &str, state: &str, dir: &std::path::Path) -> Result<SavedCaches> {
+    save_back_caches_at(ctx, repo, line, state, dir, dir)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn save_back_caches_at(
     ctx: &Ctx,
     repo: &Repo,
     line: &str,
     state: &str,
     dir: &std::path::Path,
-) -> Result<(String, Vec<(String, String, String)>)> {
+    at: &std::path::Path,
+) -> Result<SavedCaches> {
     // The cache folders of the copy. A check that started cold made its folder as a plain folder (no cache
     // could warm it): it becomes a cache first, as in `save --overlays`, so the first build of a platform is saved.
     let mut paths: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
@@ -1108,17 +1136,28 @@ pub(crate) fn save_back_caches(
     if let Some(newer) = newer_cache_given_back(repo, &checks_line, state, &folders)? {
         bail!("the newer head {} gave its caches back already", crate::ids::short(&newer));
     }
-    let saved = repo.save_cache_overlays_in(ctx, &checks_line, dir, &folders, true, state)?;
+    // The persistent recipient keeps its original head/view; classify the actual build instead.
+    let build = build_context(repo, state, ctx.caller.uid);
+    let saved = repo.save_cache_overlays_in(ctx, &checks_line, &build, dir, at, &folders, true, state)?;
     Ok((name, saved))
 }
 
-/// The cache folders of a check copy `dir`, which the check sees at `at`: units that name the line where they were
-/// built (a compiled-in path) build again, as in a new line (`relocate_caches`).
+fn build_context(repo: &Repo, state: &str, uid: u32) -> crate::model::Line {
+    crate::model::Line {
+        id: "check-copy".into(),
+        name: "check-copy".into(),
+        head: state.into(),
+        owner: uid,
+        machine: repo.p.store.machine.id.clone(),
+    }
+}
+
+/// Prepare caches using the location where the check actually executes, not its staging folder.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn relocate_copy(repo: &Repo, uid: u32, dir: &std::path::Path, at: &std::path::Path) -> Result<()> {
-    let folders: Vec<String> = repo.folder_overlays()?.into_iter().map(|(_, folder)| folder).collect();
-    repo.relocate_folders(uid, &folders, dir, at);
-    Ok(())
+fn prepare_copy(ctx: &Ctx, repo: &Repo, state: &str, uid: u32, dir: &std::path::Path, at: &std::path::Path) -> Result<()> {
+    let line = build_context(repo, state, uid);
+    repo.copy_caches(ctx, &line, state, dir, at)?;
+    repo.validate_cache_locations(&line, dir, at, crate::cache_overlay::CacheAccess::Prepared)
 }
 
 #[cfg(target_os = "macos")]
@@ -1203,7 +1242,7 @@ fn execute(
         bail!("cannot prepare private macOS check folder");
     }
     let dir = std::fs::canonicalize(&private.path)?;
-    relocate_copy(repo, ctx.caller.uid, &dir, &dir)?;
+    prepare_copy(ctx, repo, state, ctx.caller.uid, &dir, &dir)?;
     let home = dir.join(format!(".check-home-{}", crate::ids::new_id()));
     std::fs::DirBuilder::new().mode(0o700).create(&home)?;
     let scratch = home.join("tmp");
@@ -1225,7 +1264,7 @@ fn execute(
     let result = run_check(command, limits)?;
     if result.0 == 0 {
         if let Some(line) = back {
-            save_back(ctx, repo, line, state, &dir);
+            save_back(ctx, repo, line, state, &dir, &dir);
         }
     }
     Ok(result)
@@ -1402,6 +1441,55 @@ mod macos_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    fn a_privileged_copy_keeps_cache_provenance_on_a_plain_filesystem() -> Result<()> {
+        use std::path::Path;
+        let root = std::env::temp_dir().join(format!("layr-check-copy-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let _cleanup = crate::repo::Temp { path: root.clone() };
+        if !crate::storage::is_supported(&root) {
+            return Ok(());
+        }
+        let private = Path::new("/dev/shm").join(format!("layr-check-copy-{}", crate::ids::new_id()));
+        std::fs::create_dir(&private)?;
+        let _private_cleanup = crate::repo::Temp { path: private.clone() };
+        assert!(!crate::storage::is_supported(&private));
+        let src = root.join("src");
+        std::fs::create_dir(&src)?;
+        std::fs::write(src.join(".layrattributes"), "target regenerable\n")?;
+        std::fs::write(src.join(".gitignore"), "/target\n")?;
+        let mut ctx = Ctx {
+            store: crate::store::Store::open(&root.join("store"))?,
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            author: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        let run = |ctx: &Ctx, args: &[&str]| super::super::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(run(&ctx, &["init", "copy", "--from", src.to_str().unwrap(), "-q"])?, 0);
+        ctx.cwd = root.join("store/projects/copy/lines/main");
+        let repo = Repo::open(&ctx, "copy")?;
+        let line = repo.line("main")?;
+        super::super::admin::with_try_copy(&ctx, &repo, &line.head, &[], false, true, |dir| {
+            let original = std::fs::read(dir.join("target/.layr-cache-location"))?;
+            std::fs::write(dir.join("target/caller-output"), "foreign")?;
+            prepare_privileged_copy(&ctx, &repo, &line.head, ctx.caller.uid, dir, &private)?;
+            // Preparation must never mutate the caller-owned source or relabel its output.
+            assert_eq!(std::fs::read(dir.join("target/.layr-cache-location"))?, original);
+            assert!(dir.join("target/caller-output").exists());
+            assert!(!private.join("target/caller-output").exists());
+            let marker = |path: &Path| -> Result<Value> {
+                Ok(serde_json::from_slice(&std::fs::read(path.join("target/.layr-cache-location"))?)?)
+            };
+            assert_eq!(marker(&private)?["location"], json!({"workspace":"/work", "target":"/work/target"}));
+            assert!(crate::storage::is_subvolume(&dir.join("target")));
+            assert!(!crate::storage::is_subvolume(&private.join("target")));
+            Ok(())
+        })
+    }
 
     #[test]
     fn required_definitions_include_commands_and_platforms() {

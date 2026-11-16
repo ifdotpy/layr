@@ -1,12 +1,13 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # save --overlays makes the snapshot of the working folder and its compare with the head before the
 # project lock (issue #194). Under the lock it uses them when the folder did not change since; a
 # folder that changed after the prepare step (LAYR_TEST_SAVE_PAUSE_MS) is saved as it is then.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-printf 'target regenerable\n' > $T/src/.layrattributes
+printf 'target regenerable cache-portable\n' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1

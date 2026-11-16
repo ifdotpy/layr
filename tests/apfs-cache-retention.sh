@@ -14,7 +14,7 @@ cd "$P/main" || exit 1
 l line new -q topic
 cd "$P/topic" || exit 1
 printf 'target/\n' >> .gitignore
-printf 'target regenerable\n' > .layrattributes
+printf 'target regenerable cache-portable\n' > .layrattributes
 l add -A && l save -qm attributes
 
 # 1. save --overlays keeps the build output in the cache overlay, not as a snapshot of the state.

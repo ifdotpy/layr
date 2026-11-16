@@ -38,7 +38,8 @@ new_volume() {
         mount --make-private "$mp" || return 1
         return 0
     fi
-    new_fs "$mp" 2G
+    # Secondary volumes need their own filesystem even with a pre-mounted test store.
+    LAYR_TEST_PREMOUNTED= new_fs "$mp" 2G
 }
 
 # unmount <name> and remount <name>. On the OverlayFS build a volume that is not mounted is a folder
@@ -76,7 +77,7 @@ git init -q --bare -b main $R
 git clone -q $R $U 2>/dev/null
 printf 'one\n' > $U/notes.txt
 printf 'target/\n' > $U/.gitignore
-printf 'target regenerable\n' > $U/.layrattributes
+printf 'target regenerable cache-portable\n' > $U/.layrattributes
 (cd $U && git add -A && git commit -qm "upstream 1" && git push -q origin main)
 
 # clone_project <name>: a project on the default volume (main), its main line unprotected in the macOS test mode.
@@ -142,6 +143,56 @@ has "the refusal names the volume" "volume 'slow'" "$out"
 remount slow
 ok "the volume is usable again" l volume list
 
+# Copied metadata can still point at a live folder on the destination volume.
+clone_project external-cache || exit 1
+E=$LAYR_ROOT/projects/external-cache
+# Model imported machine-local metadata pointing at the destination volume. `line move` cannot
+# create this setup: it correctly refuses moving a line across filesystems. Keep the external
+# folder plain so btrfs's per-subvolume st_dev does not trigger the existing volume guard first.
+mkdir "$FAST/external-cache"
+cp -a "$E/lines/main/." "$FAST/external-cache/" || exit 1
+l __empty-trash "$E/lines" || exit 1
+python3 - "$E/meta" "$FAST/external-cache" <<'PYFIXTURE'
+import json, pathlib, sqlite3, sys
+meta = pathlib.Path(sys.argv[1])
+with sqlite3.connect(meta / "db/layr.sqlite") as db:
+    line = db.execute("SELECT id FROM lines WHERE name='main'").fetchone()[0]
+(meta / "line-paths.json").write_text(json.dumps({line: sys.argv[2]}))
+PYFIXTURE
+rm "$FAST/external-cache/target/.layr-cache-location"
+echo original > "$FAST/external-cache/target/output"
+cache_inode=$(stat_field inode "$FAST/external-cache/target")
+output_inode=$(stat_field inode "$FAST/external-cache/target/output")
+python3 - "$FAST/external-cache/target/output" "$T/external-ready" "$T/external-go" <<'PY' &
+import os, pathlib, sys, time
+with open(sys.argv[1], 'a') as output:
+    pathlib.Path(sys.argv[2]).touch()
+    while not pathlib.Path(sys.argv[3]).exists(): time.sleep(.02)
+    output.write('writer survived\n'); output.flush(); os.fsync(output.fileno())
+PY
+writer=$!
+for i in $(seq 1 100); do [ -e "$T/external-ready" ] && break; sleep .02; done
+ok "the external cache writer is ready" test -e "$T/external-ready"
+out=$(l project move external-cache fast 2>&1); rc=$?
+no "a project move refuses unknown output in an external live line" test "$rc" = 0
+has "the refusal comes from live cache validation" 'cannot exclude active builds' "$out"
+ok "the external cache path remains present" test -d "$FAST/external-cache/target"
+eq "the external cache directory keeps its inode" "$cache_inode" "$(stat_field inode "$FAST/external-cache/target")"
+eq "the external output keeps its inode" "$output_inode" "$(stat_field inode "$FAST/external-cache/target/output")"
+eq "the external output keeps its bytes" original "$(cat "$FAST/external-cache/target/output")"
+no "unknown external output is not stamped" test -e "$FAST/external-cache/target/.layr-cache-location"
+touch "$T/external-go"
+wait "$writer"
+has "the writer continues at the preserved external path" 'writer survived' "$(cat "$FAST/external-cache/target/output")"
+ok "the refused project remains on its original volume" test -d "$E"
+no "the refused project exposes no partial copy" test -e "$FAST/projects/external-cache"
+
+# A live cache built before its first save has no folder overlay to enumerate.
+l --project p config ignore.local '["unsaved/"]' >/dev/null
+l --project p config regenerable '["unsaved"]' >/dev/null
+echo foreign-location > "$P/lines/main/unsaved/output"
+no "the unsaved cache has no saved overlay" l --project p overlay readers "$(overlay unsaved)"
+
 # Space before the move (the copy must keep the sharing).
 NS=$("$LAYR" __project-space $P | json "d['need']")
 
@@ -154,6 +205,8 @@ eq "the record names fast" "fast" "$(record_of p)"
 ok "the journal is gone" test ! -e $LAYR_ROOT/project-moves/p.json
 F=$FAST/projects/p
 ok "the project is on fast" test -d $F/lines/main
+no "the project move rejects a cache with no saved overlay" test -e "$F/lines/main/unsaved/output"
+ok "the moved unsaved cache starts with cold provenance" test -f "$F/lines/main/unsaved/.layr-cache-location"
 cd $F/lines/main || exit 1
 out=$(l status --short 2>&1); rc=$?
 eq "status works on fast" 0 "$rc"
