@@ -25,7 +25,7 @@ umask 077
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Known failures of the fs stack (fs-legacy-facades) on macOS, skipped so that the stack can merge
 # (2026-11-16): the xattr compares see com.apple.provenance, APFS refuses names that are not UTF-8, and the
-# thin, trash, corrupt-blob and EPERM cases need a fix on macOS. temporary_aliases fails only in the sandbox.
+# thin, trash, corrupt-blob and EPERM cases need a fix on macOS. The last two fail only in the sandbox.
 macos_known=(
     fs_contract_tests::plain_copy_preserves_byte_names_attributes_sparse_data_and_safe_paths
     fs_contract_tests::failed_plain_copy_returns_retry_authority_when_cleanup_cannot_finish
@@ -40,6 +40,8 @@ macos_known=(
     thin::tests::copies_succeed_while_files_change
     store::trash_tests::two_emptiers_of_one_trash_report_no_failure
     apfs::driver::tests::temporary_aliases_and_sticky_parent_children_keep_cleanup_authority
+    # Runs git as the caller with its own HOME, whose .gitconfig the sandbox refuses.
+    cmd::work::patch_identity_tests::patch_validation_and_application_resolve_the_caller_once
 )
 skips=()
 for name in "${macos_known[@]}"; do skips+=(--skip "$name"); done
