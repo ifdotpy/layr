@@ -384,13 +384,6 @@ impl Drop for CheckLock {
     }
 }
 
-<<<<<<< head
-/// The locks of a check executor. Without `only`: `meta/checks.lock` exclusive, one executor per
-/// project. With `only`: that lock shared, and `meta/checks-<name>.lock` exclusive for each name, so
-/// runs of other checks go on in parallel and a full executor waits for none of them but starts
-/// only when no run is left.
-fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<CheckLock>> {
-=======
 /// `--slot <n>` of `checks run --only`: 0 without it, else 1 to 7.
 fn run_slot(value: Option<&str>) -> Result<u8> {
     let Some(value) = value else {
@@ -409,7 +402,6 @@ fn run_slot(value: Option<&str>) -> Result<u8> {
 /// runner runs the same check of different states at once, one state per slot (the runner picks the
 /// states; layr does not keep two slots off one state).
 fn checks_locks(meta: &std::path::Path, only: &[String], slot: u8) -> Result<Vec<CheckLock>> {
->>>>>>> f936024
     use rustix::fs::FlockOperation;
     let open =
         |name: &str| std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join(name)).map(CheckLock);
@@ -423,11 +415,6 @@ fn checks_locks(meta: &std::path::Path, only: &[String], slot: u8) -> Result<Vec
         .context("a check watcher is already active for this project")?;
     let mut locks = vec![project];
     for name in only {
-<<<<<<< head
-        let lock = open(&format!("checks-{name}.lock"))?;
-        rustix::fs::flock(&lock.0, FlockOperation::NonBlockingLockExclusive)
-            .with_context(|| format!("check {name} already runs for this project"))?;
-=======
         let file = if slot == 0 { format!("checks-{name}.lock") } else { format!("checks-{name}.{slot}.lock") };
         let lock = open(&file)?;
         rustix::fs::flock(&lock.0, FlockOperation::NonBlockingLockExclusive).with_context(|| {
@@ -437,7 +424,6 @@ fn checks_locks(meta: &std::path::Path, only: &[String], slot: u8) -> Result<Vec
                 format!("check {name} already runs in slot {slot} for this project")
             }
         })?;
->>>>>>> f936024
         locks.push(lock);
     }
     Ok(locks)
@@ -1475,10 +1461,6 @@ mod policy_tests {
         assert!(format!("{only:#}").contains("already active"), "{only:#}");
         let inherited_full = full[0].0.try_clone().unwrap();
         drop(full);
-<<<<<<< head
-        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap();
-        drop((xfs, inherited, inherited_full));
-=======
         let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"]), 0).unwrap();
         drop((xfs, inherited, inherited_full));
         std::fs::remove_dir_all(meta).unwrap();
@@ -1503,7 +1485,6 @@ mod policy_tests {
         for bad in ["0", "8", "x", "-1"] {
             assert!(run_slot(Some(bad)).is_err(), "{bad}");
         }
->>>>>>> f936024
         std::fs::remove_dir_all(meta).unwrap();
     }
 
