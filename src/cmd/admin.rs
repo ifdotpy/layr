@@ -2717,9 +2717,10 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     let converted: Vec<String> =
                         copies.iter().filter(|p| tracked.contains(*p) && same_mode(p)).cloned().collect();
                     if !converted.is_empty() {
-                        let mut args = vec!["diff", "--name-only", "-z", "HEAD", "--"];
-                        args.extend(converted.iter().map(String::as_str));
-                        let out = caller_git(ctx, &src, &args)?;
+                        // Every path that git itself calls changed, with no pathspec: `git diff` takes no pathspec file,
+                        // and thousands of paths on the command line would pass ARG_MAX. The checkout is clean (init
+                        // refuses another), so the list is short.
+                        let out = caller_git(ctx, &src, &["diff", "--name-only", "-z", "HEAD"])?;
                         if !out.status.success() {
                             bail!("cannot compare the checkout with HEAD: {}", String::from_utf8_lossy(&out.stderr).trim());
                         }
