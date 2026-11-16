@@ -251,6 +251,16 @@ finish() {
     [ "$FAIL" -eq 0 ]
 }
 
+# Remove simulated build output while retaining the cache's established location provenance.
+clear_cache_output() (
+    case "${1:-}" in ""|/|.|..) echo 'FATAL: unsafe cache fixture path' >&2; exit 1 ;; esac
+    [ ! -L "$1" ] || { echo 'FATAL: cache fixture root is a symlink' >&2; exit 1; }
+    shopt -s dotglob nullglob
+    for entry in "$1"/*; do
+        [ "${entry##*/}" = .layr-cache-location ] || rm -rf -- "$entry"
+    done
+)
+
 # A small project folder.
 case_sensitive() { # true when the test folder tells README and readme apart
     touch "$T/.CaseProbe"

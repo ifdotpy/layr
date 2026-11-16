@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # `line new X <line>` takes the shared cache saved with the line's head (docs/cache-overlays.md): when the
 # line's own cache is of an older head and a protected line or a check runner saved a cache with the head
 # itself, the new line gets that one. A user's cache of an unprotected line at that head does not count, and
@@ -9,7 +10,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

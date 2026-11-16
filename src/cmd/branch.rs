@@ -150,6 +150,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name),
         ));
     }
+    let _line_lock = repo.line_lock(&l)?;
     let _lock = repo.p.lock()?;
     let from = repo.working(&l);
     if !from.is_dir() {
@@ -167,6 +168,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         None => return Err(exit(1, format!("error: line '{}' is already in the store: {}", l.name, from.display()))),
     };
+    repo.validate_cache_locations(&l, &from, &to, crate::cache_overlay::CacheAccess::Live)?;
     crate::linepaths::register_with(&ctx.store.root, Some(&to));
     let back = a.pos.len() == 1;
     let done = crate::fsutil::rename_tree(&from, &to).map_err(anyhow::Error::from).and_then(|_| {
@@ -178,6 +180,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
     });
     crate::linepaths::register(&ctx.store.root);
     done?;
+    repo.validate_cache_locations(&l, &to, &to, crate::cache_overlay::CacheAccess::Live)?;
     outln!(ctx, "Moved line {} to {}", l.name, to.display());
     Ok(0)
 }
@@ -660,11 +663,10 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         drop(lock);
         // The caches of the new lines name the place of their build: relocate them at the place of the line. The
         // relocation runs as the line owner, who cannot enter the store's work folder before the move.
-        if let Ok(overlays) = repo.folder_overlays() {
-            let folders: Vec<String> = overlays.into_iter().map(|(_, f)| f).collect();
-            for l in &lines {
-                repo.relocate_caches(l, &folders, &repo.working(l));
-            }
+        for l in &lines {
+            let working = repo.working(l);
+            let folders = repo.cache_candidates(&working)?;
+            repo.relocate_caches(l, &folders, &working, crate::cache_overlay::CacheAccess::Prepared)?;
         }
         if a.get("--count").is_some() {
             if a.has("--json") {
@@ -844,9 +846,8 @@ pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.materialize(&moved, &start, &w)?;
     // The caches of the line come with it (a live move sends them with `sync --caches`). A cache that cannot be
     // taken leaves its folder cold; the line is adopted.
-    if let Err(e) = repo.take_caches(ctx, &moved, &start, Some(&l), &w) {
-        eprintln!("warning: caches of line '{name}' not taken: {e:#}");
-    }
+    let folders = repo.take_caches(ctx, &moved, &start, Some(&l), &w)?;
+    repo.relocate_caches(&moved, &folders, &w, crate::cache_overlay::CacheAccess::Prepared)?;
     crate::gitbridge::sync_store_access(repo)?;
     let mut rec = Record::new("line.adopt");
     rec.lines.insert(

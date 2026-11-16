@@ -26,9 +26,9 @@ Git was built for one person, one working copy, and files that change by hand. T
 has a dozen agents working at once, each with its own folder, its own build cache, and shell
 commands that change files behind the editor's back. Layr is built for that.
 
-- **Parallel work is cheap.** A new line is a file system snapshot: constant time, no copy, the
-  build cache comes along. 16 lines with 128 MiB caches take **153 MiB** in Layr and
-  **2,508 MiB** as Git worktrees ([measured](docs/performance.md)).
+- **Parallel work is cheap.** A new line is a file system snapshot: constant time, no copy.
+  Build caches are bound to their absolute workspace and target location by default; a new line
+  starts cold. Explicitly portable caches can share blocks across lines ([cache contract](docs/cache-overlays.md#build-location-safety)).
 - **Nothing gets lost.** Layr snapshots the folder itself, so it sees what `rm -rf`, `sed -i` or a
   code generator did. Every operation is a signed record, and `layr undo` reverses it.
 - **You ship what you checked.** Checks, approvals and deploys name one exact state. Change one
@@ -172,7 +172,7 @@ editors and tools that read Git output keep working.
 | | |
 |---|---|
 | **Undo what an agent did** | `layr op log`, `layr undo`, `layr restore --source <state> .` ([review](docs/review.md)) |
-| **Run many agents at once** | `layr line new agent main --count 16`: separate folders, shared warm caches |
+| **Run many agents at once** | `layr line new agent main --count 16`: separate folders, location-bound caches (portable sharing is opt-in) |
 | **See conflicts before merging** | `layr status` lists files that other live lines change too |
 | **Merge lockfiles by rebuilding them** | `package-lock.json derive=npm` in `.layrattributes` ([merge](docs/merge.md)) |
 | **Find the step that broke it** | `layr bisect run --auto -- cargo test` searches every saved step, not only states with messages |

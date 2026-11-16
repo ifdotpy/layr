@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # Eviction of cache states (docs/cache-overlays.md, "Eviction"): not every machine must store all data; a store
 # remote must. With `gc.evict on`, `gc --repair` removes the local tree of a cache state that a store remote holds
 # and that no working folder uses now, and says how many bytes went. A new line that takes that cache fetches it back
@@ -8,7 +9,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
@@ -30,9 +31,13 @@ kb() { du -sk "$O/states" | cut -f1; }
 l line new side main >/dev/null 2>&1
 cd "$P/side" || exit 1
 echo s0 > s0.txt; l add s0.txt >/dev/null; l save -qm s0
+eq "an unchanged relocated cache keeps its inherited part" "$(head_of main)" "$(head_of side)"
+inherited=$(head_of side)
+head -c 2000000 /dev/urandom > target/side.bin
+echo built >> s0.txt; l add s0.txt >/dev/null; l save -qm built
 s0=$(l rev-parse head)
-head -c 2000000 /dev/urandom > target/side.bin; l save --overlays -q
 c1=$(head_of side)
+no "a real output change creates another cache part" test "$inherited" = "$c1"
 l push cloud -q >/dev/null 2>&1
 # Two caches after the push: c2 (not pushed, no line shows it) and c3 (the newest cache of side).
 cp target/side.bin "$T/side.bin"; rm target/side.bin

@@ -19,7 +19,7 @@ l line new -q topic
 cd "$P/topic" || exit 1
 has "recursive clones preserve native ACLs" 'group:everyone allow read' "$(/bin/ls -le acl/sub/file)"
 printf 'node_modules/\n' >> .gitignore
-printf 'node_modules regenerable\n' > .layrattributes
+printf 'node_modules regenerable cache-portable\n' > .layrattributes
 l add -A && l save -qm attributes
 mkdir -p node_modules/pkg
 printf 'cache\n' > node_modules/pkg/data

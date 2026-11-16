@@ -70,9 +70,12 @@ pub trait CacheAdapter: Send + Sync {
         let _ = (host, folder);
         Ok(false)
     }
-    /// `folder` came from another path (the cache of a new line, or of a merge), and it is used at `at` from now on.
-    /// Makes stale the build outputs that name the old place, so the next build makes them again. Returns the number
-    /// of outputs made stale. Runs no process, so it needs no host. The default changes nothing.
+    /// Best-effort relocation of explicitly portable output. Regenerable output is location-bound by
+    /// default: core rejects a different location before invoking an adapter. The user's portable opt-in
+    /// accepts embedded paths that this hook cannot repair. An error rejects the entire cache.
+    /// `folder` came from another path, and it is used at `at` from now on.
+    /// Rewrites or makes stale the build outputs that name the old place. Returns the number
+    /// of outputs changed. Runs no process, so it needs no host. The default changes nothing.
     fn relocated(&self, folder: &Path, at: &Path) -> Result<usize, String> {
         let _ = (folder, at);
         Ok(0)

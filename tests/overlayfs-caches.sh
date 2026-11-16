@@ -7,6 +7,7 @@ sample "$T/src"
 l init cachetest --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/cachetest/lines
 cd "$P/main" || exit 1
+l config cache.portable '["target"]'
 l config regenerable '["target"]'
 mkdir -p target
 no "the cache is not a mount" mountpoint -q target
@@ -19,9 +20,8 @@ printf changed > "$P/warm/target/output"
 eq "the source cache remains unchanged" built "$(cat target/output)"
 eq "cache changes do not enter status" "" "$(cd "$P/warm" && l status -s)"
 no "history excludes the cache output" l show head:target/output
-# A build can remove and recreate the cache root.
-ok "remove the cache root" rm -rf target
-mkdir target
+# Clearing build output retains the established provenance.
+clear_cache_output target
 printf rebuilt > target/output
 l save -q --overlays
 eq "save --overlays preserves rebuilt output" rebuilt "$(cat target/output)"
@@ -30,7 +30,7 @@ printf '\nnew build input\n' >> notes.txt
 l save -qam "new build input"
 l save -q --overlays
 # The regenerable setting belongs to this machine: a .layrattributes file makes target a cache path on the peer too.
-echo 'target regenerable' > .layrattributes
+echo 'target regenerable cache-portable' > .layrattributes
 l add .layrattributes
 l save -q -m "target is a cache"
 l save -q --overlays

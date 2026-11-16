@@ -1,5 +1,63 @@
 # Cache overlays and remotes per layer
 
+## Build location safety
+
+Regenerable means disposable, not relocatable. By default every cache is **location-bound**:
+its compatibility key records the absolute workspace and target path where its output is used.
+A new line, a merge/union from another location, adoption at another path, a physical line move,
+a check copy, or restoration elsewhere cannot reuse that output. The destination starts cold;
+a merge keeps its own compatible cache but does not union foreign output. Restoring the same
+line at the same location stays warm. A logical rename that keeps the working folder keeps the
+same build location.
+
+Caches saved by older Layr versions have no location provenance. They are incompatible and
+rejected, never labelled with the current location. Private preparation copies reset them. At a live
+location Layr cannot exclude concurrent builds on every platform, so it refuses incompatible,
+missing, or malformed provenance and leaves the output intact. Stop builds and explicitly discard
+that cache before asking Layr to establish cold output, then rebuild. Live cache folders
+carry `.layr-cache-location` metadata; saved states record provenance in `cache_key_parts`.
+Temporary preparation folders are not build locations: Linux checks record `/work`, while macOS
+checks record their actual private copy path, including when the source uses APFS views/thin layers.
+
+Cross-location sharing is an explicit, per-cache opt-in using the existing attribute/path-list
+configuration mechanisms:
+
+```text
+# .layrattributes (the folder must also be ignored)
+target regenerable cache-portable
+```
+
+Or use the project setting `layr config cache.portable '["target"]'`. The list contains folder
+paths, just like `regenerable`. `-cache-portable` unsets the attribute; remove the folder from the
+project list too if it is configured there. Both the saved cache and the destination must opt in.
+Changing mobility requires a cold cache; an existing live cache is refused until explicitly discarded.
+Legacy caches stay incompatible even after opting in.
+
+Portable output restores cross-location sharing and the existing adapter relocation, **at the
+user's risk**. Cargo relocation is best effort: it is unsafe for `env!("OUT_DIR")`, proc-macros,
+`build.rs`-generated paths, `CARGO_BIN_EXE_*`, and `CARGO_MANIFEST_DIR`. It cannot repair every
+path compiled into an artifact. A relocation that fails or times out, including a selected adapter
+or worker that cannot run, rejects the whole incoming cache. Private copies start cold; live
+output is preserved and the operation refuses if a safe reset cannot be established.
+The same policy applies at the adapter boundary to every regenerable cache, not only Cargo.
+
+Provenance is initialized only when Layr creates a new cold cache folder, before any build. Literal
+`regenerable` paths are established during line preparation or when configured; globs discover
+existing paths but cannot prove that their contents were built here. A missing marker is never
+reconstructed from saved history. Tools that delete the cache root must let Layr establish a new
+cold folder before rebuilding. For a wildcard-only declaration, removing the folder and rerunning
+is insufficient: an absent folder cannot match the discovery scan. Stop builds, remove the unknown
+folder, then add its exact path as a literal `regenerable` rule in `.layrattributes`, or configure
+`layr config regenerable '["target"]'` (including any other configured paths). The config command
+initializes absent declared paths; with a literal attribute, run `layr save --overlays` to establish
+the cold folder before rebuilding. Git import keeps unknown output in the original checkout backup.
+Physical line moves validate live cache paths before changing the location and refuse incompatible
+live caches; this includes regenerable paths with no saved overlay. Versioned and staged files in
+such a folder remain versioned data and are never reset.
+
+The sharing/union behaviour described below applies only to explicitly portable caches; all
+cache selection and placement also enforce this build-location contract.
+
 Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
 Built: slices a to d (sections 11 to 14).
 This file extends [overlays](overlays.md) (the model of layers, section 9 = what is built) and
@@ -724,7 +782,7 @@ was built at another path, and `at` is the path where the folder is used from no
 | `layr merge`, `merge --caches-only`, a follow pass | in `pull_caches`, after each folder is in place |
 | an automatic check (docs/checks.md) | on its copy, for the place where the check sees it |
 
-The registry sources are the one path that relocation cannot change. Cargo keeps the absolute path of each
+Registry sources are another kind of path that best-effort portable relocation cannot repair. Cargo keeps the absolute path of each
 registry source (`<CARGO_HOME>/registry/src/...`) in the unit's fingerprint, so a cache built with another
 CARGO_HOME builds every registry crate again; only the workspace crates stay warm. Use one absolute CARGO_HOME on
 every machine that shares caches (the laptop shell, check runners, CI), outside any user home, for example
@@ -733,7 +791,7 @@ there. When a cache came from a registry folder that this machine does not have,
 `built with the cargo registry at <path>, which this machine does not have` (`CacheAdapter::relocation_note`).
 
 The worker runs it as the owner, root too, also with `prune=none`, with a 60 s limit. It runs no process
-and never fails a command. The cargo adapter reads the dep-info files (`<profile>/deps/*.d`). The first
+and a failure or timeout starts the cache cold. The cargo adapter reads the dep-info files (`<profile>/deps/*.d`). The first
 rule of each names the place of its build. A unit built at another place goes stale when its dep-info
 names a path of that place that rustc compiled in, or that cargo compares by its absolute path:
 
@@ -743,8 +801,8 @@ names a path of that place that rustc compiled in, or that cargo compares by its
   the package).
 
 The adapter removes the fingerprint folder of such a unit, so the next build makes it again. A path in the
-old target folder (`OUT_DIR`) does not make a unit stale: that content was copied with the folder, and
-cargo finds it relative to the target folder. On the target folder of Studio (1,845 units) the pass takes
+old target folder (`OUT_DIR`) does not make a unit stale in the portable relocation heuristic.
+That heuristic is unsafe for compiled-in generated paths; only location-bound caches provide the default safety contract. On the target folder of Studio (1,845 units) the pass takes
 0.18 s.
 
 ### 18.6 Build env, profiles and the live set

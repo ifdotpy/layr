@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
@@ -15,7 +15,7 @@ l protect main --remove >/dev/null 2>&1 || true
 ok "an overlay pro" l overlay create pro -q
 ok "an overlay side" l overlay create side -q
 # The cache of main.
-rm -rf target; mkdir -p target/debug; echo public-bin > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo public-bin > target/debug/x
 ok "save --overlays in the view of main" l save --overlays -q
 TG=$(overlay target)
 has "the cache of main exists" "$TG" "$(l overlay list)"
@@ -64,5 +64,39 @@ cd $P/main
 mkdir -p "$T/remote"
 ok "a store remote" l remote add r "file://$T/remote"
 has "push sends the cache of the view" "$VC" "$(l push r 2>&1)"
+
+# A folder with only a view cache still needs final relocation, including that cache's adapter settings.
+sample "$T/view-only-src"
+echo 'target regenerable cache-portable' > "$T/view-only-src/.layrattributes"
+l init view-only --from "$T/view-only-src" -q >/dev/null
+cd "$LAYR_ROOT/projects/view-only/lines/main"
+l protect main --remove >/dev/null 2>&1 || true
+ok "create pro for the view-only cache" l overlay create pro -q
+ok "select pro before building the view-only cache" l overlay use pro -q
+echo view-only > target/out
+ok "save a cache only in pro" l save --overlays -q
+VC=$TG.view.pro
+no "there is no main-view cache" l overlay show "$TG" --json
+ok "a new line takes a view-only cache" l line new view-warm main -q
+W=$LAYR_ROOT/projects/view-only/lines/view-warm
+eq "the view-only cache stays warm" view-only "$(cat "$W/target/out")"
+python3 - "$W" <<'PYTHON'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+assert json.loads((root / 'target/.layr-cache-location').read_text())['location'] == {
+    'workspace':str(root), 'target':str(root / 'target')}
+PYTHON
+eq "the view-only marker names the final location" 0 "$?"
+ok "the relocated view-only cache can be saved" l --line view-warm save --overlays -q
+# No Cargo.toml: cargo relocation must come from the view cache's explicit adapter setting.
+mkdir -p target/debug/deps target/debug/.fingerprint/probe-aaa
+printf '%s/target/debug/deps/probe-aaa.d: src/main.rs\n# env-dep:CARGO_MANIFEST_DIR=%s\n' "$PWD" "$PWD" > target/debug/deps/probe-aaa.d
+echo fingerprint > target/debug/.fingerprint/probe-aaa/lib-probe
+ok "set the view cache adapter before saving" l overlay set "$VC" --prune cargo
+ok "save the fingerprint in the view cache" l save --overlays -q
+has "the saved source contains the fingerprint" fingerprint "$(l overlay show "$VC" head:debug/.fingerprint/probe-aaa/lib-probe)"
+ok "a new line uses the view cache's adapter" l line new view-adapted main -q
+eq "the adapted cache stays warm" view-only "$(cat "$LAYR_ROOT/projects/view-only/lines/view-adapted/target/out")"
+no "the adapter invalidates the foreign fingerprint" test -d "$LAYR_ROOT/projects/view-only/lines/view-adapted/target/debug/.fingerprint/probe-aaa"
 
 finish

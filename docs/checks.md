@@ -101,30 +101,32 @@ each slot another state; layr does not keep two slots off one state.
 state. It does not add change checks to an unrelated state. It can restore the selected state from the
 remote. It cannot be combined with `--required-checks`.
 
-A check starts warm. Its copy of the state gets the cache of each cache overlay by the rules of
-`layr line new <state>` ([cache overlays](cache-overlays.md)): the newest cache saved with the state
-or its nearest ancestor that has one, of this platform and with a fitting key, from the caller's
-own caches or those of a protected line. The check can write in the copy, cache folders included.
-Nothing goes back: the copy and its caches are gone after the check, and the copy writes no
-overlay line. The key uses the environment of the caller of `checks`, not the empty environment of
-the sandbox, so pin key variables in the project (`[workspace.metadata.layr-retest] env` for cargo).
-The copy's caches are relocated to the place where the check sees them (`/work` on Linux, the
-private copy on macOS), so a unit with a compiled-in path of another line builds again.
+A check takes a cache only when the platform, key, permissions, and build location fit
+([cache overlays](cache-overlays.md#build-location-safety)). Linux checks execute at `/work`;
+macOS checks use their actual private copy path. Output built in a line starts cold in a check
+by default. A compatible cache saved by a prior Linux check can stay warm at `/work`. Cross-location
+sharing and best-effort relocation require an explicit portable opt-in, at the user's risk.
+The check can write in its copy, cache folders included. The copy writes no overlay line.
+The key uses the environment of the caller of `checks`, so pin key variables in the project
+(`[workspace.metadata.layr-retest] env` for cargo).
 
-A privileged check on Linux starts warm too. Its root copy is made from a read-only Btrfs snapshot
-of the check copy, and a snapshot leaves out nested subvolumes, so each cache folder of the check
-copy (`target/`, a nested subvolume) is frozen the same way and copied into the root copy, sharing
-its blocks (`copy_cache_folders` in `src/cmd/checks.rs`, t256). Before this, each privileged suite
-of layr built all 363 units again (13 minutes on the x86_64 runner, 2026-11-14).
+A privileged check on Linux uses the same `/work` build location and cache compatibility rules as
+sandboxed checks. Cache selection, relocation and provenance validation run in an isolated staging
+snapshot beneath the daemon's private work directory on the store's filesystem before it is frozen.
+A read-only snapshot leaves out nested cache subvolumes, so each cache folder is frozen separately and copied into the root copy, sharing blocks
+where possible (`copy_cache_folders` in `src/cmd/checks.rs`, t256). The root copy may be on a plain
+filesystem: it preserves the validated `/work` marker and does not create managed caches there.
+Output built at `/work` remains warm; output from another location requires explicit portability.
 
 A passing check of a head of a protected line in `checks.lines` gives its caches back. The executor
 saves the cache folders of the copy as cache states saved with that head, on the line
 `<line>.checks-<os>-<arch>` (for example `main.checks-linux-aarch64`). The first such check makes
 the line at its head, and its head stays there. Each line keeps its newest cache (`history=last`),
-and the next push deletes the older cache states on the remote. Another machine of the platform then
-starts warm from that head (`layr line new X <state>`, and `layr line new X main` when main's own
-cache is of an older head): one build per head warms the next check and every machine. A plain
-`layr fetch <remote>` on that machine takes only the records of these caches; `line new` and a check fetch the cache
+and the next push deletes the older cache states on the remote. Compatible caches can warm later
+checks at the same execution location. A new line or another
+build location starts cold by default. Cross-location sharing requires the explicit portable
+opt-in described in [cache overlays](cache-overlays.md#build-location-safety), at the user's risk.
+A plain `layr fetch <remote>` on that machine takes only the records of these caches; `line new` and a check fetch the cache
 that they take on demand ([remotes](remotes.md)). A protected
 head is reviewed code built in the sandbox, so these caches count as caches of a protected line for
 other users. A pending fast-forward entry of the queue into such a line counts as its next head: a server

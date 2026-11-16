@@ -24,12 +24,13 @@ eq "old peer has the same head" "$(l rev-parse head)" "$(LAYR_ROOT=$T/peer-old/s
 new_fs "$T/peer-new" 2G
 ok "old client sends to new peer" "$OLD_LAYR" sync -q -- env LAYR_ROOT=$T/peer-new/store "$LAYR" serve-peer compat
 eq "new peer has the same head" "$(l rev-parse head)" "$(LAYR_ROOT=$T/peer-new/store "$LAYR" --project compat --line main rev-parse head)"
-# The CLI name changes to cache, but older stores and peers must keep warm data.
+# Older stores remain readable; caches without location provenance start cold.
 "$OLD_LAYR" layer add target
 printf 'old build output\n' > target/old
 "$OLD_LAYR" save -q --layers
 l line new -q read-old-cache
-ok "new client restores an old saved cache" cmp target/old ../read-old-cache/target/old
+no "new client rejects an old cache without provenance" test -e ../read-old-cache/target/old
+l config cache.portable '["generated"]'
 l config regenerable '["generated"]'
 mkdir -p generated
 printf 'new build output\n' > generated/new
@@ -41,7 +42,7 @@ LAYR_ROOT=$T/peer-old/store "$OLD_LAYR" --project compat adopt main >/dev/null
 ok "old peer restores the new cache content" cmp generated/new "$T/peer-old/store/projects/compat/lines/main/generated/new"
 ok "old client sends caches to new peer" "$OLD_LAYR" sync -q --auto --layers -- env LAYR_ROOT=$T/peer-new/store "$LAYR" serve-peer compat
 LAYR_ROOT=$T/peer-new/store l --project compat adopt main >/dev/null
-ok "new peer restores the old cache content" cmp target/old "$T/peer-new/store/projects/compat/lines/main/target/old"
+no "new peer rejects the old cache without provenance" test -e "$T/peer-new/store/projects/compat/lines/main/target/old"
 ok "new peer restores the new cache content" cmp generated/new "$T/peer-new/store/projects/compat/lines/main/generated/new"
 
 finish

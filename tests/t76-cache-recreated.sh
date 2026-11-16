@@ -1,29 +1,25 @@
 #!/bin/bash
 # ci: macos overlayfs
-# A tool deletes a cache and makes a plain folder (cargo clean). The next plain save makes it a
-# cache again first: its files never enter a state.
+# Replacing a cache root loses provenance. A save refuses unknown bytes, preserving the folder.
 . "$(dirname "$0")/lib.sh"
-
-sample $T/src
-l init g --from $T/src -q >/dev/null
+sample "$T/src"
+l init g --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/g/lines
-cd $P/main || exit 1
+cd "$P/main"
 l config regenerable '["target"]'
 l line new -q w >/dev/null
-cd $P/w || exit 1
+cd "$P/w"
 echo one >> notes.txt
 l save -q
-rm -rf target; mkdir target; echo big > target/x
-echo two >> notes.txt
-l save -q
-eq "the state has no cache content" "" "$(l show head@{0}:target | tail -n +3)"
-eq "the state has the change" 1 "$(l show head@{0}:notes.txt | grep -c two)"
-eq "the file is still in the folder" big "$(cat target/x)"
-eq "status ignores the cache" " M notes.txt" "$(l status -s)"
-# Again, with the cache already a layer in an earlier state: replace it twice.
-rm -rf target; mkdir target; echo big2 > target/y
-echo three >> notes.txt
-l save -q
-eq "a second time: no cache content" "" "$(l show head@{0}:target | tail -n +3)"
+rm -rf target; mkdir -p target; echo big > target/x
+out=$(l save -q 2>&1); rc=$?
+no "a recreated cache with unknown bytes is refused" test "$rc" = 0
+has "the refusal keeps output intact" 'output left intact' "$out"
+eq "the file remains in the recreated folder" big "$(cat target/x)"
+no "a save never stamps the unknown replacement" test -e target/.layr-cache-location
+rm -rf target; mkdir -p target; echo big2 > target/y
+out=$(l save --overlays -q 2>&1); rc=$?
+no "an explicit overlay save also refuses unknown replacement output" test "$rc" = 0
 eq "the second file is kept" big2 "$(cat target/y)"
+no "the second replacement is not stamped" test -e target/.layr-cache-location
 finish

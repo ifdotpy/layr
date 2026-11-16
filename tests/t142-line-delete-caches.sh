@@ -6,7 +6,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/overlays/$TG/states

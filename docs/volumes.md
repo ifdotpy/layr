@@ -1,5 +1,10 @@
 # Volumes
 
+Moving a project or line changes its build location. Private project copies start cold at the
+destination; only explicitly portable caches run best-effort relocation. A physical line move
+refuses incompatible live caches before moving, preserving their bytes when build exclusion
+cannot be established. Caches without provenance are never relabelled ([cache contract](cache-overlays.md#build-location-safety)).
+
 A volume is a file system that holds projects. The store root is the volume `main`. Other
 volumes let one store place projects on several disks, for example active projects on a fast
 SSD and archives on a large HDD.

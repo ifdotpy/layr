@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: overlayfs macos-plain
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A new line from a state takes the cache saved with that state (`cache_of`). A state imported
 # from git has no line: the old rule walked to the nearest ancestor that a line made (here a line
 # that pushed its commit) and took that line's old cache.
@@ -7,7 +8,7 @@
 
 # A Git remote with one commit; the project starts from it.
 sample $T/git-src
-echo 'target regenerable' > $T/git-src/.layrattributes
+echo 'target regenerable cache-portable' > $T/git-src/.layrattributes
 git init -q -b main $T/git-src
 git -C $T/git-src add -A && git -C $T/git-src commit -qm one
 git clone -q --bare $T/git-src $T/origin.git
@@ -22,7 +23,7 @@ l line new old main >/dev/null
 cd $P/old
 echo change >> notes.txt
 l add notes.txt && l save -qm "old work" >/dev/null
-rm -rf target; mkdir -p target/debug; echo old > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo old > target/debug/x
 l save --overlays -q
 l git push origin HEAD:refs/heads/main >/dev/null 2>&1
 ok "the old line's commit is on the remote" git -C $T/origin.git rev-parse --verify -q main
@@ -38,7 +39,7 @@ l git fetch origin >/dev/null 2>&1
 head=$(l rev-parse origin/main)
 l merge origin/main -q >/dev/null 2>&1 || l merge origin/main --expect "$head" -q >/dev/null
 eq "main is at the imported state" "$head" "$(l rev-parse main)"
-rm -rf target; mkdir -p target/debug; echo new > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo new > target/debug/x
 l save --overlays -q
 eq "main stays at the imported state" "$head" "$(l rev-parse main)"
 

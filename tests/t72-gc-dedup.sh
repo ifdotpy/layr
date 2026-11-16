@@ -10,7 +10,7 @@ mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$
 inode() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$1"; }
 
 sample $T/src
-printf 'target regenerable\nout2 regenerable\n' > $T/src/.layrattributes
+printf 'target regenerable cache-portable\nout2 regenerable cache-portable\n' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
@@ -20,7 +20,7 @@ l protect main --remove >/dev/null 2>&1 || true
 # same content, as a build tool does, and one file with other content.
 l line new a main >/dev/null
 cd $P/a
-rm -rf target; mkdir -p target/debug
+clear_cache_output target; mkdir -p target/debug
 head -c 600000 /dev/urandom > target/debug/same.o
 head -c 600000 /dev/urandom > target/debug/other.o
 mkdir -p out2; head -c 600000 /dev/urandom > out2/x.o
