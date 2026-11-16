@@ -223,6 +223,25 @@ records() { python3 -c 'import sqlite3,sys; print("\n".join(r for (r,) in sqlite
 eq "no record of the project names the hidden overlay" 0 "$(records | grep -c hiddenpatch7)"
 ok "back to the view of pro" l overlay use pro -q
 no "hidden.c left the folder" test -e hidden.c
+# A delete of a patched file with --to main is refused (in Git: a modify/delete conflict): the patch stays.
+headd=$(l rev-parse head)
+ok "rm of the patched lib.c" l rm -q lib.c
+out=$(l save -q -m "x" --to main 2>&1)
+eq "the delete with --to main fails (exit 1)" 1 "$(l save -q -m "x" --to main >/dev/null 2>&1; echo $?)"
+has "the refusal names the patch" "'lib.c' has a patch of overlay 'pro', and its delete in main would delete the patch too" "$out"
+has "and the way to drop the patch" "layr restore --parent lib.c" "$out"
+eq "the refused delete made no state" "$headd" "$(l rev-parse head)"
+eq "pro keeps the patch" 1 "$(l overlay show pro head:lib.c | grep -c "$MARK patch move")"
+ok "main keeps lib.c after the refusal" l show head:lib.c
+# The way that the refusal names: drop the patch, then delete the file in main.
+ok "restore --parent brings the version of main" l restore --parent lib.c
+eq "the folder has no patch" 0 "$(grep -c "$MARK" lib.c)"
+ok "the save drops the patch" l save -q -m "drop the patch of lib.c"
+no "pro has no entry for lib.c" l overlay show pro head:lib.c
+ok "rm of lib.c without a patch" l rm -q lib.c
+ok "the delete goes to main" l save -q -m "delete lib.c" --to main
+no "main lost lib.c" l show head:lib.c
+eq "the folder is clean after the delete" "" "$(l status --porcelain)"
 
 # 6. overlay move keeps its meaning: the file leaves main at the next save, and the output says so.
 out=$(l overlay move pro keep.c)

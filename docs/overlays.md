@@ -146,9 +146,15 @@ Built so far (the rest of this file describes the code until a row says "built")
   - the change overlaps the patch (the same lines or the lines next to them, as in Git);
   - the file is not text (a binary file, a link);
   - only the overlay has the file (the view of the ancestor does not show it);
-  - the save renames a file that the overlay holds.
+  - the save renames a file that the overlay holds;
+  - the save deletes a file that the overlay holds (built 2026-11-16, owner decision: as a Git user
+    expects). The delete would take the patch too. Git stops such a cherry-pick with a modify/delete
+    conflict, and `git rm` refuses a file with changes that the commit does not have.
   Each refusal names the two ways on: a save without `--to`, or `layr overlay move <ancestor> <path>`,
-  which moves the whole file.
+  which moves the whole file. The refusal of a delete names these: a save without `--to` (the view
+  hides the file, and the ancestor keeps it), or `layr restore --parent <path>` and a save in the view
+  of the overlay, which drops the patch; after that the delete goes to the ancestor. A file that
+  `layr overlay move main` named is deleted whole.
 - `layr overlay move main <paths>` moves whole files down to `main`: after the next save `main` holds
   the version that the folder shows, and every overlay of the view drops its entry and its marker for
   the path. The command says that the file has content of an overlay and that every reader of the
