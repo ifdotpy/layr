@@ -967,8 +967,8 @@ pub struct Split {
 /// in Git (owner decision 2026-11-15): the ancestor gets only the change of this save (a three-way merge;
 /// base: the version that the folder showed, ours: the version of the view of the ancestor, theirs: the
 /// saved version), and the overlay keeps its patch and shows the saved version. A change that overlaps
-/// the patch, a file that is not text, a file that only the overlay has, and a rename of such a file are
-/// refused: the private part of the file never goes down as a side effect. `layr overlay move main` moves
+/// the patch, a file that is not text, a file that only the overlay has, and a rename or a delete of such a
+/// file are refused: the private part of the file never goes down, and never goes away, as a side effect. `layr overlay move main` moves
 /// a whole file to `main` (`publish`): `main` takes the version that the view shows, and every overlay
 /// drops its entry and its marker.
 ///
@@ -1043,6 +1043,15 @@ pub fn split(
             Owner::Overlay(i) => i + 1,
         };
         (from..roots.len()).filter(|j| kinds.get(*j).is_some_and(|k| k.patches) && has_file(&roots[*j], p)).collect()
+    };
+    // The root of the version of `p` that the view of the target shows.
+    let target_view = |p: &str| -> Option<PathBuf> {
+        match target {
+            Owner::Shared => has_file(shared, p).then(|| shared.to_path_buf()),
+            Owner::Overlay(t) if removed[t].contains(p) => None,
+            Owner::Overlay(t) if has_file(&roots[t], p) => Some(roots[t].clone()),
+            Owner::Overlay(t) => below(t, p),
+        }
     };
     let refuse = |text: String| -> anyhow::Error { crate::cmd::exit(1, format!("error: --to {target_name}: {text}")) };
     let whole = |p: &str| format!("to move the whole file, run 'layr overlay move {target_name} {p}', then save");
@@ -1164,7 +1173,24 @@ pub fn split(
             continue;
         }
         match (&c.new, &c.old_path) {
-            (None, _) => take_out(&mut s, target, &p, None),
+            (None, _) => {
+                // `save --to <ancestor>` of a delete of a file that a patches overlay above the ancestor holds:
+                // the delete would take the patch too. Git stops such a cherry-pick with a modify/delete
+                // conflict, and `git rm` refuses a file with changes that the commit does not have. So the
+                // save is refused and the patch stays. A file that `layr overlay move main` named goes whole.
+                if let (Some(a), false) = (patch_holders(&p).last().copied(), publish.contains(&p)) {
+                    let name = &kinds[a].name;
+                    return Err(refuse(match target_view(&p) {
+                        Some(_) => format!(
+                            "'{p}' has a patch of overlay '{name}', and its delete in {target_name} would delete the patch too (in Git: a modify/delete conflict); save it without --to (the view hides the file, and {target_name} keeps it), or drop the patch first (in the view of overlay '{name}': 'layr restore --parent {p}', then save) and delete the file after that"
+                        ),
+                        None => format!(
+                            "'{p}' is a file of overlay '{name}' only ({target_name} does not have it), so {target_name} has nothing to delete; save it without --to"
+                        ),
+                    }));
+                }
+                take_out(&mut s, target, &p, None)
+            }
             (Some(_), old) => {
                 check_name(target, &p)?;
                 // `save --to <ancestor>` of a file with a patch above the ancestor: only the change goes down.
@@ -1180,13 +1206,7 @@ pub fn split(
                     }
                 } else if let (Some(a), true) = (holders.last().copied(), has_file(base, &p)) {
                     let name = &kinds[a].name;
-                    let view = match target {
-                        Owner::Shared => has_file(shared, &p).then(|| shared.to_path_buf()),
-                        Owner::Overlay(t) if removed[t].contains(&p) => None,
-                        Owner::Overlay(t) if has_file(&roots[t], &p) => Some(roots[t].clone()),
-                        Owner::Overlay(t) => below(t, &p),
-                    };
-                    let Some(view) = view else {
+                    let Some(view) = target_view(&p) else {
                         return Err(refuse(format!(
                             "'{p}' is a file of overlay '{name}' only ({target_name} does not have it), so the save would publish the whole file; save it without --to, or {}",
                             whole(&p)
@@ -4114,6 +4134,20 @@ mod tests {
         std::fs::write(new.join("own.c"), "own 2").unwrap();
         let e = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).err().expect("refused");
         assert!(format!("{e:#}").contains("is a file of overlay 'pro' only"), "{e:#}");
+        // `--to main` of a delete of a patched file is refused (in Git: a modify/delete conflict): the patch stays.
+        std::fs::remove_file(new.join(".env")).unwrap();
+        std::fs::write(new.join("own.c"), "own").unwrap();
+        let e = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).err().expect("refused");
+        assert!(format!("{e:#}").contains("'.env' has a patch of overlay 'pro', and its delete in main would delete the patch too"), "{e:#}");
+        // The same delete without --to: the overlay drops its patch and hides the file, and main keeps it.
+        let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no, &kinds, &no_paths).unwrap();
+        assert!(s.overlays[0].dels.contains(".env") && s.overlays[0].marks.contains(".env") && !s.shared.dels.contains(".env"));
+        // A delete of a file that only the overlay has cannot go to main.
+        std::fs::write(new.join(".env"), lines("one", "private")).unwrap();
+        std::fs::remove_file(new.join("own.c")).unwrap();
+        let e = split(&base, &new, &shared, &roots, &none, &none, Owner::Shared, &no, &kinds, &no_paths).err().expect("refused");
+        assert!(format!("{e:#}").contains("so main has nothing to delete"), "{e:#}");
+        std::fs::write(new.join("own.c"), "own 2").unwrap();
         // `overlay move main`: the whole file goes to main, and the overlay drops it.
         let publish = BTreeSet::from(["own.c".to_string(), ".env".to_string()]);
         let s = split(&base, &new, &shared, &roots, &none, &none, Owner::Overlay(0), &no, &kinds, &publish).unwrap();

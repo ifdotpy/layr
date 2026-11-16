@@ -203,7 +203,9 @@ the view. Without `--to`, a named save writes every change to the overlay that t
 name is refused, and nothing is saved. `--to` needs `-m` or `-F`. When an overlay above the ancestor has a
 patch of a saved file, the ancestor gets only the change of the save (as `git cherry-pick`), and a
 change that overlaps the patch is refused; `layr overlay move main <path>` moves a whole file to
-`main`. `save` takes the index: a path
+`main`. A delete of such a file is refused too (in Git: a modify/delete conflict), so no save
+deletes a patch as a side effect: save it without `--to` (the view hides the file), or drop the
+patch first (`layr restore --parent <path>`, then save). `save` takes the index: a path
 argument fails with exit status 128 (stage it with `layr add`). `line target`, `rm --to` and
 `overlay create|set --patches` were removed (exit status 2).
 `save --amend` replaces the current head state. Without a new message, it keeps the current message.
