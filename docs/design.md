@@ -40,7 +40,7 @@ trusted with every line.
 | A merge takes what a branch name points to now | A change made after the review goes in unseen                                              | `merge --expect` takes exactly the reviewed state; checks run on the merge result before the line moves  |
 | Build output and dependencies are not its concern | Every new working folder builds from nothing and keeps its own copy                     | Caches: regenerable folders outside history; a new line starts with a copy-on-write copy (section 5)      |
 | History is an object store; files must be checked out | Reading an old state or starting a new folder costs a write of every file          | A state is a read-only folder; `show` and `grep` read it directly                                         |
-| A conflict stops the operation               | Work waits until someone resolves it                                                         | A merge never stops: the conflicts are part of the new state (a line with checks still takes none)        |
+| A conflict stops the operation               | Work waits until someone resolves it                                                         | An unprotected merge keeps conflicts in the new state; a protected line refuses them without changes        |
 
 The same ideas appear in other systems. Jujutsu makes the working copy a commit, keeps an
 operation log with undo, and lets conflicts be committed. Sapling with EdenFS gives working
@@ -122,9 +122,11 @@ example: the group of AI agents may not push, sync or trust machines.
 When several patterns match, the most restrictive value of each setting applies.
 
 The check runs without the project lock. After it, the merge goes on only if the line did not
-move in the meantime; otherwise the caller merges again. A merge result with conflicts is not
-taken by a line with checks: the conflicts are resolved in another line first. So a protected
-line only takes states whose exact content passed its checks.
+move in the meantime; otherwise the caller merges again. Every protected line refuses a merge
+result with conflicts, including overlays, even without checks, leaving records, the head, the
+working folder and staging unchanged. Merge the target into the source line, resolve and save
+there, then review and merge that state again with `--expect`. When checks are configured, the
+protected line only takes states whose exact content passed them.
 
 ## 4. History on the remote
 

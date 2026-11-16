@@ -2,6 +2,9 @@
 # Needs root, btrfs-progs, git, zstd. LAYR points at the binary under test.
 
 set -u
+# The check scripts build with line tables only (tools/checks/environment.sh). A test that builds its
+# own cargo project must see cargo's defaults, or its unit names and prune counts change (t117).
+unset CARGO_PROFILE_DEV_DEBUG
 LAYR=${LAYR:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/layr}
 PASS=0
 FAIL=0
@@ -33,8 +36,10 @@ HERE_PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$/macos/')
 overlay() { local f=${1//\//.}; echo "$f.${LAYR_TEST_PLATFORM:-$HERE_PLATFORM}"; }
 TG=$(overlay target)
 unset LAYR_PROJECT LAYR_LINE LAYR_SOCKET
-# A pre-mounted test store must never forward commands to the host service.
-if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
+# A non-root run on a pre-mounted store must never forward commands to the host service. A root
+# run (an isolated container) keeps the normal routing: its test users talk to the test service.
+premounted_user() { [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ] && [ "$(id -u)" != 0 ]; }
+if premounted_user; then
     export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock
 fi
 
@@ -77,7 +82,7 @@ needs_nested_sandbox() {
 }
 
 l() {
-    if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
+    if premounted_user; then
         export LAYR_DIRECT=1 LAYR_SOCKET=/nonexistent/layr.sock
     fi
     "$LAYR" "$@"
@@ -133,7 +138,9 @@ cleanup() {
     if [ "$(uname -s)" = Darwin ]; then
         # Sealed entries carry the immutable flag (the root, an older store) or a deny ACL entry.
         chflags -R nouchg "$T" 2>/dev/null || true
-        /bin/chmod -R -N "$T" 2>/dev/null || true
+        # chmod -N opens each entry, and the open of a FIFO waits for a writer: the FIFO of upstream-fixes.py
+        # (t50) held the cleanup until the 900 s timeout. A FIFO or a socket needs no ACL removed for rm.
+        find "$T" ! -type p ! -type s -exec /bin/chmod -N {} + 2>/dev/null || true
         chmod -R u+w "$T" 2>/dev/null || true
         rm -rf "$T"
         return
@@ -161,7 +168,7 @@ sys.exit(1 if check(json.load(sys.stdin)["filesystems"]) else 0)
         fi
         if [ "${LAYR_TEST_PREMOUNTED:-}" = 1 ]; then
             # Unprivileged deletion needs writable subvolumes, including sealed states.
-            find "$T" -depth -type d -inum 256 -exec btrfs property set -ts {} ro false \; || exit 1
+            find "$T" -depth -type d -inum 256 -exec btrfs property set -f -ts {} ro false \; || exit 1
         fi
         private=$(mktemp -d "$base/layr-fixture-clean.XXXXXX") || exit 1
         trash="$private/trash"

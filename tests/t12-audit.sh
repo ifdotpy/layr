@@ -15,6 +15,8 @@ sample $T/src
 l init s --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/s/lines
 cd $P/main || exit 1
+# The large-file merge below tests ordinary binary conflict recording.
+l protect main --remove >/dev/null || exit 1
 echo two >> notes.txt; l save -qam two
 # The state folder of a revision (rev-parse prints the display form of the id).
 state_dir() { ls -d $LAYR_ROOT/projects/$1/states/*-$(l --project $1 --line main rev-parse $2 | cut -c1-12); }

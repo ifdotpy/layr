@@ -266,7 +266,7 @@ Park entries of older layr versions were states on the line. The first `park` co
 makes each one a parked line, in the same order. Until then they keep their trees.
 `pick` applies a state. `replay` applies states on a new base. `invert` reverses a state.
 Use `restore --ours` or `restore --theirs` for conflicts.
-`merge`, `pick`, `invert` and `replay` never stop on a conflict: the state keeps the conflicts, and `--continue` says to fix the files and run `save -m`. `--abort` undoes the operation.
+On unprotected lines, `merge`, `pick`, `invert` and `replay` keep conflicts in the state; `--continue` says to fix the files and run `save -m`. `--abort` undoes the operation. A protected merge refuses conflicts without recording or changing anything: merge the target into the source, resolve and save there, then merge again with `--expect`.
 
 Git command names (`branch`, `commit`, `stash`, `checkout`, `switch`, `cherry-pick`, `rebase`,
 `revert`, `worktree`) are no layr commands. They fail like any unknown command, with no hint.
@@ -443,9 +443,10 @@ The command does not open the store, so it works with a store of another layr ve
    (`layr config check.unit 'PATH=$HOME/.cargo/bin:$PATH cargo test'; layr protect main --check
    unit`), they run on the merge result as the caller, in a clean environment (the command sets
    what it needs), without the project lock, and main moves only if they pass and
-   main did not move in the meantime. A merge never stops on a conflict: the new state lists the
-   conflicts, text files get markers, and `layr status` shows them. A line with checks takes no
-   result with conflicts: they are resolved in a line first.
+   main did not move in the meantime. A protected line takes no result with conflicts, including
+   overlay conflicts, whether or not checks are configured. It refuses without changing records,
+   the head, the working folder or staging. Merge main into topic-1, resolve and save there,
+   then review the new state and merge it again with `--expect`.
 5. `layr git push origin <branch>` exports the line's history: each state the remote lacks becomes
    a git commit with the same parents. `--squash [-m <message>]` exports one commit on top of the
    last exported state. The exact commit id is recorded before the push; after a lost response,

@@ -284,6 +284,8 @@ eq "show of a line head still works" "topic" "$(l show topic:topic.txt)"
 # On APFS a thin layer that a kept layer builds on stays; the first state has no snapshot now.
 l line new -q old "$first"
 eq "line new from a deleted snapshot checks out the tree" "$(seq 1 20 | sed 's/^/line /')" "$(cat $P/old/notes.txt)"
+# The folder is a checkout of the objects (prepare_named_lines). Off macOS a line head keeps only a
+# native copy that it already has (objstore::native_bases): no copy is made for it.
 no "and builds no snapshot for the state" test -e $LAYR_ROOT/projects/p/states/$(uuid_of $first)
 no "nor a thin layer" test -e $LAYR_ROOT/projects/p/deltas/$(uuid_of $first)
 eq "with the times of the state" "$(python3 -I -c 'import os,sys; print(os.lstat(sys.argv[1]).st_mtime_ns)' $P/main/bin/run.sh)" \

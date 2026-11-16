@@ -2307,8 +2307,13 @@ pub fn overlay_mount(
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_unmount(path: &std::path::Path) -> io::Result<()> {
-    // Never use lazy detach for managed data.
+    // Never use lazy detach for managed data that stays: `overlay_detach` is for a deleted tree only.
     Ok(rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty())?)
+}
+/// Lazy detach (MNT_DETACH) of a mount whose tree is being deleted.
+#[cfg(feature = "overlayfs")]
+pub fn overlay_detach(path: &std::path::Path) -> io::Result<()> {
+    Ok(rustix::mount::unmount(path, rustix::mount::UnmountFlags::DETACH)?)
 }
 #[cfg(feature = "overlayfs")]
 pub fn overlay_attribute(path: &std::path::Path, name: &CStr, value: Option<&[u8]>) -> io::Result<Vec<u8>> {

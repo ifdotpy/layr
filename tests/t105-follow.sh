@@ -68,7 +68,14 @@ ok "the pass takes the remote file once the local one is gone" l follow --run
 eq "main has the remote file at that path" theirs "$(cat .tool/run.lock)"
 
 # 4. Caches of a squash-merged line. feat saves caches and pushes its branch; the remote squash-merges
-#    the same change into main. The pass takes the caches of feat into main.
+#    the same change into main. The pass takes the caches of feat into main, then frees the caches of feat
+#    (docs/cache-overlays.md, section 22). wip has saved work that the remote does not hold: it keeps its caches.
+l line new wip main >/dev/null
+cd $P/wip
+echo wip > wip.txt; l add wip.txt; l save -m "wip work" -q
+mkdir -p target/debug; echo bin-wip > target/debug/x
+l save --overlays -q
+cd $P/main
 l line new feat main >/dev/null
 cd $P/feat
 echo feat > feat.txt; l add feat.txt; l save -m "feat work" -q
@@ -77,9 +84,13 @@ l save --overlays -q
 l git push -q origin HEAD:refs/heads/feat >/dev/null 2>&1
 cd $U; git pull -q origin main; echo feat > feat.txt; git add feat.txt; git commit -qm "squash feat"; git push -q origin main
 cd $P/main
-ok "the pass with a squash-merged source succeeds" l follow --run
+out=$(l follow --run 2>&1); rc=$?
+eq "the pass with a squash-merged source succeeds" 0 "$rc"
+has "the pass with a squash-merged source frees its caches" "freed the caches of merged lines: feat" "$out"
 ok "main has the file of the squash-merged line" test -f feat.txt
 eq "main has the caches of the squash-merged line" bin-feat "$(cat target/debug/x 2>/dev/null)"
+no "the cache folder of the squash-merged line is gone" test -e $P/feat/target
+eq "a line with work that the remote does not hold keeps its caches" bin-wip "$(cat $P/wip/target/debug/x 2>/dev/null)"
 has "the cache folder is an overlay of main" "target" "$(l overlay list 2>&1)"
 
 # 4b. A source line whose state is not on this machine (evicted, no store copy) refuses only itself: the

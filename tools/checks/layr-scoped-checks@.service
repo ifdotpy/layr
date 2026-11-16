@@ -1,0 +1,16 @@
+[Unit]
+Description=Layr scoped checks for %i (queued and recent states only)
+After=layr-runner-daemon.service network-online.target
+Requires=layr-runner-daemon.service
+Conflicts=layr-checks@%i.service
+
+[Service]
+# As root with the project's grant: tools/checks/scoped-watch.py runs each check as layr-checks.
+EnvironmentFile=/etc/layr-runner.env
+EnvironmentFile=-/etc/layr-runner/%i.env
+ExecStart=/usr/bin/python3 /usr/local/lib/layr-runner/scoped-watch.py %i ${LAYR_CHECK_SCOPE}
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

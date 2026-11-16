@@ -178,7 +178,7 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
 
 /// The paths with unsaved changes in the folder of a line: modified, added, deleted and new files
 /// that are not ignored. Files of quiet overlays (caches) do not count.
-fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
+pub(crate) fn unsaved_paths(repo: &crate::repo::Repo, l: &Line) -> Result<Vec<String>> {
     let (mut st, _scan, _it, _idx) = repo.status(l)?;
     st.drop_paths(&repo.quiet_paths(l)?);
     let mut out = std::collections::BTreeSet::new();
@@ -753,6 +753,12 @@ pub(crate) fn delete_recorded(
 ) -> Result<()> {
     // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
     let staged = staged_state(ctx, repo, l)?;
+    // An OverlayFS folder is a mount. Unmount it before the record: an unmount error then keeps
+    // the line, and its folder is mounted again by the next command.
+    #[cfg(feature = "overlayfs")]
+    if made {
+        crate::storage::release_tree(&repo.working(l))?;
+    }
     // Record first, then delete the folder: the content is in the saved state.
     let mut rec = Record::new("line.delete");
     rec.lines.insert(

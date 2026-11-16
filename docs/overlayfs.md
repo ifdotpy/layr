@@ -54,6 +54,10 @@ The backend flushes new data before it publishes the snapshot in the registry.
 Concurrent source changes cause the snapshot to fail when the two metadata scans differ.
 This check does not provide an atomic filesystem snapshot of concurrent writes.
 
+A delete of a line or state that a process uses (an open file or a working directory) detaches its mount, as APFS deletes such a folder.
+The process keeps a private view of the tree until it closes it. No command reads or saves that view, and its upper layer is removed.
+`layr line delete` unmounts the folder before it records the deletion, so an unmount error keeps the line.
+
 The backend combines the layers before a new snapshot would reach 17 layers or exceed its mount-option budget.
 This operation copies the visible tree once. A moved lower directory also requires a copy of that directory.
 Trees with hard links use a full copy. New lines copy these trees into their upper directory.

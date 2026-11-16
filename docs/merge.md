@@ -19,8 +19,11 @@ rename/rename and delete/modify. Files changed on both sides use the driver from
 
 ### Conflicts and conflict markers
 
-A merge never stops on a conflict. The new state holds the conflict markers and lists the conflicted paths.
-`layr merge` prints each path and exits with 1. `layr status` shows each open path as `UU`.
+A merge into an unprotected line keeps conflicts in the new state: it holds the conflict markers and lists the conflicted paths.
+A protected line refuses conflicted merge inputs and results, including overlays, even without configured checks. Recomputing a merge with `--no-ff`, `--squash` or a divergent target cannot hide an input state's unresolved conflicts.
+The refusal leaves records, the head, the working folder and staging unchanged. Merge the target into the source line, resolve and save there, then merge the source again with `--expect <state>`.
+This guarantee applies to merge commits: `CleanMerge` certifies their results. It does not change the explicit root and `protect --direct` exceptions for direct operations such as `pick` and `replay`. A failed queued merge may still record its `queue.result` failure bookkeeping; it does not record a merge state, move the target head or change its working folder or staging.
+For an unprotected merge, `layr merge` prints each conflicted path and exits with 1. `layr status` shows each open path as `UU`.
 A merge, `pick` or `invert` is refused while the head has open conflicts. Resolve the files and run `layr save -m <message>` first.
 A new merge would keep the old markers as file content and would list no conflict.
 
@@ -129,6 +132,21 @@ target (a squash), with the title as its message and `Layr-Change: <change id>` 
 queue in that command. A separate configured daemon can still run the queue.
 Start a worker's daemon with `--manual-queue` to disable its automatic request
 and queue passes. The worker can still apply requests and run the queue explicitly.
+
+### Merge train
+
+A merge train checks several queue entries at once. The merge job of Layr Cloud (infra/aws/ci_job.py
+`merge_train`, project setting `merge.train`) stacks the squashes of the first approved, titled
+entries on the target's head, one state for each entry, in queue order. Each squash has the entry's
+squash message and one more trailer, `Layr-Queued-State: <the entry's state>`. The job queues the
+top state as one untitled entry. The runners check only that state, and its checked run moves the
+target over every squash at once.
+
+The run of each entry of the train then finds its squash: one of the newest 64 first-parent states of
+the target has its squash message and names exactly its queued state. The entry is merged already,
+so its run only marks it done, with no candidate and no second set of checks (`squash_landed` in
+src/cmd/mergecmd.rs). A later version of the same change names another state, so it merges as usual.
+The target's history passed its protection, so a squash there needs no new check.
 
 ### Queue probe limits
 

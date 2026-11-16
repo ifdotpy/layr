@@ -20,7 +20,8 @@ pub fn of(repo: &Repo, name: &str) -> Result<Authority> {
 /// records may change.
 pub fn validate_import(project: &crate::store::Project, incoming: &[String], server: bool) -> Result<()> {
     let Some((parent, name)) = project.name.split_once('%') else { return Ok(()) };
-    let repo = Repo { p: crate::store::Project::open(project.store, parent)?, ctx: None };
+    // Records only: never wait here for the parent's lock (the caller can hold an overlay lock).
+    let repo = Repo { p: crate::store::Project::open_records(project.store, parent)?, ctx: None };
     let mut lines: BTreeSet<String> = project.export_jsonl()?.lines().map(str::to_owned).collect();
     lines.extend(incoming.iter().cloned());
     let id = if project.id.is_empty() {

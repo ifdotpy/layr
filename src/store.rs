@@ -1145,15 +1145,24 @@ impl<'a> Project<'a> {
     }
 
     pub fn open(store: &'a Store, name: &str) -> Result<Project<'a>> {
-        Ok(Self::open_wait(store, name, Wait::Block)?.expect("blocking project open"))
+        Ok(Self::open_wait(store, name, Some(Wait::Block))?.expect("blocking project open"))
+    }
+
+    /// Opens a project to read its records only: a live APFS commit of it is not waited for. An overlay fetch
+    /// that held the overlay's lock opened the parent project to check the records' authority, and waited
+    /// for a save that held the parent's lock and waited for that overlay's lock: a deadlock of `follow` and
+    /// `save` (2026-11-15). The database serves the committed records while a commit runs.
+    pub fn open_records(store: &'a Store, name: &str) -> Result<Project<'a>> {
+        Ok(Self::open_wait(store, name, None)?.expect("project open without commit recovery"))
     }
 
     /// Defer maintenance when a live APFS commit needs recovery under the lock.
     pub fn open_maintenance(store: &'a Store, name: &str) -> Result<Option<Project<'a>>> {
-        Self::open_wait(store, name, Wait::Try)
+        Self::open_wait(store, name, Some(Wait::Try))
     }
 
-    fn open_wait(store: &'a Store, name: &str, wait: Wait) -> Result<Option<Project<'a>>> {
+    /// `wait`: how to take the lock for the recovery of a pending APFS commit; None leaves it to the next open.
+    fn open_wait(store: &'a Store, name: &str, wait: Option<Wait>) -> Result<Option<Project<'a>>> {
         #[cfg(not(target_os = "macos"))]
         let _ = wait;
         #[cfg(test)]
@@ -1188,9 +1197,11 @@ impl<'a> Project<'a> {
         #[cfg(target_os = "macos")]
         {
             let _t = crate::trace::span("project commit recovery");
-            if crate::apfs_commit::pending(&p)? {
-                // Wait for a live commit, or recover the index after an interrupted one.
-                let Some(_lock) = p.lock_wait(wait)? else { return Ok(None) };
+            if let Some(wait) = wait {
+                if crate::apfs_commit::pending(&p)? {
+                    // Wait for a live commit, or recover the index after an interrupted one.
+                    let Some(_lock) = p.lock_wait(wait)? else { return Ok(None) };
+                }
             }
         }
         p.remove_dead_temporaries();
