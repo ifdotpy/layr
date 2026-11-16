@@ -133,6 +133,21 @@ queue in that command. A separate configured daemon can still run the queue.
 Start a worker's daemon with `--manual-queue` to disable its automatic request
 and queue passes. The worker can still apply requests and run the queue explicitly.
 
+### Merge train
+
+A merge train checks several queue entries at once. The merge job of Layr Cloud (infra/aws/ci_job.py
+`merge_train`, project setting `merge.train`) stacks the squashes of the first approved, titled
+entries on the target's head, one state for each entry, in queue order. Each squash has the entry's
+squash message and one more trailer, `Layr-Queued-State: <the entry's state>`. The job queues the
+top state as one untitled entry. The runners check only that state, and its checked run moves the
+target over every squash at once.
+
+The run of each entry of the train then finds its squash: one of the newest 64 first-parent states of
+the target has its squash message and names exactly its queued state. The entry is merged already,
+so its run only marks it done, with no candidate and no second set of checks (`squash_landed` in
+src/cmd/mergecmd.rs). A later version of the same change names another state, so it merges as usual.
+The target's history passed its protection, so a squash there needs no new check.
+
 ### Queue probe limits
 
 ```sh

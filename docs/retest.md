@@ -903,7 +903,7 @@ So the baseline search reads the whole line log, not only the ancestors of the c
 - A new `Cargo.lock` or `Cargo.toml` (not in the baseline) selects nothing: no earlier test could use it.
 - `Cargo.lock` outside the root folder, `.cargo/config.toml`, and files that a test reads are not seen.
 
-### Records in a cache overlay
+### Records in a build-output overlay
 
 `.layr-retest` is a cache path of the line, so a new line and `layr merge` take the records
 (`docs/cache-overlays.md`). The setup, once per project:
@@ -912,11 +912,13 @@ So the baseline search reads the whole line log, not only the ancestors of the c
    `.layrattributes`; add the file when the project wants it. The project setting
    `layr config regenerable '[".layr-retest"]'` does the same for every line of the machine.)
 2. `.layr-retest` must be in `.gitignore` (already true here).
-3. Key files: a cache overlay is taken only when its key equals the key of the new line. The key
-   has no key files by default, so a lockfile change does not drop the records. If the project
-   sets `cache.key-files` (for example to `Cargo.lock`), run once:
-   `layr overlay set <overlay> --key-files none`. The overlay name is in `layr overlay list`
-   (`cache.<hash>`, folder `.layr-retest`).
+3. Key files: a build-output overlay is taken only when its key equals the key of the new line
+   (docs/cache-overlays.md section 6). The key has no key files by default, so a lockfile change
+   does not drop the records. If the project sets `overlay.<name>.key-files` for this overlay (for
+   example to `Cargo.lock`), clear it for the records. A folder name that starts with `.` gives the
+   overlay a hashed name, `folder-<12 hex digits>.<platform>` in `layr overlay list` (folder
+   `.layr-retest`, `cache_overlay_name` in src/cache_overlay.rs); a store from before 0.44 may still name it
+   `cache.<hash>` until `layr overlay migrate-parts` runs.
 
 With `--save`, `run` calls `layr save --overlays --folder .layr-retest` after it writes the record. The `--folder`
 option saves only that folder: `layr save --overlays` alone also saves every other cache of the line,
@@ -924,12 +926,10 @@ and the build folder of a big project (19.6 GiB for Studio) takes 50 to 160 s. W
 the run uses the old spelling (`save --caches --cache`); when both fail, the run prints a warning and keeps
 the record files. The call
 saves the folder as the newest
-state of the line's cache overlay (`history=last`, `union-theirs`, readers: trusted machines).
+state of the line's part on that overlay (`history=last`, `union-theirs`, readers: trusted machines).
 The record also goes under the id of the head when the working copy equals the head, because an
 auto state is in no other line. So the flow is: work, `layr save -m`, `layr retest run --save`,
 `layr line new X <line>`, and `layr retest run` in X selects only what changed.
-
-The installed `layr` 0.4.0 (2026-10-26) has no cache overlays. Build the one in this repository.
 
 ### Raw profile disk
 

@@ -176,7 +176,7 @@ pub fn local_config(ctx: &Ctx, repo: &Repo, a: &Parsed) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> (--code <join code>|--code-file <path>) --project <a,b> [--name <runner name>] [--no-start] [--json]\n       layr checks run --state <rev> [--required-checks <names> | --planned-only] [--only <names>] [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--passing] [--required-checks <names>] [--json]\nTo list check results, use layr attestations.";
+const USAGE: &str = "usage: layr checks watch [--once] [--privileged-only] [--interval <seconds>] [--json]\n       layr checks join <gateway url> (--code <join code>|--code-file <path>) --project <a,b> [--name <runner name>] [--no-start] [--json]\n       layr checks run --state <rev> [--required-checks <names> | --planned-only] [--only <names> [--slot <1-7>]] [--privileged-only] [--json]\n       layr checks pending [--state <rev>] [--platform <os>-<arch>] [--passing] [--required-checks <names>] [--json]\nTo list check results, use layr attestations.";
 
 pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // `join`: make this store a check runner of a Layr Cloud gateway (src/runner.rs).
@@ -194,7 +194,8 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
             .value("--state")
             .value("--platform")
             .value("--required-checks")
-            .value("--only"),
+            .value("--only")
+            .value("--slot"),
         args,
     )?;
     if a.pos == ["pending"]
@@ -215,6 +216,7 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
         || a.has("--passing")
         || (a.get("--required-checks").is_some() && !run)
         || (a.get("--only").is_some() && !run)
+        || (a.get("--slot").is_some() && a.get("--only").is_none())
         || (a.has("--planned-only") && (!run || a.get("--required-checks").is_some()))
     {
         return Err(exit(128, USAGE));
@@ -237,10 +239,11 @@ pub fn checks(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let state = a.get("--state").map(|rev| crate::revs::resolve(&h.repo, h.line.as_ref(), rev)).transpose()?;
     let required = required_checks(a.get("--required-checks"), state.as_deref(), true)?;
     let only = only_checks(a.get("--only"))?;
+    let slot = run_slot(a.get("--slot"))?;
     // Match the queue runner: one watcher per project without holding the project write lock. A run
     // with --only shares the project lock with other --only runs and takes the lock of each check it
     // names, so a CI runner can run different checks of one state in parallel processes.
-    let _locks = checks_locks(&h.repo.p.meta_dir(), &only)?;
+    let _locks = checks_locks(&h.repo.p.meta_dir(), &only, slot)?;
     loop {
         let h = here(ctx)?;
         h.repo.require(ctx, "try")?;
@@ -381,11 +384,24 @@ impl Drop for CheckLock {
     }
 }
 
+/// `--slot <n>` of `checks run --only`: 0 without it, else 1 to 7.
+fn run_slot(value: Option<&str>) -> Result<u8> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    match value.parse::<u8>() {
+        Ok(slot) if (1..=7).contains(&slot) => Ok(slot),
+        _ => bail!("--slot must be a number from 1 to 7"),
+    }
+}
+
 /// The locks of a check executor. Without `only`: `meta/checks.lock` exclusive, one executor per
 /// project. With `only`: that lock shared, and `meta/checks-<name>.lock` exclusive for each name, so
 /// runs of other checks go on in parallel and a full executor waits for none of them but starts
-/// only when no run is left.
-fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<CheckLock>> {
+/// only when no run is left. A run with `--slot <n>` takes `meta/checks-<name>.<n>.lock` instead: a CI
+/// runner runs the same check of different states at once, one state per slot (the runner picks the
+/// states; layr does not keep two slots off one state).
+fn checks_locks(meta: &std::path::Path, only: &[String], slot: u8) -> Result<Vec<CheckLock>> {
     use rustix::fs::FlockOperation;
     let open =
         |name: &str| std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(meta.join(name)).map(CheckLock);
@@ -399,9 +415,15 @@ fn checks_locks(meta: &std::path::Path, only: &[String]) -> Result<Vec<CheckLock
         .context("a check watcher is already active for this project")?;
     let mut locks = vec![project];
     for name in only {
-        let lock = open(&format!("checks-{name}.lock"))?;
-        rustix::fs::flock(&lock.0, FlockOperation::NonBlockingLockExclusive)
-            .with_context(|| format!("check {name} already runs for this project"))?;
+        let file = if slot == 0 { format!("checks-{name}.lock") } else { format!("checks-{name}.{slot}.lock") };
+        let lock = open(&file)?;
+        rustix::fs::flock(&lock.0, FlockOperation::NonBlockingLockExclusive).with_context(|| {
+            if slot == 0 {
+                format!("check {name} already runs for this project")
+            } else {
+                format!("check {name} already runs in slot {slot} for this project")
+            }
+        })?;
         locks.push(lock);
     }
     Ok(locks)
@@ -1414,22 +1436,55 @@ mod policy_tests {
         let meta = std::env::temp_dir().join(format!("layr-checks-locks-{}", crate::ids::new_id()));
         std::fs::create_dir_all(&meta).unwrap();
         let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap();
-        let other = checks_locks(&meta, &names(&["integration", "overlayfs-ext4"])).unwrap();
-        let same = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap_err();
+        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"]), 0).unwrap();
+        let other = checks_locks(&meta, &names(&["integration", "overlayfs-ext4"]), 0).unwrap();
+        let same = checks_locks(&meta, &names(&["overlayfs-xfs"]), 0).unwrap_err();
         assert!(format!("{same:#}").contains("check overlayfs-xfs already runs"), "{same:#}");
-        let full = checks_locks(&meta, &[]).unwrap_err();
+        let full = checks_locks(&meta, &[], 0).unwrap_err();
         assert!(format!("{full:#}").contains("already active"), "{full:#}");
         // fork/dup retains the same open file descriptions after the executor drops its files.
         let inherited = xfs.iter().chain(&other).map(|lock| lock.0.try_clone().unwrap()).collect::<Vec<_>>();
         drop((xfs, other));
-        let full = checks_locks(&meta, &[]).unwrap();
-        let only = checks_locks(&meta, &names(&["unit"])).unwrap_err();
+        // A child that another test forks keeps copies of the dropped locks until its exec: try again
+        // until the full executor gets the lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let full = loop {
+            match checks_locks(&meta, &[], 0) {
+                Ok(locks) => break locks,
+                Err(e) if std::time::Instant::now() < deadline && format!("{e:#}").contains("already active") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(e) => panic!("{e:#}"),
+            }
+        };
+        let only = checks_locks(&meta, &names(&["unit"]), 0).unwrap_err();
         assert!(format!("{only:#}").contains("already active"), "{only:#}");
         let inherited_full = full[0].0.try_clone().unwrap();
         drop(full);
-        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"])).unwrap();
+        let xfs = checks_locks(&meta, &names(&["overlayfs-xfs"]), 0).unwrap();
         drop((xfs, inherited, inherited_full));
+        std::fs::remove_dir_all(meta).unwrap();
+    }
+
+    #[test]
+    fn slots_run_one_check_at_once_and_still_exclude_a_full_executor() {
+        let meta = std::env::temp_dir().join(format!("layr-checks-slots-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&meta).unwrap();
+        let unit = vec!["unit".to_string()];
+        let first = checks_locks(&meta, &unit, 0).unwrap();
+        let second = checks_locks(&meta, &unit, 1).unwrap();
+        let third = checks_locks(&meta, &unit, 2).unwrap();
+        let busy = checks_locks(&meta, &unit, 1).unwrap_err();
+        assert!(format!("{busy:#}").contains("check unit already runs in slot 1"), "{busy:#}");
+        let full = checks_locks(&meta, &[], 0).unwrap_err();
+        assert!(format!("{full:#}").contains("already active"), "{full:#}");
+        drop((first, second, third));
+        drop(checks_locks(&meta, &[], 0).unwrap());
+        assert_eq!(run_slot(None).unwrap(), 0);
+        assert_eq!(run_slot(Some("3")).unwrap(), 3);
+        for bad in ["0", "8", "x", "-1"] {
+            assert!(run_slot(Some(bad)).is_err(), "{bad}");
+        }
         std::fs::remove_dir_all(meta).unwrap();
     }
 

@@ -160,8 +160,20 @@ pub fn other_platform(platform: Option<&str>) -> bool {
 /// After the pin of the cache state `sid`: whether its tree is still here. `gc` can evict it between the choice of
 /// the cache and the pin (`cmd::admin::evict_caches`); the pin keeps it from then on. False: the folder starts
 /// cold, with a warning.
+/// Whether a read of cache state `id` can give its tree: the state is here, or it is in the object
+/// store and not freed. A freed state stays freed (`Repo::check_state`), even while its objects remain.
+fn cache_readable(orepo: &Repo, id: &str) -> Result<bool> {
+    if orepo.p.has_state(id) {
+        return Ok(true);
+    }
+    if matches!(orepo.p.db.state_flags(id)?, Some((_, true))) {
+        return Ok(false);
+    }
+    Ok(crate::objstore::verified(&orepo.p, id)?.is_some())
+}
+
 fn cache_here(orepo: &Repo, sid: &str, folder: &str) -> Result<bool> {
-    if orepo.p.has_state(sid) || crate::objstore::verified(&orepo.p, sid)?.is_some() {
+    if cache_readable(orepo, sid)? {
         return Ok(true);
     }
     eprintln!("layr: no cache for {folder}: gc evicted state {} meanwhile; the folder starts cold", ids::short(sid));
@@ -588,7 +600,7 @@ impl<'a> Repo<'a> {
     /// see). The empty first state is no cache.
     fn usable_cache(&self, orepo: &Repo, root: &str, id: &str, uid: u32, key: &CacheKey, protected: bool) -> Result<bool> {
         // A part whose native copy was retired is here as objects: a read builds the copy again (`state_root`).
-        if id == root || !(orepo.p.has_state(id) || crate::objstore::verified(&orepo.p, id)?.is_some()) {
+        if id == root || !cache_readable(orepo, id)? {
             return Ok(false);
         }
         let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
@@ -1262,6 +1274,372 @@ impl<'a> Repo<'a> {
         }
         crate::fsutil::atomic_write(&path, &serde_json::to_vec(&all)?, 0o600)
     }
+<<<<<<< head
+||||||| base
+
+    /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
+    /// files of the folder that were used least recently (the newer of access and change time)
+    /// until the folder is at most the size. Returns the deleted bytes.
+    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --overlays`: the folders that a
+    /// build may have grown, with no walk of the other lines.
+    pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
+        let mut freed = 0;
+        let w = self.working(line);
+        for (name, folder) in self.folder_overlays()?.into_iter().filter(|(_, f)| folders.contains(f)) {
+            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
+            let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
+            if btrfs::is_subvolume(&cp) {
+                freed += lru_trim(&cp, limit)?;
+            }
+        }
+        Ok(freed)
+    }
+
+    pub fn cache_gc_lru(&self) -> Result<u64> {
+        let mut freed = 0;
+        for (name, folder) in self.folder_overlays()? {
+            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
+            for line in self.lines()? {
+                let w = self.working(&line);
+                if !self.applies_in(&name, &folder, &w)? {
+                    continue;
+                }
+                let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
+                if !btrfs::is_subvolume(&cp) {
+                    continue;
+                }
+                freed += lru_trim(&cp, limit)?;
+            }
+        }
+        Ok(freed)
+    }
+}
+
+/// The build unit that a cache file belongs to: the folder above `deps`, `.fingerprint`, `build` or `incremental`
+/// and the hash of the `<name>-<16 hex>` token of the file or of its folder (cargo names every output of a unit
+/// so). A file
+/// outside such a unit is a unit of its own.
+fn unit_of(rel: &str) -> String {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let hashed = |s: &str| {
+        let stem = s.split('.').next().unwrap_or(s);
+        // The hash alone names the unit: its rlib is `lib<name>-<hash>`, its fingerprint folder `<name>-<hash>`.
+        stem.rsplit_once('-')
+            .filter(|(name, hash)| !name.is_empty() && hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|(_, hash)| hash.to_string())
+    };
+    for (i, part) in parts.iter().enumerate() {
+        if matches!(*part, "deps" | ".fingerprint" | "build" | "incremental") {
+            if let Some(unit) = parts[i + 1..].iter().find_map(|p| hashed(p)) {
+                return format!("{}/{unit}", parts[..i].join("/"));
+            }
+        }
+    }
+    rel.to_string()
+}
+
+/// Delete the least recently used build units below `root` (all files of one unit together, `unit_of`) until the
+/// sizes add up to `limit` at most, then the folders that this left empty. Deleting single files left units with a
+/// fingerprint and no outputs, and empty unit folders.
+pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut units: BTreeMap<String, (i64, u64, Vec<String>)> = BTreeMap::new();
+    let mut total = 0u64;
+    fsutil::walk(root, "", &mut |rel, m| {
+        if !m.is_dir() {
+            let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
+            let unit = units.entry(unit_of(rel)).or_insert((0, 0, Vec::new()));
+            unit.0 = unit.0.max(used);
+            unit.1 += m.size;
+            unit.2.push(rel.to_string());
+            total += m.size;
+        }
+        Ok(true)
+    })?;
+    if total <= limit {
+        return Ok(0);
+    }
+    let mut order: Vec<(i64, u64, Vec<String>)> = units.into_values().collect();
+    order.sort_by_key(|(used, _, _)| *used);
+    let mut freed = 0;
+    let mut parents = std::collections::BTreeSet::new();
+    for (_, size, files) in order {
+        if total - freed <= limit {
+            break;
+        }
+        for rel in &files {
+            if fsutil::remove_entry(root, rel).is_ok() {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    parents.insert(parent.to_string());
+                }
+            }
+        }
+        freed += size;
+    }
+    // Folders that the trim emptied go too, deepest first, up to the root.
+    let mut folders: Vec<String> = parents.into_iter().collect();
+    folders.sort_by_key(|f| std::cmp::Reverse(f.matches('/').count()));
+    for folder in folders {
+        let mut f = folder.as_str();
+        loop {
+            if std::fs::remove_dir(root.join(f)).is_err() {
+                break;
+            }
+            match f.rsplit_once('/') {
+                Some((up, _)) => f = up,
+                None => break,
+            }
+        }
+    }
+    Ok(freed)
+=======
+
+    /// `gc lru:<size>` of the folder overlays: in the working folder of each line, delete the
+    /// files of the folder that were used least recently (the newer of access and change time)
+    /// until the folder is at most the size. Returns the deleted bytes.
+    /// `cache_gc_lru` for the cache folders `folders` of one line, after its `save --overlays`: the folders that a
+    /// build may have grown, with no walk of the other lines.
+    pub fn cache_lru_line(&self, line: &Line, folders: &[String]) -> Result<u64> {
+        let mut freed = 0;
+        let w = self.working(line);
+        for (name, folder) in self.folder_overlays()?.into_iter().filter(|(_, f)| folders.contains(f)) {
+            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
+            let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
+            if btrfs::is_subvolume(&cp) {
+                freed += lru_trim(&cp, limit)?;
+            }
+        }
+        Ok(freed)
+    }
+
+    pub fn cache_gc_lru(&self) -> Result<u64> {
+        let mut freed = 0;
+        for (name, folder) in self.folder_overlays()? {
+            let Some(limit) = self.overlay_props(&name)?.gc_lru else { continue };
+            for line in self.lines()? {
+                let w = self.working(&line);
+                if !self.applies_in(&name, &folder, &w)? {
+                    continue;
+                }
+                let Ok(cp) = fsutil::safe_join(&w, &folder) else { continue };
+                if !btrfs::is_subvolume(&cp) {
+                    continue;
+                }
+                freed += lru_trim(&cp, limit)?;
+            }
+        }
+        Ok(freed)
+    }
+
+    /// Free the caches of the lines whose work is now in `into` (docs/cache-overlays.md, section 22): `sources`,
+    /// or every line of this machine when None. A merge took their caches into `into` before, so the caches move
+    /// instead of being copied. Returns the names of the freed lines, and a message for each line that an error
+    /// kept. A line that is not merged, has unsaved changes or runs a build keeps its caches.
+    pub fn free_merged_caches(&self, ctx: &Ctx, into: &Line, sources: Option<Vec<Line>>) -> (Vec<String>, Vec<String>) {
+        let (mut freed, mut errors) = (Vec::new(), Vec::new());
+        let sources = match sources.map(Ok).unwrap_or_else(|| self.lines()) {
+            Ok(lines) => lines,
+            Err(e) => return (freed, vec![format!("{e:#}")]),
+        };
+        for line in sources {
+            let name = line.name.clone();
+            match self.free_if_merged(ctx, into, line) {
+                Ok(true) => freed.push(name),
+                Ok(false) => {}
+                Err(e) => errors.push(format!("caches of line '{name}' not freed: {e:#}")),
+            }
+        }
+        (freed, errors)
+    }
+
+    /// `free_merged_caches` for one line. True when its caches were freed.
+    fn free_if_merged(&self, ctx: &Ctx, into: &Line, line: Line) -> Result<bool> {
+        let line = self.localize(line)?;
+        if line.id == into.id || line.machine != self.p.store.machine.id || self.p.is_overlay() {
+            return Ok(false);
+        }
+        // Only a merge into the line's target frees it: `line.<name>.upstream`, else `main` (docs/review.md). A merge
+        // of main into a work line does not free the caches of main.
+        let target = match self.p.config_value(&format!("line.{}.upstream", line.name))? {
+            Some(serde_json::Value::String(name)) => name,
+            _ => "main".to_string(),
+        };
+        if target != into.name || target == line.name {
+            return Ok(false);
+        }
+        let w = self.working(&line);
+        if !w.is_dir() {
+            return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        if crate::views::of(self, &line).is_some() {
+            return Ok(false);
+        }
+        // A line that lives on keeps its caches: a protected line, or a line that follows a remote branch.
+        if self.policy().rule_for(&line.name).is_some() || crate::follow::target(self, &line)?.is_some() {
+            return Ok(false);
+        }
+        let folders = self.held_cache_folders(&line)?;
+        if folders.is_empty() {
+            return Ok(false);
+        }
+        // A line with no save of its own has no work to merge: a new line can build in its folder now.
+        if self.p.db.line_states(&line.id, StateKind::Commit)?.is_empty() {
+            return Ok(false);
+        }
+        if self.authorize_line(ctx, &line, crate::repo::LineOp::Manage).is_err() {
+            return Ok(false);
+        }
+        let into = self.line(&into.id)?;
+        self.hold(self.pin(&[line.head.as_str(), into.head.as_str()])?);
+        if !crate::cmd::mergecmd::changes_contained(self, &into, &line.head)? {
+            return Ok(false);
+        }
+        let Some(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else { return Ok(false) };
+        if !crate::cmd::branch::unsaved_paths(self, &line)?.is_empty() {
+            return Ok(false);
+        }
+        for (_, folder) in &folders {
+            if build_running(&fsutil::safe_join(&w, folder)?) {
+                return Ok(false);
+            }
+        }
+        let _lock = self.p.lock()?;
+        if self.line(&line.id)?.head != line.head {
+            return Ok(false);
+        }
+        for (name, folder) in &folders {
+            // The folder first: when a later step fails, the saved state stays, and the next merge tries again.
+            self.p.trash(&fsutil::safe_join(&w, folder)?)?;
+            // The line on the overlay goes with its states: the overlay keeps no part for a line without its line
+            // there (`history_kept`). `into` keeps what the merge took.
+            if self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists() {
+                let info = self.need_overlay(name)?;
+                let orepo = self.overlay_repo(name)?;
+                let _olock = orepo.p.lock()?;
+                if let Some(ol) = crate::overlay::find_overlay_line(&orepo.p.db, &info, &line)? {
+                    self.drop_overlay_lines(ctx, &orepo, name, &[ol])?;
+                }
+            }
+            self.apply_history(ctx, name)?;
+        }
+        Ok(true)
+    }
+
+    /// The cache overlays of `line` that hold something: files in the folder, or a saved state of the line.
+    fn held_cache_folders(&self, line: &Line) -> Result<Vec<(String, String)>> {
+        let w = self.working(line);
+        let mut out = Vec::new();
+        for (name, folder) in self.folder_overlays()? {
+            let Some(info) = self.overlay_info(&name)? else { continue };
+            // A folder overlay of no platform can hold files that no build makes again.
+            if info.platform.is_none() {
+                continue;
+            }
+            let files = std::fs::read_dir(fsutil::safe_join(&w, &folder)?).is_ok_and(|mut d| d.next().is_some());
+            let saved = || -> Result<bool> {
+                Ok(self.p.store.project_dir(&format!("{}%{name}", self.p.name))?.exists()
+                    && crate::overlay::find_overlay_line(&self.overlay_repo(&name)?.p.db, &info, line)?
+                        .is_some_and(|ol| ol.head != info.root))
+            };
+            if (files || saved()?) && self.folder_kind(line, &folder)? == FolderIn::Cache {
+                out.push((name, folder));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Whether a build runs in the cache folder `dir`: a process holds the cargo build lock of one of its profile folders
+/// (`<dir>/<profile>/.cargo-lock`).
+fn build_running(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    entries.flatten().any(|e| {
+        let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(e.path().join(".cargo-lock")) else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    })
+}
+
+/// The build unit that a cache file belongs to: the folder above `deps`, `.fingerprint`, `build` or `incremental`
+/// and the hash of the `<name>-<16 hex>` token of the file or of its folder (cargo names every output of a unit
+/// so). A file
+/// outside such a unit is a unit of its own.
+fn unit_of(rel: &str) -> String {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let hashed = |s: &str| {
+        let stem = s.split('.').next().unwrap_or(s);
+        // The hash alone names the unit: its rlib is `lib<name>-<hash>`, its fingerprint folder `<name>-<hash>`.
+        stem.rsplit_once('-')
+            .filter(|(name, hash)| !name.is_empty() && hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|(_, hash)| hash.to_string())
+    };
+    for (i, part) in parts.iter().enumerate() {
+        if matches!(*part, "deps" | ".fingerprint" | "build" | "incremental") {
+            if let Some(unit) = parts[i + 1..].iter().find_map(|p| hashed(p)) {
+                return format!("{}/{unit}", parts[..i].join("/"));
+            }
+        }
+    }
+    rel.to_string()
+}
+
+/// Delete the least recently used build units below `root` (all files of one unit together, `unit_of`) until the
+/// sizes add up to `limit` at most, then the folders that this left empty. Deleting single files left units with a
+/// fingerprint and no outputs, and empty unit folders.
+pub fn lru_trim(root: &Path, limit: u64) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut units: BTreeMap<String, (i64, u64, Vec<String>)> = BTreeMap::new();
+    let mut total = 0u64;
+    fsutil::walk(root, "", &mut |rel, m| {
+        if !m.is_dir() {
+            let used = std::fs::symlink_metadata(root.join(rel)).map(|x| x.atime().max(x.mtime())).unwrap_or(0);
+            let unit = units.entry(unit_of(rel)).or_insert((0, 0, Vec::new()));
+            unit.0 = unit.0.max(used);
+            unit.1 += m.size;
+            unit.2.push(rel.to_string());
+            total += m.size;
+        }
+        Ok(true)
+    })?;
+    if total <= limit {
+        return Ok(0);
+    }
+    let mut order: Vec<(i64, u64, Vec<String>)> = units.into_values().collect();
+    order.sort_by_key(|(used, _, _)| *used);
+    let mut freed = 0;
+    let mut parents = std::collections::BTreeSet::new();
+    for (_, size, files) in order {
+        if total - freed <= limit {
+            break;
+        }
+        for rel in &files {
+            if fsutil::remove_entry(root, rel).is_ok() {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    parents.insert(parent.to_string());
+                }
+            }
+        }
+        freed += size;
+    }
+    // Folders that the trim emptied go too, deepest first, up to the root.
+    let mut folders: Vec<String> = parents.into_iter().collect();
+    folders.sort_by_key(|f| std::cmp::Reverse(f.matches('/').count()));
+    for folder in folders {
+        let mut f = folder.as_str();
+        loop {
+            if std::fs::remove_dir(root.join(f)).is_err() {
+                break;
+            }
+            match f.rsplit_once('/') {
+                Some((up, _)) => f = up,
+                None => break,
+            }
+        }
+    }
+    Ok(freed)
+>>>>>>> main
 }
 
 #[cfg(test)]

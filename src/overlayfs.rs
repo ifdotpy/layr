@@ -1064,15 +1064,50 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
     }
     Ok(())
 }
+/// The registered trees at and below `path`, the deepest first.
+fn trees_below(state: &Locked, path: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(path)).cloned().collect();
+    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    paths
+}
+fn is_busy(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EBUSY)
+}
+/// Unmount the trees at and below `path` before the caller records their deletion (`layr line
+/// delete`), so an unmount error stops the command before the record. The registry keeps them: if
+/// the record fails, the next open of the store mounts them again. A mount that a process uses (its
+/// working directory or an open file) stays mounted here; `delete_tree` detaches it after the record.
+pub fn release_tree(path: &Path) -> Result<()> {
+    let path = absolute(path)?;
+    let state = lock(&path)?;
+    valid_path(&path)?;
+    for p in trees_below(&state, &path) {
+        if mounted(&p)? {
+            match sys::overlay_unmount(&p) {
+                Err(e) if is_busy(&e) => {}
+                r => r.with_context(|| format!("unmount before removal {}", p.display()))?,
+            }
+        }
+    }
+    Ok(())
+}
 pub fn delete_tree(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let mut state = lock(&path)?;
     valid_path(&path)?;
-    let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(&path)).cloned().collect();
-    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for p in paths {
+    for p in trees_below(&state, &path) {
         if mounted(&p)? {
-            sys::overlay_unmount(&p).with_context(|| format!("unmount before removal {}", p.display()))?;
+            match sys::overlay_unmount(&p) {
+                // A process uses the tree (a shell with its working directory in a deleted line).
+                // The tree goes, as on APFS: detach the mount from the folder. The
+                // process keeps a private view of a tree that no command reads or saves again.
+                // Its writes go only into this tree's own upper folder, which is removed below.
+                // Its lower layers are read-only, and every other mount has its own upper and work
+                // folders.
+                Err(e) if is_busy(&e) => sys::overlay_detach(&p),
+                r => r,
+            }
+            .with_context(|| format!("unmount before removal {}", p.display()))?;
         }
         state.registry.trees.remove(&p);
         state.save()?;
@@ -1582,6 +1617,48 @@ mod tests {
         delete_tree(&work)?;
         delete_tree(&initial)?;
         delete_tree(&previous)?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires root and a local filesystem with OverlayFS index support"]
+    fn delete_removes_a_tree_that_a_process_uses() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("busy-{}", crate::ids::new_id()));
+        recover(&root)?;
+        let base = root.join("base");
+        create_subvolume(&base)?;
+        fs::write(base.join("file"), b"base")?;
+        set_readonly(&base)?;
+        // A tree that no process uses: release unmounts it, and the next open mounts it again
+        // (a line delete whose record failed keeps its folder).
+        let idle = root.join("idle");
+        snapshot(&base, &idle, false)?;
+        fs::write(idle.join("unsaved"), b"idle")?;
+        release_tree(&idle)?;
+        assert!(!mounted(&idle)?);
+        recover(&root)?;
+        assert_eq!(fs::read(idle.join("unsaved"))?, b"idle");
+        // A shell with its working directory in the tree: the unmount gives EBUSY.
+        let busy = root.join("busy");
+        snapshot(&base, &busy, false)?;
+        fs::create_dir(busy.join("dir"))?;
+        let mut shell = std::process::Command::new("sleep").arg("60").current_dir(busy.join("dir")).spawn()?;
+        let result = (|| -> Result<()> {
+            assert!(sys::overlay_unmount(&busy).is_err_and(|e| is_busy(&e)));
+            release_tree(&busy)?;
+            assert!(mounted(&busy)?, "release keeps a busy mount and its registry entry");
+            delete_tree(&busy)?;
+            assert!(!mounted(&busy)?);
+            assert!(!busy.exists());
+            assert!(!lock(&base)?.registry.trees.contains_key(&busy));
+            assert_eq!(fs::read(base.join("file"))?, b"base");
+            assert_eq!(fs::read(idle.join("file"))?, b"base");
+            Ok(())
+        })();
+        let _ = shell.kill();
+        let _ = shell.wait();
+        result?;
+        delete_tree(&idle)?;
+        delete_tree(&base)?;
         Ok(())
     }
     #[test]

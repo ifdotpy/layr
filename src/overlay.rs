@@ -2971,8 +2971,15 @@ impl<'a> Repo<'a> {
                 keep.insert(l.state.clone());
             }
         }
-        // The parts that the newest `history` states of each line name.
+        // The parts that the newest `history` states of each line name. A live line whose line on a cache overlay was
+        // deleted (its caches were freed after a merge, `free_merged_caches`) keeps no part there.
         for line in lines {
+            if info.platform.is_some()
+                && orepo.p.db.line_deleted(&line.id)?
+                && find_overlay_line(&orepo.p.db, &info, line)?.is_none()
+            {
+                continue;
+            }
             let mut at = Some(line.head.clone());
             for _ in 0..keep_n {
                 let Some(id) = at.take() else { break };
