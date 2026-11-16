@@ -128,6 +128,9 @@ mod tests {
     use super::*;
     #[test]
     fn public_cleanup_retry_resumes_partial_custody_without_touching_replacement() -> anyhow::Result<()> {
+        if crate::test_runs_as_root() {
+            return Ok(());
+        }
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let directory = std::env::temp_dir().join(format!("layr-custody-{}", crate::ids::new_id()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;

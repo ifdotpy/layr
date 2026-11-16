@@ -35,6 +35,17 @@ mod free;
 mod fs_candidates;
 #[cfg(test)]
 mod fs_contract_tests;
+/// For a test that needs an ordinary user: root passes the permission checks it relies on (a mode 000
+/// folder, a refused root command). The integration check runs the tests as root and skips these; the unit
+/// check runs them as an ordinary user.
+#[cfg(test)]
+pub(crate) fn test_runs_as_root() -> bool {
+    let root = rustix::process::geteuid().is_root();
+    if root {
+        eprintln!("skipped: this test needs an ordinary user");
+    }
+    root
+}
 mod fsutil;
 mod gitbridge;
 mod ids;

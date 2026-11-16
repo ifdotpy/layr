@@ -289,6 +289,9 @@ mod transport_identity_tests {
     use anyhow::{Context, Result};
     #[test]
     fn nested_abort_retry_retains_each_driver_and_its_capture_guards() -> Result<()> {
+        if crate::test_runs_as_root() {
+            return Ok(());
+        }
         use std::os::{
             fd::AsFd,
             unix::fs::{DirBuilderExt, PermissionsExt},

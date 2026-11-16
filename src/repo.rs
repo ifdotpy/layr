@@ -5128,6 +5128,10 @@ mod status_policy_tests {
         for path in ["meta/db", "meta/stage", "meta/scan", "meta/work", "lines"] {
             std::fs::create_dir_all(dir.join(path))?;
         }
+        // A frozen publication needs a private parent (mode 0700); create_dir_all gives 0755 with the usual umask.
+        for path in ["", "meta", "meta/db", "meta/stage", "meta/scan", "meta/work", "lines"] {
+            std::fs::set_permissions(dir.join(path), std::fs::Permissions::from_mode(0o700))?;
+        }
         let repo = Repo {
             p: Project {
                 lease: Default::default(),
