@@ -77,13 +77,8 @@ layr = { layer = 3, dependencies = [
 
 [workspace.package]
 # The version of layr and layr-api (layr-api reports the version of the binary): `layr release prepare` sets it.
-<<<<<<< head
 version = "0.48.0"
-rust-version = "1.99.1"
-=======
-version = "0.47.0"
 rust-version = "1.100.0"
->>>>>>> fs-legacy-facades
 
 [workspace.metadata.layr-retest]
 # The standard commands of the project: the debug builds that the lines and CI run, and the release build that

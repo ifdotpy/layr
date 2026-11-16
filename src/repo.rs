@@ -838,14 +838,16 @@ impl<'a> Repo<'a> {
     fn save_private_working(&self, ctx: &Ctx, line: &Line, w: &Path, state: &str, message: &str) -> Result<()> {
         let top = self.line_view_top(line)?.ok_or_else(|| anyhow::anyhow!("line '{}' shows no overlay", line.name))?;
         let orepo = self.overlay_repo(&top)?;
-        let _lock = orepo.p.lock()?;
+        let _lock = orepo.p.lock_maintenance()?;
         let st = orepo.new_state(ctx, w, StateKind::Auto, Vec::new(), message, None)?;
-        let mut rec = Record::new("overlay.use");
+        let mut rec = crate::model::DraftRecord::new("overlay.use");
         rec.data = serde_json::json!({"config": {crate::overlay::auto_key(state): st.id}});
         rec.states.push(st.clone());
-        if let Err(e) = orepo.commit_record(ctx, rec) {
-            orepo.discard_states(std::slice::from_ref(&st));
-            return Err(e);
+        if let Err(e) = orepo.commit_record(&_lock, ctx, rec) {
+            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
+                orepo.discard_states(std::slice::from_ref(&st));
+            }
+            return Err(e.into());
         }
         Ok(())
     }
@@ -883,48 +885,6 @@ impl<'a> Repo<'a> {
         message: &str,
         base: &str,
     ) -> Result<StateRec> {
-<<<<<<< head
-        #[cfg(target_os = "macos")]
-        if let Some(view) = crate::views::of(self, line) {
-            return crate::views::working_snapshot(ctx, self, line, &view, parents, message, base);
-        }
-        let w = self.working(line);
-        recover_cache_replacements(&w)?;
-        self.restore_caches(line)?;
-        // A line whose next named save sends changes into an overlay (`private_view`): its automatic
-        // states hold the shared head, so no state that other readers of the project read holds a change
-        // that may be proprietary (docs/overlays.md, section 9.4). Its changes have no automatic state.
-        if self.private_view(line)? {
-            let head = self.state_root(&line.head)?;
-            let st = self.new_state(ctx, &head, StateKind::Auto, parents, message, Some(line))?;
-            // The working content goes to the store of the overlay that the folder shows, which only its
-            // readers read (docs/overlays.md section 1, automatic states): `undo` and the restore after a
-            // refused command take it from there (`working_source`). A failure keeps the safe state.
-            if let Err(e) = self.save_private_working(ctx, line, &w, &st.id, message) {
-                eprintln!("warning: the working changes of line {} have no automatic state: {e:#}", line.name);
-            }
-            return Ok(st);
-        }
-        let private = self.private_paths(line)?;
-        #[cfg(not(target_os = "macos"))]
-        let _ = base;
-        #[cfg(target_os = "macos")]
-        if private.is_empty() && self.thin_line(line)? {
-            // A thin layer over the base: only the entries that changed are copied.
-            let id = ids::new_id();
-            let base = if self.p.has_state(base) { base } else { line.head.as_str() };
-            let head = self.state_src(base)?;
-            let dst = self.p.delta_path(&id);
-            match crate::thin::snapshot_over(&head, base, &w, &dst, false) {
-                Ok(Some(_)) => {
-                    self.p.db.record_base(&id, base)?;
-                    return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
-                }
-                Ok(None) => {
-                    crate::thin::write_layer(&head.at("")?, &dst, &crate::thin::Diff::default(), base, false, None)?;
-                    self.p.db.record_base(&id, base)?;
-                    return self.describe_state(ctx, id, StateKind::Auto, parents, message, Some(line));
-=======
         self.working_snapshot_as(ctx, line, parents, message, base, ids::new_id())
     }
 
@@ -952,6 +912,21 @@ impl<'a> Repo<'a> {
             let w = self.working(line);
             recover_cache_replacements(&w)?;
             self.restore_caches(line)?;
+            // A line whose next named save sends changes into an overlay (`private_view`): its automatic
+            // states hold the shared head, so no state that other readers of the project read holds a change
+            // that may be proprietary (docs/overlays.md, section 9.4). Its changes have no automatic state here.
+            if self.private_view(line)? {
+                let head = self.state_root(&line.head)?;
+                resource = Some(TemporaryResource::Capture(ctx.captures.snapshot(&head, &self.p.state_path(&id))?));
+                let st = self.describe_state(ctx, id.clone(), StateKind::Auto, parents, message, Some(line))?;
+                // The working content goes to the store of the overlay that the folder shows, which only its
+                // readers read (docs/overlays.md section 1, automatic states): `undo` and the restore after a
+                // refused command take it from there (`working_source`). A failure keeps the safe state.
+                if let Err(e) = self.save_private_working(ctx, line, &w, &st.id, message) {
+                    eprintln!("warning: the working changes of line {} have no automatic state: {e:#}", line.name);
+                }
+                return Ok(st);
+            }
             let private = self.private_paths(line)?;
             // A build can keep a cache plain by holding it open for writing. Its physical
             // conversion is optional; its files still belong only to the cache overlay.
@@ -965,7 +940,6 @@ impl<'a> Repo<'a> {
                         metadata = crate::source::Source::of_state(&self.p, &id)?.layered_storage();
                         return self.describe_state(ctx, id.clone(), StateKind::Auto, parents, message, Some(line));
                     }
->>>>>>> fs-legacy-facades
                 }
             }
             if private.is_empty() && caches.is_empty() {
@@ -1202,7 +1176,9 @@ impl<'a> Repo<'a> {
 
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
-        Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.p.has_state(&s.id)))
+        // A state whose native copy was retired is in the object store: still the newest working content (an undo of a
+        // restore went back to the head when the retirement came first, 2026-11-16).
+        Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.tree_available(&s.id)))
     }
 
     /// The state that a save compares the working content with: the newest automatic state made
@@ -1269,97 +1245,21 @@ impl<'a> Repo<'a> {
                 _pin: pin,
             }),
         };
-<<<<<<< head
-        // Cache folders become layers before the lock: a copy (btrfs) must not run under it.
-        self.restore_caches(line)?;
-        self.prepare_cache_states(line)?;
-        #[cfg(target_os = "macos")]
-        if let Some(scan) = known {
-            // No folder was converted, so the scan still describes the working folder.
-            let w = self.working(line);
-            return btrfs::with_known_scan(&w, &scan, || self.prepare_save_layer(line));
-        }
-        self.prepare_save_layer(line)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn prepare_save_layer(&self, line: &Line) -> Result<()> {
-        let w = self.working(line);
-        // The view of an overlay: no layer of the working content in the store of the project.
-        if !w.exists() || !self.private_paths(line)?.is_empty() || self.private_view(line)? || !self.thin_line(line)? {
-            return Ok(());
-        }
-        // A cache that a tool made again as a plain folder is made a cache under the lock first.
-        if !self.plain_caches(line)?.is_empty() {
-            return Ok(());
-        }
-        let _t = crate::trace::span("prepare save");
-        let prev = self.save_base(line)?;
-        let new = btrfs::scan_with_data(&w, true)?;
-        let base_id = self.save_layer_base(line, &prev);
-        let base = self.state_src(&base_id)?;
-        let base_scan = base.scan(true)?;
-        let d = crate::thin::diff(&base_scan, &|k| base.path(k), &new, &w, self.since_of(line, &base_id))?;
-        // Nothing changed since the previous save: the save under the lock makes no state. With the
-        // same base as the save, that is recorded with the scan, so the lock only compares the scan.
-        let changed_base = self.thin_changed(&base, &w, &d)?;
-        if !changed_base && base_id == prev {
-            set_prepared_clean(&line.id, &line.head, &prev, &new);
-            return Ok(());
-        }
-        if !changed_base
-            || (base_id != prev && self.p.has_state(&prev) && {
-                let p = self.state_src(&prev)?;
-                !self.thin_changed(
-                    &p,
-                    &w,
-                    &crate::thin::diff(&p.scan(true)?, &|k| p.path(k), &new, &w, self.since_of(line, &prev))?,
-                )?
-            })
-        {
-            return Ok(());
-        }
-        let path = self.p.work_dir().join(format!("prepared-save-{}", crate::store::temp_name()));
-        std::fs::create_dir_all(self.p.work_dir())?;
-        match crate::thin::write_checked_scan(&w, &base, &base_scan, &new, &d, &path, &base_id, false) {
-            Ok(Some(scan)) => {
-                PREPARED_SAVES.with(|p| {
-                    p.borrow_mut().push(PreparedSave { line: line.id.clone(), head: line.head.clone(), prev, scan, path })
-                });
-            }
-            Ok(None) => self.p.trash(&path)?,
-            Err(_) => {
-                let _ = self.p.trash(&path);
-            }
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    fn prepare_save_layer(&self, _line: &Line) -> Result<()> {
-        Ok(())
-    }
-
-    /// True when state `id` differs from the save base of `line`. Without a base, every state
-    /// differs. Confirmed file changes count: the raw candidates also list folders and files that
-    /// only got new times, such as the working folder after a named state.
-    fn changed_since_save_base(&self, line: &Line, id: &str) -> Result<bool> {
-        let prev = self.save_base(line)?;
-        if !self.tree_available(&prev) {
-            return Ok(true);
-        }
-        // In the view of an overlay the working content is in the overlay's store (`working_source`).
-        let (old, old_full) = self.working_source(line, &prev)?;
-        let (new, new_full) = self.working_source(line, id)?;
-        if old_full || new_full {
-            return Ok(old_full != new_full || changes::any_file_change(old.as_path(), new.as_path(), skip_path)?);
-        }
-        let base = self.state_src(&prev)?;
-        changes::any_file_change(&base, &self.state_src(id)?, skip_path)
-=======
         if let Some(folder) = &mut prepared.folder {
             if self.tree_available(&folder.prev) {
                 let base = self.state_src(&folder.prev)?;
                 if let AutomaticState::Snapshot { state, comparison } = &mut folder.snapshot {
+                    // In the view of an overlay the working content is in the overlay's store (`working_source`):
+                    // the states of the project hold the shared head, so they compare equal.
+                    if self.private_view(line)? {
+                        let (old, old_full) = self.working_source(line, &folder.prev)?;
+                        let (new, new_full) = self.working_source(line, &state.id)?;
+                        if old_full == new_full && !changes::any_file_change(old.as_path(), new.as_path(), skip_path)? {
+                            self.discard_states(std::slice::from_ref(state));
+                            folder.snapshot = AutomaticState::Unchanged;
+                        }
+                        return Ok(prepared);
+                    }
                     let compared = crate::objstore::compare(&base, self.state_src(&state.id)?)?;
                     if compared.files.iter().any(|c| !skip_path(c.path())) {
                         *comparison = Some(compared);
@@ -1371,7 +1271,6 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(prepared)
->>>>>>> fs-legacy-facades
     }
 
     /// Save the working content as an automatic state if it changed since the previous one.
@@ -1421,20 +1320,14 @@ impl<'a> Repo<'a> {
         }
         recover_cache_replacements(&w)?;
         self.restore_caches(line)?;
-<<<<<<< head
-        #[cfg(target_os = "macos")]
-        // The view of an overlay goes to `working_snapshot_over`, which keeps the working content in the
-        // overlay's store: a thin layer here would hold it in the store of the project.
-        if !force && self.private_paths(line)?.is_empty() && !self.private_view(line)? && self.thin_line(line)? {
-            // Compare before any copy: an unchanged folder makes no state. One scan of the
-            // working folder serves the comparison and the layer over the head.
-=======
         if !force
             && matches!(crate::fs::host().observations.read_policy(), crate::fs::observations::ReadPolicy::Validate)
             && self.private_paths(line)?.is_empty()
             && self.plain_caches(line)?.is_empty()
+            // The view of an overlay keeps its working content in the overlay's store (`working_snapshot_as`):
+            // a comparison with the folder here would decide on content that no state of the project holds.
+            && !self.private_view(line)?
         {
->>>>>>> fs-legacy-facades
             let prev = self.save_base(line)?;
             if self.tree_available(&prev) {
                 let previous = self.state_src(&prev)?;
@@ -2315,15 +2208,11 @@ impl<'a> Repo<'a> {
             owner,
             machine: self.p.store.machine.id.clone(),
         };
-<<<<<<< head
         // A line that layr makes itself (the first line of a project, the line of a check) shows `main`: a
         // check of a merge into `main` runs on the view of `main` (docs/overlays.md section 1), and its build
         // output never holds files of an overlay.
         let _ = source;
         let layers: Vec<crate::overlay::Layer> = Vec::new();
-=======
-        let layers = if self.p.is_overlay() { Vec::new() } else { self.inherit_layers(ctx, source, start, &line)? };
->>>>>>> fs-legacy-facades
         self.materialize_with(&line, start, &dst, &layers, true)?;
         let res = (|| -> PublishResult<Record> {
             // Not pruned: this path runs under the project lock, and only `init` uses it, which takes no caches.

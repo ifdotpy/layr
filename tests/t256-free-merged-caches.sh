@@ -32,17 +32,21 @@ cache_dir() {
     d="${d:20:12}${d:12:8}${d:0:12}"
     echo "$LAYR_ROOT/projects/p/meta/overlays/$TG/states/${d:0:8}-${d:8:4}-${d:12:4}-${d:16:4}-${d:20:12}"
 }
+# Whether the cache overlay keeps the state of the folder `cache_dir` names: 0 kept, 1 freed. Its native copy may
+# already be retired into the object store, so the folder alone does not say it.
+freed() { sqlite3 "$LAYR_ROOT/projects/p/meta/overlays/$TG/meta/db/layr.sqlite" "select deleted from states where id='${1##*/}'"; }
 
 # 1. A merged line: main takes its caches, then its cache folder and its cache state go.
 work done
 state=$(cache_dir done)
-ok "the cache state of done is on the disk" test -d "$state"
+eq "the cache state of done is kept" 0 "$(freed "$state")"
 out=$(l merge done 2>&1)
 has "the merge takes the cache" "Merged cache target" "$out"
 has "the merge frees the caches of the merged line" "Freed the caches of merged line 'done'" "$out"
 eq "main has the cache of done" bin-done "$(cat target/debug/x)"
 no "the cache folder of done is gone" test -e $P/done/target
 no "the cache state of done is gone" test -e "$state"
+eq "and freed" 1 "$(freed "$state")"
 has "done shows no saved cache" "not saved" "$(cd $P/done && l overlay list 2>&1)"
 eq "done keeps its files" done "$(cat $P/done/done.txt)"
 ok "fsck passes after the free" l fsck
@@ -55,12 +59,13 @@ cd $P/sq
 rm -rf target; mkdir -p target/debug; echo bin-sq > target/debug/x
 echo sq > sq.txt; l add sq.txt; l save -m "sq work" -q
 state=$(cache_dir sq)
-ok "the cache state of sq is on the disk" test -d "$state"
+eq "the cache state of sq is kept" 0 "$(freed "$state")"
 cd $P/main
 out=$(l merge --squash sq -m "squash sq" 2>&1)
 has "a squash merge frees the caches of the line" "Freed the caches of merged line 'sq'" "$out"
 no "the cache folder of sq is gone" test -e $P/sq/target
 no "the cache state that the head of sq names is gone" test -e "$state"
+eq "and freed" 1 "$(freed "$state")"
 
 # 2b. A line whose saves add up to no change has no work in main: its caches stay.
 work noop

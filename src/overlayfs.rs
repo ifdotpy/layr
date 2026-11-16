@@ -1101,7 +1101,6 @@ fn rename_tree_using(from: &Path, to: &Path, allow_mount: bool, rename: impl FnO
     }
     Ok(())
 }
-<<<<<<< head
 /// The registered trees at and below `path`, the deepest first.
 fn trees_below(state: &Locked, path: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<_> = state.registry.trees.keys().filter(|p| p.starts_with(path)).cloned().collect();
@@ -1114,7 +1113,7 @@ fn is_busy(e: &io::Error) -> bool {
 /// Unmount the trees at and below `path` before the caller records their deletion (`layr line
 /// delete`), so an unmount error stops the command before the record. The registry keeps them: if
 /// the record fails, the next open of the store mounts them again. A mount that a process uses (its
-/// working directory or an open file) stays mounted here; `delete_tree` detaches it after the record.
+/// working directory or an open file) stays mounted here; the removal detaches it after the record.
 pub fn release_tree(path: &Path) -> Result<()> {
     let path = absolute(path)?;
     let state = lock(&path)?;
@@ -1129,27 +1128,18 @@ pub fn release_tree(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub fn delete_tree(path: &Path) -> Result<()> {
-    let path = absolute(path)?;
-    let mut state = lock(&path)?;
-    valid_path(&path)?;
-    for p in trees_below(&state, &path) {
-        if mounted(&p)? {
-            match sys::overlay_unmount(&p) {
-                // A process uses the tree (a shell with its working directory in a deleted line).
-                // The tree goes, as on APFS: detach the mount from the folder. The
-                // process keeps a private view of a tree that no command reads or saves again.
-                // Its writes go only into this tree's own upper folder, which is removed below.
-                // Its lower layers are read-only, and every other mount has its own upper and work
-                // folders.
-                Err(e) if is_busy(&e) => sys::overlay_detach(&p),
-                r => r,
-            }
-            .with_context(|| format!("unmount before removal {}", p.display()))?;
-        }
-        state.registry.trees.remove(&p);
-        state.save()?;
-=======
+/// Unmount a tree for its removal. A process uses the tree (a shell with its working directory in a
+/// deleted line): the tree goes, as on APFS, so detach the mount from the folder. The process keeps a
+/// private view of a tree that no command reads or saves again. Its writes go only into this tree's own
+/// upper folder, which the removal deletes. Its lower layers are read-only, and every other mount has its
+/// own upper and work folders.
+fn unmount_for_removal(path: &Path) -> Result<()> {
+    match sys::overlay_unmount(path) {
+        Err(e) if is_busy(&e) => sys::overlay_detach(path),
+        r => r,
+    }
+    .with_context(|| format!("unmount before removal {}", path.display()))
+}
 struct PrivateLocation {
     parent: std::sync::Arc<File>,
     name: std::ffi::OsString,
@@ -1171,7 +1161,6 @@ impl PrivateDirectory {
         // so a replacement in the writable parent can never have its contents removed.
         rustix::fs::unlinkat(self.location.parent.as_ref(), &self.location.name, rustix::fs::AtFlags::REMOVEDIR)?;
         Ok(())
->>>>>>> fs-legacy-facades
     }
 }
 enum RemovalStage {
@@ -1378,10 +1367,10 @@ impl Removal {
                     if path == self.path {
                         let name = self.path.file_name().context("owned mountpoint has no name")?;
                         let covered = PinnedMountpoint::below(&self.parent, name)?;
-                        sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
+                        unmount_for_removal(&path)?;
                         self.after_unmount(covered)?;
                     } else {
-                        sys::overlay_unmount(&path).with_context(|| format!("unmount before removal {}", path.display()))?;
+                        unmount_for_removal(&path)?;
                     }
                 }
                 state.registry.trees.remove(&path);

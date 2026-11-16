@@ -1423,60 +1423,11 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else {
             Output::Text
         };
-<<<<<<< head
-        return commit_stacked(ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, to, nothing);
-    }
-    // The new state is a snapshot of the staging line (or the head when nothing is staged);
-    // its changes against the head say whether there is anything to commit.
-    #[cfg(not(target_os = "macos"))]
-    let (head_root, mut state, new_root, all_changes) = {
-        let head_root = h.repo.state_src(&line.head)?;
-        let parents = if a.has("--amend") { head.parents.clone() } else { vec![line.head.clone()] };
-        let stage = h.repo.current_stage(&line)?;
-        let mut keep = Vec::new();
-        let src = match stage { Some(path) => path, None => h.repo.complete(head_root.clone(), &mut keep)? };
-        let mut state = h.repo.new_state(ctx, &src, StateKind::Commit, parents, &message, Some(&line))?;
-        if a.has("--amend") {
-            state.change_id = head.change_id.clone();
-        }
-        let new_root = match h.repo.state_src(&state.id) {
-            Ok(r) => r,
-            Err(e) => {
-                h.repo.discard_states(std::slice::from_ref(&state));
-                return Err(e);
-            }
-        };
-        let all_changes: Vec<Change> = match changes::file_changes(&head_root, &new_root) {
-            Ok(v) => v,
-            Err(e) => {
-                h.repo.discard_states(std::slice::from_ref(&state));
-                return Err(e);
-            }
-        };
-        (head_root, state, new_root, all_changes)
-    };
-    // On APFS the state, its tree and the changes were made before the lock.
-    #[cfg(target_os = "macos")]
-    let NamedPrepared { head_root, mut pending, mut state, checks, .. } =
-        prepared.take().ok_or_else(|| anyhow::anyhow!("internal error: named save was not prepared"))?;
-    #[cfg(target_os = "macos")]
-    let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("internal error: named save has no checks"))?;
-    #[cfg(not(target_os = "macos"))]
-    let (staged, cleared) =
-        match named_checks(ctx, &h.repo, &head, &mut state, &head_root, &new_root, &line, &all_changes, named_opts(&a))? {
-            Some(checks) => checks,
-            None => {
-                h.repo.discard_states(std::slice::from_ref(&state));
-                return nothing(&h, &line);
-            }
-        };
-=======
-        return commit_stacked(&lock, ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, nothing);
+        return commit_stacked(&lock, ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, to, nothing);
     }
     let NamedPrepared { head_root, mut state, mut publication, checks, left_out, .. } =
         prepared.take().ok_or_else(|| anyhow::anyhow!("named save was not prepared"))?;
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("named save has no checks"))?;
->>>>>>> fs-legacy-facades
     if let Some((n, e)) = author {
         state.author.name = n;
         state.author.email = e;
@@ -1658,19 +1609,11 @@ fn commit_stacked(
         repo.temp_snapshot(&src, true)?
     };
     let summary = out != Output::Quiet;
-<<<<<<< head
-    let done = match crate::overlay::commit_layers(ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary, to)?
-    {
-        Some(d) => d,
-        None => return nothing(h, line),
-    };
-=======
     let done =
-        match crate::overlay::commit_layers(locked, ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary)? {
+        match crate::overlay::commit_layers(locked, ctx, repo, line, &layers, new_tree, message, allow_empty, author, summary, to)? {
             Some(d) => d,
             None => return nothing(h, line),
         };
->>>>>>> fs-legacy-facades
     repo.drop_stage(line)?;
     repo.set_pending_moves(line, &BTreeMap::new())?;
     // The patches of the view that wait for a merge with the parent merge now (docs/overlays.md section 1):

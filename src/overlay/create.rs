@@ -24,6 +24,7 @@ pub(crate) fn make_overlay(
     props: &Props,
     folder: Option<&str>,
     key_files: Option<&serde_json::Value>,
+    parent: Option<&str>,
 ) -> Result<()> {
     locked.check(&repo.p)?;
     let owner = ctx.caller.uid;
@@ -105,6 +106,9 @@ pub(crate) fn make_overlay(
         }
         if let Some(k) = key_files {
             cfg.insert(format!("overlay.{name}.key-files"), k.clone());
+        }
+        if let Some(p) = parent {
+            cfg.insert(format!("overlay.{name}.{}", crate::overlay::PARENT), serde_json::json!(p));
         }
         if removed {
             cfg.insert(format!("overlay.{name}.removed"), serde_json::Value::Null);

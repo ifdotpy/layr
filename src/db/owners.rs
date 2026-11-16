@@ -11,7 +11,7 @@
 
 /// Owner kinds that keep the tree of a state (docs/ownership.md, "Storage that a live state needs"). `parent`,
 /// `derived`, `ref`, `tag`, `remote-ref` and `export` keep only the record. `conflict` needs the trees of its sides.
-pub const TREE_OWNERS: [&str; 9] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict", "keep"];
+pub const TREE_OWNERS: [&str; 10] = ["head", "auto", "undo", "deleted", "park", "overlay", "pin", "conflict", "keep", "queue"];
 
 use crate::db::{kind_str, Db, SCHEMA};
 use crate::model::{Record, StateKind};
@@ -476,6 +476,9 @@ impl Db {
         if let Some(name) = d["ref_change"]["name"].as_str() {
             self.sync_ref(name)?;
         }
+        if let Some(id) = d["queue_change"]["id"].as_str() {
+            self.sync_queue(id)?;
+        }
         match rec.op.as_str() {
             "tag" | "tag.delete" => {
                 if let Some(name) = d["name"].as_str() {
@@ -543,6 +546,24 @@ impl Db {
             .into_iter()
             .collect();
         self.set_owners("ref", name, &target)
+    }
+
+    /// A pending queue entry keeps its state (`queue` owner): the merge runs on it later, also when no line
+    /// keeps it any more (its line moved on). Without it, gc freed the states of pending entries, and a
+    /// runner then refused them with "refers to a collected state" (2026-11-15). Done, failed and removed
+    /// entries release it.
+    fn sync_queue(&self, id: &str) -> Result<()> {
+        let target: Vec<String> = self
+            .conn
+            .prepare_cached(
+                "SELECT json_extract(rec,'$.state') FROM queue_entries WHERE id=?1 AND deleted=0 AND json_extract(rec,'$.status')='pending'",
+            )?
+            .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+            .optional()?
+            .flatten()
+            .into_iter()
+            .collect();
+        self.set_owners("queue", id, &target)
     }
 
     fn sync_tag(&self, name: &str) -> Result<()> {

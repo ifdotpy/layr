@@ -77,7 +77,14 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
 }
 
 /// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
-pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, target: &crate::lineops::DeleteTarget) -> Result<()> {
+pub fn delete(
+    ctx: &Ctx,
+    repo: &Repo,
+    l: &Line,
+    v: &View,
+    target: &crate::lineops::DeleteTarget,
+    check: impl FnOnce(&Line) -> Result<()>,
+) -> Result<()> {
     let _lifecycle = lifecycle_lock(repo, l)?;
     let _line_lock = repo.line_lock(l)?;
     let l = {
@@ -96,9 +103,18 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, target: &crate::lineop
     } else {
         None
     };
+    // Test only (t257): after the final state was prepared, before the locked validation.
+    if let Err(e) = crate::cmd::branch::deletion_barrier() {
+        if let Some(st) = &last {
+            repo.discard_states(std::slice::from_ref(st));
+        }
+        return Err(e);
+    }
     let _lock = _line_lock.lock(&repo.p)?;
     let fresh = match target.validate(repo).and_then(|line| {
         repo.authorize_line(ctx, &line, crate::repo::LineOp::Manage)?;
+        // A refusal after the final state was prepared keeps the upper data and discards the state (t257).
+        check(&line)?;
         Ok(line)
     }) {
         Ok(line) => line,

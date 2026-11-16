@@ -634,7 +634,7 @@ fn a_view_is_the_path_of_the_tree_to_its_top() {
         v.data = json!({"config":{"view.line":names}});
         let mut all = records.to_vec();
         all.push(v);
-        let m = Model::from_records(all, "a").unwrap();
+        let m = Model::preview_records(all, "a").unwrap();
         let line = m.projects["project"].line_list().remove(0);
         m.layers("project", &line).unwrap().into_iter().map(|l| l.overlay).collect()
     };

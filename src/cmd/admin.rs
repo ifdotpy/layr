@@ -1940,47 +1940,10 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     leftovers(ctx, &h.repo, a.has("--repair"), a.has("-n"), a.has("-q"))?;
     if !a.has("-n") {
-<<<<<<< head
-        // Retirement only frees space; an overlay that cannot open must not stop prune and repack.
+        // Retirement only frees space: an overlay that cannot open must not stop the object maintenance below.
         if let Err(e) = crate::objstore::retire_native(&h.repo) {
             eprintln!("warning: native copies not retired: {e:#}");
         }
-        let mut stores = vec![("base".to_string(), crate::objstore::prune(&h.repo.p))];
-        for name in h.repo.overlay_names().unwrap_or_default() {
-            if let Ok(op) = h.repo.overlay_project(&name) {
-                stores.push((name, crate::objstore::prune(&op)));
-            }
-        }
-        for (name, pruned) in stores {
-            match pruned {
-                Ok(Some(r)) if !a.has("-q") && (r.states + r.objects + r.blobs) > 0 => outln!(
-                    ctx,
-                    "objects of {name}: {} state record(s), {} object(s), {} hot blob(s) removed, {} bytes",
-                    r.states,
-                    r.objects,
-                    r.blobs,
-                    r.bytes
-                ),
-                Err(e) => eprintln!("warning: objects of {name} not pruned: {e:#}"),
-                _ => {}
-            }
-        }
-    }
-    if !a.has("-n") && h.repo.p.meta_dir().join("objects").is_dir() {
-        let (e, p, seconds) = super::objects::repack_store(&h)?;
-        if !a.has("-q") {
-            outln!(
-                ctx,
-                "objects: {} hot blobs turned cold, {} objects into {} packs in {:.1} s",
-                e.blobs,
-                p.objects,
-                p.packs,
-                seconds
-            );
-        }
-=======
-        crate::objstore::retire_native(&h.repo)?;
->>>>>>> fs-legacy-facades
     }
     super::objects::maintain_for_gc(ctx, &h.repo, a.has("-n"), a.has("-q"))?;
     // After the project lock is released: hashing and comparing cache files takes long.

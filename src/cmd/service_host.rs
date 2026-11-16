@@ -1018,7 +1018,8 @@ mod request_tests {
             assert_eq!(code, 128, "{stderr}");
             assert!(stdout.is_empty());
             if different_format {
-                assert!(stderr.contains("format 1") && stderr.contains("format 2"), "{stderr}");
+                let (ours, theirs) = (crate::store_version::FORMAT, crate::store_version::FORMAT + 1);
+                assert!(stderr.contains(&format!("format {ours}")) && stderr.contains(&format!("format {theirs}")), "{stderr}");
             }
             assert!(stderr.contains("schema"), "{stderr}");
             assert!(stderr.contains("upgrade both the CLI and the daemon"), "{stderr}");
@@ -1130,7 +1131,8 @@ mod version_tests {
             thread.join().unwrap()?;
             let error = format!("{:#}", result.expect_err("unknown or different schema must refuse negotiation"));
             if different_format {
-                assert!(error.contains("format 1") && error.contains("format 2"), "{error}");
+                let (ours, theirs) = (crate::store_version::FORMAT, crate::store_version::FORMAT + 1);
+                assert!(error.contains(&format!("format {ours}")) && error.contains(&format!("format {theirs}")), "{error}");
             }
             assert!(error.contains("schema"), "{error}");
             assert!(error.contains("upgrade both the CLI and the daemon"), "{error}");
@@ -1168,7 +1170,8 @@ mod version_tests {
                 result?;
             } else {
                 let error = result.unwrap_err().to_string();
-                for text in ["format 2", "format 1", "other-package", "other-build"] {
+                let (ours, theirs) = (format!("format {}", crate::store_version::FORMAT), format!("format {format}"));
+                for text in [theirs.as_str(), ours.as_str(), "other-package", "other-build"] {
                     assert!(error.contains(text), "{error}");
                 }
             }

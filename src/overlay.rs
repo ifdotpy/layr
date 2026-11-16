@@ -947,8 +947,7 @@ pub struct Split {
     pub shared: Ops,
     pub overlays: Vec<Ops>,
     /// The change list of the whole tree (with renames), for the summary.
-<<<<<<< head
-    pub list: Vec<Change>,
+    pub list: Vec<EntryChange>,
     /// The target's versions that are not in the saved tree, by path. The caller writes them to a tree
     /// and names that tree in `Ops::srcs` and `Ops::blobs` (`commit_layers`).
     pub down: BTreeMap<String, Down>,
@@ -990,17 +989,7 @@ pub fn split(
     kinds: &[LayerKind],
     publish: &BTreeSet<String>,
 ) -> Result<Split> {
-    let list: Vec<Change> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path)).collect();
-=======
-    pub list: Vec<EntryChange>,
-}
-
-/// Split the changes from `base` (the line's full tree) to `new` by layer. `shared` and `roots`
-/// are the previous states of the layers; `pending` names paths that `layr overlay move` sends to
-/// an overlay.
-pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending: &BTreeMap<String, usize>) -> Result<Split> {
-    let list: Vec<EntryChange> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(c.path())).collect();
->>>>>>> fs-legacy-facades
+    let list: Vec<EntryChange> = changes::file_changes(base, new)?.into_iter().filter(|c| !skip_path(&c.path())).collect();
     let list = changes::with_renames(base, new, list);
     let removed: Vec<BTreeSet<String>> = roots.iter().map(|r| removed_paths(r)).collect::<Result<_>>()?;
     let metas: Vec<Meta> = roots.iter().map(|r| read_meta(r.as_path())).collect::<Result<_>>()?;
@@ -1160,23 +1149,12 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
     };
     let mut handled: BTreeSet<String> = BTreeSet::new();
     for c in &list {
-<<<<<<< head
-        handled.insert(c.path.clone());
-        let p = c.path.clone();
-        if publish.contains(&p) && c.new.is_some() && !sticky.contains_key(&p) {
-            if let Some(old) = &c.old_path {
+        handled.insert(c.path().clone());
+        let p = c.path().clone();
+        if publish.contains(&p) && c.new().is_some() && !sticky.contains_key(&p) {
+            if let Some(old) = c.old_path() {
                 handled.insert(old.clone());
                 take_out(&mut s, Owner::Shared, old, None);
-=======
-        handled.insert(c.path().clone());
-        let forced = pending.get(c.path()).map(|i| Owner::Overlay(*i));
-        match (c.old(), c.new(), c.old_path()) {
-            // A delete goes to every layer that has the path, so no lower file shows again.
-            (_, None, _) => {
-                for o in all(c.path()) {
-                    ops(&mut s, o).dels.insert(c.path().clone());
-                }
->>>>>>> fs-legacy-facades
             }
             publish_into(&mut s, &p);
             continue;
@@ -1184,19 +1162,18 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
         if let Some(i) = pending.get(&p).or_else(|| sticky.get(&p)).copied() {
             // `layr overlay move`: the file goes to its overlay (`move_into`). A file of a quiet overlay
             // (`sticky`) stays in it whatever the target is: `save --to main` never takes it.
-            if let Some(old) = &c.old_path {
+            if let Some(old) = c.old_path() {
                 handled.insert(old.clone());
-<<<<<<< head
                 take_out(&mut s, Owner::Overlay(i), old, None);
             }
-            if c.new.is_some() {
+            if c.new().is_some() {
                 move_into(&mut s, i, &p)?;
             } else {
                 take_out(&mut s, Owner::Overlay(i), &p, None);
             }
             continue;
         }
-        match (&c.new, &c.old_path) {
+        match (c.new(), c.old_path()) {
             (None, _) => {
                 // `save --to <ancestor>` of a delete of a file that a patches overlay above the ancestor holds:
                 // the delete would take the patch too. Git stops such a cherry-pick with a modify/delete
@@ -1239,12 +1216,6 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
                     let file = |r: &Path| fsutil::lmeta(r, &p).is_some_and(|m| !m.is_dir() && m.ftype != fsutil::FType::Symlink);
                     let merged = if file(base) && file(view.as_path()) && file(new) {
                         merge_text(&fsutil::read_file(base, &p)?, &fsutil::read_file(view.as_path(), &p)?, &fsutil::read_file(new, &p)?, "save")?
-=======
-                let owner = forced.or(top(old)).unwrap_or(Owner::Shared);
-                for o in all(old) {
-                    if o == owner {
-                        ops(&mut s, o).moves.push((old.clone(), c.path().clone()));
->>>>>>> fs-legacy-facades
                     } else {
                         None
                     };
@@ -1288,7 +1259,6 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
                     }
                     take_out(&mut s, target, old, moved.then_some(target));
                 }
-<<<<<<< head
                 for x in at_or_above(target) {
                     // The patches overlays above the target keep their entry when only the change goes down.
                     let keeps = kept.is_some() && matches!(x, Owner::Overlay(j) if holders.contains(&j));
@@ -1327,22 +1297,6 @@ pub fn split(base: &Path, new: &Path, shared: &Path, roots: &[PathBuf], pending:
                             let h = hex::encode(layr_hashers::ContentAddress::digest(data));
                             s.overlays[*a].bases.insert(p.clone(), h.clone());
                             base_of = Some((*a, h));
-=======
-                ops(&mut s, owner).puts.insert(c.path().clone());
-            }
-            // A new path goes to the shared set, unless `overlay move` named it.
-            (None, Some(_), _) => {
-                ops(&mut s, forced.unwrap_or(Owner::Shared)).puts.insert(c.path().clone());
-            }
-            // A change goes to the highest layer that has the path.
-            (Some(_), Some(_), None) => {
-                let owner = forced.or(top(c.path())).unwrap_or(Owner::Shared);
-                ops(&mut s, owner).puts.insert(c.path().clone());
-                if forced.is_some() {
-                    for o in all(c.path()) {
-                        if o != owner {
-                            ops(&mut s, o).dels.insert(c.path().clone());
->>>>>>> fs-legacy-facades
                         }
                     }
                     s.down.insert(p.clone(), Down { data: data.clone(), mode: *mode, base_of });
@@ -1916,8 +1870,11 @@ impl<'a> Repo<'a> {
             return Ok(true);
         }
         let op = self.overlay_project(name)?;
-<<<<<<< head
-        if Policy::load(&op).check(&Who::of(uid, gid), "read").is_err() {
+        let who = match self.ctx.filter(|ctx| ctx.caller.uid == uid && ctx.caller.gid == gid) {
+            Some(ctx) => Who::caller(&ctx.caller),
+            None => Who::of(uid, gid),
+        };
+        if Policy::load(&op).check(&who, "read").is_err() {
             return Ok(false);
         }
         // The cache of the view of overlay X (docs/overlays.md section 1): only a reader of X reads it, also when
@@ -1926,13 +1883,6 @@ impl<'a> Repo<'a> {
             Some(x) if x != name => self.reads_overlay(&x, uid, gid),
             _ => Ok(true),
         }
-=======
-        let who = match self.ctx.filter(|ctx| ctx.caller.uid == uid && ctx.caller.gid == gid) {
-            Some(ctx) => Who::caller(&ctx.caller),
-            None => Who::of(uid, gid),
-        };
-        Ok(Policy::load(&op).check(&who, "read").is_ok())
->>>>>>> fs-legacy-facades
     }
 
     pub(crate) fn owner_reads(&self, name: &str, owner: u32) -> Result<bool> {
@@ -2017,20 +1967,10 @@ impl<'a> Repo<'a> {
             }
             let state = match find_overlay_line(&op.db, info, line)? {
                 Some(ol) => ol.head,
-<<<<<<< head
                 None => match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned)) {
                     Some(part) => part,
                     None => return Ok(None),
                 },
-=======
-                None => {
-                    match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned))
-                    {
-                        Some(part) => part,
-                        None => continue,
-                    }
-                }
->>>>>>> fs-legacy-facades
             };
             Ok(Some(Layer { overlay: name.to_string(), state }))
         };
@@ -3086,7 +3026,7 @@ impl<'a> Repo<'a> {
         let mut n = 0;
         for name in self.overlay_names()? {
             let Ok(orepo) = self.overlay_repo(&name) else { continue };
-            let _lock = orepo.p.lock()?;
+            let _lock = orepo.p.lock_maintenance()?;
             let (_, dead) = self.auto_states(&orepo)?;
             if dead.is_empty() {
                 continue;
@@ -3101,13 +3041,13 @@ impl<'a> Repo<'a> {
                 cfg.insert(key, serde_json::Value::Null);
             }
             n += deleted.len();
-            let mut rec = Record::new("overlay.use");
+            let mut rec = crate::model::DraftRecord::new("overlay.use");
             rec.data = serde_json::json!({"config": cfg});
-            orepo.commit_record(ctx, rec)?;
+            orepo.commit_record(&_lock, ctx, rec)?;
             if !deleted.is_empty() {
-                let mut rec = Record::new("gc");
+                let mut rec = crate::model::DraftRecord::new("gc");
                 rec.data = serde_json::json!({"deleted": deleted, "auto": true});
-                orepo.commit_record(ctx, rec)?;
+                orepo.commit_record(&_lock, ctx, rec)?;
             }
         }
         Ok(n)
@@ -3556,8 +3496,8 @@ pub fn commit_layers(
     let mut resolving = BTreeSet::new();
     for (i, l) in layers.iter().enumerate() {
         for c in orepos[i].p.db.state(&l.state)?.map(|s| s.conflicts).unwrap_or_default() {
-            if c.kind == PARENT_CONFLICT {
-                resolving.insert((i, c.path));
+            if c.kind() == PARENT_CONFLICT {
+                resolving.insert((i, c.path.clone()));
             }
         }
     }
@@ -3876,11 +3816,12 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
                 msgs.push(format!("overlay {name}: {p} waits for a merge with the parent: it has local changes; save them (the save merges it), or restore them and run 'layr overlay use {}'", layers.last().map(|l| l.overlay.as_str()).unwrap_or(&name)));
                 continue;
             }
-            let conflict = |kind: &str| crate::model::Conflict { path: p.clone(), kind: kind.into(), base: None, ours: None, theirs: None };
+            let conflict =
+                |kind: crate::model::ConflictKind| crate::model::Conflict::new(p, kind, crate::model::ConflictSides::Unrecorded);
             let blob = format!("{META_BASES}/{b}");
             let (Some(r), Some(now)) = (under, now) else {
                 msgs.push(format!("overlay {name}: {p}: the parent deleted or renamed it; the overlay keeps its version (a conflict)"));
-                conflicts.push(conflict(PARENT_CONFLICT));
+                conflicts.push(conflict(crate::model::ConflictKind::Parent));
                 continue;
             };
             let texts = (fsutil::read_file(roots[i].as_path(), &blob), fsutil::read_file(roots[i].as_path(), p), fsutil::read_file(r.as_path(), p));
@@ -3910,12 +3851,12 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
                         msgs.push(format!("overlay {name}: {p}: merged with the parent"));
                     } else {
                         msgs.push(format!("overlay {name}: {p}: conflict with the parent; fix the markers and save"));
-                        conflicts.push(conflict("content"));
+                        conflicts.push(conflict(crate::model::ConflictKind::Content));
                     }
                 }
                 None => {
                     msgs.push(format!("overlay {name}: {p}: a binary file changed in the parent; the overlay keeps its version (a conflict)"));
-                    conflicts.push(conflict(PARENT_CONFLICT));
+                    conflicts.push(conflict(crate::model::ConflictKind::Parent));
                 }
             }
         }
@@ -3924,22 +3865,22 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
             .p
             .db
             .state(&new_layers[i].state)?
-            .map(|s| s.conflicts.into_iter().filter(|c| c.kind == PARENT_CONFLICT).map(|c| c.path).collect())
+            .map(|s| s.conflicts.into_iter().filter(|c| c.kind() == PARENT_CONFLICT).map(|c| c.path).collect())
             .unwrap_or_default();
-        conflicts.retain(|c| !(c.kind == PARENT_CONFLICT && open.contains(&c.path)));
+        conflicts.retain(|c| !(c.kind() == PARENT_CONFLICT && open.contains(&c.path)));
         if ops.is_empty() && conflicts.is_empty() {
             continue;
         }
         let info = repo.need_overlay(&name)?;
-        let _lock = orepo.p.lock()?;
-        let ol = orepo.ensure_overlay_line(ctx, &info, line, &new_layers[i].state)?;
+        let _lock = orepo.p.lock_maintenance()?;
+        let ol = orepo.ensure_overlay_line(&_lock, ctx, &info, line, &new_layers[i].state)?;
         if ol.head != new_layers[i].state {
             bail!("overlay '{name}' changed in another line since this line took it; run 'layr overlay use {name}'");
         }
         let prev = new_layers[i].state.clone();
         let mut st = next_state(&orepo, ctx, &prev, &work.path, &ops, own, vec![prev.clone()], "Merge the patches with the parent", Some(&ol.id))?;
         if let Some(old) = orepo.p.db.state(&prev)? {
-            st.conflicts.extend(old.conflicts.into_iter().filter(|c| c.kind == PARENT_CONFLICT));
+            st.conflicts.extend(old.conflicts.into_iter().filter(|c| c.kind() == PARENT_CONFLICT));
         }
         st.conflicts.extend(conflicts);
         new_layers[i].state = st.id.clone();
@@ -3975,10 +3916,10 @@ pub fn rebase_patches(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Vec<String>
     };
     for (n, (i, ol, st)) in made.iter().enumerate() {
         let orepo = repo.overlay_repo(&layers[*i].overlay)?;
-        let _lock = orepo.p.lock()?;
-        if let Err(e) = move_overlay_line(&orepo, ctx, "overlay.rebase", ol, &st.id, vec![st.clone()]) {
+        let _lock = orepo.p.lock_maintenance()?;
+        if let Err(e) = move_overlay_line(&_lock, &orepo, ctx, "overlay.rebase", ol, &st.id, vec![st.clone()]) {
             discard(&made[n..]);
-            return Err(e);
+            return Err(e.into());
         }
     }
     repo.drop_stage(line)?;
@@ -4004,14 +3945,14 @@ pub fn set_layers(
     // An ignored file of the user (a key of its own) is a local file too: never overwritten.
     let mut local = st.local_paths();
     local.extend(st.ignored.iter().cloned());
-<<<<<<< head
-    set_layers_from(ctx, repo, line, &old, &local, layers, force, op)
+    set_layers_from(locked, ctx, repo, line, &old, &local, layers, force, op)
 }
 
 /// `set_layers` from the full tree `old` that the folder showed and its local paths `local`, both taken
 /// before the overlay lines moved.
 #[allow(clippy::too_many_arguments)]
 pub fn set_layers_from(
+    locked: &crate::store::LockedProject<'_>,
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
@@ -4020,16 +3961,12 @@ pub fn set_layers_from(
     layers: &[Layer],
     force: bool,
     op: &str,
-) -> Result<Vec<Change>> {
+) -> Result<Vec<EntryChange>> {
     let old = old.to_path_buf();
     let view = repo.assemble(line, &line.head, layers)?;
     let wdir = repo.working(line);
     let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), local, force)?;
-    let mut rec = Record::new(op);
-=======
-    let applied = repo.apply_delta(&old, &view.path, &wdir, repo.own(line), &local, force)?;
     let mut rec = crate::model::DraftRecord::new(op);
->>>>>>> fs-legacy-facades
     rec.data = serde_json::json!({
         "line": line.id,
         "folder_view": repo.public_view_data(&line.id, layers)?,

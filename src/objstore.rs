@@ -118,74 +118,10 @@ pub fn entry(store: &Store, root: &Id, path: &str) -> Result<crate::gitbridge::E
 /// Project setting shared by new projects and successful migrations.
 pub const ENABLED: &str = "objects.enabled";
 
-<<<<<<< head
-pub struct SnapshotSource<'a>(pub &'a crate::repo::Snap);
-impl layr_objects::write::Source for SnapshotSource<'_> {
-    fn path(&self, relative: &[u8]) -> Result<PathBuf> {
-        use crate::fsutil::Src;
-        let path = self.0.at(std::str::from_utf8(relative).context("a layr path is not UTF-8")?)?;
-        #[cfg(target_os = "macos")]
-        if path.symlink_metadata().is_ok() && crate::sys::apfs_has_acl(&path)? {
-            anyhow::bail!("cannot migrate {}: native ACLs are not represented by the object format", path.display());
-        }
-        Ok(path)
-    }
-
-    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
-        use std::os::unix::ffi::OsStrExt;
-        let rel = std::str::from_utf8(relative).context("a layr path is not UTF-8")?;
-        let mut names = std::collections::BTreeSet::new();
-        #[cfg(target_os = "macos")]
-        let folders: Vec<PathBuf> = self.0.layers.iter().map(|l| l.root.join(rel)).collect();
-        #[cfg(not(target_os = "macos"))]
-        let folders = {
-            use crate::fsutil::Src;
-            self.0.folder().map(|p| vec![p.join(rel)]).unwrap_or_default()
-        };
-        #[cfg(target_os = "macos")]
-        let objects = self.0.object_base.as_deref();
-        #[cfg(not(target_os = "macos"))]
-        let objects = crate::fsutil::Src::objects(self.0);
-        if let Some(objects) = objects {
-            objects.walk(rel, &mut |path, _| {
-                let child = path.rsplit('/').next().unwrap();
-                #[cfg(target_os = "macos")]
-                let present = self.0.entry(path)?.is_some();
-                #[cfg(not(target_os = "macos"))]
-                let present = objects.entry(path)?.is_some();
-                if present {
-                    names.insert(child.as_bytes().to_vec());
-                }
-                Ok(false)
-            })?;
-        }
-        for folder in folders {
-            match std::fs::symlink_metadata(&folder) {
-                Ok(m) if m.is_dir() => {}
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => continue,
-                Err(e) => return Err(e.into()),
-            }
-            for entry in std::fs::read_dir(folder)? {
-                let name = entry?.file_name().as_bytes().to_vec();
-                let child = if relative.is_empty() { name.clone() } else { [relative, b"/", &name].concat() };
-                match std::fs::symlink_metadata(self.path(&child)?) {
-                    Ok(_) => {
-                        names.insert(name);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-        Ok(names.into_iter().collect())
-    }
-=======
 /// Enable portable source-state writes for a new project or a completed migration.
 /// The caller holds the project lock; existing projects keep their recorded setting.
 pub fn enable(locked: &crate::store::LockedProject<'_>, ctx: &crate::ctx::Ctx, repo: &Repo) -> Result<()> {
     crate::project_config::set_config(locked, ctx, repo, ENABLED, serde_json::json!(true))
->>>>>>> fs-legacy-facades
 }
 
 pub use layr_objects::write::ReaderSource as SnapshotSource;
@@ -293,20 +229,12 @@ pub fn record_states(p: &Project, records: &mut [crate::model::DraftRecord]) -> 
             exclude: Vec::new(),
             similar: false,
         };
-<<<<<<< head
-        #[cfg(target_os = "macos")]
-        let incremental = incremental_base(p, &store, &state.id)?;
-        #[cfg(not(target_os = "macos"))]
-        // Publication holds the project lock, so retirement cannot remove the parent.
-        let incremental = native_write_base(p, &store, state.parents.first().map(String::as_str), &source)?;
+        let incremental = state_write_base(p, &store, &state.id, state.parents.first().map(String::as_str), &source)?;
         // LAYR_TRACE names the kind of write (tests/t257-btrfs-incremental-write.sh reads it).
         let _t = crate::trace::named(|| {
             let kind = if incremental.is_some() { "incremental" } else { "full" };
             format!("objects: {kind} write of {}", crate::ids::short(&state.id))
         });
-=======
-        let incremental = state_write_base(p, &store, &state.id, state.parents.first().map(String::as_str), &source)?;
->>>>>>> fs-legacy-facades
         let source = SnapshotSource(&source);
         let written = match incremental {
             Some((refs, paths)) => layr_objects::write::write_changed_from(
@@ -335,32 +263,8 @@ pub fn write_base(
     parent: Option<&str>,
     source: &crate::repo::Snap,
 ) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
-<<<<<<< head
-    #[cfg(target_os = "macos")]
-    {
-        let _t = crate::trace::span("write base: thin delta");
-        if let Some(base) = incremental_base(&repo.p, store, state)? {
-            return Ok(Some(base));
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = state;
-    let Some(parent_state) = parent else { return Ok(None) };
-    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
-    if !repo.p.has_state(parent_state) {
-        return Ok(None);
-    }
-    let _pin = repo.pin(&[parent_state])?;
-    let parent_src = {
-        let _t = crate::trace::span("write base: parent source");
-        repo.state_src(parent_state)?
-    };
-    let _t = crate::trace::span("write base: snapshot change list");
-    changed_write_base(refs, &parent_src, source)
-=======
     let _pin = parent.map(|id| repo.pin(&[id])).transpose()?;
     state_write_base(&repo.p, store, state, parent, source)
->>>>>>> fs-legacy-facades
 }
 
 fn state_write_base(
@@ -457,8 +361,7 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
         }
         ids.push(id);
     }
-<<<<<<< head
-    let gone = crate::cmd::admin::drop_trees(repo, &ids)?;
+    let gone = crate::retention::drop_trees(repo, &ids)?;
     for id in gone {
         std::fs::remove_file(dir.join(id))?;
     }
@@ -466,10 +369,10 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
 }
 
 /// The native copies that the next save needs off macOS: the head of each line with a working folder here.
-/// `native_write_base` writes the next state of the line incrementally from it, and without it the write
-/// reads and hashes the whole tree. The marker stays, so a later pass retires the copy once a newer state
-/// replaced the head (or the line went). An overlay reads its parts through objects and keeps none. macOS
-/// writes incrementally from the thin layer (`incremental_base`) and keeps none either.
+/// The next state of the line is written incrementally from it, and without it the write reads and hashes
+/// the whole tree. The marker stays, so a later pass retires the copy once a newer state replaced the head
+/// (or the line went). An overlay reads its parts through objects and keeps none. macOS writes
+/// incrementally from the thin layer and keeps none either.
 fn native_bases(repo: &Repo) -> Result<Vec<String>> {
     if cfg!(target_os = "macos") || repo.p.is_overlay() {
         return Ok(Vec::new());
@@ -482,20 +385,6 @@ fn native_bases(repo: &Repo) -> Result<Vec<String>> {
         .filter(|line| repo.p.line_folder(&line.id, &line.name).exists())
         .map(|line| line.head)
         .collect())
-}
-
-/// Drop from the object store of `p` what its kept states do not reach (`Store::prune`), under the project lock, so no
-/// save publishes a state while the walk runs. None when `p` has no object store.
-pub fn prune(p: &Project) -> Result<Option<layr_objects::store::PruneReport>> {
-    if !exists(p) {
-        return Ok(None);
-=======
-    let gone = crate::retention::drop_trees(repo, &ids)?;
-    for id in gone {
-        std::fs::remove_file(dir.join(id))?;
->>>>>>> fs-legacy-facades
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -4,12 +4,8 @@ use super::{exit, here};
 use crate::args::{parse, Spec};
 use crate::ctx::{Caller, Ctx};
 use crate::ids;
-<<<<<<< head
-use crate::model::{Line, LineChange, Record, StateKind};
-use crate::repo::Repo;
-=======
 use crate::model::{Line, LineChange, StateKind};
->>>>>>> fs-legacy-facades
+use crate::repo::Repo;
 use crate::revs;
 use anyhow::{Context, Result};
 
@@ -313,25 +309,17 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         return Ok(0);
     }
     if a.has("-d") || a.has("-D") {
-<<<<<<< head
-        if a.pos.is_empty() {
-            return Err(exit(128, format!("fatal: line name required\n{DELETE_USAGE}")));
+        if a.pos.is_empty() && exact_id.is_none() {
+            return Err(exit(128, format!("fatal: line name or --id required\n{DELETE_USAGE}")));
         }
         let discard = a.has("--discard") || a.has("-f");
+        // Checked again under the lock with fresh heads (t256): the current line, or main without one.
         let check_merged = |line: &Line| -> Result<()> {
             if a.has("-d") && !a.has("-f") {
                 check_deletion_merged(repo, line, current.as_ref())?;
             }
             Ok(())
         };
-        for name in &a.pos {
-            let l = repo.line(name)?;
-            repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
-=======
-        if a.pos.is_empty() && exact_id.is_none() {
-            return Err(exit(128, "fatal: line name or --id required"));
-        }
-        let discard = a.has("--discard") || a.has("-f");
         let selectors = if let Some(id) = exact_id { vec![id.to_string()] } else { a.pos.clone() };
         for selector in &selectors {
             let (l, target) = {
@@ -344,20 +332,7 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 let target = crate::lineops::DeleteTarget::capture(repo, &l)?;
                 (l, target)
             };
-            // Test only: replace the resolved identity or folder before locked validation.
-            if let Some(dir) = std::env::var_os("LAYR_TEST_LINE_DELETE_BARRIER") {
-                let dir = std::path::PathBuf::from(dir);
-                std::fs::write(dir.join("ready"), b"")?;
-                let start = std::time::Instant::now();
-                while !dir.join("release").exists() {
-                    if start.elapsed() >= std::time::Duration::from_secs(30) {
-                        anyhow::bail!("line delete test barrier timed out");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
             let name = &l.name;
->>>>>>> fs-legacy-facades
             if current.as_ref().map(|c| c.id == l.id).unwrap_or(false) {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
@@ -393,17 +368,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
             if let Some(v) = view {
-<<<<<<< head
-                crate::views::delete(ctx, repo, &l, &v, check_merged)?;
-                outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
-=======
-                crate::cmd::view_ops::delete(ctx, repo, &l, &v, &target)?;
+                crate::cmd::view_ops::delete(ctx, repo, &l, &v, &target, check_merged)?;
                 if a.has("--json") {
                     outln!(ctx, "{}", line_json(repo, &l));
                 } else {
                     outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
                 }
->>>>>>> fs-legacy-facades
                 continue;
             }
             // The working state is prepared before the lock; under it the record and the renames only
@@ -413,21 +383,15 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             // CI line) has no working state to keep: the record alone deletes it.
             #[cfg(target_os = "linux")]
             crate::views::ensure_no_pending_move(repo, &l)?;
-<<<<<<< head
-            let made = repo.working(&l).exists();
-            let (_lock, l, last) = if !made {
-                let lock = repo.p.lock()?;
-                let fresh = repo.line(&l.id)?;
-                check_merged(&fresh)?;
-                (lock, fresh, None)
-=======
             let made = target.has_folder();
             let (_lock, last) = if !made {
+                // Test only: replace the resolved identity, folder or heads before locked validation (t256, t271).
+                deletion_barrier()?;
                 let lock = repo.p.lock_maintenance()?;
                 let fresh = target.validate(repo)?;
                 repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                check_merged(&fresh)?;
                 (lock, None)
->>>>>>> fs-legacy-facades
             } else {
                 let mut attempt = 0;
                 loop {
@@ -444,60 +408,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                     if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
-<<<<<<< head
-                    let lock = match deletion_barrier().and_then(|()| repo.p.lock()) {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            repo.discard_final_state(prepared);
-                            return Err(e);
-                        }
-                    };
-                    let checked = (|| -> Result<(crate::repo::FinalState, crate::model::Line)> {
-                        // Automatic states leave overlay files out: uncommitted changes of them would be lost.
-                        if !discard && repo.is_stacked(&l)? && repo.working(&l).exists() {
-                            let private = repo.private_paths(&l)?;
-                            let (st, _scan, _it, _idx) = repo.status(&l)?;
-                            let changed = st
-                                .staged
-                                .iter()
-                                .chain(st.unstaged.iter())
-                                .flat_map(|c| [Some(c.path.clone()), c.old_path.clone()])
-                                .flatten()
-                                .any(|p| private.contains(&p));
-                            // A line whose automatic states hold only the shared head keeps no change at all.
-                            let any = st.staged.len() + st.unstaged.len() + st.untracked.len() > 0;
-                            if changed || !repo.pending_moves(&l).is_empty() || (any && repo.private_view(&l)?) {
-                                return Err(exit(
-                                    1,
-                                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard"),
-                                ));
-                            }
-                        }
-                        let fresh = repo.line(&l.id)?;
-                        check_merged(&fresh)?;
-                        let state = repo.record_final_state(ctx, &fresh, &mut prepared)?;
-                        Ok((state, fresh))
-                    })();
-                    match checked {
-                        Err(e) => {
-                            repo.discard_final_state(prepared.take());
-                            return Err(e);
-                        }
-                        Ok((crate::repo::FinalState::Recorded(last), fresh)) => break (lock, fresh, last),
-                        Ok((crate::repo::FinalState::Moved, _)) if attempt < 3 => drop(lock),
-                        Ok((crate::repo::FinalState::Moved, fresh)) => {
-                            return Err(exit(
-                                1,
-                                format!(
-                                    "line {name} moved during the command (head {} -> {}); run it again",
-                                    ids::short(&l.head),
-                                    ids::short(&fresh.head)
-                                ),
-                            ))
-=======
+                    // Test only (t256, t271): after the preparation, before the locked validation.
+                    deletion_barrier()?;
                     let lock = repo.p.lock_maintenance()?;
                     let fresh = target.validate(repo)?;
                     repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+                    check_merged(&fresh)?;
                     // Automatic states leave overlay files out: uncommitted changes of them would be lost.
                     if !discard && repo.is_stacked(&fresh)? && repo.working(&fresh).exists() {
                         let private = repo.private_paths(&fresh)?;
@@ -505,7 +421,9 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                         let changed = st.staged.iter().chain(st.unstaged.iter())
                             .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()]).flatten()
                             .any(|p| private.contains(&p));
-                        if changed || !repo.pending_moves(&fresh).is_empty() {
+                        // A line whose automatic states hold only the shared head keeps no change at all.
+                        let any = st.staged.len() + st.unstaged.len() + st.untracked.len() > 0;
+                        if changed || !repo.pending_moves(&fresh).is_empty() || (any && repo.private_view(&fresh)?) {
                             return Err(exit(1, format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard")));
                         }
                     }
@@ -513,7 +431,6 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                         if attempt < 3 {
                             drop(lock);
                             continue;
->>>>>>> fs-legacy-facades
                         }
                         return Err(exit(1, format!("line {name} moved during the command; run it again")));
                     }
@@ -855,17 +772,13 @@ pub(crate) fn delete_recorded(
     made: bool,
 ) -> Result<()> {
     // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
-<<<<<<< head
-    let staged = staged_state(ctx, repo, l)?;
+    let staged = staged_state(locked, ctx, repo, l)?;
     // An OverlayFS folder is a mount. Unmount it before the record: an unmount error then keeps
     // the line, and its folder is mounted again by the next command.
     #[cfg(feature = "overlayfs")]
     if made {
-        crate::storage::release_tree(&repo.working(l))?;
+        crate::overlayfs::release_tree(&repo.working(l))?;
     }
-=======
-    let staged = staged_state(locked, ctx, repo, l)?;
->>>>>>> fs-legacy-facades
     // Record first, then delete the folder: the content is in the saved state.
     let mut rec = crate::model::DraftRecord::new("line.delete");
     rec.lines.insert(
@@ -1058,6 +971,7 @@ mod deletion_tests {
         std::fs::create_dir_all(project_dir.join("meta/db"))?;
         let repo = Repo {
             p: Project {
+                lease: Default::default(),
                 store: &store,
                 name: "p".into(),
                 dir: project_dir.clone(),
@@ -1074,21 +988,25 @@ mod deletion_tests {
         let saved = ids::new_id();
         let merged = ids::new_id();
         let mut sequence = 0;
-        let mut apply = |mut rec: Record| -> Result<()> {
+        let mut apply = |mut rec: crate::model::Record| -> Result<()> {
             sequence += 1;
             rec.seq = sequence;
             rec.time = sequence as i64;
             rec.machine = machine.clone();
-            repo.p.db.insert_record(&rec, &json!({"r": rec, "s": ""}).to_string())?;
-            repo.p.db.derive(&rec, &|_| true, machine)
+            repo.p.db.test_insert_record(&rec, &json!({"r": rec, "s": ""}).to_string())?;
+            repo.p.db.test_derive(&rec, &|_| true, machine)
         };
-        let line_change = |name: &str, head: &str| LineChange {
-            before: None,
-            after: Some(LineState { name: name.into(), head: head.into(), owner: 1000, machine: machine.clone() }),
-            working_before: None,
-            working_after: None,
+        let line_change = |name: &str, head: &str| -> LineChange {
+            crate::model::LineChangeWire {
+                before: None,
+                after: Some(LineState { name: name.into(), head: head.into(), owner: 1000, machine: machine.clone() }),
+                working_before: None,
+                working_after: None,
+            }
+            .try_into()
+            .expect("a line change")
         };
-        let mut rec = Record::new("fixture");
+        let mut rec = crate::model::Record::untrusted_preview("fixture");
         for (id, parents, line) in [
             (&base, vec![], &main_id),
             (&saved, vec![base.clone()], &topic_id),
@@ -1109,18 +1027,18 @@ mod deletion_tests {
         assert!(check_deletion_merged(&repo, &topic, Some(&topic)).unwrap_err().to_string().contains("same line"));
         assert!(check_deletion_merged(&repo, &current, None).unwrap_err().to_string().contains("same line"));
 
-        let mut rec = Record::new("fixture");
+        let mut rec = crate::model::Record::untrusted_preview("fixture");
         rec.lines.insert(main_id.clone(), line_change("main", &base));
         apply(rec)?;
         // A stale current-line value must not authorize deletion after its head is rewound.
         let err = check_deletion_merged(&repo, &topic, Some(&current)).unwrap_err().to_string();
         assert!(err.contains("not fully merged into 'main'"), "{err}");
-        let mut rec = Record::new("fixture");
+        let mut rec = crate::model::Record::untrusted_preview("fixture");
         rec.lines.insert(main_id.clone(), line_change("main", &merged));
         apply(rec)?;
         check_deletion_merged(&repo, &topic, None)?; // Ordinary merge, second-parent ancestry.
 
-        let mut rec = Record::new("fixture");
+        let mut rec = crate::model::Record::untrusted_preview("fixture");
         rec.lines.insert(main_id, line_change("trunk", &merged));
         apply(rec)?;
         let err = format!("{:#}", check_deletion_merged(&repo, &topic, None).unwrap_err());

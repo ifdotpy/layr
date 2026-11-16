@@ -593,80 +593,13 @@ pub fn save_working(
     rec.data = serde_json::json!({"line": line.id, "head": line.head,
         "working_before": repo.recorded_working(line)?, "working_after": st.id});
     rec.states.push(st.clone());
-<<<<<<< head
-    if let Err(error) = repo.commit_record(ctx, rec) {
-        repo.discard_states(std::slice::from_ref(&st));
-        return Err(error);
-    }
-    Ok(Some(st))
-}
-
-/// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
-pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, check: impl FnOnce(&Line) -> Result<()>) -> Result<()> {
-    let _lifecycle = lifecycle_lock(repo, l)?;
-    let _line_lock = repo.line_lock(l)?;
-    let l = repo.line(&l.id)?;
-    let at = repo.working(&l);
-    let last = if v.mounted || upper(&repo.p, &l.id).exists() {
-        let t = trees(repo, &l, v)?;
-        let list = file_changes(&t, v)?;
-        if list.is_empty() {
-            None
-        } else {
-            Some(write_state(ctx, repo, &l, &t, &list, StateKind::Auto, "final state of a deleted virtual line")?)
-        }
-    } else {
-        None
-    };
-    if is_mounted(&at) {
-        if let Err(e) = unmount(&at) {
-            if let Some(st) = &last {
-                repo.discard_states(std::slice::from_ref(st));
-            }
-            return Err(e);
-=======
     if let Err(error) = repo.commit_record(locked, ctx, rec) {
         if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
             repo.discard_states(std::slice::from_ref(&st));
->>>>>>> fs-legacy-facades
         }
         return Err(error.into());
     }
-<<<<<<< head
-    let checked = (|| -> Result<_> {
-        crate::cmd::branch::deletion_barrier()?;
-        let lock = repo.p.lock()?;
-        let fresh = repo.line(&l.id)?;
-        check(&fresh)?;
-        Ok((lock, fresh))
-    })();
-    let (_lock, fresh) = match checked {
-        Ok(checked) => checked,
-        Err(e) => {
-            if let Some(st) = &last {
-                repo.discard_states(std::slice::from_ref(st));
-            }
-            return Err(e);
-        }
-    };
-    let last_id = match last {
-        Some(st) => {
-            let mut rec = Record::new("save");
-            let before = repo.recorded_working(&fresh)?;
-            rec.data =
-                serde_json::json!({"line": fresh.id, "head": fresh.head, "working_before": before, "working_after": st.id});
-            rec.states.push(st.clone());
-            repo.commit_record(ctx, rec)?;
-            Some(st.id)
-        }
-        None => None,
-    };
-    crate::cmd::branch::delete_recorded(ctx, repo, &fresh, last_id, at.exists())?;
-    repo.p.trash(&dir(&repo.p, &fresh.id))?;
-    Ok(())
-=======
     Ok(Some(st))
->>>>>>> fs-legacy-facades
 }
 
 /// Refuse a command that does not support virtual lines yet, when it runs on one.

@@ -2549,6 +2549,8 @@ mod tests {
             reason: None,
             probes: None,
             title: None,
+            expected_head: None,
+            failure: None,
         };
         let event = |seq, status: Option<&str>| {
             let mut rec = state_record(seq, id, vec![]);
@@ -2565,13 +2567,13 @@ mod tests {
         let queue_owners = || {
             db.owner_rows().unwrap().into_iter().filter(|(_, kind, _)| kind == "queue").collect::<Vec<_>>()
         };
-        db.derive(&event(1, Some("pending")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(1, Some("pending")), &|_| true, "local").unwrap();
         assert_eq!(queue_owners(), vec![(state.to_string(), "queue".to_string(), id.to_string())]);
-        db.derive(&event(2, Some("failed")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(2, Some("failed")), &|_| true, "local").unwrap();
         assert!(queue_owners().is_empty(), "a failed entry releases its state");
-        db.derive(&event(3, Some("pending")), &|_| true, "local").unwrap();
+        db.derive_rows(&event(3, Some("pending")), &|_| true, "local").unwrap();
         assert_eq!(queue_owners().len(), 1, "a requeued entry keeps it again");
-        db.derive(&event(4, None), &|_| true, "local").unwrap();
+        db.derive_rows(&event(4, None), &|_| true, "local").unwrap();
         assert!(queue_owners().is_empty(), "a removed entry releases its state");
     }
     #[test]
