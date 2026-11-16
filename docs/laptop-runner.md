@@ -83,16 +83,35 @@ bash tools/checks/install-services.sh PROJECT
 
 The daemon has cgroup memory/process ceilings. `layr-checks@PROJECT` runs the
 watcher as the non-root service user and restarts on failure or VM boot.
-`layr-sync@PROJECT.timer` fetches then pushes results and the site index every
+`layr-sync@PROJECT.timer` fetches the heads, then pushes the results, every
 120 seconds with up to 30 seconds of jitter. Stop this project's units before replacing its binary or policy.
 An executor elsewhere keeps both machine-local execution flags off.
 A shared gateway limit also applies to runners behind the same public IP.
 Respect HTTP 429 `Retry-After`; pause transport while an owner publishes a large
 fixture, then resume the timers. Check watchers can remain active during the pause.
 
+A runner that cannot run every pending check of a busy project takes a scoped set:
+
+```sh
+bash tools/checks/install-services.sh PROJECT unit
+```
+
+This replaces `layr-checks@PROJECT` with `layr-scoped-checks@PROJECT`
+(`tools/checks/scoped-watch.py`). It runs only the named unprivileged checks. It takes
+states in the queue into main first, then states younger than 24 hours, newest first.
+`checks watch` takes every pending version of every open change: 3,905 of project
+`layr` on 2026-11-15. The scoped watcher runs as root with the project grant and
+brings each state into the store. It runs the check as `layr-checks` through the
+runner daemon. `/etc/layr-runner/PROJECT.env` (mode 0600) can set
+`LAYR_GATEWAY_TOKEN_FILE` for that project. It can also set `LAYR_CHECK_SEED_JOB`
+to the check job script of Layr Cloud (`infra/aws/ci_job.py` of project
+`layr-cloud`). The watcher then adds the Rust toolchain that a state pins and the
+crates of its `Cargo.lock` to the check seed before the check, as the AWS check job
+does. Without the seed, each state that pins a newer Rust fails `unit` in seconds.
+
 ```sh
 systemctl status layr-runner-daemon layr-checks@PROJECT layr-sync@PROJECT.timer
-journalctl -u layr-checks@PROJECT -u layr-sync@PROJECT --since today
+journalctl -u layr-checks@PROJECT -u layr-scoped-checks@PROJECT -u layr-sync@PROJECT --since today
 limactl stop layr-runner-vz && limactl start layr-runner-vz  # Mac; verify the units again
 ```
 

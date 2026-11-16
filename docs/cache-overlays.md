@@ -166,6 +166,7 @@ quiet file overlay only through `overlay move`.
 - For a folder overlay, the merge also updates the target's working folder: a clone of each
   incoming file over the target's folder. A build that runs in the target folder at that moment
   can see a mix of files; the build tool then rebuilds what is stale.
+- After the merge, the merged line frees its own caches when its work is in the target (section 22).
 - `history=<N>` keeps the newest N states on the first-parent chain of each overlay line, the
   heads of all overlay lines and the empty first state. It deletes the other states of the
   overlay: their snapshots go, their records stay. A three-way merge needs its base state; when
@@ -835,3 +836,56 @@ real `target` cache states of this repository.
 
 Result: one cache state with a new build costs about 2.3 to 2.6 GB compressed (1.9 GB packed). A
 state with the same build costs kilobytes.
+
+## 22. Free the caches of a merged line
+
+A merged line keeps no caches (owner requirement 2026-11-14). Before, a merge copied the caches of the line into
+the target, and the line kept its cache folder and its cache state. Lines of agents that were merged or left
+filled the disk of a Mac (about 220 GB of `target` folders).
+
+When the work of a line is in its target, its caches move: the target takes them, then the line frees its own
+(`Repo::free_merged_caches`, src/cache_overlay.rs). The line frees them also when the target refused them (a
+protected target whose rule does not allow them, section 10) or took none (the queue takes no caches): the work is
+merged, and a build makes the caches again. Three points run it, after the cache step of the merge:
+
+- `layr merge <line>`: for the merged line. It prints `Freed the caches of merged line '<line>'`.
+- A follow pass that merged a remote state (docs/follow.md): for every line of this machine. This covers a merge
+  queue on another machine and a squash of a pull request. The pass result names the freed lines.
+- A queue entry that this machine merged: for the line of the merged state.
+
+A line is freed only when all of these are true:
+
+- The target is the target of the line: `line.<name>.upstream`, else `main` (docs/review.md). A merge of `main`
+  into a work line frees nothing.
+- The line has a working folder on this machine, is not virtual, is not protected and follows no remote branch.
+- The line has at least one save of its own. A new line can build in its folder before its first save.
+- The target head holds the work of the line: the line head is an ancestor of it, or the line changed at least one
+  path since the common state and each such path holds the same content (a squash). A line whose saves add up to
+  no change is not merged work.
+- The line has no unsaved changes: no staged, changed or new file (`line delete` uses the same rule).
+- No build runs in the cache folder: no process holds a cargo build lock (`<folder>/<profile>/.cargo-lock`), and no
+  command holds the line lock. A build that starts later in a freed line starts cold.
+
+Then, for each cache overlay (an overlay with `platform`) whose folder is a cache path of the line:
+
+- The cache folder of the working folder goes to the trash first. When a later step fails, the saved state stays,
+  and the next merge tries again.
+- Then the line on the overlay is deleted. A live line whose line on a cache overlay was deleted keeps no part on that
+  overlay (`history_kept`), so `history` deletes the cache state of the line at once. The target keeps the states
+  that the merge took.
+
+Only build output goes, and a build makes it again. The line keeps its files, its states and its history.
+`line new X <line>` from a freed line starts cold. A later `save --overlays` in the line saves a new cache.
+
+Limits:
+
+- A squash check compares the paths with the target head. When a later state of the target changed a path that the
+  line changed too, the line is not freed.
+- A line that was never merged keeps its caches. `line delete` frees it.
+
+A follow pass with 80 lines on this machine took under 1 s when it freed nothing, and 4 s when it freed 40 lines
+(macOS, debug build, 2026-11-14).
+
+Tests: `tests/t256-free-merged-caches.sh` (local merge, squash, no net change, unsaved changes, a line with no save,
+main into a work line), and step 4 of `tests/t105-follow.sh` (a squash merge on a remote, a line with work that the remote does
+not hold).

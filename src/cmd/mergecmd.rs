@@ -1485,6 +1485,23 @@ pub fn merge(ctx: &Ctx, args: &[String]) -> Result<i32> {
         if let Err(e) = r {
             eprintln!("warning: caches of '{rev}' not merged: {e:#}");
         }
+        // Its work is in this line now: its own caches go (docs/cache-overlays.md, section 22). An error keeps them and
+        // never undoes the merge.
+        if code == 0 {
+            let r = (|| -> Result<(Vec<String>, Vec<String>)> {
+                let theirs = h.repo.p.db.line_by_name(&rev)?.into_iter().collect();
+                Ok(h.repo.free_merged_caches(ctx, &h.repo.line(&line.id)?, Some(theirs)))
+            })();
+            let (freed, errors) = r.unwrap_or_else(|e| (Vec::new(), vec![format!("{e:#}")]));
+            if !a.has("-q") {
+                for name in freed {
+                    outln!(ctx, "Freed the caches of merged line '{name}'");
+                }
+            }
+            for e in errors {
+                eprintln!("warning: {e}");
+            }
+        }
     }
     Ok(code)
 }
@@ -1561,6 +1578,26 @@ pub(crate) fn caches_contained(repo: &Repo, line: &Line, theirs: &Line) -> Resul
         }
     }
     Ok(None)
+}
+
+/// Whether the head of `into` holds the work of state `state`: `state` is its ancestor (a merge), or `state` changed
+/// at least one path since the common state and each such path holds the same content in the head (a squash, on this
+/// machine or on a remote). A state with no change of its own (only a merge of the target) is not merged work.
+pub(crate) fn changes_contained(repo: &Repo, into: &Line, state: &str) -> Result<bool> {
+    if repo.is_ancestor(state, &into.head)? {
+        return Ok(true);
+    }
+    let Some(base) = repo.merge_base(state, &into.head)? else { return Ok(false) };
+    repo.hold(repo.pin(&[base.as_str()])?);
+    let rules = crate::ignore_rules::Rules::new(&repo.working(into));
+    let (base, from, head) = (repo.state_src(&base)?, repo.state_src(state)?, repo.state_src(&into.head)?);
+    let changed = crate::radar::compare(&base, &from, &rules)?;
+    for found in &changed {
+        if crate::radar::recheck(&from, &head, &rules, &found.path)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(!changed.is_empty())
 }
 
 /// A required check has no passing run on a platform that this machine is not: the merge waits for that runner. A
@@ -1640,6 +1677,33 @@ fn recorded_candidate_id(
     Ok(None)
 }
 
+/// How many first-parent states of the target `squash_landed` reads: more than the entries of one merge train.
+const TRAIN_DEPTH: usize = 64;
+
+/// Whether one of the newest `TRAIN_DEPTH` first-parent states of `head` is the squash of this queued state that a
+/// merge train landed on the target in one checked fast-forward (docs/merge.md, "Merge train"): its message is the
+/// entry's squash message (title and `Layr-Change` trailer) and a `Layr-Queued-State` trailer that names exactly
+/// `state`, so a later version of the same change is no match. The target's history passed its protection, so
+/// the entry's code is merged and its own run only marks it done; it gets no candidate and no second set of checks.
+fn squash_landed(repo: &Repo, head: &str, message: &str, state: &str) -> Result<bool> {
+    if !message.contains("\n\nLayr-Change: ") {
+        return Ok(false);
+    }
+    let message = format!("{message}\nLayr-Queued-State: {state}");
+    let mut at = head.to_string();
+    for _ in 0..TRAIN_DEPTH {
+        let state = repo.state(&at)?;
+        if state.message == message {
+            return Ok(true);
+        }
+        match state.parents.first() {
+            Some(parent) => at = parent.clone(),
+            None => break,
+        }
+    }
+    Ok(false)
+}
+
 /// Find a prepared candidate from signed metadata without making or reading its tree.
 pub(crate) fn existing_candidate(
     ctx: &Ctx,
@@ -1648,7 +1712,13 @@ pub(crate) fn existing_candidate(
     entry: &crate::model::QueueEntry,
     machine: Option<&str>,
 ) -> Result<Option<String>> {
-    let candidate = if repo.is_ancestor(&entry.state, &line.head)? {
+    let landed = match (&entry.title, &entry.change_id) {
+        (Some(title), Some(change)) => {
+            squash_landed(repo, &line.head, &format!("{title}\n\nLayr-Change: {change}"), &entry.state)?
+        }
+        _ => false,
+    };
+    let candidate = if landed || repo.is_ancestor(&entry.state, &line.head)? {
         Some(line.head.clone())
     } else if entry.title.is_none() && repo.is_ancestor(&line.head, &entry.state)? {
         Some(entry.state.clone())
@@ -1931,7 +2001,12 @@ fn merge_rev_inner(
         Some(l) => Some(repo.localize(l)?).filter(|l| l.head == theirs),
         None => None,
     };
-    let up_to_date = theirs == head || repo.is_ancestor(&theirs, &head)?;
+    // A titled queue entry that a merge train already landed: main holds its squash, so its run only marks it done.
+    let landed = match queue {
+        Some(q) if a.has("--squash") => squash_landed(repo, &head, &message, &q.entry.state)?,
+        _ => false,
+    };
+    let up_to_date = theirs == head || landed || repo.is_ancestor(&theirs, &head)?;
     if up_to_date && theirs_line.as_ref().map(|t| repo.layers(t).map(|v| v.is_empty())).transpose()?.unwrap_or(true) {
         if queue.is_some_and(|q| q.candidate_only) {
             return Err(anyhow::Error::from(CandidateReady(head.clone())));

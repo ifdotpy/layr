@@ -2,6 +2,9 @@
 # Needs root, btrfs-progs, git, zstd. LAYR points at the binary under test.
 
 set -u
+# The check scripts build with line tables only (tools/checks/environment.sh). A test that builds its
+# own cargo project must see cargo's defaults, or its unit names and prune counts change (t117).
+unset CARGO_PROFILE_DEV_DEBUG
 LAYR=${LAYR:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/layr}
 PASS=0
 FAIL=0
