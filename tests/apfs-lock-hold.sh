@@ -133,8 +133,8 @@ l add tracked.txt && l save -qm tracked || exit 1
 head=$(l rev-parse head)
 l line new -q already-layered || exit 1
 cd "$Q/lines/already-layered" || exit 1
-l overlay create lock-empty --mode follow -q || exit 1
-l overlay use --add lock-empty >/dev/null || exit 1
+l overlay create lock-empty -q || exit 1
+l overlay use lock-empty >/dev/null || exit 1
 eq "the layered source is already up to date" "$head" "$(l rev-parse head)"
 cd "$Q/lines/main" || exit 1
 l overlay use --none >/dev/null || exit 1
