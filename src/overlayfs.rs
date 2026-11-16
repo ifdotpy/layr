@@ -1954,13 +1954,13 @@ mod tests {
         let root = PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("busy-{}", crate::ids::new_id()));
         recover(&root)?;
         let base = root.join("base");
-        create_subvolume(&base)?;
+        crate::fs::create(&base)?;
         fs::write(base.join("file"), b"base")?;
-        set_readonly(&base)?;
+        crate::fs::set_readonly(&base)?;
         // A tree that no process uses: release unmounts it, and the next open mounts it again
         // (a line delete whose record failed keeps its folder).
         let idle = root.join("idle");
-        snapshot(&base, &idle, false)?;
+        crate::fs::snapshot(&base, &idle, false)?;
         fs::write(idle.join("unsaved"), b"idle")?;
         release_tree(&idle)?;
         assert!(!mounted(&idle)?);
@@ -1968,14 +1968,14 @@ mod tests {
         assert_eq!(fs::read(idle.join("unsaved"))?, b"idle");
         // A shell with its working directory in the tree: the unmount gives EBUSY.
         let busy = root.join("busy");
-        snapshot(&base, &busy, false)?;
+        crate::fs::snapshot(&base, &busy, false)?;
         fs::create_dir(busy.join("dir"))?;
         let mut shell = std::process::Command::new("sleep").arg("60").current_dir(busy.join("dir")).spawn()?;
         let result = (|| -> Result<()> {
             assert!(sys::overlay_unmount(&busy).is_err_and(|e| is_busy(&e)));
             release_tree(&busy)?;
             assert!(mounted(&busy)?, "release keeps a busy mount and its registry entry");
-            delete_tree(&busy)?;
+            crate::fs::remove(&busy)?;
             assert!(!mounted(&busy)?);
             assert!(!busy.exists());
             assert!(!lock(&base)?.registry.trees.contains_key(&busy));
@@ -1986,8 +1986,8 @@ mod tests {
         let _ = shell.kill();
         let _ = shell.wait();
         result?;
-        delete_tree(&idle)?;
-        delete_tree(&base)?;
+        crate::fs::remove(&idle)?;
+        crate::fs::remove(&base)?;
         Ok(())
     }
     #[test]
