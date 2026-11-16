@@ -137,8 +137,10 @@ Overlay and people prefixes are excluded. Public requests never use the authenti
 The gateway must expose the routes only when a signed public manifest is present.
 
 `line new <name> [<rev>] [--count N]` creates lines. A line starts at the state that `<rev>` names when the command reads it; a save or a fetch that moves that line during the command does not change the start. Use `line list`, `line delete <name>`, or `line rename [<old>] <new>` to manage them.
-`line delete <name>` refuses a line with saves that are not merged into the current line; `-D`
-deletes it anyway. It also refuses a line whose folder has unsaved changes: modified, added or
+`line delete <name>` refuses a line with saves that are not merged into the current line, or
+`main` when there is no current line (including `--project <project>` without `--line`). The error
+names that destination; comparing a line with itself is refused. `-D` skips the merge check.
+It also refuses a line whose folder has unsaved changes: modified, added or
 deleted files, and new files that are not ignored. `-D` does not change this. An automatic save
 (`layr save` without `-m`) does not count as saved. The error names the line and its files. Save
 the changes in a named state (`layr add`, then `layr save -m`), park them (`layr park`), or add

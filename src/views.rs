@@ -627,7 +627,7 @@ pub fn save_working(ctx: &Ctx, repo: &Repo, line: &Line, v: &View, message: &str
 }
 
 /// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
-pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
+pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View, check: impl FnOnce(&Line) -> Result<()>) -> Result<()> {
     let _lifecycle = lifecycle_lock(repo, l)?;
     let _line_lock = repo.line_lock(l)?;
     let l = repo.line(&l.id)?;
@@ -651,8 +651,22 @@ pub fn delete(ctx: &Ctx, repo: &Repo, l: &Line, v: &View) -> Result<()> {
             return Err(e);
         }
     }
-    let _lock = repo.p.lock()?;
-    let fresh = repo.line(&l.id)?;
+    let checked = (|| -> Result<_> {
+        crate::cmd::branch::deletion_barrier()?;
+        let lock = repo.p.lock()?;
+        let fresh = repo.line(&l.id)?;
+        check(&fresh)?;
+        Ok((lock, fresh))
+    })();
+    let (_lock, fresh) = match checked {
+        Ok(checked) => checked,
+        Err(e) => {
+            if let Some(st) = &last {
+                repo.discard_states(std::slice::from_ref(st));
+            }
+            return Err(e);
+        }
+    };
     let last_id = match last {
         Some(st) => {
             let mut rec = Record::new("save");
