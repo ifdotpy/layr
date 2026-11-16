@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.49.0](https://github.com/ifdotpy/layr/compare/v0.48.0...v0.49.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** New projects use object store v2; Rust 1.100 builds layr
+
+### Features
+
+* **fs:** Add plain-directory and in-memory backends for tests
+* **lines:** Delete a line by id atomically
+* **queue:** Enforce the expected target head when the queue merges
+* **store:** Create new projects in object store v2
+
+
+### Performance Improvements
+
+* **diff:** Reuse metadata and prune unchanged object trees, and use filesystem change hints
+* **git:** Stream initial exports directly into a pack, without repeated materialization
+* **objects:** Keep incremental saves after native retirement, and reuse scratch buffers for file hashing
+* **overlayfs:** Preserve owner-normalized layers for new lines, and speed up candidate enumeration
+* **repo:** Reuse validated comparisons across save and merge
+* **service:** Resolve caller groups once per request
+* **status:** Share the validated status cache on every platform
+
+
+### Bug Fixes
+
+* **deps:** Resolve cargo-deny advisories and license findings
+* **init:** Ask git once for the changed paths of the checkout, with no pathspec
+* **objects:** Ignore the times of nested subvolume placeholders, and match v1 merge and log behaviour on object-backed projects
+* **overlays:** Keep cache build output out of the base object store
+* **service:** Prune and repack object stores periodically
+
+
+### Code Refactoring
+
+* **fs:** Move the APFS, OverlayFS and btrfs backends behind one filesystem core trait, and remove the legacy facades
+* **store:** Typed project and line locks, catalog transactions and commit outcomes
+* **model:** Typed line transitions, conflict subjects and record verification states
+
 ## [0.48.0](https://github.com/ifdotpy/layr/compare/v0.47.0...v0.48.0) (2026-11-16)
 
 
