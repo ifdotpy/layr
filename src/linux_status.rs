@@ -63,6 +63,9 @@ mod tests {
 
     #[test]
     fn leases_reject_writable_unreadable_and_replaced_observations() -> Result<()> {
+        if crate::test_runs_as_root() {
+            return Ok(());
+        }
         let dir = std::env::temp_dir().join(format!("layr-status-lease-{}", crate::ids::new_id()));
         std::fs::create_dir(&dir)?;
         let path = dir.join("file");

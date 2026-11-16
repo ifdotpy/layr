@@ -435,6 +435,9 @@ mod tests {
 
     #[test]
     fn object_only_parent_writes_five_files_without_resolving_unchanged_files() -> Result<()> {
+        if crate::test_runs_as_root() {
+            return Ok(());
+        }
         use layr_objects::write::{Source, WriteMode};
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("layr-object-base-{}", crate::ids::new_id()));

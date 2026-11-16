@@ -773,6 +773,9 @@ fn plain_copy_preserves_byte_names_attributes_sparse_data_and_safe_paths() -> Re
 
 #[test]
 fn failed_plain_copy_returns_retry_authority_when_cleanup_cannot_finish() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     use std::os::unix::fs::PermissionsExt;
     struct FailingRead(MemoryTree);
     impl TreeRead for FailingRead {
@@ -1070,6 +1073,9 @@ fn writable_trees_preserve_link_groups_moves_and_empty_directory_checks() -> Res
 
 #[test]
 fn direct_outputs_share_derive_verification_mode_and_rename_decisions() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     fn run(
         fs: &dyn Filesystem,
         location: &dyn Fn(&str) -> layr_fs_core::Result<NewTreeLocation>,
@@ -1287,6 +1293,9 @@ fn directory_type_replacements_match_native_merge_conflicts_and_results() -> Res
 
 #[test]
 fn readonly_custom_driver_inputs_export_writable_scratch_and_replace_xattrs() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     use crate::write_source::WriteSrc;
     let scratch = Scratch::new()?;
     let mut sources = Vec::new();
@@ -1344,6 +1353,9 @@ fn plain_backend_requires_a_private_owned_namespace() -> Result<()> {
 
 #[test]
 fn overwrite_availability_never_masks_errors_after_mutation() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     struct FailingInput {
         reads: usize,
     }
@@ -1820,6 +1832,9 @@ fn apfs_core_operations_and_capabilities_match_reference_results() -> Result<()>
 
 #[test]
 fn layered_enumeration_propagates_failed_upper_observations() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     use layr_fs_common::{LayeredTree, ReadLayer};
     use std::{collections::BTreeSet, os::unix::fs::PermissionsExt, sync::Arc};
     let scratch = Scratch::new()?;

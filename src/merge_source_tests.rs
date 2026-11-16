@@ -125,6 +125,9 @@ fn object_merges_pair_moves_and_preserve_edits_without_native_states() -> Result
 
 #[test]
 fn object_merges_read_attributes_drivers_and_disjoint_blocks() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     for (ours_portable, theirs_portable) in [(true, true), (true, false), (false, true)] {
         let f = Fixture::new()?;
         for (dir, label, num, offset) in

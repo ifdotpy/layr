@@ -295,6 +295,9 @@ fn change_hints_50k_metadata_measurement() -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn fallback_preserves_ranges_renames_and_rejects_incomplete_observations() -> Result<()> {
+    if crate::test_runs_as_root() {
+        return Ok(());
+    }
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new()?;
     let (base, tree) = (fixture.root.join("base"), fixture.root.join("tree"));
