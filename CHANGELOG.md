@@ -9,6 +9,7 @@
 
 ### Features
 
+* **cache:** Caches are portable by default; `cache-location-bound` (or `cache.location-bound`) keeps a folder's output at its build location
 * **fs:** Add plain-directory and in-memory backends for tests
 * **lines:** Delete a line by id atomically
 * **queue:** Enforce the expected target head when the queue merges

@@ -9,7 +9,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 0 ]; then
 fi
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$T/src/.layrattributes"
 l init checkloc --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/checkloc/lines/main"
 l protect main --remove >/dev/null 2>&1 || true

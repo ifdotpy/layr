@@ -8,7 +8,7 @@ fi
 . "$(dirname "$0")/lib.sh"
 export LAYR_EXPERIMENTAL_VIEWS=1
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$T/src/.layrattributes"
 l init viewloc --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/viewloc
 cd "$P/lines/main"

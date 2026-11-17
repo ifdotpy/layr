@@ -23,7 +23,7 @@ JSON
 printf 'cache=%s/npm-cache\noffline=true\nregistry=http://127.0.0.1:9/\naudit=false\nfund=false\n' "$T" > "$T/src/.npmrc"
 printf 'node_modules/\n.repair-ran\n.repair-fail\n.repair-foreign\n' > "$T/src/.gitignore"
 echo 'node_modules regenerable' > "$T/src/.layrattributes"
-l init npm-repair --from "$T/src" "${owner_args[@]}" -q >/dev/null || exit 1
+l init npm-repair --from "$T/src" ${owner_args[@]+"${owner_args[@]}"} -q >/dev/null || exit 1
 cd "$LAYR_ROOT/projects/npm-repair/lines/main"
 l protect main --remove >/dev/null 2>&1 || true
 echo disposable > node_modules/output
