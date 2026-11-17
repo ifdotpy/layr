@@ -297,6 +297,13 @@ steps. Build and setup steps still stop the check at once. `tests/run.sh` runs a
 alone, when at most five failed: a test that passes then prints `FLAKY <test>` and does not fail the run
 (`LAYR_TEST_RETRY=0` turns this off). Fix a flaky test separately; it must wait for a condition, not a time.
 
+`tools/checks/check-log.sh <rev>` lists the check results of a state from the project's records, and
+`tools/checks/check-log.sh <rev> --failed` (or `<rev> <check>`) prints their logs: each log is a derived state
+in the store remote, so it reads while the runner sleeps. `tools/checks/local-linux.sh unit|integration|overlayfs
+<ext4|xfs>` runs a Linux check of the working folder as a runner does (the tools of `install-linux.sh`, root, a
+btrfs TMPDIR on a loop file) in a privileged Docker container; `LAYR_LOCAL_CI_HOST=<ssh host>` runs it on
+another machine, and `LAYR_LOCAL_CI_TESTS="t01-basic t05-transfer"` runs only those shell tests.
+
 On the creator's machine, retain the required main protection and run
 `bash tools/checks/configure.sh`, then push. On Linux runner copies, provision the
 local service account's reader role (`layr access grant layr-checks reader`). The
