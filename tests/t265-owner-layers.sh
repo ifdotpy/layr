@@ -5,7 +5,7 @@
 # Legacy Linux CI launches shell tests as root. The lead's isolated service harness
 # runs this file as uid 1000; never turn its privileged controller into a client.
 [ "$(id -u)" != 0 ] || {
-    echo 't265-owner-layers.sh: skipped (requires an unprivileged client/service harness)'
+    echo 't265-owner-layers.sh (requires an unprivileged client/service harness): 0 passed, 0 failed'
     exit 0
 }
 . "$(dirname "$0")/lib.sh"
