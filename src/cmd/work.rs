@@ -512,6 +512,14 @@ fn stage_into(repo: &Repo, line: &Line, stage: &Path, scan: &Path, paths: &BTree
             }
         }
     }
+    // Removals first: on a volume that ignores case, a case-only rename (c.txt to C.txt) would
+    // otherwise write the new name while the old one is still in the stage.
+    for p in paths {
+        if fsutil::lmeta(scan, p).is_none() && fsutil::lmeta(&stage, p).is_some() {
+            fsutil::remove_entry(&stage, p)?;
+            prune_empty(&stage, p);
+        }
+    }
     let mut first_link: std::collections::HashMap<(u64, u64), String> = std::collections::HashMap::new();
     for p in paths {
         if fsutil::lmeta(scan, p).is_some() {
