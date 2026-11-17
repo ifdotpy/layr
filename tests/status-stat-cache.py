@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ci: macos overlayfs
 """Validate cached CLI status against full comparisons and count real blob hashes."""
+import errno
 import json
 import mmap
 import os
@@ -49,10 +50,18 @@ run("protect", "main", "--remove", cwd=work)
 # Retire native history so unprivileged Linux status does not require btrfs send.
 # The working tree is hidden from migration's live-line retention rule.
 hidden = root / "hidden"
-work.rename(hidden)
+overlayfs = os.environ.get("LAYR_TEST_BACKEND") == "overlayfs" or bool(os.environ.get("LAYR_OVERLAYFS_TEST_ROOT"))
+try:
+    work.rename(hidden)
+    moved = True
+except OSError as error:
+    # A working line is a mount on OverlayFS (EBUSY): migration supports its comparisons there.
+    if error.errno not in (errno.EBUSY, errno.EXDEV):
+        raise
+    moved = False
 try:
     run("--project", "cache", "migrate")
-    if sys.platform == "linux" and os.environ.get("LAYR_TEST_BACKEND") != "overlayfs":
+    if sys.platform == "linux" and not overlayfs:
         for name in ("states", "meta/scan", "meta/work"):
             folder = root / "store/projects/cache" / name
             if folder.exists():
@@ -61,7 +70,8 @@ try:
                         subprocess.run(["btrfs", "property", "set", "-ts", str(path), "ro", "false"], check=True, capture_output=True)
     run("--project", "cache", "migrate", "--delete-old")
 finally:
-    hidden.rename(work)
+    if moved:
+        hidden.rename(work)
 
 # A settled initial scan is deliberate: files in the cache's clock tick must be rehashed.
 time.sleep(1.1)

@@ -2,6 +2,10 @@
 # ci: macos overlayfs
 # Exact identity deletion never follows a replacement name or working folder.
 . "$(dirname "$0")/lib.sh"
+# The store sits in a folder of the test file system, so that a folder beside it is on the same
+# file system (on btrfs the store root is the mount point itself, see t94-undo-move-safety).
+FS=$LAYR_ROOT
+export LAYR_ROOT=$FS/store; mkdir -p "$LAYR_ROOT"
 
 sample "$T/src"
 l init del --no-objects --from "$T/src" -q >/dev/null
@@ -104,7 +108,7 @@ B=$T/folder; mkdir "$B"
 LAYR_TEST_LINE_DELETE_BARRIER=$B l line delete --id "$folder_id" -D --discard >"$T/out" 2>"$T/err" &
 pid=$!
 wait_ready
-l line move folder "$LAYR_ROOT/original-folder" >/dev/null || exit 1  # within the store file system
+l line move folder "$FS/original-folder" >/dev/null || exit 1
 mkdir "$P/folder"
 printf 'foreign\n' > "$P/folder/keep.txt"
 touch "$B/release"

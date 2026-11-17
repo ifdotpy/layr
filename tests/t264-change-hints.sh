@@ -6,7 +6,7 @@ mkdir -p "$T/src"
 printf 'tracked\n' > "$T/src/file"
 l init hints --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/hints/lines/main" || exit 1
-if [ "$(uname -s)" = Linux ] && [ "${LAYR_TEST_BACKEND:-}" != overlayfs ]; then
+if [ "$(uname -s)" = Linux ] && [ "${LAYR_TEST_BACKEND:-}" != overlayfs ] && [ -z "${LAYR_OVERLAYFS_TEST_ROOT:-}" ]; then
     btrfs subvolume create .git >/dev/null || exit 1
 fi
 mkdir -p .git/info

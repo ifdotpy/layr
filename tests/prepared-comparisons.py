@@ -79,7 +79,8 @@ run("add", "f0")
 retire()
 time.sleep(1.1)
 result = run("save", "-qm", "saved", extra={"LAYR_TRACE": "1"})
-assert result.stderr.count("status full comparison") == 1, result.stderr
+# OverlayFS compares the mounted line once more for the left-out warning.
+assert 1 <= result.stderr.count("status full comparison") <= (2 if overlay_backend else 1), result.stderr
 assert "saved status used for" in result.stderr, result.stderr
 retire()
 run("line", "new", "topic")
