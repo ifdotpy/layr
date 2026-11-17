@@ -153,6 +153,8 @@ eq "outside a git work tree the real find answers" "$T/bin/rg" \
     "$(cd "$T/bin" && LAYR_FS_STRICT= "$LAYR" tool find "$T/bin" -name rg </dev/null)"
 
 "$LAYR" fs stop
+# The server may answer a status while it shuts down: wait for it to go.
+for i in $(seq 1 50); do "$LAYR" fs status >/dev/null 2>&1 || break; sleep 0.1; done
 no "the server stopped" "$LAYR" fs status
 
 # A socket in an existing folder leaves the folder's mode alone; a non-socket file is kept.
