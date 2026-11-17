@@ -160,6 +160,47 @@ impl Fixture {
         let oid = oid.trim();
         Ok(git.join("objects").join(&oid[..2]).join(&oid[2..]))
     }
+
+    /// Exercise the filesystem/object history branch with the same rename fixture as Git.
+    fn object_history(&mut self) -> Result<()> {
+        let repo = self.repo()?;
+        let store = crate::objstore::open(&repo.p)?;
+        let source = self.root.join("source");
+        let mut parent = None;
+        for (oid, id) in [(&self.parent, &self.base_state), (&self.commit, &self.state)] {
+            let out = Command::new("git").arg("-C").arg(&source).args(["checkout", "-q", oid]).output()?;
+            anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let report = layr_objects::write_tree(
+                &store,
+                &source,
+                &layr_objects::WriteOptions {
+                    temperature: layr_objects::Temperature::Hot,
+                    previous: None,
+                    exclude: vec![b".git".to_vec()],
+                    similar: false,
+                },
+            )?;
+            let mut state = repo.state(id)?;
+            state.id = ids::new_id();
+            state.kind = StateKind::Commit;
+            state.parents = parent.into_iter().collect();
+            state.tree = Some(report.tree.unwrap().hex());
+            state.times = Some(report.times.unwrap().hex());
+            parent = Some(state.id.clone());
+            let mut record = Record::new("save");
+            record.states.push(state.clone());
+            repo.p.append(record, &self.ctx.actor())?;
+            // Mark content as locally readable without requiring native snapshots. state_src
+            // still selects the verified objects, as it does for a migrated state.
+            std::fs::create_dir_all(repo.p.state_path(&state.id))?;
+        }
+        let state = parent.unwrap();
+        let base = repo.state(&state)?.parents[0].clone();
+        drop(repo);
+        self.state = state;
+        self.base_state = base;
+        Ok(())
+    }
 }
 
 impl Drop for Fixture {
@@ -252,6 +293,45 @@ fn filtered_history_ignores_only_unselected_damaged_blobs() -> Result<()> {
             assert!(fixture.command(log_command, &[], true).is_err());
         }
         std::fs::write(&damaged, &original)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn object_path_history_keeps_rename_endpoints_without_reading_unrelated_changes() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.object_history()?;
+    let repo = fixture.repo()?;
+    let root = repo.state_src(&fixture.state)?;
+    let tree = crate::fsutil::Src::objects(&root).unwrap();
+    let layr_objects::Node::File { blob, .. } = tree.entry("seed")?.unwrap().entry.node else { unreachable!() };
+    let blob_path = tree.store.hot_path(&blob).unwrap();
+    let bytes = std::fs::read(&blob_path)?;
+    // A changed, same-size file outside every selected rename path. Reading its bytes must
+    // fail, so success below proves the history scan skips it before content comparison.
+    std::fs::remove_file(&blob_path)?;
+    for path in ["selected/001", "move-out", "moved-out", "move-in", "selected/moved-in", "selected/00?"] {
+        fixture.output.0.borrow_mut().clear();
+        let result = log(
+            &fixture.ctx,
+            &["--format=%s".into(), format!("{}..{}", fixture.base_state, fixture.state), "--".into(), path.into()],
+        );
+        crate::free::finish(&fixture.ctx);
+        result?;
+        assert_eq!(&*fixture.output.0.borrow(), b"many changes\n", "log -- {path}");
+    }
+    fixture.output.0.borrow_mut().clear();
+    let result = log(
+        &fixture.ctx,
+        &["--format=%s".into(), format!("{}..{}", fixture.base_state, fixture.state), "--".into(), "absent".into()],
+    );
+    crate::free::finish(&fixture.ctx);
+    result?;
+    assert!(fixture.output.0.borrow().is_empty(), "log -- absent selects no state");
+    assert!(fixture.command(true, &["seed"], false).is_err(), "selected damage is still reported");
+    std::fs::write(blob_path, bytes)?;
+    for path in ["move-out", "moved-out", "move-in", "selected/moved-in"] {
+        assert_eq!(fixture.command(true, &[path], true)?, fixture.command(false, &[path], true)?);
     }
     Ok(())
 }
