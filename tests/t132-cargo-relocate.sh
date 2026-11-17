@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # Location-bound cargo caches start cold in a new line, including generated OUT_DIR paths.
-# The explicit portable opt-in keeps the historical best-effort relocation behaviour.
+# Portable caches (the default) keep the best-effort relocation; `cache-location-bound` opts a folder out.
 #
 # The lines belong to the user that runs cargo: on a root run (the Linux CI job) the user who started the job.
 . "$(dirname "$0")/lib.sh"
@@ -49,7 +49,7 @@ echo 'pub fn one() -> i32 { 1 }' > "$SRC/dep/src/lib.rs"
 echo 'fn main() { println!("{}", dep::one()); }' > "$SRC/src/main.rs"
 printf 'fn main() { std::fs::write(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("generated.rs"), "pub const GENERATED: u32 = 1;").unwrap(); }\n' > "$SRC/build.rs"
 printf 'include!(concat!(env!("OUT_DIR"), "/generated.rs"));\n#[test]\nfn paths() {\n    println!("OUT={}", env!("OUT_DIR"));\n    assert_eq!(GENERATED, 1);\n    println!("BIN={}", env!("CARGO_BIN_EXE_x"));\n    println!("DIR={}", env!("CARGO_MANIFEST_DIR"));\n}\n' > "$SRC/tests/it.rs"
-echo 'target regenerable' > "$SRC/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
@@ -90,5 +90,6 @@ cb "$PP/main" test --workspace --no-run >/dev/null
 (cd "$PP/main" && l save --overlays -q)
 err=$(cd "$PP/main" && new_line portable main 2>&1 >/dev/null)
 has "the opt-in runs relocation" "units named the old path" "$err"
-ok "the portable dependency output is copied" test -d "$PP/portable/target/debug/deps"
+# Cargo 1.100 keeps unit output in build/<package>/<hash>; older Cargo in deps.
+ok "the portable dependency output is copied" test -d "$PP/portable/target/debug/deps" -o -d "$PP/portable/target/debug/build"
 finish

@@ -77,9 +77,10 @@ with cache.open('wb') as writer:
             run('objects', 'checkout', state, str(checkout))
             assert not (checkout / 'target/build-output').exists(), 'automatic source state contains cache output'
         retire()
-# Once the writer closes, the next pass converts and saves the cache in its own store.
+# Once the writer closes, the cache saves in its own store. `config regenerable` made `target` a cache with
+# its first (cold) state already, so an automatic pass saves no part: a save of the overlays does.
 (work / 'file.txt').write_text('build finished\n')
-run('__test-periodic', os.environ['LAYR_ROOT'], cwd=root)
+run('save', '--overlays', '-q', cwd=work)
 overlays = list((project / 'meta/overlays').glob('*/meta/objects/blobs/*/*'))
 assert any(p.is_file() and p.read_bytes() == payload for p in overlays), 'cache binary is saved in the overlay store'
 assert cache.read_bytes() == payload, 'the working build output stays intact'

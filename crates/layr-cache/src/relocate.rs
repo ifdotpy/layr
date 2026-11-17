@@ -274,7 +274,9 @@ fn unit_dep_files(fingerprints: &[PathBuf]) -> Result<Vec<PathBuf>> {
         };
         for file in files {
             let file = file?;
-            if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) && file.file_type()?.is_file() {
+            if file.file_name().to_str().is_some_and(|n| n.starts_with("dep-")) {
+                // A dep-info entry that is no file is a damaged unit: the relocation fails, and the line starts cold.
+                anyhow::ensure!(file.file_type()?.is_file(), "{} is not a file", file.path().display());
                 out.push(file.path());
             }
         }

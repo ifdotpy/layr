@@ -38,9 +38,9 @@ has "its root copy has the cache of the state" '"exit":0' "$out"
 eq "the line's own cache is the same" warm "$(cat target/built)"
 no "and does not get the check's file" test -e target/new
 
-# Default location-bound output from the line must stay cold. A sandboxed check then builds at
+# Location-bound output (`cache-location-bound`) from the line must stay cold. A sandboxed check then builds at
 # /work and saves back there; the privileged root copy must reuse that compatible location.
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$T/src/.layrattributes"
 l init bound --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/bound/lines/main" || exit 1
 l access grant layr-check-reader reader >/dev/null

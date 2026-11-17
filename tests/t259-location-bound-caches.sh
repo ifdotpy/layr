@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos macos-plain overlayfs
 # Build-output compatibility includes the eventual workspace and target location. Legacy output is cold;
-# only an explicit portable opt-in permits sharing, and failed relocation still rejects the whole cache.
+# a `cache-location-bound` folder is never shared, and failed relocation still rejects the whole cache.
 . "$(dirname "$0")/lib.sh"
 
 # Keep physical move probes on the store filesystem so they reach cache validation.
@@ -10,7 +10,7 @@ export LAYR_ROOT=$FS/store
 mkdir -p "$LAYR_ROOT"
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$T/src/.layrattributes"
 printf '[package]\nname = "location"\nversion = "0.1.0"\n' > "$T/src/Cargo.toml"
 l init locations --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/locations/lines
