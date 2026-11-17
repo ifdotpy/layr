@@ -48,10 +48,11 @@ fn diff_spec() -> Spec {
         .optional("--relative")
 }
 
-/// An empty folder to diff against a root state.
-fn empty_root() -> Result<Temp> {
-    let p = std::env::temp_dir().join(format!("layr-empty-{}", ids::new_id()));
-    std::fs::create_dir(&p)?;
+/// An empty folder to diff against a root state. It is in the project's scan folder: the
+/// filesystem service retains only folders below a trusted anchor, which TMPDIR may not have.
+fn empty_root(repo: &Repo) -> Result<Temp> {
+    let p = repo.p.scan_dir().join(crate::store::temp_name());
+    std::fs::create_dir_all(&p)?;
     Temp::existing(p)
 }
 
@@ -766,7 +767,7 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
             Ok((Entries::Tree(pr), Entries::Tree(root), v))
         }
         None => {
-            let e = empty_root()?;
+            let e = empty_root(repo)?;
             let v = all_files(&root)?;
             Ok((Entries::Tree(snap(&e.path)), Entries::Tree(root), v))
         }

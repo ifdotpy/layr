@@ -35,7 +35,7 @@ run('init', 'p', '--no-objects', '--from', str(root / 'src'), '-q', cwd=root)
 run('protect', 'main', '--remove')
 run('line', 'new', 'build', 'main')
 run('config', 'regenerable', '["target"]')
-run('overlay', 'create', 'build-cache', '--folder', 'target', '--quiet', '--history', 'last', '-q')
+run('overlay', 'create', 'build-cache', '--folder', 'target', '--history', 'last', '-q')
 hidden = []
 try:
     for name in ('main', 'build'):

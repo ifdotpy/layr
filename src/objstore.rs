@@ -197,7 +197,17 @@ impl Compared {
 }
 
 fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, written: layr_objects::WriteReport) -> Result<()> {
-    let _trace = crate::trace::span(format!("objects write {:?}: {} files", written.mode, written.files));
+    // Both forms are read by tests: t257 the kind, t262 the mode and file count.
+    let kind = match written.mode {
+        layr_objects::write::WriteMode::Incremental { .. } => "incremental",
+        layr_objects::write::WriteMode::Full { .. } => "full",
+    };
+    let _trace = crate::trace::span(format!(
+        "objects: {kind} write of {}; objects write {:?}: {} files",
+        crate::ids::short(&state.id),
+        written.mode,
+        written.files
+    ));
     let refs = StateRef {
         tree: written.tree.context("object write gave no tree")?,
         times: written.times.context("object write gave no times")?,

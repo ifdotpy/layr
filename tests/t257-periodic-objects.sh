@@ -35,7 +35,7 @@ def inventory():
     return {str(p.relative_to(objects)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in objects.rglob('*') if p.is_file()}
 
-run('init', 'p', '--from', str(root / 'src'), '-q', cwd=root)
+run('init', 'p', '--objects', '--from', str(root / 'src'), '-q', cwd=root)
 run('protect', 'main', '--remove')
 # Use object-backed comparisons even on an unprivileged btrfs mount (as in t255).
 try:
@@ -213,7 +213,7 @@ for kind in ('checkout', 'read'):
             child.kill()
             child.wait()
 # Overlay stores live below their parent's metadata, outside Store::project_names.
-run('overlay', 'create', 'notes', '--mode', 'follow', '-q')
+run('overlay', 'create', 'notes', '-q')
 overlay_objects = project / 'meta/overlays/notes/meta/objects'
 assert overlay_objects.is_dir()
 orphan = b'overlay garbage'
@@ -240,8 +240,8 @@ periodic()
 assert not orphan_path.exists(), 'periodic maintenance discovers nested overlay stores'
 assert (project / 'meta/overlays/notes/meta/objects-maintained').exists()
 # Metadata for another platform's overlay can arrive without its local project.
-run('overlay', 'create', 'far', '--mode', 'follow', '--platform', 'other-arch', '-q')
-(project / 'meta/overlays/far').rename(root / 'far-not-fetched')
+run('overlay', 'create', 'far', '-q')
+(project / 'meta/overlays/far').rename(Path(os.environ['LAYR_ROOT']) / 'far-not-fetched')  # the same file system
 run('gc', '-n')
 run('gc')
 print('periodic objects: dry-run parity, pruning, cooling, packing, interval and lock yielding passed')

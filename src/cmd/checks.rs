@@ -878,7 +878,8 @@ fn execute(
         // Filesystem suites start service clients under test users. They must
         // traverse this credential-free source copy to reach their own fixtures.
         std::fs::DirBuilder::new().mode(0o711).create(&path)?;
-        Some(crate::repo::Temp::existing(path)?)
+        // /var/tmp need not be on the store's filesystem: the copy is a plain tree.
+        Some(crate::repo::Temp::plain(path))
     } else {
         None
     };

@@ -19,8 +19,8 @@ cargo build --locked --offline
 # The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec. It also refuses
 # loopback TCP (no network namespace on macOS): the fake-server tests of api_tests and runner run in the Linux unit check.
 # ci.yml's macos job runs them outside a sandbox.
-# A frozen publication needs a private parent (mode 0700): the check's TMPDIR and the folders the tests make.
-umask 077
+# A frozen publication needs a private parent (mode 0700): the unit tests make their folders below TMPDIR with
+# the umask, so they run with 077. The shell tests keep the usual umask: a git checkout must keep 644 modes.
 # The sandbox refuses ~/.gitconfig: the git of the tests reads no global or system config.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Known failures of the fs stack (fs-legacy-facades) on macOS, skipped so that the stack can merge
@@ -45,7 +45,7 @@ macos_known=(
 )
 skips=()
 for name in "${macos_known[@]}"; do skips+=(--skip "$name"); done
-cargo test --locked --offline -- --include-ignored "${skips[@]}" \
+( umask 077; cargo test --locked --offline -- --include-ignored "${skips[@]}" \
     --skip apfs_commit::tests::recovery_takes_over_a_reused_pid \
     --skip free::holder_tests::detects_live_reused_and_dead_holders \
     --skip cmd::checks::macos_tests::sandbox_allows_only_unix_sockets_inside_work \
@@ -62,7 +62,7 @@ cargo test --locked --offline -- --include-ignored "${skips[@]}" \
     --skip runner::tests::webtransport_carries_the_same_protocol_and_close_codes \
     --skip runner::tests::a_blocked_webtransport_endpoint_falls_back_to_the_websocket \
     --skip runner::tests::a_welcome_naming_another_host_gets_no_webtransport_connection \
-    --skip runner::tests::an_expired_token_asks_for_renewal
+    --skip runner::tests::an_expired_token_asks_for_renewal )
 export LAYR="$PWD/target/debug/layr"
 python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"

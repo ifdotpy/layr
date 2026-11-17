@@ -55,7 +55,9 @@ try:
 finally:
     if hidden:
         (root / 'main').rename(work)
-run('config', 'snapshot.interval', '600', cwd=work)
+# A one second interval: the automatic state of the first kind's retry counts as the newest
+# automatic state (object-backed states included), so each kind waits it out below.
+run('config', 'snapshot.interval', '1', cwd=work)
 with sqlite3.connect(meta / 'db/layr.sqlite') as db:
     line = db.execute("SELECT id FROM lines WHERE name='main'").fetchone()[0]
 
@@ -68,6 +70,7 @@ def checks():
     return json.loads(path.read_text()) if path.exists() else {}
 
 for kind in ('line', 'project'):
+    time.sleep(1.1)
     if os.environ.get('LAYR_TEST_PREMOUNTED') == '1':
         for native in (project / 'states').iterdir():
             subprocess.run(['btrfs', 'property', 'set', '-ts', str(native), 'ro', 'false'], check=True, timeout=3)

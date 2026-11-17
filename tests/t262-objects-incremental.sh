@@ -39,7 +39,10 @@ def head_refs():
         head = db.execute("SELECT head FROM lines WHERE name='main'").fetchone()[0]
         state = json.loads(db.execute('SELECT rec FROM states WHERE id=?', (head,)).fetchone()[0])
     assert state['tree'] and state['times']
-    assert not any((project / kind / head).exists() for kind in ('states', 'deltas')), 'native parent must be retired'
+    # Off macOS the head of a line with a working folder keeps its native copy for the next
+    # incremental write (t257-btrfs-incremental-write.sh); elsewhere it must be retired.
+    if sys.platform == 'darwin':
+        assert not any((project / kind / head).exists() for kind in ('states', 'deltas')), 'native parent must be retired'
     return state['tree'], state['times']
 
 run('init', 'p', '--no-objects', '--from', str(root / 'src'), '-q')

@@ -2408,6 +2408,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .value("--volume")
         .flag("--include-ignored")
         .flag("--no-objects")
+        .flag("--objects")
         .value("-m|--message")
         .flag("-q|--quiet");
     let a = parse(&spec, args)?;
@@ -2455,7 +2456,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let res = (|| -> Result<(Line, String)> {
         let _lock = repo.p.lock_maintenance()?;
-        if !a.has("--no-objects") {
+        // v2 object storage stays opt-in until every command reads object-only states
+        // (export, sync, project copy and the cache paths still need native copies).
+        if a.has("--objects") && !a.has("--no-objects") {
             crate::objstore::enable(&_lock, ctx, &repo)?;
         }
         let work = repo.p.work_dir().join(crate::store::temp_name());
@@ -2577,9 +2580,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 copy_folder(ctx, &src, &work, a.has("--include-ignored"), None)?;
             }
         }
-        // Normalize while the import is private, before its immutable layers are shared.
-        // The service writes as root, but later lines and stages belong to the intended owner.
-        crate::repo::give_tree(&work, owner_ids.0, owner_ids.1)?;
+        // The state stays the service's (no store file belongs to the user, t98); the line
+        // made from it below belongs to the intended owner.
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
         let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st.clone());

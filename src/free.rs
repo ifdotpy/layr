@@ -226,10 +226,21 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_stat
     drop(lock);
     let wait = p.config_u64("thin.view_seconds", crate::thin::VIEW_IN_USE_SECONDS);
     std::thread::sleep(std::time::Duration::from_secs(wait));
+    // A command of a line whose head is this state may read its layer without the project lock
+    // (a save prepares under its line lease): its line lease keeps the layer. Line locks come first.
+    let mut _leases = Vec::new();
+    for line in p.db.lines()?.into_iter().filter(|l| l.head == id) {
+        match p.try_line_lock(&line.id, &line.name)? {
+            crate::store::LockAttempt::Acquired(lease) => _leases.push(lease),
+            crate::store::LockAttempt::Busy => return Ok(()),
+        }
+    }
     {
         let _lock = p.lock_maintenance()?;
         // A command can remove the view in the wait: then the state stays thin and the next save tries again.
-        if p.state_path(id).is_dir() && p.delta_path(id).is_dir() {
+        // A save prepares outside the project lock and reads the layers of the head it pinned: a pinned state
+        // keeps its layer, and the next save tries again.
+        if p.state_path(id).is_dir() && p.delta_path(id).is_dir() && !preparing_state(&p, id).unwrap_or(true) {
             crate::thin::make_keyframe(&p, id)?;
         }
     }

@@ -41,7 +41,8 @@ impl FileStat {
             mode: m.mode(),
             uid: m.uid(),
             gid: m.gid(),
-            nlink: m.nlink(),
+            // A folder's link count is its entry count on APFS (lstat) but 1 in a bulk scan: only files compare it.
+            nlink: if m.is_dir() { 1 } else { m.nlink() },
             mtime: Timestamp { seconds: m.mtime(), nanos: m.mtime_nsec() },
             ctime: Timestamp { seconds: m.ctime(), nanos: m.ctime_nsec() },
         }

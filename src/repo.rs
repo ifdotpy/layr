@@ -96,6 +96,16 @@ enum TemporaryResource {
     Capture(crate::fs::OwnedCapture),
     Working(crate::fs::OwnedWorking),
     Existing(crate::fs::ResourceOwner),
+    /// A folder outside the store's filesystem (a privileged check copy in /var/tmp): no custody,
+    /// removed as a plain tree.
+    Plain(PathBuf),
+}
+fn remove_plain(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("remove {}", path.display()))),
+    }
 }
 impl TemporaryResource {
     fn abort(self, cause: anyhow::Error) -> anyhow::Error {
@@ -103,6 +113,10 @@ impl TemporaryResource {
             Self::Capture(captured) => captured.abort(cause),
             Self::Working(created) => created.abort(cause),
             Self::Existing(owner) => owner.abort(cause),
+            Self::Plain(path) => match remove_plain(&path) {
+                Ok(()) => cause,
+                Err(e) => cause.context(format!("{e:#}")),
+            },
         }
     }
     fn release(self) {
@@ -110,6 +124,7 @@ impl TemporaryResource {
             Self::Capture(captured) => captured.release(),
             Self::Working(created) => created.release(),
             Self::Existing(owner) => owner.release(),
+            Self::Plain(_) => {}
         }
     }
 }
@@ -126,8 +141,13 @@ impl Temp {
             Some(TemporaryResource::Capture(captured)) => captured.discard(),
             Some(TemporaryResource::Working(created)) => created.discard(),
             Some(TemporaryResource::Existing(owner)) => owner.discard(),
+            Some(TemporaryResource::Plain(path)) => remove_plain(&path),
             None => Ok(()),
         }
+    }
+    /// A temporary folder that may be on any filesystem, removed as a plain tree.
+    pub(crate) fn plain(path: PathBuf) -> Self {
+        Self { path: path.clone(), resource: Some(TemporaryResource::Plain(path)) }
     }
     pub(crate) fn existing(path: PathBuf) -> Result<Self> {
         let owner = crate::fs::retain_owned(&path)?;
@@ -176,6 +196,7 @@ impl Drop for Temp {
             Some(TemporaryResource::Capture(captured)) => captured.discard(),
             Some(TemporaryResource::Working(created)) => created.discard(),
             Some(TemporaryResource::Existing(owner)) => owner.discard(),
+            Some(TemporaryResource::Plain(path)) => remove_plain(&path),
             None => Ok(()),
         };
         if let Err(error) = result {
@@ -1347,6 +1368,13 @@ impl<'a> Repo<'a> {
                 let prev = self.save_base(line)?;
                 if !self.tree_available(&prev) {
                     return Ok(true);
+                }
+                // In the view of an overlay the working content is in the overlay's store (`working_source`):
+                // the state itself holds the shared head, so compare the overlay's working content.
+                let (old, old_full) = self.working_source(line, &prev)?;
+                let (new, new_full) = self.working_source(line, &st.id)?;
+                if old_full || new_full {
+                    return Ok(old_full != new_full || changes::any_file_change(old.as_path(), new.as_path(), skip_path)?);
                 }
                 let base = self.state_src(&prev)?;
                 let source = self.state_src(&st.id)?;

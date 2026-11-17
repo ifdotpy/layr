@@ -4,6 +4,7 @@
 . "$(dirname "$0")/lib.sh"
 
 python3 - "$T" "$LAYR" <<'PY'
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -20,7 +21,7 @@ def run(*args, cwd=root):
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     return result.stdout
 
-run('init', 'history', '--from', str(source), '-q')
+run('init', 'history', '--objects', '--from', str(source), '-q')
 project = Path(os.environ['LAYR_ROOT']) / 'projects/history'
 work = project / 'lines/main'
 run('protect', 'main', '--remove', cwd=work)
@@ -33,7 +34,11 @@ def retire():
     run('line', 'list', cwd=work)
     with sqlite3.connect(project / 'meta/db/layr.sqlite') as db:
         head = db.execute("SELECT head FROM lines WHERE name='main'").fetchone()[0]
-    assert not any((project / kind / head).exists() for kind in ('states', 'deltas')), 'fixture must be object-only'
+        parents = json.loads(db.execute('SELECT rec FROM states WHERE id=?', (head,)).fetchone()[0]).get('parents') or []
+    # Off macOS the head of a line with a working folder keeps its native copy for the next
+    # incremental write (t257-btrfs-incremental-write.sh): its parents must be object-only.
+    retired = [head] if sys.platform == 'darwin' else parents
+    assert not any((project / kind / s).exists() for s in retired for kind in ('states', 'deltas')), 'fixture must be object-only'
 
 retire()
 initial = run('show', '-s', '--format=%s', 'head', cwd=work).strip()

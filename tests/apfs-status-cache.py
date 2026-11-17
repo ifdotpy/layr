@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare status from the saved status with status from a full comparison, after many kinds
 of change, including writes through a memory mapping and through a hard link outside the line."""
-import argparse, mmap, os, shutil, subprocess, tempfile
+import argparse, mmap, os, shutil, subprocess, tempfile, time
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -50,6 +50,9 @@ try:
     run(main, 'protect', 'main', '--remove')
     run(main, 'line', 'new', '-q', 'topic')
     work = main.parent / 'topic'
+    # The saved status trusts only entries whose times are a full second older than the scan (racy files):
+    # the new line's entries have the time of its clone.
+    time.sleep(1.1)
     same('first status compares all', fast=False)
     same('nothing changed')
 
@@ -82,11 +85,13 @@ try:
     os.utime(work / 'd0/sub0/f15', ns=(0, 10**18))
     same('only a new time')
     run(work, 'add', 'new.txt', 'd0/sub0/f0')
+    time.sleep(1.1)  # The new stage is racy for a second: its status is not saved before that.
     same('status after add compares all', fast=False)
     (work / 'new.txt').write_text('new and changed\n')
     same('a staged and changed file')
     (work / '.gitignore').write_text('build/\n')
     same('a changed .gitignore compares all', fast=False)
+    time.sleep(1.1)  # The .gitignore change is racy for a second: the save could not trust it.
     run(work, 'add', '-A')
     run(work, 'save', '-qm', 'all')
     # A named save computes the status that it names the left out files from (t96), and saves
@@ -114,16 +119,16 @@ try:
         (work / f'd1/sub{i % 3}/many{i}').write_text(f'again {i}\n')
     same('many changed files')
     # A write through a memory mapping changes the change counter. While a file is mapped it
-    # has no counter, so status compares all.
+    # has no counter and cannot be verified, so status compares all (no saved status).
     with (work / 'd1/sub1/f16').open('r+b') as f:
         with mmap.mmap(f.fileno(), 0) as m:
             m[0:1] = b'Z'
             m.flush()
             # A mapped file has no change counter: it is compared every time.
-            same('a mapped file is compared each time')
+            same('a mapped file is compared each time', fast=False)
             m[2:3] = b'W'
             m.flush()
-            same('a second write through the mapping')
+            same('a second write through the mapping', fast=False)
     same('after the mapping ends')
     with (work / 'd1/sub1/f16').open('r+b') as f:
         with mmap.mmap(f.fileno(), 0) as m:

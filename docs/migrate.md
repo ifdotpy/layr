@@ -6,9 +6,9 @@ the new storage. You do not need to know the history of this work.
 ## What changes
 
 Project storage v1 uses snapshots. Project storage v2 uses objects.
-New projects (`init`, including `--from`, `git clone`, and `clone`) enable object writes from the start
-on btrfs, APFS and OverlayFS. Existing projects keep their storage setting until you migrate them.
-`init --no-objects` creates a v1 project for legacy storage and migration tests.
+New projects from `init` stay on v1 unless you pass `init --objects`. `clone` enables object writes
+from the start. Existing projects keep their storage setting until you migrate them.
+`init --no-objects` is still accepted and creates a v1 project.
 `layr objects stat --json` reports `"format":2` after migration.
 The root container format and remote protocol versions are separate from these project storage versions.
 

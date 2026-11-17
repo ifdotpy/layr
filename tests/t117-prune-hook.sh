@@ -54,7 +54,25 @@ echo 'target regenerable' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
-units() { ls "$1/debug/.fingerprint" 2>/dev/null | wc -l | tr -d ' '; }
+# units <target>: the cargo units of the debug profile, in the legacy layout (.fingerprint/<name>-<hash>) and
+# in the unit directories of Cargo 1.100 (build/<package>/<hash>), as layr-cache's Layout::units counts them.
+units() {
+    python3 -I - "$1/debug" <<'PYUNITS'
+import os, re, sys
+p = sys.argv[1]
+n = 0
+fp = os.path.join(p, ".fingerprint")
+if os.path.isdir(fp):
+    n += sum(1 for e in os.listdir(fp) if os.path.isdir(os.path.join(fp, e)))
+b = os.path.join(p, "build")
+if os.path.isdir(b):
+    for pkg in os.listdir(b):
+        d = os.path.join(b, pkg)
+        if os.path.isdir(d) and not os.path.islink(d):
+            n += sum(1 for h in os.listdir(d) if re.fullmatch(r"[0-9a-f]{16}", h) and os.path.isdir(os.path.join(d, h)))
+print(n)
+PYUNITS
+}
 # times_mismatch <source target> <copy target>: the files of deps and .fingerprint that both have, whose
 # modification times differ (a count, and the first names).
 times_mismatch() {
@@ -62,7 +80,7 @@ times_mismatch() {
 import os, sys
 src, dst = sys.argv[1], sys.argv[2]
 bad = []
-for sub in ("debug/deps", "debug/.fingerprint"):
+for sub in ("debug/deps", "debug/.fingerprint", "debug/build"):
     for root, _, files in os.walk(os.path.join(src, sub)):
         for n in files:
             s = os.path.join(root, n)
