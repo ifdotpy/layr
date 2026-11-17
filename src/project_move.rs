@@ -270,6 +270,7 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         // Validate the copy before the volume record exposes its working folders at new paths.
         let repo = crate::repo::Repo {
             p: Project {
+                lease: Default::default(),
                 store,
                 name: project.into(),
                 dir: dst.clone(),

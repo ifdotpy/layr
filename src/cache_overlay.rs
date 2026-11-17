@@ -757,12 +757,8 @@ impl<'a> Repo<'a> {
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
-<<<<<<< head
         locked.check(&self.p)?;
-        self.save_cache_overlays_in(locked, ctx, line, &self.working(line), paths, shared, project_state)
-=======
-        self.save_cache_overlays_in(ctx, line, line, &self.working(line), &self.working(line), paths, shared, project_state)
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
+        self.save_cache_overlays_in(locked, ctx, line, line, &self.working(line), &self.working(line), paths, shared, project_state)
     }
 
     /// Save to `line` from `build`'s context at `w` (a check copy may have a different source head).
@@ -1266,11 +1262,13 @@ impl<'a> Repo<'a> {
                 let root = w.join(format!(".layr-cache-take-{}", ids::new_id()));
                 std::fs::create_dir(&root)?;
                 fsutil::chown_nofollow(&root, uid, gid)?;
-                staged = Some(crate::repo::Temp { path: root.clone() });
+                staged = Some(crate::repo::Temp::existing(root.clone())?);
                 let tree = crate::tree::Tree::open(&root)?;
                 let path = fsutil::safe_join(&root, &folder)?;
                 fsutil::make_parents(&root, &folder, Some((uid, gid)))?;
-                let uniform = btrfs::cache_snapshot(&incoming, &path)?;
+                crate::fs::snapshot(&incoming, &path, false)?;
+                // The owner walk below decides each entry: no uniform-owner shortcut here.
+                let uniform = false;
                 let source_owner = orepo.p.db.state(&sid)?.and_then(|state| state.cache_by);
                 crate::repo::give_cache_tree(&path, uniform, source_owner, uid, gid)?;
                 let props = self.overlay_props(&name)?;
@@ -1329,14 +1327,9 @@ impl<'a> Repo<'a> {
                         (st.id.clone(), vec![st])
                     };
                     // The working folder first: a failure leaves the overlay line where it was.
-<<<<<<< head
-                    let src = orepo.state_root(&sid)?;
+                    let src = incoming.clone();
                     let empty =
                         cp.symlink_metadata().is_err() || (crate::fs::host().namespace.managed(&cp) && files_of(&cp)?.is_empty());
-=======
-                    let src = incoming.clone();
-                    let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")))
                     } else if empty {

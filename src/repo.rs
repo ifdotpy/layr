@@ -2532,19 +2532,10 @@ impl<'a> Repo<'a> {
     /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
     /// under the lock with one rename (`save_cache_overlays`), as `save --overlays` makes it.
     pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
-<<<<<<< head
+        self.prepare_cache_locations(line)?;
         let w = self.working(line);
         for p in self.unsaved_cache_layers(line)? {
             self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
-=======
-        self.prepare_cache_locations(line)?;
-        #[cfg(target_os = "macos")]
-        {
-            let w = self.working(line);
-            for p in self.unsaved_cache_layers(line)? {
-                btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
-            }
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         }
         Ok(())
     }
@@ -2612,21 +2603,11 @@ impl<'a> Repo<'a> {
     /// Before the lock (APFS): the copy of each build-output folder whose part a named save makes
     /// (`named_cache_overlays`), taken under the lock with one rename (`save_cache_overlays`).
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
-<<<<<<< head
+        self.prepare_cache_locations(line)?;
         let w = self.working(line);
         for (p, _, due) in self.named_cache_overlays(line)? {
             if due {
                 self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
-=======
-        self.prepare_cache_locations(line)?;
-        #[cfg(target_os = "macos")]
-        {
-            let w = self.working(line);
-            for (p, _, due) in self.named_cache_overlays(line)? {
-                if due {
-                    btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
-                }
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
             }
         }
         Ok(())
@@ -4095,7 +4076,7 @@ mod cache_copy_tests {
             repo.initialize_missing_caches(&repo.line("main")?)?;
             std::fs::read(ctx.cwd.join("cache/.layr-cache-location"))?
         };
-        btrfs::delete_tree(&ctx.cwd.join("cache"))?;
+        crate::fs::remove(&ctx.cwd.join("cache"))?;
         std::fs::create_dir(ctx.cwd.join("cache"))?;
         std::fs::write(ctx.cwd.join("cache/.layr-cache-location"), provenance)?;
         std::fs::write(ctx.cwd.join("cache/data"), "original")?;

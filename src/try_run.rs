@@ -37,10 +37,6 @@ pub fn with_try_copy<T>(
         // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
         // the records of a cache overlay, so the cache comes now from the store remote.
         crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
-        if let Err(e) = repo.copy_caches(ctx, &tmp_line, state, &dir) {
-            let _ = crate::fs::remove(&dir);
-            return Err(e);
-        }
     }
     let result = run(&dir);
     if keep {

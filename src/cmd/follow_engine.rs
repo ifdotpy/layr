@@ -570,7 +570,7 @@ impl<'a> Repo<'a> {
             return Ok(Err(r));
         }
         let now = self.line(&line.id)?;
-        let _t = crate::trace::span("merge caches");
+        let _t = crate::trace::begin("merge caches");
         Ok(Ok(self.pull_caches(ctx, &now, &Source::Line(&theirs), done)?))
     }
 

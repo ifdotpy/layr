@@ -150,12 +150,8 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
             format!("error: cannot move line '{}' used as the current folder; run the command from another folder", l.name),
         ));
     }
-<<<<<<< head
-    let _lock = repo.p.lock_maintenance()?;
-=======
     let _line_lock = repo.line_lock(&l)?;
-    let _lock = repo.p.lock()?;
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
+    let _lock = repo.p.lock_maintenance()?;
     let from = repo.working(&l);
     if !from.is_dir() {
         return Err(exit(1, format!("error: line '{}' has no working folder on this machine", l.name)));
