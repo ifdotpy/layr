@@ -11,6 +11,7 @@ pub(crate) mod epochs;
 pub(crate) mod gateway;
 mod gitpack;
 mod index;
+mod listing_cache;
 pub(crate) mod overlays;
 mod public;
 mod push_cache;
@@ -811,6 +812,7 @@ impl Store {
             self.backend.as_caller(ctx)?;
         }
         if let Backend::Gateway(gateway) = &mut self.backend {
+            gateway.listing_cache_dir = Some(self.dir.clone());
             if public_only {
                 gateway.connect_public(&ctx.env)?;
                 gateway.use_public_access();

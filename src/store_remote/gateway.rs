@@ -87,6 +87,7 @@ pub struct Gateway {
     /// The gateway has no `POST batch` (an older one): later reads go one by one.
     batch_off: std::sync::atomic::AtomicBool,
     person: Arc<Mutex<Option<PersonSession>>>,
+    pub(super) listing_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl Clone for Gateway {
@@ -103,6 +104,7 @@ impl Clone for Gateway {
             cdn_off: std::sync::atomic::AtomicBool::new(self.cdn_off.load(Ordering::SeqCst)),
             batch_off: std::sync::atomic::AtomicBool::new(self.batch_off.load(Ordering::SeqCst)),
             person: self.person.clone(),
+            listing_cache_dir: self.listing_cache_dir.clone(),
         }
     }
 }
@@ -294,6 +296,7 @@ impl Gateway {
             cdn_off: std::sync::atomic::AtomicBool::new(false),
             batch_off: std::sync::atomic::AtomicBool::new(false),
             person: Arc::new(Mutex::new(None)),
+            listing_cache_dir: None,
         })
         .and_then(|mut gateway| {
             // Every client of the gateway uses the CA of the process, also one that never connects with a
@@ -521,19 +524,18 @@ impl Gateway {
         query: &[(&str, &str)],
         data: Option<Vec<u8>>,
     ) -> Result<Response> {
-        self.send_query_cdn(method, action, bearer, query, data, false)
+        self.send_query_headers(method, action, bearer, query, data, &[])
     }
 
-    /// `send_query`; with `cdn`, the request says that this client follows a signed CDN URL
-    /// (header `x-layr-cdn: 1`, docs/remotes.md), so the gateway may answer with the URL instead of the bytes.
-    fn send_query_cdn(
+    /// `send_query` with additional headers, retained across retries and session renewal.
+    fn send_query_headers(
         &self,
         method: Method,
         action: &str,
         bearer: Option<&str>,
         query: &[(&str, &str)],
         data: Option<Vec<u8>>,
-        cdn: bool,
+        headers: &[(&str, &str)],
     ) -> Result<Response> {
         let mut url = self.base.clone();
         url.set_path(&format!("{}{action}", self.base.path()));
@@ -546,8 +548,8 @@ impl Gateway {
             if let Some(token) = token {
                 request = request.bearer_auth(token);
             }
-            if cdn {
-                request = request.header(CDN_CAPABILITY, "1");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
             }
             if let Some(data) = &data {
                 let content_type =
@@ -641,28 +643,40 @@ impl Gateway {
     }
 
     fn read_request(&self, action: &str, query: Option<(&str, &str)>) -> Result<Response> {
-        self.read_request_query(action, query.as_slice())
+        self.read_request_query(action, query.as_slice(), &[])
     }
 
-    fn read_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
-        self.proof_request(Method::GET, action, query, None)
+    fn read_request_query(&self, action: &str, query: &[(&str, &str)], headers: &[(&str, &str)]) -> Result<Response> {
+        self.proof_request(Method::GET, action, query, None, headers)
     }
 
     /// Sends each request that carries a read proof (reads, listings, slot writes). A 401 means that the gateway
     /// refused the proof: a restart discarded its in-memory HMAC key, or the proof expired (clock skew). The client
     /// then exchanges one new proof and sends the request once again. A second 401 is an error. Other answers, a 404
     /// too, go to the caller at once.
-    fn proof_request(&self, method: Method, action: &str, query: &[(&str, &str)], data: Option<Vec<u8>>) -> Result<Response> {
+    fn proof_request(
+        &self,
+        method: Method,
+        action: &str,
+        query: &[(&str, &str)],
+        data: Option<Vec<u8>>,
+        headers: &[(&str, &str)],
+    ) -> Result<Response> {
         // An object read may come from the CDN: the gateway then answers with a signed URL, not the bytes.
-        let cdn = method == Method::GET && action.starts_with("objects/") && query.is_empty() && !self.cdn_off.load(Ordering::SeqCst);
+        let cdn =
+            method == Method::GET && action.starts_with("objects/") && query.is_empty() && !self.cdn_off.load(Ordering::SeqCst);
+        let mut headers = headers.to_vec();
+        if cdn {
+            headers.push((CDN_CAPABILITY, "1"));
+        }
         let token = self.proof().with_context(|| format!("gateway {method} {action}"))?;
-        let response = self.send_query_cdn(method.clone(), action, Some(&token), query, data.clone(), cdn)?;
+        let response = self.send_query_headers(method.clone(), action, Some(&token), query, data.clone(), &headers)?;
         if response.status().as_u16() != 401 {
             return self.follow_cdn(response, method, action, &token, query, data);
         }
         *self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))? = None;
         let token = self.proof().with_context(|| format!("gateway {method} {action}: renew the read proof after HTTP 401"))?;
-        let response = self.send_query_cdn(method.clone(), action, Some(&token), query, data.clone(), cdn)?;
+        let response = self.send_query_headers(method.clone(), action, Some(&token), query, data.clone(), &headers)?;
         if response.status().as_u16() != 401 {
             return self.follow_cdn(response, method, action, &token, query, data);
         }
@@ -706,7 +720,12 @@ impl Gateway {
         let _t = crate::trace::span("gateway object from the CDN");
         let fetched = if url.scheme() == "https" && url.host_str() == self.base.host_str() && url.path().starts_with("/o/") {
             send_again(true, || {
-                self.http.get(url.clone()).header(reqwest::header::ACCEPT_ENCODING, "identity").send().map_err(reqwest::Error::without_url).map_err(Into::into)
+                self.http
+                    .get(url.clone())
+                    .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                    .send()
+                    .map_err(reqwest::Error::without_url)
+                    .map_err(Into::into)
             })
             .ok()
             .filter(|r| r.status().as_u16() == 200)
@@ -718,7 +737,7 @@ impl Gateway {
             None => {
                 let _t = crate::trace::span("gateway object: the CDN failed, read through the gateway");
                 self.cdn_off.store(true, Ordering::SeqCst);
-                self.send_query_cdn(method, action, Some(token), query, data, false)
+                self.send_query_headers(method, action, Some(token), query, data, &[])
             }
         }
     }
@@ -740,10 +759,10 @@ impl Gateway {
     }
 
     fn public_request(&self, action: &str, prefix: Option<&str>) -> Result<Response> {
-        self.public_request_query(action, prefix.map(|value| ("prefix", value)).as_slice())
+        self.public_request_query(action, prefix.map(|value| ("prefix", value)).as_slice(), &[])
     }
 
-    fn public_request_query(&self, action: &str, query: &[(&str, &str)]) -> Result<Response> {
+    fn public_request_query(&self, action: &str, query: &[(&str, &str)], headers: &[(&str, &str)]) -> Result<Response> {
         let mut url = self.base.clone();
         let path = self.base.path().strip_prefix("/v1").context("invalid gateway base")?;
         url.set_path(&format!("{path}{action}"));
@@ -751,7 +770,13 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         // Anonymous routes are GET only and never carry a token or private read proof.
-        send_again(true, || self.http.get(url.clone()).send().map_err(reqwest::Error::without_url).map_err(Into::into))
+        send_again(true, || {
+            let mut request = self.http.get(url.clone());
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.send().map_err(reqwest::Error::without_url).map_err(Into::into)
+        })
     }
 
     /// A side metadata request must not turn a writer into a public-only reader.
@@ -920,7 +945,7 @@ impl Gateway {
                 // A batch only saves requests: any failure (a gateway without the route answers 404, 405, or 401
                 // before its routing) turns batches off for the rest of the command, and the keys are read alone.
                 let reply = self
-                    .proof_request(Method::POST, "batch", &[], Some(body))
+                    .proof_request(Method::POST, "batch", &[], Some(body), &[])
                     .and_then(|response| match response.status().as_u16() {
                         200 => bytes(response, BATCH_LIMIT),
                         status => Err(anyhow!("HTTP {status}")),
@@ -950,11 +975,7 @@ impl Gateway {
     }
 
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
-        #[derive(Deserialize)]
-        struct Entry {
-            key: String,
-            modified: i64,
-        }
+        use super::listing_cache::Entry;
         #[derive(Deserialize)]
         struct Objects {
             objects: Vec<Entry>,
@@ -972,6 +993,16 @@ impl Gateway {
                 return Ok(Vec::new());
             }
         }
+        let cache_path = self.listing_cache_path(prefix, false);
+        let cached = cache_path.as_deref().and_then(super::listing_cache::load::<Vec<Entry>>).filter(|cached| {
+            let mut found = std::collections::BTreeSet::new();
+            super::listing_cache::validator(prefix, false, &cached.listing).as_ref() == Some(&cached.etag)
+                && cached.listing.len() <= 100_000
+                && cached.listing.iter().all(|entry| {
+                    super::backend::check_key(&entry.key).is_ok() && entry.key.starts_with(prefix) && found.insert(&entry.key)
+                })
+        });
+        let mut etag = None;
         let mut found = std::collections::BTreeSet::new();
         let mut cursors = std::collections::BTreeSet::new();
         let mut continuation: Option<String> = None;
@@ -986,17 +1017,19 @@ impl Gateway {
             if let Some(cursor) = &continuation {
                 query.push(("continuation", cursor));
             }
+            let conditional = cached.as_ref().filter(|_| continuation.is_none());
+            let headers = conditional.map(|cached| ("if-none-match", cached.etag.as_str()));
             let response = if self.is_public() {
-                self.public_request_query("objects", &query)?
+                self.public_request_query("objects", &query, headers.as_slice())?
             } else if !has_identity
                 && (prefix.starts_with("records/")
                     || prefix.starts_with("states/")
                     || prefix == "keys/"
                     || overlay_keys_prefix(prefix))
             {
-                self.send_query(Method::GET, "objects", self.token.as_deref(), &query, None)?
+                self.send_query_headers(Method::GET, "objects", self.token.as_deref(), &query, None, headers.as_slice())?
             } else {
-                self.read_request_query("objects", &query)?
+                self.read_request_query("objects", &query, headers.as_slice())?
             };
             if response.status().as_u16() == 400 && continuation.is_none() && !legacy {
                 // Older servers may reject the opt-in pagination query. Retry only the first
@@ -1021,6 +1054,19 @@ impl Gateway {
                 continuation = None;
                 continue;
             }
+            if response.status().as_u16() == 304 {
+                let cached = conditional.context("gateway returned 304 without a cached listing")?;
+                let mut objects: Vec<_> = cached
+                    .listing
+                    .iter()
+                    .map(|entry| Object { key: entry.key.clone(), modified: entry.modified / 1000 })
+                    .collect();
+                objects.sort_by(|a, b| a.key.cmp(&b.key));
+                return Ok(objects);
+            }
+            if continuation.is_none() {
+                etag = super::listing_cache::etag(&response);
+            }
             // Older gateways may omit the cursor and return their bounded complete listing.
             // New gateways return at most 1,000 objects per page, each at most 8 MiB.
             let listing: Objects = json(response, 8 << 20)?;
@@ -1032,7 +1078,7 @@ impl Gateway {
                 if !entry.key.starts_with(prefix) || !found.insert(entry.key.clone()) {
                     bail!("invalid gateway object listing");
                 }
-                objects.push(Object { key: entry.key, modified: entry.modified / 1000 });
+                objects.push(entry);
             }
             let Some(cursor) = listing.continuation else { break };
             if cursor.is_empty() || cursor.len() > 8192 || !cursors.insert(cursor.clone()) || cursors.len() > 1024 {
@@ -1040,8 +1086,23 @@ impl Gateway {
             }
             continuation = Some(cursor);
         }
+        if let Some(path) = cache_path {
+            let verified = etag.filter(|tag| super::listing_cache::validator(prefix, false, &objects).as_ref() == Some(tag));
+            super::listing_cache::store(&path, verified, &objects);
+        }
         objects.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(objects)
+        Ok(objects.into_iter().map(|entry| Object { key: entry.key, modified: entry.modified / 1000 }).collect())
+    }
+
+    /// Bind the cache to the canonical host/project, public route, full epoch prefix and listing mode.
+    fn listing_cache_path(&self, prefix: &str, folders: bool) -> Option<std::path::PathBuf> {
+        let mut url = self.base.clone();
+        let path = if self.is_public() { self.base.path().strip_prefix("/v1")? } else { self.base.path() };
+        url.set_path(&format!("{path}objects"));
+        url.query_pairs_mut()
+            .append_pair("prefix", prefix)
+            .append_pair(if folders { "delimiter" } else { "limit" }, if folders { "/" } else { "1000" });
+        Some(super::listing_cache::path(self.listing_cache_dir.as_deref()?, url.as_str()))
     }
 
     /// The overlay folders (`overlays/<id>/`) of the store, from one folder listing (`delimiter=/`). None when
@@ -1051,11 +1112,29 @@ impl Gateway {
         if self.is_public() {
             return Ok(None);
         }
-        let response = self.read_request_query("objects", &[("prefix", "overlays/"), ("delimiter", "/")])?;
+        let cache_path = self.listing_cache_path("overlays/", true);
+        let cached = cache_path.as_deref().and_then(super::listing_cache::load::<Vec<String>>).filter(|cached| {
+            super::listing_cache::folder_validator("overlays/", &cached.listing).as_ref() == Some(&cached.etag)
+                && cached.listing.len() <= 1000
+                && cached.listing.iter().all(|prefix| {
+                    prefix.strip_prefix("overlays/").and_then(|p| p.strip_suffix('/')).is_some_and(crate::model::is_uuid)
+                })
+        });
+        let headers = cached.as_ref().map(|cached| ("if-none-match", cached.etag.as_str()));
+        let response = self.read_request_query("objects", &[("prefix", "overlays/"), ("delimiter", "/")], headers.as_slice())?;
+        if response.status().as_u16() == 304 {
+            return Ok(Some(cached.context("gateway returned 304 without cached folders")?.listing));
+        }
         if !response.status().is_success() {
             return Ok(None);
         }
-        Ok(overlay_folders(&bytes(response, 1 << 20)?))
+        let etag = super::listing_cache::etag(&response);
+        let folders = overlay_folders(&bytes(response, 1 << 20)?);
+        if let (Some(path), Some(folders)) = (cache_path, folders.as_ref()) {
+            let verified = etag.filter(|tag| super::listing_cache::folder_validator("overlays/", folders).as_ref() == Some(tag));
+            super::listing_cache::store(&path, verified, folders);
+        }
+        Ok(folders)
     }
 
     pub fn release_stream(&self, key: &str) -> Result<Option<Response>> {
@@ -1144,7 +1223,7 @@ impl Gateway {
         // obtain a read proof yet. A project writer uses its grant for those PUTs.
         let action = format!("objects/{key}");
         let response = if logical.starts_with("slots/") && (epoch_path(key).is_none() || self.token.is_none()) {
-            self.proof_request(Method::PUT, &action, &[], Some(data))?
+            self.proof_request(Method::PUT, &action, &[], Some(data), &[])?
         } else {
             let token = self.token.as_deref().context("set LAYR_GATEWAY_TOKEN_FILE to a private write token file")?;
             self.send(Method::PUT, &action, Some(token), None, Some(data))?
@@ -1354,6 +1433,350 @@ mod tests {
             let address = listener.local_addr().unwrap();
             (TestListener::Tcp(listener), TestEndpoint::Tcp(address))
         }
+    }
+
+    // Scripted HTTP replies make request and body counts independent of backend-operation tracing.
+    fn conditional_fixture(
+        replies: Vec<(u16, Option<&str>, serde_json::Value)>,
+    ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let (listener, endpoint) = test_listener();
+        let replies: Vec<_> = replies.into_iter().map(|(status, etag, body)| (status, etag.map(str::to_owned), body)).collect();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut body_bytes = 0;
+            for (status, etag, body) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                    .unwrap_or(0);
+                stream.read_exact(&mut vec![0; length]).unwrap();
+                requests.push(head);
+                let body = if status == 304 { String::new() } else { body.to_string() };
+                body_bytes += body.len();
+                write!(stream, "HTTP/1.1 {status} response\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).unwrap();
+                if let Some(etag) = etag {
+                    write!(stream, "ETag: {etag}\r\n").unwrap();
+                }
+                write!(stream, "\r\n{body}").unwrap();
+            }
+            eprintln!("conditional listing fixture: {} HTTP requests, {body_bytes} response-body bytes", requests.len());
+            requests
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        endpoint.configure(&mut gateway);
+        gateway.token = Some("fixture.write".into());
+        gateway.listing_cache_dir = Some(std::env::temp_dir().join(format!("layr-listing-{}", crate::ids::new_id())));
+        (gateway, endpoint, server)
+    }
+
+    fn listing_page(keys: &[&str], cursor: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "objects": keys.iter().map(|key| serde_json::json!({"key": key, "modified": 12345})).collect::<Vec<_>>(),
+            "continuation": cursor,
+        })
+    }
+
+    fn listing_tag(keys: &[&str]) -> String {
+        let entries: Vec<super::super::listing_cache::Entry> =
+            serde_json::from_value(listing_page(keys, None)["objects"].clone()).unwrap();
+        super::super::listing_cache::validator("states/", false, &entries).unwrap()
+    }
+
+    #[test]
+    fn listing_cache_keeps_descriptor_reads_live_in_the_client_and_its_clones() {
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, None, serde_json::json!({"recipient":"first"})),
+            (200, None, serde_json::json!({"recipient":"second"})),
+            (200, None, serde_json::json!({"recipient":"third"})),
+        ]);
+        for (client, expected) in [(&gateway, "first"), (&gateway.clone(), "second"), (&gateway, "third")] {
+            let body = client.get("store.json").unwrap().unwrap();
+            let descriptor: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(descriptor["recipient"], expected);
+        }
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request.starts_with("get /v1/p/project/store.json ")));
+        assert!(requests.iter().all(|request| !request.contains("if-none-match:")));
+        assert!(!gateway.listing_cache_dir.unwrap().exists());
+    }
+
+    #[test]
+    fn conditional_listing_aba_never_persists_pages_that_do_not_match_the_first_tag() {
+        let tag = r#""5c322c1df96524a93cac9b79edb2e62b1a6dd2bc1ebb701611b5e45689d275db""#;
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(tag), listing_page(&["states/a"], Some("next"))),
+            (200, None, listing_page(&["states/z-transient"], None)),
+            // The transient entry was removed: the server is back at the original tag.
+            (200, Some(tag), listing_page(&["states/a"], None)),
+            (304, Some(tag), serde_json::Value::Null),
+        ]);
+        assert_eq!(gateway.list("states/").unwrap().len(), 2);
+        let path = gateway.listing_cache_path("states/", false).unwrap();
+        let mismatched_was_cached = path.exists();
+        assert_eq!(gateway.list("states/").unwrap().len(), 1);
+        assert_eq!(gateway.list("states/").unwrap().len(), 1);
+        let requests = server.join().unwrap();
+        assert!(!mismatched_was_cached, "ABA pages must not be stored under the original validator");
+        assert!(!requests[2].contains("if-none-match:"));
+        assert!(requests[3].contains("if-none-match:"));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_reuses_a_complete_listing_in_one_request() {
+        let v1 = listing_tag(&["states/a", "states/z"]);
+        for public in [false, true] {
+            let (gateway, endpoint, server) = conditional_fixture(vec![
+                (200, Some(&v1), listing_page(&["states/a"], Some("next"))),
+                (200, Some("\"ignored-continuation-tag\""), listing_page(&["states/z"], None)),
+                (304, Some(&v1), serde_json::Value::Null),
+            ]);
+            if public {
+                gateway.use_public_access();
+            }
+            let first = gateway.list("states/").unwrap();
+            // A fresh client uses the on-disk cache (not an operation-lifetime snapshot).
+            let mut fresh = Gateway::open("layr+https://localhost/project").unwrap();
+            endpoint.configure(&mut fresh);
+            fresh.token = gateway.token.clone();
+            fresh.listing_cache_dir = gateway.listing_cache_dir.clone();
+            if public {
+                fresh.use_public_access();
+            }
+            let second = fresh.list("states/");
+            let requests = server.join().unwrap();
+            let second = second.unwrap();
+            assert_eq!(
+                first.iter().map(|o| (&o.key, o.modified)).collect::<Vec<_>>(),
+                second.iter().map(|o| (&o.key, o.modified)).collect::<Vec<_>>()
+            );
+            assert_eq!(second.len(), 2);
+            assert_eq!(second[0].modified, 12);
+            assert_eq!(requests.len(), 3, "two cold pages, then exactly one warm request");
+            eprintln!("listing measurement (public={public}): cold=2 requests/140 body bytes, warm=1 request/0 body bytes");
+            assert!(!requests[0].contains("if-none-match:"));
+            assert!(!requests[1].contains("if-none-match:"));
+            assert!(requests[2].contains(&format!("if-none-match: {v1}\r\n")));
+            assert!(!requests[2].contains("continuation="));
+            assert_eq!(requests[2].contains("authorization: bearer fixture.write"), !public);
+            std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn conditional_listing_changes_repage_and_only_complete_passes_replace_the_cache() {
+        let v1 = listing_tag(&["states/old"]);
+        let v2 = listing_tag(&["states/new"]);
+        let v3 = listing_tag(&["states/a", "states/z"]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&v1), listing_page(&["states/old"], None)),
+            (200, Some(&v2), listing_page(&["states/new"], Some("next"))),
+            (403, None, serde_json::json!({"error": "interrupted"})),
+            (200, Some(&v3), listing_page(&["states/a"], Some("next"))),
+            (200, None, listing_page(&["states/z"], None)),
+            (304, Some(&v3), serde_json::Value::Null),
+        ]);
+        gateway.list("states/").unwrap();
+        let path = gateway.listing_cache_path("states/", false).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(gateway.list("states/").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let changed = gateway.list("states/").unwrap();
+        assert_eq!(changed.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(), ["states/a", "states/z"]);
+        assert_eq!(gateway.list("states/").unwrap().len(), 2);
+        let requests = server.join().unwrap();
+        for n in [1, 3] {
+            assert!(requests[n].contains(&format!("if-none-match: {v1}")));
+        }
+        assert!(requests[5].contains(&format!("if-none-match: {v3}")));
+        for n in [2, 4] {
+            assert!(!requests[n].contains("if-none-match:"));
+        }
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_without_an_etag_stores_nothing_and_corruption_lists_in_full() {
+        let v1 = listing_tag(&["states/a"]);
+        let v4 = listing_tag(&["states/d"]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&v1), listing_page(&["states/a"], None)),
+            (200, None, listing_page(&["states/b"], None)),
+            (200, None, listing_page(&["states/c"], None)),
+            (200, Some(&v4), listing_page(&["states/d"], None)),
+        ]);
+        gateway.list("states/").unwrap();
+        let path = gateway.listing_cache_path("states/", false).unwrap();
+        std::fs::write(&path, b"interrupted JSON").unwrap();
+        assert_eq!(gateway.list("states/").unwrap()[0].key, "states/b");
+        assert!(!path.exists());
+        gateway.list("states/").unwrap();
+        assert!(!path.exists());
+        // A valid JSON cache with keys outside its prefix is also discarded.
+        std::fs::write(&path, br#"{"etag":"\"bad\"","listing":[{"key":"records/wrong","modified":0}]}"#).unwrap();
+        assert_eq!(gateway.list("states/").unwrap()[0].key, "states/d");
+        let requests = server.join().unwrap();
+        assert!(requests.iter().all(|r| !r.contains("if-none-match:")));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_drops_an_old_validator_when_the_gateway_stops_sending_etags() {
+        let v1 = listing_tag(&["states/a"]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&v1), listing_page(&["states/a"], None)),
+            (200, None, listing_page(&["states/b"], None)),
+            (200, None, listing_page(&["states/c"], None)),
+        ]);
+        gateway.list("states/").unwrap();
+        gateway.list("states/").unwrap();
+        assert!(!gateway.listing_cache_path("states/", false).unwrap().exists());
+        gateway.list("states/").unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains(&format!("if-none-match: {v1}")));
+        assert!(!requests[2].contains("if-none-match:"));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_valid_json_corruption_and_metadata_mismatch_are_not_cached() {
+        let page = serde_json::json!({"objects": [{"key":"states/a", "modified":12345, "size":3, "etag":"storage-v1"}]});
+        let entries = serde_json::from_value::<Vec<super::super::listing_cache::Entry>>(page["objects"].clone()).unwrap();
+        let tag = super::super::listing_cache::validator("states/", false, &entries).unwrap();
+        let mut changed = page.clone();
+        changed["objects"][0]["etag"] = serde_json::json!("storage-v2");
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&tag), page.clone()),
+            (200, Some(&tag), page.clone()),
+            (200, Some(&tag), changed),
+            (200, Some(&tag), page),
+        ]);
+        gateway.list("states/").unwrap();
+        let path = gateway.listing_cache_path("states/", false).unwrap();
+        let mut cache: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        cache["listing"][0]["size"] = serde_json::json!(4);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        gateway.list("states/").unwrap();
+        gateway.list("states/").unwrap();
+        assert!(!path.exists(), "same keys/times with a different storage ETag must not be cached");
+        gateway.list("states/").unwrap();
+        let requests = server.join().unwrap();
+        assert!(!requests[1].contains("if-none-match:"), "valid JSON with a wrong digest is corrupt");
+        assert!(requests[2].contains("if-none-match:"));
+        assert!(!requests[3].contains("if-none-match:"));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_cache_is_bound_to_remote_project_epoch_prefix_and_mode() {
+        let mut gateway = Gateway::open("layr+https://example.test/project").unwrap();
+        gateway.listing_cache_dir = Some(std::env::temp_dir().join("binding-only"));
+        let original = gateway.listing_cache_path("states/", false).unwrap();
+        let canonical = Gateway::open("layr+https://EXAMPLE.test:443/project").unwrap();
+        gateway.base = canonical.base;
+        assert_eq!(gateway.listing_cache_path("states/", false).unwrap(), original);
+        let mut paths = std::collections::BTreeSet::from([original]);
+        for prefix in ["records/", "project/epochs/one/states/", "project/epochs/two/states/"] {
+            assert!(paths.insert(gateway.listing_cache_path(prefix, false).unwrap()));
+        }
+        assert!(paths.insert(gateway.listing_cache_path("states/", true).unwrap()));
+        gateway.use_public_access();
+        assert!(paths.insert(gateway.listing_cache_path("states/", false).unwrap()));
+        gateway.base.set_host(Some("other.test")).unwrap();
+        assert!(paths.insert(gateway.listing_cache_path("states/", false).unwrap()));
+        gateway.base.set_path("/v1/p/other/");
+        assert!(paths.insert(gateway.listing_cache_path("states/", false).unwrap()));
+    }
+
+    #[test]
+    fn conditional_listing_rejects_unsolicited_and_continuation_304_responses() {
+        let v1 = listing_tag(&["states/a"]);
+        let v2 = listing_tag(&["states/b"]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (304, Some(&v1), serde_json::Value::Null),
+            (200, Some(&v1), listing_page(&["states/a"], None)),
+            (200, Some(&v2), listing_page(&["states/b"], Some("next"))),
+            (304, Some(&v1), serde_json::Value::Null),
+        ]);
+        assert!(gateway.list("states/").unwrap_err().to_string().contains("304 without"));
+        gateway.list("states/").unwrap();
+        let path = gateway.listing_cache_path("states/", false).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(gateway.list("states/").unwrap_err().to_string().contains("304 without"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        server.join().unwrap();
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_restart_keeps_only_the_new_complete_pass_and_etag() {
+        let v1 = listing_tag(&["states/old"]);
+        let v2 = listing_tag(&["states/new"]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&v1), listing_page(&["states/old"], Some("expired"))),
+            (400, None, serde_json::json!({"error": "invalid listing continuation"})),
+            (200, Some(&v2), listing_page(&["states/new"], None)),
+            (304, Some(&v2), serde_json::Value::Null),
+        ]);
+        assert_eq!(gateway.list("states/").unwrap()[0].key, "states/new");
+        assert_eq!(gateway.list("states/").unwrap()[0].key, "states/new");
+        let requests = server.join().unwrap();
+        assert!(requests[3].contains(&format!("if-none-match: {v2}")));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_retains_the_etag_when_renewing_a_read_proof() {
+        let v1 = listing_tag(&["states/a"]);
+        let identity = keys::generate_identity();
+        let sealed = keys::encrypt(&keys::recipient_of(&identity).unwrap(), b"challenge.proof").unwrap();
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&v1), listing_page(&["states/a"], None)),
+            (401, None, serde_json::json!({"error": "expired proof"})),
+            (200, None, serde_json::json!({"challenge": base64::engine::general_purpose::STANDARD.encode(sealed)})),
+            (200, None, serde_json::json!({"token": "new.proof", "expires": crate::ids::now_ms() + 600_000})),
+            (304, Some(&v1), serde_json::Value::Null),
+        ]);
+        gateway.set_identity(&identity).unwrap();
+        *gateway.read.lock().unwrap() = Some(("old.proof".into(), crate::ids::now_ms() + 300_000));
+        assert_eq!(gateway.list("states/").unwrap().len(), 1);
+        assert_eq!(gateway.list("states/").unwrap().len(), 1);
+        let requests = server.join().unwrap();
+        for n in [1, 4] {
+            assert!(requests[n].contains(&format!("if-none-match: {v1}")));
+        }
+        assert!(requests[1].contains("authorization: bearer old.proof"));
+        assert!(requests[4].contains("authorization: bearer new.proof"));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn conditional_listing_folders_revalidate_with_the_read_proof() {
+        let folder = "overlays/01a1d0ab-1111-7000-8000-000000000001/";
+        let tag = super::super::listing_cache::folder_validator("overlays/", &[folder.into()]).unwrap();
+        let (gateway, _endpoint, server) = conditional_fixture(vec![
+            (200, Some(&tag), serde_json::json!({"objects": [], "prefixes": [folder]})),
+            (304, Some(&tag), serde_json::Value::Null),
+        ]);
+        *gateway.read.lock().unwrap() = Some(("fixture.proof".into(), crate::ids::now_ms() + 600_000));
+        assert_eq!(gateway.overlay_folders().unwrap(), Some(vec![folder.into()]));
+        assert_eq!(gateway.clone().overlay_folders().unwrap(), Some(vec![folder.into()]));
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("delimiter=%2f"));
+        assert!(requests[1].contains(&format!("if-none-match: {tag}")));
+        assert!(requests.iter().all(|r| r.contains("authorization: bearer fixture.proof")));
+        std::fs::remove_dir_all(gateway.listing_cache_dir.unwrap()).unwrap();
     }
 
     fn listing_pages(pages: Vec<serde_json::Value>, public: bool) -> Result<Vec<Object>> {
@@ -1991,7 +2414,8 @@ mod tests {
                     _ => answer(&request, &bearer),
                 };
                 // A reply that names a signed URL has the CDN type, as layr-gateway `cdn.rs` sends it.
-                let kind = if reply.starts_with("{\"url\"") { format!("Content-Type: {CDN_CONTENT_TYPE}\r\n") } else { String::new() };
+                let kind =
+                    if reply.starts_with("{\"url\"") { format!("Content-Type: {CDN_CONTENT_TYPE}\r\n") } else { String::new() };
                 write!(stream, "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
                     .unwrap();
             }
