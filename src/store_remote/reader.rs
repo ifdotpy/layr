@@ -24,15 +24,14 @@ pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Resul
     records_with_local(backend, identity, project, &[], None)
 }
 
-/// The segments (`key modified`) that a fetch of this store read and checked: `seen-records` in its local folder.
+/// Checked segments (`key modified digest`): `seen-records` in the store's local folder.
 pub(super) fn seen_file(dir: &Path) -> PathBuf {
     dir.join("seen-records")
 }
 
-/// `seen`: the `seen-records` file of this store. A segment that it names with the same time, and whose records are
-/// all here, was read and checked before: it is not read again, so an idle fetch reads no segment. A segment with
-/// another time (a replaced object) or with records that are not here is read and checked, and the file is written
-/// again after a fetch that checked every segment.
+/// Reuse a checked segment only if its modification time and the digest of its complete local range match.
+/// Old stamps without a digest require a read. Fetch imports the checked lines after this returns; hydration
+/// does not, so sequence coverage alone cannot establish that the local records match a checked segment.
 pub(super) fn records_with_local(
     backend: &Backend,
     identity: &str,
@@ -46,11 +45,11 @@ pub(super) fn records_with_local(
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| text.lines().map(str::to_owned).collect())
         .unwrap_or_default();
-    let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
+    let mut have: BTreeMap<String, BTreeMap<u64, &str>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
             let record = oplog::parse_line(line, None)?.record;
-            have.entry(record.machine).or_default().insert(record.seq);
+            have.entry(record.machine).or_default().insert(record.seq, line);
         }
     }
     let mut checked = Vec::new();
@@ -58,25 +57,31 @@ pub(super) fn records_with_local(
     for object in backend.list("records/")? {
         let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
         let stamp = format!("{} {}", object.key, object.modified);
-        let here = || have.get(&machine).is_some_and(|seqs| (first..=last).all(|seq| seqs.contains(&seq)));
-        let read = !(known.contains(&stamp) && here());
-        checked.push(stamp);
-        if read {
-            wanted.push((object.key, machine, first, last));
+        let local_digest = || -> Option<String> {
+            let by_seq = have.get(&machine)?;
+            let mut digest = ContentAddress::new();
+            for seq in first..=last {
+                digest.update(by_seq.get(&seq)?.as_bytes());
+                digest.update(b"\n");
+            }
+            Some(hex::encode(digest.finalize()))
+        };
+        if let Some(bound) = local_digest().map(|digest| format!("{stamp} {digest}")).filter(|bound| known.contains(bound)) {
+            checked.push(bound);
+        } else {
+            wanted.push((object.key, machine, first, last, stamp));
         }
     }
     // A segment is one small object: a clone reads hundreds of them, so they come in batches (one request per
     // 256 segments through a gateway, else 32 reads at a time).
     let keys: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
-    let bodies: Vec<Result<Vec<u8>>> = backend
-        .get_many(&keys)?
-        .into_iter()
-        .map(|body| body.context("record segment disappeared"))
-        .collect();
-    for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
+    let bodies: Vec<Result<Vec<u8>>> =
+        backend.get_many(&keys)?.into_iter().map(|body| body.context("record segment disappeared")).collect();
+    for ((key, machine, first, last, stamp), body) in wanted.into_iter().zip(bodies) {
         let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
+        let mut digest = ContentAddress::new();
         for line in body.lines() {
             let signed = oplog::parse_line(line, None)?;
             if signed.record.machine != machine || signed.record.seq != expected || expected > last {
@@ -96,11 +101,14 @@ pub(super) fn records_with_local(
             } else {
                 by_seq.insert(expected, line.to_string());
             }
+            digest.update(line.as_bytes());
+            digest.update(b"\n");
             expected = expected.checked_add(1).context("record sequence overflow")?;
         }
         if expected.checked_sub(1) != Some(last) {
             bail!("segment {} is incomplete", key);
         }
+        checked.push(format!("{stamp} {}", hex::encode(digest.finalize())));
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
     for line in local {
@@ -485,7 +493,10 @@ pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<Stri
     if !opts.caches {
         for reference in repo.p.db.refs("", crate::ids::now_ms())? {
             if repo.state(&reference.target)?.kind == crate::model::StateKind::Cache {
-                omitted.push(format!("cache state {} of ref {}: fetch --overlay <overlay> takes it", reference.target, reference.name));
+                omitted.push(format!(
+                    "cache state {} of ref {}: fetch --overlay <overlay> takes it",
+                    reference.target, reference.name
+                ));
             }
         }
     }
@@ -562,7 +573,8 @@ fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Opt
     if opts.lines.is_empty() {
         return Ok(None);
     }
-    let mut keep: BTreeSet<String> = if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
+    let mut keep: BTreeSet<String> =
+        if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
     keep.extend(deletion_dependencies(records)?);
     Ok(Some(keep))
 }
@@ -702,7 +714,9 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
     } else {
         layr_model::merge_authority::effective_lines(&repo.p.id, &lines, crate::ids::now_ms())?
     };
-    let records = effective.lines.iter()
+    let records = effective
+        .lines
+        .iter()
         .map(|line| oplog::parse_line(line, None).map(|signed| signed.record))
         .collect::<Result<Vec<_>>>()?;
     let creator = layr_model::project_perspective(&repo.p.id, &records)?;
@@ -725,7 +739,8 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
         let Some(target) = reference.target else { continue };
         let id = reference.name.strip_prefix("lines/").context("invalid line ref")?;
         let mut line = known.remove(id).with_context(|| format!("remote line {id} has no fetched metadata; fetch again"))?;
-        let state = repo.p.db.state(&target)?.with_context(|| format!("remote line {id} target has no fetched record; fetch again"))?;
+        let state =
+            repo.p.db.state(&target)?.with_context(|| format!("remote line {id} target has no fetched record; fetch again"))?;
         anyhow::ensure!(!state.kind.auxiliary(), "remote line {id} targets an auxiliary state");
         line.head = target;
         selected.push(line);
@@ -798,9 +813,8 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     }
     let opts = &selected;
     let pending = store.dir.join("pending-lines.json");
-    let pending_clone = if pending.exists() {
-        !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty()
-    } else { false };
+    let pending_clone =
+        if pending.exists() { !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty() } else { false };
     let clone_lines = if bootstrap || pending_clone { Some(clone_lines(store, repo)?) } else { None };
     let mut report = Report {
         clone_lines,
@@ -825,7 +839,8 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
                 None => repo.p.db.lines()?,
             };
             if let Some(name) = opts.only_line.as_ref().filter(|_| !repo.p.is_overlay()) {
-                let line = lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+                let line =
+                    lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
                 return Ok(BTreeSet::from([line.head.clone()]));
             }
             let mut keep: BTreeSet<String> = lines.into_iter().map(|l| l.head).collect();
@@ -1368,5 +1383,39 @@ mod tests {
         assert_eq!(fetched.overlaps, 0);
         assert_eq!(records(&backend, &identity, PROJECT).unwrap().gaps.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn hydration_stamp_must_bind_the_local_history() {
+        for legacy in [false, true] {
+            let (backend, identity, key, root) = fixture();
+            let original: Vec<String> = (1..=3).map(|seq| line(seq, &key)).collect();
+            segment(&backend, &identity, 1, 2, &original[..2]);
+            let seen = root.join("metadata/seen-records");
+            // Hydration checks a remote machine that has not been imported locally.
+            records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap();
+            if legacy {
+                let stamps = std::fs::read_to_string(&seen).unwrap();
+                let old: String = stamps
+                    .lines()
+                    .map(|stamp| {
+                        let fields: Vec<_> = stamp.split_whitespace().take(2).collect();
+                        format!("{}\n", fields.join(" "))
+                    })
+                    .collect();
+                std::fs::write(&seen, old).unwrap();
+            }
+            // A different peer supplies a validly signed fork of that machine later.
+            let mut fork = original;
+            let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+            record.actor.name = "a different signed record".into();
+            fork[1] = oplog::sign_line(&record, &key).unwrap();
+            // Forwarding it adds an overlapping segment; the original object is unchanged.
+            segment(&backend, &identity, 1, 3, &fork);
+            let uncached = records(&backend, &identity, PROJECT).unwrap_err().to_string();
+            assert!(uncached.contains("conflicting history"), "{uncached}");
+            let cached = records_with_local(&backend, &identity, PROJECT, &fork, Some(&seen));
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(cached.is_err(), "cached reader accepted conflicting history rejected by the former push reader: {cached:?}");
+        }
     }
 }
