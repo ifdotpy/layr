@@ -79,8 +79,8 @@ HOLDER=$!
 sleep 1
 LAYR_TRACE=1 l save > "$T/late-save.log" 2>&1 &
 SAVE=$!
-# Change the folder only after the save prepared its layer (a busy runner can take seconds for it).
-for i in $(seq 1 100); do grep -q "prepare save" "$T/late-save.log" 2>/dev/null && break; sleep 0.1; done
+# Change the folder only after the save wrote its layer and waits for the lock (a busy runner can take seconds).
+for i in $(seq 1 100); do grep -q "waiting for the project lock" "$T/late-save.log" 2>/dev/null && break; sleep 0.1; done
 printf 'late\n' > late.txt
 wait $HOLDER; wait $SAVE
 trace=$(cat "$T/late-save.log")
