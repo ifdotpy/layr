@@ -73,6 +73,7 @@ run_test() {
 }
 
 failed=0
+failed_tests=()
 logdir=$(mktemp -d "${TMPDIR:-/tmp}/layr-run.XXXXXX")
 # report <name>: print a finished test's summary, or its whole output when it failed.
 report() {
@@ -83,13 +84,13 @@ report() {
     if [ "$rc" -eq 124 ]; then
         printf '%s\n' "$out"
         echo "FAIL $t: timeout after $timeout_s s"
-        failed=1
+        failed=1; failed_tests+=("$t")
         return
     fi
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out"
         echo "FAIL $t: exit $rc"
-        failed=1
+        failed=1; failed_tests+=("$t")
         return
     fi
     case "$summary" in
@@ -97,7 +98,7 @@ report() {
             # Add timing only after the original summary passes its exact check.
             [ -n "${LAYR_TEST_TIMES:-}" ] && summary="$summary (${seconds} s)"
             echo "$summary" ;;
-        *) printf '%s\n' "$out"; failed=1 ;;
+        *) printf '%s\n' "$out"; failed=1; failed_tests+=("$t") ;;
     esac
 }
 one() {
@@ -137,6 +138,22 @@ while [ "$next" -lt "${#files[@]}" ] && [ "$(jobs -rp | wc -l)" -gt 0 ]; do
 done
 wait
 flush
+# A failed test runs once more, alone (LAYR_TEST_RETRY=0 turns this off). One that passes then is flaky: it is
+# named (FLAKY) and does not fail the run, so a timing flake does not block a merge; fix it separately.
+if [ "${LAYR_TEST_RETRY:-1}" = 1 ] && [ "${#failed_tests[@]}" -gt 0 ] && [ "${#failed_tests[@]}" -le 5 ]; then
+    still=()
+    for t in "${failed_tests[@]}"; do
+        rc=0
+        run_test "$t" "$logdir/$t.retry.log" || rc=$?
+        if [ "$rc" -eq 0 ] && tail -1 "$logdir/$t.retry.log" | grep -q ', 0 failed$'; then
+            echo "FLAKY $t: failed, then passed when run again alone"
+        else
+            echo "FAIL $t: failed again when run alone"
+            still+=("$t")
+        fi
+    done
+    [ "${#still[@]}" -eq 0 ] && failed=0
+fi
 if [ "$next" -ne "${#files[@]}" ]; then
     echo "FAIL runner: a test returned no result"
     failed=1

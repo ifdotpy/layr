@@ -291,6 +291,12 @@ after sync. This count is advisory; it does not authorize execution.
 
 ## Layr's Linux workflow equivalents
 
+`integration.sh`, `overlayfs.sh` and `apfs.sh` run every test step to the end (`tools/checks/steps.sh`):
+a failed step prints `STEP FAILED: <name>`, the next step runs, and the check ends with the list of failed
+steps. Build and setup steps still stop the check at once. `tests/run.sh` runs a failed test once more,
+alone, when at most five failed: a test that passes then prints `FLAKY <test>` and does not fail the run
+(`LAYR_TEST_RETRY=0` turns this off). Fix a flaky test separately; it must wait for a condition, not a time.
+
 On the creator's machine, retain the required main protection and run
 `bash tools/checks/configure.sh`, then push. On Linux runner copies, provision the
 local service account's reader role (`layr access grant layr-checks reader`). The

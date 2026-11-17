@@ -4,6 +4,7 @@ set -euo pipefail
 test "$(uname -s)" = Darwin
 test "$(id -u)" != 0
 . tools/checks/environment.sh
+. tools/checks/steps.sh
 export LAYR_APFS_TEST_ROOT="${LAYR_APFS_TEST_ROOT:-/Volumes/LayrRunner}"
 case_root="${LAYR_APFS_CASE_ROOT:-/Volumes/LayrRunnerCase}"
 for volume in "$LAYR_APFS_TEST_ROOT" "$case_root"; do
@@ -45,7 +46,7 @@ macos_known=(
 )
 skips=()
 for name in "${macos_known[@]}"; do skips+=(--skip "$name"); done
-( umask 077; cargo test --locked --offline -- --include-ignored "${skips[@]}" \
+step "unit tests" bash -c 'umask 077; exec "$@"' unit cargo test --locked --offline -- --include-ignored "${skips[@]}" \
     --skip apfs_commit::tests::recovery_takes_over_a_reused_pid \
     --skip free::holder_tests::detects_live_reused_and_dead_holders \
     --skip cmd::checks::macos_tests::sandbox_allows_only_unix_sockets_inside_work \
@@ -62,19 +63,19 @@ for name in "${macos_known[@]}"; do skips+=(--skip "$name"); done
     --skip runner::tests::webtransport_carries_the_same_protocol_and_close_codes \
     --skip runner::tests::a_blocked_webtransport_endpoint_falls_back_to_the_websocket \
     --skip runner::tests::a_welcome_naming_another_host_gets_no_webtransport_connection \
-    --skip runner::tests::an_expired_token_asks_for_renewal )
+    --skip runner::tests::an_expired_token_asks_for_renewal
 export LAYR="$PWD/target/debug/layr"
-python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
-python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
-python3 tests/apfs-status-cache.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
+step apfs-index python3 tests/apfs-index.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
+step apfs-thin python3 tests/apfs-thin.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
+step apfs-status-cache python3 tests/apfs-status-cache.py --binary "$LAYR" --root "$LAYR_APFS_TEST_ROOT"
 mkdir -p "$TMPDIR/case"
-python3 tests/apfs-case.py --binary "$LAYR" --root "$TMPDIR/case" \
+step apfs-case python3 tests/apfs-case.py --binary "$LAYR" --root "$TMPDIR/case" \
     --case-sensitive-root "$LAYR_APFS_TEST_ROOT" --case-insensitive-root "$case_root"
-bash tests/apfs-local.sh
-bash tests/apfs-cache-retention.sh
-bash tests/apfs-ownership-bases.sh
-bash tests/apfs-lock-hold.sh
-bash tests/save-unsettled.sh
+step apfs-local bash tests/apfs-local.sh
+step apfs-cache-retention bash tests/apfs-cache-retention.sh
+step apfs-ownership-bases bash tests/apfs-ownership-bases.sh
+step apfs-lock-hold bash tests/apfs-lock-hold.sh
+step save-unsettled bash tests/save-unsettled.sh
 # The tests of ci.yml's macos job, without its sudo step (tests/apfs-service.sh): checks never run as root here.
 # The shell tests run at once (tests/run.sh, LAYR_TEST_JOBS; each has its own folder on the volume). That needs
 # Bash 4.3 for the runner of the list: macOS has 3.2, Homebrew a newer one. 8 at once ran 40 macos tests in 113 s,
@@ -85,8 +86,9 @@ if /opt/homebrew/bin/bash -c '((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 &
     cpus=$(sysctl -n hw.ncpu)
     export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$(( cpus / 2 < 8 ? (cpus / 2 < 1 ? 1 : cpus / 2) : 8 ))}
 fi
-"${tests[@]}" --tag macos-plain
-LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag macos
-LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" t115-project-copy
-LAYR_APFS_TEST_ROOT="$case_root" LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag apfs-case
-LAYR_APFS_TEST_ROOT="$case_root" python3 tests/apfs-thin.py --binary "$LAYR" --root "$case_root"
+step "shell tests (macos-plain)" "${tests[@]}" --tag macos-plain
+step "shell tests (macos)" env LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag macos
+step "shell tests (t115)" env LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" t115-project-copy
+step "shell tests (apfs-case)" env LAYR_APFS_TEST_ROOT="$case_root" LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag apfs-case
+step "apfs-thin (case-insensitive)" env LAYR_APFS_TEST_ROOT="$case_root" python3 tests/apfs-thin.py --binary "$LAYR" --root "$case_root"
+finish_steps
