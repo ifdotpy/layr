@@ -1,12 +1,13 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # `layr overlay migrate-parts` and a `cache.<folder>` overlay of an older layr (docs/overlays.md section 1a): the head
 # of each line names its part on the folder overlay, and an overlay whose states have one platform gets that platform.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main" || exit 1

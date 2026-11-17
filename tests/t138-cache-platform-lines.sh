@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # Build output of each platform is its own overlay (docs/overlays.md section 1a, slice 3): a `save` on
 # another platform makes the overlay of that platform (`target.<os>-<arch>`) and does not replace this
 # platform's part, and a new line takes the part of its own platform. A line is the same line on each
@@ -8,12 +9,12 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
-rm -rf target; mkdir target; echo built-here > target/out
+clear_cache_output target; mkdir -p target; echo built-here > target/out
 l save --overlays -q
 echo built-there > target/out
 LAYR_TEST_PLATFORM=plan9-mips l save --overlays -q

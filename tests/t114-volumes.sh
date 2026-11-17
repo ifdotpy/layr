@@ -67,7 +67,7 @@ mk() {
 work() {
     local p=$1 base=$2 main=$2/projects/$1/lines/main
     cd "$main" || exit 1
-    printf 'target/\n' > .gitignore; echo 'target regenerable' > .layrattributes; echo one > a.txt
+    printf 'target/\n' > .gitignore; echo 'target regenerable cache-portable' > .layrattributes; echo one > a.txt
     l add .gitignore .layrattributes a.txt; l save -qm "one"
     l line new -q topic >/dev/null
     cd "$base/projects/$p/lines/topic" || exit 1

@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A check runner gives warmth back (docs/checks.md): runner c checks the head of protected main and pushes, and the
 # laptop a starts a new line from that head with the cache that c's check built. One build per head. The runner's
 # plain clone takes only the records of the cache overlay: the copy of the check fetches the cache on demand.
@@ -8,7 +9,7 @@ needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

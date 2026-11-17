@@ -70,7 +70,7 @@ fn registered() -> &'static [Box<dyn CacheAdapter>] {
 }
 
 /// What a worker reports. `folder_ok` is false when the folder may be changed and was not restored. `freed`: the
-/// bytes that a prune freed; for a relocation, the number of units that it made stale.
+/// bytes that a prune freed; for a relocation, the number of units rewritten or made stale.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Report {
     pub adapter: String,
@@ -88,6 +88,18 @@ pub struct Done {
     pub folder_ok: bool,
     /// A build (`warm`) ran to its end. False when it stopped at its time limit or failed; true for the other modes.
     pub built: bool,
+}
+
+/// Whether a cache may be exposed after relocation. Failure and timeout require a cold cache.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Relocation {
+    Reused { changed: bool },
+    Cold,
+}
+
+pub struct Relocated {
+    pub log: String,
+    pub outcome: Relocation,
 }
 
 /// The command that starts a worker: the layr binary with `__cache-hook`, or the test binary in tests.
@@ -209,14 +221,17 @@ pub fn run_mode(mode: Mode, setting: Option<&str>, folder: &Path, uid: u32, limi
 /// The relocation hook (`CacheAdapter::relocated`) for `folder` of a line of owner `uid`: the folder came from
 /// another path, and it is used at `at` from now on. It runs for every owner (root too) and with the hook off
 /// (`prune=none`): it only makes stale the outputs that name the old place. The log is empty when nothing changed.
-pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Done {
+pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Relocated {
     let setting = setting.filter(|s| *s != "none");
     let applies = match setting {
         Some(name) => registered().iter().any(|a| a.name() == name),
         None => registered().iter().any(|a| a.detects(folder)),
     };
     if !applies {
-        return Done { log: String::new(), folder_ok: true, built: true };
+        return Relocated {
+            log: String::new(),
+            outcome: if setting.is_some() { Relocation::Cold } else { Relocation::Reused { changed: false } },
+        };
     }
     let launch = Launch { exe: std::env::current_exe().unwrap_or_else(|_| "layr".into()), args: vec![WORKER_ARG.into()] };
     let mut done = relocate_with(&launch, &[], setting, folder, at, uid);
@@ -232,22 +247,38 @@ pub fn relocate(setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Do
     done
 }
 
-/// `relocate` with the worker started by `launch` and extra environment for it. A failure changes no file that a
-/// build needs: a removed fingerprint only makes a unit build again.
-pub fn relocate_with(launch: &Launch, env: &[(&str, &str)], setting: Option<&str>, folder: &Path, at: &Path, uid: u32) -> Done {
-    let shown = at.display();
+/// `relocate` with the worker started by `launch` and extra environment for it.
+pub fn relocate_with(
+    launch: &Launch,
+    env: &[(&str, &str)],
+    setting: Option<&str>,
+    folder: &Path,
+    at: &Path,
+    uid: u32,
+) -> Relocated {
     let at_text = at.display().to_string();
     let mut env = env.to_vec();
     env.push((ENV_AT, &at_text));
-    let log = match execute(launch, &env, "relocate", setting, folder, uid, RELOCATE_LIMIT, RELOCATE_LIMIT + GRACE) {
-        Run::Report(r) if !r.reason.is_empty() => format!("{shown}: not relocated with {}: {}", r.adapter, r.reason),
-        Run::Report(r) if r.freed == 0 => String::new(),
-        Run::Report(r) => format!("{shown}: {} units named the old path; the next build makes them again", r.freed),
-        Run::Start(e) => format!("{shown}: not relocated: cannot start the cache hook: {e}"),
-        Run::Failed(e) => format!("{shown}: not relocated: {e}"),
-        Run::Killed => format!("{shown}: not relocated: timed out after {} s", RELOCATE_LIMIT.as_secs()),
+    relocation_result(execute(launch, &env, "relocate", setting, folder, uid, RELOCATE_LIMIT, RELOCATE_LIMIT + GRACE), at)
+}
+
+fn relocation_result(result: Run, at: &Path) -> Relocated {
+    let shown = at.display();
+    let (log, outcome) = match result {
+        Run::Report(r) if r.folder_ok && r.reason.is_empty() => (
+            if r.freed == 0 {
+                String::new()
+            } else {
+                format!("{shown}: {} units named the old path; rewritten or invalidated for the new path", r.freed)
+            },
+            Relocation::Reused { changed: r.freed != 0 },
+        ),
+        Run::Report(r) => (format!("{shown}: not relocated with {}: {}", r.adapter, r.reason), Relocation::Cold),
+        Run::Start(e) => (format!("{shown}: not relocated: cannot start the cache hook: {e}"), Relocation::Cold),
+        Run::Failed(e) => (format!("{shown}: not relocated: {e}"), Relocation::Cold),
+        Run::Killed => (format!("{shown}: not relocated: timed out after {} s", RELOCATE_LIMIT.as_secs()), Relocation::Cold),
     };
-    Done { log, folder_ok: true, built: true }
+    Relocated { log, outcome }
 }
 
 /// The build of the standard commands in a worker. After a stop at the hard limit the adapter's `recover` runs,
@@ -367,8 +398,8 @@ fn execute(
         Ok(Ok(out)) => {
             let text = String::from_utf8_lossy(&out.stdout);
             match text.lines().find_map(|l| l.strip_prefix(REPORT_MARK)).and_then(|j| serde_json::from_str::<Report>(j).ok()) {
-                Some(r) => Run::Report(r),
-                None => Run::Failed(format!("the cache hook gave no report ({})", out.status)),
+                Some(r) if out.status.success() => Run::Report(r),
+                _ => Run::Failed(format!("the cache hook gave no successful report ({})", out.status)),
             }
         }
         Ok(Err(e)) => Run::Failed(e.to_string()),
@@ -660,7 +691,7 @@ fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str
     }
 }
 
-/// Runs the adapter's `relocated` on `folder`, used at `at`. `freed` in the report is the number of stale units.
+/// Runs the adapter's `relocated` on `folder`, used at `at`. `freed` in the report is the number of changed units.
 fn relocate_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, at: &Path) -> Report {
     let found = match find(adapters, setting, folder) {
         Ok(a) => a,
@@ -731,6 +762,16 @@ mod tests {
                     Outcome::Pruned { freed: 1 }
                 }
                 _ => Outcome::Pruned { freed: 7 },
+            }
+        }
+        fn relocated(&self, _folder: &Path, _at: &Path) -> Result<usize, String> {
+            match self.0 {
+                "fail" => Err("relocation failed".into()),
+                "slow" => {
+                    std::thread::sleep(Duration::from_secs(3));
+                    Ok(0)
+                }
+                _ => Ok(2),
             }
         }
         fn warm(&self, _host: &dyn Host, folder: &Path) -> Result<(), String> {
@@ -816,6 +857,44 @@ mod tests {
 
     fn hook(setting: &str, dir: &Path, uid: u32, limit_ms: u64, wait_ms: u64) -> Done {
         run_with(&launch(), &TEST_ENV, Some(setting), dir, uid, Duration::from_millis(limit_ms), Duration::from_millis(wait_ms))
+    }
+
+    #[test]
+    fn relocation_reports_whether_output_changed() {
+        for freed in [0, 1] {
+            let report =
+                Report { adapter: "cargo".into(), pruned: false, freed, restored: false, folder_ok: true, reason: String::new() };
+            assert_eq!(
+                relocation_result(Run::Report(report), Path::new("/target")).outcome,
+                Relocation::Reused { changed: freed != 0 },
+            );
+        }
+    }
+
+    #[test]
+    fn relocation_rejects_adapter_errors_missing_workers_and_timeouts() {
+        let dir = folder("relocation");
+        let done = relocate_with(&launch(), &TEST_ENV, Some("ok"), &dir, &dir, me());
+        assert_eq!(done.outcome, Relocation::Reused { changed: true });
+        let done = relocate_with(&launch(), &TEST_ENV, Some("fail"), &dir, &dir, me());
+        assert_eq!(done.outcome, Relocation::Cold);
+        assert!(done.log.contains("relocation failed"));
+        let missing = Launch { exe: "/nonexistent/layr-worker".into(), args: vec![] };
+        assert_eq!(relocate_with(&missing, &[], None, &dir, &dir, me()).outcome, Relocation::Cold);
+        let run = execute(
+            &launch(),
+            &TEST_ENV,
+            "relocate",
+            Some("slow"),
+            &dir,
+            me(),
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+        );
+        let done = relocation_result(run, &dir);
+        assert_eq!(done.outcome, Relocation::Cold);
+        assert!(done.log.contains("timed out"));
+        assert_eq!(relocation_result(Run::Failed("no report".into()), &dir).outcome, Relocation::Cold);
     }
 
     #[test]

@@ -11,7 +11,7 @@ cd $P/main || exit 1
 l config regenerable '["target"]'
 l line new -q w >/dev/null
 cd $P/w || exit 1
-rm -rf target; mkdir target; echo cache > target/x
+clear_cache_output target; mkdir -p target; echo cache > target/x
 l save --overlays --folder target -q >/dev/null 2>&1
 echo changed >> notes.txt
 l save -a -m one -q >/dev/null 2>&1

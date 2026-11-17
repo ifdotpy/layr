@@ -57,6 +57,7 @@ fn save_back(ctx: &Ctx, a: &crate::args::Parsed, target: &str) -> Result<i32> {
         if repo.p.db.line_by_name(target)?.is_none() {
             return Err(exit(1, format!("error: no line {target}")));
         }
+        repo.prepare_cache_locations(&line)?;
         let (name, saved) = super::checks::save_back_caches(ctx, repo, target, &line.head, &repo.working(&line))?;
         if a.has("--json") {
             let caches: Vec<_> = saved
@@ -363,6 +364,7 @@ fn refuse(e: anyhow::Error, refusals: &mut Vec<String>) -> Result<()> {
 /// Prepare the copies of the line's caches before the lock; `only` (empty: all) names the paths.
 /// Returns the cache paths that it refused (a process uses them).
 fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>> {
+    repo.prepare_cache_locations(l)?;
     #[cfg(target_os = "macos")]
     if let Err(e) = cleanup_abandoned_cache_copies(repo) {
         eprintln!("layr: abandoned cache copies remain until the next cache save: {e:#}");
@@ -1309,6 +1311,77 @@ fn run_check_in(
     })
 }
 
+<<<<<<< head
+=======
+/// Create a private try copy, run the callback, then remove the copy unless requested otherwise.
+pub fn with_try_copy<T>(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    layers: &[crate::overlay::Layer],
+    keep: bool,
+    caches: bool,
+    run: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    let name = format!(".try-{:016x}", rand::random::<u64>());
+    let dir = repo.p.line_path(&name);
+    let tmp_line = Line {
+        id: format!("try-{name}"),
+        name,
+        head: state.into(),
+        owner: ctx.caller.uid,
+        machine: repo.p.store.machine.id.clone(),
+    };
+    if layers.is_empty() {
+        repo.materialize(&tmp_line, state, &dir)?;
+    } else {
+        let view = crate::overlay::View::new(state.to_string(), layers.to_vec());
+        repo.materialize_view(ctx, &tmp_line, &view, &dir)?;
+    }
+    if caches {
+        // A check starts warm: the cache of the state, by the rules of `line new <state>`. A plain fetch takes only
+        // the records of a cache overlay, so the cache comes now from the store remote.
+        crate::store_remote::fetch_caches_on_demand(ctx, repo, state, None, false);
+    }
+    let result = run(&dir);
+    if keep {
+        eprintln!("layr try: kept {}", dir.display());
+    } else {
+        let _ = btrfs::delete_tree(&dir);
+    }
+    result
+}
+
+/// Use the try identity and environment rules for commands from an exact tree.
+pub fn try_command(
+    ctx: &Ctx,
+    repo: &Repo,
+    state: &str,
+    argv: &[String],
+    dir: &Path,
+    env: &[(String, String)],
+    json: bool,
+) -> Result<i32> {
+    if argv.is_empty() || argv[0].is_empty() {
+        anyhow::bail!("a command needs a nonempty argv");
+    }
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).current_dir(dir);
+    if json {
+        command.stdout(std::process::Stdio::from(rustix::io::dup(std::io::stderr())?));
+    }
+    let mut env = env.to_vec();
+    env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
+    env.retain(|(k, _)| k != "LAYR_PROJECT");
+    env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
+    crate::privs::command_as(&mut command, ctx.caller.uid, &env)?;
+    let status = command
+        .status()
+        .map_err(|e| exit(127, format!("layr try: cannot run '{}' as user {}: {e}", argv[0], ctx.caller.user)))?;
+    Ok(status.code().unwrap_or(128))
+}
+
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
 /// The owners check (docs/ownership.md): the stored table against a replay of the records, and
 /// the present states that no owner names (leaks). Pins are local and not compared.
 pub struct OwnersCheck {
@@ -2557,6 +2630,62 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
                             }
                         }
                     }
+                    // A tracked file that differs from its blob only by the line endings of Git's conversion (`eol=crlf`
+                    // in .gitattributes) is not an unsaved change: `git status` shows it clean. The state
+                    // keeps the blob bytes, so the line folder gets them too. Git decides which paths really changed.
+                    // Only bytes: a mode that differs (a group-writable file) stays a change of the folder.
+                    let same_mode = |p: &str| match (fsutil::lmeta(&imported, p), fsutil::lmeta(&snap.path, p)) {
+                        (Some(x), Some(y)) => x.mode == y.mode,
+                        _ => false,
+                    };
+                    let converted: Vec<String> =
+                        copies.iter().filter(|p| tracked.contains(*p) && same_mode(p)).cloned().collect();
+                    if !converted.is_empty() {
+                        // Every path that git itself calls changed, with no pathspec: `git diff` takes no pathspec file,
+                        // and thousands of paths on the command line would pass ARG_MAX. The checkout is clean (init
+                        // refuses another), so the list is short.
+                        let out = caller_git(ctx, &src, &["diff", "--name-only", "-z", "HEAD"])?;
+                        if !out.status.success() {
+                            bail!("cannot compare the checkout with HEAD: {}", String::from_utf8_lossy(&out.stderr).trim());
+                        }
+                        let real: BTreeSet<String> = out
+                            .stdout
+                            .split(|b| *b == 0)
+                            .filter(|p| !p.is_empty())
+                            .map(|p| String::from_utf8_lossy(p).into_owned())
+                            .collect();
+                        // Only line endings: the folder's bytes with CRLF turned into LF are the blob. Any other filter
+                        // (Git LFS keeps a pointer as the blob and the content on disk) stays a change of the folder,
+                        // so its content is saved, not replaced by the blob.
+                        let crlf_only = |p: &str| -> bool {
+                            let (Ok(blob), Ok(disk)) =
+                                (std::fs::read(imported.join(p)), std::fs::read(snap.path.join(p)))
+                            else {
+                                return false;
+                            };
+                            let mut lf = Vec::with_capacity(disk.len());
+                            let mut i = 0;
+                            while i < disk.len() {
+                                if disk[i] == b'\r' && disk.get(i + 1) == Some(&b'\n') {
+                                    i += 1;
+                                    continue;
+                                }
+                                lf.push(disk[i]);
+                                i += 1;
+                            }
+                            lf == blob
+                        };
+                        let normalized: BTreeSet<String> =
+                            converted.into_iter().filter(|p| !real.contains(p) && crlf_only(p)).collect();
+                        copies.retain(|p| !normalized.contains(p));
+                        // On stderr even with -q: `init --from-git` runs this step quietly, and the note must reach the user.
+                        if !normalized.is_empty() {
+                            eprintln!(
+                                "note: {} path(s) differ from their Git blobs only by line endings that .gitattributes converts: the line keeps the blob bytes",
+                                normalized.len()
+                            );
+                        }
+                    }
                     // This private tree has no user file handles to preserve. Remove replaced
                     // entries too, so APFS can clone the current bytes into new inodes.
                     let replaced_directories: Vec<&String> =
@@ -2619,7 +2748,8 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// history comes from the folder (no network): its branches as `local/<branch>`, the branches of
 /// its `origin` as `origin/<branch>` (imported on first use), and the line of its current branch
 /// starts at HEAD. Ignored `target` (next to Cargo.toml) and `node_modules` (next to package.json)
-/// folders move into the line and become its caches. Then the checkout is kept as
+/// folders become cache paths; their old output stays in the checkout backup and the line starts cold.
+/// The checkout is kept as
 /// `<checkout>.before-layr` and the line moves to the checkout's path. Refused: uncommitted
 /// changes, more than one worktree, another file system.
 fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -2724,6 +2854,7 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The folder of the `local` remote is the kept checkout.
     set_config(&repo.p.lock_maintenance()?, ctx, &repo, "remote.local.url", serde_json::json!(backup.to_string_lossy()))?;
     if !caches.is_empty() {
+<<<<<<< head
         set_config(&repo.p.lock_maintenance()?, ctx, &repo, "regenerable", serde_json::json!(caches))?;
         for c in &caches {
             let dst = w.join(c);
@@ -2732,6 +2863,11 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
             move_folder(&src.join(c), &dst)?;
         }
+=======
+        // Keep unknown live output in the original checkout/backup. The moved line establishes
+        // new cold folders at its final path; importing bytes cannot establish their provenance.
+        set_config(ctx, &repo, "regenerable", serde_json::json!(caches))?;
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     }
     let layr = std::env::current_exe()?;
     // In a line folder a command finds its line; elsewhere it needs the project.
@@ -2747,11 +2883,6 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Ok(())
     };
-    if !caches.is_empty() {
-        if let Err(e) = run(&w, &["save", "--overlays", "-q"]) {
-            eprintln!("warning: the caches stay plain folders of the line: {e:#}");
-        }
-    }
     // In place: the checkout is kept beside, and the line takes its path.
     std::fs::rename(&src, &backup)?;
     if let Err(e) = run(&ctx.store.root, &["line", "move", &line_name, &src.to_string_lossy()]) {
@@ -2774,7 +2905,7 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
             tracking.iter().filter(|(n, _)| !n.ends_with("/HEAD")).count()
         );
         if !caches.is_empty() {
-            outln!(ctx, "Caches kept: {}", caches.join(", "));
+            outln!(ctx, "Cache folders: {}", caches.join(", "));
         }
         outln!(ctx, "The Git checkout is kept at {}; remove it when the line works.", backup.display());
         // `retest init` changes files of the project, and the line is protected: it runs in a line
@@ -2825,45 +2956,6 @@ fn local_excludes(src: &std::path::Path, configured: &str, ctx: &Ctx) -> Result<
         std::fs::write(&exclude, &text)?;
     }
     Ok(patterns(&text))
-}
-
-/// Moves the plain folder `from` (no store manages it yet) to `to` on the same file system: a rename. When `to` is
-/// in a mounted line folder (OverlayFS gives EXDEV), a copy that keeps modes and times (cargo compares them; the
-/// file system makes a reflink where it can), then the removal of `from`.
-fn move_folder(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => return Ok(()),
-        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {}
-        Err(e) => return Err(anyhow::Error::new(e).context(format!("move {} to {}", from.display(), to.display()))),
-    }
-    if let Err(e) = copy_keeping_times(from, to) {
-        let _ = std::fs::remove_dir_all(to);
-        return Err(e.context(format!("copy {} to {}", from.display(), to.display())));
-    }
-    std::fs::remove_dir_all(from)?;
-    Ok(())
-}
-
-/// Copies `from` to the new path `to`: folders, files and links, with modes and times.
-fn copy_keeping_times(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
-    let m = std::fs::symlink_metadata(from)?;
-    if m.file_type().is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
-        return Ok(());
-    }
-    if m.is_dir() {
-        std::fs::create_dir(to)?;
-        for e in std::fs::read_dir(from)? {
-            let e = e?;
-            copy_keeping_times(&e.path(), &to.join(e.file_name()))?;
-        }
-    } else if m.is_file() {
-        crate::fsutil::copy_regular(from, to)?;
-    } else {
-        bail!("cannot copy the special file {}", from.display());
-    }
-    std::fs::set_permissions(to, m.permissions())?;
-    crate::fsutil::keep_times(from, to)
 }
 
 /// The cache folders of a checkout: ignored `target` folders next to a Cargo.toml and ignored
@@ -3014,7 +3106,18 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
             crate::store::check_name("line", name)?;
         }
     }
+<<<<<<< head
     set_config(&_lock, ctx, repo, k, val)?;
+=======
+    set_config(ctx, repo, k, val)?;
+    if matches!(k.as_str(), "regenerable" | "cache.portable") {
+        for line in repo.lines()? {
+            if repo.working(&line).is_dir() {
+                repo.initialize_missing_caches(&line)?;
+            }
+        }
+    }
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     if POLICY_KEYS.contains(&k.as_str()) {
         crate::gitbridge::sync_store_access(repo)?;
     }
@@ -3544,32 +3647,6 @@ pub fn keep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Ok(if missing.is_empty() { 0 } else { 1 })
         }
         _ => Err(exit(2, "usage: layr keep [list [--json] | drop <name>... | drop --all]")),
-    }
-}
-
-#[cfg(test)]
-mod move_folder_tests {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    #[test]
-    fn a_copy_keeps_files_links_modes_and_times() {
-        let base = std::env::temp_dir().join(format!("layr-move-folder-{}", crate::ids::new_id()));
-        let from = base.join("target");
-        std::fs::create_dir_all(from.join("debug/deps")).unwrap();
-        std::fs::write(from.join("debug/x"), b"bin").unwrap();
-        std::fs::set_permissions(from.join("debug/x"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::os::unix::fs::symlink("x", from.join("debug/link")).unwrap();
-        let old = std::fs::File::open(from.join("debug/x")).unwrap();
-        crate::fsutil::set_mtime(&old, 1_000_000_000, 5).unwrap();
-        let to = base.join("copy");
-        super::copy_keeping_times(&from, &to).unwrap();
-        let m = std::fs::metadata(to.join("debug/x")).unwrap();
-        assert_eq!(std::fs::read(to.join("debug/x")).unwrap(), b"bin");
-        assert_eq!(m.mode() & 0o777, 0o755);
-        assert_eq!((m.mtime(), m.mtime_nsec()), (1_000_000_000, 5));
-        assert_eq!(std::fs::read_link(to.join("debug/link")).unwrap(), std::path::PathBuf::from("x"));
-        assert!(to.join("debug/deps").is_dir());
-        std::fs::remove_dir_all(&base).unwrap();
     }
 }
 

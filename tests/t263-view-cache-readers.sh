@@ -19,7 +19,7 @@ sh_in() { local u=$1 line=$2; shift 2; as $u sh -c "cd $LAYR_ROOT/projects/vc/li
 P=$LAYR_ROOT/projects/vc/lines
 
 mkdir -p $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 echo 'target/' > $T/src/.gitignore
 echo x > $T/src/a.txt
 l init vc --from $T/src --owner layr-c1 -q >/dev/null

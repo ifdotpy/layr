@@ -71,8 +71,9 @@ and the branches of its `origin` as `origin/<branch>` (imported on first use). T
 `origin` is the checkout's. The line of the current branch (or `--line`; `main` for a detached
 HEAD) starts at HEAD. If local file or directory modes differ from Git's modes, a child state
 preserves them. Its parent is the imported HEAD. Ignored `target` folders next to a `Cargo.toml` and ignored `node_modules`
-folders next to a `package.json` (at most three levels deep) move into the line and become its
-caches (the project setting `regenerable`), so nothing is built again. Then the checkout is kept
+folders next to a `package.json` (at most three levels deep) become configured cache paths
+(the project setting `regenerable`). Output without recorded location provenance
+is kept in the original checkout backup; the new line starts cold and must be rebuilt ([cache contract](cache-overlays.md#build-location-safety)). The checkout is kept
 as `<checkout>.before-layr`, and the line moves to the checkout's path (`line move`). For a
 `Cargo.toml` at the top it prints how to run `layr retest init` in a line of its own: the setup
 changes files of the project, and the new line is protected. The command refuses a checkout with

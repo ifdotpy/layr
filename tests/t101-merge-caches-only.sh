@@ -1,4 +1,5 @@
 #!/bin/bash
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # merge --overlays-only (docs/cache-overlays.md): a line takes the caches of another line without
 # its files or a merge commit. A protected line takes them only when every path that the source
 # changed holds the same content in the target (a squash merge passes). One user, so it runs on
@@ -6,19 +7,19 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
-rm -rf target; mkdir -p target/debug; echo bin0 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin0 > target/debug/x
 l save --overlays -q
 
 l line new work main >/dev/null
 cd $P/work
 echo 'first' > code.txt
 l save -a -m "change code" -q
-rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin1 > target/debug/x
 l save --overlays -q
 
 # 1. Unprotected target: the cache moves; the head, the files and the merge commit do not.
@@ -44,7 +45,7 @@ eq "the squash-merged main has the cache of work" bin1 "$(cat target/debug/x)"
 cd $P/work
 echo 'second' > code.txt
 l save -a -m "change code again" -q
-rm -rf target; mkdir -p target/debug; echo bin2 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin2 > target/debug/x
 l save --overlays -q
 cd $P/main
 l protect main --remove >/dev/null 2>&1 || true

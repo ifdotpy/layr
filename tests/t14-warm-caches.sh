@@ -1,4 +1,5 @@
 #!/bin/bash
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # Warm caches: a new line takes the build output of its nearest ancestor that has one; build
 # output of another user only from a protected line; caches come only from an explicit
 # save --overlays, never from a check; the caches live in cache overlays, never as snapshots of states.
@@ -20,7 +21,7 @@ l init w --from $T/src --owner layr-admin -q >/dev/null
 P=$LAYR_ROOT/projects/w/lines
 l --project w access grant layr-u1 writer
 l --project w access grant layr-u2 maintainer
-(cd $P/main && l config regenerable '["target"]')
+(cd $P/main && l config cache.portable '["target"]' && l config regenerable '["target"]')
 # The "build" of the check: a counter shows whether it started from earlier output.
 l --project w config check.build 'n=$(cat target/count 2>/dev/null || echo 0); echo $((n+1)) > target/count; echo built > target/out; head -c 1048576 /dev/zero > target/big.bin'
 l --project w protect main --check build
@@ -29,7 +30,7 @@ tip() { in_line $1 $2 rev-parse head; }
 
 # 1. Before any build a new line has an empty cache.
 as layr-u1 $L --project w line new -q a1 main
-eq "an empty cache before any build" "" "$(ls -A $P/a1/target)"
+eq "an empty cache before any build" "" "$(ls $P/a1/target)"
 ok "the cache is a subvolume" sh -c "btrfs subvolume show $P/a1/target >/dev/null"
 
 # 2. The check of a merge into main builds in its copy, but layr does not keep that output.

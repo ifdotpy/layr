@@ -1,5 +1,9 @@
 # Performance
 
+The cache-sharing measurements below used historical cross-location sharing; reproducing them now
+requires explicitly portable caches. The default is location-bound output: new lines start cold, and legacy caches reset. See the
+[cache contract](cache-overlays.md#build-location-safety) before enabling cross-location sharing.
+
 This page is part of the [Layr documentation](../README.md#documentation).
 
 ## Disk use compared with Git worktrees

@@ -1,9 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
-# A warm cargo target folder names the place of its build in some units: rustc compiles in the values of
-# env!("CARGO_BIN_EXE_<bin>") and env!("CARGO_MANIFEST_DIR"), and cargo does not compare them. A line that takes the
-# caches of another line (`line new`, `merge --overlays-only`) relocates them: these units build again and name the new
-# line, the other units stay fresh.
+# Location-bound cargo caches start cold in a new line, including generated OUT_DIR paths.
+# The explicit portable opt-in keeps the historical best-effort relocation behaviour.
 #
 # The lines belong to the user that runs cargo: on a root run (the Linux CI job) the user who started the job.
 . "$(dirname "$0")/lib.sh"
@@ -49,7 +47,8 @@ printf '[package]\nname = "reloc"\nversion = "0.1.0"\nedition = "2021"\n\n[depen
 printf '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2021"\n' > "$SRC/dep/Cargo.toml"
 echo 'pub fn one() -> i32 { 1 }' > "$SRC/dep/src/lib.rs"
 echo 'fn main() { println!("{}", dep::one()); }' > "$SRC/src/main.rs"
-printf '#[test]\nfn paths() {\n    println!("BIN={}", env!("CARGO_BIN_EXE_x"));\n    println!("DIR={}", env!("CARGO_MANIFEST_DIR"));\n}\n' > "$SRC/tests/it.rs"
+printf 'fn main() { std::fs::write(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("generated.rs"), "pub const GENERATED: u32 = 1;").unwrap(); }\n' > "$SRC/build.rs"
+printf 'include!(concat!(env!("OUT_DIR"), "/generated.rs"));\n#[test]\nfn paths() {\n    println!("OUT={}", env!("OUT_DIR"));\n    assert_eq!(GENERATED, 1);\n    println!("BIN={}", env!("CARGO_BIN_EXE_x"));\n    println!("DIR={}", env!("CARGO_MANIFEST_DIR"));\n}\n' > "$SRC/tests/it.rs"
 echo 'target regenerable' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
@@ -64,14 +63,15 @@ out=$(cb "$P/main" test --workspace -- --nocapture)
 has "the test names the binary of main" "BIN=$P/main/target/debug/x" "$out"
 (cd "$P/main" && l save --overlays -q)
 
-# line new: the copied test unit builds again, the binary and the dependency do not.
+# line new: every unit builds at the destination, including paths into generated build output.
 err=$(new_line w main 2>&1 >/dev/null)
-has "line new reports the relocated units" "units named the old path" "$err"
+no "a new line starts without foreign output" test -e "$P/w/target/debug/x"
 out=$(cb "$P/w" test --workspace -- --nocapture)
 has "the test in the new line runs its own binary" "BIN=$P/w/target/debug/x" "$out"
 has "the test in the new line names its own folder" "DIR=$P/w" "$out"
 has "the test unit built again" "Compiling reloc" "$out"
-no "the dependency stayed fresh" grep -q "Compiling dep" <<<"$out"
+has "the dependency also builds at the new location" "Compiling dep" "$out"
+has "OUT_DIR names the new line" "OUT=$P/w/target/" "$out"
 
 # merge --overlays-only into a line that had no caches.
 (cd "$P/later" && l merge main --overlays-only -q >/dev/null 2>&1)
@@ -81,4 +81,14 @@ has "after a merge of caches the test runs the line's own binary" "BIN=$P/later/
 # A line at the place of the build has nothing to relocate.
 out=$(cb "$P/main" test --workspace -- --nocapture)
 no "main builds nothing again" grep -q "Compiling" <<<"$out"
+# Portable output is explicitly unsafe for generated paths; exercise the opted-in relocation path.
+echo 'target regenerable cache-portable' > "$SRC/.layrattributes"
+l init portable-project --from "$SRC" $OWNER_ARG -q >/dev/null
+PP=$LAYR_ROOT/projects/portable-project/lines
+(cd "$PP/main" && l protect main --remove >/dev/null 2>&1) || true
+cb "$PP/main" test --workspace --no-run >/dev/null
+(cd "$PP/main" && l save --overlays -q)
+err=$(cd "$PP/main" && new_line portable main 2>&1 >/dev/null)
+has "the opt-in runs relocation" "units named the old path" "$err"
+ok "the portable dependency output is copied" test -d "$PP/portable/target/debug/deps"
 finish

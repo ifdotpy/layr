@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # The cache key holds the environment that changes a build (docs/cache-overlays.md, section 6): a line
 # takes a cache only when these values match, and a line that takes none names the parts that differ.
 # The values that the project pins (`[workspace.metadata.layr-retest] env`) win over the caller's, and
@@ -8,12 +9,12 @@
 
 sample $T/src
 printf '[package]\nname = "x"\nversion = "0.1.0"\n\n[workspace]\n' > $T/src/Cargo.toml
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
-rm -rf target; mkdir target; echo built > target/out
+clear_cache_output target; mkdir -p target; echo built > target/out
 MACOSX_DEPLOYMENT_TARGET=11.0 l save --overlays -q
 
 MACOSX_DEPLOYMENT_TARGET=11.0 l line new same main >/dev/null 2>&1

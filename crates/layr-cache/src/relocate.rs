@@ -14,12 +14,13 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 /// Makes stale the units of the cargo `target` folder that name the place where they were built, when the folder
-/// is used at `at` from now on. Returns the number of units made stale.
+/// is used at `at` from now on. Returns the number of units rewritten or made stale.
 pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
-    let mut stale = 0;
+    let mut changed = 0;
     for profile in profiles(target)? {
         let rel = profile.strip_prefix(target).context("a profile out of the target folder")?;
         let at_profile = at.join(rel);
+<<<<<<< head
         let units = Layout::units(&profile);
         let mut dirs = std::collections::BTreeMap::new();
         let mut fingerprints: std::collections::BTreeMap<&str, Vec<PathBuf>> = std::collections::BTreeMap::new();
@@ -48,10 +49,28 @@ pub fn relocate(target: &Path, at: &Path) -> Result<usize> {
                     Place::Stale => stale += remove_fingerprints(paths)?,
                     Place::Moved { old, new } => move_unit(paths, &entry.path(), &text, &old, &new)?,
                 }
+=======
+        let deps = profile.join("deps");
+        for entry in fs::read_dir(&deps).with_context(|| format!("read {}", deps.display()))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".d")) else { continue };
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            // A dep-info file that cannot be read names nothing that cargo uses either.
+            let Ok(bytes) = fs::read(entry.path()) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
+            let encoded: Vec<Vec<u8>> = unit_dep_files(&profile, stem)?.iter().filter_map(|f| fs::read(f).ok()).collect();
+            match place(&text, &encoded, stem, rel, &at_profile) {
+                Place::Here => {}
+                Place::Stale => changed += remove_fingerprint(&profile, stem)?,
+                Place::Moved { old, new } => changed += usize::from(move_unit(&profile, stem, &entry.path(), &text, &old, &new)?),
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
             }
         }
     }
-    Ok(stale)
+    Ok(changed)
 }
 
 /// The registry source folder (`<CARGO_HOME>/registry/src`) that the units of `target` were built from, when this
@@ -173,18 +192,27 @@ fn place(text: &str, encoded: &[Vec<u8>], artifact: &Path, rel: &Path, at_profil
 /// Moves the unit from the line root `old` to `new`: its text dep-info at `d` and the binary dep-info files
 /// in its fingerprints name the new root. Their times stay, so
 /// cargo's compare of the source times with them gives what it gave before.
+<<<<<<< head
 fn move_unit(fingerprints: &[PathBuf], d: &Path, text: &str, old: &Path, new: &Path) -> Result<()> {
+=======
+fn move_unit(profile: &Path, stem: &str, d: &Path, text: &str, old: &Path, new: &Path) -> Result<bool> {
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     let escape = |p: &Path| format!("{}/", p.display()).replace(' ', "\\ ");
-    rewrite(d, text.replace(&escape(old), &escape(new)).into_bytes())?;
+    let moved = text.replace(&escape(old), &escape(new));
+    let mut changed = moved != text;
+    if changed {
+        rewrite(d, moved.into_bytes())?;
+    }
     let (old, new) = (old.as_os_str().as_encoded_bytes(), new.as_os_str().as_encoded_bytes());
     for file in unit_dep_files(fingerprints)? {
         let bytes = fs::read(&file)?;
         let moved = rewrite_encoded(&bytes, old, new);
         if moved != bytes {
             rewrite(&file, moved)?;
+            changed = true;
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// Files that cargo or clippy name by an absolute path in every unit of a workspace (the workspace manifest, the
@@ -589,7 +617,7 @@ mod tests {
         unit(&target, "lint-bbb", "lint", &text("lint-bbb", "other.toml"));
         unit(&target, "gone-ccc", "gone", &text("gone-ccc", "missing.toml"));
         let time = fs::metadata(&dep).unwrap().modified().unwrap();
-        assert_eq!(relocate(&target, &target).unwrap(), 2);
+        assert_eq!(relocate(&target, &target).unwrap(), 4);
         assert!(fresh(&target, "json", "aaa") && !fresh(&target, "lint", "bbb") && !fresh(&target, "gone", "ccc"));
         let n = new_line.display();
         assert_eq!(

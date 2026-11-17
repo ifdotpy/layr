@@ -23,6 +23,7 @@ use crate::model::{Line, LineChange, StateKind, StateRec};
 use crate::overlay::{files_of, MergeKind, Mode, Props};
 use crate::repo::Repo;
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -78,6 +79,19 @@ pub enum FolderIn {
     Other,
 }
 
+/// Whether a caller owns a private preparation copy or is touching a live build location.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CacheAccess {
+    Prepared,
+    Live,
+}
+
+/// Proof that classification excluded versioned files. Only `cache_folder` constructs this.
+struct CacheFolder<'a> {
+    root: &'a Path,
+    relative: &'a str,
+}
+
 /// Where a line takes caches from.
 pub enum Source<'s> {
     Line(&'s Line),
@@ -130,6 +144,117 @@ pub fn key_differences(ours: &BTreeMap<String, String>, theirs: &BTreeMap<String
         .collect()
 }
 
+/// The logical execution location, independent of a temporary snapshot/preparation folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildLocation {
+    pub workspace: PathBuf,
+    pub target: PathBuf,
+}
+
+impl BuildLocation {
+    pub fn new(workspace: &Path, folder: &str) -> Result<Self> {
+        let location = Self { workspace: workspace.to_path_buf(), target: fsutil::safe_join(workspace, folder)? };
+        anyhow::ensure!(location.valid(), "a cache build location must be absolute and normalized");
+        Ok(location)
+    }
+
+    fn valid(&self) -> bool {
+        self.workspace.is_absolute()
+            && self.target.is_absolute()
+            && self.target != self.workspace
+            && self.target.starts_with(&self.workspace)
+            && !self.target.components().any(|part| part == std::path::Component::ParentDir)
+    }
+}
+
+/// Regenerable output is disposable; sharing it between build locations requires explicit consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheMobility {
+    LocationBound,
+    Portable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Provenance {
+    location: BuildLocation,
+    mobility: CacheMobility,
+}
+
+pub(crate) const PROVENANCE: &str = ".layr-cache-location";
+
+impl Provenance {
+    fn fits(&self, other: &Self) -> bool {
+        self.mobility == other.mobility && (self.mobility == CacheMobility::Portable || self.location == other.location)
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice::<Self>(bytes).ok().filter(|provenance| provenance.location.valid())
+    }
+
+    fn read(folder: &Path) -> Option<Self> {
+        Self::parse(&std::fs::read(folder.join(PROVENANCE)).ok()?)
+    }
+
+    fn read_at(dir: &std::fs::File) -> Option<Self> {
+        Self::parse(&fsutil::read_at(dir, PROVENANCE)?)
+    }
+
+    /// Publish without replacement: a concurrent restore owns any marker it installed first.
+    fn write(&self, dir: &std::fs::File, uid: u32, gid: u32) -> Result<()> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        use std::io::Write;
+        let temp = format!("{PROVENANCE}.tmp-{}", ids::new_id());
+        let fd = rustix::fs::openat(
+            dir,
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )?;
+        let mut file = std::fs::File::from(fd);
+        let installed = (|| -> Result<()> {
+            file.write_all(&serde_json::to_vec(self)?)?;
+            rustix::fs::fchown(&file, Some(rustix::fs::Uid::from_raw(uid)), Some(rustix::fs::Gid::from_raw(gid)))?;
+            file.sync_all()?;
+            match rustix::fs::linkat(dir, temp.as_str(), dir, PROVENANCE, AtFlags::empty()) {
+                Ok(()) => Ok(()),
+                Err(rustix::io::Errno::EXIST) => {
+                    anyhow::ensure!(
+                        Self::read_at(dir).as_ref() == Some(self),
+                        "conflicting location provenance; output left intact"
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
+        })();
+        let cleaned = rustix::fs::unlinkat(dir, temp.as_str(), AtFlags::empty());
+        installed?;
+        cleaned?;
+        dir.sync_all()?;
+        Ok(())
+    }
+}
+
+/// Marker maintenance in a private copy must not look like an output change. Call separately
+/// before and after the adapter, reopening its directory so adapter changes retain their times.
+fn preserve_directory_mtime(dir: &std::fs::File, edit: impl FnOnce() -> Result<()>) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let before = dir.metadata()?;
+    let result = edit();
+    fsutil::set_mtime(dir, before.mtime(), before.mtime_nsec())?;
+    result
+}
+
+/// Publish provenance without hiding adapter rewrites that retain Cargo's file timestamps.
+fn publish_relocated(dir: &std::fs::File, wanted: &Provenance, uid: u32, gid: u32, changed: bool) -> Result<()> {
+    if changed {
+        wanted.write(dir, uid, gid)
+    } else {
+        preserve_directory_mtime(dir, || wanted.write(dir, uid, gid))
+    }
+}
+
 /// The cache key of a line (`Repo::cache_key`): the platform key and its parts.
 pub struct CacheKey {
     pub key: String,
@@ -138,14 +263,21 @@ pub struct CacheKey {
 
 impl CacheKey {
     /// Whether a cache state with this platform key and these parts fits: the same platform, and
-    /// equal parts (`key_differences`); a state without parts (an older layr) by its whole key.
+    /// equal parts (`key_differences`). Missing location provenance is always incompatible.
     pub fn fits(&self, platform: Option<&str>, parts: &BTreeMap<String, String>) -> bool {
-        if parts.is_empty() {
-            return platform == Some(self.key.as_str());
+        let provenance =
+            |parts: &BTreeMap<String, String>| parts.get("location").and_then(|value| Provenance::parse(value.as_bytes()));
+        let (Some(ours), Some(theirs)) = (provenance(&self.parts), provenance(parts)) else { return false };
+        if !ours.fits(&theirs) {
+            return false;
+        }
+        let mut theirs_parts = parts.clone();
+        if ours.mobility == CacheMobility::Portable {
+            theirs_parts.insert("location".into(), self.parts["location"].clone());
         }
         let base = crate::model::cache_platform();
         let ours = self.key == base || self.key.starts_with(&format!("{base}-"));
-        ours && !other_platform(platform) && platform.is_some() && key_differences(&self.parts, parts).is_empty()
+        ours && !other_platform(platform) && platform.is_some() && key_differences(&self.parts, &theirs_parts).is_empty()
     }
 }
 
@@ -193,8 +325,15 @@ impl<'a> Repo<'a> {
     /// pins, else the caller's), and the output of the toolchain command, both named by the folder's
     /// cache adapter (docs/cache-overlays.md, section 6).
     pub fn cache_key(&self, ctx: &Ctx, name: &str, w: &Path, uid: u32) -> Result<CacheKey> {
+        self.cache_key_at(ctx, name, w, w, uid)
+    }
+
+    pub fn cache_key_at(&self, ctx: &Ctx, name: &str, w: &Path, at: &Path, uid: u32) -> Result<CacheKey> {
         let mut parts = file_parts(w, &self.key_files(name)?);
         let folder = self.overlay_setting(name, "folder")?.and_then(|v| v.as_str().map(str::to_owned));
+        if let Some(folder) = folder.as_deref() {
+            parts.insert("location".into(), serde_json::to_string(&self.provenance(folder, w, at)?)?);
+        }
         if let Some(path) = folder.and_then(|f| fsutil::safe_join(w, &f).ok()) {
             let setting = self.overlay_props(name)?.prune;
             if let Some(adapter) = crate::cache_hook::adapter_for(setting.as_deref(), &path) {
@@ -213,6 +352,77 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(CacheKey { key: platform_key_of(&parts), parts })
+    }
+
+    /// Per-folder opt-in, using the same path-list/attribute mechanisms as `regenerable`.
+    pub fn cache_mobility(&self, folder: &str, w: &Path) -> CacheMobility {
+        if self.p.config_strings("cache.portable").iter().any(|p| p == folder)
+            || Rules::attribute(w, "cache-portable").ignored(folder, true)
+        {
+            CacheMobility::Portable
+        } else {
+            CacheMobility::LocationBound
+        }
+    }
+
+    fn provenance(&self, folder: &str, root: &Path, at: &Path) -> Result<Provenance> {
+        Ok(Provenance { location: BuildLocation::new(at, folder)?, mobility: self.cache_mobility(folder, root) })
+    }
+
+    fn cache_folder<'f>(&self, line: &Line, state: &str, root: &'f Path, folder: &'f str) -> Result<Option<CacheFolder<'f>>> {
+        Ok(match self.folder_kind_at(line, state, root, folder)? {
+            FolderIn::Cache => Some(CacheFolder { root, relative: folder }),
+            FolderIn::Versioned | FolderIn::Other => None,
+        })
+    }
+
+    /// Destruction is allowed only in a private copy. Live builds do not share Layr's line lock,
+    /// and a negative writer probe cannot establish exclusion on every supported platform.
+    fn cold_cache(&self, cache: &CacheFolder<'_>, at: &Path, access: CacheAccess, uid: u32, gid: u32) -> Result<()> {
+        let (root, folder) = (cache.root, cache.relative);
+        let path = fsutil::safe_join(root, folder)?;
+        if path.symlink_metadata().is_ok() {
+            anyhow::ensure!(access == CacheAccess::Prepared,
+                "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
+            fsutil::remove_entry(root, folder)?;
+        }
+        // Unlike make_cache, creation must fail on a racing pre-existing directory: never stamp it.
+        let tree = crate::tree::Tree::open(root)?;
+        tree.mkdirs_for(folder, Some((uid, gid)))?;
+        tree.create_subvolume(folder)?;
+        let dir = tree.open_folder(folder)?;
+        self.provenance(folder, root, at)?.write(&dir, uid, gid)?;
+        tree.chown(folder, uid, gid)
+    }
+
+    /// Existing paths, declared literal paths, and saved overlays all need classification.
+    pub fn cache_candidates(&self, root: &Path) -> Result<Vec<String>> {
+        let mut folders = self.cache_paths(root)?;
+        folders.extend(self.folder_overlays()?.into_iter().map(|(_, folder)| folder));
+        folders.sort();
+        folders.dedup();
+        Ok(folders)
+    }
+
+    pub fn initialize_missing_caches(&self, line: &Line) -> Result<()> {
+        let root = self.working(line);
+        let (uid, gid) = self.owner_ids(line);
+        for folder in self.cache_candidates(&root)? {
+            let Some(cache) = self.cache_folder(line, &line.head, &root, &folder)? else { continue };
+            if fsutil::safe_join(&root, &folder)?.symlink_metadata().is_err() {
+                self.cold_cache(&cache, &root, CacheAccess::Live, uid, gid)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_cache_locations(&self, line: &Line) -> Result<()> {
+        self.validate_cache_locations(line, &self.working(line), &self.working(line), CacheAccess::Live)
+    }
+
+    pub fn validate_cache_locations(&self, line: &Line, root: &Path, at: &Path, access: CacheAccess) -> Result<()> {
+        let folders = self.cache_candidates(root)?;
+        self.relocate_folders(line, &folders, root, at, access)
     }
 
     /// Whether `folder` is a cache path of the working folder `w`: the machine setting names it, or
@@ -234,11 +444,24 @@ impl<'a> Repo<'a> {
     /// What `folder` is in `line`: a cache path, a cache path that holds versioned files in the head
     /// (not a cache), or no cache path of the line.
     pub fn folder_kind(&self, line: &Line, folder: &str) -> Result<FolderIn> {
-        if !self.is_cache_path(folder, &self.working(line)) {
+        self.folder_kind_at(line, &line.head, &self.working(line), folder)
+    }
+
+    fn folder_kind_at(&self, line: &Line, state: &str, root: &Path, folder: &str) -> Result<FolderIn> {
+        if !self.is_cache_path(folder, root) {
             return Ok(FolderIn::Other);
         }
-        let head = self.state_src(&line.head)?;
-        Ok(if crate::repo::holds_files_in(&head, folder) { FolderIn::Versioned } else { FolderIn::Cache })
+        if crate::repo::holds_files_in(&self.state_src(state)?, folder)
+            || self.current_stage(line)?.is_some_and(|stage| crate::repo::holds_files(&stage, folder))
+        {
+            return Ok(FolderIn::Versioned);
+        }
+        for layer in self.layers(line)? {
+            if crate::repo::holds_files_in(&self.overlay_repo(&layer.overlay)?.state_src(&layer.state)?, folder) {
+                return Ok(FolderIn::Versioned);
+            }
+        }
+        Ok(FolderIn::Cache)
     }
 
     /// The cache overlays that `overlay remove` removed and that gc has not freed yet, with their
@@ -534,17 +757,24 @@ impl<'a> Repo<'a> {
         shared: bool,
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
+<<<<<<< head
         locked.check(&self.p)?;
         self.save_cache_overlays_in(locked, ctx, line, &self.working(line), paths, shared, project_state)
+=======
+        self.save_cache_overlays_in(ctx, line, line, &self.working(line), &self.working(line), paths, shared, project_state)
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     }
 
-    /// `save_cache_overlays` from the folder `w` instead of the line's working folder (a check copy).
+    /// Save to `line` from `build`'s context at `w` (a check copy may have a different source head).
+    #[allow(clippy::too_many_arguments)]
     pub fn save_cache_overlays_in(
         &self,
         locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
         line: &Line,
+        build: &Line,
         w: &Path,
+        at: &Path,
         paths: &[String],
         shared: bool,
         project_state: &str,
@@ -559,13 +789,17 @@ impl<'a> Repo<'a> {
             if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
+            let Some(_cache) = self.cache_folder(build, &build.head, w, p)? else { continue };
+            let provenance = self.provenance(p, w, at)?;
+            anyhow::ensure!(Provenance::read(&cp).as_ref() == Some(&provenance),
+                "cache {p}: missing or incompatible location provenance; output left intact. Stop builds, discard this cache, declare its exact path regenerable with a literal rule or config entry, and rerun Layr before rebuilding; a wildcard alone cannot initialize an absent folder");
             let name = match &view {
                 Some(x) => self.ensure_view_cache_overlay(locked, ctx, p, x)?,
                 None => self.ensure_cache_overlay(locked, ctx, p)?,
             };
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
-            let CacheKey { key, parts } = self.cache_key(ctx, &name, w, line.owner)?;
+            let CacheKey { key, parts } = self.cache_key_at(ctx, &name, w, at, line.owner)?;
             let id = ids::new_id();
             {
                 let _lock = orepo.p.lock_maintenance()?;
@@ -845,7 +1079,7 @@ impl<'a> Repo<'a> {
 
     pub fn take_caches(&self, ctx: &Ctx, line: &Line, start: &str, source: Option<&Line>, w: &Path) -> Result<Vec<String>> {
         let mut taken = Vec::new();
-        for (name, folder, sid) in self.place_caches(ctx, line, start, source, w)? {
+        for (name, folder, sid) in self.place_caches(ctx, line, start, source, w, &self.working(line))? {
             let info = self.need_overlay(&name)?;
             let orepo = self.overlay_repo(&name)?;
             let _lock = orepo.p.lock_maintenance()?;
@@ -865,8 +1099,9 @@ impl<'a> Repo<'a> {
 
     /// The caches of a folder `w` that only lives for one command (a check copy): as `take_caches`,
     /// without overlay lines, so the copy writes no record. Returns the folders that got a cache.
-    pub fn copy_caches(&self, ctx: &Ctx, line: &Line, start: &str, w: &Path) -> Result<Vec<String>> {
-        let taken: Vec<String> = self.place_caches(ctx, line, start, None, w)?.into_iter().map(|(_, folder, _)| folder).collect();
+    pub fn copy_caches(&self, ctx: &Ctx, line: &Line, start: &str, w: &Path, at: &Path) -> Result<Vec<String>> {
+        let taken: Vec<String> =
+            self.place_caches(ctx, line, start, None, w, at)?.into_iter().map(|(_, folder, _)| folder).collect();
         if let Err(e) = crate::source_times::apply(w, &taken) {
             eprintln!("warning: source file times of the caches not set: {e:#}");
         }
@@ -874,6 +1109,7 @@ impl<'a> Repo<'a> {
     }
 
     /// The writable cache snapshots of `take_caches` in `w`: overlay name, folder and cache state.
+    #[allow(clippy::too_many_arguments)]
     fn place_caches(
         &self,
         ctx: &Ctx,
@@ -881,6 +1117,7 @@ impl<'a> Repo<'a> {
         start: &str,
         source: Option<&Line>,
         w: &Path,
+        at: &Path,
     ) -> Result<Vec<(String, String, String)>> {
         let mut taken = Vec::new();
         if self.p.is_overlay() {
@@ -919,6 +1156,9 @@ impl<'a> Repo<'a> {
             if !self.applies_in(&name, &folder, w)? {
                 continue;
             }
+            let Some(cache) = self.cache_folder(line, start, w, &folder)? else { continue };
+            // This freshly materialized copy belongs to the command, not to a live build.
+            self.cold_cache(&cache, at, CacheAccess::Prepared, uid, gid)?;
             // A machine that does not read the overlay (no key here yet) starts this folder cold.
             if !self.has_overlay_here(&name, &folder) {
                 continue;
@@ -935,14 +1175,14 @@ impl<'a> Repo<'a> {
                 if !self.has_overlay_here(&cand, &folder) {
                     continue;
                 }
-                let key = self.cache_key(ctx, &cand, w, uid)?;
+                let key = self.cache_key_at(ctx, &cand, w, at, uid)?;
                 if let Some(sid) = self.cache_source(&cand, &from, uid, &key)? {
                     found = Some((cand, sid));
                     break;
                 }
             }
             let Some((name, sid)) = found else {
-                let key = self.cache_key(ctx, &name, w, uid)?;
+                let key = self.cache_key_at(ctx, &name, w, at, uid)?;
                 self.report_key_miss(&name, &folder, &from, uid, &key.parts);
                 continue;
             };
@@ -982,6 +1222,7 @@ impl<'a> Repo<'a> {
             Source::State(s) | Source::ExactState(s, _, _) => s.to_string(),
         };
         self.hold(self.pin(&[line.head.as_str(), source_head.as_str()])?);
+        self.prepare_cache_locations(line)?;
         let w = self.working(line);
         let (uid, gid) = self.owner_ids(line);
         let own = self.own(line);
@@ -999,6 +1240,7 @@ impl<'a> Repo<'a> {
             if skip.contains(&folder) || !self.applies_in(&name, &folder, &w)? || !self.has_overlay_here(&name, &folder) {
                 continue;
             }
+            let Some(_cache) = self.cache_folder(line, &line.head, &w, &folder)? else { continue };
             let key = self.cache_key(ctx, &name, &w, uid)?;
             let Some(sid) = self.cache_source(&name, from, uid, &key)? else {
                 self.report_key_miss(&name, &folder, from, uid, &key.parts);
@@ -1009,6 +1251,44 @@ impl<'a> Repo<'a> {
             orepo.hold(orepo.pin(&[sid.as_str()])?);
             if !cache_here(&orepo, &sid, &folder)? {
                 continue;
+            }
+            // Relocate incoming portable output in an owner-readable private staging copy.
+            // A failing hook must not reset or damage the destination's live build output.
+            let mut incoming = orepo.state_root(&sid)?;
+            let mut staged = None;
+            let wanted = self.provenance(&folder, &w, &w)?;
+            let have = Provenance::read(&incoming);
+            anyhow::ensure!(
+                have.as_ref().is_some_and(|have| wanted.fits(have)),
+                "cache {folder}: incoming cache has no compatible live provenance; output left intact"
+            );
+            if have.as_ref() != Some(&wanted) {
+                let root = w.join(format!(".layr-cache-take-{}", ids::new_id()));
+                std::fs::create_dir(&root)?;
+                fsutil::chown_nofollow(&root, uid, gid)?;
+                staged = Some(crate::repo::Temp { path: root.clone() });
+                let tree = crate::tree::Tree::open(&root)?;
+                let path = fsutil::safe_join(&root, &folder)?;
+                fsutil::make_parents(&root, &folder, Some((uid, gid)))?;
+                let uniform = btrfs::cache_snapshot(&incoming, &path)?;
+                let source_owner = orepo.p.db.state(&sid)?.and_then(|state| state.cache_by);
+                crate::repo::give_cache_tree(&path, uniform, source_owner, uid, gid)?;
+                let props = self.overlay_props(&name)?;
+                let adapter = crate::cache_hook::adapter_for(props.prune.as_deref(), &fsutil::safe_join(&w, &folder)?);
+                let setting = adapter.map(|a| a.name()).or(props.prune.as_deref());
+                // This private copy loses its old marker before relocation, never after the hook.
+                let dir = tree.open_folder(&folder)?;
+                preserve_directory_mtime(&dir, || Ok(rustix::fs::unlinkat(&dir, PROVENANCE, rustix::fs::AtFlags::empty())?))?;
+                let done = crate::cache_hook::relocate(setting, &path, &wanted.location.target, uid);
+                if !done.log.is_empty() {
+                    eprintln!("layr: relocate {}", done.log);
+                }
+                let crate::cache_hook::Relocation::Reused { changed } = done.outcome else {
+                    anyhow::bail!("cache {folder}: relocation failed; live output left intact");
+                };
+                let dir = tree.open_folder(&folder)?;
+                publish_relocated(&dir, &wanted, uid, gid, changed)?;
+                incoming = path;
             }
             let made = {
                 let _lock = orepo.p.lock_maintenance()?;
@@ -1021,7 +1301,7 @@ impl<'a> Repo<'a> {
                             format!("error: {folder} holds files of the line's head; it is no cache"),
                         ));
                     }
-                    let src = orepo.state_root(&sid)?;
+                    let src = incoming.clone();
                     if cp.symlink_metadata().is_err() {
                         fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
                         crate::fs::snapshot(&src, &cp, false)?;
@@ -1034,7 +1314,9 @@ impl<'a> Repo<'a> {
                 } else if ol.head == sid || orepo.is_ancestor(&sid, &ol.head)? {
                     continue;
                 } else {
-                    let fast = ol.head == info.root || orepo.is_ancestor(&ol.head, &sid)?;
+                    let compatible =
+                        orepo.p.db.state(&ol.head)?.is_some_and(|st| key.fits(st.cache_platform.as_deref(), &st.cache_key_parts));
+                    let fast = !compatible || ol.head == info.root || orepo.is_ancestor(&ol.head, &sid)?;
                     let (head, states) = if fast {
                         (sid.clone(), Vec::new())
                     } else {
@@ -1047,9 +1329,14 @@ impl<'a> Repo<'a> {
                         (st.id.clone(), vec![st])
                     };
                     // The working folder first: a failure leaves the overlay line where it was.
+<<<<<<< head
                     let src = orepo.state_root(&sid)?;
                     let empty =
                         cp.symlink_metadata().is_err() || (crate::fs::host().namespace.managed(&cp) && files_of(&cp)?.is_empty());
+=======
+                    let src = incoming.clone();
+                    let empty = cp.symlink_metadata().is_err() || (btrfs::is_subvolume(&cp) && files_of(&cp)?.is_empty());
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")))
                     } else if empty {
@@ -1078,7 +1365,8 @@ impl<'a> Repo<'a> {
                 }
             };
             self.after_overlay_move(ctx, &name);
-            self.relocate_caches(line, std::slice::from_ref(&folder), &w);
+            self.relocate_caches(line, std::slice::from_ref(&folder), &w, CacheAccess::Live)?;
+            drop(staged);
             out.push((folder, made));
         }
         Ok(out)
@@ -1152,43 +1440,83 @@ impl<'a> Repo<'a> {
         done.built
     }
 
-    /// The relocation hook for the cache folders `folders` of `line` in `root` (its working folder, or the folder
-    /// that becomes it): they came from another path. The adapter of each makes stale the outputs that name the old
-    /// path. It never fails: the outcome is one log line on stderr, none when nothing changed.
-    pub fn relocate_caches(&self, line: &Line, folders: &[String], root: &Path) {
-        let (uid, _) = self.owner_ids(line);
-        let _t = crate::trace::named(|| format!("relocate caches of line {}", line.name));
-        self.relocate_folders(uid, folders, root, &self.working(line));
+    /// The caller must identify private preparation copies explicitly; live rejections never delete output.
+    pub fn relocate_caches(&self, line: &Line, folders: &[String], root: &Path, access: CacheAccess) -> Result<()> {
+        self.relocate_folders(line, folders, root, &self.working(line), access)
     }
 
-    /// The cache folders `folders` of `root`, used below `at` from now on (a line's working folder, or the place
-    /// where a check sees its copy): the relocation hook of each, run as `uid`.
-    pub fn relocate_folders(&self, uid: u32, folders: &[String], root: &Path, working: &Path) {
+    pub fn relocate_folders(
+        &self,
+        line: &Line,
+        folders: &[String],
+        root: &Path,
+        working: &Path,
+        access: CacheAccess,
+    ) -> Result<()> {
+        if self.p.is_overlay() {
+            return Ok(());
+        }
+        let (uid, gid) = self.owner_ids(line);
         for folder in folders {
-            let setting = match self.folder_overlay_of(folder).and_then(|o| o.map(|name| self.overlay_props(&name)).transpose()) {
-                Ok(props) => props.and_then(|p| p.prune),
-                Err(e) => {
-                    eprintln!("layr: relocate {folder}: not relocated: {e:#}");
-                    continue;
-                }
-            };
-            let paths = fsutil::safe_join(root, folder).and_then(|p| Ok((p, fsutil::safe_join(working, folder)?)));
-            let (path, at) = match paths {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("layr: relocate {folder}: not relocated: {e:#}");
-                    continue;
-                }
-            };
-            if !path.is_dir() {
+            let Some(cache) = self.cache_folder(line, &line.head, root, folder)? else { continue };
+            let path = fsutil::safe_join(root, folder)?;
+            let meta = path.symlink_metadata();
+            if meta.as_ref().is_ok_and(|m| !m.is_dir()) {
                 continue;
             }
-            let _t = crate::trace::named(|| format!("relocate {folder}"));
-            let done = crate::cache_hook::relocate(setting.as_deref(), &path, &at, uid);
-            if !done.log.is_empty() {
-                eprintln!("layr: relocate {}", done.log);
+            if meta.is_err() && access == CacheAccess::Live && root != working {
+                continue; // Move preflight: establish missing caches only at the final location.
+            }
+            let tree = crate::tree::Tree::open(root)?;
+            let wanted = self.provenance(folder, root, working)?;
+            let have = tree.open_folder(folder).ok().and_then(|dir| Provenance::read_at(&dir));
+            if have.as_ref() == Some(&wanted) {
+                continue;
+            }
+            if access == CacheAccess::Live || !have.as_ref().is_some_and(|have| wanted.fits(have)) {
+                self.cold_cache(&cache, working, access, uid, gid)?;
+                continue;
+            }
+            let setting = self.relocation_setting(line, folder);
+            // Only a compatible private preparation copy reaches this relocation path.
+            let dir = tree.open_folder(folder)?;
+            preserve_directory_mtime(&dir, || Ok(rustix::fs::unlinkat(&dir, PROVENANCE, rustix::fs::AtFlags::empty())?))?;
+            let outcome = match setting {
+                Ok(setting) => {
+                    let done = crate::cache_hook::relocate(setting.as_deref(), &path, &wanted.location.target, uid);
+                    if !done.log.is_empty() {
+                        eprintln!("layr: relocate {}", done.log);
+                    }
+                    done.outcome
+                }
+                Err(e) => {
+                    eprintln!("layr: relocate {folder}: not relocated: {e:#}");
+                    crate::cache_hook::Relocation::Cold
+                }
+            };
+            if let crate::cache_hook::Relocation::Reused { changed } = outcome {
+                let dir = tree.open_folder(folder)?;
+                publish_relocated(&dir, &wanted, uid, gid, changed)?;
+            } else {
+                eprintln!("layr: {folder}: relocation failed; starting cold");
+                self.cold_cache(&cache, working, access, uid, gid)?;
             }
         }
+        Ok(())
+    }
+
+    /// Use the settings of the part this line took, including a view-only cache or a fallback
+    /// from a lower view. An empty overlay line did not supply the output being relocated.
+    fn relocation_setting(&self, line: &Line, folder: &str) -> Result<Option<String>> {
+        let path: Vec<String> = self.layers(line)?.into_iter().map(|layer| layer.overlay).collect();
+        for name in self.cache_chain(line, &path, folder)? {
+            let info = self.need_overlay(&name)?;
+            let orepo = self.overlay_repo(&name)?;
+            if crate::overlay::find_overlay_line(&orepo.p.db, &info, line)?.is_some_and(|part| part.head != info.root) {
+                return Ok(self.overlay_props(&name)?.prune);
+            }
+        }
+        self.folder_overlay_of(folder)?.map(|name| self.overlay_props(&name)).transpose().map(|props| props.and_then(|p| p.prune))
     }
 
     /// Runs `f` with `limit` as the prune limit of this thread (the background follow pass), then restores it.
@@ -1205,7 +1533,7 @@ impl<'a> Repo<'a> {
     }
 
     fn prune_folder(&self, line: &Line, overlay: Option<&str>, folder: &str, root: &Path) {
-        let (uid, _) = self.owner_ids(line);
+        let (uid, gid) = self.owner_ids(line);
         let setting = match overlay {
             Some(name) => match self.overlay_props(name) {
                 Ok(p) => p.prune,
@@ -1225,6 +1553,20 @@ impl<'a> Repo<'a> {
         // A folder that an interrupted step left damaged is repaired first; it stays marked (and saves skip it) until
         // the repair succeeds. A prune alone cannot tell a whole folder from one with missing files.
         if self.damaged_folders(line).is_ok_and(|d| d.contains(folder)) {
+            let prepared = (|| -> Result<_> {
+                let tree = crate::tree::Tree::open(root)?;
+                let dir = tree.open_folder(folder)?;
+                let provenance = self.provenance(folder, root, root)?;
+                anyhow::ensure!(
+                    Provenance::read_at(&dir).as_ref() == Some(&provenance),
+                    "missing or incompatible location provenance; output left intact"
+                );
+                Ok((tree, provenance))
+            })();
+            let (tree, provenance) = match prepared {
+                Ok(prepared) => prepared,
+                Err(e) => return eprintln!("layr: repair {folder}: {e:#}"),
+            };
             let fixed = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
                 crate::cache_hook::run_mode(crate::cache_hook::Mode::Repair, setting.as_deref(), &path, uid, Self::prune_limit())
             });
@@ -1232,7 +1574,17 @@ impl<'a> Repo<'a> {
                 eprintln!("layr: repair {}", fixed.log);
             }
             if !fixed.folder_ok {
-                return;
+                if let Some(dir) =
+                    tree.open_folder(folder).ok().filter(|dir| Provenance::read_at(dir).as_ref() == Some(&provenance))
+                {
+                    fsutil::unlink_at(&dir, PROVENANCE);
+                }
+                return eprintln!("layr: repair {folder} failed; output is unknown and left intact. Stop builds and remove the cache folder, then rerun Layr to initialize cold output before rebuilding");
+            }
+            // A successful repair built output here, even when the installer replaced its directory.
+            let stamped = tree.open_folder(folder).and_then(|dir| provenance.write(&dir, uid, gid));
+            if let Err(e) = stamped {
+                return eprintln!("layr: repair {folder}: {e:#}; stop builds and remove the cache folder before rebuilding");
             }
         }
         let done = crate::cache_hook::with_scratch(Some(self.hook_scratch()), || {
@@ -1439,6 +1791,206 @@ mod tests {
     use super::*;
     use crate::overlay::folder_path;
 
+    fn location_key(workspace: &str, target: &str, mobility: CacheMobility) -> CacheKey {
+        let provenance = Provenance { location: BuildLocation::new(Path::new(workspace), target).unwrap(), mobility };
+        let parts = BTreeMap::from([("location".into(), serde_json::to_string(&provenance).unwrap())]);
+        CacheKey { key: platform_key_of(&parts), parts }
+    }
+
+    #[test]
+    fn cache_locations_require_both_absolute_workspace_and_target_identity() {
+        let key = location_key("/lines/main", "target", CacheMobility::LocationBound);
+        assert!(key.fits(Some(&key.key), &key.parts));
+        for other in [
+            location_key("/lines/new", "target", CacheMobility::LocationBound),
+            location_key("/lines/main", "other-target", CacheMobility::LocationBound),
+        ] {
+            assert_ne!(key.key, other.key);
+            assert!(!key.fits(Some(&other.key), &other.parts));
+        }
+        assert!(!key.fits(Some(&key.key), &BTreeMap::new()), "even an equal legacy key is cold");
+        let malformed = BTreeMap::from([("location".into(), "{}".into())]);
+        assert!(!key.fits(Some(&key.key), &malformed));
+        assert!(BuildLocation::new(Path::new("relative"), "target").is_err());
+    }
+
+    #[test]
+    fn provenance_resolution_rejects_every_cache_path_symlink() {
+        let root = std::env::temp_dir().join(format!("layr-provenance-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("outside/target")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside/target"), root.join("target")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("linked")).unwrap();
+        let tree = crate::tree::Tree::open(&root).unwrap();
+        for folder in ["target", "linked/target"] {
+            assert!(tree.open_folder(folder).is_err(), "{folder} must not reach the marker writer");
+        }
+        assert!(!root.join("outside/target").join(PROVENANCE).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provenance_validation_and_write_keep_the_resolved_descriptor() {
+        let root = std::env::temp_dir().join(format!("layr-provenance-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("parent/target")).unwrap();
+        std::fs::create_dir_all(root.join("outside/target")).unwrap();
+        let tree = crate::tree::Tree::open(&root).unwrap();
+        let dir = tree.open_folder("parent/target").unwrap();
+        let provenance =
+            Provenance { location: BuildLocation::new(&root, "parent/target").unwrap(), mobility: CacheMobility::LocationBound };
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        provenance.write(&dir, uid, gid).unwrap();
+        assert_eq!(Provenance::read_at(&dir), Some(provenance.clone()));
+        std::fs::rename(root.join("parent"), root.join("original")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("parent")).unwrap();
+        provenance.write(&dir, uid, gid).unwrap();
+        assert_eq!(Provenance::read(&root.join("original/target")), Some(provenance));
+        assert!(!root.join("outside/target").join(PROVENANCE).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_marker_arriving_after_the_missing_check_is_never_replaced() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("layr-marker-race-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        let dir = crate::tree::Tree::open(&root).unwrap().open_folder("target").unwrap();
+        let wanted =
+            Provenance { location: BuildLocation::new(&root, "target").unwrap(), mobility: CacheMobility::LocationBound };
+        let foreign = Provenance {
+            location: BuildLocation::new(Path::new("/foreign"), "target").unwrap(),
+            mobility: CacheMobility::LocationBound,
+        };
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        assert!(Provenance::read_at(&dir).is_none());
+        // A concurrent restore publishes its marker after the caller's check, before the write.
+        foreign.write(&dir, uid, gid).unwrap();
+        let marker = root.join("target").join(PROVENANCE);
+        let bytes = std::fs::read(&marker).unwrap();
+        let before = std::fs::metadata(&marker).unwrap();
+        assert!(wanted.write(&dir, uid, gid).unwrap_err().to_string().contains("conflicting location provenance"));
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        foreign.write(&dir, uid, gid).unwrap();
+        let after = std::fs::metadata(&marker).unwrap();
+        assert_eq!(before.ino(), after.ino(), "a matching marker is not rewritten");
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(std::fs::read_dir(root.join("target")).unwrap().count(), 1, "temporary files are removed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Exercise the real Cargo adapter, including rewrites that restore every output mtime.
+    fn check_relocation_save_detection(dep_info: &str, expected_change: bool) -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-relocation-times-{}", ids::new_id()));
+        let target = root.join("target");
+        let old = root.join("old");
+        std::fs::create_dir_all(&old)?;
+        for line in [&root, &old] {
+            std::fs::write(line.join("Cargo.toml"), "[workspace]\n")?;
+        }
+        std::fs::create_dir_all(target.join("debug/deps"))?;
+        let fingerprint = target.join("debug/.fingerprint/probe-aaa");
+        std::fs::create_dir_all(&fingerprint)?;
+        let output = target.join("debug/deps/probe-aaa.d");
+        let text = format!(
+            "{}/target/debug/deps/probe-aaa.d: {}\n",
+            old.display(),
+            dep_info.replace("$OLD", &old.display().to_string())
+        );
+        std::fs::write(&output, &text)?;
+        let dir = crate::tree::Tree::open(&root)?.open_folder("target")?;
+        let provenance = Provenance { location: BuildLocation::new(&root, "target")?, mobility: CacheMobility::Portable };
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        provenance.write(&dir, uid, gid)?;
+        for path in [
+            &output,
+            &fingerprint,
+            &target.join("debug/.fingerprint"),
+            &target.join("debug/deps"),
+            &target.join("debug"),
+            &target,
+        ] {
+            fsutil::set_mtime(&std::fs::File::open(path)?, 10, 123)?;
+        }
+        assert!(!crate::repo::folder_changed_since(&target, 20_000));
+        preserve_directory_mtime(&dir, || Ok(rustix::fs::unlinkat(&dir, PROVENANCE, rustix::fs::AtFlags::empty())?))?;
+        let before = std::fs::metadata(&output)?.modified()?;
+        let changed = layr_cache::relocate::relocate(&target, &target)? != 0;
+        assert_eq!(changed, expected_change);
+        assert_eq!(std::fs::metadata(&output)?.modified()?, before, "Cargo's dep-info time stays");
+        if dep_info.contains("CARGO_MANIFEST_DIR") {
+            assert!(!fingerprint.exists(), "the adapter deleted the foreign fingerprint");
+            assert!(crate::repo::folder_changed_since(&target, 20_000));
+        } else {
+            assert!(fingerprint.exists());
+            assert_eq!(std::fs::read_to_string(&output)? != text, expected_change);
+            assert!(!crate::repo::folder_changed_since(&target, 20_000), "rewrites retain all output times");
+        }
+        publish_relocated(&dir, &provenance, uid, gid, changed)?;
+        assert_eq!(Provenance::read_at(&dir), Some(provenance));
+        assert_eq!(crate::repo::folder_changed_since(&target, 20_000), expected_change);
+        // A second relocation at the destination changes nothing.
+        assert_eq!(layr_cache::relocate::relocate(&target, &target)?, 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn noop_relocation_keeps_inherited_output() -> Result<()> {
+        check_relocation_save_detection("src/lib.rs", false)
+    }
+
+    #[test]
+    fn relocation_rewrites_count_as_changed_output() -> Result<()> {
+        check_relocation_save_detection("$OLD/Cargo.toml", true)
+    }
+
+    #[test]
+    fn relocation_deletions_count_as_changed_output() -> Result<()> {
+        check_relocation_save_detection("src/lib.rs\n# env-dep:CARGO_MANIFEST_DIR=$OLD", true)
+    }
+
+    #[test]
+    fn output_detection_ignores_only_the_exact_root_marker() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-output-marker-{}", ids::new_id()));
+        std::fs::create_dir_all(root.join("nested"))?;
+        let old = |path: &Path| fsutil::set_mtime(&std::fs::File::open(path)?, 10, 0);
+        old(&root.join("nested"))?;
+        std::fs::write(root.join(PROVENANCE), "metadata")?;
+        old(&root)?;
+        assert!(!crate::repo::folder_changed_since(&root, 20_000));
+        for path in [root.join("nested").join(PROVENANCE), root.join(format!("{PROVENANCE}.tmp")), root.join("output")] {
+            std::fs::write(&path, "output")?;
+            old(path.parent().unwrap())?;
+            assert!(crate::repo::folder_changed_since(&root, 20_000), "{} is output", path.display());
+            std::fs::remove_file(&path)?;
+            old(path.parent().unwrap())?;
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_explicit_portability_on_both_sides_allows_another_location() {
+        let key = location_key("/work", "target", CacheMobility::Portable);
+        let other = location_key("/lines/new", "build", CacheMobility::Portable);
+        assert!(key.fits(Some(&other.key), &other.parts));
+        let bound = location_key("/work", "target", CacheMobility::LocationBound);
+        assert!(!key.fits(Some(&bound.key), &bound.parts));
+        assert!(!bound.fits(Some(&key.key), &key.parts));
+        assert!(!key.fits(Some(&key.key), &BTreeMap::new()));
+        for location in [
+            BuildLocation { workspace: "relative".into(), target: "relative/target".into() },
+            BuildLocation { workspace: "/work".into(), target: "/foreign/target".into() },
+            BuildLocation { workspace: "/work".into(), target: "/work/../foreign".into() },
+        ] {
+            let malformed = Provenance { location, mobility: CacheMobility::Portable };
+            let parts = BTreeMap::from([("location".into(), serde_json::to_string(&malformed).unwrap())]);
+            assert!(!key.fits(Some(&key.key), &parts), "portable provenance still requires a valid location");
+        }
+    }
+
     #[test]
     fn folder_paths_and_cache_names() {
         assert_eq!(folder_path("target/").unwrap(), "target");
@@ -1457,7 +2009,9 @@ mod tests {
     #[test]
     fn an_unknown_toolchain_is_no_difference() {
         let parts = |t: &str, env: &str| {
-            BTreeMap::from([("toolchain".to_string(), t.to_string()), ("env:CC".to_string(), env.to_string())])
+            let mut parts = location_key("/work", "target", CacheMobility::LocationBound).parts;
+            parts.extend([("toolchain".to_string(), t.to_string()), ("env:CC".to_string(), env.to_string())]);
+            parts
         };
         assert!(key_differences(&parts("aa", "x"), &parts("-", "x")).is_empty(), "root without rustc");
         assert_eq!(key_differences(&parts("aa", "x"), &parts("bb", "x")), ["toolchain"]);

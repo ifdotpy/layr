@@ -7,7 +7,7 @@ pub(crate) use crate::overlay::create::make_overlay;
 use super::{exit, here};
 use crate::access::{parse_principal, show_principal, Policy, Role};
 use crate::args::{parse, Spec};
-use crate::cache_overlay::FolderIn;
+use crate::cache_overlay::{CacheAccess, FolderIn};
 use crate::ctx::Ctx;
 use crate::ids;
 use crate::model::{Record, StateKind};
@@ -604,7 +604,10 @@ fn repair(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         FolderIn::Cache => {
-            if crate::repo::convert_cache(&repo.working(&l), &folder, u, g)? {
+            let w = repo.working(&l);
+            let missing = crate::fsutil::safe_join(&w, &folder)?.symlink_metadata().is_err();
+            repo.relocate_caches(&l, std::slice::from_ref(&folder), &w, CacheAccess::Live)?;
+            if missing || crate::repo::convert_cache(&w, &folder, u, g)? {
                 outln!(ctx, "{folder}: a cache again");
             }
         }
@@ -1302,7 +1305,7 @@ fn old_cache_platforms(repo: &Repo) -> Result<Vec<(String, String)>> {
         let mut seen = BTreeSet::new();
         for (id, _) in orepo.p.db.cache_states()? {
             if let Some(st) = orepo.p.db.state(&id)? {
-                seen.extend(st.cache_platform);
+                seen.extend(st.cache_platform.as_deref().map(cache_build_platform).map(str::to_owned));
             }
         }
         if seen.len() == 1 {
@@ -1310,6 +1313,14 @@ fn old_cache_platforms(repo: &Repo) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(out)
+}
+
+/// An overlay belongs to an OS/architecture, not to one build's key parts.
+fn cache_build_platform(key: &str) -> &str {
+    match key.rsplit_once('-') {
+        Some((platform, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => platform,
+        _ => key,
+    }
 }
 
 /// The layer of overlay `name` for a line of `owner`: its overlay line, made when missing (a
@@ -1716,6 +1727,16 @@ fn read(ctx: &Ctx, cmd: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn migration_groups_build_keys_by_platform() {
+        let keys = ["macos-aarch64-0123456789abcdef", "macos-aarch64-fedcba9876543210", "macos-aarch64"];
+        let mut platforms: BTreeSet<_> = keys.into_iter().map(cache_build_platform).collect();
+        assert_eq!(platforms, BTreeSet::from(["macos-aarch64"]));
+        platforms.insert(cache_build_platform("linux-x86_64-0123456789abcdef"));
+        assert_eq!(platforms.len(), 2, "different build platforms still prevent migration to one platform");
+        assert_eq!(cache_build_platform("linux-x86_64-not-a-key"), "linux-x86_64-not-a-key");
+    }
 
     #[test]
     fn listing_opens_each_overlay_once_and_preserves_visibility() -> Result<()> {

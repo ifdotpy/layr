@@ -21,6 +21,8 @@ state_of() { l overlay list | grep 'folder=\.layr-retest' | cut -f6; }
 l line new a main >/dev/null
 cd $P/a
 echo '.layr-retest regenerable' > .layrattributes
+# Establish this location before the build writes output.
+l save --overlays -q >/dev/null || exit 1
 mkdir -p .layr-retest && echo cached > .layr-retest/out.bin
 out=$(l save --overlays)
 has "save --overlays names the folder overlay" ".layr-retest: overlay" "$out"

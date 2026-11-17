@@ -212,6 +212,8 @@ impl Locked {
                     prepare_upper(&object, &data)?;
                 } else {
                     fs::create_dir(&upper)?;
+                    let source = fs::metadata(&data)?;
+                    sys::overlay_mtime(&upper, source.mtime(), source.mtime_nsec())?;
                 }
             }
             if !work.exists() {
@@ -1948,6 +1950,34 @@ mod tests {
         crate::fs::remove(&previous)?;
         Ok(())
     }
+    #[test]
+    #[ignore = "requires root and a local filesystem with OverlayFS index support"]
+    fn taken_cache_preserves_root_mtime() -> Result<()> {
+        let root =
+            PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("cache-times-{}", crate::ids::new_id()));
+        recover(&root)?;
+        let source = root.join("source");
+        create_subvolume(&source)?;
+        fs::write(source.join("output"), "built")?;
+        sys::overlay_mtime(&source.join("output"), 10, 123)?;
+        sys::overlay_mtime(&source, 10, 123)?;
+        let saved = root.join("saved");
+        snapshot(&source, &saved, true)?;
+        let taken = root.join("taken");
+        cache_snapshot(&saved, &taken)?;
+        let before = fs::metadata(&saved)?;
+        let after = fs::metadata(&taken)?;
+        assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()));
+        assert!(!crate::repo::folder_changed_since(&taken, 20_000), "an unchanged cache keeps its inherited part");
+        fs::remove_file(taken.join("output"))?;
+        assert!(crate::repo::folder_changed_since(&taken, 20_000), "deletion still changes the cache");
+        delete_tree(&taken)?;
+        delete_tree(&saved)?;
+        delete_tree(&source)?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires root and a local filesystem with OverlayFS index support"]
     fn delete_removes_a_tree_that_a_process_uses() -> Result<()> {

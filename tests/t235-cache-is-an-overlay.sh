@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A cache is an ordinary overlay (docs/overlays.md section 1a, slices 3 and 6): a `regenerable`
 # folder becomes the overlay of this platform (`target.<platform>`, no `cache.` prefix) at the first
 # named save, `save -m` records its part in the state, a new line takes that part, an overlay of
@@ -9,7 +10,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main" || exit 1
@@ -31,7 +32,7 @@ states() { ls "$P/meta/overlays/$1/states" | wc -l | tr -d ' '; }
 
 # 1. A regenerable folder becomes the overlay of this platform at the first named save, and the
 #    state names its part.
-rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin1 > target/debug/x
 echo a >> notes.txt
 ok "a named save" l save -qam "first"
 list=$(l overlay list)

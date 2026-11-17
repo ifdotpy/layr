@@ -3,11 +3,12 @@
 # Broker delegation (docs/ci-trust.md). The owner lets a broker machine trust CI jobs within limits. The broker
 # trusts a job for an hour, the job's cache reaches the owner, and a trust outside the delegation is refused. After
 # the revoke the broker trusts nobody.
+# This fixture explicitly shares disposable output across build locations.
 . "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/p/lines/main" || exit 1
 l protect main --remove >/dev/null 2>&1 || true

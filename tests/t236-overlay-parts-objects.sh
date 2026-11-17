@@ -7,7 +7,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p
 cd "$P/lines/main" || exit 1

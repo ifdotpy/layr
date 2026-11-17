@@ -18,6 +18,7 @@ l save --overlays -q || exit 1
 # A second cache is removed while its overlay project still exists.
 printf 'other regenerable\n' >> .layrattributes
 printf 'other/\n' >> .gitignore
+l save --overlays --folder other -q >/dev/null || exit 1
 mkdir -p other
 printf removed > other/result
 l save --overlays -q || exit 1
@@ -54,7 +55,7 @@ assert cache['folder'] == 'target' and cache['state'] == 'cache', cache
 assert cache['properties'] == {'history': 1, 'quiet': True, 'merge': 'union-theirs', 'prune': 'auto', 'platform': tg.split('.', 1)[1], 'trust': 'protected'}, cache
 assert 'size' not in cache and isinstance(cache['saved'], str), cache
 PY
-# Fix the measured tree at exactly 12 bytes, excluding the saved source-time metadata.
+# Measure 12 bytes of output plus the required provenance, excluding source-time metadata.
 rm -f target/.layr-times
 mkdir -p target/nested
 printf payload > target/nested/extra
@@ -64,7 +65,7 @@ import json, os, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
 cache = next(r for r in rows if r['name'] == os.environ['TG'])
-assert type(cache['size']) is int and cache['size'] == len(b'cache') + len(b'payload'), cache
+assert type(cache['size']) is int and cache['size'] == len(b'cache') + len(b'payload') + os.path.getsize('target/.layr-cache-location'), cache
 assert all('size' not in r for r in rows if r['folder'] is None), rows
 PY_SIZE
 out=$(l overlay list)
@@ -77,11 +78,11 @@ no "explicit text size is computed" test "$sized" = "$out"
 rm -f target/result target/nested/extra
 rmdir target/nested
 l overlay list --size --json > "$T/empty.json" || exit 1
-ok "measured empty cache is zero" env TG="$TG" python3 - "$T/empty.json" <<'PY_EMPTY'
+ok "an empty cache measures only its provenance" env TG="$TG" python3 - "$T/empty.json" <<'PY_EMPTY'
 import json, os, sys
 with open(sys.argv[1]) as f:
     rows = json.load(f)
-assert next(r for r in rows if r['name'] == os.environ['TG'])['size'] == 0, rows
+assert next(r for r in rows if r['name'] == os.environ['TG'])['size'] == os.path.getsize('target/.layr-cache-location'), rows
 PY_EMPTY
 eq "removed cache is absent from text listing" 0 "$(printf '%s\n' "$out" | grep -c "$(overlay other)")"
 finish
