@@ -60,7 +60,9 @@ l undo >/dev/null 2>&1
 ok "undo makes the line again" test -e $P/lines/w
 cd $P/lines/w
 eq "the working file is back" worked3 "$(cat notes.txt)"
-has "the staged version is back" "+staged3" "$(l diff --cached 2>&1)"
+# The undo may still settle the restored stage (OverlayFS): a read that saw it change is repeated.
+for try in 1 2 3 4 5; do out=$(l diff --cached 2>&1) && break; sleep 0.5; done
+has "the staged version is back" "+staged3" "$out"
 cd $P/lines/main
 
 # 3. add replaces its own index copy only.

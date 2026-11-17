@@ -239,9 +239,17 @@ with (overlay_meta / 'lock').open('a') as lock:
 periodic()
 assert not orphan_path.exists(), 'periodic maintenance discovers nested overlay stores'
 assert (project / 'meta/overlays/notes/meta/objects-maintained').exists()
-# Metadata for another platform's overlay can arrive without its local project.
-run('overlay', 'create', 'far', '-q')
-(project / 'meta/overlays/far').rename(Path(os.environ['LAYR_ROOT']) / 'far-not-fetched')  # the same file system
+# Metadata for another platform's overlay can arrive without its local project. On OverlayFS the store's
+# registry mounts the database of every overlay it made, so a removed folder is no such case there.
+if not os.environ.get('LAYR_OVERLAYFS_TEST_ROOT'):
+    run('overlay', 'create', 'far', '-q')
+    try:
+        (project / 'meta/overlays/far').rename(root / 'far-not-fetched')
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+        # On btrfs the store is its own file system: keep the folder on it, outside the project.
+        (project / 'meta/overlays/far').rename(Path(os.environ['LAYR_ROOT']) / 'far-not-fetched')
 run('gc', '-n')
 run('gc')
 print('periodic objects: dry-run parity, pruning, cooling, packing, interval and lock yielding passed')
