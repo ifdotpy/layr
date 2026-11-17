@@ -2716,8 +2716,8 @@ mod tests {
             p.lock_maintenance()?.append(record, &ctx.actor())?;
             Ok(p)
         };
-        let repo = Repo { p: project("p")?, ctx: None };
-        let overlay = Repo { p: project("p%notes")?, ctx: None };
+        let repo = Repo { restore_from_remote: true, p: project("p")?, ctx: None };
+        let overlay = Repo { restore_from_remote: true, p: project("p%notes")?, ctx: None };
         let state = |conflicted| -> StateRec {
             serde_json::from_value(serde_json::json!({
                 "id":ids::new_id(), "kind":"commit", "subvol":"", "author":{"name":"","email":""}, "time":0,
@@ -2790,6 +2790,7 @@ mod tests {
         let dir = store.project_dir("p")?;
         std::fs::create_dir_all(dir.join("meta/db"))?;
         let repo = Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store: &store,
@@ -2884,7 +2885,7 @@ mod tests {
         let mut record = crate::model::DraftRecord::new("state");
         record.states = vec![derived.clone()];
         p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
-        let repo = Repo { p, ctx: None };
+        let repo = Repo { restore_from_remote: true, p, ctx: None };
         let line = Line {
             id: crate::ids::new_id(),
             name: "main".into(),

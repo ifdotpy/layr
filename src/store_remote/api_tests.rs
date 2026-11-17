@@ -597,7 +597,7 @@ fn project<'a>(ctx: &'a Ctx) -> (Repo<'a>, Vec<String>, String) {
     }
     let line = crate::ids::new_id();
     move_line(&project, ctx, &line, None, &states[2]);
-    (Repo { p: project, ctx: None }, states, line)
+    (Repo { restore_from_remote: true, p: project, ctx: None }, states, line)
 }
 
 fn add_state(project: &crate::store::Project, ctx: &Ctx, parent: &str) -> String {
@@ -917,7 +917,7 @@ fn check_first_cache_fetch(
     layer.backend = layer.backend.scoped(&format!("overlays/{name}")).unwrap();
     layer.project = project_id;
     layer.dir = root.join(format!("layer-remote-{name}"));
-    push(&layer, &ctx, &Repo { p: cache, ctx: None }).unwrap();
+    push(&layer, &ctx, &Repo { restore_from_remote: true, p: cache, ctx: None }).unwrap();
     std::fs::rename(&dir, root.join(format!("original-{name}"))).unwrap();
     let selected = cache_of.is_some();
     let mut report = super::Report::default();
@@ -1235,7 +1235,7 @@ fn real_gateway_object_round_trip() {
         id: String::new(),
         db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
     };
-    let mut receiver_repo = Repo { p: project, ctx: None };
+    let mut receiver_repo = Repo { restore_from_remote: true, p: project, ctx: None };
     let mut receiver_store = api_store_with(&receiving_root, &receiver_ctx, api.clone());
     let fetched =
         receiver_store.fetch(&receiver_ctx, &mut receiver_repo, &Options::default()).expect("fetch through the real gateway");
@@ -2153,7 +2153,7 @@ fn real_gateway_cli_queue(origin: &str, token: &str) {
     job_store.project = store.project.clone();
     {
         let project = crate::store::Project::create_empty(&merger_ctx.store, "p").unwrap();
-        let mut repo = Repo { p: project, ctx: Some(&merger_ctx) };
+        let mut repo = Repo { restore_from_remote: true, p: project, ctx: Some(&merger_ctx) };
         let report = job_store.clone_into(&merger_ctx, &mut repo, &Options::default()).expect("clone for merge job");
         assert!(report.missing_lines.is_empty(), "clone omitted lines: {:?}", report.missing_lines);
         // Match the configuration records written after clone by the real CLI.

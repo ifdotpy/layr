@@ -269,6 +269,7 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
         rewrite_lines(&dst, &objects_of(&src), &objects_of(&dst))?;
         // Validate the copy before the volume record exposes its working folders at new paths.
         let repo = crate::repo::Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store,

@@ -2453,13 +2453,19 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     let anc = match line_commit(repo, state) {
         Ok(c) => Some((state.to_string(), c)),
         Err(e) => {
-            eprintln!("warning: .git folder shows an older commit: {e:#}");
-            mapped_ancestor(repo, state).ok().flatten()
+            let ancestor = mapped_ancestor(repo, state).ok().flatten();
+            let fallback = if ancestor.is_some() { "shows an older commit" } else { "has an unborn HEAD" };
+            eprintln!("warning: .git folder {fallback}: {e:#}");
+            ancestor
         }
     };
     match &anc {
         Some((_, c)) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
         None => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
+    }
+    if anc.as_ref().is_none_or(|(ancestor, _)| ancestor != state) {
+        let head = std::fs::read_to_string(g.join("HEAD"))?;
+        std::fs::write(g.join(FALLBACK_HEAD), format!("{state}\n{head}"))?;
     }
     std::fs::write(g.join("packed-refs"), packed_refs_text(repo).unwrap_or_else(|_| PACKED_HEADER.to_string()))?;
     if let Some((ast, _)) = &anc {
@@ -2587,6 +2593,8 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     // and the old index, so the folder is complete only when INDEX_OF also names it (feedback item 62).
     let indexed = fsutil::read_at(&dir, INDEX_OF).map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
     if cur == c && indexed == c {
+        fsutil::git_writable(&w, true);
+        fsutil::unlink_at(&dir, FALLBACK_HEAD);
         fsutil::git_writable(&w, false);
         return Ok(());
     }
@@ -2596,8 +2604,38 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     r
 }
 
+/// Carry an unchanged, verified fallback across a Layr head move whose Git refresh failed.
+pub fn advance_fallback_head(repo: &Repo, line: &Line, new_head: &str) -> Result<()> {
+    let w = repo.working(line);
+    let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
+        return Ok(());
+    }
+    let Some(head) = fsutil::read_at(&dir, "HEAD").and_then(|bytes| String::from_utf8(bytes).ok()) else {
+        return Ok(());
+    };
+    let expected = format!("{}\n{head}", line.head);
+    if fsutil::read_at(&dir, FALLBACK_HEAD).as_deref() != Some(expected.as_bytes())
+        || (head.starts_with("ref: ") && git_out(&w.join(".git"), &["rev-parse", "--verify", "HEAD"]).is_ok())
+    {
+        return Ok(());
+    }
+    let marker = format!("{new_head}\n{head}");
+    fsutil::git_writable(&w, true);
+    let r = fsutil::replace_at(&dir, FALLBACK_HEAD, &mut |f| Ok((&*f).write_all(marker.as_bytes())?), Some(repo.owner_ids(line)));
+    fsutil::git_writable(&w, false);
+    r
+}
+
 /// The file of a line's `.git` folder that names the commit whose index layr wrote last. Git ignores it.
 const INDEX_OF: &str = "layr-index";
+
+/// The current state and exact fallback HEAD, retained until a successful refresh.
+/// Kept locally in the managed .git folder; an ancestor must never become a mapping of the head state.
+const FALLBACK_HEAD: &str = "layr-fallback";
 
 fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> Result<()> {
     let own = Some(repo.owner_ids(line));
@@ -2621,6 +2659,7 @@ fn write_git_folder(repo: &Repo, line: &Line, dir: &std::fs::File, c: &str) -> R
         fsutil::unlink_at(dir, "index");
     }
     fsutil::replace_at(dir, INDEX_OF, &mut |f| Ok((&*f).write_all(head.as_bytes())?), own)?;
+    fsutil::unlink_at(dir, FALLBACK_HEAD);
     Ok(())
 }
 
@@ -2645,17 +2684,44 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
         return Ok(());
     };
     let cur = String::from_utf8_lossy(&cur).trim().to_string();
-    // Without a commit for the head, refresh_git_folder keeps HEAD and only warns: no refusal.
-    let Ok(expected) = line_commit(repo, &line.head) else {
-        return Ok(());
+    // A clone can deliberately write an ancestor (or an unborn HEAD) while history is absent.
+    // Accept only what Layr wrote for this state, including when history later becomes available.
+    let fallback = fsutil::read_at(&dir, FALLBACK_HEAD).and_then(|bytes| String::from_utf8(bytes).ok());
+    let fallback = fallback
+        .as_deref()
+        .and_then(|text| text.split_once('\n'))
+        .filter(|(state, _)| *state == line.head)
+        .map(|(_, head)| head.trim().to_string());
+    let expected = if let Some(head) = fallback {
+        head
+    } else {
+        // Without a commit for the head, refresh_git_folder keeps HEAD and only warns: no refusal.
+        let Ok(commit) = line_commit(repo, &line.head) else { return Ok(()) };
+        commit
     };
+    // Git keeps a symbolic HEAD unchanged when it creates the first commit on an unborn branch.
+    let untouched =
+        cur == expected && (!cur.starts_with("ref: ") || git_out(&w.join(".git"), &["rev-parse", "--verify", "HEAD"]).is_err());
     // A state can have more than one commit: an import from Git and a later export of the same state, or
     // the exports of two layr versions. A clone writes one of them. Any commit that layr maps to the head
     // names the same files, so no git command ran.
-    if cur != expected && !repo.p.db.git_commits_of(&line.head)?.contains(&cur) {
+    if !untouched && !repo.p.db.git_commits_of(&line.head)?.contains(&cur) {
+        // Only undo the first commit on the unborn fallback, never a different or redirected branch.
+        // The observed value makes deletion fail atomically if the ref changes after this diagnostic.
+        let reset_ref = expected
+            .strip_prefix("ref: ")
+            .filter(|_| cur == expected)
+            .filter(|branch| git_out(&w.join(".git"), &["symbolic-ref", "-q", branch]).is_err())
+            .and_then(|branch| {
+                let observed = git_out(&w.join(".git"), &["rev-parse", "--verify", branch]).ok()?;
+                let branch = branch.replace('\'', "'\\''");
+                Some(format!(" && git update-ref --no-deref -d '{branch}' '{}'", observed.trim()))
+            })
+            .unwrap_or_default();
+        let expected = expected.replace('\'', "'\\''");
         bail!(
             "A git commit, merge, reset or checkout ran in this line ({cur}). layr did not touch the files.\n\
-             To keep the files as they are and continue, run:\n  printf '%s\\n' {expected} > .git/HEAD\n\
+             To keep the files as they are and continue, run:\n  printf '%s\\n' '{expected}' > .git/HEAD{reset_ref}\n\
              and then:\n  layr save -a -m \"<message>\"\n\
              Use layr merge, layr git fetch and layr save instead of git."
         );
@@ -3261,7 +3327,7 @@ mod export_tests {
             let mut project = crate::model::DraftRecord::new("project");
             project.data = serde_json::json!({"name": "export", "id": p.id, "config": {}});
             p.lock_maintenance()?.append(project, &actor)?;
-            let repo = Repo { p, ctx: None };
+            let repo = Repo { restore_from_remote: true, p, ctx: None };
             let objects = crate::objstore::open(&repo.p)?;
             let source = root.join("source");
             std::fs::create_dir(&source)?;

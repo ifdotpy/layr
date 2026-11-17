@@ -1343,7 +1343,7 @@ mod tests {
                 cache = id;
             }
         }
-        let repo = Repo { p: project, ctx: None };
+        let repo = Repo { restore_from_remote: true, p: project, ctx: None };
         let report = push(&store, &ctx, &repo, &Options::default()).unwrap();
         assert_eq!(report.states, 3);
         assert!(report.omitted.contains(&format!("cache state {cache} of ref caches/test: fetch --overlay <overlay> takes it")));
@@ -1404,7 +1404,7 @@ mod tests {
                 parents = vec![if n == 1 { first.clone().unwrap() } else { id }];
             }
         }
-        Repo { p: project, ctx: None }
+        Repo { restore_from_remote: true, p: project, ctx: None }
     }
 
     #[test]

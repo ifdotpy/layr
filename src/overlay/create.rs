@@ -43,7 +43,7 @@ pub(crate) fn make_overlay(
     });
     let op = Project::create_overlay(&ctx.store, &pname, &ctx.actor(), config)?;
     let made = (|| -> crate::db::PublishResult<String> {
-        let orepo = Repo { p: op, ctx: Some(ctx) };
+        let orepo = Repo { restore_from_remote: true, p: op, ctx: Some(ctx) };
         let overlay_lock = orepo.p.lock_maintenance()?;
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();

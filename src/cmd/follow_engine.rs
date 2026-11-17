@@ -752,7 +752,7 @@ mod tests {
         let objects = crate::objstore::open(&p)?;
         let tree = objects.put_tree(&layr_objects::Tree::default())?;
         let times = objects.put_times(&layr_objects::times::Times { own: 0, records: Vec::new() })?;
-        let repo = Repo { p, ctx: Some(&ctx) };
+        let repo = Repo { restore_from_remote: true, p, ctx: Some(&ctx) };
         {
             let locked = repo.p.lock_maintenance()?;
             let mut project = crate::model::DraftRecord::new("project");

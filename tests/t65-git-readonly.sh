@@ -72,7 +72,7 @@ ex=$(git rev-parse HEAD)
 chmod -R u+w .git; git commit -q --allow-empty -m outside
 out=$(l save -a -qm blocked 2>&1); rc=$?
 eq "save refuses after a git commit" refused "$([ "$rc" -ne 0 ] && echo refused)"
-has "the refusal tells what to run" "printf '%s\\n' $ex > .git/HEAD" "$out"
+has "the refusal tells what to run" "printf '%s\\n' '$ex' > .git/HEAD" "$out"
 printf '%s\n' $ex > .git/HEAD
 echo again >> b.txt
 ok "save works after the HEAD fix" l save -a -qm fixed

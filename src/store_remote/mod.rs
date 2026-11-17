@@ -354,7 +354,17 @@ pub(super) fn states_left_file(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("states-left")
 }
 
+#[cfg(test)]
+thread_local! {
+    static REMOTE_STATE_RESTORES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn restore_state(repo: &Repo, id: &str) -> Result<()> {
+    if !repo.restore_from_remote {
+        bail!("state {} is not on this machine (run layr fetch <remote>)", crate::ids::short(id));
+    }
+    #[cfg(test)]
+    REMOTE_STATE_RESTORES.with(|count| count.set(count.get() + 1));
     if repo.p.is_overlay() {
         return restore_overlay_state(repo, id);
     }
@@ -1344,7 +1354,7 @@ impl Store {
         if pending.exists() {
             let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
             let lines = report.clone_lines.take();
-            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids), lines.as_deref())?;
+            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids), lines.as_deref(), opts.heads)?;
         }
         Ok(report)
     }
@@ -1371,7 +1381,7 @@ impl Store {
         } else {
             None
         };
-        report.missing_lines = self.materialize_clone_lines(ctx, repo, only.as_ref(), Some(&lines))?;
+        report.missing_lines = self.materialize_clone_lines(ctx, repo, only.as_ref(), Some(&lines), opts.heads)?;
         Ok(report)
     }
 
@@ -1381,6 +1391,7 @@ impl Store {
         repo: &mut Repo,
         only: Option<&std::collections::BTreeSet<String>>,
         source_lines: Option<&[crate::model::Line]>,
+        heads: bool,
     ) -> Result<Vec<String>> {
         self.private_dir()?;
         // The working folders are written with no project lock: each under its line's lock, with the
@@ -1412,7 +1423,13 @@ impl Store {
             {
                 let _line = repo.line_lock(&local)?;
                 if !repo.working(&local).exists() {
-                    repo.materialize(&local, &local.head, &repo.working(&local))?;
+                    // Git export walks ancestors: a heads-only fetch must leave their trees
+                    // on the remote. Restore the normal read policy even on failure.
+                    let restore = repo.restore_from_remote;
+                    repo.restore_from_remote = restore && !heads;
+                    let result = repo.materialize(&local, &local.head, &repo.working(&local));
+                    repo.restore_from_remote = restore;
+                    result?;
                     created = true;
                 }
             }
@@ -1629,6 +1646,7 @@ mod pin_tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
+            restore_from_remote: true,
             p: crate::store::Project {
                 lease: Default::default(),
                 store: &ctx.store,
@@ -1726,6 +1744,7 @@ mod mode_pin_tests {
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let project_id = crate::ids::new_id();
         let mut repo = Repo {
+            restore_from_remote: true,
             p: crate::store::Project {
                 lease: Default::default(),
                 store: &ctx.store,
@@ -1985,6 +2004,272 @@ mod clone_head_tests {
     use super::*;
     use crate::model::{LineChange, LineState};
 
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    #[ignore = "requires a Btrfs TMPDIR"]
+    fn heads_materialization_sync_restores_history_on_demand() -> Result<()> {
+        heads_materialization_sync(false, false, false)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    #[ignore = "requires a Btrfs TMPDIR"]
+    fn heads_materialization_fetch_then_sync() -> Result<()> {
+        heads_materialization_sync(true, false, false)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    #[ignore = "requires a Btrfs TMPDIR"]
+    fn heads_materialization_unborn_sync() -> Result<()> {
+        heads_materialization_sync(false, true, false)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    #[ignore = "requires a Btrfs TMPDIR"]
+    fn heads_materialization_offline_save_then_fetch_and_sync() -> Result<()> {
+        heads_materialization_sync(true, false, true)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    #[test]
+    #[ignore = "requires a Btrfs TMPDIR"]
+    fn heads_materialization_unborn_offline_save_then_fetch_and_sync() -> Result<()> {
+        heads_materialization_sync(true, true, true)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+    fn heads_materialization_sync(fetch_first: bool, unborn: bool, save_offline: bool) -> Result<()> {
+        use serde_json::json;
+        use std::process::Command;
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir(&root)?;
+        let ctx = Ctx {
+            store: crate::store::Store::open(&root.join("local"))?,
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: [("LAYR_PROJECT".into(), "p".into()), ("LAYR_LINE".into(), "main".into())].into(),
+            author: Default::default(),
+            captures: Default::default(),
+            out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
+        };
+        let p = crate::store::Project::create(
+            &ctx.store,
+            "p",
+            &ctx.actor(),
+            json!({"access": {format!("user:{}", ctx.caller.uid): "admin"}}),
+        )?;
+        let mut repo = Repo { restore_from_remote: true, p, ctx: Some(&ctx) };
+        let source = root.join("git-source");
+        let git = |dir: &std::path::Path, args: &[&str]| -> Result<String> {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid"])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        std::fs::create_dir(&source)?;
+        git(&source, &["init", "-q"])?;
+        std::fs::write(source.join("base-file"), "base")?;
+        git(&source, &["add", "."])?;
+        git(&source, &["commit", "-qm", "base"])?;
+        let commit = git(&source, &["rev-parse", "HEAD"])?;
+        git(&source, &["clone", "--bare", "-q", ".", repo.p.git_dir().to_str().unwrap()])?;
+        let base = crate::ids::new_id();
+        let omitted = crate::ids::new_id();
+        let mut head = crate::ids::new_id();
+        let line_id = crate::ids::new_id();
+        let mut record = crate::model::DraftRecord::new("export");
+        for (id, parents) in [(&base, vec![]), (&omitted, if unborn { vec![] } else { vec![&base] }), (&head, vec![&omitted])] {
+            record.states.push(serde_json::from_value(json!({
+                "id":id,"kind":"commit","parents":parents,"subvol":"",
+                "author":{"name":"Test","email":"test@example.invalid"},"time":1700000000000i64
+            }))?);
+        }
+        record.data = json!({"state":base,"commit":commit,"commits":{base.clone():commit}});
+        record.lines.insert(
+            line_id.clone(),
+            LineChange {
+                transition: crate::model::LineTransition::Create {
+                    after: LineState {
+                        name: "main".into(),
+                        head: head.clone(),
+                        owner: ctx.caller.uid,
+                        machine: ctx.store.machine.id.clone(),
+                    },
+                },
+                working_before: None,
+                working_after: None,
+            },
+        );
+        repo.p.lock_maintenance()?.append(record, &ctx.actor())?;
+        crate::fs::create(&repo.p.state_path(&head))?;
+        std::fs::write(repo.p.state_path(&head).join("head-file"), "head")?;
+        crate::fs::set_readonly(&repo.p.state_path(&head))?;
+        // Portable endpoints keep export comparisons independent of privileged Btrfs send.
+        // The middle state has no objects here and must still come from the archive.
+        let objects = crate::objstore::open(&repo.p)?;
+        let mut trees = serde_json::Map::new();
+        for (state, path) in [(&base, source.clone()), (&head, repo.p.state_path(&head))] {
+            let written = layr_objects::write_tree(
+                &objects,
+                &path,
+                &layr_objects::WriteOptions {
+                    temperature: layr_objects::Temperature::Hot,
+                    previous: None,
+                    exclude: vec![b".git".to_vec()],
+                    similar: false,
+                },
+            )?;
+            trees.insert(state.clone(), json!({"tree":written.tree.unwrap().hex(),"times":written.times.unwrap().hex()}));
+        }
+        let mut record = crate::model::DraftRecord::new("state.tree");
+        record.data = json!({"states":trees});
+        repo.p.lock_maintenance()?.append(record, &ctx.actor())?;
+        let url = format!("file://{}", root.join("offline-remote").display());
+        let remote = open(&url, &repo)?;
+        crate::cmd::admin::set_config(&repo.p.lock_maintenance()?, &ctx, &repo, "cloud.remote.archive.url", json!(&url))?;
+        remote.private_dir()?;
+        std::fs::write(states_left_file(&remote.dir), format!("{base}\n{omitted}\n"))?;
+        let line = repo.p.db.line_by_id(&line_id)?.unwrap();
+        REMOTE_STATE_RESTORES.with(|count| count.set(0));
+        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(std::slice::from_ref(&line)), true)?.is_empty());
+        assert_eq!(REMOTE_STATE_RESTORES.with(|count| count.get()), 0, "Git must not try remote restoration");
+        assert!(!repo.p.has_state(&omitted));
+        assert!(repo.working(&line).join("head-file").is_file());
+        let fallback = if unborn { "ref: refs/heads/main" } else { &commit };
+        assert_eq!(std::fs::read_to_string(repo.working(&line).join(".git/HEAD"))?.trim(), fallback);
+        assert!(repo.restore_from_remote, "normal reads must be restored after materialization");
+        assert!(repo.state_src(&omitted).is_err(), "the remote is offline");
+        assert!(REMOTE_STATE_RESTORES.with(|count| count.get()) > 0, "an explicit history read still tries restoration");
+        // Publish history to a local encrypted archive, then discard the temporary source trees.
+        // The command below must use its normal preflight and restore the missing history itself.
+        for state in [&base, &omitted] {
+            std::fs::create_dir(repo.p.state_path(state))?;
+            std::fs::write(repo.p.state_path(state).join("base-file"), "base")?;
+            repo.p.lock_maintenance()?.write(|tx| tx.set_present(state, true))?;
+        }
+        let mut remote = open(&url, &repo)?;
+        remote.configure(&ctx, &ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() })?;
+        writer::push(&remote, &ctx, &repo, &Options::default())?;
+        for state in [&base, &omitted] {
+            std::fs::remove_dir_all(repo.p.state_path(state))?;
+            repo.p.lock_maintenance()?.write(|tx| tx.set_present(state, false))?;
+        }
+        if save_offline {
+            // Match the CLI reproduction: the archive is unavailable while save moves the head.
+            let archive = root.join("offline-remote");
+            let unavailable = root.join("unavailable-remote");
+            std::fs::rename(&archive, &unavailable)?;
+            let result =
+                crate::cmd::admin::save(&ctx, &["--allow-empty".into(), "-m".into(), "offline save".into(), "-q".into()]);
+            std::fs::rename(&unavailable, &archive)?;
+            assert_eq!(result?, 0);
+            let moved = repo.p.db.line_by_id(&line_id)?.unwrap();
+            assert_ne!(moved.head, head, "save must persist a new head");
+            head = moved.head;
+            assert!(!repo.p.has_state(&omitted), "save must succeed without restoring history");
+            // The original line state must no longer authorize carrying this marker forward.
+            crate::gitbridge::advance_fallback_head(&repo, &line, &omitted)?;
+            assert_eq!(
+                std::fs::read_to_string(repo.working(&line).join(".git/layr-fallback"))?,
+                format!("{head}\n{fallback}\n"),
+                "failed refresh must carry the verified fallback to the saved head"
+            );
+        }
+        let line = repo.p.db.line_by_id(&line_id)?.unwrap();
+        if save_offline {
+            let archive = root.join("offline-remote");
+            let unavailable = root.join("unavailable-remote");
+            std::fs::rename(&archive, &unavailable)?;
+            crate::fsutil::git_writable(&repo.working(&line), true);
+            git(&repo.working(&line), &["commit", "--allow-empty", "-qm", "external after offline save"])?;
+            let marker = std::fs::read(repo.working(&line).join(".git/layr-fallback"))?;
+            let error =
+                crate::cmd::admin::save(&ctx, &["--allow-empty".into(), "-m".into(), "rejected save".into(), "-q".into()])
+                    .unwrap_err();
+            assert!(error.to_string().contains("A git commit, merge, reset or checkout ran in this line"), "{error:#}");
+            assert_eq!(repo.p.db.line_by_id(&line_id)?.unwrap().head, head);
+            // Even the failed-refresh hook must not bless a HEAD changed outside Layr.
+            repo.after_head_moved(&line, &omitted);
+            assert_eq!(std::fs::read(repo.working(&line).join(".git/layr-fallback"))?, marker);
+            std::fs::rename(&unavailable, &archive)?;
+            assert_eq!(crate::cmd::remote::fetch(&ctx, &["archive".into(), "--overlay".into(), "main".into(), "-q".into()])?, 0);
+            let error = crate::cmd::remote::git::sync(&ctx, &["-q".into()]).unwrap_err();
+            assert!(error.to_string().contains("A git commit, merge, reset or checkout ran in this line"), "{error:#}");
+            if unborn {
+                git(&repo.working(&line), &["update-ref", "-d", "refs/heads/main"])?;
+            } else {
+                git(&repo.working(&line), &["reset", "--soft", &commit])?;
+            }
+            crate::fsutil::git_writable(&repo.working(&line), false);
+        }
+        if fetch_first {
+            assert_eq!(crate::cmd::remote::fetch(&ctx, &["archive".into(), "--overlay".into(), "main".into(), "-q".into()])?, 0);
+            assert!(repo.p.has_state(&omitted));
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.working(&line).join(".git/HEAD"))?.trim(),
+            fallback,
+            "fetch leaves the existing HEAD alone"
+        );
+        if fetch_first || unborn {
+            // An external commit is rejected while the fallback marker still exists.
+            // For an unborn branch Git leaves the symbolic HEAD text unchanged.
+            crate::fsutil::git_writable(&repo.working(&line), true);
+            git(&repo.working(&line), &["commit", "--allow-empty", "-qm", "external"])?;
+            let error = crate::cmd::remote::git::sync(&ctx, &["-q".into()]).unwrap_err();
+            assert!(error.to_string().contains("A git commit, merge, reset or checkout ran in this line"), "{error:#}");
+            assert!(repo.head_record(&ctx, "reset", &line, &line.head, vec![], None, json!({})).is_err());
+            if unborn {
+                git(&repo.working(&line), &["update-ref", "-d", "refs/heads/main"])?;
+            } else {
+                git(&repo.working(&line), &["reset", "--soft", &commit])?;
+            }
+            crate::fsutil::git_writable(&repo.working(&line), false);
+        }
+        // The same preflight protects later head moves, even before Git history can be exported.
+        let _ = repo.head_record(&ctx, "reset", &line, &line.head, vec![], None, json!({}))?;
+        REMOTE_STATE_RESTORES.with(|count| count.set(0));
+        assert_eq!(crate::cmd::remote::git::sync(&ctx, &["-q".into()])?, 0);
+        assert!(repo.p.has_state(&omitted));
+        assert_eq!(REMOTE_STATE_RESTORES.with(|count| count.get()) > 0, !fetch_first);
+        let real_head = git(&repo.working(&line), &["rev-parse", "HEAD"])?;
+        assert_ne!(real_head, commit);
+        assert_eq!(Some(real_head), repo.p.db.git_commit_of(&head)?);
+        assert_eq!(git(&repo.working(&line), &["show", "HEAD:head-file"])?, "head");
+        assert!(!repo.working(&line).join(".git/layr-fallback").exists());
+        // A real external reset to the former fallback must now fail the complete command preflight.
+        crate::fsutil::git_writable(&repo.working(&line), true);
+        git(&repo.working(&line), &["reset", "--soft", &commit])?;
+        let error = crate::cmd::remote::git::sync(&ctx, &["-q".into()]).unwrap_err();
+        assert!(error.to_string().contains("A git commit, merge, reset or checkout ran in this line"), "{error:#}");
+        assert_eq!(git(&repo.working(&line), &["rev-parse", "HEAD"])?, commit);
+        crate::fsutil::git_writable(&repo.working(&line), true);
+        crate::free::finish(&ctx);
+        drop(repo);
+        let mut directories = vec![root.clone()];
+        while let Some(path) = directories.pop() {
+            if crate::fs::host().namespace.managed(&path) {
+                crate::fs::set_writable(&path)?;
+            }
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    directories.push(entry.path());
+                }
+            }
+        }
+        if let Err(error) = crate::fs::remove(&root) {
+            // Some Btrfs mounts forbid unprivileged subvolume deletion.
+            eprintln!("fixture cleanup {}: {error:#}", root.display());
+        }
+        Ok(())
+    }
     #[test]
     fn clone_uses_the_creator_head_after_a_later_foreign_adoption() -> Result<()> {
         let root = std::env::temp_dir().join(crate::ids::new_id());
@@ -2042,6 +2327,7 @@ mod clone_head_tests {
             db.test_derive(&record, &|_| false, &store.machine.id)?;
         }
         let mut repo = Repo {
+            restore_from_remote: true,
             p: crate::store::Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: project, db },
             ctx: None,
         };
@@ -2080,7 +2366,7 @@ mod clone_head_tests {
             captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
-        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected))?.is_empty());
+        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected), false)?.is_empty());
         assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, local_head);
         assert_eq!(std::fs::read_to_string(working.join("keep"))?, "local work");
         drop(repo);
@@ -2122,6 +2408,7 @@ mod clone_head_tests {
             let dir = store.project_dir("p")?;
             std::fs::create_dir_all(dir.join("meta/db"))?;
             let mut repo = Repo {
+                restore_from_remote: true,
                 p: crate::store::Project {
                     lease: Default::default(),
                     store: &store,
