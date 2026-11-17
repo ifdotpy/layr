@@ -19,7 +19,8 @@ saved() { l rev-parse "$(printf '%s\n' "$1" | awk '$1 == "main" { print $2 }' | 
 mkdir -p target/release; echo bin1 > target/release/x
 out=$(LAYR_TRACE=1 l save --overlays 2>&1)
 eq "the caches go to the head" "$head" "$(saved "$out")"
-[ "$(uname -s)" = Darwin ] && has "the state is prepared before the lock" "prepare caches state" "$(printf '%s\n' "$out" | sed '/store lock taken: p$/q')"
+# APFS captures the folder before the lock (read policy Capture), so no separate prepared state is made there.
+[ "$(uname -s)" = Darwin ] && has "the folder is captured before the lock" "APFS clone" "$(printf '%s\n' "$out" | sed '/store lock taken: p$/q')"
 l line new -q warm main >/dev/null
 eq "a new line from main has the cache" bin1 "$(cat $P/warm/target/release/x)"
 
