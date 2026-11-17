@@ -189,9 +189,9 @@ impl Fixture {
             state.tree = Some(report.tree.unwrap().hex());
             state.times = Some(report.times.unwrap().hex());
             parent = Some(state.id.clone());
-            let mut record = Record::new("save");
+            let mut record = crate::model::DraftRecord::new("save");
             record.states.push(state.clone());
-            repo.p.append(record, &self.ctx.actor())?;
+            repo.p.lock_maintenance().unwrap().append(record, &self.ctx.actor())?;
             // Mark content as locally readable without requiring native snapshots. state_src
             // still selects the verified objects, as it does for a migrated state.
             std::fs::create_dir_all(repo.p.state_path(&state.id))?;

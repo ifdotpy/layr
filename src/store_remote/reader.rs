@@ -48,13 +48,8 @@ pub(super) fn records_with_local(
     let mut have: BTreeMap<String, BTreeMap<u64, &str>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
-<<<<<<< head
             let record = oplog::parse_line(line)?.record;
-            have.entry(record.machine).or_default().insert(record.seq);
-=======
-            let record = oplog::parse_line(line, None)?.record;
             have.entry(record.machine).or_default().insert(record.seq, line);
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         }
     }
     let mut checked = Vec::new();
@@ -82,11 +77,7 @@ pub(super) fn records_with_local(
     let keys: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
     let bodies: Vec<Result<Vec<u8>>> =
         backend.get_many(&keys)?.into_iter().map(|body| body.context("record segment disappeared")).collect();
-<<<<<<< head
-    for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
-=======
     for ((key, machine, first, last, stamp), body) in wanted.into_iter().zip(bodies) {
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
@@ -717,7 +708,6 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
     if repo.p.is_overlay() {
         return repo.p.db.lines();
     }
-<<<<<<< head
     let authorized = repo.p.authorized_records()?;
     // These proof keys authorize canonical-main selection only. Reader and cache
     // writer identities cannot act as merge executors or manifest authorities.
@@ -731,20 +721,6 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
         .map(|r| (r.record().machine.clone(), *r.signed().key()))
         .collect();
     let records = authorized.iter().map(|r| r.record().clone()).collect::<Vec<_>>();
-=======
-    let lines = repo.p.effective_jsonl()?.lines().map(str::to_owned).collect::<Vec<_>>();
-    let effective = if store.is_api() {
-        // The API has already authorized its records; published refs select the head below.
-        layr_model::merge_authority::Effective { lines, merge_keys: BTreeMap::new() }
-    } else {
-        layr_model::merge_authority::effective_lines(&repo.p.id, &lines, crate::ids::now_ms())?
-    };
-    let records = effective
-        .lines
-        .iter()
-        .map(|line| oplog::parse_line(line, None).map(|signed| signed.record))
-        .collect::<Result<Vec<_>>>()?;
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     let creator = layr_model::project_perspective(&repo.p.id, &records)?;
     let mut model = layr_model::Project::from_authorized_records(&repo.p.id, authorized, &creator)?;
     let Some(api) = store.backend.api() else {
@@ -1429,7 +1405,7 @@ mod tests {
             }
             // A different peer supplies a validly signed fork of that machine later.
             let mut fork = original;
-            let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+            let mut record = oplog::parse_line(&fork[1]).unwrap().record;
             record.actor.name = "a different signed record".into();
             fork[1] = oplog::sign_line(&record, &key).unwrap();
             // Forwarding it adds an overlapping segment; the original object is unchanged.

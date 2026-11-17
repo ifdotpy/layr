@@ -779,12 +779,12 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
 fn state_touches(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<bool> {
     repo.source_state(&s.id)?;
     if let Some(sides) = git_sides(repo, s, specs)? {
-        return Ok(sides.changes.iter().any(|c| !skip_path(&c.path)));
+        return Ok(sides.changes.iter().any(|c| !skip_path(c.path())));
     }
     let root = repo.state_src(&s.id)?;
     match s.parents.first() {
         Some(p) => changes::any_file_change(&repo.state_src(p)?, &root, |path| skip_path(path) || !matches(specs, path)),
-        None => Ok(all_files(&root)?.iter().any(|c| matches(specs, &c.path))),
+        None => Ok(all_files(&root)?.iter().any(|c| matches(specs, c.path()))),
     }
 }
 
@@ -1193,13 +1193,8 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if !crate::gitbridge::readable(repo, &s.id)? {
                 return Ok(Vec::new());
             }
-<<<<<<< head
-            let (_o, _n, list) = state_changes(repo, s, &specs)?;
-            Ok(list.into_iter().flat_map(|c| std::iter::once(c.path().clone()).chain(c.old_path().cloned())).collect())
-=======
             // Candidate paths were already filtered; the walker only needs a membership marker.
             Ok(if state_touches(repo, s, &specs)? { vec![String::new()] } else { Vec::new() })
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         },
         |_| true,
         |s| {

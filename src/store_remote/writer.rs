@@ -1562,8 +1562,9 @@ mod tests {
             assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 4);
             let descriptor = store.descriptor().unwrap();
             // Model a remote with many small historical pushes, already checked by fetch.
-            let records: Vec<_> = (0..128).map(|_| Record::new("state")).collect();
-            for record in repo.p.append_batch(records, &ctx.actor()).unwrap() {
+            let mut records: Vec<_> = (0..128).map(|_| crate::model::DraftRecord::new("state")).collect();
+            let appended = repo.p.lock_maintenance().unwrap().append_batch(&mut records, &ctx.actor()).unwrap();
+            for record in appended {
                 let key = format::segment_name(&store.machine, record.seq, record.seq);
                 let line = repo.p.db.record_line(&store.machine, record.seq).unwrap().unwrap();
                 store
@@ -1583,9 +1584,9 @@ mod tests {
             state.time = crate::ids::now_ms();
             std::fs::create_dir(repo.p.state_path(&state.id)).unwrap();
             std::fs::write(repo.p.state_path(&state.id).join("payload"), b"incremental payload\n").unwrap();
-            let mut record = Record::new("state");
+            let mut record = crate::model::DraftRecord::new("state");
             record.states.push(state);
-            repo.p.append(record, &ctx.actor()).unwrap();
+            repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             // Exercise both a lost parent cache and discovery after an interrupted push.
             std::fs::remove_file(store.dir.join("push-cache.sqlite3")).unwrap();
             if recovery {
@@ -1642,7 +1643,7 @@ mod tests {
             let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
             let original: Vec<String> = (1..=3)
                 .map(|seq| {
-                    let mut record = Record::new(if seq == 1 { "machine" } else { "config" });
+                    let mut record = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
                     record.id = crate::ids::new_id();
                     record.machine = other.clone();
                     record.project = store.project.clone();
@@ -1665,10 +1666,10 @@ mod tests {
             assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 4);
             assert!(repo.p.db.record_line(&other, 1).unwrap().is_none());
             let mut fork = original;
-            let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+            let mut record = oplog::parse_line(&fork[1]).unwrap().record;
             record.actor.name = "a different signed record".into();
             fork[1] = oplog::sign_line(&record, &key).unwrap();
-            repo.p.import_lines(&fork, crate::store::Trust::All).unwrap();
+            repo.p.lock_maintenance().unwrap().import_lines(&fork, crate::store::Trust::All).unwrap();
             publish(1, 3, &fork);
             let parent = repo.p.db.present_states().unwrap()[0].0.clone();
             let mut state = repo.state(&parent).unwrap();
@@ -1677,9 +1678,9 @@ mod tests {
             state.time = crate::ids::now_ms();
             std::fs::create_dir(repo.p.state_path(&state.id)).unwrap();
             std::fs::write(repo.p.state_path(&state.id).join("payload"), b"incremental payload\n").unwrap();
-            let mut record = Record::new("state");
+            let mut record = crate::model::DraftRecord::new("state");
             record.states.push(state);
-            repo.p.append(record, &ctx.actor()).unwrap();
+            repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
             let identity = store.identity(&descriptor, None).unwrap();
             assert!(reader::records(&store.backend, &identity, &store.project)
                 .unwrap_err()

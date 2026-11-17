@@ -220,11 +220,7 @@ pub fn file_changes_of(
 /// Stop at the first confirmed change outside the skipped paths, including either move endpoint.
 pub fn any_file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), skip: impl Fn(&str) -> bool) -> Result<bool> {
     for c in candidates_equal(parent, child)? {
-<<<<<<< head
-        if !skip(c.path()) && file_change(parent, child, c)?.is_some() {
-=======
-        if (!skip(&c.path) || c.old_path.as_deref().is_some_and(|p| !skip(p))) && file_change(parent, child, c)?.is_some() {
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
+        if (!skip(c.path()) || c.old_path().is_some_and(|p| !skip(p))) && file_change(parent, child, c)?.is_some() {
             return Ok(true);
         }
     }

@@ -1138,13 +1138,9 @@ fn save_back_caches_at(
     if let Some(newer) = newer_cache_given_back(repo, &checks_line, state, &folders)? {
         bail!("the newer head {} gave its caches back already", crate::ids::short(&newer));
     }
-<<<<<<< head
-    let saved = repo.save_cache_overlays_in(&_lock, ctx, &checks_line, dir, &folders, true, state)?;
-=======
     // The persistent recipient keeps its original head/view; classify the actual build instead.
     let build = build_context(repo, state, ctx.caller.uid);
-    let saved = repo.save_cache_overlays_in(ctx, &checks_line, &build, dir, at, &folders, true, state)?;
->>>>>>> 109c68c98ff17551a91d01a1e865cbaf
+    let saved = repo.save_cache_overlays_in(&_lock, ctx, &checks_line, &build, dir, at, &folders, true, state)?;
     Ok((name, saved))
 }
 
@@ -1453,14 +1449,14 @@ mod policy_tests {
         use std::path::Path;
         let root = std::env::temp_dir().join(format!("layr-check-copy-{}", crate::ids::new_id()));
         std::fs::create_dir(&root)?;
-        let _cleanup = crate::repo::Temp { path: root.clone() };
-        if !crate::storage::is_supported(&root) {
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        if !crate::fs::host().namespace.supported(&root) {
             return Ok(());
         }
         let private = Path::new("/dev/shm").join(format!("layr-check-copy-{}", crate::ids::new_id()));
         std::fs::create_dir(&private)?;
-        let _private_cleanup = crate::repo::Temp { path: private.clone() };
-        assert!(!crate::storage::is_supported(&private));
+        let _private_cleanup = crate::repo::Temp::plain(private.clone());
+        assert!(!crate::fs::host().namespace.supported(&private));
         let src = root.join("src");
         std::fs::create_dir(&src)?;
         std::fs::write(src.join(".layrattributes"), "target regenerable\n")?;
@@ -1471,6 +1467,7 @@ mod policy_tests {
             cwd: root.clone(),
             env: Default::default(),
             author: Default::default(),
+            captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         let run = |ctx: &Ctx, args: &[&str]| super::super::run(ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
@@ -1490,8 +1487,8 @@ mod policy_tests {
                 Ok(serde_json::from_slice(&std::fs::read(path.join("target/.layr-cache-location"))?)?)
             };
             assert_eq!(marker(&private)?["location"], json!({"workspace":"/work", "target":"/work/target"}));
-            assert!(crate::storage::is_subvolume(&dir.join("target")));
-            assert!(!crate::storage::is_subvolume(&private.join("target")));
+            assert!(crate::fs::host().namespace.managed(&dir.join("target")));
+            assert!(!crate::fs::host().namespace.managed(&private.join("target")));
             Ok(())
         })
     }
