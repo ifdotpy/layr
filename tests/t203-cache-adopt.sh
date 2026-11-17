@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-location-bound' > "$T/src/.layrattributes"
 l init cachemove --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/cachemove/lines/main"
 l line new -q moving

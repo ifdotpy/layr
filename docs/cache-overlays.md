@@ -1,42 +1,36 @@
 # Cache overlays and remotes per layer
 
-## Build location safety
+## Build location
 
-Regenerable means disposable, not relocatable. By default every cache is **location-bound**:
-its compatibility key records the absolute workspace and target path where its output is used.
-A new line, a merge/union from another location, adoption at another path, a physical line move,
-a check copy, or restoration elsewhere cannot reuse that output. The destination starts cold;
-a merge keeps its own compatible cache but does not union foreign output. Restoring the same
-line at the same location stays warm. A logical rename that keeps the working folder keeps the
-same build location.
+Regenerable output is shared between build locations by default: a new line, a merge/union from
+another location, adoption at another path, a physical line move, a check copy, or restoration
+elsewhere takes the cache, and its adapter relocates the paths that name the old place (section 19).
+Each cache records where its output was built: live cache folders carry `.layr-cache-location`
+metadata, and saved states record it in `cache_key_parts`. Temporary preparation folders are not
+build locations: Linux checks record `/work`, while macOS checks record their actual private copy path.
 
-Caches saved by older Layr versions have no location provenance. They are incompatible and
-rejected, never labelled with the current location. Private preparation copies reset them. At a live
-location Layr cannot exclude concurrent builds on every platform, so it refuses incompatible,
-missing, or malformed provenance and leaves the output intact. Stop builds and explicitly discard
-that cache before asking Layr to establish cold output, then rebuild. Live cache folders
-carry `.layr-cache-location` metadata; saved states record provenance in `cache_key_parts`.
-Temporary preparation folders are not build locations: Linux checks record `/work`, while macOS
-checks record their actual private copy path, including when the source uses APFS views/thin layers.
-
-Cross-location sharing is an explicit, per-cache opt-in using the existing attribute/path-list
-configuration mechanisms:
+A folder whose output must stay at the place where it was built opts out:
 
 ```text
 # .layrattributes (the folder must also be ignored)
-target regenerable cache-portable
+target regenerable cache-location-bound
 ```
 
-Or use the project setting `layr config cache.portable '["target"]'`. The list contains folder
-paths, just like `regenerable`. `-cache-portable` unsets the attribute; remove the folder from the
-project list too if it is configured there. Both the saved cache and the destination must opt in.
+Or use the project setting `layr config cache.location-bound '["target"]'`. The list contains folder
+paths, just like `regenerable`. A location-bound cache is used only at its own location: the destination
+of a new line, a move or a merge from another place starts cold, and a merge keeps its own compatible
+cache but does not union foreign output. Restoring the same line at the same location stays warm.
+`cache-portable` and `layr config cache.portable` are still accepted; portable is the default.
 Changing mobility requires a cold cache; an existing live cache is refused until explicitly discarded.
-Legacy caches stay incompatible even after opting in.
 
-Portable output restores cross-location sharing and the existing adapter relocation, **at the
-user's risk**. Cargo relocation is best effort: it is unsafe for `env!("OUT_DIR")`, proc-macros,
+Caches saved by Layr versions without location provenance are rejected, never labelled with the
+current location. Private preparation copies reset them. At a live location Layr cannot exclude
+concurrent builds on every platform, so it refuses incompatible, missing, or malformed provenance and
+leaves the output intact. Stop builds and explicitly discard that cache, then rebuild.
+
+Cargo relocation is best effort: it is unsafe for `env!("OUT_DIR")`, proc-macros,
 `build.rs`-generated paths, `CARGO_BIN_EXE_*`, and `CARGO_MANIFEST_DIR`. It cannot repair every
-path compiled into an artifact. A relocation that fails or times out, including a selected adapter
+path compiled into an artifact: mark such a folder `cache-location-bound`. A relocation that fails or times out, including a selected adapter
 or worker that cannot run, rejects the whole incoming cache. Private copies start cold; live
 output is preserved and the operation refuses if a safe reset cannot be established.
 The same policy applies at the adapter boundary to every regenerable cache, not only Cargo.
@@ -55,8 +49,8 @@ Physical line moves validate live cache paths before changing the location and r
 live caches; this includes regenerable paths with no saved overlay. Versioned and staged files in
 such a folder remain versioned data and are never reset.
 
-The sharing/union behaviour described below applies only to explicitly portable caches; all
-cache selection and placement also enforce this build-location contract.
+The sharing/union behaviour described below applies to portable caches (the default); location-bound
+caches are selected and placed only at their own build location.
 
 Status: design approved by the owner on 2026-10-27. Section 9 says which slice builds which part.
 Built: slices a to d (sections 11 to 14).
@@ -802,7 +796,7 @@ names a path of that place that rustc compiled in, or that cargo compares by its
 
 The adapter removes the fingerprint folder of such a unit, so the next build makes it again. A path in the
 old target folder (`OUT_DIR`) does not make a unit stale in the portable relocation heuristic.
-That heuristic is unsafe for compiled-in generated paths; only location-bound caches provide the default safety contract. On the target folder of Studio (1,845 units) the pass takes
+That heuristic is unsafe for compiled-in generated paths; a folder with such output is marked `cache-location-bound`. On the target folder of Studio (1,845 units) the pass takes
 0.18 s.
 
 ### 18.6 Build env, profiles and the live set

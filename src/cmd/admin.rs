@@ -3026,7 +3026,7 @@ pub fn config(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     set_config(&_lock, ctx, repo, k, val)?;
     drop(_lock);
-    if matches!(k.as_str(), "regenerable" | "cache.portable") {
+    if matches!(k.as_str(), "regenerable" | "cache.portable" | "cache.location-bound") {
         for line in repo.lines()? {
             if repo.working(&line).is_dir() {
                 repo.initialize_missing_caches(&line)?;

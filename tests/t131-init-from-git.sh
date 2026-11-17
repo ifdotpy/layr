@@ -68,7 +68,7 @@ eq "a repeated import keeps the original Git history" "$(git -C "$B/origin.git" 
 has "rs/target is a cache overlay" "folder=rs/target" "$(l overlay list 2>&1)"
 has "web/node_modules is a cache overlay" "folder=web/node_modules" "$(l overlay list 2>&1)"
 l line new -q next main >/dev/null
-no "a new line starts cold at its own location" test -e "$LAYR_ROOT/projects/co/lines/next/rs/target/debug/x"
+eq "a new line takes the portable cache (the default)" rebuilt "$(cat "$LAYR_ROOT/projects/co/lines/next/rs/target/debug/x" 2>&1)"
 
 # Git does not record group write bits. Preserve them in a child state of the imported HEAD.
 umask 002

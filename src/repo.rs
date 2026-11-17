@@ -3161,14 +3161,17 @@ pub(crate) fn give_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
 /// are in history, and a cache must not hide them.
 ///
 pub fn regenerable_folders(w: &Path) -> Result<Vec<String>> {
+    // A cache that is taken is relocated in a private staging folder of the line (`.layr-cache-take-*`):
+    // its folders are no caches of the line.
+    let staged = |p: &String| p.split('/').next().is_some_and(|c| c.starts_with(".layr-cache-take-"));
     if matches!(crate::fs::host().observations.read_policy(), crate::fs::observations::ReadPolicy::Validate) {
         if let Ok(scan) = crate::fs::observe_tree(w) {
             if scan.values().all(FileFingerprint::verifiable) {
-                return Ok(regenerable_in_scan(w, &scan));
+                return Ok(regenerable_in_scan(w, &scan).into_iter().filter(|p| !staged(p)).collect());
             }
         }
     }
-    regenerable_by_walk(w)
+    Ok(regenerable_by_walk(w)?.into_iter().filter(|p| !staged(p)).collect())
 }
 
 /// Literal declarations can establish a cold cache before the first build. Globs still discover

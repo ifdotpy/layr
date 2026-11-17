@@ -205,8 +205,9 @@ eq "the record names fast" "fast" "$(record_of p)"
 ok "the journal is gone" test ! -e $LAYR_ROOT/project-moves/p.json
 F=$FAST/projects/p
 ok "the project is on fast" test -d $F/lines/main
-no "the project move rejects a cache with no saved overlay" test -e "$F/lines/main/unsaved/output"
-ok "the moved unsaved cache starts with cold provenance" test -f "$F/lines/main/unsaved/.layr-cache-location"
+# Caches are portable by default: the moved cache keeps its output and is stamped with the new location.
+ok "the project move keeps a portable cache with no saved overlay" test -e "$F/lines/main/unsaved/output"
+ok "the moved unsaved cache has location provenance" test -f "$F/lines/main/unsaved/.layr-cache-location"
 cd $F/lines/main || exit 1
 out=$(l status --short 2>&1); rc=$?
 eq "status works on fast" 0 "$rc"

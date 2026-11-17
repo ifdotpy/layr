@@ -167,7 +167,8 @@ impl BuildLocation {
     }
 }
 
-/// Regenerable output is disposable; sharing it between build locations requires explicit consent.
+/// Regenerable output is shared between build locations (relocated by its adapter) unless a folder
+/// opts out: location-bound output is used only where it was built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CacheMobility {
@@ -354,14 +355,16 @@ impl<'a> Repo<'a> {
         Ok(CacheKey { key: platform_key_of(&parts), parts })
     }
 
-    /// Per-folder opt-in, using the same path-list/attribute mechanisms as `regenerable`.
+    /// Caches are portable by default. A folder opts out with the `cache-location-bound` attribute or the
+    /// `cache.location-bound` path list (same mechanisms as `regenerable`). `cache-portable` and
+    /// `cache.portable` still name portable folders, and win over nothing: location-bound is the stricter choice.
     pub fn cache_mobility(&self, folder: &str, w: &Path) -> CacheMobility {
-        if self.p.config_strings("cache.portable").iter().any(|p| p == folder)
-            || Rules::attribute(w, "cache-portable").ignored(folder, true)
+        if self.p.config_strings("cache.location-bound").iter().any(|p| p == folder)
+            || Rules::attribute(w, "cache-location-bound").ignored(folder, true)
         {
-            CacheMobility::Portable
-        } else {
             CacheMobility::LocationBound
+        } else {
+            CacheMobility::Portable
         }
     }
 
