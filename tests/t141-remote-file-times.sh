@@ -7,7 +7,7 @@
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-printf 'target regenerable cache-portable\nbound regenerable\n' > "$T/src/.layrattributes"
+printf 'target regenerable cache-portable\nbound regenerable cache-location-bound\n' > "$T/src/.layrattributes"
 echo '/bound' >> "$T/src/.gitignore"
 touch -t 202001020304.05 "$T/src/a.txt" 2>/dev/null || { echo x > "$T/src/a.txt"; touch -t 202001020304.05 "$T/src/a.txt"; }
 l init p --from "$T/src" -q >/dev/null

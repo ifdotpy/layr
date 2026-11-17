@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
 # Projects made with --objects write source states to objects on every backend; legacy projects keep
-# their setting, and `clone` always enables objects.
+# their setting, and `clone` keeps the setting of its source.
 . "$(dirname "$0")/lib.sh"
 
 json_field() {
@@ -70,6 +70,5 @@ l push cloud -q >/dev/null
 export LAYR_ROOT=$clone_root
 l clone "file://$T/archive" replica -q >/dev/null
 cd "$LAYR_ROOT/projects/replica/lines/main"
-eq "clone overrides the source's v1 setting" true "$(l config objects.enabled)"
-check_save 'clone'
+no "clone keeps the source's v1 setting" test "$(l config objects.enabled 2>/dev/null | tr -d '"' | tail -1)" = true
 finish

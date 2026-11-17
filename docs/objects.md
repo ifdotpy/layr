@@ -7,7 +7,7 @@ here changes the format: the test vectors (section 12) and the unit tests that p
 
 Snapshot storage is v1. Object storage is v2.
 New projects stay on v1 unless `init --objects` enables `objects.enabled` before their first save;
-`clone` enables it after importing the source records, even if the source used v1. Existing
+`clone` keeps the setting of its source records. Existing
 projects keep their recorded setting. `init --no-objects` is still accepted and keeps v1.
 `layr migrate` moves a project from v1 to v2 (section 13, user guide `docs/migrate.md`).
 Experimental object configs marked `v:1` upgrade automatically; object encodings and IDs stay unchanged.
