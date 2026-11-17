@@ -2,6 +2,7 @@
 # Linux ext4/xfs counterparts of .github/workflows/overlayfs.yml.
 set -euo pipefail
 . tools/checks/environment.sh
+. tools/checks/steps.sh
 test "$(id -u)" = 0
 filesystem=${1:?usage: overlayfs.sh ext4|xfs}
 case "$filesystem" in ext4|xfs) ;; *) exit 2 ;; esac
@@ -28,10 +29,17 @@ for line in open(sys.argv[1]):
     if item.get('executable') and item.get('profile',{}).get('test'):
         print(item['executable'])
 PY
-while IFS= read -r unit; do TMPDIR="$root" "$unit" --include-ignored; done < "$TMPDIR/unit-paths"
-bash tests/overlayfs-local.sh
-bash tests/overlayfs-caches.sh
-bash tests/save-unsettled.sh
+while IFS= read -r unit; do step "unit tests $(basename "$unit")" env TMPDIR="$root" "$unit" --include-ignored; done < "$TMPDIR/unit-paths"
+step overlayfs-local bash tests/overlayfs-local.sh
+step overlayfs-caches bash tests/overlayfs-caches.sh
+step save-unsettled bash tests/save-unsettled.sh
+casefold_refused() {
+    if env LAYR_ROOT="$fold/f/store" LAYR_AUTHOR_NAME=T LAYR_AUTHOR_EMAIL=t@x.invalid \
+        "$LAYR" init p --from "$TMPDIR/fold-src" -q 2> "$TMPDIR/fold.err"; then
+        echo 'casefold store was accepted' >&2; return 1
+    fi
+    grep 'ignores case' "$TMPDIR/fold.err"
+}
 if [ "$filesystem" = ext4 ]; then
     truncate -s 64M "$TMPDIR/fold.img"
     mkfs.ext4 -q -F -O casefold "$TMPDIR/fold.img"
@@ -41,11 +49,8 @@ if [ "$filesystem" = ext4 ]; then
     mkdir "$fold/f"
     chattr +F "$fold/f"
     echo x > "$TMPDIR/fold-src/a"
-    if env LAYR_ROOT="$fold/f/store" LAYR_AUTHOR_NAME=T LAYR_AUTHOR_EMAIL=t@x.invalid \
-        "$LAYR" init p --from "$TMPDIR/fold-src" -q 2> "$TMPDIR/fold.err"; then
-        echo 'casefold store was accepted' >&2; exit 1
-    fi
-    grep 'ignores case' "$TMPDIR/fold.err"
+    step "casefold store refused" casefold_refused
     umount "$fold"
 fi
-bash tests/run.sh --tag overlayfs
+step "shell tests (overlayfs)" bash tests/run.sh --tag overlayfs
+finish_steps
