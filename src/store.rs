@@ -1843,7 +1843,13 @@ mod tests {
         assert!(rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err());
         assert!(matches!(p.try_lock()?, LockAttempt::Busy));
         drop(nested);
-        rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        // A test that forks (cache_hook's hard kill) can hold an inherited copy of this descriptor
+        // for a moment: wait for it rather than fail.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Err(error) = rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            anyhow::ensure!(error == rustix::io::Errno::WOULDBLOCK && std::time::Instant::now() < deadline, error);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         drop(line);
         let upper = p.line_leases([("z".into(), "z".into())])?;
         assert!(p.line_leases([("a".into(), "lower".into()), ("z".into(), "z".into())]).is_err());
