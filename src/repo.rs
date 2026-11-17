@@ -88,6 +88,11 @@ thread_local! {
 
 /// A temporary tree retains its operation's deletion authority. Failed constructors never
 /// turn an existing destination into cleanup authority.
+thread_local! {
+    /// Test only (`LAYR_TEST_WORKING_SNAPSHOT_ERROR`): the working snapshot of `prepare_save` runs.
+    static PREPARING_SAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct Temp {
     pub path: PathBuf,
     resource: Option<TemporaryResource>,
@@ -1022,8 +1027,9 @@ impl<'a> Repo<'a> {
             })
         })()
         .and_then(|state| {
+            // Test only: the copy of a save fails after it was written (not the copy prepared before the lock).
             anyhow::ensure!(
-                std::env::var_os("LAYR_TEST_WORKING_SNAPSHOT_ERROR").is_none(),
+                std::env::var_os("LAYR_TEST_WORKING_SNAPSHOT_ERROR").is_none() || PREPARING_SAVE.with(|p| p.get()),
                 "test: working snapshot failed after copying"
             );
             Ok(state)
@@ -1256,7 +1262,10 @@ impl<'a> Repo<'a> {
         let _prepare = crate::trace::span("prepare save");
         let id = ids::new_id();
         let pin = crate::free::prepare_state(&self.p, &id)?;
-        let state = self.working_snapshot_as(ctx, line, vec![line.head.clone()], "", &base, id)?;
+        PREPARING_SAVE.with(|p| p.set(true));
+        let state = self.working_snapshot_as(ctx, line, vec![line.head.clone()], "", &base, id);
+        PREPARING_SAVE.with(|p| p.set(false));
+        let state = state?;
         let mut prepared = PreparedAutomatic {
             repo: self,
             folder: Some(PreparedFolder {
@@ -1266,6 +1275,12 @@ impl<'a> Repo<'a> {
                 _pin: pin,
             }),
         };
+        // Test only (tests/prepared-comparisons.py): a failure after the copy; dropping the preparation
+        // must leave no unrecorded state behind.
+        if std::env::var_os("LAYR_TEST_PREPARE_SAVE_ERROR").is_some() {
+            drop(prepared);
+            anyhow::bail!("test: prepared save failed after copying");
+        }
         if let Some(folder) = &mut prepared.folder {
             if self.tree_available(&folder.prev) {
                 let base = self.state_src(&folder.prev)?;
