@@ -702,6 +702,10 @@ mod tests {
     #[test]
     #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
     fn a_local_merge_can_save_caches_under_its_preparation_leases() -> anyhow::Result<()> {
+        // The OverlayFS registry of a temporary store needs the root service (overlayfs.sh runs ignored tests too).
+        if cfg!(feature = "overlayfs") {
+            return Ok(());
+        }
         use crate::ctx::{Caller, Ctx};
         use crate::model::{Line, LineChange};
         use crate::store::{db_file, Project, Store};
