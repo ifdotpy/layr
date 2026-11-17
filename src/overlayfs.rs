@@ -1957,23 +1957,23 @@ mod tests {
             PathBuf::from(std::env::var("LAYR_OVERLAYFS_TEST_ROOT")?).join(format!("cache-times-{}", crate::ids::new_id()));
         recover(&root)?;
         let source = root.join("source");
-        create_subvolume(&source)?;
+        crate::fs::create(&source)?;
         fs::write(source.join("output"), "built")?;
         sys::overlay_mtime(&source.join("output"), 10, 123)?;
         sys::overlay_mtime(&source, 10, 123)?;
         let saved = root.join("saved");
-        snapshot(&source, &saved, true)?;
+        crate::fs::snapshot(&source, &saved, true)?;
         let taken = root.join("taken");
-        cache_snapshot(&saved, &taken)?;
+        crate::fs::snapshot(&saved, &taken, false)?;
         let before = fs::metadata(&saved)?;
         let after = fs::metadata(&taken)?;
         assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()));
         assert!(!crate::repo::folder_changed_since(&taken, 20_000), "an unchanged cache keeps its inherited part");
         fs::remove_file(taken.join("output"))?;
         assert!(crate::repo::folder_changed_since(&taken, 20_000), "deletion still changes the cache");
-        delete_tree(&taken)?;
-        delete_tree(&saved)?;
-        delete_tree(&source)?;
+        crate::fs::remove(&taken)?;
+        crate::fs::remove(&saved)?;
+        crate::fs::remove(&source)?;
         fs::remove_dir_all(root)?;
         Ok(())
     }
