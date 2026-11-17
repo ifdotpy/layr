@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # #174: a folder that .layrattributes marks regenerable, and the ignore rules ignore, is a cache
 # from the first automatic save. Its files stay out of every state without `save --overlays`, and
 # the layer is kept by layr itself. A new line from a state still starts warm (the cache overlay
@@ -10,7 +11,7 @@ S=$T/src
 rm -rf $S && mkdir -p $S/src
 echo code > $S/src/main.rs
 printf 'target/\n' > $S/.gitignore
-printf 'target regenerable\n' > $S/.layrattributes
+printf 'target regenerable cache-portable\n' > $S/.layrattributes
 l init r --from $S -q >/dev/null
 P=$LAYR_ROOT/projects/r/lines/main
 cd $P || exit 1
@@ -95,7 +96,7 @@ N=$T/named
 rm -rf $N && mkdir -p $N/src
 echo code > $N/src/main.rs
 printf 'target/\n' > $N/.gitignore
-printf 'target regenerable\n' > $N/.layrattributes
+printf 'target regenerable cache-portable\n' > $N/.layrattributes
 l init n --from $N -q >/dev/null
 cd $LAYR_ROOT/projects/n/lines/main || exit 1
 mkdir -p target && head -c 1048576 /dev/urandom > target/built

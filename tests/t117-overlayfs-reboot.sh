@@ -30,6 +30,8 @@ l init rb --from "$T/src" -q >/dev/null
 R=$LAYR_ROOT/projects/rb/lines
 W=$R/w
 cd "$R/main" || exit 1
+# This test exercises a taken cache layer, so explicitly permit sharing across locations.
+l config cache.portable '["target"]'
 l config regenerable '["target"]'
 mkdir -p target
 head -c 5000000 /dev/urandom > target/blob

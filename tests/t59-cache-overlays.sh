@@ -1,4 +1,5 @@
 #!/bin/bash
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # Cache overlays (docs/cache-overlays.md): `regenerable` folders become folder overlays; a line has
 # caches, so new lines from a line start warm; a merge brings caches back; a cache has no size
 # limit; `overlay list` and `overlay repair` replace the removed `cache` commands. One user, so it
@@ -6,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/overlays
@@ -19,7 +20,7 @@ states() { ls "$O/$1/states" | wc -l | tr -d ' '; }
 self_id=$(l remote self --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 l line new rel main >/dev/null
 cd $P/rel
-rm -rf target; mkdir -p target/debug; echo bin1 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin1 > target/debug/x
 out=$(l save --overlays)
 has "save --overlays names the cache overlay" "target: overlay $TG" "$out"
 has "the overlay is a folder overlay with the cache properties" "folder=target history=last quiet merge=union-theirs" "$(l overlay list)"
@@ -81,13 +82,16 @@ l save --overlays -q
 cd $P/main
 out=$(LAYR_TRACE=1 l merge warm 2>&1)
 has "the merge brings the cache" "Merged cache target" "$out"
-# The cache copy holds only the lock of the cache overlay, not the lock of the project. The last project lock before the
-# first cache lock is the one that ends before the copy (the save after the copy takes the project lock again).
-eq "the cache copy holds the overlay lock after the project lock is released" "ok" "$(printf '%s\n' "$out" | awk '
-  /store lock held: p$/ {p = NR}
-  /store lock taken: p%'"$TG"'$/ && !o {o = NR; pp = p}
-  /merge caches$/ {m = NR}
-  END {if (pp && o && m && pp < o && o < m) print "ok"}')"
+# Check the merge interval itself: provenance preparation may open the overlay earlier too.
+locks=$(printf '%s\n' "$out" | awk '
+  /store lock taken: p$/ {p = 1; if (merging) bad = 1}
+  /store lock held: p$/ {p = 0}
+  /trace begin merge caches$/ {merging = 1; started = 1}
+  merging && /store lock taken: p%'"$TG"'$/ {o = 1; if (p) bad = 1}
+  / ms  merge caches$/ {merging = 0; ended = 1}
+  END {if (started && ended && o && !bad) print "ok"}')
+eq "the cache copy holds the overlay lock after the project lock is released" "ok" "$locks"
+[ "$locks" = ok ] || printf '%s\n' "$out"
 eq "main has the merged line's files" "changed w" "$(cat target/debug/x target/debug/w | tr '\n' ' ' | sed 's/ $//')"
 eq "the incoming file wins" "changed" "$(cat target/debug/x)"
 eq "status stays clean" "" "$(l status --short)"
@@ -119,7 +123,10 @@ no "an absolute folder fails" l overlay create deps4 --folder /tmp
 # 8b. The removed cache command is unknown; overlay repair makes a cache again.
 no "cache list fails" l cache list
 cd $P/rel
-rm -rf target; mkdir -p target/debug; echo tool > target/debug/x
+cp target/.layr-cache-location "$T/repair-location"
+rm -rf target; mkdir -p target/debug
+cp "$T/repair-location" target/.layr-cache-location
+echo tool > target/debug/x
 eq "overlay repair makes the plain folder a cache again" "target: a cache again" "$(l overlay repair $TG)"
 eq "and keeps its files" "tool" "$(cat target/debug/x)"
 ok "repair of a folder that is no cache path exits 0" l overlay repair deps
@@ -179,8 +186,9 @@ no "a new line does not take it" test -e $P/cold/target/debug/w
 
 # 9. --folder saves one folder overlay; the other cache is left alone.
 cd $P/main
-printf 'target regenerable\nsmall regenerable\n' > .layrattributes
+printf 'target regenerable cache-portable\nsmall regenerable\n' > .layrattributes
 echo 'small/' >> .gitignore
+l save --overlays --folder small -q >/dev/null
 mkdir -p small target/debug
 echo s > small/f
 echo t2 > target/debug/t2

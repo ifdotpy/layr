@@ -251,6 +251,7 @@ finish() {
     [ "$FAIL" -eq 0 ]
 }
 
+<<<<<<< head
 # state_available <project folder> <state UUID>: storage can be native or object-backed.
 # Freed object mappings may remain until pruning; they do not make a freed state readable.
 state_available() {
@@ -264,6 +265,17 @@ paths = [project / 'states' / state, project / 'deltas' / state,
 sys.exit(0 if row and not row[0] and any(path.exists() for path in paths) else 1)
 PY
 }
+=======
+# Remove simulated build output while retaining the cache's established location provenance.
+clear_cache_output() (
+    case "${1:-}" in ""|/|.|..) echo 'FATAL: unsafe cache fixture path' >&2; exit 1 ;; esac
+    [ ! -L "$1" ] || { echo 'FATAL: cache fixture root is a symlink' >&2; exit 1; }
+    shopt -s dotglob nullglob
+    for entry in "$1"/*; do
+        [ "${entry##*/}" = .layr-cache-location ] || rm -rf -- "$entry"
+    done
+)
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
 
 # A small project folder.
 case_sensitive() { # true when the test folder tells README and readme apart

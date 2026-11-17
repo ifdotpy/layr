@@ -113,12 +113,16 @@ impl Backend {
     }
     pub fn decrypted(&self, key: &str, identity: &str) -> Result<Vec<u8>> {
         if let Self::Epoch(epoch) = self {
-            if key.starts_with("states/") && epoch.current.get(key)?.is_none() {
+            if key.starts_with("states/") {
+                if let Some(bytes) = epoch.current.get(key)? {
+                    return super::keys::decrypt(identity, &bytes);
+                }
                 for (backend, old_identity) in &epoch.history {
                     if let Some(bytes) = backend.get(key)? {
                         return super::keys::decrypt(old_identity, &bytes);
                     }
                 }
+                bail!("missing remote object {key}");
             }
         }
         let bytes = self.get(key)?.with_context(|| format!("missing remote object {key}"))?;
@@ -803,6 +807,14 @@ mod epoch_tests {
             history: vec![(root.clone(), old)],
         }));
         assert_eq!(backend.decrypted("states/old", &new).unwrap(), b"old bytes");
+        current
+            .put_new(
+                "states/old",
+                super::super::keys::encrypt(&super::super::keys::recipient_of(&new).unwrap(), b"current bytes").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(backend.decrypted("states/old", &new).unwrap(), b"current bytes");
+        assert_eq!(backend.decrypted("states/missing", &new).unwrap_err().to_string(), "missing remote object states/missing");
         assert!(backend.get("slots/removed.age").unwrap().is_none());
         backend.put_new("requests/one.json", b"sealed request".to_vec()).unwrap();
         backend.put_new("requests/claims/one.json", b"claim".to_vec()).unwrap();

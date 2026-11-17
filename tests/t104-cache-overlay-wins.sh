@@ -1,18 +1,19 @@
 #!/bin/bash
 # ci: overlayfs macos-plain
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A new line takes the newest cache overlay state, also when an older cache of the state
 # (`states/<id>@<folder>`, the mechanism before cache overlays) is there: protected main saves its
 # caches twice at the same head; the state keeps its first cache, the overlay gets the second.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 cd $P/main
 l protect main >/dev/null
 head=$(l rev-parse main)
-rm -rf target; mkdir -p target/debug; echo first > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo first > target/debug/x
 l save --overlays -q
 echo second > target/debug/x
 l save --overlays -q

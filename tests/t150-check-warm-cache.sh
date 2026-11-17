@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A check starts warm (docs/checks.md): its copy of the state gets the cache of the state by the
 # rules of `line new <state>`, relocated to the copy, the check can write there, and the line's own cache stays as
 # it was.
@@ -8,7 +9,7 @@ needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 printf '[package]\nname = "p"\nversion = "0.1.0"\n' > "$T/src/Cargo.toml"
 l init p --from "$T/src" -q >/dev/null

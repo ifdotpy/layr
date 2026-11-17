@@ -4,16 +4,17 @@
 # target, then the cache folder of the source line goes to the trash and its cache state goes too. A line with unsaved
 # changes, a line with no save of its own, and main merged into a work line keep their caches. One user, so it runs
 # on macOS and on Linux. tests/t105-follow.sh covers a squash merge on a remote.
+# This fixture explicitly shares disposable output across build locations and retains its provenance.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
-echo 'target regenerable' > $T/src/.layrattributes
+echo 'target regenerable cache-portable' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines
 TG=$(overlay target)
 cd $P/main
 l protect main --remove >/dev/null 2>&1 || true
-rm -rf target; mkdir -p target/debug; echo bin0 > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin0 > target/debug/x
 l save --overlays -q
 
 # work <line>: a line from main with one saved change and a saved cache.
@@ -21,7 +22,7 @@ work() {
     l line new $1 main >/dev/null
     cd $P/$1
     echo $1 > $1.txt; l add $1.txt; l save -m "$1 work" -q
-    rm -rf target; mkdir -p target/debug; echo bin-$1 > target/debug/x
+    clear_cache_output target; mkdir -p target/debug; echo bin-$1 > target/debug/x
     l save --overlays -q
     cd $P/main
 }
@@ -56,7 +57,7 @@ has "no overlay data is left that nothing keeps" "0 unreachable state(s)" "$(l f
 #    save, so its head names its cache state.
 l line new sq main >/dev/null
 cd $P/sq
-rm -rf target; mkdir -p target/debug; echo bin-sq > target/debug/x
+clear_cache_output target; mkdir -p target/debug; echo bin-sq > target/debug/x
 echo sq > sq.txt; l add sq.txt; l save -m "sq work" -q
 state=$(cache_dir sq)
 eq "the cache state of sq is kept" 0 "$(freed "$state")"

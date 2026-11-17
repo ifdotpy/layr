@@ -6,9 +6,10 @@
 sample $T/src
 mkdir -p $T/src/node_modules/pkg && echo m > $T/src/node_modules/pkg/index.js
 printf 'target/\n*.log\nnode_modules/\n' > $T/src/.gitignore
-printf 'target regenerable\nnode_modules regenerable\n' > $T/src/.layrattributes
+printf 'target regenerable cache-portable\nnode_modules regenerable cache-portable\n' > $T/src/.layrattributes
 l init p --from $T/src -q >/dev/null
 cd $LAYR_ROOT/projects/p/lines/main
+# This fixture opts into sharing so a new location can verify both selected caches.
 # init leaves ignored folders out: the build makes them in the line.
 mkdir -p target/debug node_modules/pkg; echo bin > target/debug/x; echo m > node_modules/pkg/index.js
 out=$(l save --overlays --folder target --folder node_modules 2>&1)

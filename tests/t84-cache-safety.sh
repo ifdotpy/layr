@@ -12,8 +12,9 @@ l config regenerable '["target"]'
 l line new -q w >/dev/null
 cd $P/w || exit 1
 
+cp target/.layr-cache-location "$T/provenance"
 # A user backup next to the cache folder, under the names an old build used for temporaries.
-rm -rf target; mkdir target; echo cache > target/x
+rm -rf target; mkdir -p target; cp "$T/provenance" target/.layr-cache-location; echo cache > target/x
 mkdir target.layr-old target.layr-new
 echo old-backup > target.layr-old/precious
 echo new-backup > target.layr-new/precious
@@ -21,7 +22,7 @@ l save --overlays --folder target -q >/dev/null 2>&1
 eq "the cache keeps its file" cache "$(cat target/x)"
 eq "a foreign target.layr-old is kept" old-backup "$(cat target.layr-old/precious)"
 eq "a foreign target.layr-new is kept" new-backup "$(cat target.layr-new/precious)"
-rm -rf target; mkdir target; echo cache2 > target/y
+rm -rf target; mkdir -p target; cp "$T/provenance" target/.layr-cache-location; echo cache2 > target/y
 l overlay repair $TG >/dev/null 2>&1
 eq "overlay repair keeps the new cache file" cache2 "$(cat target/y)"
 eq "overlay repair keeps a foreign target.layr-old" old-backup "$(cat target.layr-old/precious)"
@@ -32,7 +33,7 @@ eq "no temporary folder of ours stays" "target.layr-new target.layr-old" "$(ls -
 if [ "$(uname -s)" = Darwin ]; then
     : # APFS cannot create such names
 else
-    rm -rf target target.layr-*; mkdir target
+    rm -rf target target.layr-*; mkdir -p target; cp "$T/provenance" target/.layr-cache-location
     printf 'one\n' > "target/bad$(printf '\xff')"
     printf 'two\n' > "target/bad$(printf '\xef\xbf\xbd')"
     l save --overlays --folder target -q >/dev/null 2>&1

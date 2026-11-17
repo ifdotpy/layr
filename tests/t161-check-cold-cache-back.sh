@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A check that starts cold gives its cache back too (docs/checks.md): no cache warmed the copy, so the check made its
 # cache folder as a plain folder; the save-back makes it a cache first, so the first build of a platform is saved.
 # A pending fast-forward queue entry into main gives its caches back as main's next head: a server queue merges it
@@ -9,7 +10,7 @@ needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
 
 sample "$T/src"
-echo 'target regenerable' > "$T/src/.layrattributes"
+echo 'target regenerable cache-portable' > "$T/src/.layrattributes"
 echo '/target' >> "$T/src/.gitignore"
 l init p --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

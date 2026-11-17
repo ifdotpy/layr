@@ -24,15 +24,14 @@ pub(super) fn records(backend: &Backend, identity: &str, project: &str) -> Resul
     records_with_local(backend, identity, project, &[], None)
 }
 
-/// The segments (`key modified`) that a fetch of this store read and checked: `seen-records` in its local folder.
+/// Checked segments (`key modified digest`): `seen-records` in the store's local folder.
 pub(super) fn seen_file(dir: &Path) -> PathBuf {
     dir.join("seen-records")
 }
 
-/// `seen`: the `seen-records` file of this store. A segment that it names with the same time, and whose records are
-/// all here, was read and checked before: it is not read again, so an idle fetch reads no segment. A segment with
-/// another time (a replaced object) or with records that are not here is read and checked, and the file is written
-/// again after a fetch that checked every segment.
+/// Reuse a checked segment only if its modification time and the digest of its complete local range match.
+/// Old stamps without a digest require a read. Fetch imports the checked lines after this returns; hydration
+/// does not, so sequence coverage alone cannot establish that the local records match a checked segment.
 pub(super) fn records_with_local(
     backend: &Backend,
     identity: &str,
@@ -46,11 +45,16 @@ pub(super) fn records_with_local(
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| text.lines().map(str::to_owned).collect())
         .unwrap_or_default();
-    let mut have: BTreeMap<String, std::collections::BTreeSet<u64>> = BTreeMap::new();
+    let mut have: BTreeMap<String, BTreeMap<u64, &str>> = BTreeMap::new();
     if !known.is_empty() {
         for line in local {
+<<<<<<< head
             let record = oplog::parse_line(line)?.record;
             have.entry(record.machine).or_default().insert(record.seq);
+=======
+            let record = oplog::parse_line(line, None)?.record;
+            have.entry(record.machine).or_default().insert(record.seq, line);
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         }
     }
     let mut checked = Vec::new();
@@ -58,11 +62,19 @@ pub(super) fn records_with_local(
     for object in backend.list("records/")? {
         let (machine, first, last) = format::parse_segment_name(&object.key).context("invalid record segment name")?;
         let stamp = format!("{} {}", object.key, object.modified);
-        let here = || have.get(&machine).is_some_and(|seqs| (first..=last).all(|seq| seqs.contains(&seq)));
-        let read = !(known.contains(&stamp) && here());
-        checked.push(stamp);
-        if read {
-            wanted.push((object.key, machine, first, last));
+        let local_digest = || -> Option<String> {
+            let by_seq = have.get(&machine)?;
+            let mut digest = ContentAddress::new();
+            for seq in first..=last {
+                digest.update(by_seq.get(&seq)?.as_bytes());
+                digest.update(b"\n");
+            }
+            Some(hex::encode(digest.finalize()))
+        };
+        if let Some(bound) = local_digest().map(|digest| format!("{stamp} {digest}")).filter(|bound| known.contains(bound)) {
+            checked.push(bound);
+        } else {
+            wanted.push((object.key, machine, first, last, stamp));
         }
     }
     // A segment is one small object: a clone reads hundreds of them, so they come in batches (one request per
@@ -70,10 +82,15 @@ pub(super) fn records_with_local(
     let keys: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
     let bodies: Vec<Result<Vec<u8>>> =
         backend.get_many(&keys)?.into_iter().map(|body| body.context("record segment disappeared")).collect();
+<<<<<<< head
     for ((key, machine, first, last), body) in wanted.into_iter().zip(bodies) {
+=======
+    for ((key, machine, first, last, stamp), body) in wanted.into_iter().zip(bodies) {
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         let body = body?;
         let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
         let mut expected = first;
+        let mut digest = ContentAddress::new();
         for line in body.lines() {
             let signed = oplog::parse_line(line)?;
             if signed.record.machine != machine || signed.record.seq != expected || expected > last {
@@ -93,11 +110,14 @@ pub(super) fn records_with_local(
             } else {
                 by_seq.insert(expected, line.to_string());
             }
+            digest.update(line.as_bytes());
+            digest.update(b"\n");
             expected = expected.checked_add(1).context("record sequence overflow")?;
         }
         if expected.checked_sub(1) != Some(last) {
             bail!("segment {} is incomplete", key);
         }
+        checked.push(format!("{stamp} {}", hex::encode(digest.finalize())));
     }
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
     for line in local {
@@ -697,6 +717,7 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
     if repo.p.is_overlay() {
         return repo.p.db.lines();
     }
+<<<<<<< head
     let authorized = repo.p.authorized_records()?;
     // These proof keys authorize canonical-main selection only. Reader and cache
     // writer identities cannot act as merge executors or manifest authorities.
@@ -710,6 +731,20 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
         .map(|r| (r.record().machine.clone(), *r.signed().key()))
         .collect();
     let records = authorized.iter().map(|r| r.record().clone()).collect::<Vec<_>>();
+=======
+    let lines = repo.p.effective_jsonl()?.lines().map(str::to_owned).collect::<Vec<_>>();
+    let effective = if store.is_api() {
+        // The API has already authorized its records; published refs select the head below.
+        layr_model::merge_authority::Effective { lines, merge_keys: BTreeMap::new() }
+    } else {
+        layr_model::merge_authority::effective_lines(&repo.p.id, &lines, crate::ids::now_ms())?
+    };
+    let records = effective
+        .lines
+        .iter()
+        .map(|line| oplog::parse_line(line, None).map(|signed| signed.record))
+        .collect::<Result<Vec<_>>>()?;
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
     let creator = layr_model::project_perspective(&repo.p.id, &records)?;
     let mut model = layr_model::Project::from_authorized_records(&repo.p.id, authorized, &creator)?;
     let Some(api) = store.backend.api() else {
@@ -1371,5 +1406,39 @@ mod tests {
         assert_eq!(fetched.overlaps, 0);
         assert_eq!(records(&backend, &identity, PROJECT).unwrap().gaps.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn hydration_stamp_must_bind_the_local_history() {
+        for legacy in [false, true] {
+            let (backend, identity, key, root) = fixture();
+            let original: Vec<String> = (1..=3).map(|seq| line(seq, &key)).collect();
+            segment(&backend, &identity, 1, 2, &original[..2]);
+            let seen = root.join("metadata/seen-records");
+            // Hydration checks a remote machine that has not been imported locally.
+            records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap();
+            if legacy {
+                let stamps = std::fs::read_to_string(&seen).unwrap();
+                let old: String = stamps
+                    .lines()
+                    .map(|stamp| {
+                        let fields: Vec<_> = stamp.split_whitespace().take(2).collect();
+                        format!("{}\n", fields.join(" "))
+                    })
+                    .collect();
+                std::fs::write(&seen, old).unwrap();
+            }
+            // A different peer supplies a validly signed fork of that machine later.
+            let mut fork = original;
+            let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+            record.actor.name = "a different signed record".into();
+            fork[1] = oplog::sign_line(&record, &key).unwrap();
+            // Forwarding it adds an overlapping segment; the original object is unchanged.
+            segment(&backend, &identity, 1, 3, &fork);
+            let uncached = records(&backend, &identity, PROJECT).unwrap_err().to_string();
+            assert!(uncached.contains("conflicting history"), "{uncached}");
+            let cached = records_with_local(&backend, &identity, PROJECT, &fork, Some(&seen));
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(cached.is_err(), "cached reader accepted conflicting history rejected by the former push reader: {cached:?}");
+        }
     }
 }

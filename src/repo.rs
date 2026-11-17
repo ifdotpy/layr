@@ -2327,17 +2327,10 @@ impl<'a> Repo<'a> {
         crate::sys::apfs_clear_acl(w)?;
         std::fs::set_permissions(w, std::fs::Permissions::from_mode(0o700))?;
         crate::gitbridge::make_git_folder(self, line, state, w)?;
-        // The caches of this machine's setting always get a folder: the cache overlays fill it, or
-        // it starts empty. Folders that a `.layrattributes` file makes regenerable come from the
-        // cache overlays alone (`take_caches`).
-        for path in self.p.config_strings("regenerable") {
-            // Versioned files win: a folder that holds files of the state comes from the state.
-            if holds_files(w, &path) || cached.contains(&path) {
-                continue;
-            }
-            make_cache(w, &path, uid, gid)?;
-        }
-        Ok(())
+        let folders: Vec<String> = self.cache_candidates(w)?.into_iter().filter(|folder| !cached.contains(folder)).collect();
+        let mut building = line.clone();
+        building.head = state.to_string();
+        self.relocate_folders(&building, &folders, w, &self.working(line), crate::cache_overlay::CacheAccess::Prepared)
     }
 
     /// The cache paths of the machine setting and of the folders that `.layrattributes` files in
@@ -2474,6 +2467,7 @@ impl<'a> Repo<'a> {
     /// Make the cache paths that a tool made again as plain folders caches again, before a
     /// snapshot of the working folder. The caller holds the project lock.
     pub fn restore_caches(&self, line: &Line) -> Result<()> {
+        self.prepare_cache_locations(line)?;
         let (w, (u, g)) = (self.working(line), self.owner_ids(line));
         for p in self.plain_caches(line)? {
             if let Some(register) = crate::fs::host().register_cache {
@@ -2538,9 +2532,19 @@ impl<'a> Repo<'a> {
     /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
     /// under the lock with one rename (`save_cache_overlays`), as `save --overlays` makes it.
     pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
+<<<<<<< head
         let w = self.working(line);
         for p in self.unsaved_cache_layers(line)? {
             self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
+=======
+        self.prepare_cache_locations(line)?;
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.working(line);
+            for p in self.unsaved_cache_layers(line)? {
+                btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
+            }
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
         }
         Ok(())
     }
@@ -2608,10 +2612,21 @@ impl<'a> Repo<'a> {
     /// Before the lock (APFS): the copy of each build-output folder whose part a named save makes
     /// (`named_cache_overlays`), taken under the lock with one rename (`save_cache_overlays`).
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
+<<<<<<< head
         let w = self.working(line);
         for (p, _, due) in self.named_cache_overlays(line)? {
             if due {
                 self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
+=======
+        self.prepare_cache_locations(line)?;
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.working(line);
+            for (p, _, due) in self.named_cache_overlays(line)? {
+                if due {
+                    btrfs::prepare_snapshot(&fsutil::safe_join(&w, &p)?, &self.p.work_dir(), true)?;
+                }
+>>>>>>> 109c68c98ff17551a91d01a1e865cbaf
             }
         }
         Ok(())
@@ -3175,6 +3190,32 @@ pub fn regenerable_folders(w: &Path) -> Result<Vec<String>> {
     regenerable_by_walk(w)
 }
 
+/// Literal declarations can establish a cold cache before the first build. Globs still discover
+/// existing folders, but unknown output matching one must be refused rather than labelled.
+fn literal_regenerable(w: &Path, dirs: &std::collections::HashSet<String>) -> Vec<String> {
+    let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), dirs.clone()), Rules::limited(w, None, dirs.clone()));
+    let mut found = Vec::new();
+    for dir in dirs {
+        let text = std::fs::read_to_string(w.join(dir).join(".layrattributes")).unwrap_or_default();
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            let Some(pattern) = words.next() else { continue };
+            if pattern.starts_with('#') || pattern.contains(['*', '?', '[', '\u{005c}']) || !words.any(|a| a == "regenerable") {
+                continue;
+            }
+            let pattern = pattern.trim_matches('/');
+            let rel = if dir.is_empty() { pattern.to_string() } else { format!("{dir}/{pattern}") };
+            if crate::overlay::folder_path(&rel).is_ok() && regenerable.ignored(&rel, true) && ignored.ignored(&rel, true) {
+                let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+                if parent.is_empty() || !ignored.ignored(parent, true) {
+                    found.push(rel);
+                }
+            }
+        }
+    }
+    found
+}
+
 /// `regenerable_folders` from a scan of the working folder `w` (every entry, folders and rule
 /// files; a layer is listed without its content). A folder inside an ignored folder is no
 /// candidate, as the walk does not enter ignored folders.
@@ -3188,8 +3229,8 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, FileFingerprint>) -> Ve
             rule_dirs.insert(dir.to_string());
         }
     }
+    let mut found = literal_regenerable(w, &rule_dirs);
     let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
-    let mut found = Vec::new();
     for (rel, e) in scan {
         if rel.is_empty()
             || !matches!(e,FileFingerprint::Verified{stat,..} if stat.mode&0o170000==0o040000)
@@ -3207,6 +3248,7 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, FileFingerprint>) -> Ve
         }
     }
     found.sort();
+    found.dedup();
     found
 }
 
@@ -3234,6 +3276,7 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
         }
         enter
     })?;
+    children.extend(literal_regenerable(w, &rule_dirs));
     let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
     let mut found: Vec<String> = children
         .into_iter()
@@ -3243,6 +3286,7 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
         })
         .collect();
     found.sort();
+    found.dedup();
     Ok(found)
 }
 
@@ -3833,6 +3877,9 @@ pub fn folder_changed_since(root: &Path, since_ms: i64) -> bool {
         let Ok(rd) = std::fs::read_dir(&d) else { return true };
         for e in rd {
             let Ok(e) = e else { return true };
+            if d == root && e.file_name() == crate::cache_overlay::PROVENANCE {
+                continue;
+            }
             let Ok(m) = e.metadata() else { return true };
             if newer(&m) {
                 return true;
@@ -3877,6 +3924,21 @@ mod regenerable_walk_tests {
     use super::*;
 
     #[test]
+    fn literal_cache_declarations_include_absent_paths_but_respect_negation() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-literal-cache-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join(".gitignore"), "target/\nignored/\n")?;
+        std::fs::write(
+            root.join(".layrattributes"),
+            "target regenerable\nignored regenerable\nignored -regenerable\n*cache regenerable\n",
+        )?;
+        assert_eq!(literal_regenerable(&root, &std::collections::HashSet::from([String::new()])), ["target"]);
+        assert!(!root.join("target").exists(), "classification does not itself label bytes");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn the_walk_finds_the_regenerable_folders_the_ignore_rules_ignore() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-regen-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -3891,7 +3953,7 @@ mod regenerable_walk_tests {
         std::fs::write(root.join("e/.gitignore"), "build/\n")?;
         let found = regenerable_by_walk(&root)?;
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(found, vec!["a/target", "b/node_modules", "c/dist", "d/target"]);
+        assert_eq!(found, vec!["a/target", "b/node_modules", "c/dist", "d/target", "target"]);
         Ok(())
     }
 }
@@ -4027,7 +4089,15 @@ mod cache_copy_tests {
             0
         );
         std::fs::write(ctx.cwd.join(".gitignore"), "cache/\n")?;
+        // Establish this location before simulating a tool recreating a plain cache folder.
+        let provenance = {
+            let repo = Repo::open(&ctx, "concurrent")?;
+            repo.initialize_missing_caches(&repo.line("main")?)?;
+            std::fs::read(ctx.cwd.join("cache/.layr-cache-location"))?
+        };
+        btrfs::delete_tree(&ctx.cwd.join("cache"))?;
         std::fs::create_dir(ctx.cwd.join("cache"))?;
+        std::fs::write(ctx.cwd.join("cache/.layr-cache-location"), provenance)?;
         std::fs::write(ctx.cwd.join("cache/data"), "original")?;
         std::fs::set_permissions(ctx.cwd.join("cache"), std::fs::Permissions::from_mode(0o555))?;
         let mut child = std::process::Command::new(std::env::current_exe()?)

@@ -50,7 +50,7 @@ SRC=$T/src
 rm -rf "$SRC"; mkdir -p "$SRC/src"
 printf '[package]\nname = "prunehook"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nextra = []\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [["build", "--workspace"]]\nenv = { CARGO_INCREMENTAL = "1", RUSTC_WRAPPER = "" }\n' > "$SRC/Cargo.toml"
 echo 'pub fn a() -> i32 {' > "$SRC/src/lib.rs"; echo '    1' >> "$SRC/src/lib.rs"; echo '}' >> "$SRC/src/lib.rs"
-echo 'target regenerable' > "$SRC/.layrattributes"
+echo 'target regenerable cache-portable' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

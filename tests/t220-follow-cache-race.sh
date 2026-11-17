@@ -9,7 +9,7 @@ if [ "$(uname -s)" = Darwin ]; then export HOME="$T/home"; else export LAYR_SOCK
 export CARGO_NET_OFFLINE=true
 printf '[package]\nname = "follow-cache-race"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n\n[workspace.metadata.layr-retest]\nsweep = [["build", "--offline"]]\n' > "$T/src/Cargo.toml"
 printf 'fn main() { println!("one"); }\n' > "$T/src/src/main.rs"
-printf 'target regenerable\n' > "$T/src/.layrattributes"
+printf 'target regenerable cache-portable\n' > "$T/src/.layrattributes"
 printf '/target\n' > "$T/src/.gitignore"
 (cd "$T/src" && cargo generate-lockfile --offline) || exit 1
 l init race --from "$T/src" -q >/dev/null || exit 1

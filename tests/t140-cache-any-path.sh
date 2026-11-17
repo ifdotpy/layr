@@ -1,5 +1,6 @@
 #!/bin/bash
 # ci: macos overlayfs
+# Cross-location reuse in this fixture is explicitly opted in with cache-portable/cache.portable.
 # A cargo cache works at any path when no crate compiles a path of its folder in: the tests read
 # CARGO_MANIFEST_DIR and CARGO_BIN_EXE_<bin> at run time (cargo and nextest set both when an integration
 # test runs). A line at another path, and a clone in another store, build nothing again after they take
@@ -50,7 +51,7 @@ printf '[package]\nname = "dep"\nversion = "0.1.0"\nedition = "2021"\n' > "$SRC/
 echo 'pub fn one() -> i32 { 1 }' > "$SRC/dep/src/lib.rs"
 echo 'fn main() { println!("{}", dep::one()); }' > "$SRC/src/main.rs"
 printf '#[test]\nfn paths() {\n    println!("BIN={}", std::env::var("CARGO_BIN_EXE_x").unwrap());\n    println!("DIR={}", std::env::var("CARGO_MANIFEST_DIR").unwrap());\n}\n' > "$SRC/tests/it.rs"
-echo 'target regenerable' > "$SRC/.layrattributes"
+echo 'target regenerable cache-portable' > "$SRC/.layrattributes"
 printf '/target\n' > "$SRC/.gitignore"
 l init p --from "$SRC" $OWNER_ARG -q >/dev/null
 P=$LAYR_ROOT/projects/p/lines

@@ -66,7 +66,7 @@ out=$(l save --json)
 py "an unchanged folder names the same state" "$out" "j['saved'] is False and j['state'] == '$AUTO'"
 
 # save --overlays --json lists the cache overlays it saved.
-rm -rf target; mkdir -p target; echo bin > target/out.bin
+clear_cache_output target; mkdir -p target; echo bin > target/out.bin
 out=$(l save --overlays --json)
 py "save --overlays --json names the cache overlay" "$out" "[o['path'] for o in j['overlays']] == ['target'] and all(len(o['short']) == 7 for o in j['overlays'])"
 eq "save --overlays --json prints one line" 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"

@@ -139,13 +139,22 @@ def merge_source_moves():
                 proc.communicate(timeout=10)
 
 
+def plain_cache(work, repair):
+    target = work / "target"
+    # Initialization already created cold output with provenance for this exact location.
+    # Exercise conversion of a plain directory without inventing an origin for built bytes.
+    provenance = (target / ".layr-cache-location").read_bytes()
+    if repair:
+        run(work, "save", "--overlays", "-q")
+    target.rename(work.parent / "initialized-cache")
+    target.mkdir()
+    (target / ".layr-cache-location").write_bytes(provenance)
+    return target
+
+
 def cache_conversion(repair, check_links):
     work = project("cache-" + ("repair" if repair else "first") + ("-links" if check_links else "-times"))
-    target = work / "target"
-    if repair:
-        target.mkdir()
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
+    target = plain_cache(work, repair)
     (target / "nested").mkdir(parents=True)
     (target / "a").write_bytes(b"cache data\n" * 2048)
     os.link(target / "a", target / "nested/b")
@@ -161,11 +170,7 @@ def cache_conversion(repair, check_links):
 
 def pnpm_cache(repair):
     work = project("pnpm-" + str(repair).lower())
-    target = work / "target"
-    if repair:
-        target.mkdir()
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
+    target = plain_cache(work, repair)
     package = target / ".pnpm/pkg@1/node_modules/pkg"
     package.mkdir(parents=True)
     (package / "index.js").write_text("package\n")
@@ -190,12 +195,7 @@ def pnpm_cache(repair):
 
 def failed_cache_copy(repair, unreadable=False):
     work = project("cache-failure-" + str(repair).lower() + ("-unreadable" if unreadable else "-special"))
-    target = work / "target"
-    target.mkdir()
-    if repair:
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
-        target.mkdir()
+    target = plain_cache(work, repair)
     (target / "kept").write_text("keep this\n")
     if unreadable:
         (target / "unreadable").write_text("private output\n")
@@ -219,12 +219,7 @@ def failed_cache_copy(repair, unreadable=False):
 
 def cache_readonly(repair):
     work = project("cache-readonly-" + str(repair).lower())
-    target = work / "target"
-    target.mkdir()
-    if repair:
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
-        target.mkdir()
+    target = plain_cache(work, repair)
     nested = target / "nested"
     nested.mkdir()
     data = nested / "data"
@@ -249,12 +244,7 @@ def cache_readonly(repair):
 
 def cache_directory_metadata(repair, kind):
     work = project("cache-metadata-" + str(repair).lower() + "-" + kind)
-    target = work / "target"
-    target.mkdir()
-    if repair:
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
-        target.mkdir()
+    target = plain_cache(work, repair)
     nested = target / "nested"
     nested.mkdir()
     data = nested / "data"
@@ -291,12 +281,7 @@ def cache_directory_metadata(repair, kind):
 
 def cache_symlink_xattrs(repair):
     work = project("cache-link-xattr-" + str(repair).lower())
-    target = work / "target"
-    target.mkdir()
-    if repair:
-        run(work, "save", "--overlays", "-q")
-        target.rmdir()
-        target.mkdir()
+    target = plain_cache(work, repair)
     outside = root / ("link-referent-" + str(repair).lower())
     outside.write_text("outside the cache\n")
     (target / "link").symlink_to(outside)
