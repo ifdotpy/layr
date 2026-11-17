@@ -363,10 +363,18 @@ pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
     #[cfg(test)]
     root.comparison_io(rel, ComparisonIo::Metadata);
     if let Some(reader) = root.core_reader() {
-        return reader
+        let meta = reader
             .metadata(&layr_fs_core::RelDir::from_bytes(rel.as_bytes()).ok()?)
             .ok()?
-            .map(|m| layr_fs_common::observation(&m));
+            .map(|m| layr_fs_common::observation(&m))?;
+        // A volume that ignores case also finds `readme` for `README`: for Layr these are two paths.
+        #[cfg(target_os = "macos")]
+        if !rel.is_empty() {
+            if let Some(folder) = root.folder() {
+                exact_metadata(&folder.join(rel), rel)?;
+            }
+        }
+        return Some(meta);
     }
     if let Some(o) = root.objects() {
         return o.meta(rel).ok().flatten();
