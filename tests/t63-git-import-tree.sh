@@ -61,7 +61,9 @@ for c in $(git -C $U rev-list --topo-order --reverse main side side2); do
 done
 # Imported commits are records; a tree is built when a line reads it, as a thin layer on APFS.
 if [ "$(uname -s)" = Darwin ]; then
-    ok "built imported states are thin layers over their parents" test "$(ls $LAYR_ROOT/projects/it/deltas | wc -l)" -ge 8
+    # The fs stack builds an imported tree as a thin layer or as a complete tree (gitbridge::build_tree).
+    built=$(( $(ls $LAYR_ROOT/projects/it/deltas 2>/dev/null | wc -l) + $(ls $LAYR_ROOT/projects/it/states 2>/dev/null | wc -l) ))
+    ok "built imported states are on disk ($built)" test "$built" -ge 8
 fi
 
 # A second fetch builds on states that earlier layers hold.

@@ -868,6 +868,12 @@ impl<'a> Project<'a> {
         if !crate::fs::host().namespace.managed_or_present(path)? {
             return Ok(());
         }
+        // A subvolume whose only nested subvolume is its .git goes at once, with no search
+        // (a line folder); one with more nested subvolumes waits in the trash.
+        #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+        if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 && destroy_known(path) {
+            return Ok(());
+        }
         if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             let dir = self.trash_dir()?;
             let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
@@ -2550,4 +2556,48 @@ impl LockedProject<'_> {
         Self::finish_write(tx)?;
         Ok(n)
     }
+}
+
+/// Destroy the subvolume `path` without a search: O(1) when it has no nested subvolume, else its
+/// `.git` subvolume goes first. False when the subvolume stays (more nested subvolumes, or not one).
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+fn destroy_known(path: &Path) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let subvolume = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir() && m.ino() == 256);
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
+    if !subvolume(path)
+        || crate::sys::subvol_flags(
+            match fs::File::open(path) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+            .as_fd(),
+        )
+        .map_or(true, |flags| flags & 1 != 0)
+    {
+        return false;
+    }
+    let Ok(dir) = fs::File::open(parent) else { return false };
+    match crate::sys::subvol_destroy(dir.as_fd(), name) {
+        Ok(()) => return true,
+        Err(e) if crate::fs::is_not_empty(&e) => {}
+        Err(_) => return false,
+    }
+    let _t = crate::trace::span("delete: known nested subvolumes");
+    let git = path.join(".git");
+    if subvolume(&git)
+        && fs::symlink_metadata(&git).is_ok_and(|m| m.dev() != fs::symlink_metadata(path).map(|p| p.dev()).unwrap_or(0))
+    {
+        let Ok(inner) = fs::File::open(path) else { return false };
+        if let Ok(g) = fs::File::open(&git) {
+            if crate::sys::subvol_flags(g.as_fd()).is_ok_and(|flags| flags & 1 != 0) {
+                return false;
+            }
+        }
+        if crate::sys::subvol_destroy(inner.as_fd(), ".git").is_err() {
+            return false;
+        }
+    }
+    crate::sys::subvol_destroy(dir.as_fd(), name).is_ok()
 }

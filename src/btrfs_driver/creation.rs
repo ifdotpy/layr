@@ -149,7 +149,7 @@ impl BtrfsFs {
                 Mode::empty(),
             ))?);
             let (a, b) = (directory.metadata()?, next.metadata()?);
-            if (a.dev(), a.ino()) == (b.dev(), b.ino()) || crate::sys::filesystem_uuid(next.as_fd())? != filesystem {
+            if (a.dev(), a.ino()) == (b.dev(), b.ino()) || crate::sys::filesystem_uuid(next.as_fd()).ok() != Some(filesystem) {
                 return Err(FsError::Invalid("no trusted staging anchor outside the source tree"));
             }
             directory = next;

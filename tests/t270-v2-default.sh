@@ -1,6 +1,7 @@
 #!/bin/bash
 # ci: macos overlayfs
-# New projects write source states to objects on every backend; legacy projects keep their setting.
+# Projects made with --objects write source states to objects on every backend; legacy projects keep
+# their setting, and `clone` always enables objects.
 . "$(dirname "$0")/lib.sh"
 
 json_field() {
@@ -31,14 +32,14 @@ check_save() {
     eq "$label: new line is clean" "" "$(cd ../topic && l status --short)"
 }
 
-l init empty -q >/dev/null
+l init empty --objects -q >/dev/null
 cd "$LAYR_ROOT/projects/empty/lines/main"
 eq "empty init records its initial state as objects" 1 "$(json_field states "$(l objects stat --json)")"
 check_save 'init'
 
 mkdir -p "$T/src"
 echo source > "$T/src/source.txt"
-l init imported --from "$T/src" -q >/dev/null
+l init imported --objects --from "$T/src" -q >/dev/null
 cd "$LAYR_ROOT/projects/imported/lines/main"
 eq "init --from records its initial state as objects" 1 "$(json_field states "$(l objects stat --json)")"
 eq "init --from preserves the source" source "$(l show head:source.txt)"
@@ -49,7 +50,7 @@ git init -q -b main "$T/git"
 echo git > "$T/git/source.txt"
 git -C "$T/git" add source.txt
 git -C "$T/git" commit -qm initial
-l git clone "$T/git" git-copy -q >/dev/null
+l git clone "$T/git" git-copy --objects -q >/dev/null
 cd "$LAYR_ROOT/projects/git-copy/lines/main"
 eq "git clone enables objects before the first save" true "$(l config objects.enabled)"
 check_save 'git clone'

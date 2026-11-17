@@ -514,7 +514,13 @@ pub mod git {
     }
 
     pub fn clone(ctx: &Ctx, args: &[String]) -> Result<i32> {
-        let spec = Spec::new().value("-b|--branch").value("--owner").value("--volume").flag("-q|--quiet").value("--depth");
+        let spec = Spec::new()
+            .value("-b|--branch")
+            .value("--owner")
+            .value("--volume")
+            .flag("-q|--quiet")
+            .value("--depth")
+            .flag("--objects");
         let a = parse(&spec, args)?;
         let url = a.pos.first().ok_or_else(|| exit(128, "usage: layr git clone <url> [<project>]"))?.clone();
         let name = match a.pos.get(1) {
@@ -522,6 +528,9 @@ pub mod git {
             None => url.trim_end_matches('/').rsplit('/').next().unwrap_or("project").trim_end_matches(".git").to_string(),
         };
         let mut v = vec![name, "--git".into(), url];
+        if a.has("--objects") {
+            v.push("--objects".into());
+        }
         if let Some(b) = a.get("-b") {
             v.push("--branch".into());
             v.push(b.into());

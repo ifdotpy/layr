@@ -2001,6 +2001,10 @@ fn merge_rev_inner(
     // the preparation of a save restores caches, and a protected merge that refuses changes nothing. Here the
     // status only, from a comparison prepared before the lock.
     let prepared = repo.prepare_status_report(line).ok();
+    {
+        let _ready = crate::trace::span("prepared comparison ready");
+    }
+    crate::store::test_pause();
     let st = {
         let _t = crate::trace::span("merge: locked status");
         let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;

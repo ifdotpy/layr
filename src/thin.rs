@@ -532,13 +532,26 @@ fn clone_entry(from: &Path, to: &Path, m: &fs::Metadata) -> Result<bool> {
     Ok(true)
 }
 
+/// Remove an entry of a tree being built. Entries cloned from a sealed layer keep their
+/// immutable flags (a read-only build): open them for the delete first.
+fn remove_cloned(p: &Path) -> Result<()> {
+    let m = fs::symlink_metadata(p)?;
+    if m.is_dir() {
+        apfs::seal(p, false, true)?;
+    } else {
+        // lchflags: a link's own flag, never its target's. The seal ACL entry allows the delete.
+        crate::sys::apfs_flag(p, false)?;
+    }
+    crate::fs::remove(p)
+}
+
 /// Apply one layer to a writable complete tree. The entries cloned from the layer go to `cloned`.
 fn apply(layer: &Layer, dst: &Path, cloned: &mut Vec<PathBuf>) -> Result<()> {
     for r in &layer.removed {
         let p = dst.join(r);
         if crate::fsutil::exact_metadata(&p, r).is_some() {
             open_parent(dst, r)?;
-            crate::fs::remove(&p)?;
+            remove_cloned(&p)?;
         }
     }
     fn visit(layer: &Path, dst: &Path, rel: &str, dirs: &mut Vec<String>, cloned: &mut Vec<PathBuf>) -> Result<()> {
@@ -558,7 +571,7 @@ fn apply(layer: &Layer, dst: &Path, cloned: &mut Vec<PathBuf>) -> Result<()> {
                 existing => {
                     open_parent(dst, &child)?;
                     if existing.is_ok() {
-                        crate::fs::remove(&target)?;
+                        remove_cloned(&target)?;
                     }
                     clone_entry(&layer.join(&child), &target, &lm)?;
                     cloned.push(target);

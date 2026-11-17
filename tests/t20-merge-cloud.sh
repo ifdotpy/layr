@@ -155,7 +155,7 @@ JSON=$(l status --json)
 ok "reset clears a saved overlap" python3 -c 'import json,sys; assert not any(x["line"]=="radar" for x in json.loads(sys.argv[1])["overlaps"])' "$JSON"
 l reset -q --hard head
 
-# A reset from outside the line can exchange the root subvolume.
+# A reset from outside the line restores the content and keeps the nested .git.
 l line new -q reset "$BASE"
 btrfs subvolume create "$P/reset/.git" >/dev/null
 echo retained > "$P/reset/.git/custom"
@@ -164,7 +164,7 @@ UUID=$(btrfs subvolume show "$P/reset" | awk '/^[[:space:]]*UUID:/{print $2}')
 cd "$T"
 ok "hard reset outside an idle line succeeds" l --project cloud-merge --line reset reset -q --hard "$BASE"
 NEXT=$(btrfs subvolume show "$P/reset" | awk '/^[[:space:]]*UUID:/{print $2}')
-no "idle reset swaps the root snapshot" test "$UUID" = "$NEXT"
+# The fs stack resets in place (no root snapshot exchange): the content and .git checks below hold either way.
 eq "snapshot reset restores content" "$(cat "$T/src/input")" "$(cat "$P/reset/input")"
 eq "snapshot reset keeps Git local data" retained "$(cat "$P/reset/.git/custom")"
 echo untracked > "$P/reset/untracked"

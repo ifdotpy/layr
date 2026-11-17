@@ -8,7 +8,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -374,7 +374,11 @@ impl Copier {
             (src.to_path_buf(), None)
         } else {
             let dir = self.root.join("meta").join(crate::project_copy::TMP).join(serial.to_string());
-            fs::create_dir_all(&dir)?;
+            // A frozen snapshot needs a private parent (owner only).
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+            for d in [self.root.join("meta").join(crate::project_copy::TMP), dir.clone()] {
+                fs::set_permissions(&d, fs::Permissions::from_mode(0o700))?;
+            }
             let snap = dir.join(&name);
             crate::fs::snapshot(src, &snap, true)?;
             (snap, Some(dir))

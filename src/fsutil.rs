@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static UNSETTLED: AtomicBool = AtomicBool::new(false);
+/// The line about an unsettled copy is printed once per command, also when a command copies twice.
+static UNSETTLED_TOLD: AtomicBool = AtomicBool::new(false);
 
 /// A copy of `src` could not settle: writers changed it in every round, so its files come from
 /// different moments. The copy stays; `repo.save` marks the state as taken while processes ran.
 pub fn mark_unsettled(src: &Path) {
-    if !UNSETTLED.swap(true, Ordering::Relaxed) {
+    if !UNSETTLED.swap(true, Ordering::Relaxed) && !UNSETTLED_TOLD.swap(true, Ordering::Relaxed) {
         eprintln!(
             "layr: {} kept changing while it was copied; the state is kept and marked as taken while processes ran",
             src.display()

@@ -14,7 +14,7 @@ pub(crate) mod custody;
 pub(crate) mod receive_native;
 pub(crate) mod services;
 use crate::fsutil::Src;
-use anyhow::Result;
+use anyhow::{Context, Result};
 pub(crate) use composition::host;
 use layr_fs_core::*;
 pub(crate) use services::*;
@@ -150,12 +150,18 @@ pub(crate) fn remove(path: &Path) -> Result<()> {
     }
     let driver = composition::operation(None, path, CapturePurpose::State)?;
     let ownership = driver.claim(ManagedPath::claim(path))?;
-    driver.remove(ownership).map_err(|failure| {
-        operation_error(
-            driver,
-            FsError::Cleanup { cause: Box::new(FsError::Invalid("tree removal requires recovery")), failure: Box::new(failure) },
-        )
-    })
+    driver
+        .remove(ownership)
+        .map_err(|failure| {
+            operation_error(
+                driver,
+                FsError::Cleanup {
+                    cause: Box::new(FsError::Invalid("tree removal requires recovery")),
+                    failure: Box::new(failure),
+                },
+            )
+        })
+        .with_context(|| format!("remove {}", path.display()))
 }
 #[cfg(test)]
 pub(crate) fn set_readonly(path: &Path) -> Result<()> {

@@ -5,14 +5,14 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **store:** New projects use object store v2; Rust 1.100 builds layr
+* **build:** Rust 1.100 builds layr
 
 ### Features
 
 * **fs:** Add plain-directory and in-memory backends for tests
 * **lines:** Delete a line by id atomically
 * **queue:** Enforce the expected target head when the queue merges
-* **store:** Create new projects in object store v2
+* **store:** `init --objects` and `git clone --objects` create a project in object store v2; new projects stay on v1 by default
 
 
 ### Performance Improvements
@@ -33,6 +33,13 @@
 * **objects:** Ignore the times of nested subvolume placeholders, and match v1 merge and log behaviour on object-backed projects
 * **overlays:** Keep cache build output out of the base object store
 * **service:** Prune and repack object stores periodically
+* **fs:** Keep export, sync, project copy, history and privileged checks working when the temporary folder is not on the store's filesystem
+* **apfs:** Remove sealed entries and links while a thin state is made complete, and treat a file that shrinks during a compare as changed
+* **merge:** Revalidate the prepared comparison, and keep the overlay working content as an automatic state
+* **save:** Refuse a save after a git command moved `.git/HEAD`, before reporting nothing to save
+* **gc:** An overlay that cannot open no longer fails object maintenance
+* **init:** States from `init --from` belong to the service again; the line belongs to its owner
+* **lines:** A line delete destroys the `.git` subvolume first, with no search
 
 
 ### Code Refactoring

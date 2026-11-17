@@ -1551,8 +1551,12 @@ fn same_content(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel: 
             let mut pos = from;
             while pos < to {
                 let n = ((to - pos).min(ab.len() as u64)) as usize;
-                a.read_exact_at(&mut ab[..n], pos)?;
-                b.read_exact_at(&mut bb[..n], pos)?;
+                // A file that shrank during the read (a process writes in the folder) differs.
+                match (a.read_exact_at(&mut ab[..n], pos), b.read_exact_at(&mut bb[..n], pos)) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+                    (Err(e), _) | (_, Err(e)) => return Err(e.into()),
+                }
                 if ab[..n] != bb[..n] {
                     return Ok(false);
                 }
@@ -1603,8 +1607,18 @@ fn changed_ranges(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), rel
         while pos < to {
             let an = (alen.saturating_sub(pos).min(4096)) as usize;
             let bn = (blen.saturating_sub(pos).min(4096)) as usize;
-            a.read_exact_at(&mut ab[..an], pos)?;
-            b.read_exact_at(&mut bb[..bn], pos)?;
+            // A file that shrank during the read (a process writes in the folder): the rest changed.
+            match (a.read_exact_at(&mut ab[..an], pos), b.read_exact_at(&mut bb[..bn], pos)) {
+                (Ok(()), Ok(())) => {}
+                (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    match ranges.last_mut() {
+                        Some((start, n)) if *start + *n == pos => *n = end - *start,
+                        _ => ranges.push((pos, end - pos)),
+                    }
+                    return Ok(ranges);
+                }
+                (Err(e), _) | (_, Err(e)) => return Err(e.into()),
+            }
             let len = an.max(bn) as u64;
             if ab[..an] != bb[..bn] {
                 match ranges.last_mut() {
@@ -2495,7 +2509,8 @@ fn status_fingerprints(scan: BTreeMap<String, ScanEntry>) -> BTreeMap<String, cr
                 size: f.3,
                 uid: e.meta.uid,
                 gid: e.meta.gid,
-                nlink: e.nlink,
+                // lstat counts a folder's entries in its link count and a bulk scan reports 1: only files compare it.
+                nlink: if e.meta.is_dir() { 1 } else { e.nlink },
                 mtime: Timestamp { seconds: f.4, nanos: f.5 },
                 ctime: Timestamp { seconds: f.6, nanos: f.7 },
             };

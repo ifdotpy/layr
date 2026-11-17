@@ -162,10 +162,52 @@ impl Pinned {
             Err(error) => return Err(FsError::backend(error)),
         }
         let root = self.tree.reader.directory.root_file().try_clone()?;
+        // The usual nested subvolume (a working folder's .git) goes first, with no search.
+        {
+            let _t = crate::trace::span("delete: known nested subvolumes");
+            self.known(driver, &root, b".git")?;
+            if crate::sys::subvol_destroy(directory.as_fd(), "tree").is_ok() {
+                self.placement = Placement::Removed;
+                return Ok(());
+            }
+        }
+        let _t = crate::trace::span("delete: full search for nested subvolumes");
         self.nested(driver, &root)?;
         backend(crate::sys::subvol_destroy(directory.as_fd(), "tree"))?;
         self.placement = Placement::Removed;
         Ok(())
+    }
+    /// Take the nested subvolume `name` directly below `parent` into custody and destroy it.
+    fn known(&mut self, driver: &BtrfsFs, parent: &File, name: &[u8]) -> Result<()> {
+        let parent_metadata = parent.metadata()?;
+        let child = match rustix::fs::openat(
+            parent,
+            OsStr::from_bytes(name),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(child) => File::from(child),
+            Err(_) => return Ok(()),
+        };
+        let metadata = child.metadata()?;
+        if metadata.ino() != 256 || metadata.dev() == parent_metadata.dev() {
+            return Ok(());
+        }
+        let name = RelPath::new(name.to_vec())?;
+        driver.step("nested-opened")?;
+        let reader = Arc::new(Reader { directory: DirectoryTree::from_file(child)? });
+        self.children.push(Pinned {
+            tree: NativeTree {
+                path: self.tree.path.join(OsStr::from_bytes(name.as_bytes())),
+                reader,
+                access: Access::Working,
+                provenance: Provenance::Other,
+            },
+            placement: Placement::Public(Locator { parent: Arc::new(parent.try_clone()?), name }),
+            cleanup: Vec::new(),
+            children: Vec::new(),
+        });
+        self.finish_children(driver)
     }
     fn finish_children(&mut self, driver: &BtrfsFs) -> Result<()> {
         while let Some(child) = self.children.last_mut() {

@@ -1384,6 +1384,8 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         Ok(1)
     };
+    // A git command that moved .git/HEAD refuses the save before "nothing to save" (t65).
+    crate::gitbridge::check_git_head(&h.repo, &line)?;
     // Freeze and compare the index before the project lock. The line lease keeps
     // the stage and the head unchanged until publication.
     let mut prepared =

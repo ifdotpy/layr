@@ -386,7 +386,10 @@ pub fn maintain_for_gc(ctx: &Ctx, repo: &crate::repo::Repo, dry: bool, quiet: bo
         if !repo.p.store.project_dir(&format!("{}%{name}", repo.p.name))?.try_exists()? {
             continue;
         }
-        report(&name, &repo.overlay_project(&name)?)?;
+        // An overlay that cannot open (or fails its maintenance) must not stop the others or gc.
+        if let Err(e) = repo.overlay_project(&name).and_then(|p| report(&name, &p)) {
+            eprintln!("warning: objects of {name} not maintained: {e:#}");
+        }
     }
     Ok(())
 }
