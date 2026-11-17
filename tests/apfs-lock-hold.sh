@@ -74,12 +74,13 @@ ok "the remote has the line" git -C "$R" rev-parse --verify -q topic
 # A folder that changes while a save waits for the lock: the layer written before the lock
 # becomes an automatic state, and the state under the lock copies only the changed entry.
 mkdir -p bulk2 && for i in $(seq 1 200); do printf '%s\n' "$i" > "bulk2/f$i"; done
-python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); time.sleep(6)' "$LAYR_ROOT/projects/hold/meta/lock" &
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); time.sleep(12)' "$LAYR_ROOT/projects/hold/meta/lock" &
 HOLDER=$!
 sleep 1
 LAYR_TRACE=1 l save > "$T/late-save.log" 2>&1 &
 SAVE=$!
-sleep 3
+# Change the folder only after the save prepared its layer (a busy runner can take seconds for it).
+for i in $(seq 1 100); do grep -q "prepare save" "$T/late-save.log" 2>/dev/null && break; sleep 0.1; done
 printf 'late\n' > late.txt
 wait $HOLDER; wait $SAVE
 trace=$(cat "$T/late-save.log")
