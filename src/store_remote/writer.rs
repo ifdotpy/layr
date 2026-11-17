@@ -511,6 +511,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     let mut present: BTreeMap<String, String> = index.iter().map(|(id, entry)| (id.clone(), entry.attempt.clone())).collect();
     // Authenticate another writer's records only if a missing local parent cache is needed.
     // An ordinary incremental push reuses its already verified local parent directly.
+    // Hydration uses the same checked segment cache as fetch: losing a tree cache must not
+    // download the entire record history again just to authenticate that tree.
     let mut remote_records = None;
     drop(stage);
     let stage = crate::trace::span("store select history");
@@ -593,7 +595,13 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         journal.stats.seed_started_ms = crate::ids::now_ms();
         let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
         if remote_records.is_none() {
-            remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
+            remote_records = Some(reader::records_with_local(
+                &store.backend,
+                &identity,
+                &descriptor.project,
+                &record_lines,
+                Some(&reader::seen_file(&store.dir)),
+            )?);
         }
         let records = remote_records.as_ref().unwrap();
         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
@@ -659,7 +667,13 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
                 } else if pushed.is_none() && store.backend.can_read() {
                     if let Ok(identity) = store.identity(&descriptor, opts.paper_key.as_deref()) {
                         if remote_records.is_none() {
-                            remote_records = Some(reader::records(&store.backend, &identity, &descriptor.project)?);
+                            remote_records = Some(reader::records_with_local(
+                                &store.backend,
+                                &identity,
+                                &descriptor.project,
+                                &record_lines,
+                                Some(&reader::seen_file(&store.dir)),
+                            )?);
                         }
                         let records = remote_records.as_ref().unwrap();
                         let mut source = reader::Reader::new(&store.backend, &identity, &records.keys);
@@ -1521,6 +1535,172 @@ mod tests {
         let repo = branch_fixture(&ctx, &store);
         PUSH_CACHE_DISABLED.with(|disabled| disabled.set(true));
         push(&store, &ctx, &repo, &Options::default()).unwrap();
+        super::super::backend::trace_requests();
+    }
+
+    #[test]
+    fn parent_hydration_reuses_verified_record_segments() {
+        use crate::model::Record;
+        use std::process::Command;
+        let mut measurements = Vec::new();
+        for recovery in [false, true] {
+            let root = std::env::temp_dir().join(crate::ids::new_id());
+            std::fs::create_dir_all(&root).unwrap();
+            let ctx = context(&root);
+            let mut store = remote(&root, &ctx);
+            store
+                .configure(
+                    &ctx,
+                    &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() },
+                )
+                .unwrap();
+            let repo = branch_fixture(&ctx, &store);
+            assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 4);
+            let descriptor = store.descriptor().unwrap();
+            // Model a remote with many small historical pushes, already checked by fetch.
+            let records: Vec<_> = (0..128).map(|_| Record::new("state")).collect();
+            for record in repo.p.append_batch(records, &ctx.actor()).unwrap() {
+                let key = format::segment_name(&store.machine, record.seq, record.seq);
+                let line = repo.p.db.record_line(&store.machine, record.seq).unwrap().unwrap();
+                store
+                    .backend
+                    .put_new(&key, keys::encrypt(&descriptor.recipient, format!("{line}\n").as_bytes()).unwrap())
+                    .unwrap();
+                std::fs::write(store.dir.join("own-records"), format!("root {key}")).unwrap();
+            }
+            let identity = store.identity(&descriptor, None).unwrap();
+            let local: Vec<_> = repo.p.export_jsonl().unwrap().lines().map(str::to_owned).collect();
+            reader::records_with_local(&store.backend, &identity, &store.project, &local, Some(&reader::seen_file(&store.dir)))
+                .unwrap();
+            let parent = repo.p.db.present_states().unwrap()[0].0.clone();
+            let mut state = repo.state(&parent).unwrap();
+            state.id = crate::ids::new_id();
+            state.parents = vec![parent.clone()];
+            state.time = crate::ids::now_ms();
+            std::fs::create_dir(repo.p.state_path(&state.id)).unwrap();
+            std::fs::write(repo.p.state_path(&state.id).join("payload"), b"incremental payload\n").unwrap();
+            let mut record = Record::new("state");
+            record.states.push(state);
+            repo.p.append(record, &ctx.actor()).unwrap();
+            // Exercise both a lost parent cache and discovery after an interrupted push.
+            std::fs::remove_file(store.dir.join("push-cache.sqlite3")).unwrap();
+            if recovery {
+                let mut index = load_index(&store.dir).unwrap();
+                index.remove(&parent);
+                checkpoint(&store.dir, &index).unwrap();
+                drop(super::super::push_journal::Journal::open(&store.dir).unwrap());
+            }
+            drop(repo);
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", "store_remote::writer::tests::crash_push_process", "--nocapture"])
+                .env("LAYR_TEST_CRASH_ROOT", &root)
+                .env("LAYR_TRACE", "1")
+                .env("LAYR_ROOT", root.join("local"))
+                .env("LAYR_DIRECT", "1")
+                .output()
+                .unwrap();
+            let log = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{log}");
+            let gets: usize = log
+                .lines()
+                .find_map(|line| line.split_once("remote get records: "))
+                .map(|(_, tail)| tail.split_whitespace().next().unwrap().parse().unwrap())
+                .unwrap_or(0);
+            eprintln!("parent hydration recovery={recovery}: {gets} record GETs");
+            measurements.push((recovery, gets));
+            store.verify(true).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for (recovery, gets) in measurements {
+            // Only the segment just published by this push is new to seen-records.
+            assert_eq!(gets, 1, "historical segments must stay cached (recovery={recovery})");
+        }
+    }
+
+    #[test]
+    fn push_rejects_cached_conflicting_history() {
+        use crate::model::Record;
+        let mut outcomes = Vec::new();
+        for recovery in [false, true] {
+            let root = std::env::temp_dir().join(crate::ids::new_id());
+            std::fs::create_dir_all(&root).unwrap();
+            let ctx = context(&root);
+            let mut store = remote(&root, &ctx);
+            store
+                .configure(
+                    &ctx,
+                    &super::super::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() },
+                )
+                .unwrap();
+            let repo = branch_fixture(&ctx, &store);
+            let descriptor = store.descriptor().unwrap();
+            let other = crate::ids::new_id();
+            let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+            let original: Vec<String> = (1..=3)
+                .map(|seq| {
+                    let mut record = Record::new(if seq == 1 { "machine" } else { "config" });
+                    record.id = crate::ids::new_id();
+                    record.machine = other.clone();
+                    record.project = store.project.clone();
+                    record.seq = seq;
+                    if seq == 1 {
+                        record.data =
+                            serde_json::json!({"name":"third", "public_key":hex::encode(key.verifying_key().to_bytes())});
+                    }
+                    oplog::sign_line(&record, &key).unwrap()
+                })
+                .collect();
+            let publish = |first, last, lines: &[String]| {
+                let name = format::segment_name(&other, first, last);
+                let bytes = format!("{}\n", lines.join("\n"));
+                assert!(store.backend.put_new(&name, keys::encrypt(&descriptor.recipient, bytes.as_bytes()).unwrap()).unwrap());
+            };
+            publish(1, 2, &original[..2]);
+            // Force actual parent hydration, which observes but never imports the other machine.
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(true));
+            assert_eq!(push(&store, &ctx, &repo, &Options::default()).unwrap().states, 4);
+            assert!(repo.p.db.record_line(&other, 1).unwrap().is_none());
+            let mut fork = original;
+            let mut record = oplog::parse_line(&fork[1], None).unwrap().record;
+            record.actor.name = "a different signed record".into();
+            fork[1] = oplog::sign_line(&record, &key).unwrap();
+            repo.p.import_lines(&fork, crate::store::Trust::All).unwrap();
+            publish(1, 3, &fork);
+            let parent = repo.p.db.present_states().unwrap()[0].0.clone();
+            let mut state = repo.state(&parent).unwrap();
+            state.id = crate::ids::new_id();
+            state.parents = vec![parent.clone()];
+            state.time = crate::ids::now_ms();
+            std::fs::create_dir(repo.p.state_path(&state.id)).unwrap();
+            std::fs::write(repo.p.state_path(&state.id).join("payload"), b"incremental payload\n").unwrap();
+            let mut record = Record::new("state");
+            record.states.push(state);
+            repo.p.append(record, &ctx.actor()).unwrap();
+            let identity = store.identity(&descriptor, None).unwrap();
+            assert!(reader::records(&store.backend, &identity, &store.project)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting history"));
+            if recovery {
+                let mut index = load_index(&store.dir).unwrap();
+                index.remove(&parent);
+                checkpoint(&store.dir, &index).unwrap();
+                drop(super::super::push_journal::Journal::open(&store.dir).unwrap());
+            }
+            let result = push(&store, &ctx, &repo, &Options::default());
+            PUSH_CACHE_DISABLED.with(|disabled| disabled.set(false));
+            let result = result.map(|report| report.states).map_err(|error| error.to_string());
+            drop(repo);
+            std::fs::remove_dir_all(root).unwrap();
+            eprintln!("conflicting history recovery={recovery}: {result:?}");
+            outcomes.push((recovery, result));
+        }
+        for (recovery, result) in outcomes {
+            assert!(
+                result.as_ref().is_err_and(|error| error.contains("conflicting history")),
+                "push must reject conflicting histories (recovery={recovery}), got {result:?}"
+            );
+        }
     }
 
     #[test]
