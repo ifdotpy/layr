@@ -383,7 +383,7 @@ mod batch_commit_tests {
             "id": start, "kind": "commit", "subvol": "", "author": ctx.author(), "time": ids::now_ms()
         }))?);
         p.lock_maintenance()?.append(state, &ctx.actor())?;
-        let repo = Repo { p, ctx: None };
+        let repo = Repo { restore_from_remote: true, p, ctx: None };
         let mut lines = Vec::new();
         let mut tmps = Vec::new();
         let mut recs = Vec::new();

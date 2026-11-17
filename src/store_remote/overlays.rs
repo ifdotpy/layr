@@ -1185,7 +1185,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 op.lock_maintenance()?.import_lines(&lines, crate::store::Trust::All)?;
                 op.reload_id()?;
             }
-            let mut orepo = Repo { p: op, ctx: None };
+            let mut orepo = Repo { restore_from_remote: true, p: op, ctx: None };
             for (machine, key) in records.keys.iter().filter(|(machine, _)| !waiting.contains(*machine)) {
                 crate::machine_trust::trust(
                     &orepo.p.lock_maintenance()?,
@@ -1334,7 +1334,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             } else {
                 op.id.clone()
             };
-            let mut orepo = Repo { p: op, ctx: None };
+            let mut orepo = Repo { restore_from_remote: true, p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
             let opts = &fetch_selection(repo, &name, opts)?;

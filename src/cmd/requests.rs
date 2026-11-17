@@ -495,6 +495,7 @@ mod tests {
         let dir = ctx.store.project_dir("p").unwrap();
         std::fs::create_dir_all(dir.join("meta/db")).unwrap();
         let repo = Repo {
+            restore_from_remote: true,
             p: crate::store::Project {
                 lease: Default::default(),
                 store: &ctx.store,

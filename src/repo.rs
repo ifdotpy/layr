@@ -24,6 +24,8 @@ pub struct Repo<'a> {
     pub p: Project<'a>,
     /// The command that opened this repo. A restore of an evicted state connects with it.
     pub ctx: Option<&'a Ctx>,
+    /// Heads-only materialization must not download omitted history while preparing Git.
+    pub restore_from_remote: bool,
 }
 
 /// An immutable source-state identity checked against this catalog's state kind.
@@ -388,7 +390,7 @@ impl<'a> Repo<'a> {
     }
 
     pub fn from_project(ctx: &'a Ctx, p: Project<'a>) -> Result<Repo<'a>> {
-        let r = Repo { p, ctx: Some(ctx) };
+        let r = Repo { restore_from_remote: true, p, ctx: Some(ctx) };
         r.can_read(ctx)?;
         Ok(r)
     }
@@ -886,7 +888,7 @@ impl<'a> Repo<'a> {
             for l in self.layers(line)?.into_iter().rev() {
                 let Ok(op) = self.overlay_project(&l.overlay) else { continue };
                 if let Some(id) = op.db.overlay_config(&crate::overlay::auto_key(state))?.and_then(|v| v.as_str().map(str::to_owned)) {
-                    let orepo = Repo { p: op, ctx: self.ctx };
+                    let orepo = Repo { restore_from_remote: self.restore_from_remote, p: op, ctx: self.ctx };
                     if let Ok(root) = orepo.state_root(&id) {
                         return Ok((root, true));
                     }
@@ -2740,6 +2742,9 @@ impl<'a> Repo<'a> {
         moved.head = new_head.to_string();
         if let Err(e) = crate::gitbridge::refresh_git_folder(self, &moved) {
             eprintln!("warning: .git folder of line {} not updated: {e:#}", line.name);
+            if let Err(e) = crate::gitbridge::advance_fallback_head(self, line, new_head) {
+                eprintln!("warning: .git fallback of line {} not updated: {e:#}", line.name);
+            }
         }
     }
 
@@ -4898,7 +4903,7 @@ mod commit_record_tests {
         let mut rec = crate::model::DraftRecord::new("project");
         rec.data = serde_json::json!({"id": id, "name": "p", "config": {"objects.enabled": objects}});
         p.lock_maintenance().unwrap().append(rec, &Actor { uid: 0, name: "root".into(), session: None })?;
-        let repo = Repo { p, ctx: None };
+        let repo = Repo { restore_from_remote: true, p, ctx: None };
         let state = ids::new_id();
         let preparation_pin = crate::free::prepare_state(&repo.p, &state)?;
         std::fs::create_dir(repo.p.state_path(&state))?;
@@ -5147,6 +5152,7 @@ mod status_policy_tests {
         std::fs::create_dir_all(dir.join("meta/db"))?;
         std::fs::create_dir_all(dir.join("meta/stage"))?;
         let repo = Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store: &store,
@@ -5230,6 +5236,7 @@ mod status_policy_tests {
             std::fs::set_permissions(dir.join(path), std::fs::Permissions::from_mode(0o700))?;
         }
         let repo = Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store: &store,
@@ -5404,6 +5411,7 @@ mod status_policy_tests {
         std::fs::create_dir_all(dir.join("meta/work"))?;
         std::fs::create_dir_all(dir.join("meta/scan"))?;
         let repo = Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store: &store,

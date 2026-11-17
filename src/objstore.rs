@@ -418,7 +418,11 @@ mod tests {
             author: Default::default(),
             captures: Default::default(),
         };
-        let repo = Repo { p: Project::create(&ctx.store, "p", &ctx.actor(), serde_json::json!({}))?, ctx: None };
+        let repo = Repo {
+            restore_from_remote: true,
+            p: Project::create(&ctx.store, "p", &ctx.actor(), serde_json::json!({}))?,
+            ctx: None,
+        };
         assert!(!enabled(&repo.p)?);
         {
             let lock = repo.p.lock_maintenance()?;

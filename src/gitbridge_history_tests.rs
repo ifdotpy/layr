@@ -63,7 +63,7 @@ impl Fixture {
         let mut record = crate::model::DraftRecord::new("project");
         record.data = serde_json::json!({"name": "history", "id": p.id, "config": {}});
         p.lock_maintenance().unwrap().append(record, &ctx.actor())?;
-        let repo = Repo { p, ctx: Some(&ctx) };
+        let repo = Repo { restore_from_remote: true, p, ctx: Some(&ctx) };
         let git = repo.p.git_dir();
         let source = root.join("source");
         std::fs::create_dir(&source)?;

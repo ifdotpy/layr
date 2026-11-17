@@ -102,7 +102,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     for name in names {
         if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
             if let Ok(Some(p)) = Project::open_maintenance(store, &name) {
-                let repo = crate::repo::Repo { p, ctx: Some(ctx) };
+                let repo = crate::repo::Repo { restore_from_remote: true, p, ctx: Some(ctx) };
                 if let Err(error) = crate::objstore::retire_native_maintenance(&repo) {
                     eprintln!("layr: native copies of {name} remain for retry: {error:#}");
                 }

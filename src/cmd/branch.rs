@@ -971,6 +971,7 @@ mod deletion_tests {
         let project_dir = store.project_dir("p")?;
         std::fs::create_dir_all(project_dir.join("meta/db"))?;
         let repo = Repo {
+            restore_from_remote: true,
             p: Project {
                 lease: Default::default(),
                 store: &store,

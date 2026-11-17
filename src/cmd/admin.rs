@@ -2450,7 +2450,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         serde_json::json!({"access": {format!("user:{owner}"): "admin"}, "protect": {"main": {}}}),
     )?;
     let dir = p.dir.clone();
-    let repo = Repo { p, ctx: Some(ctx) };
+    let repo = Repo { restore_from_remote: true, p, ctx: Some(ctx) };
     // The last step of every path: the line of the new state. Runs under the project lock.
     let finish = |locked: &crate::store::LockedProject<'_>, state: String| -> Result<(Line, String)> {
         let l = repo.create_line(locked, ctx, &line_name, &state, owner)?;
