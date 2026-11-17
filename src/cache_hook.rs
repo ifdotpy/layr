@@ -1013,7 +1013,8 @@ mod tests {
     #[test]
     fn a_hard_kill_restores_the_folder_from_its_copy() {
         let dir = folder("hard-restore");
-        let done = hook("hard-restore", &dir, me(), 200, 500);
+        // The adapter sleeps 3 s after its damage: a 2 s hard limit leaves a busy runner time to reach it.
+        let done = hook("hard-restore", &dir, me(), 600, 2000);
         assert!(done.log.contains("timed out") && done.log.contains("processes stopped; restored from its copy"), "{}", done.log);
         assert!(done.folder_ok);
         assert_eq!(names(&dir), vec!["kept.txt".to_string()]);
@@ -1025,7 +1026,8 @@ mod tests {
     #[test]
     fn a_hard_kill_that_cannot_restore_reports_the_folder_damaged() {
         let dir = folder("hard-stuck");
-        let done = hook("hard-stuck", &dir, me(), 200, 500);
+        // The adapter sleeps 3 s after its damage: a 2 s hard limit leaves a busy runner time to reach it.
+        let done = hook("hard-stuck", &dir, me(), 600, 2000);
         assert!(!done.folder_ok, "{}", done.log);
         assert!(done.log.contains("marked damaged") && done.log.contains("the copy is gone"), "{}", done.log);
     }
