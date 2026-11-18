@@ -77,6 +77,50 @@ fn server(count: usize) -> (S3, Arc<Mutex<Vec<Call>>>, std::thread::JoinHandle<(
     (s3, calls, worker)
 }
 #[test]
+fn folder_listing_uses_delimiter_and_follows_common_prefix_pages() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = std::thread::spawn(move || {
+        for page in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut input = BufReader::new(&mut socket);
+            let mut line = String::new();
+            input.read_line(&mut line).unwrap();
+            let target = line.split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let query: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(query.get("prefix").map(String::as_str), Some("store/overlays/"));
+            assert_eq!(query.get("delimiter").map(String::as_str), Some("/"));
+            assert_eq!(query.get("continuation-token").map(String::as_str), (page == 1).then_some("next"));
+            loop {
+                line.clear();
+                input.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = if page == 0 {
+                "<ListBucketResult><CommonPrefixes><Prefix>store/overlays/a/</Prefix></CommonPrefixes><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>"
+            } else {
+                "<ListBucketResult><CommonPrefixes><Prefix>store/overlays/b &amp; c/</Prefix></CommonPrefixes><IsTruncated>false</IsTruncated></ListBucketResult>"
+            };
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let mut s3 = S3::new(
+        "bucket",
+        "us-east-1",
+        Credentials { key_id: "test".into(), secret: "secret".into(), token: None },
+        Some(&endpoint),
+    )
+    .unwrap();
+    s3.prefix = "store/".into();
+    assert_eq!(s3.folders("overlays/").unwrap(), ["overlays/a/", "overlays/b & c/"]);
+    worker.join().unwrap();
+}
+
+#[test]
 fn stream_uses_eight_mib_parts_and_conditional_completion() {
     let (s3, calls, worker) = server(4);
     let size = (8 << 20) + 7;

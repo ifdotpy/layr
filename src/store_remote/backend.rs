@@ -646,15 +646,60 @@ impl Backend {
         Ok(())
     }
 
+    /// Immediate child folders, without enumerating their objects. Prefixes end in `/`.
+    fn folders(&self, prefix: &str) -> Result<Option<Vec<String>>> {
+        check_key(prefix.trim_end_matches('/'))?;
+        if !prefix.ends_with('/') {
+            bail!("folder listing needs a directory prefix");
+        }
+        match self {
+            Self::Epoch(epoch) => epoch.root.folders(prefix),
+            Self::Prefix(base, scope) => match base.folders(&format!("{scope}{prefix}"))? {
+                Some(folders) => Ok(Some(
+                    folders
+                        .into_iter()
+                        .map(|folder| Ok(folder.strip_prefix(scope).context("folder is outside its namespace")?.to_string()))
+                        .collect::<Result<_>>()?,
+                )),
+                None => Ok(None),
+            },
+            Self::Gateway(g) if prefix == "overlays/" => g.overlay_folders(),
+            Self::Gateway(_) => Ok(None),
+            Self::S3(s) => Ok(Some(s.folders(prefix)?)),
+            Self::Api(_) => Ok(None),
+            Self::File(root, identity) => identity.run(|| {
+                let start = crate::fsutil::safe_join(root, prefix.trim_end_matches('/'))?;
+                if fs::symlink_metadata(&start).is_ok_and(|m| m.file_type().is_symlink()) {
+                    bail!("symbolic link in remote store");
+                }
+                let entries = match fs::read_dir(&start) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+                    Err(e) => return Err(e.into()),
+                };
+                let mut folders = Vec::new();
+                for entry in entries {
+                    let entry = entry?;
+                    let kind = entry.file_type()?;
+                    if kind.is_symlink() {
+                        bail!("symbolic link in remote store");
+                    }
+                    if kind.is_dir() {
+                        let name = entry.file_name().into_string().map_err(|_| anyhow::anyhow!("remote folder is not UTF-8"))?;
+                        folders.push(format!("{prefix}{name}/"));
+                    }
+                }
+                folders.sort();
+                Ok(Some(folders))
+            }),
+        }
+    }
+
     /// The overlay key objects (`overlays/<id>/keys/...`), and for a backend without folder listings every object
     /// of `overlays/`. A gateway lists the overlay folders, then the keys of each: the full listing holds every
     /// chunk of every overlay, and it took a follow pass of project layr more than 10 minutes (2026-11-15).
     pub fn overlay_key_objects(&self) -> Result<Vec<Object>> {
-        let folders = match self {
-            Self::Epoch(epoch) if !epoch_object("overlays/") => return epoch.root.overlay_key_objects(),
-            Self::Gateway(g) => g.overlay_folders()?,
-            _ => None,
-        };
+        let folders = self.folders("overlays/")?;
         let Some(folders) = folders else { return self.list("overlays/") };
         let mut objects = Vec::new();
         for folder in folders {
@@ -866,6 +911,29 @@ pub(super) fn check_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overlay_discovery_does_not_walk_file_cache_data_or_lose_scoped_keys() {
+        let root = std::env::temp_dir().join(format!("layr-overlay-listing-{}", crate::ids::new_id()));
+        let backend = Backend::file(root.clone());
+        let scoped = backend.scoped("project/epochs/current").unwrap();
+        scoped.put_new("overlays/a/keys/public.json", Vec::new()).unwrap();
+        scoped.put_new("overlays/b/keys/hidden.age", Vec::new()).unwrap();
+        let data = root.join("project/epochs/current/overlays/a/epochs/old/chunks");
+        fs::create_dir_all(&data).unwrap();
+        // A recursive listing must fail if it reaches the cache payload namespace.
+        std::os::unix::fs::symlink("missing", data.join("poison")).unwrap();
+        assert!(scoped.list("overlays/").is_err());
+        let objects = scoped.overlay_key_objects().unwrap();
+        assert_eq!(
+            objects.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
+            ["overlays/a/keys/public.json", "overlays/b/keys/hidden.age"]
+        );
+        assert!(matches!(backend.folders("absent/").unwrap(), Some(f) if f.is_empty()));
+        std::os::unix::fs::symlink("project/epochs/current/overlays", root.join("linked")).unwrap();
+        assert!(backend.folders("linked/").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn reader_hooks_use_s3_caller_credentials_and_leave_file_reads_local() {
         use std::net::TcpListener;

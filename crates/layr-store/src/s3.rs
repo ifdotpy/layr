@@ -405,10 +405,23 @@ impl S3 {
     }
 
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
+        Ok(self.list_delimited(prefix, None)?.0)
+    }
+
+    /// Immediate child prefixes; S3 applies the delimiter before paginating objects.
+    pub fn folders(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self.list_delimited(prefix, Some("/"))?.1)
+    }
+
+    fn list_delimited(&self, prefix: &str, delimiter: Option<&str>) -> Result<(Vec<Object>, Vec<String>)> {
         let prefix = self.key(prefix);
         let (mut keys, mut token) = (Vec::new(), None::<String>);
+        let mut folders = std::collections::BTreeSet::new();
         loop {
             let mut query = vec![("list-type", "2"), ("prefix", prefix.as_str())];
+            if let Some(delimiter) = delimiter {
+                query.push(("delimiter", delimiter));
+            }
             if let Some(token) = &token {
                 query.push(("continuation-token", token));
             }
@@ -419,6 +432,16 @@ impl S3 {
             let xml = String::from_utf8(reply.body)?;
             if !xml.contains("<ListBucketResult") {
                 bail!("S3 returned no object listing");
+            }
+            for item in xml.split("<CommonPrefixes>").skip(1) {
+                let item = item.split("</CommonPrefixes>").next().unwrap_or(item);
+                let folder = aws::xml_text(item, "Prefix").context("S3 folder has no prefix")?;
+                let child = folder.strip_prefix(&prefix).and_then(|s| s.strip_suffix('/'));
+                if !child.is_some_and(|s| !s.is_empty() && !s.contains('/')) {
+                    bail!("S3 returned an invalid child prefix");
+                }
+                crate::paths::check_rel(folder.trim_end_matches('/'))?;
+                folders.insert(folder.strip_prefix(&self.prefix).context("S3 folder is outside the prefix")?.to_string());
             }
             for item in xml.split("<Contents>").skip(1) {
                 let item = item.split("</Contents>").next().unwrap_or(item);
@@ -435,7 +458,7 @@ impl S3 {
                     bail!("S3 listing has no continuation token");
                 }
                 keys.sort_by(|a, b| a.key.cmp(&b.key));
-                return Ok(keys);
+                return Ok((keys, folders.into_iter().collect()));
             }
             if next == token {
                 bail!("S3 listing repeats a continuation token");
