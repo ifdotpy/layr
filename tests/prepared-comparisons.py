@@ -149,21 +149,31 @@ second = json.loads(run("save", "--force", "--json").stdout)
 assert first["saved"] and second["saved"] and first["state"] != second["state"], (first, second)
 assert run("show", first["state"] + ":f0").stdout == run("show", second["state"] + ":f0").stdout
 retire()
-if sys.platform == "darwin":
-    (work / "f0").write_text("failed preparation\n")
-    before = {path for folder in (project / "states", project / "deltas") if folder.exists() for path in folder.iterdir()}
-    failure = subprocess.run([binary, "save"], cwd=work, env=dict(env, LAYR_TEST_PREPARE_SAVE_ERROR="1"), capture_output=True, text=True, timeout=120)
-    assert failure.returncode != 0 and "prepared save failed after copying" in failure.stderr, failure.stderr
-    after = {path for folder in (project / "states", project / "deltas") if folder.exists() for path in folder.iterdir()}
-    assert after <= before, (before, after, failure.stderr)
-    # An invalidated preparation publishes its retained capture, then allocates a
-    # new layer for the safe fallback. Failure of that new copy must clean its ID.
-    trace = paused(["save"], "prepare save", lambda: (work / "f1").write_text("late fallback write\n"),
-                   extra={"LAYR_TEST_WORKING_SNAPSHOT_ERROR": "1"}, succeeds=False)
-    assert "layer over prepared save" in trace and "working snapshot failed after copying" in trace, trace
+# Fail the current installation path after a private capture, including after a
+# stale capture has forced a new preparation. Neither attempt may publish a save.
+(work / "f0").write_text("failed preparation\n")
+def native_paths():
+    return {path for folder in (project / "states", project / "deltas")
+            if folder.exists() for path in folder.iterdir()}
+
+def records():
     with sqlite3.connect(project / "meta/db/layr.sqlite") as db:
-        recorded = {row[0] for row in db.execute("SELECT id FROM states")}
-    after = {path for folder in (project / "states", project / "deltas") if folder.exists() for path in folder.iterdir()}
-    assert not {path for path in after - before if path.name not in recorded}, trace
-    assert (work / "f1").read_text() == "late fallback write\n"
+        return {row[0] for row in db.execute("SELECT id FROM states")}
+
+before, recorded = native_paths(), records()
+workspaces = set((project / "meta/work").iterdir())
+failure = subprocess.run([binary, "save"], cwd=work,
+    env=dict(env, LAYR_TEST_SAVE_INSTALL_FAIL="1"), capture_output=True, text=True, timeout=120)
+assert failure.returncode != 0 and "injected prepared installation failure" in failure.stderr, failure.stderr
+assert native_paths() <= before, (before, native_paths(), failure.stderr)
+assert records() == recorded, failure.stderr
+assert set((project / "meta/work").iterdir()) <= workspaces, failure.stderr
+# The first capture becomes stale; the second reaches installation and fails.
+trace = paused(["save"], "prepare save", lambda: (work / "f1").write_text("late retry write\n"),
+               extra={"LAYR_TEST_SAVE_INSTALL_FAIL": "1"}, succeeds=False)
+assert trace.count("prepare save") >= 2 and "injected prepared installation failure" in trace, trace
+assert native_paths() <= before, trace
+assert records() == recorded, trace
+assert set((project / "meta/work").iterdir()) <= workspaces, trace
+assert (work / "f1").read_text() == "late retry write\n"
 print("PREPARED COMPARISONS PASS")

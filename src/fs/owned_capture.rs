@@ -150,32 +150,40 @@ pub(crate) fn materialise_owned(source: &crate::source::Source, destination: &Pa
 
 /// The namespace may already have changed, so recovery keeps both identities and the exact
 /// driver. Only a verified completion transfers the new index and removes the old one.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct ExchangeRecovery {
-    driver: Arc<dyn PathAdmission>,
+    _driver: Arc<dyn PathAdmission>,
     phase: ExchangeRecoveryPhase,
 }
+#[cfg(any(target_os = "macos", test))]
 enum ExchangeRecoveryPhase {
     Exchange(ExchangeFailure),
+    #[cfg(test)]
     Discard(RemovalFailure),
 }
+#[cfg(any(target_os = "macos", test))]
 impl std::fmt::Debug for ExchangeRecovery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
+#[cfg(any(target_os = "macos", test))]
 impl std::fmt::Display for ExchangeRecovery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let error = match &self.phase {
             ExchangeRecoveryPhase::Exchange(failure) => &failure.error,
+            #[cfg(test)]
             ExchangeRecoveryPhase::Discard(failure) => &failure.error,
         };
         write!(f, "index replacement requires recovery: {error}")
     }
 }
+#[cfg(any(target_os = "macos", test))]
 impl std::error::Error for ExchangeRecovery {}
+#[cfg(test)]
 impl ExchangeRecovery {
     pub(crate) fn retry(self) -> std::result::Result<(), Self> {
-        let Self { driver, phase } = self;
+        let Self { _driver: driver, phase } = self;
         let ownership = match phase {
             ExchangeRecoveryPhase::Discard(failure) => failure.ownership,
             ExchangeRecoveryPhase::Exchange(failure) => {
@@ -184,7 +192,7 @@ impl ExchangeRecovery {
                     driver.capabilities(&scope).exchange
                 };
                 let Some(exchange) = capability else {
-                    return Err(Self { driver, phase: ExchangeRecoveryPhase::Exchange(failure) });
+                    return Err(Self { _driver: driver, phase: ExchangeRecoveryPhase::Exchange(failure) });
                 };
                 match exchange.exchange(failure.first, failure.second) {
                     Ok((published, obsolete)) => {
@@ -193,14 +201,15 @@ impl ExchangeRecovery {
                     }
                     Err(mut failure) => {
                         failure.progress = ExchangeProgress::Swapped;
-                        return Err(Self { driver, phase: ExchangeRecoveryPhase::Exchange(failure) });
+                        return Err(Self { _driver: driver, phase: ExchangeRecoveryPhase::Exchange(failure) });
                     }
                 }
             }
         };
-        driver.remove(ownership).map_err(|failure| Self { driver, phase: ExchangeRecoveryPhase::Discard(failure) })
+        driver.remove(ownership).map_err(|failure| Self { _driver: driver, phase: ExchangeRecoveryPhase::Discard(failure) })
     }
 }
+#[cfg(any(target_os = "macos", test))]
 impl OwnedWorking {
     pub(crate) fn exchange_existing(self, destination: ManagedPath) -> Result<()> {
         let Self { tree, mut owner } = self;
@@ -247,7 +256,9 @@ impl OwnedWorking {
                     }
                 }
             }
-            Err(failure) => Err(anyhow::Error::new(ExchangeRecovery { driver, phase: ExchangeRecoveryPhase::Exchange(failure) })),
+            Err(failure) => {
+                Err(anyhow::Error::new(ExchangeRecovery { _driver: driver, phase: ExchangeRecoveryPhase::Exchange(failure) }))
+            }
         }
     }
 }
@@ -316,10 +327,10 @@ mod transport_identity_tests {
         let (inner, inner_guard, inner_parent, inner_root, inner_child) = fixtures.pop().unwrap();
         assert!(!Arc::ptr_eq(&outer.driver, &inner.driver));
         let mut error = inner.abort(anyhow::anyhow!("primary failure")).downcast::<Cleanup>()?;
-        error.guards.push(inner_guard);
+        error._guards.push(inner_guard);
         let cause = anyhow::Error::new(error).context("inner operation failed");
         let mut error = outer.abort(cause).downcast::<Cleanup>()?;
-        error.guards.push(outer_guard);
+        error._guards.push(outer_guard);
         assert!(format!("{error:#}").contains("inner operation failed"));
         rustix::fs::fchmod(outer_child.as_fd(), rustix::fs::Mode::from_raw_mode(0o700))?;
         let error = error.retry().expect_err("the inner operation must still report its retained failure");

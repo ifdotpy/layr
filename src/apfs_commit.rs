@@ -734,6 +734,39 @@ mod tests {
 
     #[test]
     #[ignore = "requires a case-sensitive APFS test volume"]
+    fn publication_reservation_defers_live_and_committed_recovery() -> Result<()> {
+        let s = Sandbox::new();
+        let store = Store::open(&s.0.join("store"))?;
+        let p = Project::create(&store, "p", &actor(), serde_json::json!({}))?;
+        let line = ids::new_id();
+        stage(&p, &line)?;
+        let pc = PendingCommit::prepare(&p, &line)?;
+        let id = pc.id.clone();
+        assert!(p.try_reserve()?.is_none(), "a live journal defers publication");
+        assert!(!p.holds_lock(), "a refused reservation releases its lock");
+        {
+            let _lock = p.lock_maintenance()?;
+            recorded(&_lock, &pc, &line)?;
+        }
+        die(&pending_dir(&p, &id));
+        let tree = pc.tree.clone();
+        std::mem::forget(pc);
+        assert!(p.try_reserve()?.is_none(), "an abandoned journal also defers publication");
+        assert!(tree.exists(), "reservation must not publish the committed clone");
+        assert!(p.stage_path(&line).exists(), "reservation must not delete the stage");
+        assert!(!p.state_path(&id).exists());
+        // A normal lock outside publication performs recovery before the next preparation.
+        drop(p.lock_maintenance()?);
+        assert!(!pending(&p)?);
+        assert!(!p.stage_path(&line).exists());
+        assert_eq!(fs::read(p.state_path(&id).join("file"))?, b"staged bytes");
+        assert!(crate::apfs::native_info(&p.state_path(&id))?.readonly);
+        assert!(p.try_reserve()?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a case-sensitive APFS test volume"]
     fn recovery_refuses_a_substitute_tree() -> Result<()> {
         let s = Sandbox::new();
         let store = Store::open(&s.0.join("store"))?;

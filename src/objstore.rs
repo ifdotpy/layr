@@ -197,6 +197,21 @@ impl Compared {
 }
 
 fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, written: layr_objects::WriteReport) -> Result<()> {
+    trace_write(state, &written);
+    let refs = StateRef {
+        tree: written.tree.context("object write gave no tree")?,
+        times: written.times.context("object write gave no times")?,
+    };
+    store.set_state(&state.id, &refs)?;
+    state.tree = Some(refs.tree.hex());
+    state.times = Some(refs.times.hex());
+    if !p.is_overlay() || state.cache_of.is_some() {
+        queue_native(p, &state.id)?;
+    }
+    Ok(())
+}
+
+fn trace_write(state: &crate::model::StateRec, written: &layr_objects::WriteReport) {
     // Both forms are read by tests: t257 the kind, t262 the mode and file count.
     let kind = match written.mode {
         layr_objects::write::WriteMode::Incremental { .. } => "incremental",
@@ -208,15 +223,77 @@ fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, writte
         written.mode,
         written.files
     ));
-    let refs = StateRef {
-        tree: written.tree.context("object write gave no tree")?,
-        times: written.times.context("object write gave no times")?,
+}
+
+/// A shared lease protects objects encoded before a record can name their roots.
+/// Acquire before preparation; pruning always tries its exclusive side without waiting.
+pub(crate) struct PreparationLease {
+    _file: std::fs::File,
+}
+
+fn lease_file(p: &Project) -> Result<std::fs::File> {
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(p.meta_dir().join("object-preparation.lock"))?)
+}
+
+pub(crate) fn preparation_lease(p: &Project) -> Result<PreparationLease> {
+    let file = lease_file(p)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
+    Ok(PreparationLease { _file: file })
+}
+
+/// Maintenance never waits for an in-flight preparation while holding a project lock.
+pub(crate) fn try_preparation_exclusive(p: &Project) -> Result<Option<std::fs::File>> {
+    let file = lease_file(p)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Encode a caller-owned immutable capture without installing a state ref or retirement marker.
+pub(crate) fn prepare_state(repo: &Repo, state: &mut crate::model::StateRec, source: &crate::repo::Snap) -> Result<()> {
+    if !enabled(&repo.p)? {
+        return Ok(());
+    }
+    let store = open(&repo.p)?;
+    let options = layr_objects::WriteOptions {
+        temperature: layr_objects::Temperature::Hot,
+        previous: None,
+        exclude: Vec::new(),
+        similar: false,
     };
-    store.set_state(&state.id, &refs)?;
-    state.tree = Some(refs.tree.hex());
-    state.times = Some(refs.times.hex());
-    if !p.is_overlay() || state.cache_of.is_some() {
-        queue_native(p, &state.id)?;
+    // Input pins prevent native retirement while the incremental writer reads the parent.
+    let incremental = state_write_base(&repo.p, &store, &state.id, state.parents.first().map(String::as_str), source)?;
+    let source = SnapshotSource(source);
+    let written = match incremental {
+        Some((refs, paths)) => layr_objects::write::write_changed_from(
+            &store,
+            &source,
+            &layr_objects::write::Base { tree: refs.tree, times: refs.times },
+            &paths,
+            &options,
+        )?,
+        None => layr_objects::write::write_tree_from(&store, &source, &options)?,
+    };
+    trace_write(state, &written);
+    state.tree = Some(written.tree.context("object write gave no tree")?.hex());
+    state.times = Some(written.times.context("object write gave no times")?.hex());
+    Ok(())
+}
+
+/// The short publication half; record_states skips these already encoded states.
+pub(crate) fn install_prepared(p: &Project, state: &crate::model::StateRec) -> Result<()> {
+    if let (Some(tree), Some(times)) = (&state.tree, &state.times) {
+        open(p)?.set_state(&state.id, &StateRef { tree: Id::parse(tree)?, times: Id::parse(times)? })?;
+        if !p.is_overlay() || state.cache_of.is_some() {
+            queue_native(p, &state.id)?;
+        }
     }
     Ok(())
 }
@@ -284,7 +361,11 @@ fn state_write_base(
     parent: Option<&str>,
     source: &crate::repo::Snap,
 ) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
-    if let Some((base, paths)) = crate::source::storage::stored_delta(p, state)? {
+    let delta = match crate::source::storage::stored_delta(p, state)? {
+        Some(delta) => Some(delta),
+        None => crate::source::storage::capture_delta(source)?,
+    };
+    if let Some((base, paths)) = delta {
         if let Some(refs) = store.state_ref(&base)? {
             return Ok(Some((refs, paths)));
         }
@@ -308,14 +389,15 @@ fn changed_write_base(
     source: &crate::repo::Snap,
 ) -> Result<Option<(StateRef, Vec<Vec<u8>>)>> {
     use crate::fsutil::Src;
-    if parent.objects().is_some() {
-        let Some(folder) = source.folder() else { return Ok(None) };
+    let _comparison = crate::trace::span("objects full comparison");
+    if let (Some(_), Some(folder)) = (parent.objects(), source.folder()) {
         let comparison = crate::changes::compare_for_write(parent, folder)?;
-        // This older import API has no dirty-folder argument. Including those folders
-        // conservatively imports their subtree and preserves all metadata.
+        // This path-only result includes dirty folders so write_changed_from preserves
+        // their metadata by conservatively importing their subtree.
         let paths = comparison.changed.into_iter().chain(comparison.dirty).collect();
         return Ok(Some((refs, paths)));
     }
+    // Without sparse evidence for this base, compare the complete logical readers.
     let (changed, dirty) = crate::changes::object_candidates(parent, source)?;
     let paths: std::collections::BTreeSet<Vec<u8>> = changed.into_iter().chain(dirty).collect();
     Ok(Some((refs, paths.into_iter().collect())))
@@ -350,6 +432,7 @@ pub fn retire_native_maintenance(repo: &Repo) -> Result<()> {
 }
 
 fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -> Result<()> {
+    let Some(_lease) = try_preparation_exclusive(&repo.p)? else { return Ok(()) };
     let dir = repo.p.meta_dir().join("object-native");
     if !dir.is_dir() {
         return Ok(());
@@ -449,6 +532,272 @@ mod tests {
             exclude: Vec::new(),
             similar: false,
         }
+    }
+
+    struct CountingReader {
+        reader: std::sync::Arc<dyn layr_fs_core::TreeRead>,
+        opened: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+    impl layr_fs_core::TreeRead for CountingReader {
+        fn kind(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<crate::fsutil::FType>> {
+            self.reader.kind(path)
+        }
+        fn metadata(&self, path: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
+            self.reader.metadata(path)
+        }
+        fn entries(
+            &self,
+            path: &layr_fs_core::RelDir,
+            visit: &mut dyn FnMut(&layr_fs_core::RelPath) -> layr_fs_core::Result<()>,
+        ) -> layr_fs_core::Result<()> {
+            self.reader.entries(path, visit)
+        }
+        fn open_file(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Box<dyn layr_fs_core::ReadSeek + '_>> {
+            self.opened.lock().unwrap().push(path.as_bytes().to_vec());
+            self.reader.open_file(path)
+        }
+        fn read_link(&self, path: &layr_fs_core::RelPath) -> layr_fs_core::Result<Vec<u8>> {
+            self.reader.read_link(path)
+        }
+    }
+
+    #[test]
+    fn sparse_layer_write_does_not_read_unchanged_contents() -> Result<()> {
+        use layr_fs_common::{LayeredTree, ReadLayer};
+        let root = std::env::temp_dir().join(format!("layr-sparse-object-base-{}", crate::ids::new_id()));
+        let folder = root.join("source");
+        let layer = root.join("private");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        std::fs::create_dir_all(layer.join("sub"))?;
+        for i in 0..100 {
+            std::fs::write(folder.join(format!("sub/f{i}")), format!("original {i}"))?;
+        }
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let original = layr_objects::write_tree(&store, &folder, &options())?;
+        let refs = StateRef { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        let objects =
+            crate::object_tree::ObjectTree::new(Store::open(&root.join("objects"), Keying::Plain)?, refs, &root.join("reads"))?;
+        std::fs::write(layer.join("sub/f9"), b"automatic change")?;
+        let source = CountingReader {
+            reader: std::sync::Arc::new(LayeredTree::new(vec![
+                ReadLayer { reader: crate::fs::reader(&layer)?, removed: Default::default() },
+                ReadLayer { reader: objects, removed: Default::default() },
+            ])?),
+            opened: Default::default(),
+        };
+        // The same path collector serves installed and private APFS layers. Only the
+        // sparse physical layer is scanned; its inherited siblings are never candidates.
+        let scanned_paths = || -> Result<Vec<String>> {
+            let mut paths = Vec::new();
+            crate::fsutil::walk(&layer, "", &mut |path, _| {
+                paths.push(path.to_owned());
+                Ok(true)
+            })?;
+            Ok(paths)
+        };
+        let paths = crate::source::storage::layer_paths(scanned_paths()?, []);
+        assert_eq!(paths, [b"sub".to_vec(), b"sub/f9".to_vec()]);
+        let base = layr_objects::write::Base { tree: refs.tree, times: refs.times };
+        let report = layr_objects::write::write_changed_from(&store, &SnapshotSource(&source), &base, &paths, &options())?;
+        assert_eq!(report.mode, layr_objects::write::WriteMode::Incremental { changed_paths: 2 });
+        assert_eq!(report.files, 1);
+        assert_eq!(*source.opened.lock().unwrap(), [b"sub/f9".to_vec()]);
+        let full = layr_objects::write::write_tree_from(&store, &SnapshotSource(&source), &options())?;
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        drop(source);
+        // Removals and both sides of a rename must use the layered source too.
+        std::fs::copy(folder.join("sub/f11"), layer.join("sub/renamed"))?;
+        let removed = ["sub/f10", "sub/f11"].map(str::to_owned);
+        let objects =
+            crate::object_tree::ObjectTree::new(Store::open(&root.join("objects"), Keying::Plain)?, refs, &root.join("reads"))?;
+        let source = CountingReader {
+            reader: std::sync::Arc::new(LayeredTree::new(vec![
+                ReadLayer {
+                    reader: crate::fs::reader(&layer)?,
+                    removed: removed
+                        .iter()
+                        .map(|path| layr_fs_core::RelPath::new(path.as_bytes()))
+                        .collect::<layr_fs_core::Result<_>>()?,
+                },
+                ReadLayer { reader: objects, removed: Default::default() },
+            ])?),
+            opened: Default::default(),
+        };
+        let paths = crate::source::storage::layer_paths(scanned_paths()?, removed);
+        assert_eq!(paths.len(), 5);
+        assert!(paths.contains(&b"sub/f10".to_vec()) && paths.contains(&b"sub/f11".to_vec()));
+        let report = layr_objects::write::write_changed_from(&store, &SnapshotSource(&source), &base, &paths, &options())?;
+        assert_eq!(report.files, 2);
+        let mut opened = source.opened.lock().unwrap().clone();
+        opened.sort();
+        assert_eq!(opened, [b"sub/f9".to_vec(), b"sub/renamed".to_vec()]);
+        let full = layr_objects::write::write_tree_from(&store, &SnapshotSource(&source), &options())?;
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        let tree = crate::object_tree::ObjectTree::new(
+            Store::open(&root.join("objects"), Keying::Plain)?,
+            StateRef { tree: report.tree.unwrap(), times: report.times.unwrap() },
+            &root.join("result-reads"),
+        )?;
+        assert!(tree.entry("sub/f10")?.is_none() && tree.entry("sub/f11")?.is_none());
+        assert_eq!(tree.read("sub/renamed")?, b"original 11");
+        // Native ACLs cannot be represented by the object format. A sparse layer
+        // must retain the same explicit rejection as a complete encoding.
+        use layr_fs_core::{TreeRead, TreeWrite};
+        let mut attributes = source.metadata(&layr_fs_core::RelDir::Root)?.unwrap().attributes;
+        let acl_layer = layr_fs_plain::MemoryTree::new(attributes.clone());
+        acl_layer.put(&layr_fs_core::RelPath::new(b"sub")?, layr_fs_core::EntryData::Directory, &attributes)?;
+        attributes.acl = Some(b"native ACL bytes".to_vec());
+        acl_layer.put(
+            &layr_fs_core::RelPath::new(b"sub/f9")?,
+            layr_fs_core::EntryData::File(&mut &b"automatic change"[..]),
+            &attributes,
+        )?;
+        let acl_source = LayeredTree::new(vec![
+            ReadLayer { reader: std::sync::Arc::new(acl_layer), removed: Default::default() },
+            ReadLayer { reader: source.reader.clone(), removed: Default::default() },
+        ])?;
+        let error =
+            layr_objects::write::write_changed_from(&store, &SnapshotSource(&acl_source), &base, &paths, &options()).unwrap_err();
+        assert!(error.to_string().contains("native ACL"));
+        assert!(layr_objects::write::write_tree_from(&store, &SnapshotSource(&acl_source), &options())
+            .unwrap_err()
+            .to_string()
+            .contains("native ACL"));
+        drop(tree);
+        drop(source);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn private_apfs_layer_uses_its_base_regardless_of_parent() -> Result<()> {
+        use std::{collections::BTreeSet, os::unix::fs::PermissionsExt};
+        // Clones refuse symbolic links in their paths, and macOS's /tmp is one.
+        let root = std::env::temp_dir().canonicalize()?.join(format!("layr-private-layer-base-{}", crate::ids::new_id()));
+        let store = crate::store::Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: crate::ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        let folder = root.join("source");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        for i in 0..100 {
+            std::fs::write(folder.join(format!("sub/f{i}")), format!("original {i}"))?;
+        }
+        let objects = open(&p)?;
+        let original = layr_objects::write_tree(&objects, &folder, &options())?;
+        let refs = StateRef { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        let base_id = crate::ids::new_id();
+        objects.set_state(&base_id, &refs)?;
+        // Another record parent disagrees outside the sparse layer. The writer must
+        // reuse the actual layer base, including its original f99 entry.
+        std::fs::write(folder.join("sub/f99"), b"other parent")?;
+        let other = layr_objects::write_tree(&objects, &folder, &options())?;
+        let other_id = crate::ids::new_id();
+        objects.set_state(&other_id, &StateRef { tree: other.tree.unwrap(), times: other.times.unwrap() })?;
+        std::fs::write(folder.join("sub/f99"), b"original 99")?;
+        std::fs::write(folder.join("sub/f9"), b"automatic change")?;
+        std::fs::remove_file(folder.join("sub/f10"))?;
+        std::fs::rename(folder.join("sub/f11"), folder.join("sub/renamed"))?;
+        std::fs::remove_file(folder.join("sub/f12"))?;
+        std::fs::create_dir(folder.join("sub/f12"))?;
+        std::fs::set_permissions(folder.join("sub/f13"), std::fs::Permissions::from_mode(0o600))?;
+        layr_objects::fsx::set_xattrs(&folder.join("sub/f14"), &[(b"user.test".to_vec(), b"new".to_vec())])?;
+        layr_objects::times::set(&folder.join("sub/f15"), 1_700_000_000_123_456_789)?;
+        layr_objects::times::set(&folder.join("sub"), 1_700_000_000_234_567_890)?;
+        let diff = crate::thin::Diff {
+            write: ["sub/f9", "sub/renamed", "sub/f12", "sub/f13", "sub/f14", "sub/f15"].map(str::to_owned).into(),
+            removed: ["sub/f10", "sub/f11", "sub/f12"].map(str::to_owned).into(),
+            whole: BTreeSet::new(),
+        };
+        let layer = root.join("private");
+        let capture = crate::thin::write_layer_owned(&folder, &layer, &diff, &base_id, None)?.freeze()?;
+        let parent = crate::object_tree::ObjectTree::new(open(&p)?, refs, &root.join("reads"))?;
+        let source: crate::source::Source = crate::thin::Layered::over(&layer, crate::thin::Layered::objects(parent))?.into();
+        assert!(matches!(source, crate::source::Source::Layers(_)));
+        let state = crate::ids::new_id();
+        assert!(!p.delta_path(&state).exists(), "the capture is still private");
+        let evidence = crate::source::storage::capture_delta(&source)?.expect("layer base");
+        assert_eq!(evidence.0, base_id);
+        assert_eq!(evidence.1.len(), 9);
+        assert!(!evidence.1.contains(&b"sub/f99".to_vec()), "inherited siblings are not candidates");
+        let expected = layr_objects::write::write_tree_from(&objects, &SnapshotSource(&source), &options())?;
+        // Sparse evidence chooses its own base even with a different or absent record parent.
+        for parent in [Some(base_id.as_str()), Some(other_id.as_str()), None] {
+            let (base, paths) = state_write_base(&p, &objects, &state, parent, &source)?.expect("object layer base");
+            assert_eq!(base, refs);
+            assert_eq!(paths, evidence.1);
+            let report = layr_objects::write::write_changed_from(
+                &objects,
+                &SnapshotSource(&source),
+                &layr_objects::write::Base { tree: base.tree, times: base.times },
+                &paths,
+                &options(),
+            )?;
+            assert_eq!((report.tree, report.times), (expected.tree, expected.times));
+        }
+        drop(source);
+        // Publication changes only the location, never the sparse evidence.
+        std::fs::create_dir_all(p.deltas_dir())?;
+        capture.release();
+        crate::apfs::move_tree(&layer, &p.delta_path(&state))?;
+        assert_eq!(crate::source::storage::stored_delta(&p, &state)?, Some(evidence));
+        drop(objects);
+        drop(p);
+        drop(store);
+        crate::fs::remove(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn object_base_keeps_incremental_writes_for_sources_without_a_folder() -> Result<()> {
+        use crate::fsutil::Src;
+        use layr_objects::write::WriteMode;
+        let root = std::env::temp_dir().join(format!("layr-reader-write-base-{}", crate::ids::new_id()));
+        let folder = root.join("source");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        for i in 0..100 {
+            std::fs::write(folder.join(format!("sub/f{i}")), format!("original {i}"))?;
+        }
+        let store = Store::open(&root.join("objects"), Keying::Plain)?;
+        let original = layr_objects::write_tree(&store, &folder, &options())?;
+        let refs = StateRef { tree: original.tree.unwrap(), times: original.times.unwrap() };
+        let parent = crate::source::Source::Objects(crate::object_tree::ObjectTree::new(
+            Store::open(&root.join("objects"), Keying::Plain)?,
+            refs,
+            &root.join("parent-reads"),
+        )?);
+        std::fs::write(folder.join("sub/f9"), b"automatic change")?;
+        let full = layr_objects::write_tree(&store, &folder, &options())?;
+        let source = crate::source::Source::Objects(crate::object_tree::ObjectTree::new(
+            Store::open(&root.join("objects"), Keying::Plain)?,
+            StateRef { tree: full.tree.unwrap(), times: full.times.unwrap() },
+            &root.join("child-reads"),
+        )?);
+        assert!(source.folder().is_none(), "private layered captures also have no single folder");
+        let (base, paths) = changed_write_base(refs, &parent, &source)?.expect("reader-only sources must keep their delta");
+        assert_eq!(paths, [b"sub/f9".to_vec()]);
+        let report = layr_objects::write::write_changed_from(
+            &store,
+            &SnapshotSource(&source),
+            &layr_objects::write::Base { tree: base.tree, times: base.times },
+            &paths,
+            &options(),
+        )?;
+        assert_eq!(report.mode, WriteMode::Incremental { changed_paths: 1 });
+        assert_eq!(report.files, 1);
+        assert_eq!((report.tree, report.times), (full.tree, full.times));
+        drop(source);
+        drop(parent);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

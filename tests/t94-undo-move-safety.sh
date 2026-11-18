@@ -36,6 +36,7 @@ drop_tree() {
             /bin/chmod -R -N "$d" 2>/dev/null || true
             rm -rf "$d"
         elif [ "$(stat -f -c %T "$d" 2>/dev/null)" = btrfs ]; then
+            btrfs property set "$d" ro false
             btrfs subvolume delete "$d" >/dev/null
         else
             # OverlayFS: a state is a mount (the CI job runs as root).
@@ -76,7 +77,9 @@ echo later >> notes.txt
 # The undo ring holds no operation any more: the states of the restore are freed.
 l config undo.ops 0 >/dev/null; l gc --repair -q >/dev/null
 tree_sum "$P/lines/main" > "$T/sum.before"
+latest=$(l op log -n 1)
 out=$(l undo "$restore_op" 2>&1); rc=$?
+eq "a stopped undo records no automatic save" "$latest" "$(l op log -n 1)"
 eq "undo stops with exit 1 when the after state cannot load" 1 "$rc"
 has "the error says the undo stopped" "cannot undo" "$out"
 tree_sum "$P/lines/main" > "$T/sum.after"
@@ -115,5 +118,53 @@ has "a command in the moved folder finds the line without the index" "notes.txt"
 cd "$P/lines/main"
 ok "line move back" l line move w
 no "the moved folder is gone" test -e "$W"
+
+# (e) A non-in-place undo keeps the saves and folder replacement under one lock.
+# Write while it waits for that lock: the first capture must be discarded and
+# undoing the undo must recover the late edit from the replacement capture.
+new_project undo_gap
+l line new -q victim
+new_op=$(l op log --all -n 1 | awk '{print $1}')
+echo early > "$P/lines/victim/early.txt"
+barrier=$T/undo-barrier
+mkdir "$barrier"
+LAYR_TEST_SAVE_UNDO_BARRIER="$barrier" LAYR_TRACE=1 l undo "$new_op" >"$T/undo-gap.out" 2>&1 &
+pid=$!
+for _ in $(seq 1 500); do
+    [ -f "$barrier/ready" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.02
+done
+if [ ! -f "$barrier/ready" ]; then
+    touch "$barrier/release"; wait "$pid"; cat "$T/undo-gap.out"
+    echo 'FATAL: undo did not reach its publication barrier'; exit 1
+fi
+eq "undo keeps its before-undo save unpublished at the barrier" "$new_op" "$(l op log --all -n 1 | awk '{print $1}')"
+python3 - "$P/meta/lock" "$barrier" "$P/lines/victim/late.txt" <<'PYUNDO'
+import fcntl
+from pathlib import Path
+import sys
+import time
+with open(sys.argv[1], 'a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    Path(sys.argv[2], 'release').touch()
+    time.sleep(0.2)
+    Path(sys.argv[3]).write_text('written during lock wait\n')
+PYUNDO
+wait "$pid"
+eq "undo retries a capture changed during the project lock wait" 0 "$?"
+ok "undo removes the created folder" test ! -e "$P/lines/victim"
+undo_op=$(l op log --all -n 1 | awk '{print $1}')
+ok "undo the undo restores the created line" l undo "$undo_op"
+eq "undo of undo recovers the early file" early "$(cat "$P/lines/victim/early.txt")"
+eq "undo of undo recovers the lock-wait edit" 'written during lock wait' "$(cat "$P/lines/victim/late.txt")"
+# A head-check refusal must not publish a before-undo automatic save.
+cd "$P/lines/victim"
+echo changed >> notes.txt
+l save -qam changed
+cd "$P/lines/main"
+latest=$(l op log --all -n 1)
+no "undo refuses a created line whose head changed" l undo "$new_op"
+eq "the refused undo adds no before-undo save" "$latest" "$(l op log --all -n 1)"
 
 finish

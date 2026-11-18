@@ -111,23 +111,6 @@ impl Repo<'_> {
         batch_names(prefix, count)
     }
 
-    /// Create lines with the project lock held (the caller took it). The lock-free command path
-    /// calls `prepare_named_lines` first and `commit_prepared_lines` under the lock.
-    pub(crate) fn create_named_lines(
-        &self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        names: Vec<String>,
-        start: &str,
-        owner: u32,
-        source: Option<&Line>,
-        view: Option<&crate::overlay::View>,
-    ) -> Result<Vec<Line>> {
-        locked.check(&self.p)?;
-        let prepared = self.prepare_named_lines(ctx, names, start, owner, source, view)?;
-        self.commit_prepared_lines(locked, ctx, prepared)
-    }
-
     /// The object store and tree of `start` when the state has no snapshot here and `layr migrate`
     /// recorded its tree (docs/objects.md, section 13).
     fn objects_start(&self, start: &str) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {

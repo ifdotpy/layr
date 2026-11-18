@@ -404,8 +404,8 @@ pub fn working_status(repo: &Repo, line: &Line, v: &View) -> Result<Status> {
     Ok(result)
 }
 
-/// Record working content for a command without cloning the FSKit mount.
-pub fn working_snapshot(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn working_snapshot_at(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
@@ -414,12 +414,15 @@ pub fn working_snapshot(
     message: &str,
     base: &str,
     id: String,
+    complete: &Path,
+    delta: &Path,
 ) -> Result<StateRec> {
     let mut prior = line.clone();
     prior.head = base.to_string();
     let t = trees(repo, &prior, v)?;
     let list = file_changes(&t, v)?;
-    let mut state = write_state_as(ctx, repo, &prior, &t, &list, StateKind::Auto, message, id)?;
+    crate::secrets::check_changes(ctx, repo, &t.head.clone().into(), &t.merged.clone().into(), &prior.head, &list)?;
+    let mut state = write_state_at(ctx, repo, &prior, &t, &list, StateKind::Auto, message, id, complete, delta)?;
     state.parents = parents;
     Ok(state)
 }
@@ -458,11 +461,17 @@ pub(crate) fn write_state(
     kind: StateKind,
     message: &str,
 ) -> Result<StateRec> {
-    write_state_as(ctx, repo, line, t, list, kind, message, ids::new_id())
+    let id = ids::new_id();
+    let st =
+        write_state_at(ctx, repo, line, t, list, kind, message, id.clone(), &repo.p.state_path(&id), &repo.p.delta_path(&id))?;
+    if repo.p.delta_path(&id).exists() {
+        repo.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, &line.head))?;
+    }
+    Ok(st)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_state_as(
+fn write_state_at(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
@@ -471,6 +480,8 @@ fn write_state_as(
     kind: StateKind,
     message: &str,
     id: String,
+    complete_path: &Path,
+    delta: &Path,
 ) -> Result<StateRec> {
     let _s = crate::trace::span("view write state");
     let is_dir = |m: &Option<Meta>| m.as_ref().is_some_and(|m| m.is_dir());
@@ -506,7 +517,7 @@ fn write_state_as(
     })?;
     // A path below a removed folder of the head that comes back is written; the folder is new.
     d.removed = topmost(gone);
-    let dst = repo.p.delta_path(&id);
+    let dst = delta.to_path_buf();
     // A reverted entry can live only in the lower tree. Hard links also need a complete
     // snapshot so their identity survives. Ordinary edits still write only the upper layer.
     let missing_upper = d.write.iter().any(|p| std::fs::symlink_metadata(t.upper.join(p)).is_err());
@@ -520,7 +531,7 @@ fn write_state_as(
         }
     };
     if complete {
-        let path = repo.p.state_path(&id);
+        let path = complete_path.to_path_buf();
         let made = (|| -> Result<()> {
             t.merged.materialize(&path, false)?;
             // A complete fallback obeys the same exclusions as the thin write. In particular,
@@ -552,54 +563,20 @@ fn write_state_as(
             crate::apfs::seal(&path, true, false)
         })();
         if let Err(error) = made {
-            let _ = repo.p.delete_state(&id);
+            let _ = crate::fs::remove(&path);
             return Err(error);
         }
     }
-    let described = (|| -> Result<StateRec> {
-        if !complete {
-            repo.p.lock_or_borrow()?.write(|tx| tx.record_base(&id, &line.head))?;
-        }
-        repo.describe_state(ctx, id.clone(), kind, vec![line.head.clone()], message, Some(line))
-    })();
-    if described.is_err() {
-        let _ = repo.p.delete_state(&id);
-    }
-    described
-}
-
-/// Save the working content without moving the named head. The caller holds the project
-/// lock, as for a folder line. Compare against the last automatic state to avoid duplicates.
-pub fn save_working(
-    locked: &crate::store::LockedProject<'_>,
-    ctx: &Ctx,
-    repo: &Repo,
-    line: &Line,
-    v: &View,
-    message: &str,
-) -> Result<Option<StateRec>> {
-    let prev = repo.save_base(line)?;
-    let mut previous = line.clone();
-    previous.head = prev;
-    let prior = trees(repo, &previous, v)?;
-    if file_changes(&prior, v)?.is_empty() {
-        return Ok(None);
-    }
-    let t = trees(repo, line, v)?;
-    let list = file_changes(&t, v)?;
-    crate::secrets::check_changes(ctx, repo, &t.head.clone().into(), &t.merged.clone().into(), &line.head, &list)?;
-    let st = write_state(ctx, repo, line, &t, &list, StateKind::Auto, message)?;
-    let mut rec = crate::model::DraftRecord::new("save");
-    rec.data = serde_json::json!({"line": line.id, "head": line.head,
-        "working_before": repo.recorded_working(line)?, "working_after": st.id});
-    rec.states.push(st.clone());
-    if let Err(error) = repo.commit_record(locked, ctx, rec) {
-        if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
-            repo.discard_states(std::slice::from_ref(&st));
-        }
-        return Err(error.into());
-    }
-    Ok(Some(st))
+    let path = if complete { complete_path } else { delta };
+    Ok(repo.state_record(
+        ctx,
+        id,
+        kind,
+        vec![line.head.clone()],
+        message,
+        Some(line),
+        crate::fs::host().namespace.info(path)?.uuid,
+    ))
 }
 
 /// Refuse a command that does not support virtual lines yet, when it runs on one.

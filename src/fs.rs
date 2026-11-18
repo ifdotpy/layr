@@ -60,11 +60,12 @@ pub(crate) struct CaptureReport {
 
 /// Recovery retains the exact operation registry and the remaining deletion authority.
 pub(crate) struct Cleanup {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) driver: Arc<dyn Filesystem>,
     pub(crate) failure: RemovalFailure,
     cause: CleanupCause,
     description: String,
-    guards: Vec<composition::CaptureLocation>,
+    _guards: Vec<composition::CaptureLocation>,
 }
 enum CleanupCause {
     Operation(FsError),
@@ -95,7 +96,13 @@ fn retained_error(driver: Arc<dyn Filesystem>, error: FsError, guards: Vec<compo
     match error {
         FsError::Cleanup { cause, failure } => {
             let description = format!("{cause:#}");
-            anyhow::Error::new(Cleanup { driver, cause: CleanupCause::Operation(*cause), failure: *failure, description, guards })
+            anyhow::Error::new(Cleanup {
+                driver,
+                cause: CleanupCause::Operation(*cause),
+                failure: *failure,
+                description,
+                _guards: guards,
+            })
         }
         error => error.into(),
     }
@@ -183,6 +190,7 @@ pub(crate) fn observe_paths(
 ) -> Result<std::collections::BTreeMap<String, crate::status_cache::FileFingerprint>> {
     host().observations.scan(path, Some(paths))
 }
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 pub(crate) fn is_not_empty(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -317,15 +325,16 @@ impl Cleanup {
             Ok(recovery) => CleanupCause::Retained(Box::new(recovery)),
             Err(error) => CleanupCause::Operation(FsError::backend(error)),
         };
-        Self { driver, failure, cause, description, guards: Vec::new() }
+        Self { driver, failure, cause, description, _guards: Vec::new() }
     }
     /// Resume all retained receipts in order; private capture directories stay alive until
     /// cleanup succeeds. Dropping an error grants no authority over a replacement tree.
+    #[cfg(test)]
     pub(crate) fn retry(self) -> std::result::Result<(), Self> {
-        let Self { driver, mut failure, mut cause, description, guards } = self;
+        let Self { driver, mut failure, mut cause, description, _guards: guards } = self;
         loop {
             if let Err(next) = driver.remove(failure.ownership) {
-                return Err(Self { driver, failure: next, cause, description, guards });
+                return Err(Self { driver, failure: next, cause, description, _guards: guards });
             }
             match cause {
                 CleanupCause::Operation(FsError::Cleanup { cause: inner, failure: next }) => {

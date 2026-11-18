@@ -14,13 +14,15 @@
 //! states are read as sources: they are read-only. Symbolic links are never followed. A file
 //! with more than one link is skipped. The pass runs after gc released the project lock.
 // The block pass is pure code that every platform compiles and tests; only btrfs runs it.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 
 use crate::fsutil;
 use crate::repo::Repo;
 use anyhow::Result;
 use layr_hashers::{FastCryptographic, PurposeHasher};
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(target_os = "macos", test))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
@@ -105,6 +107,7 @@ fn collect(root: &Path, target: bool, dry: bool, out: &mut Vec<Entry>) {
 }
 
 /// Groups of two or more files of one size, with at least one file that may be replaced.
+#[cfg(any(target_os = "macos", test))]
 pub fn size_groups(entries: Vec<Entry>) -> Vec<Vec<Entry>> {
     let mut by_size: BTreeMap<u64, Vec<Entry>> = BTreeMap::new();
     for e in entries {
@@ -125,6 +128,7 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n)
 }
 
+#[cfg(target_os = "macos")]
 fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut f = open_plain(path)?;
     let (mut h, mut buf) = (FastCryptographic::new(), vec![0u8; 1 << 20]);

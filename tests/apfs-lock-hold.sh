@@ -1,9 +1,12 @@
 #!/bin/bash
 # Short store lock holds on APFS: a command saves the working folder before the lock (the
-# lock only takes that layer), and the state after the command copies only what it changed.
+# lock only publishes it), and the state after the command copies only what it changed.
 [ "$(uname -s)" = Darwin ] || { echo 'This test requires macOS'; exit 1; }
 . "$(dirname "$0")/lib.sh"
 
+# Extract every project lock hold: retries must also copy outside the lock.
+locked() { printf '%s\n' "$1" | awk '/store lock held/{on=0} on{print} /store lock taken/{on=1}'; }
+copies='APFS (clone|copy tree)|thin materialize'
 sample "$T/src"
 l init hold --no-objects --from "$T/src" -q >/dev/null
 P=$LAYR_ROOT/projects/hold/lines
@@ -20,7 +23,8 @@ sleep 1.1
 
 trace=$(LAYR_TRACE=1 l restore tracked.txt 2>&1)
 eq "restore discards the edit" "tracked" "$(cat tracked.txt)"
-has "the save before the command was written before the lock" "take prepared save" "$trace"
+has "the save before the command is prepared" "prepare save" "$trace"
+eq "the save before the command copies outside the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
 has "the state after the command copies only the restored file" "thin write 1 " "$(printf '%s\n' "$trace" | sed 's/  */ /g')"
 ok "undo of the restore" l undo
 eq "undo brings the edit back" "edited" "$(cat tracked.txt)"
@@ -72,7 +76,7 @@ wait $PUSH
 eq "the push succeeded" "0" "$?"
 ok "the remote has the line" git -C "$R" rev-parse --verify -q topic
 # A folder that changes while a save waits for the lock: the layer written before the lock
-# becomes an automatic state, and the state under the lock copies only the changed entry.
+# is discarded and the latest folder is captured again outside the project lock.
 mkdir -p bulk2 && for i in $(seq 1 200); do printf '%s\n' "$i" > "bulk2/f$i"; done
 python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); time.sleep(12)' "$LAYR_ROOT/projects/hold/meta/lock" &
 HOLDER=$!
@@ -85,8 +89,8 @@ printf 'late\n' > late.txt
 wait $HOLDER; wait $SAVE
 trace=$(cat "$T/late-save.log")
 has "the save wrote its layer before the lock" "prepare save" "$trace"
-has "the changed folder gets a layer over the prepared one" "layer over prepared save" "$trace"
-has "under the lock only the changed entry is copied" "thin write 1 entries" "$(printf '%s\n' "$trace" | sed 's/  */ /g')"
+ok "the changed folder is prepared again" test "$(printf '%s\n' "$trace" | grep -c 'prepare save')" -ge 2
+eq "the late edit is captured outside the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
 auto=$(printf '%s\n' "$trace" | awk '$1 == "topic" {print $2}')
 eq "the state has the late file" "late" "$(l show "$auto:late.txt")"
 eq "the state has the files of the prepared layer" "200" "$(l show "$auto:bulk2/f200")"
@@ -106,8 +110,6 @@ eq "a save without a change writes no layer" "" "$(LAYR_TRACE=1 l save 2>&1 | gr
 rm -rf bulk3
 
 # merge and reset --hard copy and merge the trees before the lock; under it they only rename.
-locked() { printf '%s\n' "$1" | awk '/store lock held/{exit} on{print} /store lock taken/{on=1}'; }
-copies='APFS (clone|copy tree)|thin materialize'
 l line new -q side
 cd "$P/side" || exit 1
 printf 'side\n' > side.txt && l add side.txt && l save -qm side
@@ -123,7 +125,7 @@ head=$(l rev-parse head)
 printf 'dirty up-to-date\n' > tracked.txt
 sleep 1.1  # not racy for the prepared save
 trace=$(LAYR_TRACE=1 l merge -q side 2>&1)
-has "an up-to-date merge takes its prepared save" "take prepared save" "$trace"
+has "an up-to-date merge publishes its prepared save" "publish prepared save" "$trace"
 eq "an up-to-date merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
 eq "an up-to-date merge keeps dirty content" "dirty up-to-date" "$(cat tracked.txt)"
 eq "an up-to-date merge keeps the head" "$head" "$(l rev-parse head)"
@@ -149,7 +151,7 @@ l overlay use --none >/dev/null || exit 1
 printf 'dirty layered up-to-date\n' > tracked.txt
 sleep 1.1  # not racy for the prepared comparison
 trace=$(LAYR_TRACE=1 l merge -q already-layered 2>&1)
-has "an up-to-date overlay merge takes its prepared save" "take prepared save" "$trace"
+has "an up-to-date overlay merge publishes its prepared save" "publish prepared save" "$trace"
 eq "an up-to-date overlay merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
 eq "an up-to-date overlay merge keeps dirty content" "dirty layered up-to-date" "$(cat tracked.txt)"
 eq "an up-to-date overlay merge keeps the head" "$head" "$(l rev-parse head)"

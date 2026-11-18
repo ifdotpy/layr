@@ -211,6 +211,10 @@ no "the mount is gone" bash -c "mount | grep -q '$P/lines/v2 (layrfs'"
 ok "the line folder is gone" test ! -e "$P/lines/v2"
 ok "the view folder is gone" test -z "$(ls "$P/meta/vlines" 2>/dev/null)"
 
+ok "undo of mounted deletion restores its final save" l undo
+eq "mounted deletion retained the unsaved upper file" unsaved "$(cat "$P/lines/v2/unsaved.txt")"
+ok "remove the restored folder line" l line delete -D --discard v2
+
 # A complete fallback preserves upper hard links and excludes ignored build output.
 ok "a virtual line for hard links" l line new linked --view virtual
 L="$P/lines/linked"

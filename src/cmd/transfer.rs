@@ -146,13 +146,10 @@ fn source_state(ctx: &Ctx, h: &super::Here, rev: Option<&str>) -> Result<String>
         None => {
             let l = h.line()?;
             h.repo.authorize_line(ctx, l, crate::repo::LineOp::Save)?;
-            let _lock = h.repo.p.lock_maintenance()?;
+            let _line_lock = h.repo.line_lock(l)?;
             let l = h.repo.line(&l.id)?;
-            let s = h.repo.save(&_lock, ctx, &l, "copy out", false, false)?;
-            Ok(match s {
-                Some(s) => s.id,
-                None => h.repo.last_auto(&l)?.map(|s| s.id).unwrap_or(l.head.clone()),
-            })
+            let (_lock, state) = h.repo.save_working(ctx, &l, &_line_lock, "copy out")?;
+            Ok(state.unwrap_or(l.head))
         }
     }
 }

@@ -76,81 +76,44 @@ pub fn save(ctx: &Ctx, h: &Here, line: &Line, v: &View, message: &str, quiet: bo
     Ok(0)
 }
 
-/// Delete a virtual line: unsaved changes become its final automatic state, as for a folder.
+/// Delete a virtual line through the same owned final-save protocol as a folder line.
 pub fn delete(
     ctx: &Ctx,
     repo: &Repo,
-    l: &Line,
-    v: &View,
+    line_lock: crate::store::LineLeaseSet,
     target: &crate::lineops::DeleteTarget,
-    check: impl FnOnce(&Line) -> Result<()>,
+    discard: bool,
+    check: impl Fn(&Line) -> Result<()>,
 ) -> Result<()> {
-    let _lifecycle = lifecycle_lock(repo, l)?;
-    let _line_lock = repo.line_lock(l)?;
-    let l = {
-        let _lock = repo.p.lock_maintenance()?;
-        target.validate(repo)?
-    };
+    // The caller holds lifecycle -> line, including the deletion's initial safety checks.
+    let l = target.validate(repo)?;
     let at = repo.working(&l);
-    let last = if v.mounted || upper(&repo.p, &l.id).exists() {
-        let t = trees(repo, &l, v)?;
-        let list = file_changes(&t, v)?;
-        if list.is_empty() {
-            None
-        } else {
-            Some(write_state(ctx, repo, &l, &t, &list, StateKind::Auto, "final state of a deleted virtual line")?)
-        }
+    // Validate the mounted identity before our own unmount changes it. The caller's
+    // lifecycle and line leases exclude management changes while we capture the
+    // exposed mountpoint; that identity then protects the preparation gap.
+    let unmounted_target = if is_mounted(&at) {
+        unmount(&at)?;
+        Some(crate::lineops::DeleteTarget::capture(repo, &l)?)
     } else {
         None
     };
-    // Test only (t257): after the final state was prepared, before the locked validation.
-    if let Err(e) = crate::cmd::branch::deletion_barrier() {
-        if let Some(st) = &last {
-            repo.discard_states(std::slice::from_ref(st));
-        }
-        return Err(e);
-    }
-    let _lock = _line_lock.lock(&repo.p)?;
-    let fresh = match target.validate(repo).and_then(|line| {
-        repo.authorize_line(ctx, &line, crate::repo::LineOp::Manage)?;
-        // A refusal after the final state was prepared keeps the upper data and discards the state (t257).
-        check(&line)?;
-        Ok(line)
-    }) {
-        Ok(line) => line,
-        Err(e) => {
-            if let Some(st) = &last {
-                repo.discard_states(std::slice::from_ref(st));
-            }
-            return Err(e);
-        }
-    };
-    if is_mounted(&at) {
-        if let Err(e) = unmount(&at) {
-            if let Some(st) = &last {
-                repo.discard_states(std::slice::from_ref(st));
-            }
-            return Err(e);
-        }
-    }
-    let last_id = match last {
-        Some(st) => {
-            let mut rec = crate::model::DraftRecord::new("save");
-            let before = repo.recorded_working(&fresh)?;
-            rec.data =
-                serde_json::json!({"line": fresh.id, "head": fresh.head, "working_before": before, "working_after": st.id});
-            rec.states.push(st.clone());
-            repo.commit_record(&_lock, ctx, rec)?;
-            Some(st.id)
-        }
-        None => None,
-    };
-    crate::cmd::branch::delete_recorded(&_lock, ctx, repo, &fresh, last_id, at.exists())?;
+    let target = unmounted_target.as_ref().unwrap_or(target);
+    let (_lock, fresh, last, staged) =
+        crate::cmd::branch::prepare_deletion(ctx, repo, &l, line_lock, upper(&repo.p, &l.id).exists(), discard, || {
+            let fresh = target.validate(repo)?;
+            repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
+            check(&fresh)?;
+            Ok(fresh)
+        })?;
+    crate::cmd::branch::delete_recorded(&_lock, ctx, repo, &fresh, last, at.exists(), staged)?;
     repo.p.trash(&dir(&repo.p, &fresh.id))?;
+    drop(_lock);
+    if let Err(e) = repo.finish_line_delete_caches(ctx) {
+        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+    }
     Ok(())
 }
 
-/// `layr line show <line> --folder [<path>] | --none | --virtual`.
 pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = crate::args::Spec::new().flag("--folder").flag("--none").flag("--virtual");
     let a = crate::args::parse(&spec, args)?;

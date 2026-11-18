@@ -243,6 +243,87 @@ pub(crate) fn deletion_barrier() -> Result<()> {
     Ok(())
 }
 
+/// Prepare a folder or virtual line's final save, then recheck deletion before publication.
+/// The owned preparation drops unpublished work on every refusal or retry.
+pub(crate) fn prepare_deletion<'p>(
+    ctx: &Ctx,
+    repo: &'p Repo<'p>,
+    l: &Line,
+    line_lock: crate::store::LineLeaseSet,
+    made: bool,
+    discard: bool,
+    check: impl Fn() -> Result<Line>,
+) -> Result<(crate::store::LockedProject<'p>, Line, Option<String>, Option<String>)> {
+    let name = &l.name;
+    let mut attempt = 0;
+    let mut initial_lease = Some(line_lock);
+    loop {
+        attempt += 1;
+        let lease = match initial_lease.take() {
+            Some(lease) => lease,
+            None => repo.line_lock(l)?,
+        };
+        let fresh = repo.line(&l.id)?;
+        if !repo.setup_save(ctx, &fresh, true)? {
+            if attempt < 3 {
+                continue;
+            }
+            return Err(exit(1, "cache setup is busy; retry line deletion"));
+        }
+        let fresh = repo.line(&l.id)?;
+        // Automatic states leave overlay files out: uncommitted changes of them would be lost.
+        if !discard && repo.is_stacked(&fresh)? && repo.working(&fresh).exists() {
+            let private = repo.private_paths(&fresh)?;
+            let (st, _scan, _it, _idx) = repo.status(&fresh)?;
+            let changed = st
+                .staged
+                .iter()
+                .chain(st.unstaged.iter())
+                .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
+                .flatten()
+                .any(|p| private.contains(&p));
+            let any = st.staged.len() + st.unstaged.len() + st.untracked.len() > 0;
+            if changed || !repo.pending_moves(&fresh).is_empty() || (any && repo.private_view(&fresh)?) {
+                return Err(exit(
+                    1,
+                    format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard"),
+                ));
+            }
+        }
+        let prepared = match repo.prepare_final_state(ctx, &fresh, &lease) {
+            Err(error) if error.is::<crate::repo::StalePreparation>() && attempt < 3 => continue,
+            result => result?,
+        };
+        // Preparation owns its inputs; management changes may invalidate the target
+        // before publication. Reacquire the line lease before the final project lock.
+        drop(lease);
+        // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
+        // test can write into the folder before the lock.
+        if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        let staged = prepared.staged_id();
+        deletion_barrier()?;
+        let lease = repo.line_lock(l)?;
+        let lock = lease.lock(&repo.p)?;
+        let fresh = check()?;
+        match repo.record_final_state(ctx, &lock, prepared)? {
+            crate::repo::FinalState::Recorded(last) => return Ok((lock, fresh, if made { last } else { None }, staged)),
+            crate::repo::FinalState::Moved if attempt < 3 => drop(lock),
+            crate::repo::FinalState::Moved => {
+                return Err(exit(
+                    1,
+                    format!(
+                        "line {name} moved during the command (head {} -> {}); run it again",
+                        ids::short(&l.head),
+                        ids::short(&fresh.head)
+                    ),
+                ))
+            }
+        }
+    }
+}
+
 fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
     let spec = Spec::new()
         .flag("-l|--list")
@@ -340,6 +421,11 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                 return Err(exit(1, format!("error: cannot delete line '{name}' used as the current folder")));
             }
             #[cfg(target_os = "macos")]
+            let _lifecycle = crate::views::of(repo, &l).map(|_| crate::views::lifecycle_lock(repo, &l)).transpose()?;
+            let line_lock = repo.line_lock(&l)?;
+            let l = repo.line(&l.id)?;
+            repo.authorize_line(ctx, &l, crate::repo::LineOp::Manage)?;
+            #[cfg(target_os = "macos")]
             let view = crate::views::of(repo, &l);
             check_merged(&l)?;
             // Unsaved changes in the folder of the line need an explicit --discard (or -f): -D
@@ -370,80 +456,32 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
-            if let Some(v) = view {
-                crate::cmd::view_ops::delete(ctx, repo, &l, &v, &target, check_merged)?;
+            if view.is_some() {
+                let deleted = line_json(repo, &l);
+                crate::cmd::view_ops::delete(ctx, repo, line_lock, &target, discard, check_merged)?;
                 if a.has("--json") {
-                    outln!(ctx, "{}", line_json(repo, &l));
+                    outln!(ctx, "{}", deleted);
                 } else {
                     outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
                 }
                 continue;
             }
             // The working state is prepared before the lock; under it the record and the renames only
-            // (issue #194). A folder that changed since adds a layer of its changes under the lock; a
-            // moved head prepares again, up to three times.
+            // (issue #194). Changed content or moved inputs prepare again outside the lock,
+            // up to three times.
             // A line that this machine never made a folder for (another machine's line that a fetch brought, as a
             // CI line) has no working state to keep: the record alone deletes it.
             #[cfg(target_os = "linux")]
             crate::views::ensure_no_pending_move(repo, &l)?;
             let made = target.has_folder();
-            let (_lock, last) = if !made {
-                // Test only: replace the resolved identity, folder or heads before locked validation (t256, t271).
-                deletion_barrier()?;
-                let lock = repo.p.lock_maintenance()?;
+            let (_lock, _fresh, last, staged) = prepare_deletion(ctx, repo, &l, line_lock, made, discard, || {
                 let fresh = target.validate(repo)?;
                 repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
                 check_merged(&fresh)?;
-                (lock, None)
-            } else {
-                let mut attempt = 0;
-                loop {
-                    attempt += 1;
-                    let current = {
-                        let _lock = repo.p.lock_maintenance()?;
-                        let current = target.validate(repo)?;
-                        repo.authorize_line(ctx, &current, crate::repo::LineOp::Manage)?;
-                        current
-                    };
-                    let prepared = repo.prepare_final_state(ctx, &current)?;
-                    // Test hook (tests/t123-line-delete-save.sh): wait after the prepare step, so a
-                    // test can write into the folder before the lock.
-                    if let Some(ms) = std::env::var("LAYR_TEST_LINE_DELETE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                    }
-                    // Test only (t256, t271): after the preparation, before the locked validation.
-                    deletion_barrier()?;
-                    let lock = repo.p.lock_maintenance()?;
-                    let fresh = target.validate(repo)?;
-                    repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
-                    check_merged(&fresh)?;
-                    // Automatic states leave overlay files out: uncommitted changes of them would be lost.
-                    if !discard && repo.is_stacked(&fresh)? && repo.working(&fresh).exists() {
-                        let private = repo.private_paths(&fresh)?;
-                        let (st, _scan, _it, _idx) = repo.status(&fresh)?;
-                        let changed = st.staged.iter().chain(st.unstaged.iter())
-                            .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()]).flatten()
-                            .any(|p| private.contains(&p));
-                        // A line whose automatic states hold only the shared head keeps no change at all.
-                        let any = st.staged.len() + st.unstaged.len() + st.untracked.len() > 0;
-                        if changed || !repo.pending_moves(&fresh).is_empty() || (any && repo.private_view(&fresh)?) {
-                            return Err(exit(1, format!("error: line '{name}' has unsaved changes of overlay files, which automatic states do not keep; save them, or delete the line with --discard")));
-                        }
-                    }
-                    if fresh.head != current.head {
-                        if attempt < 3 {
-                            drop(lock);
-                            continue;
-                        }
-                        return Err(exit(1, format!("line {name} moved during the command; run it again")));
-                    }
-                    let last = prepared.working_state(&lock, ctx, &fresh, "before line delete")?;
-                    break (lock, last);
-                }
-            };
-            // The final state stays in the `deleted` ring. As a thin layer it keeps the states
-            // under it, so it gets a complete tree (APFS), in the background after this command
-            // (docs/ownership.md): the copy of the whole tree and its seal took seconds here.
+                Ok(fresh)
+            })?;
+            // Final preparation already made the complete APFS tree. Background retirement
+            // only drops an older layer after its readers have had time to finish.
             #[cfg(target_os = "macos")]
             if let Some(id) = &last {
                 if repo.p.delta_path(id).is_dir() {
@@ -452,7 +490,11 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             }
             let l = target.validate(repo)?;
             let deleted = line_json(repo, &l);
-            delete_recorded(&_lock, ctx, repo, &l, last, made)?;
+            delete_recorded(&_lock, ctx, repo, &l, last, made, staged)?;
+            drop(_lock);
+            if let Err(e) = repo.finish_line_delete_caches(ctx) {
+                eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+            }
             if a.has("--json") {
                 outln!(ctx, "{}", deleted);
             } else {
@@ -772,9 +814,33 @@ pub(crate) fn delete_recorded(
     l: &crate::model::Line,
     last: Option<String>,
     made: bool,
+    staged: Option<String>,
 ) -> Result<()> {
-    // A staged version may exist nowhere else: keep it as a state, so `undo` restores the index.
-    let staged = staged_state(locked, ctx, repo, l)?;
+    // Read the configured detachment plan before committing. Filesystem checks are
+    // best effort after publication: an inaccessible cache must not refuse deletion.
+    let root = repo.working(l);
+    let detach_path = |folder: &str| -> Result<Option<std::path::PathBuf>> {
+        crate::fsutil::check_rel(folder)?;
+        let mut path = root.clone();
+        for component in folder.split('/').filter(|c| !c.is_empty()) {
+            path.push(component);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(Some(path))
+    };
+    let mut folders = std::collections::BTreeSet::new();
+    if made {
+        folders.extend(repo.folder_overlays()?.into_iter().map(|(_, folder)| folder));
+        folders.extend(repo.view_cache_overlays()?.into_iter().map(|(_, folder, _)| folder));
+        for folder in &folders {
+            crate::fsutil::check_rel(folder)?;
+        }
+    }
     // An OverlayFS folder is a mount. Unmount it before the record: an unmount error then keeps
     // the line, and its folder is mounted again by the next command.
     #[cfg(feature = "overlayfs")]
@@ -791,6 +857,21 @@ pub(crate) fn delete_recorded(
     repo.commit_record(locked, ctx, rec)?;
     if made {
         crate::fsutil::git_writable(&repo.working(l), true);
+        // Detach known folder overlays first. A nested cache would otherwise force
+        // the trash worker to search the entire working tree for storage roots.
+        {
+            let _known = crate::trace::span("delete: known nested subvolumes");
+            for folder in folders {
+                // Walk without following links; a build may have replaced a parent.
+                let result = detach_path(&folder).and_then(|path| match path {
+                    Some(path) => repo.p.trash(&path),
+                    None => Ok(()),
+                });
+                if let Err(e) = result {
+                    eprintln!("warning: could not detach cache folder '{folder}' of deleted line '{}': {e:#}", l.name);
+                }
+            }
+        }
         // Into the trash, emptied after the store lock: a folder with build output takes
         // minutes to delete, and other commands must not wait for it.
         repo.p.trash(&repo.working(l))?;
@@ -805,10 +886,6 @@ pub(crate) fn delete_recorded(
     crate::gitbridge::sync_store_access(repo)?;
     // The line's head no longer keeps its caches.
     super::admin::trash_excess_caches(&repo.p)?;
-    // Its cache overlay lines go too, with their states.
-    if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
-        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
-    }
     Ok(())
 }
 
@@ -929,31 +1006,6 @@ pub fn tag(ctx: &Ctx, args: &[String]) -> Result<i32> {
     rec.data = serde_json::json!({"name": name, "state": id, "message": a.get("-m")});
     repo.commit_record(&_lock, ctx, rec)?;
     Ok(0)
-}
-
-/// The index of a line as an automatic state, when it differs from the head (None otherwise).
-fn staged_state(
-    locked: &crate::store::LockedProject<'_>,
-    ctx: &Ctx,
-    repo: &crate::repo::Repo,
-    l: &crate::model::Line,
-) -> Result<Option<String>> {
-    if repo.current_stage(l)?.is_none() {
-        return Ok(None);
-    }
-    let (index, _temp) = repo.index_view(l)?;
-    let head = repo.head_src(l)?;
-    if !crate::changes::file_changes(&head, &index)?.iter().any(|c| !crate::repo::skip_path(c.path())) {
-        return Ok(None);
-    }
-    let mut keep = Vec::new();
-    let tree = repo.complete(index, &mut keep)?;
-    let st = repo.new_state(ctx, &tree, StateKind::Auto, vec![l.head.clone()], "staged before line delete", Some(l))?;
-    let mut rec = crate::model::DraftRecord::new("save");
-    rec.states.push(st.clone());
-    rec.data = serde_json::json!({"line": l.id});
-    repo.commit_record(locked, ctx, rec)?;
-    Ok(Some(st.id))
 }
 
 #[cfg(test)]

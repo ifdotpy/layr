@@ -178,13 +178,14 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
         }
         // Keep cache preparation and publication in the same line operation as follow and other hooks.
         let _cache_lock = if a.has("--caches") { Some(repo.cache_build_lock(&l)?) } else { None };
-        let _line_lock = if a.has("--caches") { Some(repo.line_lock(&l)?) } else { None };
-        let l = if a.has("--caches") { repo.line(&l.id)? } else { l };
+        #[cfg(target_os = "macos")]
+        let _lifecycle = if virtual_line(&l) { Some(crate::views::lifecycle_lock(repo, &l)?) } else { None };
+        let line_lock = repo.line_lock(&l)?;
+        let l = repo.line(&l.id)?;
         if a.has("--caches") {
             repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
         }
         let mut prepared = None;
-        let mut automatic = None;
         if a.has("--caches") {
             // A cache copy that a later cache fails to make leaves the earlier ones in the work folder.
             repo.hold(repo.pin(&[&l.head, &repo.save_base(&l)?])?);
@@ -203,8 +204,6 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                     return Err(e);
                 }
             };
-        } else if !a.has("--force") {
-            automatic = Some(repo.prepare_save(ctx, &l)?);
         }
         // Test barrier after cache preparation and before publication.
         if a.has("--caches") {
@@ -218,21 +217,33 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
                 }
             }
         }
-        // Test hook (tests/t128-caches-prepare.sh): wait after the prepare step, so a test can
-        // change the folder before the lock.
-        if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        let acquired = match &_line_lock {
-            Some(leases) => leases.lock(&repo.p),
-            None => repo.p.lock_maintenance(),
-        };
-        let _lock = match acquired {
-            Ok(lock) => lock,
-            Err(e) => {
-                repo.discard_prepared_caches(prepared);
-                return Err(e);
+        let (_lock, automatic) = if !a.has("--caches") {
+            let (lock, _, outcome, _) = repo.save_prepared(
+                ctx,
+                &l.id,
+                &line_lock,
+                crate::repo::SaveMode::Automatic { message: msg.clone(), running: a.has("--running"), force: a.has("--force") },
+            )?;
+            let state = match outcome {
+                crate::repo::PublishOutcome::Saved(state) => Some(state),
+                crate::repo::PublishOutcome::Unchanged(_) => None,
+                crate::repo::PublishOutcome::Stale => unreachable!("foreground save retries stale preparation"),
+            };
+            (lock, state)
+        } else {
+            // Test hook (tests/t128-caches-prepare.sh): wait after the prepare step, so a test can
+            // change the folder before the lock.
+            if let Some(ms) = std::env::var("LAYR_TEST_SAVE_PAUSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
             }
+            let lock = match line_lock.lock(&repo.p) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    repo.discard_prepared_caches(prepared);
+                    return Err(e);
+                }
+            };
+            (lock, None)
         };
         let l = repo.line(&l.id)?;
         if expected_head.is_some_and(|expected| expected != l.head) {
@@ -240,7 +251,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             repo.discard_prepared();
             bail!("line {} moved before the cache save", l.name);
         }
-        if !virtual_line(&l) {
+        if a.has("--caches") && !virtual_line(&l) {
             crate::repo::recover_cache_replacements(&repo.working(&l))?;
         }
         let (mut caches, mut versioned) = if a.has("--caches") { repo.line_cache_paths(&l)? } else { Default::default() };
@@ -289,10 +300,7 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             caches.retain(|p| !refused.contains(p));
             Some(repo.caches_state(&_lock, ctx, &l, &msg, a.has("--running"), &caches, prepared.take())?)
         } else {
-            match automatic.take() {
-                Some(prepared) => prepared.publish(&_lock, ctx, &l, &msg, a.has("--running"))?,
-                None => repo.save(&_lock, ctx, &l, &msg, a.has("--running"), a.has("--force"))?,
-            }
+            automatic
         };
         if let Some(name) = a.get("--keep") {
             // An unchanged folder makes no state: the keep then holds the state equal to the folder.
@@ -632,14 +640,6 @@ pub fn undo_record(ctx: &Ctx, repo: &Repo, id: &str, force: bool) -> Result<i32>
         return Err(exit(1, "permission denied: only the project admin or the user who made it can undo this operation"));
     }
     let _queue_lock = if r.data.get("queue_change").is_some() { Some(super::queue::require_lock(repo)?) } else { None };
-    // Before the lock: the automatic state of each line's folder and the trees that the undo
-    // reads (seconds to minutes each under the lock). Errors only lose the preparation; the
-    // states are loaded again under the lock, where an error stops the undo.
-    for ch in r.lines.values() {
-        for s in [&ch.working_before, &ch.working_after].into_iter().flatten() {
-            let _ = repo.state_root(s);
-        }
-    }
     let r2 = undo_locked(ctx, repo, &r, force);
     repo.discard_prepared();
     r2
@@ -670,7 +670,8 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
     for s in [&before, &after] {
         repo.state_src(s).map_err(|e| exit(1, format!("error: cannot undo, no file changed: {e:#}")))?;
     }
-    let wb = save_before_undo(&_line_lock, None, ctx, repo, &line)?;
+    let (_commit, wb) = repo.save_working(ctx, &line, &_line_lock, "before undo")?;
+    drop(_commit);
     if let Err(e) = revert_working(repo, &line, &before, &after, force) {
         super::work::put_back(repo, &line, wb.as_deref());
         return Err(e);
@@ -751,29 +752,75 @@ fn undo_in_place(repo: &Repo, r: &Record) -> bool {
     })
 }
 
-/// The automatic save of a line before its undo. An in-place undo takes the project lock for the
-/// save alone (the copy of the folder is made before it); the caller holds no project lock then.
-fn save_before_undo(
-    leases: &crate::store::LineLeaseSet,
-    locked: Option<&crate::store::LockedProject<'_>>,
-    ctx: &Ctx,
-    repo: &Repo,
-    line: &Line,
-) -> Result<Option<String>> {
-    if let Some(locked) = locked {
-        return repo.working_state(locked, ctx, line, "before undo");
+fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
+    let _warnings = crate::fsutil::copy_retry_warnings();
+    for attempt in 0..3 {
+        if let Some(code) = try_undo_locked(ctx, repo, r, force, attempt)? {
+            return Ok(code);
+        }
     }
-    let prepared = repo.prepare_save(ctx, line)?;
-    let _commit = leases.lock(&repo.p)?;
-    prepared.working_state(&_commit, ctx, line, "before undo")
+    bail!("line changed during undo preparation; retry the command")
 }
 
-fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
+fn try_undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool, attempt: usize) -> Result<Option<i32>> {
     let in_place = undo_in_place(repo, r);
     // The lines of the undo, in id order, for their folders. An in-place undo takes the project lock
     // for its checks and its record only; any other undo keeps the project lock for all of it.
     let lines = r.lines.keys().map(|id| repo.p.db.line_by_id(id)).collect::<Result<Vec<_>>>()?;
     let leases = repo.p.line_leases(lines.into_iter().flatten().map(|l| (l.id, l.name)))?;
+    // Restore undo's inputs before preparing any working save. On APFS the current
+    // thin head may itself depend on the removed before head (an amend keeps a
+    // sibling in history but can retain its storage as a layer base).
+    let mut needed: Vec<String> = Vec::new();
+    for ch in r.lines.values() {
+        needed.extend(
+            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten(),
+        );
+    }
+    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
+    let unavailable = |e: anyhow::Error| {
+        exit(
+            1,
+            format!(
+                "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
+                repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
+            ),
+        )
+    };
+    // Keep inputs through the automatic saves, which can advance the undo ring.
+    let _inputs = repo.pin(&needed.iter().map(String::as_str).collect::<Vec<_>>()).map_err(unavailable)?;
+    for state in &needed {
+        repo.state_src(state).map_err(unavailable)?;
+    }
+    // Keep every capture private until one project lock covers their publication
+    // and the undo. A writer during the lock wait invalidates the content fence.
+    let mut prepared = Vec::new();
+    if !in_place {
+        for lid in r.lines.keys() {
+            let Some(line) = repo.p.db.line_by_id(lid)? else { continue };
+            if repo.p.db.line_by_name(&line.name)?.is_none_or(|active| active.id != line.id) {
+                continue;
+            }
+            let line = repo.localize(line)?;
+            if !repo.setup_save(ctx, &line, true)? {
+                return Ok(None);
+            }
+            let line = repo.line(lid)?;
+            let mode = crate::repo::SaveMode::Automatic { message: "before undo".into(), running: false, force: false };
+            match repo.prepare_save(ctx, &line, &leases, mode) {
+                Ok(mut save) => {
+                    if attempt == 2 {
+                        // Keep the last running copy when a writer never settles, as save does.
+                        save.accept_unsettled();
+                    }
+                    prepared.push((line, save));
+                }
+                Err(e) if e.is::<crate::repo::StalePreparation>() => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        }
+        crate::repo::save_barrier("undo")?;
+    }
     let _lock = if in_place { None } else { Some(leases.lock(&repo.p)?) };
     let mut rec = crate::model::DraftRecord::new("undo");
     rec.data = serde_json::json!({"undo": r.id, "op": r.op});
@@ -898,27 +945,31 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         }
         lines.push((lid, ch, cur, alive, cur_state));
     }
-    let mut needed: Vec<String> = Vec::new();
-    for ch in r.lines.values() {
-        needed.extend(
-            [ch.before().map(|b| b.head.clone()), ch.working_before.clone(), ch.working_after.clone()].into_iter().flatten(),
-        );
-    }
-    needed.extend(["final_state", "staged_state"].iter().filter_map(|k| r.data.get(*k)?.as_str().map(str::to_string)));
-    for s in &needed {
-        repo.state_src(s).map_err(|e| {
-            exit(
-                1,
-                format!(
-                    "error: cannot undo, no file changed: {e:#} (the newest {} operations of a line can be undone)",
-                    repo.p.config_u64("undo.ops", crate::db::owners::UNDO_OPS_DEFAULT as u64)
-                ),
-            )
-        })?;
-    }
     // The heads the checks saw: an in-place undo checks them again under the project lock.
-    let seen: Vec<(String, Option<(String, String)>)> =
-        lines.iter().map(|(lid, _, _, _, cs)| ((*lid).clone(), cs.as_ref().map(|s| (s.name.clone(), s.head.clone())))).collect();
+    let seen: Vec<(String, Option<(String, String)>)> = lines
+        .iter()
+        .map(|(lid, _, _, _, cs)| ((*lid).clone(), cs.as_ref().map(|s| (s.name.clone(), s.head.clone()))))
+        .collect();
+    // Refusals above publish no "before undo" saves. In the non-in-place case,
+    // retain this same project lock through every save and folder replacement.
+    let mut working = std::collections::HashMap::new();
+    if let Some(lock) = &_lock {
+        for (line, save) in prepared {
+            let state = match repo.publish_save(ctx, lock, save)? {
+                crate::repo::PublishOutcome::Saved(state) => Some(state.id),
+                crate::repo::PublishOutcome::Unchanged(id) => repo.working(&line).exists().then_some(id),
+                crate::repo::PublishOutcome::Stale => return Ok(None),
+            };
+            working.insert(line.id, state);
+        }
+    } else {
+        for (_, _, cur, alive, _) in &lines {
+            if let Some(line) = cur.as_ref().filter(|_| *alive) {
+                let (_, state) = repo.save_working(ctx, line, &leases, "before undo")?;
+                working.insert(line.id.clone(), state);
+            }
+        }
+    }
     // The lines with their restored head: their .git folders follow it after the record is made.
     let mut restored: Vec<Line> = Vec::new();
     // In place: the stage of each line is dropped after the record, and each folder that was
@@ -930,7 +981,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         match (ch.before(), &cur) {
             (Some(b), Some(l)) if alive => {
                 // Save the current content, then restore the old pointers and content.
-                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
+                wb = working.remove(lid).flatten();
                 written.push((l.clone(), wb.clone()));
                 // A name change keeps the folder where it is, as `line rename` does.
                 if b.name != l.name {
@@ -990,7 +1041,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
             }
             (None, Some(l)) if alive => {
                 // The operation created the line: delete it (content saved first).
-                wb = save_before_undo(&leases, _lock.as_ref(), ctx, repo, l)?;
+                wb = working.remove(lid).flatten();
                 repo.p.trash(&repo.working(l))?;
                 repo.drop_stage(l)?;
             }
@@ -1062,7 +1113,7 @@ fn undo_locked(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
         fmt_time(r.time),
         short_op(&done.id)
     );
-    Ok(0)
+    Ok(Some(0))
 }
 
 /// Make the working folder equal to a state (all paths, untracked and ignored included).
@@ -1245,28 +1296,6 @@ fn try_state_in(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], quiet: boo
 /// cannot tell whether build output is valid for a state (docs/design.md, section 5).
 pub fn run_check(ctx: &Ctx, repo: &Repo, state: &str, argv: &[String], command: &str, quiet: bool) -> Result<i32> {
     run_check_in(ctx, repo, state, argv, command, &[], quiet, false, false, None)
-}
-
-/// Run a configured check in an exact view, with the same clean environment as `run_check`.
-/// This function takes the project lock itself; the caller must not hold it.
-pub fn run_check_view(
-    ctx: &Ctx,
-    repo: &Repo,
-    view: &crate::overlay::View,
-    argv: &[String],
-    command: &str,
-    quiet: bool,
-) -> Result<i32> {
-    {
-        let _lock = repo.p.lock_maintenance()?;
-        repo.require(ctx, "try")?;
-        repo.check_view_collected(view)?;
-        repo.check_view_read(ctx, view)?;
-        if !view.layers.is_empty() {
-            repo.save_view(&_lock, ctx, view)?;
-        }
-    }
-    run_check_in(ctx, repo, &view.shared, argv, command, &[], quiet, false, false, (!view.layers.is_empty()).then_some(view))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1577,6 +1606,8 @@ fn repair_project(
     free: bool,
     bases_read: Option<&BTreeMap<String, String>>,
 ) -> Result<usize> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = bases_read;
     if dry {
         repair_temporary(ctx, repo, true, quiet)?;
         let c = snapshot(repo, || owners_check(repo))?;

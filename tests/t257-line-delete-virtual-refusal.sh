@@ -45,9 +45,11 @@ cd "$P/lines/main"
 upper=$(printf '%s\n' "$P"/meta/vlines/*/upper)
 [ -d "$upper" ] || { echo 'FATAL: the virtual upper folder is missing'; exit 1; }
 
+has "the refused deletion starts with a mounted target" "$V (layrfs" "$(mount)"
 out=$(l line delete --discard virt 2>&1); rc=$?
 eq "an unmerged virtual line is refused" 1 "$rc"
 has "the early virtual refusal names the destination" "not fully merged into 'main'" "$out"
+has "the early refusal keeps the mount" "$V (layrfs" "$(mount)"
 has "the early refusal keeps the line" virt "$(l line list)"
 eq "the early refusal keeps upper data" "keep the upper data" "$(cat "$upper/unsaved.txt")"
 
@@ -71,7 +73,9 @@ if [ ! -f "$barrier/ready" ]; then
 fi
 state_ids > "$T/states.prepared"
 comm -13 "$T/states.before" "$T/states.prepared" > "$T/prepared"
-ok "virtual deletion prepared a temporary state before the barrier" test -s "$T/prepared"
+no "virtual deletion publishes no native state before the barrier" test -s "$T/prepared"
+find "$P/meta/work" -mindepth 2 -maxdepth 2 -type d -name tree > "$T/workspaces"
+ok "virtual deletion captures its tree in a workspace" test -s "$T/workspaces"
 l reset -q --hard head~1 || { touch "$barrier/release"; wait "$pid"; exit 1; }
 touch "$barrier/release"
 wait "$pid"; rc=$?
@@ -80,13 +84,17 @@ eq "a destination rewound during virtual deletion refuses" 1 "$rc"
 has "the locked virtual refusal names the destination" "not fully merged into 'main'" "$(cat "$T/delete.out")"
 has "the locked refusal keeps the virtual line" virt "$(l line list)"
 eq "the locked refusal keeps upper data" "keep the upper data" "$(cat "$upper/unsaved.txt")"
-while IFS= read -r state; do
-    [ -n "$state" ] || continue
-    no "the refused virtual deletion discards its temporary complete tree" test -e "$P/states/$state"
-    no "the refused virtual deletion discards its temporary layer" test -e "$P/deltas/$state"
-done < "$T/prepared"
+no "our own unmount is not a folder replacement" grep -q "working folder .* changed" "$T/delete.out"
+state_ids > "$T/states.refused"
+ok "the refused deletion publishes no native state" cmp -s "$T/states.before" "$T/states.refused"
+while IFS= read -r tree; do
+    no "the refused deletion retires its capture workspace" test -e "$tree"
+done < "$T/workspaces"
 ok "the refused virtual line can be mounted again" l line show virt --virtual
 eq "the remounted line still reads its upper data" "keep the upper data" "$(cat "$V/unsaved.txt")"
-ok "the virtual line can still be explicitly discarded" l line delete -D --discard virt
+before=$(l line list virt --json) || exit 1
+out=$(l line delete -D --discard virt --json); rc=$?
+eq "the virtual line can still be explicitly discarded" 0 "$rc"
+ok "virtual deletion returns the line JSON" python3 -c 'import json, sys; assert json.loads(sys.argv[1]) == [json.loads(sys.argv[2])]' "$before" "$out"
 
 finish

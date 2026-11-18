@@ -78,12 +78,81 @@ fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn lock_at(home: PathBuf) -> Result<Locked> {
-    let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home.join("lock"))?;
-    {
-        let _wait = crate::trace::begin(format!("OverlayFS registry lock wait {}", home.display()));
-        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+// A save reserves the registry before its first publication. Nested backend calls clone the
+// same open description; they neither wait nor unlock it when their short operation ends.
+thread_local! {
+    static PUBLICATIONS: std::cell::RefCell<Vec<(PathBuf, File)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NONBLOCKING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+/// Periodic preparation skips a busy registry, including reads and optional cache work.
+/// Remember collisions even when a best-effort caller catches the lock error.
+pub(crate) struct NonBlocking {
+    previous: Option<bool>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl NonBlocking {
+    pub(crate) fn new() -> Self {
+        Self { previous: NONBLOCKING.replace(Some(false)), _thread: Default::default() }
     }
+    pub(crate) fn contended(&self) -> bool {
+        NONBLOCKING.get() == Some(true)
+    }
+}
+impl Drop for NonBlocking {
+    fn drop(&mut self) {
+        let contended = self.contended();
+        NONBLOCKING.set(self.previous.map(|previous| previous || contended));
+    }
+}
+pub(crate) struct Publication(std::marker::PhantomData<std::rc::Rc<()>>);
+impl Drop for Publication {
+    fn drop(&mut self) {
+        PUBLICATIONS.with(|held| {
+            held.borrow_mut().pop();
+        });
+    }
+}
+fn reserved(home: &Path) -> Option<io::Result<File>> {
+    PUBLICATIONS.with(|held| held.borrow().iter().find(|(h, _)| h == home).map(|(_, f)| f.try_clone()))
+}
+pub(crate) fn try_publication(path: &Path) -> Result<Option<Publication>> {
+    let home = home_of(path)?;
+    let file = match reserved(&home) {
+        Some(file) => file?,
+        None => {
+            let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home.join("lock"))?;
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+            file
+        }
+    };
+    PUBLICATIONS.with(|held| held.borrow_mut().push((home, file)));
+    Ok(Some(Publication(Default::default())))
+}
+fn lock_at(home: PathBuf) -> Result<Locked> {
+    let lock = if let Some(file) = reserved(&home) {
+        file?
+    } else {
+        let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home.join("lock"))?;
+        {
+            let _wait = crate::trace::begin(format!("OverlayFS registry lock wait {}", home.display()));
+            let operation = if NONBLOCKING.get().is_some() {
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            } else {
+                rustix::fs::FlockOperation::LockExclusive
+            };
+            if let Err(error) = rustix::fs::flock(&lock, operation) {
+                if error == rustix::io::Errno::WOULDBLOCK && NONBLOCKING.get().is_some() {
+                    NONBLOCKING.set(Some(true));
+                }
+                return Err(error.into());
+            }
+        }
+        lock
+    };
     let held = crate::trace::span("OverlayFS registry lock held");
     let registry = match fs::read(home.join("registry.json")) {
         Ok(data) => serde_json::from_slice(&data)?,
@@ -231,6 +300,12 @@ impl Locked {
         Ok(())
     }
     fn collect(&self) -> Result<()> {
+        // Reclamation is store-wide and recursive. Publication only changes registry ownership;
+        // a later outside-lock collection reclaims abandoned construction and unreferenced data.
+        if crate::store::holds_project_lock() {
+            return Ok(());
+        }
+        crate::repo::save_barrier("overlay_collect")?;
         let used: HashSet<_> = self
             .registry
             .trees
@@ -458,6 +533,20 @@ pub(super) fn supports_volume(path: &Path) -> bool {
 pub(super) fn managed_root(path: &Path) -> bool {
     path.is_dir() && native_info(path).is_ok()
 }
+/// One registry snapshot per validation scan. A registered path remains a boundary
+/// when a build replaces its cache with a plain directory, as it does for snapshots.
+pub(crate) struct NestedRoots(HashSet<PathBuf>);
+impl NestedRoots {
+    pub(crate) fn read(root: &Path) -> Result<Self> {
+        let root = absolute(root)?;
+        let state = lock(&root)?;
+        Ok(Self(nested_trees(&state.registry, &root)))
+    }
+    pub(crate) fn classify(&self, path: &Path, _metadata: &fs::Metadata) -> io::Result<crate::fsutil::StorageRoot> {
+        Ok(if self.0.contains(path) { crate::fsutil::StorageRoot::Managed } else { crate::fsutil::StorageRoot::Unmanaged })
+    }
+}
+
 pub(super) fn native_info(path: &Path) -> Result<SubvolInfo> {
     let path = absolute(path)?;
     let state = lock(&path)?;
@@ -653,6 +742,7 @@ fn copy_stable(src: &Path, dst: &Path, nested: &HashSet<PathBuf>) -> Result<Capt
     for _ in 0..3 {
         let before = scan(src, nested)?;
         copy_tree(src, dst, nested, &mut HashMap::new())?;
+        crate::repo::save_barrier("copy")?;
         if before == scan(src, nested)? {
             return Ok(CaptureConsistency::ValidatedCopy);
         }
@@ -731,6 +821,7 @@ fn snapshot_layers(
             }
             sys::overlay_attribute(&target, c"trusted.overlay.opaque", Some(b"y"))?;
         }
+        crate::repo::save_barrier("copy")?;
         let settled = before == upper_scan()?;
         // Writers changed the upper layer in every round: keep the last copy (see `copy_stable`).
         if settled || round == 2 {
@@ -1793,6 +1884,67 @@ mod tests {
         assert!(!changes.iter().any(|c| c.path() == "old"));
         assert_eq!(changes.iter().filter(|c| c.path().starts_with("link-")).count(), 4);
         assert!(changes.iter().filter(|c| c.path().starts_with("link-")).all(|c| c.old_path().is_none()));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn periodic_registry_reads_skip_contention_and_restore_the_wait_policy() -> Result<()> {
+        let home = std::env::temp_dir().join(format!("layr-overlay-lock-{}", crate::ids::new_id()));
+        fs::create_dir(&home)?;
+        let lock = File::create(home.join("lock"))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+        {
+            let periodic = NonBlocking::new();
+            assert!(!periodic.contended());
+            {
+                let nested = NonBlocking::new();
+                // Optional cache discovery can catch this error; the tick still skips.
+                assert!(lock_at(home.clone()).is_err());
+                assert!(nested.contended());
+            }
+            assert!(periodic.contended());
+            assert!(NONBLOCKING.get().is_some());
+        }
+        assert_eq!(NONBLOCKING.get(), None);
+        drop(lock);
+        {
+            let periodic = NonBlocking::new();
+            drop(lock_at(home.clone())?);
+            assert!(!periodic.contended());
+        }
+        // Foreground callers keep the default policy after the periodic scope exits.
+        drop(lock_at(home.clone())?);
+        fs::remove_dir_all(home)?;
+        Ok(())
+    }
+
+    #[test]
+    fn boundary_snapshot_keeps_replaced_cache_paths_and_excludes_unregistered_siblings() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-overlay-boundaries-{}", crate::ids::new_id()));
+        let cache = root.join("target");
+        let sibling = root.join("target-sibling");
+        fs::create_dir_all(&cache)?;
+        fs::create_dir(&sibling)?;
+        let entry: Entry = serde_json::from_value(serde_json::json!({
+            "info": {"uuid": crate::ids::new_id(), "readonly": false},
+            "base": "unused", "plain": true
+        }))?;
+        let mut registry = Registry::default();
+        registry.trees.insert(root.clone(), entry.clone());
+        registry.trees.insert(cache.clone(), entry);
+        let roots = NestedRoots(nested_trees(&registry, &root));
+        drop(registry);
+        // There is deliberately no registry on disk: repeated queries must use the
+        // scan's snapshot, including after a registered directory has been replaced.
+        fs::rename(&cache, root.join("removed-cache"))?;
+        fs::create_dir(&cache)?;
+        fs::write(cache.join("replacement"), b"plain replacement cache")?;
+        for _ in 0..100 {
+            assert_eq!(roots.classify(&cache, &fs::symlink_metadata(&cache)?)?, crate::fsutil::StorageRoot::Managed);
+            assert_eq!(roots.classify(&sibling, &fs::symlink_metadata(&sibling)?)?, crate::fsutil::StorageRoot::Unmanaged);
+            assert_eq!(roots.classify(&root, &fs::symlink_metadata(&root)?)?, crate::fsutil::StorageRoot::Unmanaged);
+        }
         fs::remove_dir_all(root)?;
         Ok(())
     }

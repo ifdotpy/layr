@@ -131,7 +131,9 @@ for kind in ('line', 'project'):
             periodic.wait(timeout=3)
     # Make this line due again for the second case without sleeping for the interval.
     with sqlite3.connect(meta / 'db/layr.sqlite') as db:
-        db.execute("UPDATE states SET time=1 WHERE kind='auto' AND line=?", (line,))
+        # Object-backed automatic states remain save bases after native retirement. Age both
+        # derived time fields, since readers obtain the state record's time from rec.
+        db.execute("UPDATE states SET time=1, rec=json_set(rec, '$.time', 1) WHERE kind='auto' AND line=?", (line,))
 PY
 eq "periodic saves yield to user locks and retry skipped lines" 0 "$?"
 finish

@@ -12,8 +12,14 @@ use crate::ignore_rules::Rules;
 use crate::model::{Conflict, Line, LineChange, LineState, Record, StateKind, StateRec};
 use crate::status_cache::{FileFingerprint, StatusCache};
 use crate::store::{check_name, Project};
+
+#[path = "save.rs"]
+mod save;
 use crate::tree::Tree;
 use anyhow::{bail, Context, Result};
+pub(crate) use save::barrier as save_barrier;
+pub(crate) use save::{PreparedEmptyTree, StalePreparation};
+pub use save::{PreparedSave, PublishOutcome, SaveMode};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -88,18 +94,12 @@ thread_local! {
     pub(crate) static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// A temporary tree retains its operation's deletion authority. Failed constructors never
-/// turn an existing destination into cleanup authority.
-thread_local! {
-    /// Test only (`LAYR_TEST_WORKING_SNAPSHOT_ERROR`): the working snapshot of `prepare_save` runs.
-    static PREPARING_SAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
+/// A temporary tree retains its operation's deletion authority.
 pub struct Temp {
     pub path: PathBuf,
     resource: Option<TemporaryResource>,
 }
-enum TemporaryResource {
+pub(crate) enum TemporaryResource {
     Capture(crate::fs::OwnedCapture),
     Working(crate::fs::OwnedWorking),
     Existing(crate::fs::ResourceOwner),
@@ -115,7 +115,7 @@ fn remove_plain(path: &Path) -> Result<()> {
     }
 }
 impl TemporaryResource {
-    fn abort(self, cause: anyhow::Error) -> anyhow::Error {
+    pub(crate) fn abort(self, cause: anyhow::Error) -> anyhow::Error {
         match self {
             Self::Capture(captured) => captured.abort(cause),
             Self::Working(created) => created.abort(cause),
@@ -126,7 +126,7 @@ impl TemporaryResource {
             },
         }
     }
-    fn release(self) {
+    pub(crate) fn release(self) {
         match self {
             Self::Capture(captured) => captured.release(),
             Self::Working(created) => created.release(),
@@ -669,6 +669,18 @@ impl<'a> Repo<'a> {
                 return Ok(Snap::Objects(tree));
             }
         }
+        if !self.p.has_state(id) && crate::store::save_preparing(&self.p) && crate::gitbridge::buildable(self, id) {
+            if let Some(source) = crate::store::save_source(&self.p, id) {
+                return Ok(source);
+            }
+            let path = self.p.work_dir().join(crate::store::temp_name());
+            let temp = Temp::directory(path, 0o700)?;
+            let tree = temp.path.join("tree");
+            crate::gitbridge::prepare_tree(self, id, &tree)?;
+            let source = snap(&tree);
+            crate::store::hold_save_source(&self.p, id, source.clone(), temp);
+            return Ok(source);
+        }
         self.check_state(id)?;
         Snap::of_state(&self.p, id)
     }
@@ -859,37 +871,21 @@ impl<'a> Repo<'a> {
         self.working_snapshot_over(ctx, line, parents, message, &line.head)
     }
 
-    /// The working content of `line` (folder `w`), whose folder shows the view of an overlay X, as an
-    /// automatic state of X's own store. The records of X say which automatic state of the line it belongs
-    /// to (`auto.<state>`), so no record of the project names it, and only readers of X read it (a reader of
-    /// X reads every overlay below it). The caller holds the project lock.
-    fn save_private_working(&self, ctx: &Ctx, line: &Line, w: &Path, state: &str, message: &str) -> Result<()> {
-        let top = self.line_view_top(line)?.ok_or_else(|| anyhow::anyhow!("line '{}' shows no overlay", line.name))?;
-        let orepo = self.overlay_repo(&top)?;
-        let _lock = orepo.p.lock_maintenance()?;
-        let st = orepo.new_state(ctx, w, StateKind::Auto, Vec::new(), message, None)?;
-        let mut rec = crate::model::DraftRecord::new("overlay.use");
-        rec.data = serde_json::json!({"config": {crate::overlay::auto_key(state): st.id}});
-        rec.states.push(st.clone());
-        if let Err(e) = orepo.commit_record(&_lock, ctx, rec) {
-            if matches!(e, crate::db::CommitResolution::NotCommitted(_)) {
-                orepo.discard_states(std::slice::from_ref(&st));
-            }
-            return Err(e.into());
-        }
-        Ok(())
-    }
-
     /// The tree to restore a working folder from for the automatic state `state` of `line`: the state
-    /// that keeps its working content in the store of an overlay of the line's path (`save_private_working`),
+    /// that keeps its working content in the store of an overlay of the line's path (`prepare_private_working`),
     /// else the state itself. The second value says whether it holds the whole working content.
     pub fn working_source(&self, line: &Line, state: &str) -> Result<(PathBuf, bool)> {
+        self.working_source_with(line, state, |repo, id| repo.state_root(id))
+    }
+
+    // Preparation reads object-backed private states without rebuilding published native trees.
+    fn working_source_with<T>(&self, line: &Line, state: &str, read: impl Fn(&Repo, &str) -> Result<T>) -> Result<(T, bool)> {
         if !self.p.is_overlay() {
             for l in self.layers(line)?.into_iter().rev() {
                 let Ok(op) = self.overlay_project(&l.overlay) else { continue };
                 if let Some(id) = op.db.overlay_config(&crate::overlay::auto_key(state))?.and_then(|v| v.as_str().map(str::to_owned)) {
                     let orepo = Repo { restore_from_remote: self.restore_from_remote, p: op, ctx: self.ctx };
-                    if let Ok(root) = orepo.state_root(&id) {
+                    if let Ok(root) = read(&orepo, &id) {
                         return Ok((root, true));
                     }
                     eprintln!(
@@ -900,24 +896,12 @@ impl<'a> Repo<'a> {
                 }
             }
         }
-        Ok((self.state_root(state)?, false))
+        Ok((read(self, state)?, false))
     }
 
-    /// `working_snapshot` with its thin layer over `base` (APFS): over a state close to the
-    /// working content, only the few entries that differ are copied.
-    pub fn working_snapshot_over(
-        &self,
-        ctx: &Ctx,
-        line: &Line,
-        parents: Vec<String>,
-        message: &str,
-        base: &str,
-    ) -> Result<StateRec> {
-        self.working_snapshot_as(ctx, line, parents, message, base, ids::new_id())
-    }
-
+    /// Capture at caller-owned paths; no state storage or database rows are published here.
     #[allow(clippy::too_many_arguments)]
-    fn working_snapshot_as(
+    fn capture_working(
         &self,
         ctx: &Ctx,
         line: &Line,
@@ -925,15 +909,27 @@ impl<'a> Repo<'a> {
         message: &str,
         base: &str,
         id: String,
+        complete: &Path,
+        delta: &Path,
     ) -> Result<StateRec> {
         let mut resource = None;
-        let mut metadata = None;
         let mut temporary = None;
         let made = (|| {
             #[cfg(target_os = "macos")]
             if let Some(view) = crate::views::of(self, line) {
-                let state = crate::views::working_snapshot(ctx, self, line, &view, parents, message, base, id.clone())?;
-                let path = if self.p.state_path(&id).is_dir() { self.p.state_path(&id) } else { self.p.delta_path(&id) };
+                let state = crate::views::working_snapshot_at(
+                    ctx,
+                    self,
+                    line,
+                    &view,
+                    parents,
+                    message,
+                    base,
+                    id.clone(),
+                    complete,
+                    delta,
+                )?;
+                let path = if complete.is_dir() { complete.to_path_buf() } else { delta.to_path_buf() };
                 resource = Some(TemporaryResource::Existing(crate::fs::retain_owned(&path)?));
                 return Ok(state);
             }
@@ -944,15 +940,17 @@ impl<'a> Repo<'a> {
             // states hold the shared head, so no state that other readers of the project read holds a change
             // that may be proprietary (docs/overlays.md, section 9.4). Its changes have no automatic state here.
             if self.private_view(line)? {
-                let head = self.state_root(&line.head)?;
-                resource = Some(TemporaryResource::Capture(ctx.captures.snapshot(&head, &self.p.state_path(&id))?));
-                let st = self.describe_state(ctx, id.clone(), StateKind::Auto, parents, message, Some(line))?;
-                // The working content goes to the store of the overlay that the folder shows, which only its
-                // readers read (docs/overlays.md section 1, automatic states): `undo` and the restore after a
-                // refused command take it from there (`working_source`). A failure keeps the safe state.
-                if let Err(e) = self.save_private_working(ctx, line, &w, &st.id, message) {
-                    eprintln!("warning: the working changes of line {} have no automatic state: {e:#}", line.name);
-                }
+                let head = self.state_src(&line.head)?;
+                resource = Some(TemporaryResource::Capture(crate::fs::freeze_source(&head, complete)?));
+                let st = self.state_record(
+                    ctx,
+                    id.clone(),
+                    StateKind::Auto,
+                    parents,
+                    message,
+                    Some(line),
+                    crate::fs::host().namespace.info(complete)?.uuid,
+                );
                 return Ok(st);
             }
             let private = self.private_paths(line)?;
@@ -963,16 +961,31 @@ impl<'a> Repo<'a> {
                 if let Some(format) = crate::source::storage::sparse_format(&self.p) {
                     let base = if self.p.has_state(base) { base } else { line.head.as_str() };
                     let source = self.state_src(base)?;
-                    if let Some(captured) = format.write_snapshot(&self.p, &id, &source, base, &w)? {
+                    if let Some(captured) = format.write_snapshot_at(&source, base, &w, delta)? {
                         resource = Some(TemporaryResource::Capture(captured));
-                        metadata = crate::source::Source::of_state(&self.p, &id)?.layered_storage();
-                        return self.describe_state(ctx, id.clone(), StateKind::Auto, parents, message, Some(line));
+                        return Ok(self.state_record(
+                            ctx,
+                            id.clone(),
+                            StateKind::Auto,
+                            parents,
+                            message,
+                            Some(line),
+                            crate::fs::host().namespace.info(if delta.exists() { delta } else { complete })?.uuid,
+                        ));
                     }
                 }
             }
             if private.is_empty() && caches.is_empty() {
-                resource = Some(TemporaryResource::Capture(ctx.captures.snapshot(&w, &self.p.state_path(&id))?));
-                return self.describe_state(ctx, id.clone(), StateKind::Auto, parents, message, Some(line));
+                resource = Some(TemporaryResource::Capture(ctx.captures.snapshot(&w, complete)?));
+                return Ok(self.state_record(
+                    ctx,
+                    id.clone(),
+                    StateKind::Auto,
+                    parents,
+                    message,
+                    Some(line),
+                    crate::fs::host().namespace.info(if delta.exists() { delta } else { complete })?.uuid,
+                ));
             }
             let copy = Temp::capture(
                 &w,
@@ -1000,7 +1013,7 @@ impl<'a> Repo<'a> {
                 }
                 drop(t);
             }
-            let destination = self.p.state_path(&id);
+            let destination = complete.to_path_buf();
             resource = Some(TemporaryResource::Capture(ctx.captures.snapshot(&dst, &destination)?));
             let info = crate::fs::host().namespace.info(&destination)?;
             Ok(StateRec {
@@ -1027,15 +1040,7 @@ impl<'a> Repo<'a> {
                 cache_key_parts: Default::default(),
                 parts: Default::default(),
             })
-        })()
-        .and_then(|state| {
-            // Test only: the copy of a save fails after it was written (not the copy prepared before the lock).
-            anyhow::ensure!(
-                std::env::var_os("LAYR_TEST_WORKING_SNAPSHOT_ERROR").is_none() || PREPARING_SAVE.with(|p| p.get()),
-                "test: working snapshot failed after copying"
-            );
-            Ok(state)
-        });
+        })();
         match made {
             Ok(state) => {
                 if let Some(resource) = resource {
@@ -1043,24 +1048,17 @@ impl<'a> Repo<'a> {
                 }
                 Ok(state)
             }
-            Err(error) => {
-                if let Some(metadata) = metadata {
-                    if let Err(cleanup) = metadata.forget_base(&self.p, &id) {
-                        eprintln!("warning: {cleanup:#}");
-                    }
-                }
-                Err(match resource {
-                    Some(resource) => resource.abort(error),
-                    None => error,
-                })
-            }
+            Err(error) => Err(match resource {
+                Some(resource) => resource.abort(error),
+                None => error,
+            }),
         }
     }
 
     /// Files of a snapshot of the working folder that hold an overlay file under another name:
     /// moved from a path in `private`, or new with the same content as one of them.
-    fn private_copies(&self, line: &Line, snap: &Path, private: &BTreeSet<String>) -> Result<Vec<String>> {
-        let base = self.head_tree(line)?;
+    fn private_copies(&self, line: &Line, captured: &Path, private: &BTreeSet<String>) -> Result<Vec<String>> {
+        let base = self.head_src(line)?;
         let mut by_size: std::collections::HashMap<u64, Vec<&String>> = std::collections::HashMap::new();
         for p in private {
             if let Some(m) = fsutil::lmeta(&base, p).filter(|m| !m.is_dir()) {
@@ -1068,15 +1066,18 @@ impl<'a> Repo<'a> {
             }
         }
         let mut out = Vec::new();
-        for c in changes::file_changes(&base, snap)? {
-            let Some(n) = c.new() else { continue };
+        for c in changes::file_changes(&base, captured)? {
+            let n = match c.new() {
+                Some(n) => n,
+                None => continue,
+            };
             if c.old_path().map(|o| private.contains(o)).unwrap_or(false) {
                 out.push(c.path().clone());
                 continue;
             }
             if c.old().is_none() {
                 for p in by_size.get(&n.size).into_iter().flatten() {
-                    if fsutil::same_entry(&base, p, snap, c.path(), None)? {
+                    if fsutil::same_entry(&base, p, captured, c.path(), None)? {
                         out.push(c.path().clone());
                         break;
                     }
@@ -1136,7 +1137,12 @@ impl<'a> Repo<'a> {
     ) -> PublishResult<Record> {
         let states = rec.states.clone();
         locked.check(&self.p)?;
-        match locked.append(rec, &ctx.actor()) {
+        let result = if rec.op == "save" && std::env::var_os("LAYR_TEST_SAVE_RECORD_FAIL").is_some() {
+            Err(CommitResolution::NotCommitted(anyhow::anyhow!("injected prepared record failure")))
+        } else {
+            locked.append(rec, &ctx.actor())
+        };
+        match result {
             Ok(r) => Ok(r),
             Err(e) => {
                 if matches!(e, CommitResolution::NotCommitted(_)) {
@@ -1218,213 +1224,22 @@ impl<'a> Repo<'a> {
         Ok(auto.map(|s| s.id).unwrap_or_else(|| line.head.clone()))
     }
 
-    /// Prepare deletion's final state before taking the project lock.
-    pub fn prepare_final_state<'r>(&'r self, ctx: &Ctx, line: &Line) -> Result<PreparedAutomatic<'r, 'a>> {
-        let prepared = self.prepare_save(ctx, line)?;
-        if let Some(PreparedFolder { snapshot: AutomaticState::Snapshot { state, .. }, .. }) = &prepared.folder {
-            crate::source::storage::complete(&self.p, &state.id)?;
-        }
-        Ok(prepared)
+    /// Final deletion prepares the entire save before taking the project lock.
+    pub fn prepare_final_state(&self, ctx: &Ctx, line: &Line, guard: &crate::store::LineLeaseSet) -> Result<PreparedSave> {
+        self.prepare_save(ctx, line, guard, SaveMode::FinalDeletion)
     }
 
-    pub fn working_state(
+    pub fn record_final_state(
         &self,
-        locked: &crate::store::LockedProject<'_>,
         ctx: &Ctx,
-        line: &Line,
-        message: &str,
-    ) -> Result<Option<String>> {
-        locked.check(&self.p)?;
-        if !self.working(line).exists() {
-            return Ok(None);
-        }
-        Ok(match self.save(locked, ctx, line, message, false, false)? {
-            Some(s) => Some(s.id),
-            None => Some(self.save_base(line)?),
+        lock: &crate::store::LockedProject<'_>,
+        prepared: PreparedSave,
+    ) -> Result<FinalState> {
+        Ok(match self.publish_save(ctx, lock, prepared)? {
+            PublishOutcome::Saved(st) => FinalState::Recorded(Some(st.id)),
+            PublishOutcome::Unchanged(id) => FinalState::Recorded(Some(id)),
+            PublishOutcome::Stale => FinalState::Moved,
         })
-    }
-
-    pub fn prepare_working_caches(&self, line: &Line) -> Result<()> {
-        self.restore_caches(line)?;
-        self.prepare_cache_states(line)
-    }
-
-    /// Freeze and compare the working state while holding only the line lease.
-    /// Dropping an unused preparation releases its unpublished native state.
-    pub fn prepare_save<'r>(&'r self, ctx: &Ctx, line: &Line) -> Result<PreparedAutomatic<'r, 'a>> {
-        #[cfg(target_os = "macos")]
-        if crate::views::of(self, line).is_some() {
-            return Ok(PreparedAutomatic { repo: self, folder: None });
-        }
-        let prev = self.save_base(line)?;
-        self.hold(self.pin(&[&line.head, &prev])?);
-        self.prepare_working_caches(line)?;
-        let observed = self.observe(line, &self.select_index(line)?)?;
-        let base = crate::source::storage::capture_base(&self.p, &line.head, &prev);
-        let _prepare = crate::trace::span("prepare save");
-        let id = ids::new_id();
-        let pin = crate::free::prepare_state(&self.p, &id)?;
-        PREPARING_SAVE.with(|p| p.set(true));
-        let state = self.working_snapshot_as(ctx, line, vec![line.head.clone()], "", &base, id);
-        PREPARING_SAVE.with(|p| p.set(false));
-        let state = state?;
-        let mut prepared = PreparedAutomatic {
-            repo: self,
-            folder: Some(PreparedFolder {
-                observed,
-                prev,
-                snapshot: AutomaticState::Snapshot { state, comparison: None },
-                _pin: pin,
-            }),
-        };
-        // Test only (tests/prepared-comparisons.py): a failure after the copy; dropping the preparation
-        // must leave no unrecorded state behind.
-        if std::env::var_os("LAYR_TEST_PREPARE_SAVE_ERROR").is_some() {
-            drop(prepared);
-            anyhow::bail!("test: prepared save failed after copying");
-        }
-        if let Some(folder) = &mut prepared.folder {
-            if self.tree_available(&folder.prev) {
-                let base = self.state_src(&folder.prev)?;
-                if let AutomaticState::Snapshot { state, comparison } = &mut folder.snapshot {
-                    // In the view of an overlay the working content is in the overlay's store (`working_source`):
-                    // the states of the project hold the shared head, so they compare equal.
-                    if self.private_view(line)? {
-                        let (old, old_full) = self.working_source(line, &folder.prev)?;
-                        let (new, new_full) = self.working_source(line, &state.id)?;
-                        if old_full == new_full && !changes::any_file_change(old.as_path(), new.as_path(), skip_path)? {
-                            self.discard_states(std::slice::from_ref(state));
-                            folder.snapshot = AutomaticState::Unchanged;
-                        }
-                        return Ok(prepared);
-                    }
-                    let compared = crate::objstore::compare(&base, self.state_src(&state.id)?)?;
-                    if compared.files.iter().any(|c| !skip_path(c.path())) {
-                        *comparison = Some(compared);
-                    } else {
-                        self.discard_states(std::slice::from_ref(state));
-                        folder.snapshot = AutomaticState::Unchanged;
-                    }
-                }
-            }
-        }
-        Ok(prepared)
-    }
-
-    /// Save the working content as an automatic state if it changed since the previous one.
-    /// The caller holds the project lock.
-    pub fn save(
-        &self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        line: &Line,
-        message: &str,
-        running: bool,
-        force: bool,
-    ) -> Result<Option<StateRec>> {
-        locked.check(&self.p)?;
-        #[cfg(target_os = "macos")]
-        if let Some(view) = crate::views::of(self, line) {
-            return crate::views::save_working(locked, ctx, self, line, &view, message);
-        }
-        let st = self.save_working(locked, ctx, line, message, running, force)?;
-        // A cache folder that has no cache overlay state on this line yet gets its first one
-        // (the cache of the line, as `save --overlays` makes it). A failure keeps the state.
-        let of = match &st {
-            Some(s) => s.id.clone(),
-            None => self.save_base(line)?,
-        };
-        if let Err(e) = self.save_cache_states(locked, ctx, line, &of) {
-            eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
-        }
-        clear_regenerable_memo();
-        Ok(st)
-    }
-
-    fn save_working(
-        &self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        line: &Line,
-        message: &str,
-        running: bool,
-        force: bool,
-    ) -> Result<Option<StateRec>> {
-        locked.check(&self.p)?;
-        let _t = crate::trace::span("save working state");
-        let w = self.working(line);
-        if !w.exists() {
-            return Ok(None);
-        }
-        recover_cache_replacements(&w)?;
-        self.restore_caches(line)?;
-        if !force
-            && matches!(crate::fs::host().observations.read_policy(), crate::fs::observations::ReadPolicy::Validate)
-            && self.private_paths(line)?.is_empty()
-            && self.plain_caches(line)?.is_empty()
-            // The view of an overlay keeps its working content in the overlay's store (`working_snapshot_as`):
-            // a comparison with the folder here would decide on content that no state of the project holds.
-            && !self.private_view(line)?
-        {
-            let prev = self.save_base(line)?;
-            if self.tree_available(&prev) {
-                let previous = self.state_src(&prev)?;
-                if crate::fs::observations::validated_read(&[&w], None, || {
-                    changes::any_file_change(&previous, &Snap::native(&w), skip_path)
-                })? == Some(false)
-                {
-                    return Ok(None);
-                }
-            }
-        }
-        let base = crate::source::storage::capture_base(&self.p, &line.head, &self.save_base(line)?);
-        let mut st = self.working_snapshot_over(ctx, line, vec![line.head.clone()], message, &base)?;
-        st.running = running || crate::fsutil::take_unsettled();
-        if !force {
-            let checked = (|| -> Result<bool> {
-                let prev = self.save_base(line)?;
-                if !self.tree_available(&prev) {
-                    return Ok(true);
-                }
-                // In the view of an overlay the working content is in the overlay's store (`working_source`):
-                // the state itself holds the shared head, so compare the overlay's working content.
-                let (old, old_full) = self.working_source(line, &prev)?;
-                let (new, new_full) = self.working_source(line, &st.id)?;
-                if old_full || new_full {
-                    return Ok(old_full != new_full || changes::any_file_change(old.as_path(), new.as_path(), skip_path)?);
-                }
-                let base = self.state_src(&prev)?;
-                let source = self.state_src(&st.id)?;
-                if base.objects().is_some() && source.folder().is_some() && crate::objstore::enabled(&self.p)? {
-                    let compared = crate::objstore::compare(&base, source)?;
-                    let changed = compared.files.iter().any(|c| !skip_path(c.path()));
-                    if changed {
-                        compared.record(&self.p, &mut st)?;
-                    }
-                    Ok(changed)
-                } else {
-                    changes::any_file_change(&base, &source, skip_path)
-                }
-            })();
-            let changed = match checked {
-                Ok(checked) => checked,
-                Err(e) => {
-                    self.discard_states(std::slice::from_ref(&st));
-                    return Err(e);
-                }
-            };
-            if !changed {
-                self.discard_states(std::slice::from_ref(&st));
-                return Ok(None);
-            }
-        }
-        // The working content the save changes from: undo of the save goes back to it.
-        let before = self.recorded_working(line)?;
-        let mut rec = crate::model::DraftRecord::new("save");
-        rec.states.push(st.clone());
-        rec.data = serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": st.id});
-        self.commit_record(locked, ctx, rec)?;
-        Ok(Some(st))
     }
 
     /// The working content that the newest record of `line` left in the working folder: the state
@@ -1825,14 +1640,6 @@ impl<'a> Repo<'a> {
         Ok(hex::encode(h.finalize()))
     }
 
-    /// Capture immutable comparison inputs before taking the project lock.
-    pub fn prepare_status(&self, line: &Line) -> Result<PreparedComparison> {
-        let selected = self.select_index(line)?;
-        let observed = self.observe(line, &selected)?;
-        let (st, scan, index_temp, index) = self.status_selected(line, &selected)?;
-        Ok(PreparedComparison { observed, st, capture: ComparisonCapture::Snapshot { scan, index_temp, index } })
-    }
-
     pub fn uses_native_hints(&self, line: &Line) -> Result<bool> {
         Ok(crate::fs::prefers_captured_comparison(&self.select_index(line)?.source))
     }
@@ -1842,7 +1649,7 @@ impl<'a> Repo<'a> {
         let selected = self.select_index(line)?;
         let observed = self.observe(line, &selected)?;
         let st = self.status_report_selected(line, &selected)?;
-        Ok(PreparedComparison { observed, st, capture: ComparisonCapture::Report })
+        Ok(PreparedComparison { observed, st })
     }
 
     fn observe(&self, line: &Line, selected: &SelectedIndex) -> Result<ObservedVersion> {
@@ -1856,24 +1663,6 @@ impl<'a> Repo<'a> {
             started,
             entries: crate::fs::observe_tree(&work)?,
         })
-    }
-
-    /// Consume a validated capture; a changed input takes the ordinary snapshot path.
-    pub fn locked_status(
-        &self,
-        locked: &crate::store::LockedProject<'_>,
-        line: &Line,
-        prepared: Option<PreparedComparison>,
-    ) -> Result<(Status, Temp, Option<Temp>, Snap)> {
-        if let Some(prepared) = prepared {
-            if let Some(validated) = prepared.revalidate(self, locked)? {
-                let PreparedComparison { st, capture, .. } = validated.prepared;
-                if let ComparisonCapture::Snapshot { scan, index_temp, index } = capture {
-                    return Ok((st, scan, index_temp, index));
-                }
-            }
-        }
-        self.status(line)
     }
 
     pub fn locked_status_report(
@@ -2482,7 +2271,7 @@ impl<'a> Repo<'a> {
     }
 
     /// Make the cache paths that a tool made again as plain folders caches again, before a
-    /// snapshot of the working folder. The caller holds the project lock.
+    /// snapshot of the working folder. The caller holds the line lock.
     pub fn restore_caches(&self, line: &Line) -> Result<()> {
         self.prepare_cache_locations(line)?;
         let (w, (u, g)) = (self.working(line), self.owner_ids(line));
@@ -2500,10 +2289,13 @@ impl<'a> Repo<'a> {
     }
 
     /// The cache folders of a line that are layers now but have no cache overlay state on this
-    /// line yet. `save_cache_states` makes that first state, so a new line from a state of this
+    /// line yet. the save protocol makes that first state, so a new line from a state of this
     /// line starts warm, without `save --overlays`.
     fn unsaved_cache_layers(&self, line: &Line) -> Result<Vec<String>> {
         let w = self.working(line);
+        if !w.exists() {
+            return Ok(Vec::new());
+        }
         if self.p.is_overlay() {
             return Ok(Vec::new());
         }
@@ -2522,10 +2314,11 @@ impl<'a> Repo<'a> {
                 continue;
             }
             if head.is_none() {
-                head = Some(self.state_root(&line.head)?);
+                head = Some(self.state_src(&line.head)?);
                 stage = Some(self.current_stage(line)?);
             }
-            if holds_files(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p)) {
+            if holds_files_in(head.as_ref().unwrap(), &p) || stage.as_ref().unwrap().as_ref().is_some_and(|s| holds_files(s, &p))
+            {
                 continue;
             }
             let name = match self.folder_overlay_of(&p)? {
@@ -2544,32 +2337,6 @@ impl<'a> Repo<'a> {
         let Some(info) = self.overlay_info(name)? else { return Ok(false) };
         let orepo = self.overlay_repo(name)?;
         Ok(crate::overlay::find_overlay_line(&orepo.p.db, &info, line)?.is_some_and(|ol| ol.head != info.root))
-    }
-
-    /// Before the lock (APFS): the copy that the first cache state of each unsaved cache takes
-    /// under the lock with one rename (`save_cache_overlays`), as `save --overlays` makes it.
-    pub fn prepare_cache_states(&self, line: &Line) -> Result<()> {
-        self.prepare_cache_locations(line)?;
-        let w = self.working(line);
-        for p in self.unsaved_cache_layers(line)? {
-            self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
-        }
-        Ok(())
-    }
-
-    /// The first cache state of each cache folder of `line` that has none (`unsaved_cache_layers`),
-    /// saved with the automatic state `of`. The caller holds the project lock.
-    fn save_cache_states(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, line: &Line, of: &str) -> Result<()> {
-        locked.check(&self.p)?;
-        let paths = self.unsaved_cache_layers(line)?;
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let shared = self.policy().rule_for(&line.name).is_some();
-        let made = self.save_cache_overlays(locked, ctx, line, &paths, shared, of);
-        // Copies that no snapshot took (prepared before the lock) go to the trash.
-        self.discard_prepared();
-        made.map(|_| ())
     }
 
     /// The build-output overlays of `line` for a named save (docs/overlays.md, section 1a, slice
@@ -3184,7 +2951,7 @@ pub fn regenerable_folders(w: &Path) -> Result<Vec<String>> {
     // A cache that is taken is relocated in a private staging folder of the line (`.layr-cache-take-*`):
     // its folders are no caches of the line.
     let staged = |p: &String| p.split('/').next().is_some_and(|c| c.starts_with(".layr-cache-take-"));
-    if matches!(crate::fs::host().observations.read_policy(), crate::fs::observations::ReadPolicy::Validate) {
+    if !matches!(crate::fs::host().observations.read_policy(), crate::fs::observations::ReadPolicy::Capture) {
         if let Ok(scan) = crate::fs::observe_tree(w) {
             if scan.values().all(FileFingerprint::verifiable) {
                 return Ok(regenerable_in_scan(w, &scan).into_iter().filter(|p| !staged(p)).collect());
@@ -4614,6 +4381,14 @@ impl SelectedIndex {
     }
 }
 
+/// The outcome of `record_final_state`.
+pub enum FinalState {
+    /// The state of the working folder (None: no folder).
+    Recorded(Option<String>),
+    /// The head or the folder moved since the state was prepared: prepare it again.
+    Moved,
+}
+
 #[cfg(test)]
 thread_local! {
     static INDEX_SELECTED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -4644,12 +4419,6 @@ struct ObservedVersion {
 pub struct PreparedComparison {
     observed: ObservedVersion,
     st: Status,
-    capture: ComparisonCapture,
-}
-
-enum ComparisonCapture {
-    Snapshot { scan: Temp, index_temp: Option<Temp>, index: Snap },
-    Report,
 }
 
 /// Publication authority borrows the project lock and owns exactly one capture.
@@ -4671,136 +4440,7 @@ impl ObservedVersion {
     }
 }
 
-#[must_use]
-pub struct PreparedAutomatic<'r, 's> {
-    repo: &'r Repo<'s>,
-    folder: Option<PreparedFolder>,
-}
-
-struct PreparedFolder {
-    observed: ObservedVersion,
-    prev: String,
-    snapshot: AutomaticState,
-    _pin: crate::free::Pin,
-}
-
-enum AutomaticState {
-    Unchanged,
-    Snapshot { state: StateRec, comparison: Option<crate::objstore::Compared> },
-}
-
-impl Drop for PreparedAutomatic<'_, '_> {
-    fn drop(&mut self) {
-        if let Some(PreparedFolder { snapshot: AutomaticState::Snapshot { state, .. }, .. }) = &self.folder {
-            self.repo.discard_states(std::slice::from_ref(state));
-        }
-    }
-}
-
-impl PreparedAutomatic<'_, '_> {
-    pub fn publish(
-        self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        line: &Line,
-        message: &str,
-        running: bool,
-    ) -> Result<Option<StateRec>> {
-        locked.check(&self.repo.p)?;
-        #[cfg(target_os = "macos")]
-        if crate::views::of(self.repo, line).is_some() {
-            return self.repo.save(locked, ctx, line, message, running, false);
-        }
-        let Some(folder) = &self.folder else {
-            return self.repo.save(locked, ctx, line, message, running, false);
-        };
-        let observed = &folder.observed;
-        if observed.line != line.id
-            || observed.head != line.head
-            || self.repo.line(&line.id)?.head != line.head
-            || self.repo.save_base(line)? != folder.prev
-        {
-            return self.repo.save(locked, ctx, line, message, running, false);
-        }
-        if !observed.matches(self.repo)? {
-            let _fallback = crate::trace::span("prepared save invalidated");
-            if matches!(folder.snapshot, AutomaticState::Snapshot { .. })
-                && crate::source::storage::sparse_format(&self.repo.p).is_some()
-                && self.repo.layers(line)?.is_empty()
-                && self.repo.private_paths(line)?.is_empty()
-                && self.repo.plain_caches(line)?.is_empty()
-            {
-                // The retained capture is still an honest automatic state. Publishing it first
-                // gives the safe save a close base, so only concurrent writes are recopied.
-                let _layer = crate::trace::span("layer over prepared save");
-                let repo = self.repo;
-                let retained = ValidatedForPublish { _locked: locked, prepared: self }.publish(ctx, line, message, running)?;
-                return Ok(repo.save(locked, ctx, line, message, running, false)?.or(retained));
-            }
-            return self.repo.save(locked, ctx, line, message, running, false);
-        }
-        let _taken = crate::trace::span("take prepared save");
-        ValidatedForPublish { _locked: locked, prepared: self }.publish(ctx, line, message, running)
-    }
-
-    pub fn working_state(
-        self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        line: &Line,
-        message: &str,
-    ) -> Result<Option<String>> {
-        let repo = self.repo;
-        Ok(Some(match self.publish(locked, ctx, line, message, false)? {
-            Some(state) => state.id,
-            None => repo.save_base(line)?,
-        }))
-    }
-}
-
-impl ValidatedForPublish<'_, '_, PreparedAutomatic<'_, '_>> {
-    fn publish(self, ctx: &Ctx, line: &Line, message: &str, running: bool) -> Result<Option<StateRec>> {
-        let mut prepared = self.prepared;
-        let folder = prepared.folder.as_mut().context("missing prepared folder")?;
-        let of = match &folder.snapshot {
-            AutomaticState::Snapshot { state, .. } => state.id.clone(),
-            AutomaticState::Unchanged => folder.prev.clone(),
-        };
-        if let AutomaticState::Snapshot { state, comparison } = &mut folder.snapshot {
-            if let Some(compared) = comparison.take() {
-                compared.record(&prepared.repo.p, state)?;
-            }
-            state.message = message.to_string();
-            state.running = running || crate::fsutil::take_unsettled();
-            let before = prepared.repo.recorded_working(line)?;
-            let mut rec = crate::model::DraftRecord::new("save");
-            rec.states.push(state.clone());
-            rec.data =
-                serde_json::json!({"line": line.id, "head": line.head, "working_before": before, "working_after": state.id});
-            // Publication errors carry their commit resolution; commit_record owns cleanup.
-            let result = prepared.repo.commit_record(self._locked, ctx, rec);
-            if result.is_err() {
-                folder.snapshot = AutomaticState::Unchanged;
-                result?;
-            }
-        }
-        if let Err(e) = prepared.repo.save_cache_states(self._locked, ctx, line, &of) {
-            eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
-        }
-        clear_regenerable_memo();
-        Ok(match std::mem::replace(&mut folder.snapshot, AutomaticState::Unchanged) {
-            AutomaticState::Snapshot { state, .. } => Some(state),
-            AutomaticState::Unchanged => None,
-        })
-    }
-}
-
 impl PreparedComparison {
-    pub fn needs_save(&self, repo: &Repo, line: &Line) -> Result<bool> {
-        let st = &self.st;
-        Ok(!st.clean() || !st.untracked.is_empty() || !st.ignored.is_empty() || repo.save_base(line)? != line.head)
-    }
-
     pub fn revalidate<'lock, 'p>(
         self,
         repo: &Repo,
@@ -4812,35 +4452,6 @@ impl PreparedComparison {
             return Ok(None);
         }
         Ok(Some(ValidatedForPublish { _locked: locked, prepared: self }))
-    }
-}
-
-impl ValidatedForPublish<'_, '_, PreparedComparison> {
-    /// Reuse a clean head comparison for the pre-command save. Ignored additions still
-    /// require an automatic state, even though the displayed status calls them clean.
-    pub fn working_state(
-        self,
-        repo: &Repo,
-        ctx: &Ctx,
-        line: &Line,
-        message: &str,
-        automatic: Option<PreparedAutomatic<'_, '_>>,
-    ) -> Result<(Option<String>, Status)> {
-        let st = &self.prepared.st;
-        let unchanged = st.clean() && st.untracked.is_empty() && st.ignored.is_empty() && repo.save_base(line)? == line.head;
-        let working = if unchanged {
-            if let Err(e) = repo.save_cache_states(self._locked, ctx, line, &line.head) {
-                eprintln!("warning: cache overlay of line {} not saved: {e:#}", line.name);
-            }
-            clear_regenerable_memo();
-            Some(line.head.clone())
-        } else {
-            match automatic {
-                Some(prepared) => prepared.working_state(self._locked, ctx, line, message)?,
-                None => repo.working_state(self._locked, ctx, line, message)?,
-            }
-        };
-        Ok((working, self.prepared.st))
     }
 }
 
@@ -5312,16 +4923,17 @@ mod status_policy_tests {
                     std::fs::write(&hook_base, head).unwrap();
                 }))
             });
-            let prepared = if report { repo.prepare_status_report(&line)? } else { repo.prepare_status(&line)? };
+            let prepared = report.then(|| repo.prepare_status_report(&line)).transpose()?;
+            let snapshot = (!report).then(|| repo.status(&line)).transpose()?;
             assert!(repo.current_stage(&line)?.is_some());
             crate::fs::remove(&stage)?;
             std::fs::remove_file(&base)?;
             assert!(repo.current_stage(&line)?.is_none());
             let locked = repo.p.lock_maintenance()?;
             let st = if report {
-                repo.locked_status_report(&locked, &line, Some(prepared)).context("consume report")?
+                repo.locked_status_report(&locked, &line, prepared).context("consume report")?
             } else {
-                let (st, _scan, _temp, index) = repo.locked_status(&locked, &line, Some(prepared)).context("consume snapshot")?;
+                let (st, _scan, _temp, index) = snapshot.context("missing captured status")?;
                 assert!(fsutil::lmeta(&index, "file").is_some(), "clean keeps the tracked file in its index");
                 st
             };
@@ -5353,7 +4965,7 @@ mod status_policy_tests {
                     std::thread::sleep(std::time::Duration::from_millis(1100));
                 }))
             });
-            let result = if report { repo.prepare_status_report(&line) } else { repo.prepare_status(&line) };
+            let result = if report { repo.prepare_status_report(&line).map(|_| ()) } else { repo.status(&line).map(|_| ()) };
             assert!(result.is_err(), "replacement must not lend its token to the old semantics");
             #[cfg(target_os = "macos")]
             assert!(crate::thin::is_thin(&stage));
@@ -5364,7 +4976,7 @@ mod status_policy_tests {
             let st = if report {
                 repo.locked_status_report(&locked, &line, None)?
             } else {
-                let (st, _scan, _temp, index) = repo.locked_status(&locked, &line, None)?;
+                let (st, _scan, _temp, index) = repo.status(&line)?;
                 assert!(fsutil::lmeta(&index, "file").is_some());
                 st
             };
@@ -5373,7 +4985,7 @@ mod status_policy_tests {
             assert_eq!(std::fs::read(work.join("file"))?, b"tracked");
         }
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let prepared = repo.prepare_status(&line)?;
+        let prepared = repo.prepare_status_report(&line)?;
         std::fs::write(work.join("file"), b"concurrent write")?;
         {
             let locked = repo.p.lock_maintenance()?;
@@ -5381,7 +4993,7 @@ mod status_policy_tests {
         }
         std::fs::write(work.join("file"), b"tracked")?;
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let prepared = repo.prepare_status(&line)?;
+        let prepared = repo.prepare_status_report(&line)?;
         std::fs::write(work.join(crate::ignore_rules::LOCAL_EXCLUDE), b"file\n")?;
         {
             let locked = repo.p.lock_maintenance()?;

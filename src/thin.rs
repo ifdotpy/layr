@@ -1274,6 +1274,7 @@ fn write_checked(
             return Ok(layer);
         }
         let wrote = write_layer_owned(src, dst, &d, base_id, None);
+        crate::repo::save_barrier("copy")?;
         let after = apfs::scan_with_data(src, true).with_context(|| format!("scan {} after the copy", src.display()))?;
         let mut layer = match wrote {
             Ok(layer) => layer,
@@ -1363,6 +1364,7 @@ pub fn complete_tree(p: &Project, id: &str) -> Result<PathBuf> {
 /// of a thin state, made again on its next read. A view in use (a pin, or used in the last minute) and the tree of a
 /// state that is no longer thin (a keyframe made it its own tree) stay.
 fn keep_newest_views(p: &Project, made: &str) -> Result<()> {
+    let Some(_lease) = crate::objstore::try_preparation_exclusive(p)? else { return Ok(()) };
     let max = p.config_u64("thin.views", VIEWS) as usize;
     let in_use = p.config_u64("thin.view_seconds", VIEW_IN_USE_SECONDS);
     let dir = p.meta_dir().join("views");
@@ -1503,6 +1505,7 @@ pub fn delete_now(p: &Project, id: &str) -> Result<()> {
 
 /// Remove the views that no command used within `thin.view_seconds`. Returns their count.
 pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
+    let Some(_lease) = crate::objstore::try_preparation_exclusive(p)? else { return Ok(0) };
     let limit = p.config_u64("thin.view_seconds", VIEW_SECONDS);
     // The lower tree of a virtual line is mounted: it stays (docs/views.md).
     let protected = crate::views::protected_states(p);
@@ -1529,7 +1532,21 @@ pub fn evict_views(p: &Project, keep: &BTreeSet<String>) -> Result<usize> {
 
 /// Give a thin state a complete tree and drop its layer, so the chains above it get short.
 pub fn make_keyframe(p: &Project, id: &str) -> Result<()> {
+    let Some(_lease) = crate::objstore::try_preparation_exclusive(p)? else { return Ok(()) };
     complete_tree(p, id)?;
+    retire_layer(p, id)
+}
+
+/// A final worker may only retire a layer whose complete view was already published.
+pub(crate) fn retire_final_layer(p: &Project, id: &str) -> Result<()> {
+    let Some(_lease) = crate::objstore::try_preparation_exclusive(p)? else { return Ok(()) };
+    if !p.state_path(id).exists() {
+        return Ok(());
+    }
+    retire_layer(p, id)
+}
+
+fn retire_layer(p: &Project, id: &str) -> Result<()> {
     p.trash(&p.delta_path(id))?;
     forget_layer(p, id)?;
     let _ = fs::remove_file(view_stamp(p, id));

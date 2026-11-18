@@ -107,6 +107,7 @@ pub use store::Project;
 mod store_remote;
 mod store_remove;
 mod store_version;
+#[cfg(any(all(target_os = "linux", not(feature = "overlayfs")), test))]
 mod stream;
 mod sync_local;
 #[allow(unsafe_code)]
@@ -162,8 +163,7 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     if argv.first().map(String::as_str) == Some("__keyframe") && (argv.len() == 4 || argv.len() == 5 && argv[4] == "final") {
-        // A complete tree for a thin line head with a long chain, after the command that moved it, or for the
-        // final state of a deleted line (`free`).
+        // Keyframe a thin line head, or retire a deleted line's layer after its complete view was published.
         if let Err(e) = crate::free::keyframe_process(std::path::Path::new(&argv[1]), &argv[2], &argv[3], argv.len() == 5) {
             eprintln!("layr keyframe: {e:#}");
             std::process::exit(1);

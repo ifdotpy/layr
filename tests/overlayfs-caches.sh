@@ -20,6 +20,19 @@ printf changed > "$P/warm/target/output"
 eq "the source cache remains unchanged" built "$(cat target/output)"
 eq "cache changes do not enter status" "" "$(cd "$P/warm" && l status -s)"
 no "history excludes the cache output" l show head:target/output
+# Free both a plain cache inside a writable mount and an idle line whose mount was released.
+cd "$P/warm"
+l config regenerable '["target", "out"]'
+mkdir -p out && printf plain > out/output
+printf warm > warm.txt
+l add warm.txt && l save -qm warm || exit 1
+l save -q --overlays || exit 1
+cd "$P/main"
+ok "merge frees the source's plain cache" l merge -q warm
+no "the merged line's cache folder is gone" test -e "$P/warm/target"
+no "the merged line's plain cache folder is gone" test -e "$P/warm/out"
+ok "delete an idle line after its mount is released" l line delete -D warm
+no "the deleted line's folder is gone" test -e "$P/warm"
 # Clearing build output retains the established provenance.
 clear_cache_output target
 printf rebuilt > target/output

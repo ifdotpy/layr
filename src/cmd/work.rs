@@ -434,16 +434,13 @@ pub fn begin<'p>(
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
-    // The copy of changed files goes before the project lock; under it the save takes it by a rename.
-    let prepared = repo.prepare_save(ctx, &line)?;
-    let lock = line_lock.into_locked(&repo.p)?;
-    let w = prepared.working_state(&lock, ctx, &line, "before a layr command")?;
+    let (lock, w) = repo.save_working(ctx, &line, &line_lock, "before a layr command")?;
     Ok((lock, w))
 }
 
 /// `begin` for a command that writes the working folder or moves the head of the line. It holds the
 /// line lock for the whole command (the caller keeps the returned guard) and takes the project lock
-/// only for the automatic save of the working folder: its copy is made before, under the line lock.
+/// only for publication of the automatic save of the working folder.
 pub fn begin_line(
     ctx: &Ctx,
     repo: &Repo,
@@ -454,14 +451,8 @@ pub fn begin_line(
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
-    let prepared = if repo.uses_native_hints(&line)? { None } else { Some(repo.prepare_save(ctx, &line)?) };
-    let w = {
-        let _commit = line_lock.lock(&repo.p)?;
-        match prepared {
-            Some(prepared) => prepared.working_state(&_commit, ctx, &line, "before a layr command")?,
-            None => repo.working_state(&_commit, ctx, &line, "before a layr command")?,
-        }
-    };
+    let (_commit, w) = repo.save_working(ctx, &line, &line_lock, "before a layr command")?;
+    drop(_commit);
     Ok((line_lock, w))
 }
 
@@ -755,6 +746,9 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         let token = h.repo.index_token(&line)?;
         read(&line)?.map(|r| (token, r))
     };
+    // Drop the scan after the project lock on every return path. Native cleanup may
+    // reclaim backing objects, which publication defers until the lock is released.
+    let (scan, paths, ignored_named);
     let _lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
     let quiet = h.repo.quiet_paths(&line)?;
@@ -762,7 +756,7 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some((token, r)) if token == h.repo.index_token(&line)? => Some(r),
         _ => read(&line)?,
     };
-    let (scan, paths, ignored_named) = match prepared {
+    (scan, paths, ignored_named) = match prepared {
         Some(v) => v,
         None => {
             let (st, scan, _it, index) = h.repo.status_light(&line)?;
@@ -2111,7 +2105,10 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         None
     };
-    let (_, w) = begin_line(ctx, &h.repo, &line, reset_op(&line, &target))?;
+    let line = h.repo.line(&line.id)?;
+    h.repo.authorize_line(ctx, &line, reset_op(&line, &target))?;
+    let (_commit, w) = h.repo.save_working(ctx, &line, &_line_lock, "before a layr command")?;
+    drop(_commit);
     let line = h.repo.line(&line.id)?;
     let repo = &h.repo;
     // The head may have moved before the lock: check again with the head read under it.
@@ -2286,32 +2283,41 @@ pub fn clean(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    let prepared = h.repo.prepare_status(&line)?;
-    let r = (|| -> Result<i32> {
-        // Clean changes only the working folder: a protected line allows it.
-        let (_lock, w) = begin(ctx, &h.repo, &line, crate::repo::LineOp::Working)?;
-        let line = h.repo.line(&line.id)?;
-        let (st, scan, _it, index) = h.repo.locked_status(&_lock, &line, Some(prepared))?;
-        let targets = targets(&st, &scan.path, &index);
-        let wdir = h.repo.working(&line);
-        for t in &targets {
-            let rel = t.trim_end_matches('/');
-            // A folder (build output) goes to the trash, which is emptied after the lock.
-            match fsutil::safe_join(&wdir, rel) {
-                Ok(full) if full.symlink_metadata().is_ok_and(|m| m.is_dir()) && h.repo.p.trash(&full).is_ok() => {}
-                _ => fsutil::remove_entry(&wdir, rel)?,
+    // Like restore, clean holds the line lease while changing the folder and captures
+    // its after state before the short record publication lock.
+    let (line_lock, w) = begin_line(ctx, &h.repo, &line, crate::repo::LineOp::Working)?;
+    let line = h.repo.line(&line.id)?;
+    let (st, scan, _it, index) = h.repo.status(&line)?;
+    let targets = targets(&st, &scan.path, &index);
+    let wdir = h.repo.working(&line);
+    let mut trashed = false;
+    for t in &targets {
+        let rel = t.trim_end_matches('/');
+        match fsutil::safe_join(&wdir, rel) {
+            Ok(full) if full.symlink_metadata().is_ok_and(|m| m.is_dir()) && h.repo.p.trash_background(&full).is_ok() => {
+                trashed = true
             }
-            if !a.has("-q") {
-                outln!(ctx, "Removing {}", h.rel(t));
+            _ => fsutil::remove_entry(&wdir, rel)?,
+        }
+        if !a.has("-q") {
+            outln!(ctx, "Removing {}", h.rel(t));
+        }
+    }
+    // Kick once after the loop because the rate-limited emptier may have exited before the last move.
+    if trashed {
+        if let Ok(dir) = h.repo.p.trash_dir() {
+            crate::store::spawn_trash_emptier(&dir);
+        }
+    }
+    if !targets.is_empty() {
+        if let Err(error) = record_working_checked(&line_lock, ctx, &h.repo, &line, "clean", w.clone()) {
+            if matches!(error, crate::db::CommitResolution::NotCommitted(_)) {
+                put_back(&h.repo, &line, w.as_deref());
             }
+            return Err(error.into());
         }
-        if !targets.is_empty() {
-            record_working(&_lock, ctx, &h.repo, &line, "clean", w)?;
-        }
-        Ok(0)
-    })();
-    h.repo.discard_prepared();
-    r
+    }
+    Ok(0)
 }
 
 /// What `clean` removes, as git does. A folder goes whole only when nothing in it is in the

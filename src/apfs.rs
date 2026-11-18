@@ -37,6 +37,27 @@ pub(super) fn supports_volume(path: &Path) -> bool {
 pub(super) fn managed_root(path: &Path) -> bool {
     path.is_dir() && native_info(path).is_ok()
 }
+/// APFS stores each boundary in its directory marker; no global registry is needed.
+pub(crate) struct NestedRoots;
+impl NestedRoots {
+    pub(crate) fn read(_root: &Path) -> Result<Self> {
+        Ok(Self)
+    }
+    pub(crate) fn classify(&self, path: &Path, _metadata: &fs::Metadata) -> io::Result<crate::fsutil::StorageRoot> {
+        marker_kind(crate::sys::apfs_marker(path, None))
+    }
+}
+fn marker_kind(marker: io::Result<Vec<u8>>) -> io::Result<crate::fsutil::StorageRoot> {
+    match marker {
+        Ok(bytes) => {
+            serde_json::from_slice::<SubvolInfo>(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            Ok(crate::fsutil::StorageRoot::Managed)
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ENOATTR) => Ok(crate::fsutil::StorageRoot::Unmanaged),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn native_info(path: &Path) -> Result<SubvolInfo> {
     Ok(serde_json::from_slice(&crate::sys::apfs_marker(path, None)?)?)
 }
@@ -1138,6 +1159,7 @@ fn copy_snapshot(
         // round sees no change. After COPY_ROUNDS rounds the copy stays: each entry is then a
         // consistent copy from some moment of the copy, as with `git add`.
         for round in 0..crate::thin::COPY_ROUNDS {
+            crate::repo::save_barrier("copy")?;
             let after = {
                 let _t = crate::trace::span("APFS scan after");
                 scan(src)?
@@ -1678,6 +1700,19 @@ mod tests {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn boundary_marker_errors_do_not_become_unmanaged_directories() -> Result<()> {
+        use crate::fsutil::StorageRoot;
+        assert_eq!(marker_kind(Err(io::Error::from_raw_os_error(libc::ENOATTR)))?, StorageRoot::Unmanaged);
+        for errno in [libc::EACCES, libc::EPERM, libc::EIO, libc::ENOENT, libc::ENOTDIR, libc::ELOOP] {
+            assert_eq!(marker_kind(Err(io::Error::from_raw_os_error(errno))).unwrap_err().raw_os_error(), Some(errno));
+        }
+        let info = SubvolInfo { uuid: crate::ids::new_id(), received_uuid: None, parent_uuid: None, readonly: false, base: None };
+        assert_eq!(marker_kind(Ok(serde_json::to_vec(&info)?))?, StorageRoot::Managed);
+        assert_eq!(marker_kind(Ok(b"invalid marker".to_vec())).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        Ok(())
+    }
 
     struct Sandbox(PathBuf);
     impl Sandbox {

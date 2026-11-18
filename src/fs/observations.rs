@@ -10,6 +10,7 @@ use std::{
 
 pub(crate) enum ReadPolicy {
     Capture,
+    #[cfg(any(target_os = "macos", test))]
     Validate,
 }
 pub(crate) struct ReadObservation {

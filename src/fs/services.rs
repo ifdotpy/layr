@@ -10,6 +10,7 @@ use std::{
 pub(crate) struct TreeInfo {
     pub uuid: String,
     pub received_uuid: Option<String>,
+    #[cfg_attr(not(all(target_os = "linux", not(feature = "overlayfs"))), allow(dead_code))]
     pub parent_uuid: Option<String>,
     pub readonly: bool,
 }
@@ -34,6 +35,7 @@ pub(crate) trait Namespace: Send + Sync {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum CloneLookup {
+    #[cfg_attr(feature = "overlayfs", allow(dead_code))]
     ReceivedOnly,
     LocalOrReceived,
 }

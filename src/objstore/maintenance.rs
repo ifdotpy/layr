@@ -34,7 +34,9 @@ impl MaintenanceInterval {
     fn due(self, now: i64, last: i64) -> bool {
         match self {
             Self::Disabled => false,
-            Self::Every(seconds) => u64::try_from(now.saturating_sub(last)).is_ok_and(|elapsed| elapsed >= seconds.get().saturating_mul(1000)),
+            Self::Every(seconds) => {
+                u64::try_from(now.saturating_sub(last)).is_ok_and(|elapsed| elapsed >= seconds.get().saturating_mul(1000))
+            }
         }
     }
 }
@@ -93,6 +95,7 @@ pub enum MaintenanceMode {
 /// Plan under the project lock, prune before publication resumes, then compress outside it.
 /// Each project (including overlays) follows this same path on all filesystems.
 pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_objects::store::MaintenancePlan>> {
+    let Some(_preparation) = super::try_preparation_exclusive(p)? else { return Ok(None) };
     use layr_objects::store::MaintenanceLimit;
     if !exists(p) {
         return Ok(None);

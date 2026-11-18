@@ -727,6 +727,7 @@ fn finish_merge(
     ctx: &Ctx,
     repo: &Repo,
     line: &Line,
+    guard: &crate::store::LineLeaseSet,
     commit: MergeCommit,
     local: &std::collections::BTreeSet<String>,
     data: serde_json::Value,
@@ -737,18 +738,16 @@ fn finish_merge(
         MergeCommit::Protected(CleanMerge(candidate)) | MergeCommit::Ordinary(candidate) => candidate,
     };
     // Save preparation can restore caches, so even it waits for conflict validation.
-    let prepared = repo.prepare_save(ctx, line).inspect_err(|_| candidate.discard(repo))?;
-    let working = (|| -> Result<Option<String>> {
-        let locked = leases.lock(&repo.p)?;
-        prepared.working_state(&locked, ctx, line, if queue.is_some() { "before a queued merge" } else { "before a layr command" })
-    })();
-    let working = match working {
+    let working =
+        repo.save_working(ctx, line, guard, if queue.is_some() { "before a queued merge" } else { "before a layr command" });
+    let (_commit, working) = match working {
         Ok(w) => w,
         Err(e) => {
             candidate.discard(repo);
             return Err(e);
         }
     };
+    drop(_commit);
     finish(
         leases,
         ctx,
@@ -2083,6 +2082,7 @@ fn merge_rev_inner(
                 ctx,
                 repo,
                 line,
+                held.as_ref().expect("merge line lock"),
                 commit,
                 &std::collections::BTreeSet::new(),
                 serde_json::json!({"theirs":theirs,"up_to_date":true}),
@@ -2090,9 +2090,7 @@ fn merge_rev_inner(
                 &settled,
             )?;
         } else {
-            let prepared = repo.prepare_save(ctx, line)?;
-            let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
-            prepared.working_state(&locked, ctx, line, "before a layr command")?;
+            let (_commit, _) = repo.save_working(ctx, line, held.as_ref().expect("merge line lock"), "before a layr command")?;
         }
         if !a.has("-q") {
             outln!(ctx, "Already up to date.");
@@ -2144,9 +2142,7 @@ fn merge_rev_inner(
         let commit =
             MergeCommit::new(repo, MergeCandidate { head: head.clone(), states: vec![], overlays: ovl }, rule.is_some())?;
         if !commit.candidate().overlays.changed() {
-            let prepared = repo.prepare_save(ctx, line)?;
-            let locked = held.as_ref().ok_or_else(|| anyhow::anyhow!("missing line lease"))?.lock(&repo.p)?;
-            prepared.working_state(&locked, ctx, line, "before a layr command")?;
+            let (_commit, _) = repo.save_working(ctx, line, held.as_ref().expect("merge line lock"), "before a layr command")?;
             outln!(ctx, "Already up to date.");
             return Ok(0);
         }
@@ -2156,6 +2152,7 @@ fn merge_rev_inner(
             ctx,
             repo,
             line,
+            held.as_ref().expect("merge line lock"),
             commit,
             &local,
             serde_json::json!({"theirs": theirs, "overlays_only": true}),
@@ -2194,6 +2191,7 @@ fn merge_rev_inner(
             ctx,
             repo,
             line,
+            held.as_ref().expect("merge line lock"),
             commit,
             &local,
             serde_json::json!({"theirs": theirs, "fast_forward": true}),
@@ -2253,6 +2251,7 @@ fn merge_rev_inner(
                 ctx,
                 repo,
                 line,
+                held.as_ref().expect("merge line lock"),
                 commit,
                 &local,
                 serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": 0, "candidate": sid}),
@@ -2354,6 +2353,7 @@ fn merge_rev_inner(
         ctx,
         repo,
         line,
+        held.as_ref().expect("merge line lock"),
         commit,
         &local,
         serde_json::json!({"theirs": theirs, "base": base, "squash": a.has("--squash"), "conflicts": nconf}),

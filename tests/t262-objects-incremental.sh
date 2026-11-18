@@ -140,7 +140,36 @@ result = subprocess.run([binary, '__test-periodic', os.environ['LAYR_ROOT']], en
                         capture_output=True, text=True, timeout=30)
 assert result.returncode == 0, result.stderr
 incremental(result.stderr, 1)
-print('default and complete-stage named saves and automatic object-only saves remain incremental')
+# Read records directly: a CLI command here could retire the first automatic save.
+with sqlite3.connect(project / 'meta/db/layr.sqlite') as db:
+    records = [json.loads(row[0]) for row in db.execute('SELECT rec FROM states')]
+first_auto, = [state for state in records if state.get('message') == 'periodic']
+if sys.platform == 'darwin':
+    assert (project / 'deltas' / first_auto['id']).is_dir(), 'first automatic layer must remain native'
+(work / 'sub/f9').write_text('second automatic change\n')
+result = subprocess.run([binary, '__test-periodic', os.environ['LAYR_ROOT']], env=env,
+                        capture_output=True, text=True, timeout=30)
+assert result.returncode == 0, result.stderr
+incremental(result.stderr, 1)
+if sys.platform == 'darwin':
+    # The imported count alone hides a full comparison that hashes unchanged files.
+    assert 'objects full comparison' not in result.stderr, result.stderr
+with sqlite3.connect(project / 'meta/db/layr.sqlite') as db:
+    records = [json.loads(row[0]) for row in db.execute('SELECT rec FROM states')]
+second_auto, = [state for state in records
+                if state.get('message') == 'periodic' and state['id'] != first_auto['id']]
+assert second_auto['parents'] == first_auto['parents']
+if sys.platform == 'darwin':
+    # Python has no os.getxattr on macOS.
+    marker = json.loads(subprocess.check_output(
+        ['xattr', '-p', 'com.layr.subvolume', str(project / 'deltas' / second_auto['id'])], timeout=30))
+    assert marker['base'] == first_auto['id'], 'second layer must use the unretired automatic base'
+checkout = root / 'second-automatic-saved'
+run('objects', 'checkout', second_auto['id'], str(checkout), cwd=work)
+assert (checkout / 'sub/f8').read_text() == 'original 8\n'
+assert (checkout / 'sub/f9').read_text() == 'second automatic change\n'
+assert (checkout / 'sub/f99').read_text() == 'original 99\n'
+print('default and complete-stage named saves and repeated automatic saves remain incremental')
 PY
 eq "retired object parents keep incremental saves" 0 "$?"
 finish

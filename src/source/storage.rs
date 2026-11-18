@@ -161,51 +161,28 @@ pub(crate) fn sparse_format(project: &Project) -> Option<SparseFormat> {
     let _ = project;
     None
 }
-pub(crate) fn capture_base(project: &Project, head: &str, previous: &str) -> String {
-    #[cfg(target_os = "macos")]
-    if sparse_format(project).is_some()
-        && previous != head
-        && project.delta_path(previous).is_dir()
-        && crate::thin::chain_len(project, previous) < project.config_u64("thin.chain", crate::thin::MAX_CHAIN) as usize
-    {
-        return previous.to_owned();
-    }
-    let _ = (project, previous);
-    head.to_owned()
-}
 impl SparseFormat {
-    pub(crate) fn write_snapshot(
+    pub(crate) fn write_snapshot_at(
         self,
-        project: &Project,
-        id: &str,
         source: &Source,
         base: &str,
         work: &Path,
+        destination: &Path,
     ) -> Result<Option<OwnedCapture>> {
-        let _ = (project, id, source, base, work);
+        let _ = (source, base, work, destination);
         match self {
             #[cfg(target_os = "macos")]
             Self::Layer => {
-                let destination = project.delta_path(id);
                 let layered = source.clone().into_layered();
-                match crate::thin::snapshot_layer(&layered, base, work, &destination) {
-                    Ok(Some((layer, _))) => {
-                        let captured = layer.freeze()?;
-                        let recorded =
-                            project.lock_or_borrow().and_then(|db| db.write(|tx| tx.record_base(id, base)).map_err(Into::into));
-                        if let Err(error) = recorded {
-                            return Err(captured.abort(error));
-                        }
-                        Ok(Some(captured))
-                    }
+                match crate::thin::snapshot_layer(&layered, base, work, destination) {
+                    Ok(Some((layer, _))) => Ok(Some(layer.freeze()?)),
                     Ok(None) => {
-                        let (captured, _) = freeze_state(project, base, source, id)?;
-                        let recorded =
-                            project.lock_or_borrow().and_then(|db| db.write(|tx| tx.record_base(id, base)).map_err(Into::into));
-                        if let Err(error) = recorded {
-                            return Err(captured.abort(error));
-                        }
-                        Ok(Some(captured))
+                        let root = layr_fs_common::required(source, &RelDir::Root)?.attributes;
+                        let driver = crate::apfs::driver::ApfsFs::for_destination(destination, crate::apfs::driver::Links::Keep)?;
+                        let captured = driver
+                            .frozen_layer(root, layr_types::StateId::parse(base)?, driver.location(destination)?)
+                            .map_err(|error| crate::fs::operation_error(driver.clone(), error))?;
+                        Ok(Some(OwnedCapture::new(driver, captured)))
                     }
                     Err(error) if crate::thin::needs_complete(&error) => Ok(None),
                     Err(error) => Err(error),
@@ -215,20 +192,44 @@ impl SparseFormat {
     }
 }
 
+/// PreparedTree::source and Layered::of_state resolve the top layer over its marker base.
+/// That base can be a newer automatic save than the state's logical parent.
+pub(crate) fn capture_delta(source: &Source) -> Result<Option<(String, Vec<Vec<u8>>)>> {
+    #[cfg(target_os = "macos")]
+    if let Source::Layers(layered) = source {
+        return layer_delta(layered.top());
+    }
+    let _ = source;
+    Ok(None)
+}
+
 pub(crate) fn stored_delta(project: &Project, state: &str) -> Result<Option<(String, Vec<Vec<u8>>)>> {
     #[cfg(target_os = "macos")]
-    if let Some(base) = crate::thin::layer_base(project, state)? {
-        let delta = project.delta_path(state);
-        let mut paths = crate::apfs::scan_shared(&delta, false)?
-            .keys()
-            .filter(|path| !path.is_empty())
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        paths.extend(crate::thin::removed_of(&delta)?);
-        return Ok(Some((base, paths.into_iter().map(String::into_bytes).collect())));
+    if project.delta_path(state).is_dir() {
+        return layer_delta(&project.delta_path(state));
     }
     let _ = (project, state);
     Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn layer_delta(root: &Path) -> Result<Option<(String, Vec<Vec<u8>>)>> {
+    let Some(base) = crate::apfs::native_info(root)?.base else { return Ok(None) };
+    let scan = crate::apfs::scan_shared(root, false)?;
+    let paths = layer_paths(scan.keys().cloned(), crate::thin::removed_of(root)?);
+    Ok(Some((base, paths)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn layer_paths(written: impl IntoIterator<Item = String>, removed: impl IntoIterator<Item = String>) -> Vec<Vec<u8>> {
+    written
+        .into_iter()
+        .chain(removed)
+        .filter(|path| !path.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(String::into_bytes)
+        .collect()
 }
 
 pub(crate) fn complete(project: &Project, id: &str) -> Result<std::path::PathBuf> {
