@@ -139,6 +139,13 @@ If it differs, the entry becomes `failed` and names the expected and observed he
 useful when landing a replayed stack whose delta was prepared for one exact target tree.
 Entries without this option keep the existing behavior (see [the queue](review.md#ref-protection-and-the-merge-queue)).
 
+After each merge the queue tries the pending entries into the same line against the new head (a
+merge in a temporary folder, no state and no merge commands). An entry that would conflict fails at
+once with `queued merge has conflicts: <paths>` and is part of the `queue run` result, so its author
+can merge the target into the line while the queue goes on. Before, such an entry failed only when
+the queue reached it: 15 of 17 conflicts in three days came 17 to 388 minutes after `queue add`. An
+entry whose merge needs a merge command (a driver or a verify command) stays pending until its turn.
+
 ### Merge train
 
 A merge train checks several queue entries at once. The merge job of Layr Cloud (infra/aws/ci_job.py

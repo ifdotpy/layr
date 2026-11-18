@@ -489,6 +489,7 @@ fn run_entries(
             }
             continue;
         }
+        let mut conflicted = Vec::new();
         let mut attempts = 0;
         let outcome = loop {
             attempts += 1;
@@ -548,6 +549,12 @@ fn run_entries(
                 for e in errors.unwrap_or_else(|e| vec![format!("{e:#}")]) {
                     eprintln!("layr queue: {e}");
                 }
+                // The new head can conflict with entries that wait behind this one: they fail now, and their authors
+                // can merge the target while the queue goes on, instead of hours later when the queue reaches them.
+                match fail_conflicting(ctx, repo, &entry) {
+                    Ok(failed) => conflicted.extend(failed),
+                    Err(error) => eprintln!("layr queue: conflict pass: {error:#}"),
+                }
             }
             result => {
                 let (reason, failure) = match result {
@@ -570,6 +577,7 @@ fn run_entries(
             }
         }
         results.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
+        results.append(&mut conflicted);
         if guard.is_some() {
             break;
         }
@@ -578,6 +586,39 @@ fn run_entries(
         bail!("checked queue entry is not pending on the target line");
     }
     Ok(results)
+}
+
+/// Fail the pending entries into the target of `merged` that conflict with its new head (same reason as the queued
+/// merge would give), and return them. An entry whose merge needs a merge command stays pending.
+fn fail_conflicting(ctx: &Ctx, repo: &Repo, merged: &QueueEntry) -> Result<Vec<QueueEntry>> {
+    let mut failed = Vec::new();
+    for entry in repo.p.db.queue_entries(None)? {
+        if entry.status != "pending" || entry.id == merged.id || entry.target_line != merged.target_line {
+            continue;
+        }
+        let line = target(repo, &entry)?;
+        let paths = match super::mergecmd::trial_conflicts(ctx, repo, &line, &entry.state) {
+            Ok(Some(paths)) if !paths.is_empty() => paths,
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!("layr queue: entry '{}': conflict check: {error:#}", entry.id);
+                continue;
+            }
+        };
+        let _lock = repo.p.lock_maintenance()?;
+        if repo.p.db.queue_entry(&entry.id)?.as_ref() != Some(&entry) || target(repo, &entry)?.head != line.head {
+            continue;
+        }
+        let mut after = entry.clone();
+        after.status = "failed".into();
+        after.reason = Some(format!("queued merge has conflicts: {}", paths.join(", ")));
+        let mut rec = crate::model::DraftRecord::new("queue.result");
+        rec.data =
+            serde_json::json!({"queue_change":QueueChange{id:entry.id.clone(),before:Some(entry.clone()),after:Some(after)}});
+        repo.commit_record(&_lock, ctx, rec)?;
+        failed.push(repo.p.db.queue_entry(&entry.id)?.ok_or_else(|| anyhow::anyhow!("queue entry disappeared"))?);
+    }
+    Ok(failed)
 }
 
 /// Why a change cannot be queued or merged: it is closed. None for an open or merged change.
