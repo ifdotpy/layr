@@ -15,9 +15,10 @@
 //!
 //! Chunks (`chunked`): the chunks that the deleted trees name and no kept tree names are dead.
 //! `chunked::release` rewrites each pack that holds one with its live chunks, after the trees go,
-//! so that no dead chunk stays in a pack. A pack whose chunks no tree names at all (a push that
+//! so that no dead chunk stays in a pack; each pack goes right after its copy. A pack whose chunks no tree names at all (a push that
 //! stopped before its tree) goes when its index is older than a day and none of its chunks is live.
 
+use super::backend::{Missing, Undecodable};
 use super::format::{parse_data_name, parse_tree_name, tree_name};
 use super::reader::Reader;
 use super::Store;
@@ -64,6 +65,12 @@ impl Swept {
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs after a pass found the chunks to release, before the release: tests publish a pack there.
+    pub(super) static BEFORE_RELEASE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A pack index younger than this may belong to a push in flight.
@@ -148,20 +155,36 @@ pub(super) fn sweep(
     }
     // A kept delta tree needs its base trees to decode (a tree is a zstd delta on its base tree), but not their
     // data: the parts and chunks that stay are the ones that the trees kept for their own state link.
-    // A tree that cannot be decoded (a delta whose base tree is gone) stays as it is: the sweep cannot tell what it
-    // links, so it deletes nothing for it, and it never fails a push for it.
-    let mut broken: BTreeSet<(String, String)> = BTreeSet::new();
+    // A kept tree or base that a failed read left unknown may link any part or chunk: the pass deletes nothing, and it
+    // never fails a push for it, nor does one that the listing shows and a read finds absent. One that never decodes (a
+    // delta whose base tree is not listed, bytes that do not decrypt or decode) restores nothing: the pass goes on
+    // without it.
     let own = keep.clone();
+    let mut linked = BTreeSet::new();
+    let mut live_chunks: BTreeSet<String> = BTreeSet::new();
+    let mut kept_chunks: Vec<BTreeSet<String>> = Vec::new();
     let mut pending: Vec<(String, String)> = keep.iter().cloned().collect();
     while let Some((state, attempt)) = pending.pop() {
-        let header = match reader.tree(&state, &attempt) {
-            Ok((header, _, _)) => header,
-            Err(e) => {
-                eprintln!("layr: remote tree {} cannot be read ({e:#}); the sweep leaves it", tree_name(&state, &attempt));
-                broken.insert((state, attempt));
+        let (header, _, tree) = match reader.tree(&state, &attempt) {
+            Ok(read) => read,
+            Err(e)
+                if e.downcast_ref::<Undecodable>().is_some()
+                    || e.downcast_ref::<Missing>().is_some_and(|missing| !objects.iter().any(|o| o.key == missing.0)) =>
+            {
+                eprintln!("layr: remote tree {} cannot be decoded ({e:#}); the sweep leaves it", tree_name(&state, &attempt));
                 continue;
             }
+            Err(e) => {
+                eprintln!("layr: remote tree {} cannot be read ({e:#}); the sweep deletes nothing", tree_name(&state, &attempt));
+                return Ok(swept);
+            }
         };
+        if own.contains(&(state.clone(), attempt)) {
+            linked.extend(tree.files.values().flat_map(|e| e.3.iter().map(|l| l.object())));
+            let named: BTreeSet<String> = tree.chunks.values().flatten().cloned().collect();
+            live_chunks.extend(named.iter().cloned());
+            kept_chunks.push(named);
+        }
         if let Some(base) = header.base {
             if keep.insert(base.clone()) {
                 why(&base.0, format!("base tree of {}", crate::ids::short(&state)));
@@ -169,16 +192,7 @@ pub(super) fn sweep(
             }
         }
     }
-    let mut linked = BTreeSet::new();
-    let mut live_chunks: BTreeSet<String> = BTreeSet::new();
-    let mut kept_chunks: Vec<BTreeSet<String>> = Vec::new();
-    for (state, attempt) in own.iter().filter(|t| !broken.contains(*t)) {
-        let Ok((_, _, tree)) = reader.tree(state, attempt) else { continue };
-        linked.extend(tree.files.values().flat_map(|e| e.3.iter().map(|l| l.object())));
-        let named: BTreeSet<String> = tree.chunks.values().flatten().cloned().collect();
-        live_chunks.extend(named.iter().cloned());
-        kept_chunks.push(named);
-    }
+    let mut broken: BTreeSet<(String, String)> = BTreeSet::new();
     // The data of a tree that stays only as a base: its parts go unless a tree of `own` links them.
     let bases: Vec<&(String, String)> = keep.iter().filter(|t| !own.contains(*t)).collect();
     let dead: Vec<&(String, String)> = trees.iter().filter(|t| !keep.contains(*t)).collect();
@@ -269,16 +283,21 @@ fn sweep_chunks(
         .collect();
     let indexes = super::chunked::indexes(&store.backend, Some(&store.dir), identity)?;
     let now = chrono::Utc::now().timestamp();
-    let mut held: BTreeSet<&str> = BTreeSet::new();
+    // Each held chunk, with the time that the newest pack holding it was published.
+    let mut held: BTreeMap<&str, i64> = BTreeMap::new();
     for (pack, index) in &indexes {
-        held.extend(index.chunks.iter().map(|(id, _, _)| id.as_str()));
+        let published = modified.get(pack).copied().unwrap_or(now);
+        for (id, _, _) in &index.chunks {
+            let newest = held.entry(id.as_str()).or_insert(published);
+            *newest = (*newest).max(published);
+        }
         // A pack of a push that stopped before its tree: old, and nothing live in it.
         let old = modified.get(pack).is_some_and(|time| now - time > PACK_GRACE);
         if old && !index.chunks.iter().any(|(id, _, _)| live.contains(id)) {
             dead.extend(index.chunks.iter().map(|(id, _, _)| id.clone()));
         }
     }
-    swept.missing = kept.iter().filter(|named| named.iter().any(|id| !held.contains(id.as_str()))).count();
+    swept.missing = kept.iter().filter(|named| named.iter().any(|id| !held.contains_key(id.as_str()))).count();
     for index in indexes.values() {
         for (id, _, length) in &index.chunks {
             if dead.contains(id) {
@@ -293,9 +312,12 @@ fn sweep_chunks(
         let marks = dead_marks(&store.dir);
         // A marked chunk whose tree an earlier pass deleted is still dead while no live tree names it and a pack
         // holds it.
-        dead.extend(marks.keys().filter(|id| !live.contains(*id) && held.contains(id.as_str())).cloned());
+        dead.extend(marks.keys().filter(|id| !live.contains(*id) && held.contains_key(id.as_str())).cloned());
+        // A mark covers the packs that held its chunk when it was set. A pack published since (a push in flight that
+        // uploads a released chunk again) starts the grace again: the tree that names the chunk is not listed yet.
+        let since = |id: &String, mark: &i64| held.get(id.as_str()).is_none_or(|published| published <= mark);
         let now_marks: BTreeMap<String, i64> =
-            dead.iter().map(|id| (id.clone(), marks.get(id).copied().unwrap_or(now))).collect();
+            dead.iter().map(|id| (id.clone(), marks.get(id).copied().filter(|mark| since(id, mark)).unwrap_or(now))).collect();
         if now_marks != marks {
             let text: String = now_marks.iter().map(|(id, t)| format!("{id} {t}\n")).collect();
             crate::fsutil::atomic_write(&store.dir.join("dead-chunks"), text.as_bytes(), 0o600)?;
@@ -327,10 +349,13 @@ fn sweep_chunks(
         );
         return Ok(());
     }
-    for key in super::chunked::release(store, identity, recipient, &dead)? {
-        if swept.delete(&store.backend, &key) {
-            swept.packs.push(key);
+    #[cfg(test)]
+    BEFORE_RELEASE.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
+    super::chunked::release(store, identity, recipient, &indexes, &dead, &mut |key| {
+        let deleted = swept.delete(&store.backend, key);
+        if deleted {
+            swept.packs.push(key.to_string());
         }
-    }
-    Ok(())
+        deleted
+    })
 }

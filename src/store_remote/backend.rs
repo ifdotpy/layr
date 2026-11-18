@@ -9,6 +9,37 @@ use std::path::{Path, PathBuf};
 pub use super::download::TransferStats;
 pub use layr_store::s3::Object;
 
+/// An object that the store answered for and that cannot be used: its bytes do not decrypt or decode. Unlike a failed
+/// read, reading it again gives the same answer.
+#[derive(Debug)]
+pub struct Undecodable(pub String);
+
+impl Undecodable {
+    pub fn of(e: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self(format!("{e:#}")))
+    }
+}
+
+impl std::fmt::Display for Undecodable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Undecodable {}
+
+/// An object that the store says is absent, by key. A listing that shows it again means a read that may succeed later.
+#[derive(Debug)]
+pub struct Missing(pub String);
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "missing remote object {}", self.0)
+    }
+}
+
+impl std::error::Error for Missing {}
+
 #[derive(Clone)]
 pub enum Backend {
     File(PathBuf, FileIdentity),
@@ -121,18 +152,18 @@ impl Backend {
         if let Self::Epoch(epoch) = self {
             if key.starts_with("states/") {
                 if let Some(bytes) = epoch.current.get(key)? {
-                    return super::keys::decrypt(identity, &bytes);
+                    return super::keys::decrypt(identity, &bytes).map_err(Undecodable::of);
                 }
                 for (backend, old_identity) in &epoch.history {
                     if let Some(bytes) = backend.get(key)? {
-                        return super::keys::decrypt(old_identity, &bytes);
+                        return super::keys::decrypt(old_identity, &bytes).map_err(Undecodable::of);
                     }
                 }
-                bail!("missing remote object {key}");
+                bail!(Missing(key.to_string()));
             }
         }
-        let bytes = self.get(key)?.with_context(|| format!("missing remote object {key}"))?;
-        super::keys::decrypt(identity, &bytes)
+        let bytes = self.get(key)?.ok_or_else(|| Missing(key.to_string()))?;
+        super::keys::decrypt(identity, &bytes).map_err(Undecodable::of)
     }
 
     /// Stream a release object and select the authenticated identity of its epoch.
@@ -316,80 +347,70 @@ impl Backend {
         matches!(self, Self::S3(_) | Self::Gateway(_) | Self::Api(_) | Self::File(..))
     }
 
+    /// Enforced ciphertext ceiling, when every route uses the Gateway's bounded reader.
+    /// File/S3 bodies have no transport ceiling and must be prefetched one at a time.
+    pub(super) fn read_limit(&self) -> Option<usize> {
+        match self {
+            Self::Gateway(_) => Some(super::gateway::OBJECT_LIMIT),
+            Self::Prefix(base, _) => base.read_limit(),
+            Self::Epoch(epoch) => {
+                let limit = epoch.current.read_limit()?;
+                (epoch.root.read_limit() == Some(limit) && epoch.history.iter().all(|(b, _)| b.read_limit() == Some(limit)))
+                    .then_some(limit)
+            }
+            _ => None,
+        }
+    }
+
     /// Objects in input order. The returned Vec retains all bodies; use `visit_many` for large inventories.
+    #[cfg(test)]
     pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         let mut out = vec![None; keys.len()];
-        self.visit_many(keys, |i, body| {
+        self.visit_many(keys, &vec![None; keys.len()], |i, body| {
             out[i] = body;
             Ok(())
         })?;
         Ok(out)
     }
 
-    /// Consume bounded batches as they complete. Indices refer to `keys`; completion order is unspecified.
-    pub fn visit_many(&self, keys: &[String], mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>) -> Result<()> {
-        self.visit_reads(keys, None, "", &mut |i, body, _| visit(i, body))
-    }
-
-    /// Download known-size whole objects. Gateway reads use at most eight jobs and 64 MiB of reserved bodies.
-    /// Sizes are upper bounds on ciphertext bytes, not plaintext lengths; an oversized body is rejected.
-    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
-    pub fn download_many(
+    /// Consume bounded batches as they complete. Indices refer to `keys`; completion order is unspecified. `sizes`,
+    /// by key, are known from a listing or not: a known size reserves the bytes of its read, and its body may not
+    /// exceed it.
+    pub fn visit_many(
         &self,
         keys: &[String],
-        sizes: &[u64],
+        sizes: &[Option<u64>],
         mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>,
     ) -> Result<()> {
-        if keys.len() != sizes.len() {
-            bail!("download size count does not match keys");
-        }
-        self.visit_reads(keys, Some(sizes), "", &mut |i, body, _| visit(i, body))
+        self.visit_reads(keys, sizes, "", &mut |i, body, _| visit(i, body))
     }
 
-    /// Decrypt each body with the identity of the epoch that supplied it, including through Prefix views.
-    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    /// Decrypt each body with the identity of the epoch that supplied it, including through Prefix views. `sizes` as
+    /// in `visit_many`.
     pub fn visit_decrypted_many(
         &self,
         keys: &[String],
+        sizes: &[Option<u64>],
         identity: &str,
         mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
     ) -> Result<()> {
-        self.visit_reads(keys, None, identity, &mut |i, body, selected| {
+        self.visit_reads(keys, sizes, identity, &mut |i, body, selected| {
             let body = body.with_context(|| format!("missing remote object {}", keys[i]))?;
             visit(i, super::keys::decrypt(selected, &body)?)
         })
     }
 
-    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    #[cfg(test)]
     pub fn decrypted_many(&self, keys: &[String], identity: &str) -> Result<Vec<Vec<u8>>> {
         let mut out = vec![Vec::new(); keys.len()];
-        self.visit_decrypted_many(keys, identity, |i, body| {
+        self.visit_decrypted_many(keys, &vec![None; keys.len()], identity, |i, body| {
             out[i] = body;
             Ok(())
         })?;
         Ok(out)
     }
 
-    /// Known-size downloads decrypted using the identity of their actual epoch.
-    #[allow(dead_code)] // Consumed by the subsequent fetch/push planning work.
-    pub fn download_decrypted_many(
-        &self,
-        keys: &[String],
-        sizes: &[u64],
-        identity: &str,
-        mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
-    ) -> Result<()> {
-        if keys.len() != sizes.len() {
-            bail!("download size count does not match keys");
-        }
-        self.visit_reads(keys, Some(sizes), identity, &mut |i, body, selected| {
-            let body = body.with_context(|| format!("missing remote object {}", keys[i]))?;
-            visit(i, super::keys::decrypt(selected, &body)?)
-        })
-    }
-
     /// Shared across Gateway clones/views. Non-HTTP backends have no gateway transport counters.
-    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
     pub fn transfer_stats(&self) -> TransferStats {
         match self {
             Self::Gateway(g) => g.transfer_stats(),
@@ -399,9 +420,12 @@ impl Backend {
         }
     }
 
-    fn visit_reads(&self, keys: &[String], sizes: Option<&[u64]>, identity: &str, visit: &mut ReadVisitor<'_>) -> Result<()> {
+    fn visit_reads(&self, keys: &[String], sizes: &[Option<u64>], identity: &str, visit: &mut ReadVisitor<'_>) -> Result<()> {
         for key in keys {
             check_key(key)?;
+        }
+        if sizes.len() != keys.len() {
+            bail!("download size count does not match keys");
         }
         match self {
             Self::Prefix(base, prefix) => {
@@ -415,8 +439,8 @@ impl Backend {
                         .iter()
                         .map(|&i| if mapped { epoch_key(&keys[i]).into_owned() } else { keys[i].clone() })
                         .collect();
-                    let lengths: Option<Vec<_>> = sizes.map(|s| indices.iter().map(|&i| s[i]).collect());
-                    backend.visit_reads(&names, lengths.as_deref(), selected, &mut |j, body, id| visit(indices[j], body, id))
+                    let lengths: Vec<_> = indices.iter().map(|&i| sizes[i]).collect();
+                    backend.visit_reads(&names, &lengths, selected, &mut |j, body, id| visit(indices[j], body, id))
                 };
                 route(&epoch.root, &root, false, identity, visit)?;
                 let mut missing = Vec::new();
@@ -449,26 +473,48 @@ impl Backend {
                 Ok(())
             }
             Self::Gateway(g) => g.visit_many(keys, sizes, |i, body| visit(i, body, identity)),
-            _ => super::download::run(
-                keys.len(),
-                super::download::JOBS,
-                super::download::BYTE_BUDGET,
-                |_| 32 << 20,
-                |i| self.get(&keys[i]),
-                |i, body| visit(i, body, identity),
-            ),
+            // Listed sizes reserve their bytes, and a body may not exceed its size. A File or S3 body of unknown size
+            // has no ceiling: its read runs alone, after the reads of known size, which share the pool. An API read
+            // keeps a share of the budget.
+            _ => {
+                let unknown = match self {
+                    Self::Api(_) => super::download::BYTE_BUDGET / super::download::JOBS as u64,
+                    _ => super::download::BYTE_BUDGET,
+                };
+                let (known, open): (Vec<usize>, Vec<usize>) = (0..keys.len()).partition(|&i| sizes[i].is_some());
+                let order = [known, open].concat();
+                super::download::run(
+                    keys.len(),
+                    super::download::JOBS,
+                    super::download::BYTE_BUDGET,
+                    |j| sizes[order[j]].unwrap_or(unknown),
+                    |j| self.get_within(&keys[order[j]], sizes[order[j]]),
+                    |j, body| visit(order[j], body, identity),
+                )
+            }
         }
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.get_within(key, None)
+    }
+
+    /// `get` of an immutable object of at most `limit` bytes (its listed size, or a bound of its format): a larger body
+    /// fails before a File or S3 read takes in more than `limit` bytes of it.
+    pub(super) fn get_within(&self, key: &str, limit: Option<u64>) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
         let _io = Io::start("get", key, self.is_leaf());
+        let exceeds = |limit: u64| anyhow::anyhow!("remote object {key} exceeds its size bound ({limit} bytes)");
+        let bounded = |body: Option<Vec<u8>>| match (body, limit) {
+            (Some(body), Some(limit)) if body.len() as u64 > limit => Err(exceeds(limit)),
+            (body, _) => Ok(body),
+        };
         match self {
             Self::Epoch(epoch) => {
                 if !epoch_object(key) {
-                    return epoch.root.get(key);
+                    return epoch.root.get_within(key, limit);
                 }
-                let data = epoch.current.get(&epoch_key(key))?;
+                let data = epoch.current.get_within(&epoch_key(key), limit)?;
                 if data.is_some()
                     || !(key.starts_with("states/")
                         || key.starts_with("files/")
@@ -478,29 +524,62 @@ impl Backend {
                     return Ok(data);
                 }
                 for (backend, _) in &epoch.history {
-                    if let Some(bytes) = backend.get(key)? {
+                    if let Some(bytes) = backend.get_within(key, limit)? {
                         return Ok(Some(bytes));
                     }
                 }
                 Ok(None)
             }
-            Self::Prefix(base, prefix) => base.get(&format!("{prefix}{key}")),
-            Self::S3(s) => s.get(key),
-            Self::Gateway(g) => g.get(key),
-            Self::Api(a) => a.get(key),
+            Self::Prefix(base, prefix) => base.get_within(&format!("{prefix}{key}"), limit),
+            Self::S3(s) => s.get_within(key, limit),
+            // The gateway's reader has its own ceiling (`OBJECT_LIMIT`); a smaller bound stops it sooner.
+            Self::Gateway(g) => {
+                let ceiling = super::gateway::OBJECT_LIMIT;
+                bounded(
+                    g.get_limited(key, limit.map_or(ceiling, |limit| usize::try_from(limit).unwrap_or(ceiling).min(ceiling)))?,
+                )
+            }
+            Self::Api(a) => bounded(a.get(key)?),
             Self::File(root, identity) => identity.run(|| {
+                #[cfg(test)]
+                record(root, "get", key);
+                #[cfg(test)]
+                if fault(root, "get", key) {
+                    bail!("read remote object {key}: injected fault");
+                }
+                #[cfg(test)]
+                if fault(root, "absent", key) {
+                    return Ok(None);
+                }
+                #[cfg(test)]
+                let counted = FILE_THREADS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(root)
+                    .map(|threads| threads.insert(std::thread::current().id()))
+                    .is_some();
+                // A counted read lasts a moment, so that reads that may run together do overlap on a busy machine.
+                #[cfg(test)]
+                if counted {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
                 let path = crate::fsutil::safe_join(root, key)?;
-                let mut f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
+                let f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
                     Ok(f) => f,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(e) => return Err(e).with_context(|| format!("read remote object {key}")),
                 };
-                if !f.metadata()?.is_file() {
+                let metadata = f.metadata()?;
+                if !metadata.is_file() {
                     bail!("remote object is not a file: {key}");
                 }
-                let mut data = Vec::new();
-                f.read_to_end(&mut data)?;
-                Ok(Some(data))
+                if let Some(limit) = limit.filter(|limit| metadata.len() > *limit) {
+                    return Err(exceeds(limit));
+                }
+                // The file's length reserves its buffer; a file that grew since is cut one byte past the bound.
+                let mut data = Vec::with_capacity(usize::try_from(metadata.len())?);
+                f.take(limit.map_or(u64::MAX, |limit| limit + 1)).read_to_end(&mut data)?;
+                bounded(Some(data))
             }),
         }
     }
@@ -508,7 +587,7 @@ impl Backend {
     /// Publish a whole object or leave its destination absent. Never replace an object.
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         check_key(key)?;
-        match self {
+        let created = match self {
             Self::Epoch(epoch) => {
                 if epoch_object(key) {
                     epoch.current.put_new(&epoch_key(key), body)
@@ -520,6 +599,8 @@ impl Backend {
             Self::S3(s) => s.put_new(key, body),
             Self::Gateway(g) => g.put_new(key, body),
             Self::Api(a) => a.put_new(key, body),
+            #[cfg(test)]
+            Self::File(root, _) if fault(root, "put", key) => Ok(false),
             Self::File(root, identity) => identity.run(|| {
                 fs::create_dir_all(root)?;
                 let path = crate::fsutil::safe_join(root, key)?;
@@ -543,7 +624,13 @@ impl Backend {
                 let _ = fs::remove_file(temporary);
                 result
             }),
+        };
+        // Logged after the write ends: tests check what an upload waited for.
+        #[cfg(test)]
+        if let Self::File(root, _) = self {
+            record(root, "put", key);
         }
+        created
     }
 
     /// Visit requests in backend order. The callback can stop the pass.
@@ -615,6 +702,8 @@ impl Backend {
             Self::Gateway(g) => g.list(prefix),
             Self::Api(a) => a.list(prefix),
             Self::File(root, identity) => identity.run(|| {
+                #[cfg(test)]
+                record(root, "list", prefix);
                 let mut out = Vec::new();
                 if root.exists() {
                     // A state prefix must not enumerate every sibling state directory.
@@ -757,7 +846,12 @@ fn walk_entry(root: &Path, entry: fs::DirEntry, prefix: &str, out: &mut Vec<Obje
         }
     } else if name.starts_with(prefix) && !temporary {
         let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-        out.push(Object { key: name, modified });
+        #[cfg(test)]
+        if fault(root, "unsized", &name) {
+            out.push(Object { key: name, modified, size: None });
+            return Ok(());
+        }
+        out.push(Object { key: name, modified, size: Some(m.len()) });
     }
     Ok(())
 }
@@ -973,6 +1067,33 @@ mod temporary_tests {
 
     /// The source cannot be read, so the copy fails after the temporary file exists.
     #[test]
+    fn reads_of_known_size_share_the_pool_before_the_reads_of_unknown_size() {
+        let root = dir("mixed-sizes");
+        let backend = Backend::file(root.clone());
+        let keys: Vec<String> = (0..8).map(|n| format!("obj/{n}")).collect();
+        for key in &keys {
+            backend.put_new(key, vec![1; 10]).unwrap();
+        }
+        // Every other size is known.
+        let sizes: Vec<Option<u64>> = (0..keys.len()).map(|n| (n % 2 == 0).then_some(10)).collect();
+        FILE_REQUESTS.lock().unwrap().insert(root.clone(), Vec::new());
+        let mut seen = vec![false; keys.len()];
+        backend
+            .visit_many(&keys, &sizes, |i, body| {
+                assert_eq!(body.as_deref(), Some(&[1; 10][..]));
+                seen[i] = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(seen.iter().all(|seen| *seen));
+        let gets = FILE_REQUESTS.lock().unwrap().remove(&root).unwrap();
+        let known: Vec<bool> = gets.iter().map(|(_, key)| sizes[keys.iter().position(|k| k == key).unwrap()].is_some()).collect();
+        // An unknown read runs alone: one before a known read would hold back the reads of known size after it.
+        assert_eq!(known, [[true; 4], [false; 4]].concat(), "{gets:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_failed_put_leaves_no_temporary_file() {
         let root = dir("failed");
         let backend = Backend::file(root.clone());
@@ -1000,6 +1121,37 @@ mod temporary_tests {
         assert!(!old.exists());
         assert!(root.join("a/.put-new").exists() && root.join("a/object").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// The requests of the File backends whose roots a test registered: `(operation, key or prefix)` in order.
+#[cfg(test)]
+pub(super) static FILE_REQUESTS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<(&'static str, String)>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The threads that read objects of the File backends whose roots a test registered.
+#[cfg(test)]
+pub(super) static FILE_THREADS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::collections::HashSet<std::thread::ThreadId>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Faults of the File backends whose roots a test registered: `(operation, key prefix)`. A `get` of such a key fails, an
+/// `absent` one reads as absent, an `unsized` one lists without its size, and a `put` of one creates nothing (`put_new`
+/// returns false).
+#[cfg(test)]
+pub(super) static FILE_FAULTS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<(&'static str, String)>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+fn fault(root: &Path, operation: &str, key: &str) -> bool {
+    let faults = FILE_FAULTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    faults.get(root).is_some_and(|faults| faults.iter().any(|(op, prefix)| *op == operation && key.starts_with(prefix.as_str())))
+}
+
+#[cfg(test)]
+fn record(root: &Path, operation: &'static str, key: &str) {
+    if let Some(log) = FILE_REQUESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(root) {
+        log.push((operation, key.to_string()));
     }
 }
 

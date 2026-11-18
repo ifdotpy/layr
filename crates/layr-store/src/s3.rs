@@ -3,6 +3,8 @@ use super::aws::{self, Credentials, EMPTY_SHA256};
 pub struct Object {
     pub key: String,
     pub modified: i64,
+    /// The stored bytes, when the listing says.
+    pub size: Option<u64>,
 }
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -383,6 +385,9 @@ fn failure(what: &str, status: u16, _reply: &[u8]) -> anyhow::Error {
     anyhow!("{what}: HTTP {status}")
 }
 
+/// The most bytes that a read without a size bound reserves before its body arrives.
+const UNBOUNDED_RESERVE: u64 = 8 << 20;
+
 impl S3 {
     pub fn put_new(&self, key: &str, body: Vec<u8>) -> Result<bool> {
         let key = self.key(key);
@@ -421,7 +426,8 @@ impl S3 {
                 let modified = aws::xml_text(item, "LastModified").context("S3 list entry has no time")?;
                 let modified = chrono::DateTime::parse_from_rfc3339(&modified)?.timestamp();
                 let relative = key.strip_prefix(&self.prefix).context("S3 returned a key outside the prefix")?;
-                keys.push(Object { key: relative.to_string(), modified });
+                let size = aws::xml_text(item, "Size").and_then(|size| size.parse().ok());
+                keys.push(Object { key: relative.to_string(), modified, size });
             }
             let next = aws::xml_text(&xml, "NextContinuationToken").filter(|t| !t.is_empty());
             if next.is_none() {
@@ -496,12 +502,33 @@ impl S3 {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let reply = self.call(Method::GET, &self.key(key), &[], &[], Vec::new())?;
-        match reply.status {
-            200 => Ok(Some(reply.body)),
-            404 => Ok(None),
-            _ => Err(failure("S3 get", reply.status, &reply.body)),
+        self.get_within(key, None)
+    }
+
+    /// `get` of an object of at most `limit` bytes: a larger body fails before more than `limit` bytes of it are read.
+    pub fn get_within(&self, key: &str, limit: Option<u64>) -> Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        let response = self.request(Method::GET, &self.key(key), &[], &[], Vec::new(), LIMIT)?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            status => return Err(failure("S3 get", status, &[])),
         }
+        // The advertised length reserves the body up front within `limit`; without one, at most `UNBOUNDED_RESERVE`,
+        // and the body grows as its bytes arrive.
+        let length = response.content_length();
+        let reserve = length.unwrap_or(0).min(limit.unwrap_or(UNBOUNDED_RESERVE));
+        let limit = limit.unwrap_or(u64::MAX);
+        if length.is_some_and(|length| length > limit) {
+            bail!("remote object {key} exceeds its size bound ({limit} bytes)");
+        }
+        let mut body = Vec::with_capacity(usize::try_from(reserve)?);
+        // The service can echo credentials in its errors: only the kind of a read error is kept.
+        response.take(limit.saturating_add(1)).read_to_end(&mut body).map_err(|error| anyhow!("S3 get: {}", error.kind()))?;
+        if body.len() as u64 > limit {
+            bail!("remote object {key} exceeds its size bound ({limit} bytes)");
+        }
+        Ok(Some(body))
     }
 
     pub fn delete(&self, key: &str) -> Result<()> {

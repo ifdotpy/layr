@@ -8,8 +8,13 @@ use layr_fs_unix::DirectoryTree;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::{Arc, Mutex};
 
+/// A native error as an `FsError`. An I/O error in its chain stays `FsError::Io`, with its kind and the whole message:
+/// boxed in `FsError::Backend`, it is hidden from a caller that looks for it (`crate::fs::is_storage_full`).
 fn backend<T>(value: anyhow::Result<T>) -> layr_fs_core::Result<T> {
-    value.map_err(FsError::backend)
+    value.map_err(|error| match error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()) {
+        Some(io) => FsError::Io(std::io::Error::new(io.kind(), format!("{error:#}"))),
+        None => FsError::backend(error),
+    })
 }
 struct Registered {
     path: PathBuf,
@@ -366,6 +371,18 @@ impl ReflinkRange for RangeClone {
 
 #[cfg(test)]
 mod tests {
+    /// A full disk in a native step (the `create_dir` of a stage) reaches the fetch, through the driver's error and its
+    /// conversion back to `anyhow`, as the full disk that the fetch retries after freeing room.
+    #[test]
+    fn a_full_disk_in_a_native_step_stays_a_full_disk() {
+        let full = || anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ENOSPC));
+        for native in [full(), full().context("create the stage")] {
+            let message = format!("{native:#}");
+            let error = anyhow::Error::from(super::backend::<()>(Err(native)).unwrap_err());
+            assert!(crate::fs::is_storage_full(&error), "{error:#}");
+            assert!(format!("{error:#}").starts_with(&message), "{error:#}");
+        }
+    }
     fn path_hints_with(
         base: &Path,
         tree: &Path,

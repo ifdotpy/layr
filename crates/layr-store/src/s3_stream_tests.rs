@@ -120,3 +120,29 @@ fn disconnect_after_a_part_aborts_without_completing() {
     assert_eq!(calls[2].method, "DELETE");
     assert!(!calls.iter().any(|c| c.method == "POST" && c.target.contains("uploadId=")));
 }
+
+/// A read without a size bound does not reserve the length that the server advertises: a body that claims a petabyte
+/// and ends early fails as a short read.
+#[test]
+fn an_unbounded_get_reserves_no_advertised_length() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let worker = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut input = BufReader::new(&mut socket);
+        let mut line = String::new();
+        while line != "\r\n" {
+            line.clear();
+            if input.read_line(&mut line)? == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+        }
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\nshort", 1u64 << 50)
+    });
+    let credentials = Credentials { key_id: "test".into(), secret: "test-secret".into(), token: None };
+    let s3 = S3::new("bucket", "us-east-1", credentials, Some(&endpoint))?;
+    assert!(s3.get("object").is_err());
+    worker.join().map_err(|_| anyhow!("the test server panicked"))??;
+    Ok(())
+}

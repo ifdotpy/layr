@@ -1,13 +1,17 @@
-//! Bounded blocking downloads. A result keeps its byte reservation until the consumer returns.
+//! The one bounded worker pool of the transport: downloads, listings and uploads. A job keeps its byte reservation
+//! until the caller has consumed its result.
 
 use anyhow::{anyhow, Result};
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
 };
 
 pub(super) const JOBS: usize = 8;
 pub(super) const BYTE_BUDGET: u64 = 64 << 20;
+/// Resident bytes of the uploads of one state (parts and chunk packs in each representation), and of the chunk packs
+/// that a reader decodes ahead.
+pub(super) const TRANSFER_BUFFER_BUDGET: usize = 256 << 20;
 
 /// A read proof that the gateway refused even when new. The optional batch routes treat it as "no such route".
 #[derive(Debug)]
@@ -19,6 +23,7 @@ impl std::fmt::Display for ProofRejected {
 }
 impl std::error::Error for ProofRejected {}
 
+/// Fetch `count` indexed jobs on at most `jobs` workers and consume them on the calling thread.
 pub(super) fn run<T: Send>(
     count: usize,
     jobs: usize,
@@ -27,74 +32,159 @@ pub(super) fn run<T: Send>(
     fetch: impl Fn(usize) -> Result<T> + Sync,
     mut consume: impl FnMut(usize, T) -> Result<()>,
 ) -> Result<()> {
-    let quick = super::gateway::is_quick();
-    let next = AtomicUsize::new(0);
-    let cancelled = AtomicBool::new(false);
-    let used = Mutex::new(0u64);
-    let available = Condvar::new();
-    let (tx, rx) = mpsc::sync_channel(0);
     std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for _ in 0..count.min(jobs) {
-            let (tx, next, cancelled, used, available, weight, fetch) =
-                (tx.clone(), &next, &cancelled, &used, &available, &weight, &fetch);
-            handles.push(scope.spawn(move || {
-                while !cancelled.load(Ordering::SeqCst) {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= count {
-                        break;
-                    }
-                    let charge = weight(i).max(1).min(budget);
-                    let mut active = used.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    while *active + charge > budget && !cancelled.load(Ordering::SeqCst) {
-                        active = available.wait(active).unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                    if cancelled.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    *active += charge;
-                    drop(active);
-                    // Catch panics as well: cancellation must wake and join every waiting worker.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if quick {
-                            super::gateway::quick(|| fetch(i))
-                        } else {
-                            fetch(i)
-                        }
-                    }))
-                    .unwrap_or_else(|_| Err(anyhow!("download worker panicked")));
-                    let (ack, received) = mpsc::sync_channel::<()>(0);
-                    if tx.send((i, result, ack)).is_ok() {
-                        let _ = received.recv();
-                    }
-                    *used.lock().unwrap_or_else(std::sync::PoisonError::into_inner) -= charge;
-                    available.notify_all();
-                }
-            }));
+        let mut pool = Pool::new(scope, jobs.min(count), budget, &fetch);
+        for i in 0..count {
+            pool.submit(i, weight(i), &mut consume)?;
         }
-        drop(tx);
-        let mut result = Ok(());
-        for (i, item, ack) in rx {
-            if result.is_ok() {
-                result = item.and_then(|value| consume(i, value));
-                if result.is_err() {
-                    cancelled.store(true, Ordering::SeqCst);
-                    available.notify_all();
-                }
-            }
-            // On error, drain already running work before returning to the caller.
-            drop(ack);
-        }
-        for handle in handles {
-            if handle.join().is_err() && result.is_ok() {
-                result = Err(anyhow!("download worker panicked"));
-            }
-        }
-        result
+        pool.finish(&mut consume)
     })
 }
 
-/// Application HTTP bodies consumed/supplied by the gateway transport, excluding headers and TLS framing.
+type Job<J> = (usize, u64, J);
+type Done<T> = (usize, u64, Result<T>);
+
+/// Workers on scoped threads, started as the submissions need them. The calling thread submits jobs with a byte
+/// weight and consumes their results. A submission first consumes finished results until its weight fits the
+/// budget; a weight above the budget waits until nothing else is reserved, then runs alone. After a failed job or
+/// consumer, queued jobs are skipped; dropping the pool also skips them, and the scope joins the running ones.
+pub(super) struct Pool<'scope, 'env, J, T> {
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    work: Arc<dyn Fn(J) -> Result<T> + Send + Sync + 'scope>,
+    jobs: Option<mpsc::Sender<Job<J>>>,
+    queue: Arc<Mutex<mpsc::Receiver<Job<J>>>>,
+    done: mpsc::Sender<Done<T>>,
+    results: mpsc::Receiver<Done<T>>,
+    cancelled: Arc<AtomicBool>,
+    quick: bool,
+    workers: usize,
+    started: usize,
+    budget: u64,
+    used: u64,
+    outstanding: usize,
+    submitted: usize,
+}
+
+impl<'scope, 'env, J: Send + 'scope, T: Send + 'scope> Pool<'scope, 'env, J, T> {
+    pub fn new(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        workers: usize,
+        budget: u64,
+        work: impl Fn(J) -> Result<T> + Send + Sync + 'scope,
+    ) -> Self {
+        let (jobs, queue) = mpsc::channel();
+        let (done, results) = mpsc::channel();
+        Self {
+            scope,
+            work: Arc::new(work),
+            jobs: Some(jobs),
+            queue: Arc::new(Mutex::new(queue)),
+            done,
+            results,
+            cancelled: Arc::default(),
+            quick: super::gateway::is_quick(),
+            workers: workers.max(1),
+            started: 0,
+            budget: budget.max(1),
+            used: 0,
+            outstanding: 0,
+            submitted: 0,
+        }
+    }
+
+    /// Queue `job`; returns its index, the first argument of `consume`.
+    pub fn submit(&mut self, job: J, weight: u64, consume: &mut dyn FnMut(usize, T) -> Result<()>) -> Result<usize> {
+        let weight = weight.clamp(1, self.budget);
+        self.wait_for(weight, consume)?;
+        if self.outstanding >= self.started && self.started < self.workers {
+            self.start_worker();
+        }
+        let index = self.submitted;
+        let jobs = self.jobs.as_ref().ok_or_else(|| anyhow!("the transfer pool is finished"))?;
+        jobs.send((index, weight, job)).map_err(|_| anyhow!("transfer workers stopped"))?;
+        self.submitted += 1;
+        self.outstanding += 1;
+        self.used += weight;
+        Ok(index)
+    }
+
+    /// Consume finished results until `weight` more bytes fit the budget (or nothing is reserved).
+    pub fn wait_for(&mut self, weight: u64, consume: &mut dyn FnMut(usize, T) -> Result<()>) -> Result<()> {
+        while self.outstanding > 0 && self.used + weight.min(self.budget) > self.budget {
+            self.next(consume)?;
+        }
+        Ok(())
+    }
+
+    /// Consume the next result to finish, if a job is outstanding.
+    pub fn next_result(&mut self, consume: &mut dyn FnMut(usize, T) -> Result<()>) -> Result<()> {
+        if self.outstanding > 0 {
+            self.next(consume)?;
+        }
+        Ok(())
+    }
+
+    /// Consume every outstanding result.
+    pub fn finish(mut self, consume: &mut dyn FnMut(usize, T) -> Result<()>) -> Result<()> {
+        self.jobs = None;
+        while self.outstanding > 0 {
+            self.next(consume)?;
+        }
+        Ok(())
+    }
+
+    fn next(&mut self, consume: &mut dyn FnMut(usize, T) -> Result<()>) -> Result<()> {
+        let (index, weight, result) = self.results.recv().map_err(|_| anyhow!("transfer workers stopped"))?;
+        let consumed = result.and_then(|value| consume(index, value));
+        self.outstanding -= 1;
+        self.used -= weight;
+        if consumed.is_err() {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+        consumed
+    }
+
+    fn start_worker(&mut self) {
+        let (queue, done, cancelled, work, quick) =
+            (self.queue.clone(), self.done.clone(), self.cancelled.clone(), self.work.clone(), self.quick);
+        self.started += 1;
+        self.scope.spawn(move || loop {
+            let Ok((index, weight, job)) = queue.lock().map_err(drop).and_then(|queue| queue.recv().map_err(drop)) else {
+                return;
+            };
+            let result = if cancelled.load(Ordering::SeqCst) {
+                Err(anyhow!("cancelled after an earlier transfer failed"))
+            } else {
+                // Catch panics as well: every job must answer, or the caller would wait for it forever.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if quick {
+                        super::gateway::quick(|| work(job))
+                    } else {
+                        work(job)
+                    }
+                }))
+                .unwrap_or_else(|_| Err(anyhow!("transfer worker panicked")))
+            };
+            // Answer before cancelling: the failure reaches the caller ahead of the jobs that it makes skip.
+            let failed = result.is_err();
+            let _ = done.send((index, weight, result));
+            if failed {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+}
+
+impl<J, T> Drop for Pool<'_, '_, J, T> {
+    fn drop(&mut self) {
+        // An abandoned pool runs nothing more: queued jobs are skipped, and the scope joins the running ones.
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.jobs = None;
+    }
+}
+
+/// Application HTTP bodies consumed/supplied by the gateway transport, excluding headers and TLS framing. A buffered
+/// request body counts in full at each attempt; streamed request bodies and responses count as HTTP reads them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferStats {
     pub requests: u64,
@@ -147,7 +237,7 @@ impl<R: std::io::Read> std::io::Read for Counted<R> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{atomic::AtomicUsize, Barrier};
 
     #[test]
     fn scheduler_holds_byte_reservations_until_consumed() {
@@ -211,7 +301,7 @@ mod tests {
     #[allow(clippy::panic)] // This test intentionally exercises panic-to-error conversion.
     fn scheduler_panics_become_errors_and_release_workers() {
         let result = run(100, 2, 1, |_| 1, |_| -> Result<()> { panic!("failed download") }, |_, _| Ok(()));
-        assert_eq!(result.unwrap_err().to_string(), "download worker panicked");
+        assert_eq!(result.unwrap_err().to_string(), "transfer worker panicked");
     }
 
     #[test]

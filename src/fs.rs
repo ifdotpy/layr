@@ -188,6 +188,10 @@ pub(crate) fn is_not_empty(error: &anyhow::Error) -> bool {
         .chain()
         .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::DirectoryNotEmpty))
 }
+/// A full disk anywhere in the chain of `error`.
+pub(crate) fn is_storage_full(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::StorageFull))
+}
 pub(crate) fn copy_range(src: &std::fs::File, off: u64, len: u64, dst: &std::fs::File, dst_off: u64) -> std::io::Result<()> {
     if let Some(clone) = composition::range_clone() {
         if let Ok(range) = ByteRange::new(off, len) {

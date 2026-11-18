@@ -91,6 +91,33 @@ impl LocalReplica for Local<'_, '_> {
         let lines = clone.then(|| fetch::source_lines(self.repo(), true)).transpose()?;
         self.select_fetch(records, selection, available, lines)
     }
+    fn fetch_preflight(
+        &mut self,
+        records: &[String],
+        selection: &Options,
+        clone: bool,
+    ) -> Result<Option<layr_store::sync::FetchSelection<StateRec, Line>>> {
+        // W7's presence preflight, sharing the exact selection policy with discovery.
+        // A missing selected state causes full remote inventory before catalog writes.
+        let known = self.repo().p.db.state_auxiliary()?.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        let lines = clone.then(|| fetch::source_lines(self.repo(), true)).transpose()?;
+        let (plan, present) = self.plan_fetch(records, selection, &known, lines)?;
+        if !plan.missing.is_empty() {
+            return Ok(None);
+        }
+        for id in present {
+            if !self.repo().p.has_state(&id) {
+                return Ok(None);
+            }
+            self.repo().p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true))?;
+        }
+        Ok(Some(plan))
+    }
+    fn fetch_temp_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.repo().p.work_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir.join(crate::store::temp_name()))
+    }
     fn push_candidates(
         &self,
         records: &[String],
@@ -109,8 +136,8 @@ impl LocalReplica for Local<'_, '_> {
         tips.extend(repo.p.db.refs("", crate::ids::now_ms())?.into_iter().map(|reference| reference.target));
         Ok(tips)
     }
-    fn ancestry(&self, id: &str) -> Result<Vec<String>> {
-        fetch::state_ancestry(self.repo(), id)
+    fn nearest_ancestor(&self, id: &str, wanted: &mut dyn FnMut(&str) -> bool) -> Result<Option<String>> {
+        fetch::nearest_ancestor(self.repo(), id, wanted)
     }
     fn pin_state(&self, id: &str) -> Result<()> {
         self.repo().hold(self.repo().pin(&[id])?);

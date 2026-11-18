@@ -18,10 +18,23 @@ def source(path):
     for m in reversed(list(re.finditer(r'#\[cfg\(test\)\]\s*(?:pub\([^)]*\)\s+)?mod\s+\w+\s*\{', text))):
         end = closing(text, text.index('{', m.start())); text = text[:m.start()] + ' ' * (end - m.start()) + text[end:]
     return text
+def body(text, start):
+    """The `{` of the body of the function whose signature starts at `start`, or -1 for a declaration. A `;` or `{`
+    inside parentheses, brackets (`[u8; 32]`) or generics (`-> T<{ 1 }>`) belongs to the signature. A generic `<`
+    follows a name or `::` at once; `->`, `=>` and shifts are no delimiters."""
+    stack = []
+    for at in range(start, len(text)):
+        c, before, after = text[at], text[at - 1], text[at + 1:at + 2]
+        if c in '([' or (c == '{' and stack) or (c == '<' and (before.isalnum() or before in '_:') and after not in '<='):
+            stack.append(c)
+        elif stack and stack[-1] == {')': '(', ']': '[', '}': '{', '>': '<'}.get(c) and not (c == '>' and before in '-='):
+            stack.pop()
+        elif not stack and c in '{;': return at if c == '{' else -1
+    return -1
 def functions(text):
     for m in re.finditer(r'\bfn\s+(\w+)\s*[<(]', text):
-        start, semi = text.find('{', m.end()), text.find(';', m.end())
-        if start >= 0 and (semi < 0 or start < semi): yield m[1], text[m.start():closing(text, start)]
+        start = body(text, m.end() - 1)
+        if start >= 0: yield m[1], text[m.start():closing(text, start)]
 def transfer(text):
     for m in re.finditer(r'(?:\.|RemoteSync::|Store::)\s*(?:fetch|push|clone_into)\s*\(', text):
         depth = commas = 0
@@ -30,7 +43,7 @@ def transfer(text):
         if commas >= 2: return True
     return False
 def scan(root, frozen=None):
-    data, errors = {'$callers': [], '$references': []}, []
+    data, errors = {'$callers': [], '$references': [], '$access': {}}, []
     for path in sorted((root / 'src').rglob('*.rs')):
         name, text = path.relative_to(root).as_posix(), source(path)
         if name.startswith('src/store_remote/'):
@@ -38,8 +51,14 @@ def scan(root, frozen=None):
             known = frozen.get(name, {}) if frozen is not None else data[name]
             if frozen is not None and any(n in known and count > known[n] for n, count in data[name].items()): errors.append(name + ': duplicate legacy function name')
             if frozen is not None and name not in frozen and APP.search(text): errors.append(name + ': new transport file captures local storage')
-            for n, body in definitions:
-                if (n in ENGINES or (path.name == 'gitpack.rs' and n in {'push', 'fetch'}) or n not in known) and APP.search(body): errors.append(name + ':' + n + ': local storage in transport helper')
+            # Each legacy function keeps exactly its frozen local-storage accesses (by token): a new one fails.
+            access = collections.defaultdict(collections.Counter)
+            for n, body in definitions: access[n].update(re.sub(r'\s+', '', m[0]) for m in APP.finditer(body))
+            data['$access'][name] = {n: dict(sorted(c.items())) for n, c in sorted(access.items()) if c}
+            legacy = frozen.get('$access', {}).get(name, {}) if frozen is not None else data['$access'][name]
+            for n, used in access.items():
+                allowed = {} if n in ENGINES or (path.name == 'gitpack.rs' and n in {'push', 'fetch'}) or n not in known else legacy.get(n, {})
+                if any(count > allowed.get(token, 0) for token, count in used.items()): errors.append(name + ':' + n + ': local storage in transport helper')
         else:
             if transfer(text): data['$callers'].append(name)
             if re.search(r'\bstore_remote\b', text): data['$references'].append(name)

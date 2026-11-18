@@ -197,6 +197,7 @@ impl Browse {
                 person.as_ref(),
                 access.paper.as_deref(),
                 &access.layers.lock().map_err(|_| anyhow::anyhow!("overlay key cache lock failed"))?.clone(),
+                backend.overlay_key_objects()?,
             )?
         };
         let mut identities = BTreeMap::new();
@@ -283,7 +284,8 @@ impl Browse {
             let mut stack: Vec<crate::overlay::Layer> = Vec::new();
             if state.parts.is_empty() {
                 let stack_machine = if state.id == line.head { &line.machine } else { &machine };
-                let old = db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
+                let old =
+                    db.config(&format!("stack.{}@{}", line.id, stack_machine))?.or(db.config(&format!("stack.{}", line.id))?);
                 stack = old.map(serde_json::from_value).transpose()?.unwrap_or_default();
             }
             for (overlay, part) in &state.parts {
@@ -306,7 +308,8 @@ impl Browse {
                 if selection.as_ref().is_some_and(|v| v["enabled"] == false) {
                     continue;
                 }
-                let saved = overlay.overlay_config(&format!("hidden.part.{}", state.id))?.and_then(|v| v.as_str().map(str::to_owned));
+                let saved =
+                    overlay.overlay_config(&format!("hidden.part.{}", state.id))?.and_then(|v| v.as_str().map(str::to_owned));
                 let head = match saved {
                     Some(part) => Some(part),
                     None => crate::overlay::find_follow_line(overlay, &line)?.map(|ol| ol.head),

@@ -12,7 +12,7 @@ boundary = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boundary)
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    for name in ['src/store_remote/reader.rs', 'src/store_remote/writer.rs', 'src/cmd/branch.rs',
+    for name in ['src/store_remote/reader.rs', 'src/store_remote/writer.rs', 'src/store_remote/chunked.rs', 'src/cmd/branch.rs',
                  'src/sync_local/push.rs', 'src/sync_local/fetch.rs', 'crates/layr-store/src/sync.rs']:
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +45,26 @@ with tempfile.TemporaryDirectory() as directory:
     path.write_text(original[:start] + ' crate::db::open(); ' + original[start:])
     assert boundary.check(root)
     path.write_text(original)
+    # A legacy transport function keeps only its frozen local-storage accesses: a new Repo access fails.
+    path = root / 'src/store_remote/reader.rs'
+    original = path.read_text()
+    start = original.index('{', original.index('fn restore_over(')) + 1
+    path.write_text(original[:start] + ' let _ = repo.p.db.lines(); ' + original[start:])
+    assert boundary.check(root)
+    path.write_text(original)
+    # A `;` in an array type of a signature (`key: [u8; 32]`) does not hide the function's body.
+    path = root / 'src/store_remote/chunked.rs'
+    original = path.read_text()
+    start = original.index('{', original.index('key: [u8; 32],\n        by_sha')) + 1
+    path.write_text(original[:start] + ' let _ = crate::db::Db::open(path); ' + original[start:])
+    assert boundary.check(root)
+    path.write_text(original)
+    # A `{` of a const generic argument in the return type (`-> T<{ 1 }>`) does not hide the function's body.
+    path = root / 'src/store_remote/writer.rs'
+    original = path.read_text()
+    path.write_text(original + '\nstruct Probe<const N: usize>;\nfn probe() -> Probe<{ 1 }> { let _ = crate::db::Db::open(path); Probe }\n')
+    assert boundary.check(root)
+    path.write_text(original)
     # A new call inside an existing allowlisted function is not grandfathered either.
     path = root / 'src/sync_local/push.rs'
     original = path.read_text()
@@ -55,4 +75,4 @@ with tempfile.TemporaryDirectory() as directory:
     path = root / 'src/sync_local/fetch.rs'
     path.write_text(path.read_text() + '\nuse crate::store_remote::{Options, backend::Backend};\n')
     assert boundary.check(root)
-print('Sync boundary regression probes OK (12 negative cases)')
+print('Sync boundary regression probes OK (15 negative cases)')
