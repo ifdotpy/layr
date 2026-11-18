@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+pub use super::download::TransferStats;
 pub use layr_store::s3::Object;
 
 #[derive(Clone)]
@@ -48,6 +49,9 @@ fn epoch_key(key: &str) -> std::borrow::Cow<'_, str> {
         key.into()
     }
 }
+fn historical_object(key: &str) -> bool {
+    ["states/", "files/", "requests/", "claims/"].iter().any(|p| key.starts_with(p))
+}
 fn epoch_object(key: &str) -> bool {
     key == "store.json"
         || key == "public.json"
@@ -55,6 +59,8 @@ fn epoch_object(key: &str) -> bool {
             .iter()
             .any(|p| key.starts_with(p))
 }
+type ReadVisitor<'a> = dyn FnMut(usize, Option<Vec<u8>>, &str) -> Result<()> + 'a;
+
 impl Backend {
     pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
         match self {
@@ -310,23 +316,148 @@ impl Backend {
         matches!(self, Self::S3(_) | Self::Gateway(_) | Self::Api(_) | Self::File(..))
     }
 
-    /// The objects `keys` in their order, as `get` gives each: one batch request per epoch through a gateway
-    /// (`Gateway::get_many`), else up to 32 reads at a time.
+    /// Objects in input order. The returned Vec retains all bodies; use `visit_many` for large inventories.
     pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
-        if let Self::Gateway(gateway) = self {
-            return gateway.get_many(keys);
-        }
-        let mut out = Vec::with_capacity(keys.len());
-        for batch in keys.chunks(32) {
-            let got: Vec<Result<Option<Vec<u8>>>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = batch.iter().map(|key| scope.spawn(move || self.get(key))).collect();
-                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("read panicked")))).collect()
-            });
-            for item in got {
-                out.push(item?);
-            }
-        }
+        let mut out = vec![None; keys.len()];
+        self.visit_many(keys, |i, body| {
+            out[i] = body;
+            Ok(())
+        })?;
         Ok(out)
+    }
+
+    /// Consume bounded batches as they complete. Indices refer to `keys`; completion order is unspecified.
+    pub fn visit_many(&self, keys: &[String], mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>) -> Result<()> {
+        self.visit_reads(keys, None, "", &mut |i, body, _| visit(i, body))
+    }
+
+    /// Download known-size whole objects. Gateway reads use at most eight jobs and 64 MiB of reserved bodies.
+    /// Sizes are upper bounds on ciphertext bytes, not plaintext lengths; an oversized body is rejected.
+    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    pub fn download_many(
+        &self,
+        keys: &[String],
+        sizes: &[u64],
+        mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>,
+    ) -> Result<()> {
+        if keys.len() != sizes.len() {
+            bail!("download size count does not match keys");
+        }
+        self.visit_reads(keys, Some(sizes), "", &mut |i, body, _| visit(i, body))
+    }
+
+    /// Decrypt each body with the identity of the epoch that supplied it, including through Prefix views.
+    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    pub fn visit_decrypted_many(
+        &self,
+        keys: &[String],
+        identity: &str,
+        mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_reads(keys, None, identity, &mut |i, body, selected| {
+            let body = body.with_context(|| format!("missing remote object {}", keys[i]))?;
+            visit(i, super::keys::decrypt(selected, &body)?)
+        })
+    }
+
+    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    pub fn decrypted_many(&self, keys: &[String], identity: &str) -> Result<Vec<Vec<u8>>> {
+        let mut out = vec![Vec::new(); keys.len()];
+        self.visit_decrypted_many(keys, identity, |i, body| {
+            out[i] = body;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Known-size downloads decrypted using the identity of their actual epoch.
+    #[allow(dead_code)] // Consumed by the subsequent fetch/push planning work.
+    pub fn download_decrypted_many(
+        &self,
+        keys: &[String],
+        sizes: &[u64],
+        identity: &str,
+        mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        if keys.len() != sizes.len() {
+            bail!("download size count does not match keys");
+        }
+        self.visit_reads(keys, Some(sizes), identity, &mut |i, body, selected| {
+            let body = body.with_context(|| format!("missing remote object {}", keys[i]))?;
+            visit(i, super::keys::decrypt(selected, &body)?)
+        })
+    }
+
+    /// Shared across Gateway clones/views. Non-HTTP backends have no gateway transport counters.
+    #[allow(dead_code)] // Transport seam for subsequent fetch/push work.
+    pub fn transfer_stats(&self) -> TransferStats {
+        match self {
+            Self::Gateway(g) => g.transfer_stats(),
+            Self::Prefix(base, _) => base.transfer_stats(),
+            Self::Epoch(e) => e.root.transfer_stats(),
+            _ => Default::default(),
+        }
+    }
+
+    fn visit_reads(&self, keys: &[String], sizes: Option<&[u64]>, identity: &str, visit: &mut ReadVisitor<'_>) -> Result<()> {
+        for key in keys {
+            check_key(key)?;
+        }
+        match self {
+            Self::Prefix(base, prefix) => {
+                let scoped: Vec<_> = keys.iter().map(|key| format!("{prefix}{key}")).collect();
+                base.visit_reads(&scoped, sizes, identity, visit)
+            }
+            Self::Epoch(epoch) => {
+                let (current, root): (Vec<_>, Vec<_>) = (0..keys.len()).partition(|&i| epoch_object(&keys[i]));
+                let route = |backend: &Backend, indices: &[usize], mapped: bool, selected: &str, visit: &mut ReadVisitor<'_>| {
+                    let names: Vec<_> = indices
+                        .iter()
+                        .map(|&i| if mapped { epoch_key(&keys[i]).into_owned() } else { keys[i].clone() })
+                        .collect();
+                    let lengths: Option<Vec<_>> = sizes.map(|s| indices.iter().map(|&i| s[i]).collect());
+                    backend.visit_reads(&names, lengths.as_deref(), selected, &mut |j, body, id| visit(indices[j], body, id))
+                };
+                route(&epoch.root, &root, false, identity, visit)?;
+                let mut missing = Vec::new();
+                route(&epoch.current, &current, true, identity, &mut |i, body, id| {
+                    if body.is_none() && historical_object(&keys[i]) {
+                        missing.push(i);
+                        Ok(())
+                    } else {
+                        visit(i, body, id)
+                    }
+                })?;
+                for (backend, old_identity) in &epoch.history {
+                    if missing.is_empty() {
+                        break;
+                    }
+                    let mut next = Vec::new();
+                    route(backend, &missing, false, old_identity, &mut |i, body, id| {
+                        if body.is_none() {
+                            next.push(i);
+                            Ok(())
+                        } else {
+                            visit(i, body, id)
+                        }
+                    })?;
+                    missing = next;
+                }
+                for i in missing {
+                    visit(i, None, identity)?;
+                }
+                Ok(())
+            }
+            Self::Gateway(g) => g.visit_many(keys, sizes, |i, body| visit(i, body, identity)),
+            _ => super::download::run(
+                keys.len(),
+                super::download::JOBS,
+                super::download::BYTE_BUDGET,
+                |_| 32 << 20,
+                |i| self.get(&keys[i]),
+                |i, body| visit(i, body, identity),
+            ),
+        }
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
