@@ -166,7 +166,13 @@ fn published_objects(
         if next.object() != object.key {
             bail!("overlay key differs from its object name");
         }
-        let authority = authorities.get(&next.key.name).context("overlay key has no creator authority")?;
+        // A key can arrive before the record of its overlay's creator: a fetch lists the keys of the remote,
+        // and the creator record of a new overlay comes with a later fetch. Skip the key until then. A bail
+        // here failed every fetch for minutes and stopped the macOS runner's ticks (2026-11-18).
+        let Some(authority) = authorities.get(&next.key.name) else {
+            refused.push(format!("overlay {}: skipped overlay.key: no creator authority yet", next.key.name));
+            continue;
+        };
         if !authority.permits(&next.record, &next.line) {
             refused.push(format!(
                 "overlay {}: refused overlay.key signer {} (not a key manager)",
@@ -1373,5 +1379,43 @@ mod tests {
             rec.data["recipient"].as_str().unwrap(),
         );
         assert!(parse(&changed, &parent, &store, &trusted).is_err());
+    }
+
+    #[test]
+    fn a_key_before_its_creator_record_is_skipped_and_the_fetch_goes_on() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let machine = crate::ids::new_id();
+        let parent = crate::ids::new_id();
+        let store = keys::recipient_of(&keys::generate_identity()).unwrap();
+        let mut rec = Record::untrusted_preview("overlay.key");
+        rec.id = crate::ids::new_id();
+        rec.machine = machine.clone();
+        rec.project = crate::ids::new_id();
+        rec.seq = 2;
+        rec.time = 1;
+        rec.data = serde_json::to_value(Key {
+            hidden: false,
+            overlay: rec.project.clone(),
+            name: "fresh".into(),
+            epoch: crate::ids::new_id(),
+            parent: parent.clone(),
+            store: store.clone(),
+            recipient: keys::recipient_of(&keys::generate_identity()).unwrap(),
+            readers: BTreeMap::new(),
+            revocation: None,
+            access_mode: layr_store::epochs::Mode::Private,
+        })
+        .unwrap();
+        let line = oplog::sign_line(&rec, &signer).unwrap();
+        let trusted = BTreeMap::from([(machine, signer.verifying_key())]);
+        let object = parse(&line, &parent, &store, &trusted).unwrap().object();
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let backend = Backend::file(root.clone());
+        backend.put_new(&object, format!("{line}\n").into_bytes()).unwrap();
+        let objects = backend.list("overlays/").unwrap();
+        let (found, refused) = published_objects(&backend, &parent, &store, &trusted, &BTreeMap::new(), objects).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(found.is_empty());
+        assert_eq!(refused, vec!["overlay fresh: skipped overlay.key: no creator authority yet".to_string()]);
     }
 }
